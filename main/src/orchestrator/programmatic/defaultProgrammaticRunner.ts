@@ -23,6 +23,7 @@ import { SpawnStepRunner } from './spawnStepRunner';
 import { ProgrammaticRunHost, type StepReporter } from './programmaticRunHost';
 import type { HumanGateResolver } from './humanGate';
 import { NoopSupervisor, type SupervisorSession } from './supervisor';
+import { SupervisorChatRegistry, type SupervisorChatSession } from './supervisorChat';
 
 export interface DefaultProgrammaticRunnerDeps {
   spawner: ClaudeSpawnerLike;
@@ -35,6 +36,13 @@ export interface DefaultProgrammaticRunnerDeps {
    * an un-configured deployment behaves exactly as Stages 1-2.
    */
   supervisorFactory?: () => SupervisorSession;
+  /**
+   * Per-run supervisor CHAT factory (Stage 3 human seam). When present, a
+   * conversational supervisor session is started for the run, registered in
+   * SupervisorChatRegistry (so the tRPC/renderer can reach it), and fed the monitor
+   * feed via the host. Absent ⇒ no chat session (the default).
+   */
+  chatSessionFactory?: () => SupervisorChatSession;
   logger?: LoggerLike;
 }
 
@@ -64,12 +72,21 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
 
     // Supervisor (Stage 3): monitor + triage + human seam, bracketing the walk.
     const supervisor = (this.deps.supervisorFactory ?? (() => new NoopSupervisor()))();
-    await supervisor.start({
+    const supervisorCtx = {
       runId: ctx.runId,
       projectId: ctx.run.project_id,
       workflowName: ctx.workflow.name,
       worktreePath: ctx.worktreePath,
-    });
+    };
+    await supervisor.start(supervisorCtx);
+
+    // Supervisor CHAT (Stage 3 human seam): an optional conversational session,
+    // registered so the tRPC/renderer can reach it, fed the monitor feed via host.
+    const chat = this.deps.chatSessionFactory?.();
+    if (chat) {
+      await chat.start(supervisorCtx);
+      SupervisorChatRegistry.getInstance().register(ctx.runId, chat);
+    }
 
     const host = new ProgrammaticRunHost({
       runId: ctx.runId,
@@ -77,6 +94,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       reporter: this.deps.reporter,
       gate: this.deps.gate,
       supervisor,
+      ...(chat ? { chat } : {}),
       logger: this.deps.logger,
     });
 
@@ -84,8 +102,8 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     try {
       result = await new WorkflowController(runner, host).run(ctx.runId, def, ctx.signal);
     } finally {
-      // Always tear the supervisor down — fail-soft so a broken stop never masks
-      // the run outcome (or a thrown failure below).
+      // Always tear the supervisor + chat down — fail-soft so a broken stop never
+      // masks the run outcome (or a thrown failure below).
       try {
         await supervisor.stop();
       } catch (err) {
@@ -93,6 +111,17 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
           runId: ctx.runId,
           error: err instanceof Error ? err.message : String(err),
         });
+      }
+      if (chat) {
+        SupervisorChatRegistry.getInstance().unregister(ctx.runId);
+        try {
+          await chat.stop();
+        } catch (err) {
+          this.deps.logger?.warn('[ProgrammaticRunner] chat.stop failed (fail-soft)', {
+            runId: ctx.runId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
     }
 

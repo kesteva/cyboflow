@@ -58,6 +58,7 @@ import { useRunEndEligibility } from '../../hooks/useRunEndEligibility';
 import { trpc } from '../../trpc/client';
 import { Flag } from 'lucide-react';
 import { SessionActionToast } from './SessionActionToast';
+import { SupervisorChatDock } from './SupervisorChatDock';
 
 interface CyboflowRootProps {
   projectId: number | null;
@@ -229,6 +230,9 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
   return (
     <div className="flex h-full flex-col">
+      {/* Supervisor chat (Stage 3 human seam) — fixed overlay, self-hides unless the
+          active run has a supervisor chat session (programmatic + SDK supervisor). */}
+      <SupervisorChatDock runId={activeRunId} />
       {/* Thin top header row */}
       <div className="flex items-center gap-2 border-b border-border-primary px-4 py-2">
         {/* Back-to-home pill — returns the center surface to the cross-project
