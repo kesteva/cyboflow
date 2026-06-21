@@ -100,7 +100,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
 
     let result;
     try {
-      result = await new WorkflowController(runner, host).run(ctx.runId, def, ctx.signal);
+      result = await new WorkflowController(runner, host).run(ctx.runId, def, ctx.signal, ctx.resumeFromStepId);
     } finally {
       // Always tear the supervisor + chat down — fail-soft so a broken stop never
       // masks the run outcome (or a thrown failure below).

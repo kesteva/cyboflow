@@ -76,8 +76,20 @@ export class WorkflowController {
    * `signal` (optional) cancels the walk: it is checked at the top of every step
    * iteration and threaded into each runStep + human gate, so a canceled run
    * stops promptly with a 'canceled' outcome instead of completing or retrying.
+   *
+   * `resumeFromStepId` (optional, crash-safe resume) FAST-FORWARDS the walk to the
+   * step with that id: all phases/steps BEFORE it are skipped (they already ran
+   * before the restart — their effects are in git/the DB), and the walk resumes AT
+   * that step (re-running it, which is safe: an interrupted agent step re-runs and
+   * a gate re-attaches to its still-pending review item). An unknown id (e.g. the
+   * workflow was edited) falls back to starting from the beginning.
    */
-  async run(runId: string, def: WorkflowDefinition, signal?: AbortSignal): Promise<ControllerResult> {
+  async run(
+    runId: string,
+    def: WorkflowDefinition,
+    signal?: AbortSignal,
+    resumeFromStepId?: string,
+  ): Promise<ControllerResult> {
     const steps: StepReport[] = [];
     // Per-step-id loopback counters, shared across the whole run so a target that
     // is revisited from multiple failing steps still terminates. Gate-revise
@@ -88,9 +100,31 @@ export class WorkflowController {
     // and escalation-gate 'revise' re-runs so a flapping step can never spin.
     const triageRetries = new Map<string, number>();
 
+    // Resume target: skip every phase/step before resumeFromStepId.
+    let resumePhaseIdx = -1;
+    let resumeStepIdx = -1;
+    if (resumeFromStepId !== undefined && resumeFromStepId.length > 0) {
+      for (let p = 0; p < def.phases.length; p++) {
+        const s = def.phases[p].steps.findIndex((st) => st.id === resumeFromStepId);
+        if (s >= 0) {
+          resumePhaseIdx = p;
+          resumeStepIdx = s;
+          break;
+        }
+      }
+      if (resumePhaseIdx < 0) {
+        this.host.log?.('warn', `resume step '${resumeFromStepId}' not in definition; starting from the beginning`);
+      } else {
+        this.host.log?.('info', `resuming run at step '${resumeFromStepId}'`);
+      }
+    }
+
     this.emit({ kind: 'run-started', runId });
 
-    for (const phase of def.phases) {
+    for (let phaseIdx = 0; phaseIdx < def.phases.length; phaseIdx++) {
+      const phase = def.phases[phaseIdx];
+      // Skip phases entirely before the resume phase (already executed pre-restart).
+      if (resumePhaseIdx >= 0 && phaseIdx < resumePhaseIdx) continue;
       const n = phase.steps.length;
       // Defensive termination bound on step VISITS within this phase (one per
       // while-iteration; in-place retries live INSIDE an iteration and do not
@@ -105,7 +139,8 @@ export class WorkflowController {
       const maxExecutions = (2 * MAX_STEP_LOOPBACKS * n + 1) * n + n + 1;
       let executions = 0;
 
-      let i = 0;
+      // Resume: start at the resume step index in the resume phase, else 0.
+      let i = resumePhaseIdx >= 0 && phaseIdx === resumePhaseIdx ? resumeStepIdx : 0;
       while (i < n) {
         if (signal?.aborted) {
           return this.finish({ outcome: 'canceled', steps, failedStepId: phase.steps[i]?.id }, runId);

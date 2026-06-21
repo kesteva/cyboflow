@@ -42,7 +42,7 @@ describe('recoverActiveStateOrphans', () => {
   // Case A: "recovers running orphans"
   // -------------------------------------------------------------------------
   it('recovers running orphans', () => {
-    const db = createTestDb();
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -52,7 +52,7 @@ describe('recoverActiveStateOrphans', () => {
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
     // Return value: 1 running recovered, nothing else.
-    expect(result).toEqual({ runningRecovered: 1, startingRecovered: 0, approvalsCanceled: 0 });
+    expect(result).toEqual({ runningRecovered: 1, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [] });
 
     // The row must be transitioned to 'failed' with error_message='app_restart'.
     const row = db
@@ -66,7 +66,7 @@ describe('recoverActiveStateOrphans', () => {
   // Case B: "recovers starting orphans"
   // -------------------------------------------------------------------------
   it('recovers starting orphans', () => {
-    const db = createTestDb();
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -76,7 +76,7 @@ describe('recoverActiveStateOrphans', () => {
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
     // Return value: 1 starting recovered, nothing else.
-    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 1, approvalsCanceled: 0 });
+    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 1, approvalsCanceled: 0, programmaticToResume: [] });
 
     // The row must be transitioned to 'failed' with error_message='app_restart'.
     const row = db
@@ -90,7 +90,7 @@ describe('recoverActiveStateOrphans', () => {
   // Case C: "skips live runs"
   // -------------------------------------------------------------------------
   it('skips live runs', () => {
-    const db = createTestDb();
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -104,7 +104,7 @@ describe('recoverActiveStateOrphans', () => {
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
     // Nothing should be recovered.
-    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0 });
+    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [] });
 
     // The row must remain 'running' — not touched.
     const row = db
@@ -117,7 +117,7 @@ describe('recoverActiveStateOrphans', () => {
   // Case D: "cancels pending approvals for recovered runs"
   // -------------------------------------------------------------------------
   it('cancels pending approvals for recovered runs', () => {
-    const db = createTestDb();
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -130,7 +130,7 @@ describe('recoverActiveStateOrphans', () => {
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
     // 1 running recovered, 1 approval canceled.
-    expect(result).toEqual({ runningRecovered: 1, startingRecovered: 0, approvalsCanceled: 1 });
+    expect(result).toEqual({ runningRecovered: 1, startingRecovered: 0, approvalsCanceled: 1, programmaticToResume: [] });
 
     // The approval row must be 'timed_out' with decided_at set and decided_by='system'.
     const approval = db
@@ -150,7 +150,7 @@ describe('recoverActiveStateOrphans', () => {
   // 'starting'/'running', so a paused row is left untouched.
   // -------------------------------------------------------------------------
   it('does NOT recover paused runs (they survive restart)', () => {
-    const db = createTestDb();
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -160,7 +160,7 @@ describe('recoverActiveStateOrphans', () => {
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
     // Nothing recovered — paused is not in the sweep set.
-    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0 });
+    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [] });
 
     // The row must remain 'paused' — not force-failed.
     const row = db
@@ -174,7 +174,7 @@ describe('recoverActiveStateOrphans', () => {
   // Case E: "ignores already-terminal rows"
   // -------------------------------------------------------------------------
   it('ignores already-terminal rows', () => {
-    const db = createTestDb();
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const runQueues = new RunQueueRegistry();
 
@@ -184,7 +184,7 @@ describe('recoverActiveStateOrphans', () => {
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
     // Nothing should be recovered.
-    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0 });
+    expect(result).toEqual({ runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [] });
 
     // Both rows must remain untouched.
     const e1 = db
@@ -196,6 +196,76 @@ describe('recoverActiveStateOrphans', () => {
       .prepare('SELECT status FROM workflow_runs WHERE id = ?')
       .get('run-E2') as { status: string };
     expect(e2.status).toBe('failed');
+  });
+
+  // -------------------------------------------------------------------------
+  // Crash-safe resume (Stage 3): programmatic runs are RESET to 'starting' and
+  // returned for re-drive, NOT force-failed.
+  // -------------------------------------------------------------------------
+  const markProgrammatic = (db: ReturnType<typeof createTestDb>, id: string, stepId: string | null): void => {
+    db.prepare(`UPDATE workflow_runs SET execution_model = 'programmatic', current_step_id = ? WHERE id = ?`).run(stepId, id);
+  };
+
+  it('resets a stranded programmatic running run to starting and returns it for resume', () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedRun(db, { id: 'run-P1', status: 'running' });
+    markProgrammatic(db, 'run-P1', 'epics');
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.runningRecovered).toBe(0); // NOT force-failed
+    expect(result.programmaticToResume).toEqual([{ id: 'run-P1', currentStepId: 'epics' }]);
+    const row = db.prepare('SELECT status, error_message FROM workflow_runs WHERE id = ?').get('run-P1') as {
+      status: string;
+      error_message: string | null;
+    };
+    expect(row.status).toBe('starting'); // reset for re-drive
+    expect(row.error_message).toBeNull();
+  });
+
+  it('resets a programmatic run parked at a gate (awaiting_review) for resume', () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedRun(db, { id: 'run-P2', status: 'awaiting_review' });
+    markProgrammatic(db, 'run-P2', 'approve-idea');
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.programmaticToResume).toEqual([{ id: 'run-P2', currentStepId: 'approve-idea' }]);
+    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-P2') as { status: string }).status).toBe('starting');
+  });
+
+  it('leaves a NON-programmatic awaiting_review run untouched (not failed, not resumed)', () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedRun(db, { id: 'run-P3', status: 'awaiting_review' }); // orchestrated (default)
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.programmaticToResume).toEqual([]);
+    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-P3') as { status: string }).status).toBe('awaiting_review');
+  });
+
+  it('skips a live programmatic run still in the executor registry', () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedRun(db, { id: 'run-P4', status: 'running' });
+    markProgrammatic(db, 'run-P4', 'epics');
+    runQueues.getOrCreate('run-P4'); // live → not an orphan
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.programmaticToResume).toEqual([]);
+    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-P4') as { status: string }).status).toBe('running');
   });
 });
 

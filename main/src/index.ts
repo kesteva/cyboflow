@@ -1142,6 +1142,30 @@ app.whenReady().then(async () => {
       console.log(`[Main] Recovered active-state orphans (running: ${orphanRecovery.runningRecovered}, starting: ${orphanRecovery.startingRecovered}, approvals canceled: ${orphanRecovery.approvalsCanceled})`);
     }
 
+    // Crash-safe resume (Stage 3): re-drive PROGRAMMATIC runs the previous process
+    // left mid-walk. recoverActiveStateOrphans reset them to 'starting' (NOT
+    // force-failed); re-enqueue each on its per-run queue, threading the persisted
+    // current_step_id so the WorkflowController fast-forwards past completed steps
+    // and a gate re-attaches to its still-pending review item. Fire-and-forget +
+    // per-run try/catch, mirroring runLauncher.
+    if (orphanRecovery.programmaticToResume.length > 0) {
+      console.log(`[Main] Resuming ${orphanRecovery.programmaticToResume.length} programmatic run(s) after restart`);
+      for (const { id, currentStepId } of orphanRecovery.programmaticToResume) {
+        if (currentStepId) runExecutor.setPendingResumeStep(id, currentStepId);
+        const queue = runQueues.getOrCreate(id);
+        void queue.add(async () => {
+          try {
+            await runExecutor.execute(id);
+          } catch (err) {
+            loggerLike.error('[Main] programmatic resume re-drive failed', {
+              runId: id,
+              error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+            });
+          }
+        });
+      }
+    }
+
     // Boot recovery: runs orphaned by an archived (dismissed) session. Left
     // non-terminal (e.g. 'stuck' from before the dismiss-cascade existed) they
     // keep showing in the active-runs rail. Cancel them so the rail's

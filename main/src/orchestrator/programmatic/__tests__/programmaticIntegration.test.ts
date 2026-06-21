@@ -305,6 +305,38 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     expect(finalStep.current_step_id).toBe('decompose');
   });
 
+  it('crash-safe resume: resumeFromStepId fast-forwards the walk past completed steps', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const mgr = HumanStepManager.initialize(adapter);
+    seedRun(db, 'run-res');
+
+    const spawner = makeSpawner();
+    const reporter: StepReporter = { report: (rid, sid, s) => void buildStepTransitionEvent(rid, sid, s, adapter) };
+    const gate = new ReviewQueueHumanGate(mgr, reviewItemChangeEvents, reviewItemProjectChannel);
+    const approver = (payload: unknown): void => {
+      const p = payload as { reviewItemId?: string; action?: string };
+      if (p?.action === 'created' && p.reviewItemId) {
+        const id = p.reviewItemId;
+        setTimeout(() => void mgr.resolveHumanGate('run-res', id, 'user', 'approve'), 0);
+      }
+    };
+    reviewItemChangeEvents.on(reviewItemProjectChannel(1), approver);
+
+    const runner = new DefaultProgrammaticRunner({ spawner, reporter, gate });
+    // Resume at the refine phase 'epics' step → plan-phase agents (context/research)
+    // must NOT re-run; the walk completes from 'epics' onward.
+    await expect(runner.run({ ...ctxFor('run-res'), resumeFromStepId: 'epics' })).resolves.toBeUndefined();
+
+    expect(spawner.calls.some((c) => c.prompt.includes('`context`'))).toBe(false); // skipped
+    expect(spawner.calls.some((c) => c.prompt.includes('`research`'))).toBe(false); // skipped
+    expect(spawner.calls.some((c) => c.prompt.includes('`epics`'))).toBe(true); // resumed here
+    const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-res') as {
+      current_step_id: string | null;
+    };
+    expect(finalStep.current_step_id).toBe('decompose');
+  });
+
   it('cancellation mid-gate settles the walk and leaves no reviewItemChangeEvents listener', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);

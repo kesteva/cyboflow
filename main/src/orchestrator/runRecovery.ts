@@ -22,60 +22,103 @@ export interface RecoveryResult {
   runningRecovered: number;
   startingRecovered: number;
   approvalsCanceled: number;
+  /**
+   * Programmatic runs stranded mid-walk that were RESET to 'starting' for
+   * crash-safe re-drive (NOT force-failed). The caller (index boot) re-drives each
+   * via RunExecutor, threading `currentStepId` as the controller resume point.
+   */
+  programmaticToResume: Array<{ id: string; currentStepId: string | null }>;
 }
 
 export function recoverActiveStateOrphans(
   db: DatabaseLike,
   runQueues: RunQueueRegistry,
 ): RecoveryResult {
-  // Step 1: SELECT all running/starting rows.
+  // Step 1: SELECT all non-terminal active-state rows. 'awaiting_review' is now
+  // included ONLY to find PROGRAMMATIC runs parked at a gate to resume — a
+  // non-programmatic awaiting_review row is left UNTOUCHED below (its dead-socket
+  // recovery is ApprovalRouter.recoverStaleAwaitingReview, not this sweep).
   //
-  // Phase 4b note: 'paused' is DELIBERATELY excluded from this sweep. A paused run
-  // (SDK-only Pause) is a NON-terminal state that retains claude_session_id +
-  // current_step_id so Resume can re-drive via --resume; it MUST survive an app
-  // restart. Because this WHERE only matches 'starting'/'running', a paused run is
-  // never force-failed to 'app_restart' on boot — no behavioral change is needed.
+  // Phase 4b note: 'paused' is DELIBERATELY excluded — a paused (SDK Pause) run
+  // retains claude_session_id + current_step_id so Resume re-drives it; it MUST
+  // survive a restart and is never force-failed here.
   const candidates = db
-    .prepare(`SELECT id, status FROM workflow_runs WHERE status IN ('starting', 'running')`)
-    .all() as { id: string; status: 'running' | 'starting' }[];
+    .prepare(
+      `SELECT id, status, execution_model, current_step_id
+         FROM workflow_runs
+        WHERE status IN ('starting', 'running', 'awaiting_review')`,
+    )
+    .all() as {
+    id: string;
+    status: 'running' | 'starting' | 'awaiting_review';
+    execution_model: 'orchestrated' | 'programmatic' | null;
+    current_step_id: string | null;
+  }[];
 
   // Step 2: Filter out live executor entries (defensive — at boot the registry
   // is empty, but the parameterization makes this code reusable).
   const orphans = candidates.filter((row) => !runQueues.has(row.id));
-  if (orphans.length === 0) {
-    return { runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0 };
+
+  // Partition:
+  //  - PROGRAMMATIC orphans (any of starting/running/awaiting_review) → RESET to
+  //    'starting' and resume (host code re-walks from current_step_id; a gate
+  //    re-attaches to its still-pending review item).
+  //  - NON-programmatic starting/running orphans → force-fail 'app_restart'
+  //    (unchanged — there is no in-process executor to re-drive an orchestrator turn).
+  //  - NON-programmatic awaiting_review orphans → leave untouched.
+  const programmatic = orphans.filter((r) => r.execution_model === 'programmatic');
+  const forceFail = orphans.filter(
+    (r) => r.execution_model !== 'programmatic' && (r.status === 'running' || r.status === 'starting'),
+  );
+
+  if (orphans.length === 0 || (programmatic.length === 0 && forceFail.length === 0)) {
+    return { runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [] };
   }
 
-  const runningIds = orphans.filter((r) => r.status === 'running').map((r) => r.id);
-  const startingIds = orphans.filter((r) => r.status === 'starting').map((r) => r.id);
-  const allIds = orphans.map((r) => r.id);
+  const runningIds = forceFail.filter((r) => r.status === 'running').map((r) => r.id);
+  const startingIds = forceFail.filter((r) => r.status === 'starting').map((r) => r.id);
+  const failIds = forceFail.map((r) => r.id);
+  const resumeIds = programmatic.map((r) => r.id);
 
-  const placeholders = allIds.map(() => '?').join(',');
-
-  // Step 3: Single transaction for all UPDATEs.
+  // Step 3: Single transaction for all UPDATEs (clean state if a crash recurs here).
   const tx = db.transaction(() => {
-    db.prepare(
-      `UPDATE workflow_runs
-          SET status = 'failed',
-              error_message = 'app_restart',
-              ended_at = CURRENT_TIMESTAMP,
-              updated_at = CURRENT_TIMESTAMP
-        WHERE id IN (${placeholders})
-          AND status IN ('running', 'starting')`,
-    ).run(...allIds);
+    if (failIds.length > 0) {
+      const ph = failIds.map(() => '?').join(',');
+      db.prepare(
+        `UPDATE workflow_runs
+            SET status = 'failed', error_message = 'app_restart',
+                ended_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          WHERE id IN (${ph}) AND status IN ('running', 'starting')`,
+      ).run(...failIds);
+    }
 
-    const approvalsInfo = db
-      .prepare(
-        `UPDATE approvals
-            SET status = 'timed_out',
-                decided_at = CURRENT_TIMESTAMP,
-                decided_by = 'system'
-          WHERE run_id IN (${placeholders})
-            AND status = 'pending'`,
-      )
-      .run(...allIds) as { changes: number };
+    // Reset programmatic runs to 'starting' so the normal execute() lifecycle
+    // (pre_spawn → running, guarded on 'starting') re-drives them cleanly; keep
+    // current_step_id as the resume pointer. Clear any prior terminal stamps.
+    if (resumeIds.length > 0) {
+      const ph = resumeIds.map(() => '?').join(',');
+      db.prepare(
+        `UPDATE workflow_runs
+            SET status = 'starting', error_message = NULL, ended_at = NULL,
+                updated_at = CURRENT_TIMESTAMP
+          WHERE id IN (${ph})`,
+      ).run(...resumeIds);
+    }
 
-    return approvalsInfo.changes;
+    // Time out pending approvals only for the FORCE-FAILED runs (a resumed run's
+    // gate review_items must survive so the gate can re-attach).
+    let approvalsChanges = 0;
+    if (failIds.length > 0) {
+      const ph = failIds.map(() => '?').join(',');
+      const approvalsInfo = db
+        .prepare(
+          `UPDATE approvals SET status = 'timed_out', decided_at = CURRENT_TIMESTAMP, decided_by = 'system'
+            WHERE run_id IN (${ph}) AND status = 'pending'`,
+        )
+        .run(...failIds) as { changes: number };
+      approvalsChanges = approvalsInfo.changes;
+    }
+    return approvalsChanges;
   });
 
   const approvalsCanceled = tx();
@@ -83,6 +126,7 @@ export function recoverActiveStateOrphans(
     runningRecovered: runningIds.length,
     startingRecovered: startingIds.length,
     approvalsCanceled,
+    programmaticToResume: programmatic.map((r) => ({ id: r.id, currentStepId: r.current_step_id })),
   };
 }
 

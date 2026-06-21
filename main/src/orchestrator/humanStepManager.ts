@@ -306,6 +306,23 @@ export class HumanStepManager {
   }
 
   /**
+   * Find the id of an ALREADY-pending human-gate decision item for (runId, stepId),
+   * or null (crash-safe resume). Used by ReviewQueueHumanGate to re-attach to a
+   * gate that openHumanGate reports as already open after a restart re-drives a run
+   * parked at it. Read-only; no transition.
+   */
+  async findPendingGate(runId: string, stepId: string): Promise<string | null> {
+    if (!hasReviewItemsTable(this.db)) return null;
+    const row = this.db
+      .prepare(
+        `SELECT id FROM review_items
+          WHERE run_id = ? AND kind = 'decision' AND status = 'pending' AND source = ? LIMIT 1`,
+      )
+      .get(runId, this.sourceForStep(stepId)) as { id?: string } | undefined;
+    return row?.id ?? null;
+  }
+
+  /**
    * Stable per-step source string so the idempotency probe and the gate row use
    * the SAME provenance. e.g. 'gate:human-step:plan-review'.
    */
