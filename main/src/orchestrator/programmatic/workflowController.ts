@@ -89,6 +89,7 @@ export class WorkflowController {
     def: WorkflowDefinition,
     signal?: AbortSignal,
     resumeFromStepId?: string,
+    completedStepIds?: ReadonlySet<string>,
   ): Promise<ControllerResult> {
     const steps: StepReport[] = [];
     // Per-step-id loopback counters, shared across the whole run so a target that
@@ -155,6 +156,14 @@ export class WorkflowController {
         }
 
         const step = phase.steps[i];
+
+        // Crash-safe resume: a step that INDIVIDUALLY completed before a restart
+        // (persisted done/skipped) is skipped without re-running or re-reporting.
+        if (completedStepIds?.has(step.id)) {
+          i += 1;
+          continue;
+        }
+
         const baseCtx = { runId, phaseId: phase.id, stepIndex: i, signal };
         this.host.reportStep(step.id, 'running');
 
@@ -190,7 +199,7 @@ export class WorkflowController {
         }
 
         if (aborted || signal?.aborted) {
-          steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'canceled', attempts: attempt });
+          this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'canceled', attempts: attempt });
           this.host.reportStep(step.id, 'done');
           return this.finish({ outcome: 'canceled', steps, failedStepId: step.id }, runId);
         }
@@ -206,7 +215,7 @@ export class WorkflowController {
             i = next.i;
             continue;
           }
-          steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'done', attempts: attempt });
+          this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'done', attempts: attempt });
           this.host.reportStep(step.id, 'done');
           i += 1;
           continue;
@@ -222,7 +231,7 @@ export class WorkflowController {
         }
 
         if (step.optional === true) {
-          steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'skipped', attempts: attempt, error: lastError });
+          this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'skipped', attempts: attempt, error: lastError });
           this.host.log?.('warn', `optional step '${step.id}' failed; skipping`);
           this.host.reportStep(step.id, 'done');
           i += 1;
@@ -249,6 +258,21 @@ export class WorkflowController {
       this.host.notify?.(event);
     } catch {
       // A broken monitor feed must never affect the walk.
+    }
+  }
+
+  /**
+   * Append a settled step to the trace AND persist it host-side (Stage 3,
+   * migration 032). Centralizes every settle so per-step results are recorded as
+   * they happen (powering crash-safe resume + queryable results). Fail-soft: a
+   * broken recorder must never affect the walk.
+   */
+  private pushStep(steps: StepReport[], report: StepReport): void {
+    steps.push(report);
+    try {
+      this.host.recordStepResult?.(report);
+    } catch {
+      // A broken result sink must never affect the walk.
     }
   }
 
@@ -305,13 +329,13 @@ export class WorkflowController {
       const verdict = await this.host.requestHumanGate(step, ctx);
       if (verdict === 'approve') {
         // The human accepts the failure — skip the step and advance.
-        steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'skipped', attempts: attempt, error: lastError });
+        this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'skipped', attempts: attempt, error: lastError });
         this.host.log?.('warn', `triage: human accepted failure of step '${step.id}'; skipping`);
         this.host.reportStep(step.id, 'done');
         return { terminal: false, i: i + 1 };
       }
       if (verdict === 'abort') {
-        steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'canceled', attempts: attempt });
+        this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'canceled', attempts: attempt });
         this.host.reportStep(step.id, 'done');
         return { terminal: true, result: { outcome: 'canceled', steps, failedStepId: step.id } };
       }
@@ -323,7 +347,7 @@ export class WorkflowController {
       // 'reject' (or revise-exhausted) → terminal failure
     }
 
-    steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'failed', attempts: attempt, error: lastError });
+    this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'failed', attempts: attempt, error: lastError });
     this.host.reportStep(step.id, 'done');
     return { terminal: true, result: { outcome: 'failed', steps, failedStepId: step.id } };
   }
@@ -354,17 +378,17 @@ export class WorkflowController {
     attempts = 1,
   ): { terminal: true; result: ControllerResult } | { terminal: false; i: number } {
     if (decision === 'approve') {
-      steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'done', attempts });
+      this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'done', attempts });
       this.host.reportStep(step.id, 'done');
       return { terminal: false, i: i + 1 };
     }
     if (decision === 'reject') {
-      steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'rejected', attempts });
+      this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'rejected', attempts });
       this.host.reportStep(step.id, 'done');
       return { terminal: true, result: { outcome: 'rejected', steps, failedStepId: step.id } };
     }
     if (decision === 'abort') {
-      steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'canceled', attempts });
+      this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'canceled', attempts });
       this.host.reportStep(step.id, 'done');
       return { terminal: true, result: { outcome: 'canceled', steps, failedStepId: step.id } };
     }
@@ -376,7 +400,7 @@ export class WorkflowController {
       // Budget exhausted — end gracefully rather than letting the defensive
       // per-phase execution bound throw.
       this.host.log?.('warn', `gate '${step.id}' revised ${used} times; ending run (revise budget exhausted)`);
-      steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'rejected', attempts });
+      this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'rejected', attempts });
       this.host.reportStep(step.id, 'done');
       return { terminal: true, result: { outcome: 'rejected', steps, failedStepId: step.id } };
     }
@@ -386,7 +410,7 @@ export class WorkflowController {
       step.loopback !== undefined && step.loopback.length > 0
         ? phaseSteps.findIndex((s) => s.id === step.loopback)
         : -1;
-    steps.push({ stepId: step.id, phaseId: phase.id, outcome: 'done', attempts });
+    this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'done', attempts });
     this.host.reportStep(step.id, 'done');
     // A resolvable target ⇒ jump there; otherwise re-present the gate / re-run the
     // step (i unchanged).

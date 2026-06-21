@@ -217,7 +217,7 @@ describe('recoverActiveStateOrphans', () => {
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
     expect(result.runningRecovered).toBe(0); // NOT force-failed
-    expect(result.programmaticToResume).toEqual([{ id: 'run-P1', currentStepId: 'epics' }]);
+    expect(result.programmaticToResume).toEqual([{ id: 'run-P1', currentStepId: 'epics', completedStepIds: [] }]);
     const row = db.prepare('SELECT status, error_message FROM workflow_runs WHERE id = ?').get('run-P1') as {
       status: string;
       error_message: string | null;
@@ -236,8 +236,32 @@ describe('recoverActiveStateOrphans', () => {
 
     const result = recoverActiveStateOrphans(adapter, runQueues);
 
-    expect(result.programmaticToResume).toEqual([{ id: 'run-P2', currentStepId: 'approve-idea' }]);
+    expect(result.programmaticToResume).toEqual([{ id: 'run-P2', currentStepId: 'approve-idea', completedStepIds: [] }]);
     expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-P2') as { status: string }).status).toBe('starting');
+  });
+
+  it('returns persisted completed step ids for a resumed programmatic run (migration 032)', () => {
+    const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    db.exec(`CREATE TABLE IF NOT EXISTS step_results (
+      run_id TEXT NOT NULL, step_id TEXT NOT NULL, phase_id TEXT,
+      outcome TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 1, summary TEXT, error TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (run_id, step_id))`);
+    const adapter = dbAdapter(db);
+    const runQueues = new RunQueueRegistry();
+
+    seedRun(db, { id: 'run-P5', status: 'running' });
+    markProgrammatic(db, 'run-P5', 'tasks');
+    db.prepare(`INSERT INTO step_results (run_id, step_id, outcome, attempts) VALUES ('run-P5','context','done',1)`).run();
+    db.prepare(`INSERT INTO step_results (run_id, step_id, outcome, attempts) VALUES ('run-P5','research','skipped',1)`).run();
+    db.prepare(`INSERT INTO step_results (run_id, step_id, outcome, attempts) VALUES ('run-P5','epics','failed',1)`).run();
+
+    const result = recoverActiveStateOrphans(adapter, runQueues);
+
+    expect(result.programmaticToResume).toHaveLength(1);
+    expect(result.programmaticToResume[0].id).toBe('run-P5');
+    expect(result.programmaticToResume[0].currentStepId).toBe('tasks');
+    // only done/skipped are "completed"; the failed epics is NOT skipped on resume.
+    expect(result.programmaticToResume[0].completedStepIds.sort()).toEqual(['context', 'research']);
   });
 
   it('leaves a NON-programmatic awaiting_review run untouched (not failed, not resumed)', () => {

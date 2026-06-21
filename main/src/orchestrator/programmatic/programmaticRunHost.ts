@@ -14,7 +14,7 @@
  */
 import type { WorkflowStep } from '../../../../shared/types/workflows';
 import type { LoggerLike } from '../types';
-import type { ControllerHost, ControllerStepContext, HumanGateDecision, SupervisorEvent, TriageDecision } from './types';
+import type { ControllerHost, ControllerStepContext, HumanGateDecision, StepReport, SupervisorEvent, TriageDecision } from './types';
 import type { HumanGateResolver } from './humanGate';
 import type { SupervisorSession } from './supervisor';
 import type { SupervisorChatSession } from './supervisorChat';
@@ -44,6 +44,12 @@ export interface ProgrammaticRunHostArgs {
    * stays aware of the run. Independent of `supervisor` (triage).
    */
   chat?: SupervisorChatSession;
+  /**
+   * Per-step result sink (Stage 3, migration 032). When present, the host persists
+   * each settled step's StepReport (in production via StepResultStore.record) —
+   * backing queryable per-step results + crash-safe resume. Absent ⇒ not recorded.
+   */
+  recordStepResult?: (runId: string, report: StepReport) => void;
   logger?: LoggerLike;
 }
 
@@ -117,6 +123,20 @@ export class ProgrammaticRunHost implements ControllerHost {
         error: err instanceof Error ? err.message : String(err),
       });
       return 'fail';
+    }
+  }
+
+  /** Per-step result sink (Stage 3). Fail-soft — recording must not abort the walk. */
+  recordStepResult(report: StepReport): void {
+    if (!this.args.recordStepResult) return;
+    try {
+      this.args.recordStepResult(this.args.runId, report);
+    } catch (err) {
+      this.args.logger?.warn('[ProgrammaticRunHost] recordStepResult failed (fail-soft)', {
+        runId: this.args.runId,
+        stepId: report.stepId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

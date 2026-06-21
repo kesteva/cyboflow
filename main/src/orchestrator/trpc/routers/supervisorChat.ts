@@ -22,6 +22,7 @@ import {
   type SupervisorChatMessage,
   type SupervisorChatChanged,
 } from '../../programmatic/supervisorChat';
+import { StepResultStore, type StepResultRow } from '../../stepResultStore';
 import { eventToAsyncIterable } from './events';
 
 export const supervisorChatRouter = router({
@@ -34,6 +35,17 @@ export const supervisorChatRouter = router({
     .input(z.object({ runId: z.string() }))
     .query(({ input }): { active: boolean } => {
       return { active: SupervisorChatRegistry.getInstance().get(input.runId) !== undefined };
+    }),
+
+  /**
+   * Deterministic per-step results for a run (Stage 3, migration 032) — the
+   * structured outcome of each settled step (done/skipped/failed/rejected/canceled
+   * + attempts). [] when the store is uninitialized or the run has no results.
+   */
+  stepResults: protectedProcedure
+    .input(z.object({ runId: z.string() }))
+    .query(({ input }): StepResultRow[] => {
+      return StepResultStore.tryGetInstance()?.listForRun(input.runId) ?? [];
     }),
 
   /** The current transcript for a run's supervisor chat ([] when none active). */

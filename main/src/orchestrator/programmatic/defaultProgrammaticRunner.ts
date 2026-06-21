@@ -18,6 +18,7 @@
 import { resolveWorkflowDefinition } from '../../../../shared/types/workflows';
 import type { ClaudeSpawnerLike, ProgrammaticRunner, ProgrammaticRunContext } from '../runExecutor';
 import type { LoggerLike } from '../types';
+import type { StepReport } from './types';
 import { WorkflowController } from './workflowController';
 import { SpawnStepRunner } from './spawnStepRunner';
 import { ProgrammaticRunHost, type StepReporter } from './programmaticRunHost';
@@ -43,6 +44,12 @@ export interface DefaultProgrammaticRunnerDeps {
    * feed via the host. Absent ⇒ no chat session (the default).
    */
   chatSessionFactory?: () => SupervisorChatSession;
+  /**
+   * Per-step result sink (Stage 3, migration 032). When present, each settled step
+   * is persisted (in production via StepResultStore.record) for queryable results
+   * + crash-safe resume. Absent ⇒ results live only in the returned trace.
+   */
+  stepResultRecorder?: (runId: string, report: StepReport) => void;
   logger?: LoggerLike;
 }
 
@@ -95,12 +102,19 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       gate: this.deps.gate,
       supervisor,
       ...(chat ? { chat } : {}),
+      ...(this.deps.stepResultRecorder ? { recordStepResult: this.deps.stepResultRecorder } : {}),
       logger: this.deps.logger,
     });
 
     let result;
     try {
-      result = await new WorkflowController(runner, host).run(ctx.runId, def, ctx.signal, ctx.resumeFromStepId);
+      result = await new WorkflowController(runner, host).run(
+        ctx.runId,
+        def,
+        ctx.signal,
+        ctx.resumeFromStepId,
+        ctx.completedStepIds,
+      );
     } finally {
       // Always tear the supervisor + chat down — fail-soft so a broken stop never
       // masks the run outcome (or a thrown failure below).

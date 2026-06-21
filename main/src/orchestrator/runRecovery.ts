@@ -25,9 +25,11 @@ export interface RecoveryResult {
   /**
    * Programmatic runs stranded mid-walk that were RESET to 'starting' for
    * crash-safe re-drive (NOT force-failed). The caller (index boot) re-drives each
-   * via RunExecutor, threading `currentStepId` as the controller resume point.
+   * via RunExecutor, threading `currentStepId` as the coarse resume point and
+   * `completedStepIds` (persisted done/skipped from step_results, migration 032) so
+   * the controller skips individually-completed steps.
    */
-  programmaticToResume: Array<{ id: string; currentStepId: string | null }>;
+  programmaticToResume: Array<{ id: string; currentStepId: string | null; completedStepIds: string[] }>;
 }
 
 export function recoverActiveStateOrphans(
@@ -74,6 +76,23 @@ export function recoverActiveStateOrphans(
   if (orphans.length === 0 || (programmatic.length === 0 && forceFail.length === 0)) {
     return { runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [] };
   }
+
+  // Read persisted per-step completion (migration 032) for the runs we'll resume,
+  // so the controller skips individually-completed steps. Fail-soft: a missing
+  // step_results table (older DB) yields no completed ids → coarse current_step_id
+  // resume still applies.
+  const hasStepResults =
+    (db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='step_results'")
+      .get() as { name?: string } | undefined)?.name === 'step_results';
+  const completedFor = (runId: string): string[] => {
+    if (!hasStepResults) return [];
+    return (
+      db
+        .prepare(`SELECT step_id AS stepId FROM step_results WHERE run_id = ? AND outcome IN ('done','skipped')`)
+        .all(runId) as { stepId: string }[]
+    ).map((r) => r.stepId);
+  };
 
   const runningIds = forceFail.filter((r) => r.status === 'running').map((r) => r.id);
   const startingIds = forceFail.filter((r) => r.status === 'starting').map((r) => r.id);
@@ -126,7 +145,11 @@ export function recoverActiveStateOrphans(
     runningRecovered: runningIds.length,
     startingRecovered: startingIds.length,
     approvalsCanceled,
-    programmaticToResume: programmatic.map((r) => ({ id: r.id, currentStepId: r.current_step_id })),
+    programmaticToResume: programmatic.map((r) => ({
+      id: r.id,
+      currentStepId: r.current_step_id,
+      completedStepIds: completedFor(r.id),
+    })),
   };
 }
 

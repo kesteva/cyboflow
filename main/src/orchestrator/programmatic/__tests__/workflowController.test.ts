@@ -463,6 +463,36 @@ describe('WorkflowController', () => {
 
       expect(runner.calls.map((x) => x.id)).toEqual(['a', 'b']);
     });
+
+    it('skips individually-completed steps via completedStepIds (finer than resumeFromStepId)', async () => {
+      const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' }), step({ id: 'c' })])]);
+      const runner = makeRunner();
+
+      // a + b already completed before the restart → only c re-runs.
+      await new WorkflowController(runner, makeHost()).run('r', d, undefined, undefined, new Set(['a', 'b']));
+
+      expect(runner.calls.map((x) => x.id)).toEqual(['c']);
+    });
+  });
+
+  // ── per-step result recording (Stage 3, migration 032) ───────────────────────
+  it('records each settled step via host.recordStepResult with its outcome', async () => {
+    const d = def([
+      phase('p1', [step({ id: 'a' }), step({ id: 'b', optional: true })]),
+      phase('p2', [step({ id: 'gate', agent: 'human', human: true })]),
+    ]);
+    const runner = makeRunner({ b: [{ status: 'failed', error: 'meh' }] }); // b optional → skipped
+    const host = makeHost({ gate: ['approve'] });
+    const recorded: Array<{ stepId: string; outcome: string }> = [];
+    host.recordStepResult = (r) => recorded.push({ stepId: r.stepId, outcome: r.outcome });
+
+    await new WorkflowController(runner, host).run('r', d);
+
+    expect(recorded).toEqual([
+      { stepId: 'a', outcome: 'done' },
+      { stepId: 'b', outcome: 'skipped' },
+      { stepId: 'gate', outcome: 'done' },
+    ]);
   });
 
   it('does not falsely trip the execution bound when several steps loop back to an early step', async () => {
