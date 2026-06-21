@@ -19,6 +19,7 @@ import { EventEmitter } from 'node:events';
 import type { LoggerLike } from './types';
 import type { WorkflowRow, WorkflowRunRow } from '../../../shared/types/workflows';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import type { ClaudeStreamEvent } from '../../../shared/types/claudeStream';
 import type { RunEventBridge, BridgeEventsOptions } from './runEventBridge';
 import { bridgeEvents as bridgeEventsImpl } from './runEventBridge';
 import type { StreamEventPublisher } from './runLauncher';
@@ -171,6 +172,17 @@ export interface ProgrammaticRunContext {
    * these without re-running — finer than `resumeFromStepId` alone.
    */
   completedStepIds?: ReadonlySet<string>;
+  /**
+   * Inject a synthetic event into the run's unified stream (monitor-unify seam).
+   *
+   * Emits a `'output'` event on the per-run PERSISTING bridge source so the host
+   * (e.g. the on-demand monitor) can render conversation turns + triage rationale
+   * in the run's Chat pane: the bridge INSERTs the event into `raw_events` and
+   * publishes it to the renderer. Threaded by `executeProgrammatic`; a no-op
+   * (`() => {}`) when no persisting bridge was wired (no publisher/db — the test
+   * construction path), so callers can invoke it unconditionally.
+   */
+  injectEvent: (event: ClaudeStreamEvent) => void;
 }
 
 /**
@@ -276,6 +288,18 @@ export class RunExecutor {
    * Populated when bridgeEvents() returns a RunEventBridge; disposed by teardownRun().
    */
   private readonly bridges: Map<string, { dispose(): void }> = new Map();
+
+  /**
+   * Per-run dedicated EventEmitter sources for PROGRAMMATIC runs (monitor-unify
+   * seam), keyed by runId. Created in executeProgrammatic() when a persisting
+   * bridge is wired (publisher && db present); the run context's injectEvent emits
+   * a synthetic 'output' event on it, which the per-run persisting bridge picks up
+   * and persists+publishes. Distinct from the shared `source` (which fans in the
+   * spawner/interactive manager); a programmatic run owns its own emitter so its
+   * injected turns never collide with another run's stream. All listeners removed
+   * (and the key deleted) by teardownRun().
+   */
+  private readonly progSources: Map<string, EventEmitter> = new Map();
 
   /**
    * Per-run panelId mapping, keyed by runId.
@@ -607,9 +631,38 @@ export class RunExecutor {
     this.programmaticAborts.set(runId, abort);
 
     try {
-      const bridgeHandle = await this.bridgeEvents(runId, panelId);
-      if (bridgeHandle) {
+      // Programmatic runs own a PER-RUN PERSISTING bridge over a dedicated
+      // EventEmitter (monitor-unify seam). The base bridgeEvents() uses the shared
+      // `source` with skipPersistence:true — correct for the orchestrated/CCM path
+      // (the CCM pipeline owns raw_events persistence), but WRONG for a programmatic
+      // run where nothing else persists the injected conversation turns. Here we
+      // wire a dedicated source with skipPersistence:false so synthetic 'output'
+      // events injected via the run context's injectEvent are persisted to
+      // raw_events AND published to the renderer. Gated on publisher && db (tests
+      // construct RunExecutor without them) — when absent, no bridge is wired and
+      // injectEvent becomes a no-op for the run (mirrors the base method's guard).
+      let injectEvent: (event: ClaudeStreamEvent) => void = () => {};
+      if (this.publisher && this.db) {
+        const progSource = new EventEmitter();
+        this.progSources.set(runId, progSource);
+        const bridgeHandle = bridgeEventsImpl({
+          runId,
+          source: progSource,
+          publisher: this.publisher,
+          db: this.db,
+          logger: this.logger,
+          skipPersistence: false,
+        });
         this.bridges.set(runId, bridgeHandle);
+        injectEvent = (event: ClaudeStreamEvent): void => {
+          progSource.emit('output', {
+            panelId: runId,
+            sessionId: runId,
+            type: 'json',
+            data: event,
+            timestamp: new Date().toISOString(),
+          });
+        };
       }
 
       await this.onLifecycleTransition(runId, 'pre_spawn');
@@ -631,6 +684,7 @@ export class RunExecutor {
           run,
           workflow,
           signal: abort.signal,
+          injectEvent,
           ...(resumeFromStepId ? { resumeFromStepId } : {}),
           ...(completedStepIds ? { completedStepIds } : {}),
         });
@@ -812,6 +866,15 @@ export class RunExecutor {
     if (bridge) {
       bridge.dispose();
       this.bridges.delete(runId);
+    }
+    // Dispose the per-run PROGRAMMATIC source (monitor-unify seam). The bridge
+    // handle's dispose() above already removed its own 'output' listener; here we
+    // strip any remaining listeners and drop the map entry so a re-init does not
+    // leak emitters. Empty for orchestrated runs (no entry).
+    const progSource = this.progSources.get(runId);
+    if (progSource) {
+      progSource.removeAllListeners();
+      this.progSources.delete(runId);
     }
     // Remove the per-run 'turn-end' listener (interactive runs only — the map is
     // empty for SDK runs). For a persistent interactive run teardownRun fires

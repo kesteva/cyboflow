@@ -18,6 +18,7 @@ import { randomUUID } from 'crypto';
 import { join } from 'path';
 import { RunExecutor } from '../runExecutor';
 import type { ClaudeSpawnerLike, WorkflowRegistryLike, ClaudeSpawnerOptions, WorkflowPromptReaderLike, ProgrammaticRunner, ProgrammaticRunContext } from '../runExecutor';
+import { buildAssistantTextEvent } from '../programmatic/syntheticEvents';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import { RunLauncher } from '../runLauncher';
 import type {
@@ -304,6 +305,111 @@ describe('RunExecutor.execute — execution-model branch (Stage 1)', () => {
 
     expect(spawner.spawnCliProcess).toHaveBeenCalledOnce();
     expect(runner.run).not.toHaveBeenCalled();
+  });
+});
+
+describe('RunExecutor.executeProgrammatic — inject seam (monitor-unify)', () => {
+  /**
+   * B4: a programmatic run wired with a publisher + a real in-memory db gets a
+   * PER-RUN PERSISTING bridge. When the runner calls ctx.injectEvent(...), the
+   * synthetic event must (a) be INSERTed into raw_events for the run AND (b) be
+   * published to the renderer as an envelope.
+   */
+  it('persists + publishes an injected synthetic event for the run', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    // Fake publisher captures every envelope keyed by runId.
+    const published: Array<{ runId: string; type: string }> = [];
+    const publisher: StreamEventPublisher = {
+      publish(runId, envelope) {
+        published.push({ runId, type: (envelope as { type: string }).type });
+      },
+    };
+
+    // Real in-memory db so the persisting bridge can INSERT a raw_events row.
+    const db = makeRawEventsDb();
+
+    // The runner injects one assistant turn, then resolves (drains to rest).
+    const runner: ProgrammaticRunner = {
+      run: vi.fn((ctx: ProgrammaticRunContext) => {
+        ctx.injectEvent(buildAssistantTextEvent('hi'));
+        return Promise.resolve();
+      }),
+    };
+
+    const executor = new TestableRunExecutor(
+      makeSpawner(),
+      registry,
+      makeSpyLogger(),
+      undefined, // promptReader
+      undefined, // lifecycleTransitions
+      publisher, // publisher (slot 6)
+      db, // db (slot 7)
+      undefined, // source
+      undefined, // stepEmitter
+      undefined, // taskStageDeriver
+      undefined, // ideaBodyReader
+      undefined, // sprintLaneTaskIds
+      runner, // programmaticRunner (slot 13)
+    );
+
+    await executor.execute(run.id);
+
+    expect(runner.run).toHaveBeenCalledOnce();
+    // (a) raw_events row written for this run via the persisting bridge.
+    expect(countRawEvents(db, run.id)).toBe(1);
+    // (b) the publisher received an envelope for this run.
+    const forRun = published.filter((e) => e.runId === run.id);
+    expect(forRun.length).toBe(1);
+    expect(forRun[0].type).toBe('assistant');
+  });
+
+  /**
+   * Guard: with no publisher/db wired (the common test construction), no
+   * persisting bridge exists, injectEvent is a no-op, and nothing is persisted —
+   * the runner can still call it unconditionally without throwing.
+   */
+  it('injectEvent is a safe no-op when no publisher/db is wired', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    let injected: ((event: ReturnType<typeof buildAssistantTextEvent>) => void) | undefined;
+    const runner: ProgrammaticRunner = {
+      run: vi.fn((ctx: ProgrammaticRunContext) => {
+        injected = ctx.injectEvent;
+        ctx.injectEvent(buildAssistantTextEvent('hi'));
+        return Promise.resolve();
+      }),
+    };
+
+    const executor = new TestableRunExecutor(
+      makeSpawner(),
+      registry,
+      makeSpyLogger(),
+      undefined, // promptReader
+      undefined, // lifecycleTransitions
+      undefined, // publisher
+      undefined, // db
+      undefined, // source
+      undefined, // stepEmitter
+      undefined, // taskStageDeriver
+      undefined, // ideaBodyReader
+      undefined, // sprintLaneTaskIds
+      runner, // programmaticRunner (slot 13)
+    );
+
+    // Must not throw even though injectEvent is a no-op.
+    await expect(executor.execute(run.id)).resolves.toBeUndefined();
+    expect(injected).toBeTypeOf('function');
   });
 });
 
