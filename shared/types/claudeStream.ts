@@ -170,7 +170,13 @@ export interface UserEvent {
   type: 'user';
   message: {
     role: 'user';
-    content: ToolResultBlock[];
+    /**
+     * Primarily carries `tool_result` blocks (SDK-emitted user turns). May also carry
+     * `text` blocks for genuine user-text turns (e.g. the on-demand monitor's injected
+     * conversation turns — see `main/src/orchestrator/programmatic/syntheticEvents.ts`).
+     * This widening is additive/back-compat: existing SDK producers emit only tool_result.
+     */
+    content: Array<ToolResultBlock | TextBlock>;
   };
   tool_use_result?: {
     filenames?: string[];

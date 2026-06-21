@@ -318,6 +318,75 @@ describe('MessageProjection', () => {
   });
 
   // -------------------------------------------------------------------------
+  // 8b. user with a text block → user-role message (monitor conversation turn)
+  // -------------------------------------------------------------------------
+
+  it('projects a user event with a text block to a user-role text message', () => {
+    const userTextEvent: UserEvent = {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: '  Why did the build step fail?  ' }],
+      },
+      parent_tool_use_id: null,
+      session_id: SESSION_ID,
+    };
+
+    const result = projection.project(userTextEvent);
+
+    expect(result).not.toBeNull();
+    const msg = result as UnifiedMessage;
+    expect(msg.role).toBe('user');
+    expect(msg.id).toMatch(/^user_msg_/);
+    expect(msg.segments).toHaveLength(1);
+    expect(msg.segments[0].type).toBe('text');
+    if (msg.segments[0].type === 'text') {
+      // Trimmed.
+      expect(msg.segments[0].content).toBe('Why did the build step fail?');
+    }
+    expect(msg.metadata).toEqual({});
+  });
+
+  it('joins multiple non-empty text blocks and drops empty ones in a user event', () => {
+    const userTextEvent: UserEvent = {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'First line' },
+          { type: 'text', text: '   ' },
+          { type: 'text', text: 'Second line' },
+        ],
+      },
+      parent_tool_use_id: null,
+    };
+
+    const result = projection.project(userTextEvent);
+
+    expect(result).not.toBeNull();
+    const msg = result as UnifiedMessage;
+    expect(msg.role).toBe('user');
+    expect(msg.segments[0].type).toBe('text');
+    if (msg.segments[0].type === 'text') {
+      expect(msg.segments[0].content).toBe('First line\nSecond line');
+    }
+  });
+
+  it('returns null for a user event whose only text block is whitespace (tool_result-only behavior preserved)', () => {
+    const userWhitespaceEvent: UserEvent = {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: '   ' }],
+      },
+      parent_tool_use_id: null,
+    };
+
+    const result = projection.project(userWhitespaceEvent);
+    expect(result).toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
   // 9. result/success → null
   // -------------------------------------------------------------------------
 

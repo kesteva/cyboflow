@@ -19,7 +19,7 @@
  *   }
  */
 
-import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactBoundaryEvent, AssistantEvent, UserEvent, ResultEvent } from '../../../../shared/types/claudeStream';
+import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactBoundaryEvent, AssistantEvent, UserEvent, ResultEvent, TextBlock } from '../../../../shared/types/claudeStream';
 import type { UnifiedMessage, MessageSegment, ToolCall, ToolResult } from '../../../../shared/types/unifiedMessage';
 import type { ILogger } from './types';
 
@@ -327,6 +327,26 @@ export class MessageProjection {
           this.parentToolMap.set(block.tool_use_id, event.parent_tool_use_id);
         }
       }
+    }
+
+    // Step 3: gather any text blocks. A user turn may carry genuine user text
+    // (e.g. the on-demand monitor's injected conversation turns) alongside or
+    // instead of tool_result blocks. If there is ≥1 non-empty text block, render
+    // it as a user-role message.
+    const userText = content
+      .filter((block): block is TextBlock => block.type === 'text')
+      .map(block => block.text.trim())
+      .filter(text => text.length > 0)
+      .join('\n');
+
+    if (userText.length > 0) {
+      return {
+        id: `user_msg_${++this.messageIdCounter}`,
+        role: 'user',
+        timestamp: new Date().toISOString(),
+        segments: [{ type: 'text', content: userText }],
+        metadata: {},
+      };
     }
 
     // User events carrying only tool_result blocks are internal plumbing —

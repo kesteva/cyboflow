@@ -191,7 +191,10 @@ const userEventSchema = z.object({
   type: z.literal('user'),
   message: z.object({
     role: z.literal('user'),
-    content: z.array(toolResultBlockSchema),
+    // Primarily tool_result blocks (SDK user turns); may also carry text blocks for
+    // genuine user-text turns (the on-demand monitor's injected conversation turns).
+    // Mirrors the additive widening of UserEvent.message.content in claudeStream.ts.
+    content: z.array(z.union([toolResultBlockSchema, textBlockSchema])),
   }).passthrough(),
   tool_use_result: z.object({
     filenames: z.array(z.string()).optional(),

@@ -143,6 +143,9 @@ describe('UserEvent', () => {
 
     const toolResult = event.message.content[0];
     expect(toolResult.type).toBe('tool_result');
+    if (toolResult.type !== 'tool_result') {
+      throw new Error('Expected a tool_result block from user_string_content fixture');
+    }
     // Research §1 §4: content can be a plain string — this fixture tests the string form
     expect(typeof toolResult.content).toBe('string');
   });
@@ -161,6 +164,9 @@ describe('UserEvent', () => {
 
     const toolResult = event.message.content[0];
     expect(toolResult.type).toBe('tool_result');
+    if (toolResult.type !== 'tool_result') {
+      throw new Error('Expected a tool_result block from user_array_content fixture');
+    }
     // Research §1 §4: content can be an array [{type, text}] — this fixture tests the array form
     expect(Array.isArray(toolResult.content)).toBe(true);
   });
