@@ -13,22 +13,21 @@
 ## Checklist
 <!-- Please check all that apply -->
 - [ ] I have read the [CONTRIBUTING.md](../CONTRIBUTING.md) guidelines
-- [ ] My code follows the code style of this project
+- [ ] **Every commit is signed off** (`git commit -s`) per the [DCO](../DCO) — the `dco` CI check enforces this
+- [ ] My code follows the code style of this project and does not use the `any` type
 - [ ] I have performed a self-review of my own code
-- [ ] I have commented my code, particularly in hard-to-understand areas
 - [ ] I have made corresponding changes to the documentation
 - [ ] My changes generate no new warnings
-- [ ] I have added tests that prove my fix is effective or that my feature works
-- [ ] New and existing unit tests pass locally with my changes
+- [ ] `pnpm test:unit` passes locally with my changes
 - [ ] I have run `pnpm typecheck` and `pnpm lint` locally
-- [ ] I have tested the Electron app locally with `pnpm electron-dev`
+- [ ] I have tested the Electron app locally with `pnpm dev`
 
 ## Critical Areas Modified
 <!-- Check if you modified any of these critical areas -->
-- [ ] Session output handling (requires explicit permission)
-- [ ] Timestamp handling
-- [ ] State management/IPC events
-- [ ] Diff viewer CSS
+- [ ] Entity-model writes (must funnel through `TaskChangeRouter` / `ReviewItemRouter` / `ArtifactRouter` chokepoints — no direct table UPDATEs)
+- [ ] IPC contract or tRPC router shapes (keep request/response `T` parity — see CLAUDE.md)
+- [ ] Database migrations (`main/src/database/migrations/`)
+- [ ] Workflow/agent prompt bodies or the dual-substrate seam
 
 ## Screenshots (if applicable)
 <!-- Add screenshots to help explain your changes -->
