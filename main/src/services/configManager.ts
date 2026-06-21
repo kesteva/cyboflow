@@ -233,10 +233,13 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
-   * Which supervisor a PROGRAMMATIC run runs alongside (Stage 3). Floors to
-   * 'review-queue' (escalate failures to the human review queue — no live SDK
-   * call) when unset; 'sdk' opts into the SDK triage agent. NOT seeded into the
-   * constructor defaults, so existing config.json files stay byte-identical.
+   * Whether a PROGRAMMATIC run wires the ON-DEMAND monitor (the monitor-unify
+   * refactor; supersedes the old Stage 3 supervisor + supervisor-chat planes — the
+   * key/value are kept unchanged so existing config.json files stay byte-identical).
+   * Floors to 'review-queue' (no monitor: exhausted required failures escalate to the
+   * human review queue, the Chat composer stays disabled — no live SDK call) when
+   * unset; 'sdk' opts into the on-demand monitor (triage + chat in the run's Chat
+   * pane). NOT seeded into the constructor defaults.
    */
   getProgrammaticSupervisor(): 'review-queue' | 'sdk' {
     return this.config.programmaticSupervisor ?? 'review-queue';

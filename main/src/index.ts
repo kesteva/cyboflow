@@ -33,11 +33,13 @@ import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
-import { ReviewQueueSupervisor, type SupervisorSession } from './orchestrator/programmatic/supervisor';
-import { SdkSupervisorSession, SdkSupervisorAdvisor } from './orchestrator/programmatic/sdkSupervisor';
-import { makeSdkStructuredQuery } from './orchestrator/programmatic/sdkStructuredQuery';
-import { DefaultSupervisorChatSession, type SupervisorChatSession } from './orchestrator/programmatic/supervisorChat';
-import { makeSdkStreamingChatBackend } from './orchestrator/programmatic/supervisorChatBackend';
+import {
+  DefaultMonitorSession,
+  DefaultHistoryReader,
+  type MonitorContext,
+  type MonitorSession,
+} from './orchestrator/programmatic/monitor';
+import { makeSdkStructuredQuery, makeSdkTextQuery } from './orchestrator/programmatic/monitorQuery';
 import { StepResultStore } from './orchestrator/stepResultStore';
 import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
 import { dockBadgeService } from './services/dockBadgeService';
@@ -59,6 +61,7 @@ import type { ApprovalRequest } from './orchestrator/approvalRouter';
 import type { QuestionRequest } from './orchestrator/questionRouter';
 import type { ApprovalDecidedEvent } from '../../shared/types/approvals';
 import type { QuestionAnsweredEvent } from '../../shared/types/questions';
+import type { ClaudeStreamEvent } from '../../shared/types/claudeStream';
 import type { DatabaseLike } from './orchestrator/types';
 import { buildApprovalCreatedEvent } from './orchestrator/approvalCreatedBridge';
 import { buildQuestionCreatedEvent } from './orchestrator/questionCreatedBridge';
@@ -608,7 +611,7 @@ async function initializeServices() {
   AgentOverrideRouter.initialize(cyboflowDb);
   HumanStepManager.initialize(cyboflowDb);
   // Per-step result store (Stage 3, migration 032): the programmatic step recorder
-  // + crash-safe resume + the supervisorChat.stepResults tRPC query reach it here.
+  // + crash-safe resume + the monitor.stepResults tRPC query reach it here.
   StepResultStore.initialize(cyboflowDb);
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).
@@ -824,22 +827,45 @@ async function initializeServices() {
       reviewItemProjectChannel,
       cyboflowLogger,
     ),
-    // Supervisor (Stage 3): the monitor + triage + human-seam plane that runs
-    // alongside the host-driven walk. Selected by config (default 'review-queue'):
-    //   - 'review-queue' → ReviewQueueSupervisor: escalate every exhausted failure
-    //     to the HUMAN review queue (no live SDK call) — the policy human seam.
-    //   - 'sdk' → SdkSupervisorSession: ask an SDK agent to TRIAGE each failure
-    //     (retry/escalate/fail) with accumulated run context (opt-in; live SDK call,
-    //     not headlessly verifiable — see sdkStructuredQuery.ts).
-    supervisorFactory: ((): (() => SupervisorSession) => {
-      if (configManager.getProgrammaticSupervisor() === 'sdk') {
-        const queryFn = makeSdkStructuredQuery(cyboflowLogger);
-        return () => new SdkSupervisorSession(new SdkSupervisorAdvisor(queryFn), undefined, cyboflowLogger);
-      }
-      return () => new ReviewQueueSupervisor(cyboflowLogger);
-    })(),
-    // Per-step result sink (Stage 3, migration 032): persist each settled step so
-    // results are queryable + crash-safe resume can skip individually-completed steps.
+    // ON-DEMAND monitor (the monitor-unify refactor): the single triage + chat
+    // human-seam plane that folds the old Stage 3 supervisor + supervisor-chat
+    // planes into one token-frugal `MonitorSession` rendering in the run's existing
+    // Chat pane. Opt-in via config (default 'review-queue'):
+    //   - 'review-queue' → NO factory: exhausted required failures 'escalate' to the
+    //     HUMAN review queue (the host's default; no live SDK call) and the Chat
+    //     composer stays disabled for the run — behavior-identical to before.
+    //   - 'sdk' → a `DefaultMonitorSession` over the real on-demand query fns
+    //     (monitorQuery.ts) + a HistoryReader bound to cyboflowDb. The session reads
+    //     the WHOLE run history ONLY when it must act (triage a failure / answer a
+    //     human chat turn); it consumes zero tokens during routine progress. The
+    //     run's `injectEvent` (threaded as the 2nd factory arg from the run context,
+    //     Slice B) is owned by the session so its `converse` renders the human turn +
+    //     the monitor's reply into the run's Chat pane (the tRPC `monitor.send` seam).
+    //     The runner registers the session in MonitorRegistry so the router reaches
+    //     it. NOT headlessly verifiable — it makes a real Claude call (monitorQuery.ts).
+    ...(configManager.getProgrammaticSupervisor() === 'sdk'
+      ? {
+          monitorFactory: ((): ((
+            ctx: MonitorContext,
+            injectEvent: (event: ClaudeStreamEvent) => void,
+          ) => MonitorSession) => {
+            const structuredQuery = makeSdkStructuredQuery(cyboflowLogger);
+            const textQuery = makeSdkTextQuery(cyboflowLogger);
+            const history = new DefaultHistoryReader(cyboflowDb, cyboflowLogger);
+            return (ctx, injectEvent) =>
+              new DefaultMonitorSession({
+                ctx,
+                history,
+                structuredQuery,
+                textQuery,
+                injectEvent,
+                logger: cyboflowLogger,
+              });
+          })(),
+        }
+      : {}),
+    // Per-step result sink (migration 032): persist each settled step so results
+    // are queryable + crash-safe resume can skip individually-completed steps.
     stepResultRecorder: (runId, report) =>
       StepResultStore.tryGetInstance()?.record({
         runId,
@@ -849,17 +875,6 @@ async function initializeServices() {
         attempts: report.attempts,
         ...(report.error !== undefined ? { error: report.error } : {}),
       }),
-    // Supervisor CHAT (Stage 3 human seam): a long-lived conversational session the
-    // user converses with while the run executes. Only when the SDK supervisor is
-    // opted in (it needs the live SDK); the default review-queue mode has no chat.
-    ...(configManager.getProgrammaticSupervisor() === 'sdk'
-      ? {
-          chatSessionFactory: ((): (() => SupervisorChatSession) => {
-            const backend = makeSdkStreamingChatBackend(cyboflowLogger);
-            return () => new DefaultSupervisorChatSession(backend, undefined, cyboflowLogger);
-          })(),
-        }
-      : {}),
     logger: cyboflowLogger,
   });
 

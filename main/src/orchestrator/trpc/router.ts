@@ -19,7 +19,7 @@ import { questionsRouter } from './routers/questions';
 import { tasksRouter } from './routers/tasks';
 import { reviewItemsRouter } from './routers/reviewItems';
 import { substratesRouter } from './routers/substrates';
-import { supervisorChatRouter } from './routers/supervisorChat';
+import { monitorRouter } from './routers/monitor';
 
 export const appRouter = router({
   cyboflow: router({
@@ -30,11 +30,11 @@ export const appRouter = router({
     files: filesRouter,
     health: healthRouter,
     insights: insightsRouter,
+    monitor: monitorRouter,
     questions: questionsRouter,
     reviewItems: reviewItemsRouter,
     runs: runsRouter,
     substrates: substratesRouter,
-    supervisorChat: supervisorChatRouter,
     tasks: tasksRouter,
     workflows: workflowsRouter,
   }),
