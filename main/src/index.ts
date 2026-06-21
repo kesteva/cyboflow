@@ -36,6 +36,8 @@ import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
 import { ReviewQueueSupervisor, type SupervisorSession } from './orchestrator/programmatic/supervisor';
 import { SdkSupervisorSession, SdkSupervisorAdvisor } from './orchestrator/programmatic/sdkSupervisor';
 import { makeSdkStructuredQuery } from './orchestrator/programmatic/sdkStructuredQuery';
+import { DefaultSupervisorChatSession, type SupervisorChatSession } from './orchestrator/programmatic/supervisorChat';
+import { makeSdkStreamingChatBackend } from './orchestrator/programmatic/supervisorChatBackend';
 import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
 import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
@@ -832,6 +834,17 @@ async function initializeServices() {
       }
       return () => new ReviewQueueSupervisor(cyboflowLogger);
     })(),
+    // Supervisor CHAT (Stage 3 human seam): a long-lived conversational session the
+    // user converses with while the run executes. Only when the SDK supervisor is
+    // opted in (it needs the live SDK); the default review-queue mode has no chat.
+    ...(configManager.getProgrammaticSupervisor() === 'sdk'
+      ? {
+          chatSessionFactory: ((): (() => SupervisorChatSession) => {
+            const backend = makeSdkStreamingChatBackend(cyboflowLogger);
+            return () => new DefaultSupervisorChatSession(backend, undefined, cyboflowLogger);
+          })(),
+        }
+      : {}),
     logger: cyboflowLogger,
   });
 

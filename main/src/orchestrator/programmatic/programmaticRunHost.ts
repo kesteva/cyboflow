@@ -17,6 +17,7 @@ import type { LoggerLike } from '../types';
 import type { ControllerHost, ControllerStepContext, HumanGateDecision, SupervisorEvent, TriageDecision } from './types';
 import type { HumanGateResolver } from './humanGate';
 import type { SupervisorSession } from './supervisor';
+import type { SupervisorChatSession } from './supervisorChat';
 
 /**
  * Drives a step boundary onto the live timeline (current_step_id + emit). In
@@ -37,6 +38,12 @@ export interface ProgrammaticRunHostArgs {
    * the controller never sees notify/triageFailure (Stages 1-2 behavior).
    */
   supervisor?: SupervisorSession;
+  /**
+   * The supervisor CHAT session (Stage 3 human seam). When present, the host also
+   * forwards the monitor feed to `chat.observe` so the conversational supervisor
+   * stays aware of the run. Independent of `supervisor` (triage).
+   */
+  chat?: SupervisorChatSession;
   logger?: LoggerLike;
 }
 
@@ -66,16 +73,27 @@ export class ProgrammaticRunHost implements ControllerHost {
     });
   }
 
-  /** Monitor feed → supervisor (Stage 3). Fail-soft — never abort the walk. */
+  /** Monitor feed → supervisor + chat (Stage 3). Fail-soft — never abort the walk. */
   notify(event: SupervisorEvent): void {
-    if (!this.args.supervisor) return;
-    try {
-      this.args.supervisor.notify(event);
-    } catch (err) {
-      this.args.logger?.warn('[ProgrammaticRunHost] supervisor.notify failed (fail-soft)', {
-        runId: this.args.runId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+    if (this.args.supervisor) {
+      try {
+        this.args.supervisor.notify(event);
+      } catch (err) {
+        this.args.logger?.warn('[ProgrammaticRunHost] supervisor.notify failed (fail-soft)', {
+          runId: this.args.runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (this.args.chat) {
+      try {
+        this.args.chat.observe(event);
+      } catch (err) {
+        this.args.logger?.warn('[ProgrammaticRunHost] chat.observe failed (fail-soft)', {
+          runId: this.args.runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 
