@@ -285,6 +285,56 @@ describe('DefaultMonitorSession.converse', () => {
     expect(reply.toLowerCase()).toContain('sorry');
     expect(injected[0]?.toLowerCase()).toContain('sorry');
   });
+
+  it('renders a placeholder assistant turn when the answer is empty (no silent drop)', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    // A successful-but-EMPTY answer ('' / whitespace) must NOT render as nothing.
+    const textQuery: TextQueryFn = vi.fn().mockResolvedValue('   ');
+    const injected: Array<{ role: string; text: string }> = [];
+    const injectEvent = (event: unknown): void => {
+      const e = event as { message: { role: string; content: Array<{ type: string; text?: string }> } };
+      injected.push({ role: e.message.role, text: e.message.content.find((b) => b.type === 'text')?.text ?? '' });
+    };
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery: vi.fn(), textQuery, injectEvent });
+
+    const reply = await session.converse('q');
+
+    expect(reply.trim().length).toBeGreaterThan(0);
+    const assistant = injected.find((m) => m.role === 'assistant');
+    expect(assistant?.text.trim().length).toBeGreaterThan(0);
+    expect(assistant?.text).toBe(reply);
+  });
+
+  it('serializes concurrent converse calls so their turns never interleave', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    let call = 0;
+    const textQuery: TextQueryFn = vi.fn().mockImplementation(() => {
+      call += 1;
+      const n = call;
+      // The FIRST answer is slow: were converse not serialized, the second call's
+      // user turn + (fast) reply would inject before the first call's reply.
+      const delay = n === 1 ? 20 : 0;
+      return new Promise<string>((resolve) => setTimeout(() => resolve(`r${n}`), delay));
+    });
+    const injected: Array<{ role: string; text: string }> = [];
+    const injectEvent = (event: unknown): void => {
+      const e = event as { message: { role: string; content: Array<{ type: string; text?: string }> } };
+      injected.push({ role: e.message.role, text: e.message.content.find((b) => b.type === 'text')?.text ?? '' });
+    };
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery: vi.fn(), textQuery, injectEvent });
+
+    // Fire both WITHOUT awaiting the first — they must still run strictly in order.
+    const p1 = session.converse('first');
+    const p2 = session.converse('second');
+    await Promise.all([p1, p2]);
+
+    expect(injected).toEqual([
+      { role: 'user', text: 'first' },
+      { role: 'assistant', text: 'r1' },
+      { role: 'user', text: 'second' },
+      { role: 'assistant', text: 'r2' },
+    ]);
+  });
 });
 
 describe('MonitorRegistry', () => {

@@ -294,6 +294,9 @@ export interface DefaultMonitorSessionDeps {
 const ANSWER_FAILED =
   'Sorry — I could not answer that right now (the monitor encountered an error). Please try again.';
 
+/** Rendered when the monitor returns a successful-but-empty answer (so a turn always renders). */
+const NO_ANSWER = 'I could not produce an answer for that.';
+
 /**
  * The default `MonitorSession` over the fakeable query fns + a `HistoryReader`. Each
  * call reads the whole history fresh (no accumulated feed), builds the prompt, runs
@@ -307,6 +310,8 @@ export class DefaultMonitorSession implements MonitorSession {
   private readonly model?: string;
   private readonly injectEvent?: (event: ClaudeStreamEvent) => void;
   private readonly logger?: LoggerLike;
+  /** Tail of the serialized converse chain — see `converse`. */
+  private sendChain: Promise<unknown> = Promise.resolve();
 
   constructor(deps: DefaultMonitorSessionDeps) {
     this.ctx = deps.ctx;
@@ -381,10 +386,30 @@ export class DefaultMonitorSession implements MonitorSession {
    * no `injectEvent` is wired the turns are not rendered (fallback to a bare answer).
    */
   async converse(text: string, signal?: AbortSignal): Promise<string> {
+    // Serialize exchanges on this session: concurrent sends (the frontend
+    // isSending flag only guards a single component instance) must NOT interleave
+    // their inject(user) → answer → inject(assistant) sequences or race the
+    // whole-history read (review: converse-no-serialization). Each call waits for
+    // the prior to settle; the chain tail swallows outcomes so one failure does
+    // not poison later exchanges.
+    const exchange = this.sendChain.then(() => this.converseOnce(text, signal));
+    this.sendChain = exchange.then(
+      () => undefined,
+      () => undefined,
+    );
+    return exchange;
+  }
+
+  /** One full chat exchange (serialized by `converse`). */
+  private async converseOnce(text: string, signal?: AbortSignal): Promise<string> {
     this.tryInject(buildUserTextEvent(text));
     const reply = await this.answer(text, signal);
-    this.tryInject(buildAssistantTextEvent(reply));
-    return reply;
+    // A successful-but-EMPTY reply ('' from textQuery) would render as nothing —
+    // the user would see their question with no answer. Always render something
+    // (review: empty-monitor-reply-dropped).
+    const rendered = reply.trim().length > 0 ? reply : NO_ANSWER;
+    this.tryInject(buildAssistantTextEvent(rendered));
+    return rendered;
   }
 
   /** Inject a synthetic turn into the Chat pane, fail-soft (no-op when unwired). */
