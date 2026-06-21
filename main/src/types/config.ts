@@ -28,6 +28,9 @@ export interface AppConfig {
   // ignored on the interactive substrate (which hard-pins 'orchestrated'). NOT seeded into the
   // constructor defaults, so existing config.json files stay byte-identical.
   defaultExecutionModel?: ExecutionModel;
+  // Which supervisor a PROGRAMMATIC run runs alongside (Stage 3). 'review-queue' (default) escalates
+  // failures to the human review queue; 'sdk' asks an SDK agent to triage (live SDK call — opt-in).
+  programmaticSupervisor?: 'review-queue' | 'sdk';
   // Theme preference
   theme?: 'paper' | 'light' | 'dark';
   // Notification settings
@@ -83,6 +86,8 @@ export interface UpdateConfigRequest {
   defaultAgentPermissionMode?: PermissionMode;
   // Global default execution model for new SDK workflow runs ('orchestrated' | 'programmatic').
   defaultExecutionModel?: ExecutionModel;
+  // Programmatic-run supervisor kind ('review-queue' | 'sdk'). See AppConfig.
+  programmaticSupervisor?: 'review-queue' | 'sdk';
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;

@@ -33,7 +33,9 @@ import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
-import { ReviewQueueSupervisor } from './orchestrator/programmatic/supervisor';
+import { ReviewQueueSupervisor, type SupervisorSession } from './orchestrator/programmatic/supervisor';
+import { SdkSupervisorSession, SdkSupervisorAdvisor } from './orchestrator/programmatic/sdkSupervisor';
+import { makeSdkStructuredQuery } from './orchestrator/programmatic/sdkStructuredQuery';
 import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
 import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
@@ -817,11 +819,19 @@ async function initializeServices() {
       cyboflowLogger,
     ),
     // Supervisor (Stage 3): the monitor + triage + human-seam plane that runs
-    // alongside the host-driven walk. ReviewQueueSupervisor routes a required
-    // step's exhausted failure to the HUMAN review queue (escalate) instead of
-    // hard-failing the run — the policy realization of the human seam. The SDK
-    // monitor/chat agent is a drop-in for this factory behind SupervisorSession.
-    supervisorFactory: () => new ReviewQueueSupervisor(cyboflowLogger),
+    // alongside the host-driven walk. Selected by config (default 'review-queue'):
+    //   - 'review-queue' → ReviewQueueSupervisor: escalate every exhausted failure
+    //     to the HUMAN review queue (no live SDK call) — the policy human seam.
+    //   - 'sdk' → SdkSupervisorSession: ask an SDK agent to TRIAGE each failure
+    //     (retry/escalate/fail) with accumulated run context (opt-in; live SDK call,
+    //     not headlessly verifiable — see sdkStructuredQuery.ts).
+    supervisorFactory: ((): (() => SupervisorSession) => {
+      if (configManager.getProgrammaticSupervisor() === 'sdk') {
+        const queryFn = makeSdkStructuredQuery(cyboflowLogger);
+        return () => new SdkSupervisorSession(new SdkSupervisorAdvisor(queryFn), undefined, cyboflowLogger);
+      }
+      return () => new ReviewQueueSupervisor(cyboflowLogger);
+    })(),
     logger: cyboflowLogger,
   });
 
