@@ -83,46 +83,75 @@ The full file should then export **8 vars**: 5 Apple
 
 ## Cutting a release
 
+macOS ships as **lean per-arch builds** — `arm64` and `x64` are built in
+*separate* electron-builder invocations so each DMG can exclude the other arch's
+~200 MB `claude` binary (see `scripts/configure-build.js`). A universal build is
+**not** used: `@electron/universal` chokes on the two identical per-arch `claude`
+Mach-Os. The trade-off is that the release is a few explicit steps rather than one
+`release:mac` command.
+
 1. Bump `version` in `package.json` (e.g. `0.1.2` → `0.1.3`). The updater compares
    this baked-in version against the manifest, so this is what gates the prompt.
-2. Load the release secrets into your shell, then build + sign + notarize +
-   publish in one step:
+   For beta, a `-beta.N` suffix is conventional (e.g. `0.1.3-beta.1`).
+2. Load the release secrets, **aborting loudly if any are missing** (a missing var
+   silently ships an *unsigned* build). Add this guarded wrapper to `~/.zshrc`:
    ```bash
-   source ~/Developer/cyboflow/.envrc.local   # 5 Apple + 3 R2 vars
-   pnpm release:mac          # stable: build:mac → publish:r2 (uploads to stable/)
-   pnpm release:mac:beta     # beta:   build:mac:beta → publish:r2 (uploads to beta/)
-   ```
-   Or use the guarded wrapper (recommended) — it sources the file, **aborts loudly
-   if any credential is missing** (instead of silently shipping unsigned), and
-   works from the primary repo or any worktree. Add to `~/.zshrc`:
-   ```bash
-   cyborelease() {
+   cybosecrets() {
      source ~/Developer/cyboflow/.envrc.local
      : "${CSC_LINK:?missing Apple signing vars}" "${R2_ACCESS_KEY_ID:?missing R2 vars}"
-     pnpm "${1:-release:mac}"   # cyborelease  → stable;  cyborelease release:mac:beta → beta
    }
    ```
-3. Dry-run the upload step alone to see what would publish:
+3. Build, sign + notarize each arch (separate runs). Beta example:
    ```bash
-   pnpm build:mac && UPDATE_DRY_RUN=true pnpm publish:r2
-   BUILD_VARIANT=beta UPDATE_DRY_RUN=true pnpm publish:r2   # dry-run the beta prefix
+   cybosecrets
+   pnpm build:mac:beta:arm64   # → dist-electron/Cyboflow-Beta-<v>-macOS-arm64.{dmg,zip,blockmap}
+   pnpm build:mac:beta:x64     # → dist-electron/Cyboflow-Beta-<v>-macOS-x64.{dmg,zip,blockmap}
    ```
+   Stable is the same with `build:mac:arm64` / `build:mac:x64`.
+4. **Generate the combined `latest-mac.yml`.** Each per-arch build writes its own
+   manifest and the next run overwrites it, so no single file lists both arches —
+   without a merge, the updater can't resolve the arch-matching artifact. The
+   generator computes each file's `size` + `base64(sha512)` (the exact format
+   electron-builder emits) and writes one manifest naming every arch's zip + dmg.
+   Pass the **arm64 zip first** (it becomes the legacy `path` fallback):
+   ```bash
+   node scripts/gen-mac-latest-yml.mjs dist-electron/latest-mac.yml \
+     Cyboflow-Beta-<v>-macOS-arm64.zip Cyboflow-Beta-<v>-macOS-arm64.dmg \
+     Cyboflow-Beta-<v>-macOS-x64.zip  Cyboflow-Beta-<v>-macOS-x64.dmg
+   ```
+   electron-updater's `MacUpdater.filterFilesForArch` selects purely on whether the
+   filename contains `arm64` (arm64 Macs incl. Rosetta → the arm64 file; x64 Macs →
+   the non-arm64 file), so one manifest serves both.
+5. **Publish only this release's files.** `dist-electron` accumulates a mix of
+   variants/arches plus stale artifacts, so pass an explicit allowlist (`PUBLISH_ONLY`,
+   comma-separated basenames) — never the bare glob, which would cross-contaminate
+   the feeds. Dry-run first:
+   ```bash
+   FILES="Cyboflow-Beta-<v>-macOS-arm64.dmg,Cyboflow-Beta-<v>-macOS-arm64.dmg.blockmap,\
+   Cyboflow-Beta-<v>-macOS-arm64.zip,Cyboflow-Beta-<v>-macOS-arm64.zip.blockmap,\
+   Cyboflow-Beta-<v>-macOS-x64.dmg,Cyboflow-Beta-<v>-macOS-x64.dmg.blockmap,\
+   Cyboflow-Beta-<v>-macOS-x64.zip,Cyboflow-Beta-<v>-macOS-x64.zip.blockmap,latest-mac.yml"
+   BUILD_VARIANT=beta PUBLISH_ONLY="$FILES" UPDATE_DRY_RUN=true pnpm publish:r2
+   BUILD_VARIANT=beta PUBLISH_ONLY="$FILES" pnpm publish:r2        # real upload → beta/
+   ```
+   (Stable: drop `BUILD_VARIANT=beta`, use the non-`Beta` filenames → `stable/`.)
 
-`publish:r2` mirrors everything in `dist-electron` matching `*.yml`/`*.zip`/`*.dmg`/
-`*.blockmap` to the bucket under the variant prefix (`stable/` or `beta/`, from
-`BUILD_VARIANT`). The `.yml` manifest is uploaded `no-cache` (it changes every
-release); the binaries are uploaded `immutable` (their version is in the filename).
+`publish:r2` uploads each allowlisted `*.yml`/`*.zip`/`*.dmg`/`*.blockmap` to the
+bucket under the variant prefix (`stable/` or `beta/`, from `BUILD_VARIANT`). The
+`.yml` manifest is uploaded `no-cache` (it changes every release); the binaries are
+uploaded `immutable` (their version is in the filename).
 
-The website's "Download" buttons point at the current
-`https://updates.cyboflow.com/stable/Cyboflow-<version>-macOS-universal.dmg` (and the
-`beta/Cyboflow-Beta-<version>-...` for the beta app) for first installs — auto-update
-only upgrades an already-installed app.
+The website's "Download" buttons point at the per-arch DMGs for first installs —
+auto-update only upgrades an already-installed app:
+- `https://updates.cyboflow.com/stable/Cyboflow-<version>-macOS-arm64.dmg`
+- `https://updates.cyboflow.com/beta/Cyboflow-Beta-<version>-macOS-arm64.dmg` (and the `-x64.dmg` for Intel)
 
 ### Typical flow
 
 ```
-bump version → pnpm release:mac:beta → test the Beta app → fix → repeat
-                                     → on green: pnpm release:mac (ship Stable)
+bump version → build:mac:beta:{arm64,x64} → gen-mac-latest-yml → publish (beta/)
+            → test the Beta app → fix → repeat
+            → on green: build:mac:{arm64,x64} → gen-mac-latest-yml → publish (stable/)
 ```
 
 Because Beta is a distinct app (own data dir), you can run it alongside Stable
@@ -154,6 +183,8 @@ auto-update to (a `-beta.N` prerelease suffix is conventional, e.g. `0.1.3-beta.
 | **`.zip` is required** | `mac.target: "default"` produces `.dmg` **and** `.zip`. The updater needs the `.zip`; the `.dmg` is only for first install. |
 | **Manifest must not be cached** | `latest-mac.yml` is uploaded `no-cache`. If you front it with extra CDN caching, the app won't see new releases until the cache expires. |
 | **First install is still manual** | The updater upgrades an installed app only. New users download the `.dmg` from the website. |
+| **Per-arch manifests must be merged** | Each per-arch build overwrites `latest-mac.yml`. Always regenerate it with `scripts/gen-mac-latest-yml.mjs` listing *both* arches before publishing, or one arch's users get no updates. |
+| **Publish with an allowlist** | `dist-electron` holds a mix of variants/arches/stale files. Use `PUBLISH_ONLY` so a release publishes exactly its own files — the bare glob cross-contaminates the `stable/` and `beta/` feeds. |
 
 ---
 
