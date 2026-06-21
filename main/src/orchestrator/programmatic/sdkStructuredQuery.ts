@@ -18,16 +18,32 @@ import type { LoggerLike } from '../types';
 import { resolveClaudeExecutablePath } from '../../services/panels/claude/claudeExecutablePath';
 import type { StructuredQueryFn } from './sdkSupervisor';
 
+/** Default deadline for a single triage query. A hung claude binary must not
+ *  stall the whole programmatic run — on timeout we abort + throw, and
+ *  SdkSupervisorSession.triage escalates the failure to the human seam instead. */
+export const SUPERVISOR_QUERY_TIMEOUT_MS = 120_000;
+
 /**
  * Build the production `StructuredQueryFn`. A single-turn, tool-less structured
  * query: the supervisor only needs a judgement, so `maxTurns: 1` keeps it cheap
  * and bounded. Returns the structured_output (or null on any non-success / drain
  * without a structured result — `parseSupervisorAdvice` then falls back to
- * 'escalate').
+ * 'escalate'). Bounded by `timeoutMs`: a hung query aborts and throws (→ escalate)
+ * rather than hanging the run.
  */
-export function makeSdkStructuredQuery(logger?: LoggerLike): StructuredQueryFn {
+export function makeSdkStructuredQuery(
+  logger?: LoggerLike,
+  timeoutMs: number = SUPERVISOR_QUERY_TIMEOUT_MS,
+): StructuredQueryFn {
   return async ({ prompt, schema, cwd, model }) => {
     const abortController = new AbortController();
+    // Deadline: abort the in-flight query so the `for await` loop ends, then the
+    // throw below surfaces (SdkSupervisorSession escalates to human on any throw).
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      abortController.abort();
+    }, timeoutMs);
     try {
       const q = query({
         prompt,
@@ -49,13 +65,17 @@ export function makeSdkStructuredQuery(logger?: LoggerLike): StructuredQueryFn {
           structured = msg.structured_output ?? null;
         }
       }
+      if (timedOut) throw new Error(`supervisor triage query timed out after ${timeoutMs}ms`);
       return structured;
     } catch (err) {
-      logger?.warn('[sdkStructuredQuery] structured supervisor query failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
+      const message = timedOut
+        ? `supervisor triage query timed out after ${timeoutMs}ms`
+        : err instanceof Error ? err.message : String(err);
+      logger?.warn('[sdkStructuredQuery] structured supervisor query failed', { error: message });
       // Surfacing as a throw lets SdkSupervisorSession.triage escalate to human.
-      throw err instanceof Error ? err : new Error(String(err));
+      throw new Error(message);
+    } finally {
+      clearTimeout(timer);
     }
   };
 }
