@@ -41,6 +41,8 @@ export interface SupervisorContext {
   runId: string;
   projectId: number;
   workflowName: string;
+  /** The run's git worktree — the cwd a real SDK supervisor agent runs in. */
+  worktreePath: string;
 }
 
 /** A triage request: the failed step + the last error it produced. */

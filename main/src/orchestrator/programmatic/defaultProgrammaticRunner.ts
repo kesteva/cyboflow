@@ -68,6 +68,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       runId: ctx.runId,
       projectId: ctx.run.project_id,
       workflowName: ctx.workflow.name,
+      worktreePath: ctx.worktreePath,
     });
 
     const host = new ProgrammaticRunHost({

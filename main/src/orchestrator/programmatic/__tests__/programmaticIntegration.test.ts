@@ -26,6 +26,7 @@ import { join } from 'node:path';
 import { DefaultProgrammaticRunner } from '../defaultProgrammaticRunner';
 import { ReviewQueueHumanGate } from '../humanGate';
 import { ReviewQueueSupervisor } from '../supervisor';
+import { SdkSupervisorSession } from '../sdkSupervisor';
 import type { StepReporter } from '../programmaticRunHost';
 import { HumanStepManager } from '../../humanStepManager';
 import { reviewItemChangeEvents, reviewItemProjectChannel } from '../../reviewItemRouter';
@@ -249,6 +250,56 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     expect(contextFailed).toBe(true);
     expect(spawner.calls.some((c) => c.prompt.includes('`epics`'))).toBe(true); // reached refine phase
     const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-esc') as {
+      current_step_id: string | null;
+    };
+    expect(finalStep.current_step_id).toBe('decompose');
+  });
+
+  it("Stage 3 SDK supervisor: a 'retry' triage verdict recovers a transiently-failing step", async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const mgr = HumanStepManager.initialize(adapter);
+    seedRun(db, 'run-sdk');
+
+    // The 'epics' agent fails ONCE then succeeds; everything else succeeds.
+    let epicsFails = 0;
+    const spawner: ClaudeSpawnerLike & { calls: ClaudeSpawnerOptions[] } = {
+      calls: [],
+      spawnCliProcess: vi.fn(async (o: ClaudeSpawnerOptions) => {
+        spawner.calls.push(o);
+        if (o.prompt.includes('`epics`') && epicsFails === 0) {
+          epicsFails += 1;
+          throw new Error('epics transient blip');
+        }
+      }),
+      abort: vi.fn().mockResolvedValue(undefined),
+    };
+    const reporter: StepReporter = { report: (rid, sid, s) => void buildStepTransitionEvent(rid, sid, s, adapter) };
+    const gate = new ReviewQueueHumanGate(mgr, reviewItemChangeEvents, reviewItemProjectChannel);
+    const approver = (payload: unknown): void => {
+      const p = payload as { reviewItemId?: string; action?: string };
+      if (p?.action === 'created' && p.reviewItemId) {
+        const id = p.reviewItemId;
+        setTimeout(() => void mgr.resolveHumanGate('run-sdk', id, 'user', 'approve'), 0);
+      }
+    };
+    reviewItemChangeEvents.on(reviewItemProjectChannel(1), approver);
+
+    // SDK supervisor with a FAKE advisor (the SDK boundary) → triages 'retry'.
+    const advisor = { advise: vi.fn().mockResolvedValue({ decision: 'retry', rationale: 'transient' }) };
+    const runner = new DefaultProgrammaticRunner({
+      spawner,
+      reporter,
+      gate,
+      supervisorFactory: () => new SdkSupervisorSession(advisor),
+    });
+    await expect(runner.run(ctxFor('run-sdk'))).resolves.toBeUndefined();
+
+    // The supervisor was consulted for the epics failure and chose retry → the run
+    // completed (epics ran twice) rather than failing or escalating.
+    expect(advisor.advise).toHaveBeenCalledTimes(1);
+    expect(spawner.calls.filter((c) => c.prompt.includes('`epics`')).length).toBe(2);
+    const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-sdk') as {
       current_step_id: string | null;
     };
     expect(finalStep.current_step_id).toBe('decompose');

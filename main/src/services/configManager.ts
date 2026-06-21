@@ -232,6 +232,16 @@ export class ConfigManager extends EventEmitter {
     return this.config.defaultExecutionModel ?? null;
   }
 
+  /**
+   * Which supervisor a PROGRAMMATIC run runs alongside (Stage 3). Floors to
+   * 'review-queue' (escalate failures to the human review queue — no live SDK
+   * call) when unset; 'sdk' opts into the SDK triage agent. NOT seeded into the
+   * constructor defaults, so existing config.json files stay byte-identical.
+   */
+  getProgrammaticSupervisor(): 'review-queue' | 'sdk' {
+    return this.config.programmaticSupervisor ?? 'review-queue';
+  }
+
   getSessionCreationPreferences() {
     return this.config.sessionCreationPreferences || {
       sessionCount: 1,
