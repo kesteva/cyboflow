@@ -48,6 +48,14 @@ export interface HumanGateResolver {
  */
 export interface HumanGateOpener {
   openHumanGate(runId: string, stepId: string, stepName: string): Promise<string | null>;
+  /**
+   * Find an ALREADY-pending gate review-item id for (runId, stepId), or null
+   * (crash-safe resume). When `openHumanGate` returns null because the gate is
+   * already open — the common case after a restart re-drives a run parked at a
+   * gate — the resolver attaches to this existing item and awaits its resolution
+   * instead of rejecting. Optional so pre-existing openers/fakes keep compiling.
+   */
+  findPendingGate?(runId: string, stepId: string): Promise<string | null>;
 }
 
 /**
@@ -134,19 +142,34 @@ export class ReviewQueueHumanGate implements HumanGateResolver {
 
       this.opener
         .openHumanGate(runId, step.id, step.name)
-        .then((id) => {
+        .then(async (id) => {
           if (settled) return; // aborted while opening
-          if (!id) {
+          let effectiveId = id;
+          // Crash-safe resume: openHumanGate returns null when a gate for this step
+          // is ALREADY pending (idempotency). On a re-driven run that's the gate we
+          // want — attach to it and await rather than reject.
+          if (!effectiveId && this.opener.findPendingGate) {
+            effectiveId = await this.opener.findPendingGate(runId, step.id);
+            if (settled) return;
+            if (effectiveId) {
+              this.logger?.info('[ReviewQueueHumanGate] re-attached to an already-open gate (resume)', {
+                runId,
+                stepId: step.id,
+                reviewItemId: effectiveId,
+              });
+            }
+          }
+          if (!effectiveId) {
             settled = true;
             cleanup();
             reject(new Error(`ReviewQueueHumanGate: could not open human gate for run ${runId} step '${step.id}'`));
             return;
           }
-          targetId = id;
-          this.logger?.info('[ReviewQueueHumanGate] human gate opened; awaiting resolution', {
+          targetId = effectiveId;
+          this.logger?.info('[ReviewQueueHumanGate] human gate open; awaiting resolution', {
             runId,
             stepId: step.id,
-            reviewItemId: id,
+            reviewItemId: effectiveId,
           });
         })
         .catch((err) => {

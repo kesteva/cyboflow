@@ -430,6 +430,41 @@ describe('WorkflowController', () => {
     });
   });
 
+  // ── crash-safe resume (resumeFromStepId) ────────────────────────────────────
+  describe('resume', () => {
+    it('fast-forwards to resumeFromStepId, skipping earlier phases/steps', async () => {
+      const d = def([
+        phase('p1', [step({ id: 'a' }), step({ id: 'b' })]),
+        phase('p2', [step({ id: 'c' }), step({ id: 'dd' })]),
+      ]);
+      const runner = makeRunner();
+
+      const result = await new WorkflowController(runner, makeHost()).run('r', d, undefined, 'c');
+
+      expect(result.outcome).toBe('completed');
+      // a, b (whole p1) and the earlier p2 step are skipped; resume at c.
+      expect(runner.calls.map((x) => x.id)).toEqual(['c', 'dd']);
+    });
+
+    it('resumes mid-phase at the given step (earlier steps in the same phase skipped)', async () => {
+      const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' }), step({ id: 'c' })])]);
+      const runner = makeRunner();
+
+      await new WorkflowController(runner, makeHost()).run('r', d, undefined, 'b');
+
+      expect(runner.calls.map((x) => x.id)).toEqual(['b', 'c']); // 'a' skipped
+    });
+
+    it('falls back to the beginning when resumeFromStepId is unknown', async () => {
+      const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' })])]);
+      const runner = makeRunner();
+
+      await new WorkflowController(runner, makeHost()).run('r', d, undefined, 'nope');
+
+      expect(runner.calls.map((x) => x.id)).toEqual(['a', 'b']);
+    });
+  });
+
   it('does not falsely trip the execution bound when several steps loop back to an early step', async () => {
     // p1: a, b(→a), c(→a), d(→a). Each of b/c/d fails once then succeeds on rerun.
     const d = def([

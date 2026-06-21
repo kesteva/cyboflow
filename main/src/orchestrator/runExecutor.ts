@@ -159,6 +159,12 @@ export interface ProgrammaticRunContext {
    * requestProgrammaticCancel / cancel).
    */
   signal: AbortSignal;
+  /**
+   * Crash-safe resume (optional): the step id to fast-forward the controller to —
+   * the run's persisted `current_step_id` when a stranded programmatic run is
+   * re-driven on boot. Absent on a fresh run (walk starts from the beginning).
+   */
+  resumeFromStepId?: string;
 }
 
 /**
@@ -281,6 +287,14 @@ export class RunExecutor {
    * by teardownRun(). Empty for orchestrated runs (one spawn == the whole run).
    */
   private readonly programmaticAborts: Map<string, AbortController> = new Map();
+
+  /**
+   * Per-run crash-safe resume step (programmatic runs only), keyed by runId. Set
+   * by setPendingResumeStep() before boot recovery re-drives a stranded run; read
+   * by executeProgrammatic() to fast-forward the controller to the persisted
+   * current_step_id; cleared by teardownRun(). Empty for fresh runs.
+   */
+  private readonly pendingResumeStep: Map<string, string> = new Map();
 
   /**
    * Per-run 'turn-end' listeners bound to the `source` EventEmitter, keyed by
@@ -593,6 +607,7 @@ export class RunExecutor {
       });
 
       try {
+        const resumeFromStepId = this.pendingResumeStep.get(runId);
         await runner.run({
           runId,
           panelId,
@@ -601,6 +616,7 @@ export class RunExecutor {
           run,
           workflow,
           signal: abort.signal,
+          ...(resumeFromStepId ? { resumeFromStepId } : {}),
         });
         // If the run was canceled mid-walk, the cancel path owns the terminal DB
         // transition ('canceled') — do NOT fire the 'drained' rest (it would race
@@ -638,6 +654,17 @@ export class RunExecutor {
     if (!abort) return false;
     if (!abort.signal.aborted) abort.abort();
     return true;
+  }
+
+  /**
+   * Mark a programmatic run for crash-safe RESUME at `stepId` (boot recovery).
+   * Called before re-driving execute(runId) on a run whose previous process died
+   * mid-walk; executeProgrammatic threads it into the controller so already-done
+   * steps are skipped and the walk resumes at the persisted current_step_id.
+   * Cleared by teardownRun() when the resumed turn settles.
+   */
+  setPendingResumeStep(runId: string, stepId: string): void {
+    this.pendingResumeStep.set(runId, stepId);
   }
 
   /**
@@ -773,6 +800,7 @@ export class RunExecutor {
     this.turnEndListeners.delete(runId);
     this.activePanelIds.delete(runId);
     this.programmaticAborts.delete(runId);
+    this.pendingResumeStep.delete(runId);
     this.pendingSystemPromptAppend.delete(runId);
     this.pendingNudge.delete(runId);
     this.pendingResume.delete(runId);

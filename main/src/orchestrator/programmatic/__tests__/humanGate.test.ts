@@ -68,6 +68,37 @@ describe('ReviewQueueHumanGate', () => {
     expect(events.listenerCount('review-project-1')).toBe(0);
   });
 
+  // ── crash-safe resume: re-attach to an already-open gate ─────────────────────
+  it('re-attaches to an already-open gate when openHumanGate returns null (resume)', async () => {
+    const events = new EventEmitter();
+    const opener: HumanGateOpener = {
+      openHumanGate: vi.fn().mockResolvedValue(null), // already open
+      findPendingGate: vi.fn().mockResolvedValue('ri-existing'),
+    };
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+
+    const pending = gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'approve-plan' }) });
+    await Promise.resolve();
+    await Promise.resolve(); // let openHumanGate.then + the async findPendingGate settle
+
+    events.emit('review-project-1', { reviewItemId: 'ri-existing', action: 'resolved', item: { resolution: 'approve' } });
+
+    await expect(pending).resolves.toBe('approve');
+    expect(opener.findPendingGate).toHaveBeenCalledWith('r', 'approve-plan');
+    expect(events.listenerCount('review-project-1')).toBe(0);
+  });
+
+  it('still rejects when the gate is null AND no pending gate exists', async () => {
+    const events = new EventEmitter();
+    const opener: HumanGateOpener = {
+      openHumanGate: vi.fn().mockResolvedValue(null),
+      findPendingGate: vi.fn().mockResolvedValue(null),
+    };
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+    await expect(gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }) })).rejects.toThrow('could not open human gate');
+    expect(events.listenerCount('review-project-1')).toBe(0);
+  });
+
   // ── cancellation: a canceled run must settle the gate to 'abort' and remove
   //    the listener (no hang, no leak) — fix #1/#4/#12/#15 ─────────────────────
   it("settles to 'abort' and removes its listener when the signal aborts while awaiting", async () => {
