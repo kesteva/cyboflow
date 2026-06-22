@@ -20,6 +20,7 @@
  */
 import { useReducer } from 'react';
 import type {
+  FanOutInnerStep,
   WorkflowDefinition,
   WorkflowPhase,
   WorkflowStep,
@@ -59,6 +60,20 @@ export type WorkflowEditorAction =
   | { type: 'TOGGLE_HUMAN'; phaseId: string; stepId: string }
   | { type: 'TOGGLE_MCP'; phaseId: string; stepId: string; mcp: string }
   | { type: 'SET_LOOPBACK'; phaseId: string; stepId: string; loopback: string | null }
+  // Fan-out (parallel per-item) editing.
+  | { type: 'SET_STEP_FANOUT'; phaseId: string; stepId: string; enabled: boolean }
+  | { type: 'SET_FANOUT_OVER'; phaseId: string; stepId: string; over: string }
+  | { type: 'ADD_FANOUT_INNER'; phaseId: string; stepId: string }
+  | { type: 'REMOVE_FANOUT_INNER'; phaseId: string; stepId: string; innerIndex: number }
+  | {
+      type: 'SET_FANOUT_INNER_FIELD';
+      phaseId: string;
+      stepId: string;
+      innerIndex: number;
+      field: 'id' | 'agent';
+      value: string;
+    }
+  | { type: 'TOGGLE_FANOUT_INNER_OPTIONAL'; phaseId: string; stepId: string; innerIndex: number }
   | { type: 'ADD_STEP'; phaseId: string }
   | { type: 'REMOVE_STEP'; phaseId: string; stepId: string }
   | { type: 'MOVE_STEP'; phaseId: string; stepId: string; dir: 'up' | 'down' }
@@ -216,6 +231,100 @@ export function workflowEditorReducer(
             return rest;
           }
           return { ...step, loopback: action.loopback };
+        }),
+      );
+      return { ...state, definition };
+    }
+
+    case 'SET_STEP_FANOUT': {
+      const definition = mapPhase(state.definition, action.phaseId, (phase) =>
+        mapStep(phase, action.stepId, (step) => {
+          if (action.enabled) {
+            // Seed a minimal one-inner-step chain over 'tasks' using the step's
+            // own agent. Server zod (fanOutSchema) is authoritative on save.
+            const fanOut: NonNullable<WorkflowStep['fanOut']> = {
+              over: 'tasks',
+              inner: [{ id: 'item', agent: step.agent }],
+            };
+            return { ...step, fanOut };
+          }
+          // Disable — drop the key entirely.
+          const rest = { ...step };
+          delete rest.fanOut;
+          return rest;
+        }),
+      );
+      return { ...state, definition };
+    }
+
+    case 'SET_FANOUT_OVER': {
+      const definition = mapPhase(state.definition, action.phaseId, (phase) =>
+        mapStep(phase, action.stepId, (step) => {
+          if (step.fanOut === undefined) return step;
+          return { ...step, fanOut: { ...step.fanOut, over: action.over } };
+        }),
+      );
+      return { ...state, definition };
+    }
+
+    case 'ADD_FANOUT_INNER': {
+      const definition = mapPhase(state.definition, action.phaseId, (phase) =>
+        mapStep(phase, action.stepId, (step) => {
+          if (step.fanOut === undefined) return step;
+          const taken = new Set(step.fanOut.inner.map((s) => s.id));
+          const newInner: FanOutInnerStep = {
+            id: uniqueId('item', taken),
+            agent: step.agent,
+          };
+          return {
+            ...step,
+            fanOut: { ...step.fanOut, inner: [...step.fanOut.inner, newInner] },
+          };
+        }),
+      );
+      return { ...state, definition };
+    }
+
+    case 'REMOVE_FANOUT_INNER': {
+      const definition = mapPhase(state.definition, action.phaseId, (phase) =>
+        mapStep(phase, action.stepId, (step) => {
+          if (step.fanOut === undefined) return step;
+          // Keep at least one inner step (fanOutSchema requires inner.min(1)).
+          if (step.fanOut.inner.length <= 1) return step;
+          const inner = step.fanOut.inner.filter((_, i) => i !== action.innerIndex);
+          return { ...step, fanOut: { ...step.fanOut, inner } };
+        }),
+      );
+      return { ...state, definition };
+    }
+
+    case 'SET_FANOUT_INNER_FIELD': {
+      const definition = mapPhase(state.definition, action.phaseId, (phase) =>
+        mapStep(phase, action.stepId, (step) => {
+          if (step.fanOut === undefined) return step;
+          const inner = step.fanOut.inner.map((row, i) =>
+            i === action.innerIndex ? { ...row, [action.field]: action.value } : row,
+          );
+          return { ...step, fanOut: { ...step.fanOut, inner } };
+        }),
+      );
+      return { ...state, definition };
+    }
+
+    case 'TOGGLE_FANOUT_INNER_OPTIONAL': {
+      const definition = mapPhase(state.definition, action.phaseId, (phase) =>
+        mapStep(phase, action.stepId, (step) => {
+          if (step.fanOut === undefined) return step;
+          const inner = step.fanOut.inner.map((row, i) => {
+            if (i !== action.innerIndex) return row;
+            if (row.optional === true) {
+              const rest = { ...row };
+              delete rest.optional;
+              return rest;
+            }
+            return { ...row, optional: true };
+          });
+          return { ...step, fanOut: { ...step.fanOut, inner } };
         }),
       );
       return { ...state, definition };

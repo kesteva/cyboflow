@@ -13,6 +13,7 @@
  * FEATURE: user-editable workflow blueprint editor.
  */
 import { useState } from 'react';
+import type { ReactElement } from 'react';
 import type { WorkflowDefinition, WorkflowPhase, WorkflowStep } from '../../../../shared/types/workflows';
 import type { WorkflowEditorAction } from '../../hooks/useWorkflowEditorState';
 import { AGENT_OPTIONS, MCP_OPTIONS } from './workflowEditorOptions';
@@ -226,6 +227,185 @@ function StepTab({ phase, step, dispatch }: TabProps) {
           testId="inspector-toggle-human"
         />
       </div>
+
+      <FanOutSection phase={phase} step={step} dispatch={dispatch} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Fan-out (parallel per-item) editor — lives under the STEP tab
+// ---------------------------------------------------------------------------
+
+/**
+ * Toggle + editor for `step.fanOut`. Enabling seeds a minimal one-inner-step
+ * chain over 'tasks'; disabling clears the key. When enabled, exposes the `over`
+ * key and an add/remove inner-chain list (id + agent + optional per row). The
+ * server zod schema (fanOutSchema) is authoritative on save — this stays plain
+ * TS and never validates.
+ */
+function FanOutSection({ phase, step, dispatch }: TabProps): ReactElement {
+  const fanOut = step.fanOut;
+  const enabled = fanOut !== undefined;
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+        paddingTop: 12,
+        borderTop: '1px dotted var(--color-border-primary)',
+      }}
+      data-testid="inspector-fanout-section"
+    >
+      <ToggleRow
+        label="fan-out (parallel per-item)"
+        checked={enabled}
+        onToggle={() =>
+          dispatch({ type: 'SET_STEP_FANOUT', phaseId: phase.id, stepId: step.id, enabled: !enabled })
+        }
+        testId="inspector-toggle-fanout"
+      />
+
+      {enabled && fanOut !== undefined && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }} data-testid="inspector-fanout-editor">
+          <div>
+            <label style={labelStyle} htmlFor="insp-fanout-over">over (item source)</label>
+            <input
+              id="insp-fanout-over"
+              type="text"
+              value={fanOut.over}
+              onChange={(e) =>
+                dispatch({ type: 'SET_FANOUT_OVER', phaseId: phase.id, stepId: step.id, over: e.target.value })
+              }
+              style={inputStyle}
+              data-testid="inspector-fanout-over-input"
+            />
+            <p style={{ marginTop: 6, fontSize: 9.5, color: 'var(--color-text-tertiary)' }}>
+              Runtime item-source key — v1 recognizes <b>tasks</b> (→ batch lane task ids).
+            </p>
+          </div>
+
+          <div>
+            <label style={labelStyle}>inner chain (per item)</label>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {fanOut.inner.map((inner, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 6,
+                    padding: '8px',
+                    border: '1px solid var(--color-border-primary)',
+                    background: 'var(--color-bg-primary)',
+                  }}
+                  data-testid={`inspector-fanout-inner-${idx}`}
+                >
+                  <input
+                    type="text"
+                    value={inner.id}
+                    onChange={(e) =>
+                      dispatch({
+                        type: 'SET_FANOUT_INNER_FIELD',
+                        phaseId: phase.id,
+                        stepId: step.id,
+                        innerIndex: idx,
+                        field: 'id',
+                        value: e.target.value,
+                      })
+                    }
+                    placeholder="id"
+                    style={inputStyle}
+                    data-testid={`inspector-fanout-inner-id-${idx}`}
+                  />
+                  <input
+                    type="text"
+                    value={inner.agent}
+                    onChange={(e) =>
+                      dispatch({
+                        type: 'SET_FANOUT_INNER_FIELD',
+                        phaseId: phase.id,
+                        stepId: step.id,
+                        innerIndex: idx,
+                        field: 'agent',
+                        value: e.target.value,
+                      })
+                    }
+                    placeholder="agent"
+                    style={inputStyle}
+                    data-testid={`inspector-fanout-inner-agent-${idx}`}
+                  />
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
+                    <ToggleRow
+                      label="optional"
+                      checked={inner.optional === true}
+                      onToggle={() =>
+                        dispatch({
+                          type: 'TOGGLE_FANOUT_INNER_OPTIONAL',
+                          phaseId: phase.id,
+                          stepId: step.id,
+                          innerIndex: idx,
+                        })
+                      }
+                      testId={`inspector-fanout-inner-optional-${idx}`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        dispatch({
+                          type: 'REMOVE_FANOUT_INNER',
+                          phaseId: phase.id,
+                          stepId: step.id,
+                          innerIndex: idx,
+                        })
+                      }
+                      disabled={fanOut.inner.length <= 1}
+                      style={{
+                        fontFamily: 'inherit',
+                        fontSize: 9,
+                        letterSpacing: '0.14em',
+                        textTransform: 'uppercase',
+                        background: 'transparent',
+                        border: '1px solid var(--color-text-primary)',
+                        color: 'var(--color-text-primary)',
+                        padding: '3px 8px',
+                        cursor: fanOut.inner.length <= 1 ? 'not-allowed' : 'pointer',
+                        opacity: fanOut.inner.length <= 1 ? 0.4 : 1,
+                        flexShrink: 0,
+                      }}
+                      data-testid={`inspector-fanout-inner-remove-${idx}`}
+                    >
+                      remove
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() => dispatch({ type: 'ADD_FANOUT_INNER', phaseId: phase.id, stepId: step.id })}
+              style={{
+                marginTop: 8,
+                fontFamily: 'inherit',
+                fontSize: 9.5,
+                letterSpacing: '0.14em',
+                textTransform: 'uppercase',
+                background: 'transparent',
+                border: '1px dashed var(--color-text-primary)',
+                color: 'var(--color-text-primary)',
+                padding: '5px 0',
+                width: '100%',
+                cursor: 'pointer',
+              }}
+              data-testid="inspector-fanout-inner-add"
+            >
+              + add inner step
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

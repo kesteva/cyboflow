@@ -497,6 +497,112 @@ describe('WorkflowEditorModal — edit mode', () => {
   });
 });
 
+describe('WorkflowEditorModal — fan-out editing', () => {
+  it('the fan-out toggle adds then removes step.fanOut and persists it through Save', async () => {
+    const { onSaved } = await renderEditMode();
+
+    // The fan-out toggle lives under the STEP tab (the default), bound to
+    // `step.fanOut !== undefined` for the selected step ('context').
+    const toggle = screen.getByTestId('inspector-toggle-fanout');
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByTestId('inspector-fanout-editor')).toBeNull();
+
+    // Enable → the editor surfaces with a seeded single-inner-step chain.
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'true'));
+    expect(screen.getByTestId('inspector-fanout-editor')).toBeInTheDocument();
+    expect(screen.getByTestId('inspector-fanout-over-input')).toHaveValue('tasks');
+    expect(screen.getByTestId('inspector-fanout-inner-0')).toBeInTheDocument();
+
+    // Save → scope dialog → "Save globally" — the persisted definition carries fanOut.
+    const saveBtn = screen.getByTestId('editor-save-button');
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('save-scope-confirm'));
+    });
+
+    expect(mockUpdateSpec).toHaveBeenCalledOnce();
+    const savedArg = mockUpdateSpec.mock.calls[0][0];
+    const savedStep = savedArg.definition.phases[0].steps.find((s) => s.id === 'context');
+    expect(savedStep?.fanOut).toEqual({
+      over: 'tasks',
+      inner: [{ id: 'item', agent: 'idea-extractor' }],
+    });
+    expect(onSaved).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
+  });
+
+  it('disabling the fan-out toggle clears step.fanOut entirely', async () => {
+    await renderEditMode();
+
+    const toggle = screen.getByTestId('inspector-toggle-fanout');
+
+    // Enable then disable — the editor disappears.
+    fireEvent.click(toggle);
+    await waitFor(() => expect(screen.getByTestId('inspector-fanout-editor')).toBeInTheDocument());
+
+    fireEvent.click(toggle);
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'false'));
+    expect(screen.queryByTestId('inspector-fanout-editor')).toBeNull();
+  });
+
+  it('add/remove inner-step rows mutate the fan-out chain', async () => {
+    const { onSaved } = await renderEditMode();
+
+    // Enable fan-out (seeds one inner row).
+    fireEvent.click(screen.getByTestId('inspector-toggle-fanout'));
+    await waitFor(() => expect(screen.getByTestId('inspector-fanout-inner-0')).toBeInTheDocument());
+
+    // Add a second inner row.
+    fireEvent.click(screen.getByTestId('inspector-fanout-inner-add'));
+    await waitFor(() => expect(screen.getByTestId('inspector-fanout-inner-1')).toBeInTheDocument());
+
+    // Edit the second row's id + agent.
+    fireEvent.change(screen.getByTestId('inspector-fanout-inner-id-1'), { target: { value: 'verify' } });
+    fireEvent.change(screen.getByTestId('inspector-fanout-inner-agent-1'), { target: { value: 'task-verify' } });
+
+    // Persist and assert the two-step chain is saved.
+    const saveBtn = screen.getByTestId('editor-save-button');
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('save-scope-confirm'));
+    });
+
+    const savedStep = mockUpdateSpec.mock.calls[0][0].definition.phases[0].steps.find((s) => s.id === 'context');
+    expect(savedStep?.fanOut?.inner).toEqual([
+      { id: 'item', agent: 'idea-extractor' },
+      { id: 'verify', agent: 'task-verify' },
+    ]);
+    expect(onSaved).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
+
+    // Now remove the first row — the chain collapses to the remaining step.
+    fireEvent.click(screen.getByTestId('inspector-fanout-inner-remove-0'));
+    await waitFor(() => expect(screen.queryByTestId('inspector-fanout-inner-1')).toBeNull());
+    // The single remaining row is the one that was second (id 'verify').
+    expect(screen.getByTestId('inspector-fanout-inner-id-0')).toHaveValue('verify');
+  });
+
+  it('the last inner row cannot be removed (chain keeps >= 1 step)', async () => {
+    await renderEditMode();
+
+    fireEvent.click(screen.getByTestId('inspector-toggle-fanout'));
+    await waitFor(() => expect(screen.getByTestId('inspector-fanout-inner-0')).toBeInTheDocument());
+
+    // With a single inner row the remove button is disabled.
+    const removeBtn = screen.getByTestId('inspector-fanout-inner-remove-0');
+    expect(removeBtn).toBeDisabled();
+
+    // Clicking it is a no-op — the row stays.
+    fireEvent.click(removeBtn);
+    expect(screen.getByTestId('inspector-fanout-inner-0')).toBeInTheDocument();
+  });
+});
+
 describe('WorkflowEditorModal — create mode', () => {
   it('seeds a hardcoded skeleton (no clone) and offers "Save as new flow"', async () => {
     const onSaved = vi.fn();
