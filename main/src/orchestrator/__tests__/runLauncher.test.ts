@@ -1257,6 +1257,150 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// RunLauncher.launch — findingIds (findings-triage redesign / migration 032)
+//
+// A session-less variant is used for simplicity: the seed path is independent of
+// whether the run is session-hosted. findingIds is the 11th positional launch arg
+// (AFTER projectId). The seed is a direct workflow_runs write — no store
+// dependency — so the only collaborators are the registry + worktree stubs. The
+// fixture layers the migration-032 seed_finding_ids column on top of the shared
+// test DB (which does not carry it).
+// ---------------------------------------------------------------------------
+
+describe('RunLauncher.launch findingIds (compound seed)', () => {
+  /**
+   * Build a launcher whose registry seeds a queued run row (createRun returns the
+   * RESOLVED substrate, mirroring the real registry). `workflowName` controls the
+   * compound-only guard. The DB gains the migration-032 seed_finding_ids column.
+   */
+  function makeFindingFixture(db: Database.Database, tmpDir: string, workflowName: string) {
+    // Migration 032: seed_finding_ids is written by the launch path but is NOT in
+    // the shared fixture schema — layer the additive ALTER on top here.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
+    const adapter = dbAdapter(db);
+    const logger = makeSpyLogger();
+
+    const seedWorkflowId = randomUUID();
+    db.prepare(
+      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, ?, '/fake/compound.md', 'default')",
+    ).run(seedWorkflowId, workflowName);
+
+    const cannedRunId = randomUUID().replace(/-/g, '');
+    const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', workflowName, cannedRunId.slice(0, 8));
+    const cannedBranchName = `cyboflow/${workflowName}/${cannedRunId.slice(0, 8)}`;
+
+    const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate) => {
+      db.prepare(
+        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
+      ).run(cannedRunId, seedWorkflowId, 1);
+      return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
+    });
+
+    const fakeRegistry = {
+      getById: (id: string) =>
+        db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
+      createRun: createRunSpy,
+    } as unknown as WorkflowRegistry;
+
+    const fakeWorktree = {
+      createDeterministicWorktree: vi.fn().mockResolvedValue({
+        worktreePath: cannedWorktreePath,
+        branchName: cannedBranchName,
+        baseCommit: 'abc123',
+        baseBranch: 'HEAD',
+      }),
+    } as unknown as WorktreeManager;
+
+    const launcher = new RunLauncher(
+      adapter,
+      fakeRegistry,
+      fakeWorktree,
+      logger,
+      fakeMcpConfigWriter,
+      fakeOrchSocketProvider,
+      fakeBridgeScriptResolver,
+      fakeNodeResolver,
+    );
+
+    return { launcher, workflowId: seedWorkflowId, cannedRunId, createRunSpy };
+  }
+
+  it('stamps seed_finding_ids = JSON.stringify(ids) for a compound launch', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const { launcher, workflowId, cannedRunId } = makeFindingFixture(db, tmpDir, 'compound');
+
+      await launcher.launch(
+        workflowId,
+        tmpDir,
+        undefined, // substrate
+        undefined, // taskId
+        undefined, // ideaId
+        undefined, // sessionId
+        undefined, // requestedPermissionMode
+        undefined, // baseBranch
+        undefined, // seedTaskIds
+        undefined, // projectId
+        ['rvw_a', 'rvw_b'], // findingIds (11th, LAST)
+      );
+
+      const row = db
+        .prepare('SELECT seed_finding_ids FROM workflow_runs WHERE id = ?')
+        .get(cannedRunId) as { seed_finding_ids: string | null };
+      expect(row.seed_finding_ids).toBe(JSON.stringify(['rvw_a', 'rvw_b']));
+    });
+  });
+
+  it('rejects findingIds for a non-compound workflow BEFORE creating a run row', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const { launcher, workflowId, createRunSpy } = makeFindingFixture(db, tmpDir, 'sprint');
+
+      await expect(
+        launcher.launch(
+          workflowId, tmpDir,
+          undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+          ['rvw_a'],
+        ),
+      ).rejects.toThrow("findingIds is only valid for the 'compound' workflow");
+
+      // The guard fires before createRun — no half-created run row.
+      expect(createRunSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it('rejects an empty findingIds array BEFORE creating a run row', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const { launcher, workflowId, createRunSpy } = makeFindingFixture(db, tmpDir, 'compound');
+
+      await expect(
+        launcher.launch(
+          workflowId, tmpDir,
+          undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+          [],
+        ),
+      ).rejects.toThrow('findingIds must contain at least one finding id');
+      expect(createRunSpy).not.toHaveBeenCalled();
+    });
+  });
+
+  it('leaves seed_finding_ids null when findingIds is omitted (legacy path byte-identical)', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const { launcher, workflowId, cannedRunId } = makeFindingFixture(db, tmpDir, 'compound');
+
+      await launcher.launch(workflowId, tmpDir);
+
+      const row = db
+        .prepare('SELECT seed_finding_ids FROM workflow_runs WHERE id = ?')
+        .get(cannedRunId) as { seed_finding_ids: string | null };
+      expect(row.seed_finding_ids).toBeNull();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // RunLauncher.launch — session-hosted runs (session<->run restructure, Phase 1)
 //
 // When a sessionId is supplied, the run executes inside that session's EXISTING

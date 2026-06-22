@@ -129,6 +129,9 @@ describe('WorkflowRegistry', () => {
     // snapshot. Layer both additive shapes on top of GATE_SCHEMA (mirrors the
     // migration's ALTER + CREATE TABLE; never widens GATE_SCHEMA).
     db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
+    // getRunById now SELECTs workflow_runs.seed_finding_ids (compound triage seed,
+    // migration 032); layer the additive ALTER on top so the projection resolves.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
     db.exec(`
       CREATE TABLE workflow_revisions (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,

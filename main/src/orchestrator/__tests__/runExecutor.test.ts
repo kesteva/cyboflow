@@ -13,7 +13,7 @@
  *   h. RunLauncher.launch with executor/registry omitted still returns correct shape
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'crypto';
 import { join } from 'path';
 import { RunExecutor } from '../runExecutor';
@@ -2685,5 +2685,489 @@ describe('RunExecutor — event-driven rest (persistent interactive substrate)',
     resolveSpawn();
     await executePromise;
     expect(dispose).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration 032 (findings triage): getPrompt selected-findings injection +
+// terminal-seam close-out.
+// ---------------------------------------------------------------------------
+
+import Database from 'better-sqlite3';
+import { readFileSync } from 'node:fs';
+import { join as joinPath } from 'node:path';
+import type { FindingReaderLike } from '../runExecutor';
+import {
+  ReviewItemRouter,
+  reviewItemChangeEvents,
+  reviewItemProjectChannel,
+} from '../reviewItemRouter';
+import type { ReviewItemChangedEvent } from '../../../../shared/types/reviews';
+
+type ResolvedFinding = NonNullable<ReturnType<FindingReaderLike['read']>>;
+
+/** Stub finding reader backed by an in-memory map (keyed by review-item id). */
+function makeFindingReader(entries: Record<string, ResolvedFinding>): FindingReaderLike {
+  return { read: (id: string) => entries[id] ?? null };
+}
+
+/** Build a RunExecutor with the finding reader in the trailing (13th) slot. */
+function makeCompoundExecutor(
+  spawner: ClaudeSpawnerLike,
+  registry: WorkflowRegistryLike,
+  reader: WorkflowPromptReaderLike,
+  findingReader?: FindingReaderLike,
+): RunExecutor {
+  return new RunExecutor(
+    spawner,
+    registry,
+    makeSpyLogger(),
+    reader,
+    undefined, // lifecycleTransitions
+    undefined, // publisher
+    undefined, // db
+    undefined, // source
+    undefined, // stepEmitter
+    undefined, // taskStageDeriver
+    undefined, // ideaBodyReader
+    undefined, // sprintLaneTaskIds
+    findingReader, // findingReader (13th arg)
+  );
+}
+
+describe('RunExecutor.getPrompt — selected-findings injection (migration 032)', () => {
+  const compoundReader = () =>
+    makeStubReader({ '/fake/compound.md': { prompt: 'COMPOUND BODY', systemPromptAppend: '' } });
+
+  it('prepends a `# Selected findings` block, ordered P0 before P1, then bucket order quick<doc<task within equal priority', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/w',
+      seed_finding_ids: JSON.stringify(['f-doc-p1', 'f-task-p0', 'f-quick-p0', 'f-doc-p0']),
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/compound.md', name: 'compound' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const findingReader = makeFindingReader({
+      'f-doc-p1': { id: 'f-doc-p1', title: 'Doc P1', body: 'b', severity: 'info', priority: 'P1', proposedTarget: 'docs', source: 'agent:executor' },
+      'f-task-p0': { id: 'f-task-p0', title: 'Task P0', body: 'b', severity: 'warning', priority: 'P0', proposedTarget: 'backlog', source: 'agent:executor' },
+      'f-quick-p0': { id: 'f-quick-p0', title: 'Quick P0', body: 'b', severity: 'error', priority: 'P0', proposedTarget: 'fix', source: 'agent:executor' },
+      'f-doc-p0': { id: 'f-doc-p0', title: 'Doc P0', body: 'b', severity: 'info', priority: 'P0', proposedTarget: 'docs', source: 'agent:executor' },
+    });
+    const executor = makeCompoundExecutor(spawner, registry, compoundReader(), findingReader);
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt.startsWith('# Selected findings')).toBe(true);
+    // Base prompt preserved after the injected block.
+    expect(prompt).toContain('COMPOUND BODY');
+    expect(prompt.indexOf('# Selected findings')).toBeLessThan(prompt.indexOf('COMPOUND BODY'));
+    // The per-finding-immediate resolve directive leads the block.
+    expect(prompt).toContain('IMMEDIATELY call `cyboflow_resolve_finding`');
+
+    // Ordering: P0 quick < P0 doc < P0 task < P1 doc.
+    const iQuickP0 = prompt.indexOf('Quick P0');
+    const iDocP0 = prompt.indexOf('Doc P0');
+    const iTaskP0 = prompt.indexOf('Task P0');
+    const iDocP1 = prompt.indexOf('Doc P1');
+    expect(iQuickP0).toBeGreaterThanOrEqual(0);
+    expect(iQuickP0).toBeLessThan(iDocP0);
+    expect(iDocP0).toBeLessThan(iTaskP0);
+    expect(iTaskP0).toBeLessThan(iDocP1);
+    // Bucket meta is rendered.
+    expect(prompt).toContain('Target: quick');
+    expect(prompt).toContain('Target: task');
+  });
+
+  it('folds a legacy `prompt` target into the doc bucket', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_finding_ids: JSON.stringify(['f-legacy']) });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/compound.md', name: 'compound' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const findingReader = makeFindingReader({
+      'f-legacy': { id: 'f-legacy', title: 'Legacy prompt finding', body: null, severity: null, priority: 'P2', proposedTarget: 'prompt', source: 'agent:reviewer' },
+    });
+    const executor = makeCompoundExecutor(spawner, registry, compoundReader(), findingReader);
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt).toContain('Legacy prompt finding');
+    expect(prompt).toContain('Target: doc');
+  });
+
+  it('renders an em-dash priority badge for a null-priority finding (never a fake P2 label)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_finding_ids: JSON.stringify(['f-unset']) });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/compound.md', name: 'compound' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const findingReader = makeFindingReader({
+      'f-unset': { id: 'f-unset', title: 'Unset priority', body: 'b', severity: 'info', priority: null, proposedTarget: 'docs', source: 'agent:executor' },
+    });
+    const executor = makeCompoundExecutor(spawner, registry, compoundReader(), findingReader);
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toContain('## — Unset priority');
+  });
+
+  it('returns the base prompt verbatim when no findingReader is injected', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_finding_ids: JSON.stringify(['f-1']) });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/compound.md', name: 'compound' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const executor = makeCompoundExecutor(spawner, registry, compoundReader()); // no findingReader
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('COMPOUND BODY');
+  });
+
+  it('returns the base prompt verbatim when seed_finding_ids is unparseable JSON', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_finding_ids: 'not json [' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/compound.md', name: 'compound' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const findingReader = makeFindingReader({});
+    const executor = makeCompoundExecutor(spawner, registry, compoundReader(), findingReader);
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('COMPOUND BODY');
+  });
+
+  it('returns the base prompt verbatim when no seeded id resolves to a finding', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w', seed_finding_ids: JSON.stringify(['missing-1', 'missing-2']) });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/compound.md', name: 'compound' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const findingReader = makeFindingReader({}); // every id resolves to null
+    const executor = makeCompoundExecutor(spawner, registry, compoundReader(), findingReader);
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('COMPOUND BODY');
+  });
+
+  it('returns the base prompt verbatim when the run has no seed_finding_ids', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/w' }); // no seed_finding_ids
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/compound.md', name: 'compound' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const findingReader = makeFindingReader({ 'f-1': { id: 'f-1', title: 'X', body: null, severity: null, priority: null, proposedTarget: null, source: null } });
+    const executor = makeCompoundExecutor(spawner, registry, compoundReader(), findingReader);
+
+    await executor.execute(run.id);
+
+    expect(spawnedPrompt(spawner)).toBe('COMPOUND BODY');
+  });
+
+  it('the sprint seed-tasks branch still wins when a batch_id is present alongside seed_finding_ids', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/w',
+      batch_id: 'batch-1',
+      seed_finding_ids: JSON.stringify(['f-1']),
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md', name: 'sprint' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/sprint.md': { prompt: 'SPRINT BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({
+      't-1': { type: 'task', title: 'Sprint task', summary: null, body: 'Body', scope: null, ref: 'TASK-1' },
+    });
+    const laneTaskIds: SprintLaneTaskIdsLike = { listLaneTaskIds: () => ['t-1'] };
+    const findingReader = makeFindingReader({
+      'f-1': { id: 'f-1', title: 'Should not appear', body: null, severity: null, priority: 'P0', proposedTarget: 'fix', source: null },
+    });
+    // Full positional construction so both the sprint readers AND the finding
+    // reader are injected — the sprint branch must win.
+    const executor = new RunExecutor(
+      spawner,
+      registry,
+      makeSpyLogger(),
+      reader,
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      ideaReader,
+      laneTaskIds,
+      findingReader,
+    );
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt.startsWith('# Sprint tasks')).toBe(true);
+    expect(prompt).not.toContain('# Selected findings');
+    expect(prompt).not.toContain('Should not appear');
+  });
+
+  it('the seed-idea branch still wins when a seed_idea_id is present alongside seed_finding_ids', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/w',
+      seed_idea_id: 'IDEA-1',
+      seed_finding_ids: JSON.stringify(['f-1']),
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md', name: 'planner' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({
+      'IDEA-1': { type: 'idea', title: 'My idea', summary: null, body: 'The idea body.', scope: null },
+    });
+    const findingReader = makeFindingReader({
+      'f-1': { id: 'f-1', title: 'Should not appear', body: null, severity: null, priority: 'P0', proposedTarget: 'fix', source: null },
+    });
+    const executor = new RunExecutor(
+      spawner,
+      registry,
+      makeSpyLogger(),
+      reader,
+      undefined, undefined, undefined, undefined, undefined, undefined,
+      ideaReader,
+      undefined,
+      findingReader,
+    );
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt.startsWith('# Selected idea')).toBe(true);
+    expect(prompt).not.toContain('# Selected findings');
+    expect(prompt).not.toContain('Should not appear');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration 032: terminal-seam compound findings close-out.
+//
+// When a SEEDED compound run goes terminal (drained/failed/canceled), any
+// seeded finding STILL pending (the agent's per-finding cyboflow_resolve_finding
+// never landed) has its `selected` flag cleared via the ReviewItemRouter
+// set-selected chokepoint op (actor:'orchestrator'), while `staged_at` is left
+// set so the finding stays in the human's Ready section. A non-compound terminal
+// run touches no finding.
+// ---------------------------------------------------------------------------
+
+/** Build an in-memory DB with the migration chain the review-item chokepoint needs. */
+function buildReviewDb(): Database.Database {
+  const db = new Database(':memory:');
+  db.pragma('foreign_keys = ON');
+  db.exec(`
+    CREATE TABLE projects (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      path TEXT NOT NULL UNIQUE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+  db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
+
+  const migDir = joinPath(__dirname, '..', '..', 'database', 'migrations');
+  db.exec(readFileSync(joinPath(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+  db.exec(readFileSync(joinPath(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
+  db.exec(readFileSync(joinPath(migDir, '014_native_tasks.sql'), 'utf-8'));
+  db.exec(readFileSync(joinPath(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
+  db.exec(readFileSync(joinPath(migDir, '016_review_items.sql'), 'utf-8'));
+  db.exec(readFileSync(joinPath(migDir, '032_findings_triage.sql'), 'utf-8'));
+  return db;
+}
+
+/** Create a finding, approve it (→ staged + selected), and return its id. */
+async function createStagedFinding(router: ReviewItemRouter): Promise<string> {
+  const { reviewItemId } = await router.applyReviewItem(1, {
+    op: 'create',
+    actor: 'agent:executor',
+    kind: 'finding',
+    title: 'A finding',
+    payload: { kind: 'finding', proposedTarget: 'fix' },
+  });
+  await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId });
+  return reviewItemId;
+}
+
+/** Read the (staged_at, selected, status) columns for a finding id. */
+function readFindingCols(
+  db: Database.Database,
+  id: string,
+): { staged_at: string | null; selected: number; status: string } {
+  return db
+    .prepare('SELECT staged_at, selected, status FROM review_items WHERE id = ?')
+    .get(id) as { staged_at: string | null; selected: number; status: string };
+}
+
+/** Subclass exposing onLifecycleTransition so the terminal seam can be driven directly. */
+class TerminalSeamExecutor extends RunExecutor {
+  protected override async getPrompt(_runId: string, _workflow: WorkflowRow): Promise<string> {
+    return 'test prompt';
+  }
+  public async testLifecycleTransition(
+    runId: string,
+    phase: import('../runExecutor').ExecutionPhase,
+  ): Promise<void> {
+    return this.onLifecycleTransition(runId, phase);
+  }
+}
+
+/** Build a TerminalSeamExecutor with the review DB injected (7th arg) for the close-out. */
+function makeTerminalSeamExecutor(
+  registry: WorkflowRegistryLike,
+  db: Database.Database,
+): TerminalSeamExecutor {
+  return new TerminalSeamExecutor(
+    makeSpawner(),
+    registry,
+    makeSpyLogger(),
+    undefined, // promptReader
+    undefined, // lifecycleTransitions
+    undefined, // publisher
+    db, // db (7th arg) — drives the SELECT status read
+  );
+}
+
+describe('RunExecutor — terminal-seam compound findings close-out (migration 032)', () => {
+  afterEach(() => {
+    ReviewItemRouter._resetForTesting();
+    reviewItemChangeEvents.removeAllListeners();
+  });
+
+  it('clears selected on a still-pending seeded finding via the set-selected orchestrator op and leaves staged_at set', async () => {
+    const db = buildReviewDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const findingId = await createStagedFinding(router);
+
+    // Sanity: the finding is staged + selected before the close-out.
+    const before = readFindingCols(db, findingId);
+    expect(before.selected).toBe(1);
+    expect(before.staged_at).not.toBeNull();
+
+    const events: ReviewItemChangedEvent[] = [];
+    reviewItemChangeEvents.on(reviewItemProjectChannel(1), (e: ReviewItemChangedEvent) => events.push(e));
+
+    const run = makeWorkflowRunRow({
+      project_id: 1,
+      worktree_path: '/w',
+      seed_finding_ids: JSON.stringify([findingId]),
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, name: 'compound' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const executor = makeTerminalSeamExecutor(registry, db);
+
+    // The close-out writes entity_events.run_id (FK -> workflow_runs); seed a real
+    // run row so the chokepoint set-selected commit isn't rejected by the FK.
+    db.prepare(
+      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'compound', '/fake/path.md', 'default')",
+    ).run(run.workflow_id);
+    db.prepare(
+      "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, 1, 'queued', 'default')",
+    ).run(run.id, run.workflow_id);
+
+    await executor.testLifecycleTransition(run.id, 'drained');
+    await router._queueForProject(1).onIdle();
+
+    const after = readFindingCols(db, findingId);
+    expect(after.selected).toBe(0); // selected cleared
+    expect(after.staged_at).not.toBeNull(); // staged_at untouched (stays in Ready)
+    expect(after.status).toBe('pending'); // still pending (not consumed)
+
+    // The clear routed through the chokepoint set-selected op (one event per id).
+    const selectionEvents = events.filter((e) => e.action === 'selection-changed' && e.reviewItemId === findingId);
+    expect(selectionEvents.length).toBe(1);
+    expect(selectionEvents[0].item.selected).toBe(false);
+  });
+
+  it('leaves an already-resolved seeded finding untouched (no spurious set-selected)', async () => {
+    const db = buildReviewDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const findingId = await createStagedFinding(router);
+    // The agent resolved this finding mid-run — it is no longer pending.
+    await router.applyReviewItem(1, {
+      op: 'resolve',
+      actor: 'agent:executor',
+      reviewItemId: findingId,
+      resolution: 'fixed:compound',
+    });
+
+    const events: ReviewItemChangedEvent[] = [];
+    reviewItemChangeEvents.on(reviewItemProjectChannel(1), (e: ReviewItemChangedEvent) => events.push(e));
+
+    const run = makeWorkflowRunRow({
+      project_id: 1,
+      worktree_path: '/w',
+      seed_finding_ids: JSON.stringify([findingId]),
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, name: 'compound' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const executor = makeTerminalSeamExecutor(registry, db);
+
+    await executor.testLifecycleTransition(run.id, 'failed');
+    await router._queueForProject(1).onIdle();
+
+    // No selection-changed event — the resolved finding is not still-pending.
+    const selectionEvents = events.filter((e) => e.action === 'selection-changed');
+    expect(selectionEvents.length).toBe(0);
+    expect(readFindingCols(db, findingId).status).toBe('resolved');
+  });
+
+  it('does NOT touch findings for a non-compound terminal run', async () => {
+    const db = buildReviewDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const findingId = await createStagedFinding(router);
+
+    const events: ReviewItemChangedEvent[] = [];
+    reviewItemChangeEvents.on(reviewItemProjectChannel(1), (e: ReviewItemChangedEvent) => events.push(e));
+
+    // A sprint run that (somehow) carries seed_finding_ids must be skipped — the
+    // close-out is guarded on workflow.name === 'compound'.
+    const run = makeWorkflowRunRow({
+      project_id: 1,
+      worktree_path: '/w',
+      seed_finding_ids: JSON.stringify([findingId]),
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, name: 'sprint' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const executor = makeTerminalSeamExecutor(registry, db);
+
+    await executor.testLifecycleTransition(run.id, 'canceled');
+    await router._queueForProject(1).onIdle();
+
+    expect(events.filter((e) => e.action === 'selection-changed').length).toBe(0);
+    const after = readFindingCols(db, findingId);
+    expect(after.selected).toBe(1); // untouched
   });
 });

@@ -321,7 +321,7 @@ describe('cyboflow.runs.start', () => {
       // undefined EXCEPT the trailing projectId (10th slot), so createRun can stamp
       // workflow_runs.project_id even for a GLOBAL flow (workflow.project_id NULL).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 1);
+      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 1, undefined);
     } finally {
       // Reset module state regardless of test outcome.
       setStartRunDeps({
@@ -357,7 +357,7 @@ describe('cyboflow.runs.start', () => {
       // slot — so the launcher writes workflow_runs.seed_idea_id directly (no
       // stage derivation).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', undefined, undefined, undefined, undefined, 1);
+      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', undefined, undefined, undefined, undefined, 1, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -392,7 +392,7 @@ describe('cyboflow.runs.start', () => {
       // launch projectId (migration 030) in the 10th slot — so the launcher hosts
       // the run inside the session's existing worktree.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined, 1);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined, 1, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -426,7 +426,7 @@ describe('cyboflow.runs.start', () => {
       // 7th slot, baseBranch (8th) + seedTaskIds (9th) undefined, and the explicit
       // launch projectId (migration 030) in the 10th slot.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, undefined, 'auto', undefined, undefined, 1);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, undefined, 'auto', undefined, undefined, 1, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -458,6 +458,133 @@ describe('cyboflow.runs.start', () => {
 
       // launch must NOT be called when the project lookup fails.
       expect(launchMock).not.toHaveBeenCalled();
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a5) findingIds supplied (findings-triage / migration 032) → full-form launch
+  // carrying the selected compound findings into the 11th (LAST) launch slot,
+  // AFTER projectId. The full positional vector is asserted — including the
+  // baseBranch placeholder in slot 8 still undefined.
+  // -------------------------------------------------------------------------
+  it('(a5) findingIds supplied → forwards the full-form launch with the seed findings as the LAST positional arg', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-find',
+      worktreePath: '/tmp/wt/find',
+      branchName: 'cyboflow/compound/find1234',
+    });
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({
+        workflowId: 'wf-compound',
+        projectId: 1,
+        findingIds: ['rvw_a', 'rvw_b'],
+      });
+
+      // With findingIds present, start calls the full-form launch — every optional
+      // arg undefined EXCEPT the launch projectId (10th slot) and findingIds (11th,
+      // LAST slot). Position 8 (baseBranch) stays undefined.
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock).toHaveBeenCalledWith(
+        'wf-compound',
+        '/projects/my-project',
+        undefined, // substrate
+        undefined, // taskId
+        undefined, // ideaId
+        undefined, // sessionId
+        undefined, // permissionMode
+        undefined, // baseBranch (position 8 placeholder)
+        undefined, // taskIds
+        1, // projectId (10th)
+        ['rvw_a', 'rvw_b'], // findingIds (11th, LAST)
+      );
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a6) findingIds omitted → back-compat: the 11th slot is undefined (the full
+  // positional vector matches the (a) happy path with a trailing undefined).
+  // -------------------------------------------------------------------------
+  it('(a6) findingIds omitted → forwards undefined in the LAST (11th) positional slot', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-nofind',
+      worktreePath: '/tmp/wt/nofind',
+      branchName: 'cyboflow/sprint/nofind12',
+    });
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1 });
+
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock).toHaveBeenCalledWith(
+        'wf-sprint',
+        '/projects/my-project',
+        undefined, // substrate
+        undefined, // taskId
+        undefined, // ideaId
+        undefined, // sessionId
+        undefined, // permissionMode
+        undefined, // baseBranch (position 8 placeholder)
+        undefined, // taskIds
+        1, // projectId (10th)
+        undefined, // findingIds (11th, LAST — omitted)
+      );
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a7) findingIds = [] → Zod rejects the empty array (the array elements are
+  // non-empty strings but the schema does not constrain length; an EMPTY array is
+  // a valid Zod value, so it reaches launch as []). The launcher enforces the
+  // non-empty guard (covered in runLauncher.test.ts); here we assert the router
+  // forwards [] verbatim in the LAST slot rather than coercing it away.
+  // -------------------------------------------------------------------------
+  it('(a7) findingIds = [] → forwarded verbatim as the LAST positional arg (launcher enforces non-empty)', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-emptyfind',
+      worktreePath: '/tmp/wt/emptyfind',
+      branchName: 'cyboflow/compound/empty123',
+    });
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({ workflowId: 'wf-compound', projectId: 1, findingIds: [] });
+
+      expect(launchMock).toHaveBeenCalledOnce();
+      const lastArg = launchMock.mock.calls[0][10] as string[] | undefined;
+      expect(lastArg).toEqual([]);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },

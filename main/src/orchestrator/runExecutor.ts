@@ -25,6 +25,9 @@ import { bridgeEvents as bridgeEventsImpl } from './runEventBridge';
 import type { StreamEventPublisher } from './runLauncher';
 import { rollupRunUsage } from './runUsageRollup';
 import { buildSeedTasksBlock } from './seedTasksBlock';
+import type { FindingTagBucket } from '../../../shared/types/reviews';
+import { findingBucket } from '../../../shared/types/reviews';
+import { ReviewItemRouter } from './reviewItemRouter';
 
 // ---------------------------------------------------------------------------
 // Narrow interfaces (no concrete imports)
@@ -75,6 +78,31 @@ export interface IdeaBodyReaderLike {
      * pre-existing stubs/adapters keep compiling.
      */
     attachments?: Array<{ name: string; path: string }> | null;
+  } | null;
+}
+
+/**
+ * Narrow injected reader for a SELECTED finding's content (migration 032).
+ *
+ * The real implementation in main/src/index.ts delegates to
+ * `selectFindingForSeed(cyboflowDb, id)` (reviewItemListing.ts) on the narrow
+ * DatabaseLike adapter; tests inject a stub. Returns null when the id resolves to
+ * no row OR the row is not a finding. When injected and a COMPOUND run carries
+ * `seed_finding_ids`, getPrompt() prepends a `# Selected findings` block listing
+ * the human-curated set (D1/D4). Participates in NO stage derivation — distinct
+ * from the task_id / taskStageDeriver path (mirrors IdeaBodyReaderLike).
+ */
+export interface FindingReaderLike {
+  read(reviewItemId: string): {
+    id: string;
+    title: string;
+    body: string | null;
+    severity: 'info' | 'warning' | 'error' | null;
+    priority: 'P0' | 'P1' | 'P2' | null;
+    proposedTarget: 'backlog' | 'docs' | 'prompt' | 'fix' | null;
+    source: string | null;
+    suggestedFix?: string | null;
+    locations?: Array<{ path: string; line?: number }> | null;
   } | null;
 }
 
@@ -463,6 +491,16 @@ export class RunExecutor {
      * so the orchestrated lifecycle is byte-identical (zero-behavior-change floor).
      */
     private readonly programmaticRunner?: ProgrammaticRunner,
+    /**
+     * Optional selected-finding reader (migration 032). When injected and a
+     * COMPOUND run carries `seed_finding_ids`, getPrompt() prepends a
+     * `# Selected findings` block (one section per seeded finding, sorted by
+     * priority then bucket) to the compound run's MAIN prompt so the agent acts
+     * ONLY on the human-curated set in order. When absent, or the run has no
+     * seed_finding_ids, or no id resolves, getPrompt() returns the base prompt
+     * verbatim (zero-behavior-change floor). Participates in NO stage derivation.
+     */
+    private readonly findingReader?: FindingReaderLike,
   ) {}
 
   /**
@@ -993,10 +1031,14 @@ export class RunExecutor {
    *      resumed conversation already holds planner.md; do NOT re-send it).
    *   2. (Phase 4b) pending resume → return the minimal CONTINUE prompt (the
    *      resumed conversation already holds the base prompt; do NOT re-send it).
-   *   3. (Piece A) run.seed_idea_id set + idea body resolves → PREPEND a
+   *   3. (parallel-sprint) run.batch_id resolves lane tasks → PREPEND a
+   *      `# Sprint tasks` block to the MAIN prompt.
+   *   4. (Piece A) run.seed_idea_id set + idea body resolves → PREPEND a
    *      `# Selected idea` block to the MAIN prompt (never systemPromptAppend,
    *      which is invisible to the chat transcript).
-   *   4. none → return the base prompt verbatim (zero-behavior-change floor).
+   *   5. (migration 032) compound run.seed_finding_ids resolve → PREPEND a
+   *      `# Selected findings` block (priority/bucket-ordered) to the MAIN prompt.
+   *   6. none → return the base prompt verbatim (zero-behavior-change floor).
    *
    * @param runId    The workflow run ID — used to stash systemPromptAppend.
    * @param workflow The workflow row containing workflow_path.
@@ -1047,6 +1089,18 @@ export class RunExecutor {
     const seedBlock = this.buildSeedIdeaBlock(runId);
     if (seedBlock) {
       return Promise.resolve(`# Selected idea\n\n${seedBlock}\n\n${prompt}`);
+    }
+
+    // Selected-findings injection (migration 032). When a COMPOUND run carries
+    // seed_finding_ids, prepend a `# Selected findings` block listing the
+    // human-curated set in priority/bucket order. Checked AFTER the
+    // nudge/resume branches (a resumed conversation already holds the block and
+    // must NOT receive it again) and after the sprint/seed-idea branches (a
+    // compound run never carries a batch_id or seed_idea_id, so order is mostly
+    // academic). Fail-soft on every miss → fall through to the base prompt.
+    const findingsBlock = this.buildSelectedFindingsBlock(runId);
+    if (findingsBlock) {
+      return Promise.resolve(`# Selected findings\n\n${findingsBlock}\n\n${prompt}`);
     }
 
     return Promise.resolve(prompt);
@@ -1134,6 +1188,98 @@ export class RunExecutor {
     // Shared renderer — the programmatic path (composeStepPrompt's taskScope) feeds
     // the same helper, so both planes emit byte-identical `# Sprint tasks` bodies.
     return buildSeedTasksBlock(batchId, this.sprintLaneTaskIds, this.ideaBodyReader, this.logger);
+  }
+
+  /**
+   * Resolve the `# Selected findings` block body for a compound run's
+   * seed_finding_ids (migration 032).
+   *
+   * Returns null (so getPrompt falls through to the base prompt) when: no
+   * findingReader is injected, the run is missing or carries no seed_finding_ids,
+   * the JSON does not parse to a non-empty string array, or NO seeded finding
+   * resolves to a row. Each finding is read fail-soft; an id that resolves to
+   * null is skipped so one stale id never sinks the whole compound prompt.
+   *
+   * Ordering: findings are sorted by priority (P0 < P1 < P2, null LAST) then by
+   * bucket order (quick < doc < task) via findingBucket(), so the agent acts on
+   * the highest-priority quick fixes first. Each finding renders as
+   * `## <P-badge> <title>` + a meta line (`Target: <bucket> · Source: <source>`)
+   * + body + an optional `### Suggested fix` + an optional `### Locations` list.
+   * The block leads with a directive pinning the per-finding-immediate
+   * cyboflow_resolve_finding call (mid-run-only; the terminal-seam close-out is
+   * the safety net for whatever the agent missed).
+   */
+  private buildSelectedFindingsBlock(runId: string): string | null {
+    if (!this.findingReader) return null;
+    const run = this.registry.getRunById(runId);
+    const rawIds = run?.seed_finding_ids ?? null;
+    if (!rawIds) return null;
+
+    let ids: string[];
+    try {
+      const parsed: unknown = JSON.parse(rawIds);
+      if (!Array.isArray(parsed)) return null;
+      ids = parsed.filter((v): v is string => typeof v === 'string' && v.length > 0);
+    } catch (err) {
+      this.logger.warn(
+        `RunExecutor.buildSelectedFindingsBlock: could not parse seed_finding_ids for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+    if (ids.length === 0) return null;
+
+    type ResolvedFinding = NonNullable<ReturnType<FindingReaderLike['read']>>;
+    const resolved: ResolvedFinding[] = [];
+    for (const id of ids) {
+      try {
+        const finding = this.findingReader.read(id);
+        if (finding) resolved.push(finding);
+      } catch (err) {
+        // Fail-soft per id — one unresolvable finding never sinks the prompt.
+        this.logger.warn(
+          `RunExecutor.buildSelectedFindingsBlock: could not resolve finding ${id} for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    if (resolved.length === 0) return null;
+
+    // Sort by priority (P0 < P1 < P2, null LAST) then bucket order
+    // (quick < doc < task). Stable for equal keys (Array.prototype.sort is
+    // stable), so the original seeded order is the final tiebreak.
+    const priorityRank = (p: 'P0' | 'P1' | 'P2' | null): number =>
+      p === 'P0' ? 0 : p === 'P1' ? 1 : p === 'P2' ? 2 : 3;
+    const bucketRank: Record<FindingTagBucket, number> = { quick: 0, doc: 1, task: 2 };
+    resolved.sort((a, b) => {
+      const byPriority = priorityRank(a.priority) - priorityRank(b.priority);
+      if (byPriority !== 0) return byPriority;
+      return bucketRank[findingBucket(a.proposedTarget)] - bucketRank[findingBucket(b.proposedTarget)];
+    });
+
+    const sections = resolved.map((f) => {
+      const badge = f.priority ?? '—';
+      const title = f.title?.trim() || '(untitled finding)';
+      const bucket = findingBucket(f.proposedTarget);
+      const sourceTail = f.source?.trim() || 'unknown';
+      const parts: string[] = [`## ${badge} ${title}`, `Target: ${bucket} · Source: ${sourceTail} · id: \`${f.id}\``];
+
+      const body = f.body?.trim();
+      if (body) parts.push(body);
+
+      const suggestedFix = f.suggestedFix?.trim();
+      if (suggestedFix) parts.push(`### Suggested fix\n${suggestedFix}`);
+
+      const locations = (f.locations ?? []).filter((l) => l.path?.trim());
+      if (locations.length > 0) {
+        const lines = locations.map((l) => `- ${l.path.trim()}${typeof l.line === 'number' ? `:${l.line}` : ''}`);
+        parts.push(['### Locations', ...lines].join('\n'));
+      }
+
+      return parts.join('\n\n');
+    });
+
+    const directive =
+      'Act ONLY on these findings, in the order listed. For each, apply the action for its target bucket, then IMMEDIATELY call `cyboflow_resolve_finding` with its id and the matching resolution kind — do not batch resolves to the end.';
+    return [directive, ...sections].join('\n\n');
   }
 
   /**
@@ -1299,6 +1445,83 @@ export class RunExecutor {
     // idempotent. Fail-soft inside rollupRunUsage: a rollup error is logged and
     // swallowed there, so it can never break this transition.
     this.materializeRunUsage(runId, phase);
+
+    // Compound findings close-out (migration 032). At the SAME terminal seam,
+    // a seeded compound run that goes terminal clears `selected` on any seeded
+    // finding still pending (the agent failed to resolve it) so the triage tray
+    // never silently re-offers an already-applied fix as auto-selected. Routes
+    // through the ReviewItemRouter chokepoint (set-selected, actor:'orchestrator')
+    // — staged_at is left set so the finding stays in Ready for the human to
+    // re-decide. AWAITed so the close-out completes before teardown; fail-soft
+    // inside the helper.
+    await this.compoundFindingsCloseOut(runId, phase);
+  }
+
+  /**
+   * Terminal-seam close-out for seeded COMPOUND runs (migration 032).
+   *
+   * Fires only for the terminal phases (drained / failed / canceled) and only
+   * when the run is a compound run carrying seed_finding_ids. Reads each seeded
+   * finding's status off `this.db` (a tiny read OFF the chokepoint), collects
+   * those STILL `status='pending'` (the agent's per-finding
+   * cyboflow_resolve_finding never landed), and clears their `selected` flag via
+   * the chokepoint `set-selected` op — leaving `staged_at` set so each stays in
+   * the human's Ready section. The write goes ON the chokepoint
+   * (ReviewItemRouter.applyReviewItem); only the status check is read directly.
+   *
+   * Fail-soft: skips entirely when no `db` is injected, the run/workflow is
+   * missing, the run is not compound, seed_finding_ids is absent/unparseable, or
+   * no finding is still pending. A chokepoint error is logged at warn level and
+   * NOT escalated — a close-out failure must never crash the run lifecycle.
+   */
+  private async compoundFindingsCloseOut(runId: string, phase: ExecutionPhase): Promise<void> {
+    if (!this.db) return;
+    if (phase !== 'drained' && phase !== 'failed' && phase !== 'canceled') return;
+
+    try {
+      const run = this.registry.getRunById(runId);
+      const rawIds = run?.seed_finding_ids ?? null;
+      if (!run || !rawIds) return;
+
+      const workflow = this.registry.getById(run.workflow_id);
+      if (workflow?.name !== 'compound') return;
+
+      let ids: string[];
+      try {
+        const parsed: unknown = JSON.parse(rawIds);
+        if (!Array.isArray(parsed)) return;
+        ids = parsed.filter((v): v is string => typeof v === 'string' && v.length > 0);
+      } catch {
+        return;
+      }
+      if (ids.length === 0) return;
+
+      // Read-only status check OFF the chokepoint — a tiny per-id SELECT.
+      const stillPending: string[] = [];
+      const stmt = this.db.prepare('SELECT status FROM review_items WHERE id = ?');
+      for (const id of ids) {
+        const row = stmt.get(id) as { status?: string } | undefined;
+        if (row?.status === 'pending') stillPending.push(id);
+      }
+      if (stillPending.length === 0) return;
+
+      // Clear `selected` via the chokepoint (keeps staged_at). The set-selected
+      // op accepts the explicit id list and emits one 'selection-changed' event
+      // per affected id.
+      await ReviewItemRouter.getInstance().applyReviewItem(run.project_id, {
+        op: 'set-selected',
+        actor: 'orchestrator',
+        reviewItemIds: stillPending,
+        selected: false,
+        runId,
+      });
+    } catch (err) {
+      this.logger.warn('[RunExecutor] compound findings close-out failed (fail-soft)', {
+        runId,
+        phase,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**

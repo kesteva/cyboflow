@@ -74,9 +74,10 @@ import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
-import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
+import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, FindingReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
 import { buildSeedTasksBlock } from './orchestrator/seedTasksBlock';
 import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
+import { selectFindingForSeed } from './orchestrator/reviewItemListing';
 import { buildStepTransitionEvent, resolveInitialStepId } from './orchestrator/stepTransitionBridge';
 import {
   transitionToRunning,
@@ -978,6 +979,33 @@ async function initializeServices() {
     logger: cyboflowLogger,
   });
 
+  // Selected-finding reader (migration 032): resolves a compound run's
+  // seed_finding_ids to each finding's content via selectFindingForSeed (which
+  // already SELECTs only kind='finding' rows and lifts proposedTarget /
+  // suggestedFix / locations from payload_json). Injected as the trailing
+  // RunExecutor arg so getPrompt can prepend a `# Selected findings` block, and
+  // so the terminal-seam close-out can read seeded-finding status. Reads through
+  // the narrow DatabaseLike adapter (cyboflowDb) — the same handle the review
+  // routers use. Returns null when the row is missing or not a finding.
+  const findingReader: FindingReaderLike = {
+    read: (id) => {
+      const finding = selectFindingForSeed(cyboflowDb, id);
+      return finding
+        ? {
+            id: finding.id,
+            title: finding.title,
+            body: finding.body,
+            severity: finding.severity,
+            priority: finding.priority,
+            proposedTarget: finding.proposedTarget,
+            source: finding.source,
+            suggestedFix: finding.suggestedFix,
+            locations: finding.locations,
+          }
+        : null;
+    },
+  };
+
   runExecutor = new RunExecutor(
     substrateFacade,
     workflowRegistry,
@@ -998,6 +1026,7 @@ async function initializeServices() {
       markBatchTerminal: (batchId, status) => sprintLaneStore.markBatchTerminal(batchId, status),
     },
     programmaticRunner,
+    findingReader,
   );
 
   // Raw-PTY byte path (TASK-814 / IDEA-030): subscribe the facade's 'pty-output'

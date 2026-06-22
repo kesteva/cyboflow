@@ -32,6 +32,8 @@ import type {
   DecisionPayload,
   PermissionPayload,
   ReviewItem,
+  FindingProposedTarget,
+  FindingPriority,
 } from '../../../shared/types/reviews';
 import { ReviewItemRouter, type ReviewItemDbRow } from './reviewItemRouter';
 
@@ -365,4 +367,110 @@ export function selectPendingBlockingReviewItems(db: DatabaseLike, runId: string
     )
     .all(runId) as ReviewItemDbRow[];
   return rows.map((r) => ReviewItemRouter.shapeRow(r));
+}
+
+// ---------------------------------------------------------------------------
+// Read helper: a single finding shaped for compound-run seed injection
+// (findings-triage redesign / migration 032)
+// ---------------------------------------------------------------------------
+
+/**
+ * The de-normalized finding shape RunExecutor injects into a SEEDED compound
+ * run's prompt (the `## Selected findings` block) and the MCP
+ * `cyboflow_get_selected_findings` reply.
+ *
+ * `proposedTarget` / `suggestedFix` / `locations` are lifted out of the finding's
+ * `payload_json` (the FindingPayload union); `priority` is the first-class column
+ * (migration 032). All three are null when the finding carried no such hint.
+ */
+export interface FindingSeedRow {
+  id: string;
+  title: string;
+  body: string | null;
+  severity: 'info' | 'warning' | 'error' | null;
+  priority: FindingPriority | null;
+  source: string | null;
+  proposedTarget: FindingProposedTarget | null;
+  suggestedFix: string | null;
+  locations: Array<{ path: string; line?: number }> | null;
+}
+
+/** Parse the optional `proposedTarget` hint off a finding payload, dropping garbage. */
+function liftProposedTarget(payload: unknown): FindingProposedTarget | null {
+  if (typeof payload !== 'object' || payload === null) return null;
+  const t = (payload as { proposedTarget?: unknown }).proposedTarget;
+  return t === 'backlog' || t === 'docs' || t === 'prompt' || t === 'fix' ? t : null;
+}
+
+/** Parse the optional `suggestedFix` prose off a finding payload. */
+function liftSuggestedFix(payload: unknown): string | null {
+  if (typeof payload !== 'object' || payload === null) return null;
+  const f = (payload as { suggestedFix?: unknown }).suggestedFix;
+  return typeof f === 'string' ? f : null;
+}
+
+/** Parse the optional `locations` array off a finding payload, dropping malformed entries. */
+function liftLocations(payload: unknown): Array<{ path: string; line?: number }> | null {
+  if (typeof payload !== 'object' || payload === null) return null;
+  const locs = (payload as { locations?: unknown }).locations;
+  if (!Array.isArray(locs)) return null;
+  const shaped: Array<{ path: string; line?: number }> = [];
+  for (const loc of locs) {
+    if (typeof loc !== 'object' || loc === null) continue;
+    const path = (loc as { path?: unknown }).path;
+    if (typeof path !== 'string') continue;
+    const line = (loc as { line?: unknown }).line;
+    shaped.push(typeof line === 'number' ? { path, line } : { path });
+  }
+  return shaped.length > 0 ? shaped : null;
+}
+
+/**
+ * Read a single finding by id, shaped for compound-run seeding. Returns null when
+ * the table is absent, the row is missing, or the row's kind is not 'finding'.
+ *
+ * Read-only — deliberately does NOT route through ReviewItemRouter (no write).
+ * Reuses the table-existence guard so a pre-migration-016 DB is a clean no-op.
+ */
+export function selectFindingForSeed(db: DatabaseLike, reviewItemId: string): FindingSeedRow | null {
+  if (!hasReviewItemsTable(db)) return null;
+  const row = db
+    .prepare(
+      `SELECT id, title, body, severity, priority, source, payload_json AS payloadJson
+         FROM review_items
+        WHERE id = ? AND kind = 'finding'`,
+    )
+    .get(reviewItemId) as
+    | {
+        id: string;
+        title: string;
+        body: string | null;
+        severity: 'info' | 'warning' | 'error' | null;
+        priority: FindingPriority | null;
+        source: string | null;
+        payloadJson: string | null;
+      }
+    | undefined;
+  if (!row) return null;
+
+  let payload: unknown = null;
+  if (row.payloadJson) {
+    try {
+      payload = JSON.parse(row.payloadJson);
+    } catch {
+      payload = null;
+    }
+  }
+
+  return {
+    id: row.id,
+    title: row.title,
+    body: row.body,
+    severity: row.severity,
+    priority: row.priority,
+    source: row.source,
+    proposedTarget: liftProposedTarget(payload),
+    suggestedFix: liftSuggestedFix(payload),
+    locations: liftLocations(payload),
+  };
 }

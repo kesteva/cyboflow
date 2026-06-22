@@ -220,16 +220,20 @@ export interface RunLauncherLike {
    * per-task lanes of a session-hosted `sprint` run — only valid when the
    * workflow's name === 'sprint'; `projectId` is the EXPLICIT launch project
    * (migration 030 — global workflows) threaded into WorkflowRegistry.createRun
-   * (stamped onto workflow_runs.project_id) and SprintLaneStore.createForRun. All
-   * are OPTIONAL — when substrate is omitted the run falls through the resolver
+   * (stamped onto workflow_runs.project_id) and SprintLaneStore.createForRun;
+   * `findingIds` (findings-triage redesign / migration 032) seeds the selected
+   * findings of a `compound` run — only valid when the workflow's name ===
+   * 'compound', written DIRECTLY to workflow_runs.seed_finding_ids. All are
+   * OPTIONAL — when substrate is omitted the run falls through the resolver
    * ladder to DEFAULT_SUBSTRATE ('sdk'); when taskId / ideaId are omitted no link
    * is recorded; when sessionId is omitted the run creates its own dedicated
    * worktree (legacy path); when requestedPermissionMode is omitted the
    * permission ladder falls through to frontmatter → global default → 'default';
    * when projectId is omitted createRun falls back to workflow.project_id (a
-   * GLOBAL workflow launched without it throws).
+   * GLOBAL workflow launched without it throws); when findingIds is omitted the
+   * run is not finding-seeded.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, findingIds?: string[]): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -753,6 +757,14 @@ export const runsRouter = router({
       // substrate-keyed selection cap N is enforced here (defense in depth — the
       // picker also enforces it client-side).
       taskIds: z.array(z.string().min(1)).optional(),
+      // Optional compound seed findings (findings-triage redesign / migration 032).
+      // When supplied, the launcher writes workflow_runs.seed_finding_ids (a JSON
+      // string array) directly; RunExecutor.getPrompt injects the selected findings
+      // as a `## Selected findings` block, and the terminal-seam close-out clears
+      // `selected` on any un-resolved seeded finding. Only valid for the 'compound'
+      // workflow (the launcher enforces this). Mirrors taskIds/ideaId; NO selection
+      // cap (OD-7) — a triage tray may seed any number of findings.
+      findingIds: z.array(z.string().min(1)).optional(),
     }))
     .mutation(async ({ ctx, input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
@@ -789,14 +801,17 @@ export const runsRouter = router({
       // (migration 014), planner seed idea (migration 017), session host
       // (Phase 1 / migration 019), per-run agent permission override
       // (WorkflowPicker), and sprint seed tasks (feat/parallel-sprint), PLUS the
-      // explicit launch projectId (migration 030 — global workflows). The
-      // projectId MUST always be threaded now: a GLOBAL built-in / custom flow
-      // carries workflow.project_id = NULL, so createRun has no fallback project
-      // and would throw without it. (The earlier "legacy 2-arg shape when all
-      // optionals are omitted" fast path is gone — it could not supply a project
-      // for a global flow.) Any optional arg may still be undefined, which the
-      // launcher treats as "no link / no host / resolver default". baseBranch is
-      // never sent over IPC — undefined placeholder.
+      // explicit launch projectId (migration 030 — global workflows) and the
+      // compound seed findings (findings-triage / migration 032). The projectId
+      // MUST always be threaded now: a GLOBAL built-in / custom flow carries
+      // workflow.project_id = NULL, so createRun has no fallback project and would
+      // throw without it. (The earlier "legacy 2-arg shape when all optionals are
+      // omitted" fast path is gone — it could not supply a project for a global
+      // flow.) Any optional arg may still be undefined, which the launcher treats
+      // as "no link / no host / resolver default". baseBranch and
+      // requestedExecutionModel are never sent over this IPC path — undefined
+      // placeholders. findingIds is the LAST positional arg, AFTER
+      // requestedExecutionModel.
       const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
         input.workflowId,
         project.path,
@@ -808,6 +823,8 @@ export const runsRouter = router({
         undefined,
         input.taskIds,
         input.projectId,
+        undefined,
+        input.findingIds,
       );
       return { runId, worktreePath, branchName };
     }),
