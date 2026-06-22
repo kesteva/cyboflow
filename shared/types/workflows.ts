@@ -455,6 +455,21 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem'],
             retries: 3,
             desc: 'Parallel per-task fan-out — per-task progress in sprint lanes',
+            // Inert on the orchestrated plane (the agent reads sprint.md and drives lanes
+            // via the cyboflow_update_sprint_task MCP; host.fanOut is undefined). On the
+            // programmatic plane the host walks each task through this inner chain, driving
+            // one sprint lane per task. The 5 inner ids EQUAL SPRINT_LANE_STEP_IDS in order
+            // so the lane vocabulary + swimlane UI render identically.
+            fanOut: {
+              over: 'tasks',
+              inner: [
+                { id: 'implement', agent: 'implement', name: 'Implement' },
+                { id: 'write-tests', agent: 'write-tests', name: 'Write tests' },
+                { id: 'code-review', agent: 'code-review', name: 'Code review' },
+                { id: 'task-verify', agent: 'task-verify', name: 'Verify' },
+                { id: 'visual-verify', agent: 'visual-verify', name: 'Visual check', optional: true },
+              ],
+            },
           },
         ],
       },
