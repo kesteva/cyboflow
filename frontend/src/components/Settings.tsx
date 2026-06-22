@@ -47,6 +47,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Global CLI runtime: false = allow SDK (per-run picker available, default
   // 'sdk'); true = force the interactive PTY substrate everywhere (SDK disabled).
   const [interactivePtyOnly, setInteractivePtyOnly] = useState(false);
+  // Telemetry is opt-out (default on). These flags take effect after a restart
+  // since the SDKs are initialized once at boot.
+  const [errorReportingEnabled, setErrorReportingEnabled] = useState(true);
+  const [usageMetricsEnabled, setUsageMetricsEnabled] = useState(true);
   const [notificationSettings, setNotificationSettings] = useState({
     enabled: true,
     playSound: true,
@@ -86,7 +90,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
       setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
       setInteractivePtyOnly(data.interactivePtyOnly ?? false);
-      
+      setErrorReportingEnabled(data.telemetry?.errorReportingEnabled ?? true);
+      setUsageMetricsEnabled(data.telemetry?.usageMetricsEnabled ?? true);
+
       // Load additional paths
       const paths = data.additionalPaths || [];
       setAdditionalPathsText(paths.join('\n'));
@@ -124,7 +130,15 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         defaultAgentPermissionMode,
         interactivePtyOnly,
         additionalPaths: parsedPaths,
-        notifications: notificationSettings
+        notifications: notificationSettings,
+        // Spread the existing telemetry first so the persisted installId is
+        // preserved; fall back to '' (never undefined) if it was never set.
+        telemetry: {
+          installId: _config?.telemetry?.installId ?? '',
+          ..._config?.telemetry,
+          errorReportingEnabled,
+          usageMetricsEnabled
+        }
       });
 
       if (!response.success) {
@@ -373,6 +387,37 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                   scripted Planner and Sprint (with every kind of human approval), try a quick
                   session, open a PR, and merge back to main. Your real projects, sessions, and
                   settings are untouched; demo data is discarded when you turn this off.
+                </p>
+              </SettingsSection>
+            </CollapsibleCard>
+
+            {/* Privacy & Telemetry */}
+            <CollapsibleCard
+              title="Privacy & Telemetry"
+              subtitle="Help improve Cyboflow with anonymized diagnostics"
+              icon={<ShieldCheck className="w-5 h-5" />}
+              defaultExpanded={false}
+              variant="subtle"
+            >
+              <SettingsSection
+                title="Anonymized Diagnostics"
+                description="Telemetry is fully anonymized — no source code, prompts, or file paths are ever sent."
+                icon={<ShieldCheck className="w-4 h-4" />}
+              >
+                <Checkbox
+                  label="Send anonymized crash & error reports"
+                  checked={errorReportingEnabled}
+                  onChange={(e) => setErrorReportingEnabled(e.target.checked)}
+                />
+                <div className="mt-4">
+                  <Checkbox
+                    label="Send anonymized feature usage metrics"
+                    checked={usageMetricsEnabled}
+                    onChange={(e) => setUsageMetricsEnabled(e.target.checked)}
+                  />
+                </div>
+                <p className="text-xs text-text-tertiary mt-3">
+                  Changes take effect after restarting the app.
                 </p>
               </SettingsSection>
             </CollapsibleCard>
