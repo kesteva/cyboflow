@@ -118,8 +118,11 @@ describe('ConfigManager migration: enableCrystalFooter → enableCyboflowFooter'
     // Neither key was in the file, so enableCyboflowFooter stays undefined
     expect(config.enableCyboflowFooter).toBeUndefined();
 
-    // No extra save triggered by the migration block (write count unchanged after initialize)
+    // The footer-migration block itself triggers no save (legacy key absent). The
+    // single extra write is the one-time telemetry installId persistence: the loaded
+    // config had no telemetry.installId, so initialize() generates one and saves once.
     const callCountAfter = writeFileSpy.mock.calls.length;
-    expect(callCountAfter).toBe(callCountBefore);
+    expect(callCountAfter).toBe(callCountBefore + 1);
+    expect(config.telemetry?.installId).toMatch(/^[0-9a-f-]{36}$/);
   });
 });

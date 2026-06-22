@@ -46,6 +46,16 @@ export interface AppConfig {
   // Demo mode: boots the app against a throwaway demo database + sandbox repo
   // with scripted agent runs. Read ONCE at startup — toggling relaunches the app.
   demoMode?: boolean;
+  // Telemetry settings (opt-OUT model: both flags default true). Privacy: source
+  // code, file paths, repo names, and LLM prompts are NEVER sent — error/usage
+  // payloads are scrubbed before transmission. SDKs are silent no-ops when the
+  // matching flag is false OR the credential env var (SENTRY_DSN / APTABASE_APP_KEY)
+  // is absent. installId is a random uuid v4 minted once on first boot.
+  telemetry?: {
+    errorReportingEnabled: boolean;  // Sentry; DEFAULT true (opt-out model)
+    usageMetricsEnabled: boolean;    // Aptabase; DEFAULT true (opt-out model)
+    installId: string;               // random uuid v4, generated once on first boot, persisted
+  };
   // Additional paths to add to PATH environment variable
   additionalPaths?: string[];
   // Session creation preferences
@@ -99,6 +109,14 @@ export interface UpdateConfigRequest {
   devMode?: boolean;
   // Demo mode (see AppConfig.demoMode) — applied on next launch.
   demoMode?: boolean;
+  // Telemetry settings (see AppConfig.telemetry). Opt-OUT model: both flags default
+  // true. Privacy: source code, file paths, repo names, and LLM prompts are NEVER
+  // sent — payloads are scrubbed before transmission.
+  telemetry?: {
+    errorReportingEnabled: boolean;  // Sentry; DEFAULT true (opt-out model)
+    usageMetricsEnabled: boolean;    // Aptabase; DEFAULT true (opt-out model)
+    installId: string;               // random uuid v4, generated once on first boot, persisted
+  };
   additionalPaths?: string[];
   sessionCreationPreferences?: {
     sessionCount?: number;

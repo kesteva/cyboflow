@@ -6,6 +6,7 @@ import type { ExecutionModel } from '../../../shared/types/executionModel';
 import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
+import { v4 as uuidv4 } from 'uuid';
 import { getCyboflowDirectory } from '../utils/cyboflowDirectory';
 import { clearShellPathCache } from '../utils/shellPath';
 
@@ -31,6 +32,11 @@ export class ConfigManager extends EventEmitter {
         notifyOnStatusChange: true,
         notifyOnWaiting: true,
         notifyOnComplete: true
+      },
+      telemetry: {
+        errorReportingEnabled: true,
+        usageMetricsEnabled: true,
+        installId: ''
       },
       sessionCreationPreferences: {
         sessionCount: 1,
@@ -68,6 +74,10 @@ export class ConfigManager extends EventEmitter {
           ...this.config.notifications,
           ...loadedConfig.notifications
         },
+        telemetry: {
+          ...this.config.telemetry,
+          ...loadedConfig.telemetry
+        },
         sessionCreationPreferences: {
           ...this.config.sessionCreationPreferences,
           ...loadedConfig.sessionCreationPreferences,
@@ -102,6 +112,21 @@ export class ConfigManager extends EventEmitter {
       }
     } catch (error) {
       // Config file doesn't exist, use defaults
+      await this.saveConfig();
+    }
+
+    // Generate a persistent anonymous installId exactly once, when absent.
+    // This survives restarts because it is persisted to config.json immediately
+    // and read back via the telemetry deep-merge above on subsequent boots.
+    if (!this.config.telemetry) {
+      this.config.telemetry = {
+        errorReportingEnabled: true,
+        usageMetricsEnabled: true,
+        installId: ''
+      };
+    }
+    if (!this.config.telemetry.installId) {
+      this.config.telemetry.installId = uuidv4();
       await this.saveConfig();
     }
   }
