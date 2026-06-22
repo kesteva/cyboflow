@@ -104,6 +104,7 @@ Mach-Os. The trade-off is that the release is a few explicit steps rather than o
 3. Build, sign + notarize each arch (separate runs). Dev example:
    ```bash
    cybosecrets
+   pnpm electron:rebuild      # ⚠️ force native deps back to the Electron ABI first (see gotcha)
    pnpm build:mac:dev:arm64   # → dist-electron/Cyboflow-Dev-<v>-macOS-arm64.{dmg,zip,blockmap}
    pnpm build:mac:dev:x64     # → dist-electron/Cyboflow-Dev-<v>-macOS-x64.{dmg,zip,blockmap}
    ```
@@ -185,6 +186,7 @@ auto-update to (a `-dev.N` prerelease suffix is conventional, e.g. `0.1.3-dev.1`
 | **First install is still manual** | The updater upgrades an installed app only. New users download the `.dmg` from the website. |
 | **Per-arch manifests must be merged** | Each per-arch build overwrites `latest-mac.yml`. Always regenerate it with `scripts/gen-mac-latest-yml.mjs` listing *both* arches before publishing, or one arch's users get no updates. |
 | **Publish with an allowlist** | `dist-electron` holds a mix of variants/arches/stale files. Use `PUBLISH_ONLY` so a release publishes exactly its own files — the bare glob cross-contaminates the `stable/` and `dev/` feeds. |
+| **Native-module ABI before packaging** | The unit gate (`pnpm test:unit`) rebuilds `better-sqlite3` for the **host Node** ABI (NMV 127). electron-builder's rebuild step *caches* and can then skip the Electron rebuild, packaging the host-ABI module — the app crashes on launch with `NODE_MODULE_VERSION 127 … requires 136`. Run **`pnpm electron:rebuild`** (force) before `build:mac:*` after running tests. Verify a built app: load its `…/app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node` with host `node` — it should *refuse* with "compiled against … 136" (proving the Electron ABI). |
 
 ---
 
