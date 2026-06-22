@@ -128,6 +128,15 @@ describe('formatElapsed', () => {
     const nowMs = new Date('2024-01-01T00:00:00.000Z').getTime();
     expect(formatElapsed(startedAt, nowMs)).toBe('0s');
   });
+
+  it('reads a zone-less SQLite stamp as UTC, not the viewer local time', () => {
+    // workflow_runs.started_at is written by CURRENT_TIMESTAMP: a space-separated
+    // stamp with NO 'Z'. It MUST be parsed as UTC — otherwise a viewer west of UTC
+    // sees the start in the future and the elapsed clamps to 0s forever.
+    const startedAt = '2024-01-01 00:00:00';
+    const nowMs = new Date('2024-01-01T00:06:36.000Z').getTime();
+    expect(formatElapsed(startedAt, nowMs)).toBe('6m 36s');
+  });
 });
 
 // ---------------------------------------------------------------------------
