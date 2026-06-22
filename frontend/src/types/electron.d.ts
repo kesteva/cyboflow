@@ -235,6 +235,9 @@ interface ElectronAPI {
     updateSessionPreferences: (preferences: SessionCreationPreferences) => Promise<IPCResponse<void>>;
   };
 
+  // Telemetry — fire-and-forget renderer → main usage tracking (returns void, never throws).
+  telemetry: { track(eventName: string, properties?: Record<string, string | number | boolean>): void };
+
   // Prompts — IPCDataResponse so callers can use response.data directly after success check
   prompts: {
     getAll: () => Promise<IPCDataResponse<unknown[]>>;
