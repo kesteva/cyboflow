@@ -26,7 +26,7 @@ export interface RecoveryResult {
    * Programmatic runs stranded mid-walk that were RESET to 'starting' for
    * crash-safe re-drive (NOT force-failed). The caller (index boot) re-drives each
    * via RunExecutor, threading `currentStepId` as the coarse resume point and
-   * `completedStepIds` (persisted done/skipped from step_results, migration 032) so
+   * `completedStepIds` (persisted done/skipped from step_results, migration 033) so
    * the controller skips individually-completed steps.
    */
   programmaticToResume: Array<{ id: string; currentStepId: string | null; completedStepIds: string[] }>;
@@ -77,7 +77,7 @@ export function recoverActiveStateOrphans(
     return { runningRecovered: 0, startingRecovered: 0, approvalsCanceled: 0, programmaticToResume: [] };
   }
 
-  // Read persisted per-step completion (migration 032) for the runs we'll resume,
+  // Read persisted per-step completion (migration 033) for the runs we'll resume,
   // so the controller skips individually-completed steps. Fail-soft: a missing
   // step_results table (older DB) yields no completed ids → coarse current_step_id
   // resume still applies.

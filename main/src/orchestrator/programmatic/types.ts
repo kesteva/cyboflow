@@ -204,7 +204,7 @@ export interface ControllerHost {
   triageFailure?(step: WorkflowStep, ctx: ControllerStepContext, error: string | undefined): Promise<TriageDecision>;
 
   /**
-   * Optional per-step result sink (Stage 3, migration 032). The controller calls
+   * Optional per-step result sink (Stage 3, migration 033). The controller calls
    * this each time a step SETTLES (with its final StepReport) so the host can
    * persist it — backing queryable per-step results and crash-safe resume (skip
    * individually-completed steps). Fail-soft; absent ⇒ results live only in the

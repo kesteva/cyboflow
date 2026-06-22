@@ -1,6 +1,6 @@
 /**
  * StepResultStore — persists per-step results for programmatic runs (Stage 3,
- * migration 032). The host records each step's structured outcome as the
+ * migration 033). The host records each step's structured outcome as the
  * WorkflowController settles it; the store backs (a) deterministic queryable
  * per-step results and (b) sharper crash-safe resume (skip individually-completed
  * steps on re-drive, not just the coarse current_step_id pointer).

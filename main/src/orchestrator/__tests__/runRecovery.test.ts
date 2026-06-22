@@ -240,7 +240,7 @@ describe('recoverActiveStateOrphans', () => {
     expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-P2') as { status: string }).status).toBe('starting');
   });
 
-  it('returns persisted completed step ids for a resumed programmatic run (migration 032)', () => {
+  it('returns persisted completed step ids for a resumed programmatic run (migration 033)', () => {
     const db = createTestDb({ includeWorkflowRunTaskColumns: true });
     db.exec(`CREATE TABLE IF NOT EXISTS step_results (
       run_id TEXT NOT NULL, step_id TEXT NOT NULL, phase_id TEXT,

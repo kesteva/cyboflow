@@ -114,7 +114,7 @@ export interface WorkflowRunRow {
   substrate?: CliSubstrate;
   /**
    * Execution model stamped at launch ('orchestrated' | 'programmatic') — the
-   * sibling immutable stamp to `substrate` (migration 031). Decides WHO walks the
+   * sibling immutable stamp to `substrate` (migration 032). Decides WHO walks the
    * run's DAG: the orchestrator agent ('orchestrated', today's behavior + the
    * only model the interactive substrate can run) or host code ('programmatic',
    * SDK only). Resolved once and immutable; reads back 'orchestrated' for every

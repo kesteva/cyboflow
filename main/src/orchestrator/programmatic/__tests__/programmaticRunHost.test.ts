@@ -137,7 +137,7 @@ describe('ProgrammaticRunHost', () => {
     await expect(host.triageFailure(step({ id: 'a' }), ctx, 'boom')).resolves.toBe('retry');
   });
 
-  it('forwards recordStepResult to the recorder with the bound runId (migration 032)', () => {
+  it('forwards recordStepResult to the recorder with the bound runId (migration 033)', () => {
     const recordStepResult = vi.fn();
     const host = new ProgrammaticRunHost({ runId: 'run-9', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), recordStepResult });
 

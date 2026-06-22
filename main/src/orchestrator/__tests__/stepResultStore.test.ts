@@ -8,7 +8,7 @@ import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 function buildDb(withTable = true): Database.Database {
   const db = new Database(':memory:');
   if (withTable) {
-    const sql = readFileSync(join(__dirname, '..', '..', 'database', 'migrations', '032_step_results.sql'), 'utf-8');
+    const sql = readFileSync(join(__dirname, '..', '..', 'database', 'migrations', '033_step_results.sql'), 'utf-8');
     db.exec(sql);
   }
   return db;

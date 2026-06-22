@@ -61,7 +61,7 @@ export interface ProgrammaticRunHostArgs {
    */
   injectEvent?: (event: ClaudeStreamEvent) => void;
   /**
-   * Per-step result sink (migration 032). When present, the host persists each
+   * Per-step result sink (migration 033). When present, the host persists each
    * settled step's StepReport (in production via StepResultStore.record) — backing
    * queryable per-step results + crash-safe resume. Absent ⇒ not recorded.
    */
@@ -149,7 +149,7 @@ export class ProgrammaticRunHost implements ControllerHost {
     }
   }
 
-  /** Per-step result sink (migration 032). Fail-soft — recording must not abort the walk. */
+  /** Per-step result sink (migration 033). Fail-soft — recording must not abort the walk. */
   recordStepResult(report: StepReport): void {
     if (!this.args.recordStepResult) return;
     try {

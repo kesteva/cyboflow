@@ -3,7 +3,7 @@
  * a workflow's DAG (its `WorkflowDefinition`). Sibling to the dual-substrate
  * choice in `./substrate.ts`, resolved once at launch and stamped immutably onto
  * the `workflow_runs` row (see executionModelResolver.ts and
- * migration 031_workflow_run_execution_model.sql):
+ * migration 032_workflow_run_execution_model.sql):
  *
  *   'orchestrated' — an ORCHESTRATOR AGENT reads and manages the DAG. The model
  *                    sequences phases/steps, delegates each to a subagent, and is
@@ -29,7 +29,7 @@
  * be imported in any environment.
  *
  * CONTRACT NOTE: the ExecutionModel union and the CHECK domain in
- * migration 031_workflow_run_execution_model.sql are a single contract split
+ * migration 032_workflow_run_execution_model.sql are a single contract split
  * across TypeScript + SQL — if a new model is ever added, widen BOTH together
  * (exactly as the CliSubstrate / migration 013 contract is paired).
  */

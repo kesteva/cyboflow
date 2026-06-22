@@ -1,4 +1,4 @@
--- Migration 032: per-step results for programmatic runs (Stage 3).
+-- Migration 033: per-step results for programmatic runs (Stage 3).
 --
 -- The programmatic WorkflowController settles each step with a structured outcome
 -- (done | skipped | failed | rejected | canceled) + attempt count + an optional

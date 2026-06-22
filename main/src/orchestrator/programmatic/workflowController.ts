@@ -327,7 +327,7 @@ export class WorkflowController {
 
   /**
    * Append a settled step to the trace AND persist it host-side (Stage 3,
-   * migration 032). Centralizes every settle so per-step results are recorded as
+   * migration 033). Centralizes every settle so per-step results are recorded as
    * they happen (powering crash-safe resume + queryable results). Fail-soft: a
    * broken recorder must never affect the walk.
    */

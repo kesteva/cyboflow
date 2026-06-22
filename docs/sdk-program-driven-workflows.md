@@ -23,7 +23,7 @@ section below.
 > ⚠️ **Live verification status.** A headless **integration smoke**
 > (`programmaticIntegration.test.ts`) drives the REAL runner/controller/gate/host
 > over the REAL planner DAG + DB with only the SDK spawn faked, and a **boot
-> smoke** confirmed a clean `pnpm dev` boot + migration 031 in the live DB + the
+> smoke** confirmed a clean `pnpm dev` boot + migration 032 in the live DB + the
 > full composition-root wiring. NOT covered headlessly: a real-Claude per-step
 > turn and the renderer gate-approval UI — exercise those in a `pnpm dev` run
 > against a `programmatic`-stamped workflow before relying on the live SDK path.
@@ -303,7 +303,7 @@ false positives). Clusters and resolutions:
 
 - `shared/types/executionModel.ts` — type, default, guards, substrate binding.
 - `main/src/orchestrator/executionModelResolver.ts` — the single resolver.
-- `main/src/database/migrations/031_workflow_run_execution_model.sql` — column.
+- `main/src/database/migrations/032_workflow_run_execution_model.sql` — column.
 - `main/src/orchestrator/workflowRegistry.ts` — `createRun` stamp + `getRunById`
   projection + `WorkflowConfigProvider.getDefaultExecutionModel`.
 - `shared/types/workflows.ts` — `WorkflowRunRow.execution_model`.

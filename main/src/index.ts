@@ -611,7 +611,7 @@ async function initializeServices() {
   // per-project; emits AgentChangedEvent post-commit on the per-project channel.
   AgentOverrideRouter.initialize(cyboflowDb);
   HumanStepManager.initialize(cyboflowDb);
-  // Per-step result store (Stage 3, migration 032): the programmatic step recorder
+  // Per-step result store (Stage 3, migration 033): the programmatic step recorder
   // + crash-safe resume + the monitor.stepResults tRPC query reach it here.
   StepResultStore.initialize(cyboflowDb);
 
@@ -910,7 +910,7 @@ async function initializeServices() {
         },
       };
     },
-    // Per-step result sink (migration 032): persist each settled step so results
+    // Per-step result sink (migration 033): persist each settled step so results
     // are queryable + crash-safe resume can skip individually-completed steps.
     stepResultRecorder: (runId, report) =>
       StepResultStore.tryGetInstance()?.record({

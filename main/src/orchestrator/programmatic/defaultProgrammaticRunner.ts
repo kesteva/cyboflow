@@ -58,7 +58,7 @@ export interface DefaultProgrammaticRunnerDeps {
     injectEvent: (event: ClaudeStreamEvent) => void,
   ) => MonitorSession;
   /**
-   * Per-step result sink (migration 032). When present, each settled step is
+   * Per-step result sink (migration 033). When present, each settled step is
    * persisted (in production via StepResultStore.record) for queryable results +
    * crash-safe resume. Absent ⇒ results live only in the returned trace.
    */

@@ -1,4 +1,4 @@
--- Migration 031: Add execution_model column to workflow_runs.
+-- Migration 032: Add execution_model column to workflow_runs.
 --
 -- This is the orchestrated-vs-programmatic execution-model seam — the axis that
 -- decides WHO walks a run's DAG (its WorkflowDefinition). Sibling to the

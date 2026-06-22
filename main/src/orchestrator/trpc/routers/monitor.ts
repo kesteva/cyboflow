@@ -67,7 +67,7 @@ export const monitorRouter = router({
     }),
 
   /**
-   * Deterministic per-step results for a run (migration 032) — the structured
+   * Deterministic per-step results for a run (migration 033) — the structured
    * outcome of each settled step (done/skipped/failed/rejected/canceled + attempts).
    * [] when the store is uninitialized or the run has no results. UNCHANGED from the
    * old supervisorChat router.

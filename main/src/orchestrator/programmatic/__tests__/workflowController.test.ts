@@ -478,7 +478,7 @@ describe('WorkflowController', () => {
     });
   });
 
-  // ── per-step result recording (Stage 3, migration 032) ───────────────────────
+  // ── per-step result recording (Stage 3, migration 033) ───────────────────────
   it('records each settled step via host.recordStepResult with its outcome', async () => {
     const d = def([
       phase('p1', [step({ id: 'a' }), step({ id: 'b', optional: true })]),

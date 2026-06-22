@@ -115,7 +115,7 @@ describe('WorkflowRegistry', () => {
     db.exec(
       "ALTER TABLE workflow_runs ADD COLUMN substrate TEXT NOT NULL DEFAULT 'sdk' CHECK (substrate IN ('sdk','interactive'))",
     );
-    // createRun also stamps workflow_runs.execution_model (migration 031), the
+    // createRun also stamps workflow_runs.execution_model (migration 032), the
     // sibling immutable stamp to substrate that getRunById now projects. The
     // column is provided by the includeWorkflowRunTaskColumns block above (folded
     // in alongside batch_id), so no manual ALTER is needed here.
@@ -807,7 +807,7 @@ describe('WorkflowRegistry', () => {
       });
     });
 
-    // ───── execution_model stamping (migration 031) ─────
+    // ───── execution_model stamping (migration 032) ─────
 
     it("stamps the default execution model 'orchestrated' when no override is set (zero-behavior-change)", async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {

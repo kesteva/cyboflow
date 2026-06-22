@@ -167,7 +167,7 @@ export interface ProgrammaticRunContext {
    */
   resumeFromStepId?: string;
   /**
-   * Crash-safe resume (optional, migration 032): step ids that INDIVIDUALLY
+   * Crash-safe resume (optional, migration 033): step ids that INDIVIDUALLY
    * completed before the restart (persisted done/skipped). The controller skips
    * these without re-running — finer than `resumeFromStepId` alone.
    */
@@ -780,7 +780,7 @@ export class RunExecutor {
   }
 
   /**
-   * Mark already-completed step ids for crash-safe RESUME (migration 032). Set by
+   * Mark already-completed step ids for crash-safe RESUME (migration 033). Set by
    * boot recovery (from the persisted step_results) before re-driving execute();
    * executeProgrammatic threads them so the controller skips those steps. Cleared
    * by teardownRun().
