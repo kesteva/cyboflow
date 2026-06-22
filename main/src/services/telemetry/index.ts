@@ -1,7 +1,12 @@
 import * as Sentry from '@sentry/electron/main';
 import { initialize as aptabaseInitialize, trackEvent as aptabaseTrack } from '@aptabase/electron/main';
 import { app } from 'electron';
+import * as fs from 'fs';
+import * as path from 'path';
 import { scrubSentryEvent, scrubBreadcrumb } from './scrub';
+import { environmentFromBuildInfo, type TelemetryEnvironment } from './environment';
+
+export type { TelemetryEnvironment } from './environment';
 
 // Module-level singleton state. Both stay false until the corresponding SDK is
 // successfully initialized (env credential present AND config flag enabled), so
@@ -9,23 +14,45 @@ import { scrubSentryEvent, scrubBreadcrumb } from './scrub';
 let sentryActive = false;
 let aptabaseActive = false;
 
+/** Resolve the telemetry environment by reading the packaged buildInfo.json. */
+function resolveTelemetryEnvironment(): TelemetryEnvironment {
+  if (!app.isPackaged) return 'development';
+  let buildInfo: { environment?: unknown } | null = null;
+  try {
+    const buildInfoPath = path.join(process.resourcesPath, 'app', 'main', 'dist', 'buildInfo.json');
+    if (fs.existsSync(buildInfoPath)) {
+      buildInfo = JSON.parse(fs.readFileSync(buildInfoPath, 'utf8'));
+    }
+  } catch {
+    buildInfo = null;
+  }
+  return environmentFromBuildInfo(app.isPackaged, buildInfo);
+}
+
 /**
  * Initialize error reporting (Sentry) and usage metrics (Aptabase) from the
  * resolved telemetry config. Each SDK is only initialized when its config flag
  * is enabled AND its credential env var is present; otherwise it is skipped
  * silently. Telemetry must never throw into app code.
+ *
+ * Errors are reported in ALL environments (tagged dev/stable/beta so dev noise
+ * is filterable). Usage metrics fire ONLY for release builds — never under
+ * `pnpm dev` or a local dev `.dmg`.
  */
 export function initTelemetry(cfg: {
   errorReportingEnabled: boolean;
   usageMetricsEnabled: boolean;
   installId: string;
 }): void {
+  const environment = resolveTelemetryEnvironment();
+  const isReleaseBuild = environment !== 'development';
+
   if (cfg.errorReportingEnabled && process.env.SENTRY_DSN) {
     try {
       Sentry.init({
         dsn: process.env.SENTRY_DSN,
         release: app.getVersion(),
-        environment: app.isPackaged ? 'production' : 'development',
+        environment,
         // Scrub every outbound event/breadcrumb so user source code, file
         // paths, repo names and prompts never leave the machine.
         beforeSend: (event) => scrubSentryEvent(event),
@@ -40,7 +67,9 @@ export function initTelemetry(cfg: {
     }
   }
 
-  if (cfg.usageMetricsEnabled && process.env.APTABASE_APP_KEY) {
+  // Usage metrics are release-only: a dev build (unpackaged OR an unstamped
+  // local dev .dmg) resolves to 'development' and is skipped entirely.
+  if (isReleaseBuild && cfg.usageMetricsEnabled && process.env.APTABASE_APP_KEY) {
     try {
       aptabaseInitialize(process.env.APTABASE_APP_KEY);
       aptabaseActive = true;
