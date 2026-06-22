@@ -980,68 +980,82 @@ export class TaskChangeRouter {
 
   /**
    * Record a task->task dependency edge. `taskId` is the BLOCKED task,
-   * `change.dependsOnTaskId` the PREREQUISITE. Both must be real TASKS in this
-   * project (dependencies are task-only; ideas/epics never carry one). The edge:
-   *   1. rejects self-edges (`invalid_dependency`),
-   *   2. validates both endpoints exist + same project (`invalid_dependency`),
+   * `change.dependsOnTaskId` the PREREQUISITE. Each endpoint may be given as the
+   * opaque `tasks.id` OR its display `ref` (e.g. `TASK-001`): agents reasoning
+   * over the seeded sprint set only ever see refs (the `# Sprint tasks` block
+   * renders refs, not opaque ids), so both endpoints are resolved id-or-ref to
+   * the canonical id BEFORE any validation/storage — a ref-keyed call must not be
+   * rejected `invalid_dependency` when the task is real (observed 2026-06-22, the
+   * programmatic sprint dependency step). Both must be real TASKS in this project
+   * (dependencies are task-only; ideas/epics never carry one). The edge:
+   *   1. resolves both endpoints id-or-ref + validates existence and same project
+   *      (`invalid_dependency` when either fails to resolve / is foreign),
+   *   2. rejects self-edges on the RESOLVED ids (`invalid_dependency`) — so a
+   *      mixed ref/id self-edge (`TASK-001` vs its `tsk_…`) is still caught,
    *   3. is cycle-checked over the existing blocking-edge closure
    *      (`dependency_cycle`) — only `blocking` edges form the DAG, so `related`
    *      edges skip the cycle guard,
-   *   4. INSERT-OR-IGNOREs (the UNIQUE(task_id, depends_on_task_id) makes a
-   *      re-add a no-op),
+   *   4. INSERT-OR-IGNOREs the RESOLVED ids (the UNIQUE(task_id, depends_on_task_id)
+   *      makes a re-add a no-op),
    *   5. appends a `dependency-added` entity_events row on the blocked task so
    *      the change is in the faithful changelog.
    *
-   * Returns the BLOCKED task id + the (new or last) entity_events row. A dup
-   * re-add returns the most recent event without writing a new one.
+   * Returns the BLOCKED task's canonical id + the (new or last) entity_events
+   * row. A dup re-add returns the most recent event without writing a new one.
    */
   private runAddDependency(
     projectId: number,
     change: TaskChange,
   ): { taskId: string; event: { id: number; seq: number } } {
-    const taskId = change.taskId as string;
-    const dependsOnTaskId = change.dependsOnTaskId as string;
+    const rawTaskId = change.taskId as string;
+    const rawDependsOn = change.dependsOnTaskId as string;
     const kind: TaskDependencyKind = change.dependencyKind ?? 'blocking';
     const now = new Date().toISOString();
 
+    // Resolved canonical ids — assigned inside the txn, read by the post-txn
+    // dup-lookup / emitChange / return so a ref-keyed call still keys everything
+    // downstream on the opaque id.
+    let blockedId = '';
+    let prereqId = '';
     let eventId = 0;
     let eventSeq = 0;
     let wroteEdge = false;
 
     const txn = this.db.transaction(() => {
-      // Self-edge guard.
-      if (taskId === dependsOnTaskId) {
-        throw new TaskChangeError('invalid_dependency', 'a task cannot depend on itself');
-      }
-
-      // Both endpoints must be real tasks in this project. Dependencies are
-      // task-only (ideas/epics never participate in the execution DAG).
-      const blocked = this.db
-        .prepare('SELECT id, project_id FROM tasks WHERE id = ?')
-        .get(taskId) as { id: string; project_id: number } | undefined;
+      // Resolve BOTH endpoints id-or-ref. Both must be real tasks in this
+      // project (dependencies are task-only — ideas/epics never participate in
+      // the execution DAG). Error messages carry the RAW input the caller sent
+      // so a bad ref is legible (`task TASK-999 not found`).
+      const blocked = this.resolveTaskByRefOrId(projectId, rawTaskId);
       if (!blocked) {
-        throw new TaskChangeError('invalid_dependency', `task ${taskId} not found`);
+        throw new TaskChangeError('invalid_dependency', `task ${rawTaskId} not found`);
       }
       if (blocked.project_id !== projectId) {
-        throw new TaskChangeError('invalid_dependency', `task ${taskId} belongs to a different project`);
+        throw new TaskChangeError('invalid_dependency', `task ${rawTaskId} belongs to a different project`);
       }
-      const prereq = this.db
-        .prepare('SELECT id, project_id FROM tasks WHERE id = ?')
-        .get(dependsOnTaskId) as { id: string; project_id: number } | undefined;
+      const prereq = this.resolveTaskByRefOrId(projectId, rawDependsOn);
       if (!prereq) {
-        throw new TaskChangeError('invalid_dependency', `prerequisite task ${dependsOnTaskId} not found`);
+        throw new TaskChangeError('invalid_dependency', `prerequisite task ${rawDependsOn} not found`);
       }
       if (prereq.project_id !== projectId) {
         throw new TaskChangeError(
           'invalid_dependency',
-          `prerequisite task ${dependsOnTaskId} belongs to a different project`,
+          `prerequisite task ${rawDependsOn} belongs to a different project`,
         );
+      }
+      blockedId = blocked.id;
+      prereqId = prereq.id;
+
+      // Self-edge guard — compare the RESOLVED ids so a mixed ref/id self-edge
+      // (a ref on one endpoint, the same task's opaque id on the other) is caught.
+      if (blockedId === prereqId) {
+        throw new TaskChangeError('invalid_dependency', 'a task cannot depend on itself');
       }
 
       // Idempotent no-op: the edge already exists (any kind on this pair).
       const existing = this.db
         .prepare('SELECT kind FROM task_dependencies WHERE task_id = ? AND depends_on_task_id = ?')
-        .get(taskId, dependsOnTaskId) as { kind: string } | undefined;
+        .get(blockedId, prereqId) as { kind: string } | undefined;
       if (existing) {
         return; // wroteEdge stays false — surface the last event below
       }
@@ -1049,7 +1063,7 @@ export class TaskChangeRouter {
       // Cycle guard: only blocking edges form the ordering DAG. Reject an edge
       // that would create a cycle in the transitive closure of blocking edges.
       if (kind === 'blocking') {
-        this.validateDependencyEdge(taskId, dependsOnTaskId);
+        this.validateDependencyEdge(blockedId, prereqId);
       }
 
       // INSERT OR IGNORE — the UNIQUE(task_id, depends_on_task_id) makes a
@@ -1058,15 +1072,15 @@ export class TaskChangeRouter {
         .prepare(
           'INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_task_id, kind) VALUES (?, ?, ?)',
         )
-        .run(taskId, dependsOnTaskId, kind);
+        .run(blockedId, prereqId, kind);
 
       const deltas: FieldDelta[] = [
-        { field: 'depends_on_task_id', from: null, to: dependsOnTaskId },
+        { field: 'depends_on_task_id', from: null, to: prereqId },
         { field: 'dependency_kind', from: null, to: kind },
       ];
       const ev = this.insertEvent(
         'task',
-        taskId,
+        blockedId,
         change.kind ?? 'dependency-added',
         change.actor,
         change.runId ?? null,
@@ -1086,14 +1100,36 @@ export class TaskChangeRouter {
         .prepare(
           'SELECT id, seq FROM entity_events WHERE entity_type = ? AND entity_id = ? ORDER BY seq DESC LIMIT 1',
         )
-        .get('task', taskId) as { id: number; seq: number } | undefined;
+        .get('task', blockedId) as { id: number; seq: number } | undefined;
       eventId = last?.id ?? 0;
       eventSeq = last?.seq ?? 0;
     } else {
-      this.emitChange(projectId, 'task', taskId, 'updated');
+      this.emitChange(projectId, 'task', blockedId, 'updated');
     }
 
-    return { taskId, event: { id: eventId, seq: eventSeq } };
+    return { taskId: blockedId, event: { id: eventId, seq: eventSeq } };
+  }
+
+  /**
+   * Resolve a task identifier that may be EITHER the opaque `tasks.id` (`tsk_…`)
+   * OR its display `ref` (`TASK-001`) to the canonical row. Opaque id wins (an
+   * exact `id` match is tried first); on a miss the lookup falls back to the
+   * project-scoped `ref` (UNIQUE(project_id, ref) ⇒ unambiguous). Returns
+   * undefined when neither resolves. Used by `runAddDependency` so agents — which
+   * only see display refs in the seeded `# Sprint tasks` block — can record edges
+   * by ref while the stored edge + the fan-out DAG key on the opaque id.
+   */
+  private resolveTaskByRefOrId(
+    projectId: number,
+    identifier: string,
+  ): { id: string; project_id: number } | undefined {
+    const byId = this.db
+      .prepare('SELECT id, project_id FROM tasks WHERE id = ?')
+      .get(identifier) as { id: string; project_id: number } | undefined;
+    if (byId) return byId;
+    return this.db
+      .prepare('SELECT id, project_id FROM tasks WHERE project_id = ? AND ref = ?')
+      .get(projectId, identifier) as { id: string; project_id: number } | undefined;
   }
 
   // --------------------------------------------------------------------------

@@ -1045,6 +1045,11 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       ).n;
     }
 
+    /** The display ref (e.g. TASK-001) the chokepoint minted for an opaque id. */
+    function refOf(db: Database.Database, id: string): string {
+      return (db.prepare('SELECT ref FROM tasks WHERE id = ?').get(id) as { ref: string }).ref;
+    }
+
     it('inserts a blocking edge + appends a dependency-added entity_event on the blocked task', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
@@ -1125,6 +1130,73 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       await expect(
         router.applyChange(1, { actor: 'user', entityType: 'task', taskId: a, dependsOnTaskId: 'tsk_missing' }),
       ).rejects.toMatchObject({ code: 'invalid_dependency' });
+    });
+
+    // Ref-or-id resolution (FIND 2026-06-22): agents reasoning over the seeded
+    // sprint set only see display refs (the `# Sprint tasks` block renders refs,
+    // not opaque ids), so a ref-keyed `cyboflow_add_task_dependency` was rejected
+    // `invalid_dependency` even though the task was real. The chokepoint now
+    // resolves either endpoint id-or-ref to the canonical id before storage.
+    it('resolves both endpoints by display ref, storing the canonical opaque id', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const [a, b] = await makeTasks(db, router, 2);
+
+      const { taskId } = await router.applyChange(1, {
+        actor: 'agent:executor',
+        entityType: 'task',
+        taskId: refOf(db, a),
+        dependsOnTaskId: refOf(db, b),
+      });
+
+      // The returned id AND the stored edge are the OPAQUE ids — not the refs the
+      // caller sent — so the edge aligns with the fan-out lane/DAG item ids.
+      expect(taskId).toBe(a);
+      const row = db
+        .prepare('SELECT task_id, depends_on_task_id, kind FROM task_dependencies WHERE task_id = ?')
+        .get(a) as { task_id: string; depends_on_task_id: string; kind: string };
+      expect(row).toEqual({ task_id: a, depends_on_task_id: b, kind: 'blocking' });
+    });
+
+    it('resolves a mixed ref/id edge (ref on one endpoint, opaque id on the other)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const [a, b] = await makeTasks(db, router, 2);
+
+      await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        taskId: refOf(db, a), // ref
+        dependsOnTaskId: b, // opaque id
+      });
+
+      expect(depCount(db, a)).toBe(1);
+      const row = db
+        .prepare('SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?')
+        .get(a) as { depends_on_task_id: string };
+      expect(row.depends_on_task_id).toBe(b);
+    });
+
+    it('rejects a mixed ref/id self-edge (ref + its own opaque id) with invalid_dependency', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const [a] = await makeTasks(db, router, 1);
+
+      await expect(
+        router.applyChange(1, { actor: 'user', entityType: 'task', taskId: refOf(db, a), dependsOnTaskId: a }),
+      ).rejects.toMatchObject({ code: 'invalid_dependency' });
+      expect(depCount(db, a)).toBe(0);
+    });
+
+    it('rejects an unknown display ref with invalid_dependency', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const [a] = await makeTasks(db, router, 1);
+
+      await expect(
+        router.applyChange(1, { actor: 'user', entityType: 'task', taskId: a, dependsOnTaskId: 'TASK-404' }),
+      ).rejects.toMatchObject({ code: 'invalid_dependency' });
+      expect(depCount(db, a)).toBe(0);
     });
 
     it('rejects a back-edge that would create a cycle with dependency_cycle', async () => {

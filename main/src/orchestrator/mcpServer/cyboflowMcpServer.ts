@@ -241,12 +241,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_add_task_dependency',
         description:
-          'Record a task->task dependency edge for THIS run\'s project. task_id is the BLOCKED task; depends_on_task_id is the PREREQUISITE that must finish first. Routes through the single write chokepoint. Both must be real TASKS in this project (rejected with error invalid_dependency otherwise); a self-edge is rejected (invalid_dependency); an edge that would create a cycle among blocking edges is rejected (error dependency_cycle); re-adding an existing edge is an idempotent no-op. Default kind=\'blocking\' participates in sprint ordering; kind=\'related\' is advisory metadata only.',
+          'Record a task->task dependency edge for THIS run\'s project. task_id is the BLOCKED task; depends_on_task_id is the PREREQUISITE that must finish first. Each may be given as the opaque task id OR the display ref (e.g. TASK-001) — pass the ref straight from the sprint task list, it is resolved automatically. Routes through the single write chokepoint. Both must be real TASKS in this project (rejected with error invalid_dependency otherwise); a self-edge is rejected (invalid_dependency); an edge that would create a cycle among blocking edges is rejected (error dependency_cycle); re-adding an existing edge is an idempotent no-op. Default kind=\'blocking\' participates in sprint ordering; kind=\'related\' is advisory metadata only.',
         inputSchema: {
           type: 'object',
           properties: {
-            task_id: { type: 'string', description: 'The BLOCKED task id (required)' },
-            depends_on_task_id: { type: 'string', description: 'The PREREQUISITE task id that must finish first (required)' },
+            task_id: { type: 'string', description: 'The BLOCKED task — opaque id or display ref e.g. TASK-001 (required)' },
+            depends_on_task_id: { type: 'string', description: 'The PREREQUISITE that must finish first — opaque id or display ref e.g. TASK-001 (required)' },
             kind: { type: 'string', enum: ['blocking', 'related'], description: "Optional edge kind; defaults to 'blocking'" },
           },
           required: ['task_id', 'depends_on_task_id'],
