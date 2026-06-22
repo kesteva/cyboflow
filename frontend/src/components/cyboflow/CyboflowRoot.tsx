@@ -2,7 +2,9 @@
  * CyboflowRoot — top-level Cyboflow view.
  *
  * Layout:
- *   header row     — thin bar with "Choose workflow" and "Quick Session" buttons
+ *   header row     — thin bar with the back-to-home pill plus the run / session
+ *                    action bars (the workflow / quick-session / edit-flow
+ *                    launchers were removed; those actions live on other surfaces)
  *   main content   — three-branch left column:
  *                    1. activeRunId set   → WorkflowCanvas (when phaseState has definition) + RunBottomPane
  *                    2. mainRepoSession   → PanelTabBar + PanelContainer (session panels fill the area)
@@ -241,42 +243,12 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           ← Cyboflow home
         </button>
 
-        {/* Top-bar "Choose workflow" is a global NEW-workflow launcher (not the
-            in-session "Add a workflow" affordance), so it forces a fresh session —
-            it must never silently absorb the quick session the user is viewing. */}
-        <button
-          onClick={() => {
-            setPickerForceNew(true);
-            setIsPickerOpen(true);
-          }}
-          className="rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
-          data-testid="open-workflow-picker"
-        >
-          Choose workflow
-        </button>
-
-        {/* Quick Session button — starts a Claude session directly */}
-        <button
-          onClick={handleStartQuickSession}
-          disabled={projectId === null || quickSession.isStarting}
-          title={projectId === null ? 'Select a project to start a quick session' : undefined}
-          className="rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
-          data-testid="start-quick-session"
-        >
-          Quick Session
-        </button>
-
-        {/* Edit flow — opens the blueprint editor for the active run's workflow (⌘E). */}
-        <button
-          onClick={handleOpenEditor}
-          disabled={!canEditWorkflow}
-          title={canEditWorkflow ? 'Edit the active workflow (⌘E)' : 'Start a workflow run to edit its blueprint'}
-          className="rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
-          data-testid="open-workflow-editor"
-        >
-          Edit flow
-        </button>
-
+        {/* The top-bar "Choose workflow" / "Quick Session" launchers and the
+            "Edit flow" button were removed — those actions now live on their
+            own surfaces (sidebar, backlog, the wizard, the in-session
+            "Add a workflow" affordance) and the keyboard shortcuts (⌘E to edit
+            the active flow, the quick-session shortcut) still drive the same
+            handlers, so nothing here is orphaned. */}
         <div className="flex-1" />
 
         {/* Run-scoped controls (Phase 4a) — git-neutral Cancel only, a distinct

@@ -7,10 +7,8 @@
  *   3. Opening and closing the workflow picker modal toggles its visibility.
  *   4. Modal closes automatically after a successful run start (onWorkflowStarted fires).
  *   5. (TASK-790) Session alive: RunBottomPane renders when activeRunId is null but mainRepoSession exists.
- *   6. (TASK-790) Quick Session button directly calls start() — no mode picker.
- *   7. (TASK-790) Quick Session button disabled with tooltip when projectId is null.
- *   8. (TASK-780) Does not call getPhaseState.query when activeRunId is null.
- *   9. (TASK-780) Mounts WorkflowCanvas above RunBottomPane when a run is active.
+ *   6. (TASK-780) Does not call getPhaseState.query when activeRunId is null.
+ *   7. (TASK-780) Mounts WorkflowCanvas above RunBottomPane when a run is active.
  */
 import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
@@ -417,53 +415,6 @@ describe('CyboflowRoot — session-alive (TASK-790)', () => {
     expect(screen.getByText('Choose a workflow to start')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Choose a workflow' })).toBeInTheDocument();
     expect(screen.queryByTestId('run-bottom-pane-tab-data-stream')).not.toBeInTheDocument();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Quick Session tests (TASK-790 — direct start, no mode picker)
-// ---------------------------------------------------------------------------
-
-describe('CyboflowRoot — Quick Session (TASK-790)', () => {
-  afterEach(() => {
-    act(() => {
-      useCyboflowStore.getState().clearActiveRun();
-      useCyboflowStore.getState().clearActiveQuickSession();
-    });
-  });
-
-  it('renders Quick Session button disabled with tooltip when projectId is null', () => {
-    render(<CyboflowRoot projectId={null} />);
-    const btn = screen.getByTestId('start-quick-session');
-    expect(btn).toBeDisabled();
-    expect(btn).toHaveAttribute('title', 'Select a project to start a quick session');
-
-    // Clicking disabled button must not invoke start
-    fireEvent.click(btn);
-    expect(mockQuickSessionStart).not.toHaveBeenCalled();
-
-    // No mode-picker elements should be present (TASK-790 removes the mode picker)
-    expect(screen.queryByTestId('quick-mode-chat')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('quick-mode-terminal')).not.toBeInTheDocument();
-  });
-
-  it('clicking Quick Session button directly calls start() without a mode picker', async () => {
-    render(<CyboflowRoot projectId={42} />);
-
-    const btn = screen.getByTestId('start-quick-session');
-    expect(btn).not.toBeDisabled();
-
-    // No mode-picker: clicking the button should immediately invoke start
-    await act(async () => {
-      fireEvent.click(btn);
-    });
-
-    expect(mockQuickSessionStart).toHaveBeenCalledTimes(1);
-    expect(mockQuickSessionStart).toHaveBeenCalledWith();
-
-    // No mode picker dropdown ever appears
-    expect(screen.queryByTestId('quick-mode-chat')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('quick-mode-terminal')).not.toBeInTheDocument();
   });
 });
 
