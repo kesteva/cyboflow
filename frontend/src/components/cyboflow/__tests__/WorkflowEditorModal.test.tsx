@@ -529,7 +529,8 @@ describe('WorkflowEditorModal — fan-out editing', () => {
     const savedStep = savedArg.definition.phases[0].steps.find((s) => s.id === 'context');
     expect(savedStep?.fanOut).toEqual({
       over: 'tasks',
-      inner: [{ id: 'item', agent: 'idea-extractor' }],
+      // Enabling fan-out seeds a default readable `name` (the lane label).
+      inner: [{ id: 'item', agent: 'idea-extractor', name: 'Item' }],
     });
     expect(onSaved).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
   });
@@ -575,8 +576,9 @@ describe('WorkflowEditorModal — fan-out editing', () => {
 
     const savedStep = mockUpdateSpec.mock.calls[0][0].definition.phases[0].steps.find((s) => s.id === 'context');
     expect(savedStep?.fanOut?.inner).toEqual([
-      { id: 'item', agent: 'idea-extractor' },
-      { id: 'verify', agent: 'task-verify' },
+      // Seeded with a default readable `name` (lane label) on enable/add.
+      { id: 'item', agent: 'idea-extractor', name: 'Item' },
+      { id: 'verify', agent: 'task-verify', name: 'Item 2' },
     ]);
     expect(onSaved).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
 

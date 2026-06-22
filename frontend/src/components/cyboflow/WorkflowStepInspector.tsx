@@ -305,6 +305,23 @@ function FanOutSection({ phase, step, dispatch }: TabProps): ReactElement {
                 >
                   <input
                     type="text"
+                    value={inner.name ?? ''}
+                    onChange={(e) =>
+                      dispatch({
+                        type: 'SET_FANOUT_INNER_FIELD',
+                        phaseId: phase.id,
+                        stepId: step.id,
+                        innerIndex: idx,
+                        field: 'name',
+                        value: e.target.value,
+                      })
+                    }
+                    placeholder="name (lane label)"
+                    style={inputStyle}
+                    data-testid={`inspector-fanout-inner-name-${idx}`}
+                  />
+                  <input
+                    type="text"
                     value={inner.id}
                     onChange={(e) =>
                       dispatch({

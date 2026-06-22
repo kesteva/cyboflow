@@ -70,7 +70,7 @@ export type WorkflowEditorAction =
       phaseId: string;
       stepId: string;
       innerIndex: number;
-      field: 'id' | 'agent';
+      field: 'id' | 'agent' | 'name';
       value: string;
     }
   | { type: 'TOGGLE_FANOUT_INNER_OPTIONAL'; phaseId: string; stepId: string; innerIndex: number }
@@ -110,6 +110,17 @@ function uniqueId(base: string, taken: Set<string>): string {
   let n = 2;
   while (taken.has(`${base}-${n}`)) n += 1;
   return `${base}-${n}`;
+}
+
+/**
+ * Derive a human-readable default label from a kebab-case id, e.g.
+ * `'write-tests'` → `'Write tests'`. Used to seed a fan-out inner step's `name`
+ * so the swimlane strip never shows a raw kebab id by default.
+ */
+function titleCaseId(id: string): string {
+  const spaced = id.replace(/-/g, ' ').trim();
+  if (spaced.length === 0) return id;
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1);
 }
 
 // ---------------------------------------------------------------------------
@@ -244,7 +255,7 @@ export function workflowEditorReducer(
             // own agent. Server zod (fanOutSchema) is authoritative on save.
             const fanOut: NonNullable<WorkflowStep['fanOut']> = {
               over: 'tasks',
-              inner: [{ id: 'item', agent: step.agent }],
+              inner: [{ id: 'item', agent: step.agent, name: 'Item' }],
             };
             return { ...step, fanOut };
           }
@@ -272,9 +283,13 @@ export function workflowEditorReducer(
         mapStep(phase, action.stepId, (step) => {
           if (step.fanOut === undefined) return step;
           const taken = new Set(step.fanOut.inner.map((s) => s.id));
+          const newId = uniqueId('item', taken);
           const newInner: FanOutInnerStep = {
-            id: uniqueId('item', taken),
+            id: newId,
             agent: step.agent,
+            // Seed a readable default lane label so user fan-out flows don't show
+            // raw kebab ids in the swimlane strip (label falls back to id).
+            name: titleCaseId(newId),
           };
           return {
             ...step,
