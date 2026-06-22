@@ -172,7 +172,19 @@ export class WorkflowController {
         // An EMPTY item set (or an absent driver) falls through to the normal
         // single agent-step path below — byte-identical to today.
         if (step.fanOut !== undefined && this.host.fanOut !== undefined) {
-          const items = this.host.fanOut.resolveItems(runId, step.fanOut.over);
+          // resolveItems may hit the DB (the production sprint driver SELECTs lanes).
+          // A throw must NOT crash the walk — contain it and fall through to the
+          // normal single agent-step path (degraded but safe), mirroring driveLane's
+          // fail-soft contract. An empty result takes the same fall-through.
+          let items: string[] = [];
+          try {
+            items = this.host.fanOut.resolveItems(runId, step.fanOut.over);
+          } catch (err) {
+            this.host.log?.(
+              'warn',
+              `fan-out resolveItems('${step.fanOut.over}') threw; running '${step.id}' as a single step: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
           if (items.length > 0) {
             this.host.reportStep(step.id, 'running');
             const fanResult = await this.runFanOut(

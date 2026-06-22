@@ -731,6 +731,31 @@ describe('WorkflowController', () => {
       expect(runner.calls.map((c) => c.id)).toEqual(['execute', 'next']);
     });
 
+    it('contains a resolveItems throw: runs the fanOut step as a single step (no crash)', async () => {
+      // The production sprint driver SELECTs lanes in resolveItems; a transient DB
+      // throw (e.g. SQLITE_BUSY) must NOT escape the walk. The controller contains
+      // it and degrades to the normal single agent-step path.
+      const d = def([phase('p1', [fanStep('execute', ['implement', 'verify']), step({ id: 'next' })])]);
+      const driver: FanOutDriver & { lanes: unknown[] } = {
+        lanes: [],
+        resolveItems() {
+          throw new Error('SQLITE_BUSY: database is locked');
+        },
+        driveLane() {
+          throw new Error('driveLane must not be reached when resolveItems throws');
+        },
+      };
+      const runner = makeRunner();
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      // Degraded to the normal single-step path: the outer step ran once, no lanes driven.
+      expect(runner.calls.filter((c) => c.id === 'execute').length).toBe(1);
+      expect(driver.lanes).toEqual([]);
+      expect(runner.calls.map((c) => c.id)).toEqual(['execute', 'next']);
+    });
+
     it('runs a fanOut step as a normal step when host.fanOut is undefined', async () => {
       const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'])])]);
       const runner = makeRunner();

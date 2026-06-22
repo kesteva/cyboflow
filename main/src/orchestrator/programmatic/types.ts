@@ -140,7 +140,10 @@ export interface FanOutDriver {
   /**
    * Resolve the item ids for `over` (e.g. 'tasks' → the run's batch lane task
    * ids). An empty result ⇒ NO fan-out — the controller falls through to the
-   * normal single agent-step path (byte-identical to today).
+   * normal single agent-step path (byte-identical to today). SHOULD be fail-soft
+   * (the production driver hits the DB); a throw is contained by the controller
+   * and treated as an empty result, so a transient DB error degrades to a single
+   * step rather than crashing the run.
    */
   resolveItems(runId: string, over: string): string[];
   /**
