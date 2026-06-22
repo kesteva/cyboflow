@@ -879,7 +879,17 @@ async function initializeServices() {
       if (!batchId) return undefined;
       return {
         resolveItems: (_runId, over) =>
-          over === 'tasks' ? sprintLaneStore.listLanes(batchId).map((lane) => lane.taskId) : [],
+          over === 'tasks'
+            ? sprintLaneStore
+                .listLanes(batchId)
+                // Crash-safe resume: skip lanes already settled (integrated/failed)
+                // so a re-entered fanOut step does not re-run completed work or flip
+                // a failed lane back to integrated — mirrors the monotonic-forward
+                // guard in deriveLaneFromTaskDispatch. On a fresh run all lanes are
+                // 'queued', so every task is returned.
+                .filter((lane) => lane.status !== 'integrated' && lane.status !== 'failed')
+                .map((lane) => lane.taskId)
+            : [],
         driveLane: ({ runId: rid, itemId, status, currentStepId, allowedStepIds }) => {
           try {
             sprintLaneStore.updateLane({
