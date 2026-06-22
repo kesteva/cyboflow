@@ -260,6 +260,64 @@ See `main/src/ipc/cyboflow.ts` for the canonical caller.
 
 Canonical drift: FIND-SPRINT-028-11 — three cyboflow:* handlers without guards (resolved by TASK-726 via the `validateInput` helper).
 
+### IPC / type-parity rules (silent-drop class)
+
+These rules all guard the same failure mode: a type declaration that drifts from the runtime
+shape on the other side of an IPC/tRPC boundary, so a field is silently dropped instead of
+caught by the compiler. `CLAUDE.md` states the rules tersely; the case studies and audit greps
+live here.
+
+- **`IPCResponse<T>` callers must pass an explicit `T`** — never rely on the default. The
+  wrapper in `frontend/src/types/electron.d.ts` / `frontend/src/utils/api.ts` defaults
+  `T = unknown`, which forces narrowing of `result.data` and catches field renames. Audit
+  untyped sites: `grep -rnE "IPCResponse[^<A-Za-z]" frontend/src`.
+
+- **Never declare a local `IPCResponse<T>` or inline `{ success; data?; error? }` shape** in
+  frontend code — import from `frontend/src/utils/api.ts`. Audit: `grep -rn "interface
+  IPCResponse" frontend/src` should return zero hits outside `utils/api.ts` and
+  `types/electron.d.ts`. `main/src/preload.ts` currently keeps its own `IPCResponse`
+  declaration plus many bare `Promise<IPCResponse>` sites — include `grep -n
+  "Promise<IPCResponse>" main/src/preload.ts` in any audit pass until `shared/types/ipc.ts`
+  lands.
+
+- **IPC handler ↔ declared `T` parity:** the `T` in `IPCResponse<T>` declared in
+  `frontend/src/types/electron.d.ts` and `frontend/src/utils/api.ts` MUST match the shape the
+  matching `main/src/ipc/*` handler actually returns at runtime — not a legacy or aspirational
+  type. A mismatched `T` forces `as unknown as X` double-casts in every consumer and hides
+  handler shape changes from TypeScript (FIND-SPRINT-024-4: `getJsonMessages` declared
+  `ClaudeJsonMessage[]` while the handler returned `UnifiedMessage[]`, causing TASK-637 to
+  silently drop all output). When changing an IPC handler's return shape, grep the channel name
+  across `frontend/src/types/electron.d.ts`, `frontend/src/utils/api.ts`, and the handler file
+  in the same pass.
+
+- **IPC request-shape parity (the request-direction mirror):** request interfaces sent
+  frontend → main (e.g. `CreateSessionRequest`, currently dual-declared in
+  `main/src/types/session.ts` and `frontend/src/types/session.ts`) MUST be kept in sync. A field
+  the server reads but the client can never send silently falls back to defaults — the
+  request-direction twin of FIND-SPRINT-024-4 (FIND-SPRINT-037-5: `branchName` added to main
+  only; `quickSession` dead on both sides). On any IPC touch, grep the request interface name
+  across both `*/src/types/` and verify field parity. Prefer promoting to `shared/types/ipc.ts`
+  over maintaining a dual declaration.
+
+- **Optional `logger?` on observability classes must be passed, not omitted.** Constructors that
+  accept `logger?: Pick<ILogger, ...>` (e.g. `TypedEventNarrowing`, `RawEventsSink`,
+  `MessageProjection`) gate every diagnostic on `this.logger?.…` — omitting the argument silently
+  turns the whole class into a no-op for observability (same silent-drop class as
+  FIND-SPRINT-024-4 and FIND-SPRINT-033-6). Pass a logger from the enclosing scope; if the
+  surrounding type uses a different logger surface (e.g. orchestrator `LoggerLike` has no
+  `verbose`), adapt at the call site (e.g. `{ verbose: (m) => logger.debug(m) }`). Audit on
+  touch (production code only — tests intentionally exercise the no-logger path): `grep -rn "new
+  TypedEventNarrowing()" main/src --exclude-dir=__tests__` must return 0 matches.
+
+- **tRPC subscription `onData` payload type must come from `AppRouter` inference** — never a
+  local mirror or `(evt: unknown)` + runtime shape guard. Write `onData: (event) => …` and let
+  the tRPC client infer the payload from the router. A locally-declared interface (e.g. a
+  `WorkflowStepTransitionEvent` copy in the renderer) or an `unknown`-typed arg with a
+  hand-rolled `'runId' in evt` guard defeats inference and silently accepts stale shapes after
+  the router output changes. Caught in TASK-768 / commit `f6240a6`. Audit: `grep -rnE "onData:
+  \(evt: unknown\)|onData: \(event:" frontend/src` — each production hit is a candidate for
+  inference (test files intentionally fake the shape and are exempt).
+
 ### Per-session mutation serialization
 
 Any state mutation for a workflow run passes through a per-run `SimpleQueue({concurrency: 1})`.
