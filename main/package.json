@@ -16,8 +16,10 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.141",
+    "@aptabase/electron": "^0.3.1",
     "@homebridge/node-pty-prebuilt-multiarch": "^0.12.0",
     "@modelcontextprotocol/sdk": "^1.12.1",
+    "@sentry/electron": "^7.13.0",
     "@trpc/client": ">=11.0.0 <12.0.0",
     "@trpc/server": ">=11.0.0 <12.0.0",
     "better-sqlite3": "^11.7.0",
