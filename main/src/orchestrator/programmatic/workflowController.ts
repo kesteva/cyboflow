@@ -188,6 +188,26 @@ export class WorkflowController {
               this.host.reportStep(step.id, 'done');
               return this.finish({ outcome: 'canceled', steps, failedStepId: step.id }, runId);
             }
+            // The fan-out settled. If the OUTER step also carries a trailing human
+            // checkpoint, open the gate now (fan-out-then-gate) and route the
+            // decision through the SAME applyGateDecision logic the normal agent
+            // path uses (so approve advances, reject/abort terminate, and revise
+            // honors the outer step's `loopback`). Otherwise advance. Not routing
+            // here silently dropped a declared `human`/`loopback` on a fanOut step.
+            if (hasTrailingGate(step)) {
+              this.emit({ kind: 'gate-opened', runId, phaseId: phase.id, stepId: step.id });
+              const decision = await this.host.requestHumanGate(step, {
+                runId,
+                phaseId: phase.id,
+                stepIndex: i,
+                signal,
+                attempt: 1,
+              });
+              const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, steps, i);
+              if (next.terminal) return this.finish(next.result, runId);
+              i = next.i;
+              continue;
+            }
             this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'done', attempts: 1 });
             this.host.reportStep(step.id, 'done');
             i += 1;

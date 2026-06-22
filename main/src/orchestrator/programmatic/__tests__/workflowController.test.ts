@@ -741,5 +741,48 @@ describe('WorkflowController', () => {
       expect(result.outcome).toBe('completed');
       expect(runner.calls.filter((c) => c.id === 'execute').length).toBe(1);
     });
+
+    // ── A fanOut OUTER step that ALSO carries a trailing human checkpoint
+    //    (human: true) / outer loopback must route through the SAME gate logic
+    //    the normal agent path uses — it must NOT silently drop the gate. ──────
+    it('opens the trailing human gate after a fanOut step settles, advancing on approve', async () => {
+      const d = def([
+        phase('p1', [
+          step({ id: 'execute', agent: 'orchestrate', human: true, fanOut: { over: 'tasks', inner: [{ id: 'implement', agent: 'implement' }] } }),
+          step({ id: 'next' }),
+        ]),
+      ]);
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const host = makeHost({ execute: ['approve'] });
+      host.fanOut = driver;
+      const runner = makeRunner();
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      // The outer fanOut step opened its gate exactly once, then advanced to 'next'.
+      expect(host.gateCalls).toEqual(['execute']);
+      expect(result.steps.map((s) => s.stepId)).toEqual(['execute', 'next']);
+      // Both lanes still integrated under the gated outer step.
+      expect(driver.lanes.filter((l) => l.status === 'integrated').length).toBe(2);
+    });
+
+    it('ends the run rejected when the fanOut step trailing gate is rejected', async () => {
+      const d = def([
+        phase('p1', [
+          step({ id: 'execute', agent: 'orchestrate', human: true, fanOut: { over: 'tasks', inner: [{ id: 'implement', agent: 'implement' }] } }),
+          step({ id: 'next' }),
+        ]),
+      ]);
+      const driver = makeFanOutDriver(['t1']);
+      const host = makeHost({ execute: ['reject'] });
+      host.fanOut = driver;
+
+      const result = await new WorkflowController(makeRunner(), host).run('r', d);
+
+      expect(result.outcome).toBe('rejected');
+      expect(result.failedStepId).toBe('execute');
+      expect(host.gateCalls).toEqual(['execute']);
+    });
   });
 });
