@@ -809,5 +809,60 @@ describe('WorkflowController', () => {
       expect(result.failedStepId).toBe('execute');
       expect(host.gateCalls).toEqual(['execute']);
     });
+
+    // ── Closing-stage gate: incomplete sprint → skip verify/review → human gate ──
+    it('skips the automated closing stages and goes to the human gate when a lane fails', async () => {
+      // execute-tasks fans out over two items; one item's required inner step fails
+      // (incompleteCount = 1). The closing stages (sprint-verify, sprint-review) must
+      // be SKIPPED and the run must advance straight to the human-review gate.
+      const d = def([
+        phase('execute', [fanStep('execute-tasks', ['implement'])]),
+        phase('review', [
+          step({ id: 'sprint-verify' }),
+          step({ id: 'sprint-review' }),
+          step({ id: 'human-review', agent: 'human', human: true }),
+        ]),
+      ]);
+      const driver = makeFanOutDriver(['t1', 't2']);
+      // Single-shot fail on 'implement' ⇒ exactly one lane fails, the other integrates.
+      const runner = makeRunner({ implement: [{ status: 'failed', error: 'boom' }] });
+      const host = makeFanHost(driver);
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      // Reached the human gate (not failed/rejected) — the partial sprint is surfaced.
+      expect(host.gateCalls).toEqual(['human-review']);
+      expect(result.outcome).toBe('completed');
+      // The automated closing stages never hit the runner …
+      expect(runner.calls.some((c) => c.id === 'sprint-verify')).toBe(false);
+      expect(runner.calls.some((c) => c.id === 'sprint-review')).toBe(false);
+      // … and are recorded as skipped in the trace; the gate itself ran.
+      const byId = Object.fromEntries(result.steps.map((s) => [s.stepId, s.outcome]));
+      expect(byId['sprint-verify']).toBe('skipped');
+      expect(byId['sprint-review']).toBe('skipped');
+      expect(byId['human-review']).toBe('done');
+    });
+
+    it('runs the closing stages normally when every fan-out lane integrates', async () => {
+      const d = def([
+        phase('execute', [fanStep('execute-tasks', ['implement'])]),
+        phase('review', [
+          step({ id: 'sprint-verify' }),
+          step({ id: 'human-review', agent: 'human', human: true }),
+        ]),
+      ]);
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const runner = makeRunner(); // all ok ⇒ both lanes integrate, sprint complete
+      const host = makeFanHost(driver);
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      // Closing stage RAN (not skipped) because the sprint is complete.
+      expect(runner.calls.some((c) => c.id === 'sprint-verify')).toBe(true);
+      const byId = Object.fromEntries(result.steps.map((s) => [s.stepId, s.outcome]));
+      expect(byId['sprint-verify']).toBe('done');
+      expect(host.gateCalls).toEqual(['human-review']);
+    });
   });
 });

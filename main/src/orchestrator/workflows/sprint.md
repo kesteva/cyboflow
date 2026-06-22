@@ -130,6 +130,15 @@ window into per-task progress.
 
 Enter this phase only after **every** lane is terminal (`integrated` or `failed`).
 
+**Closing-stage gate — if ANY lane is `failed` or otherwise not `integrated`, the
+sprint is INCOMPLETE: SKIP sprint-verify and sprint-review and go straight to the
+human gate.** Running the full-suite verification and code review over a sprint with
+blocked/failed tasks is wasteful and misleading — the human decides what to do with
+the partial sprint first. To skip them, report each of the two steps done via
+`cyboflow_report_step` (so the timeline advances) **without** delegating its subagent
+or doing its work, then present the human gate below with the partial-sprint summary.
+Run sprint-verify and sprint-review normally ONLY when every lane is `integrated`.
+
 1. **sprint-verify** → delegate to `cyboflow-sprint-verify` (runs the full suite
    ONCE over the whole sprint's combined state). On `VERDICT: FAIL`, identify the
    offending task(s) from the failures, set those lanes back to `running`, and loop

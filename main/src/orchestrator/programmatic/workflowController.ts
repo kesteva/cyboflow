@@ -101,6 +101,13 @@ export class WorkflowController {
     // Per-step-id triage-retry counters (Stage 3) — bounds 'retry' triage verdicts
     // and escalation-gate 'revise' re-runs so a flapping step can never spin.
     const triageRetries = new Map<string, number>();
+    // Closing-stage gate (2026-06-22): set true when a fan-out step settles with
+    // one or more incomplete/failed lanes (the sprint has blocked tasks). While
+    // set, the walk skips every subsequent AUTOMATED step (e.g. sprint-verify,
+    // code-review) and advances straight to the next human gate, which surfaces the
+    // partial sprint — running the closing stages over an incomplete sprint is
+    // wasteful and misleading. Cleared when a human-gated step is reached.
+    let skipToHumanGate = false;
 
     // Resume target: skip every phase/step before resumeFromStepId.
     let resumePhaseIdx = -1;
@@ -165,6 +172,32 @@ export class WorkflowController {
           continue;
         }
 
+        // Closing-stage gate: the sprint has incomplete/blocked tasks (a fan-out
+        // settled with failed lanes). Skip every subsequent AUTOMATED step and go
+        // straight to the next human gate. A human-gated step (pure gate or an
+        // agent step with a trailing checkpoint) is the stopping point — it clears
+        // the flag so any steps AFTER the gate run normally once the human decides.
+        if (skipToHumanGate) {
+          if (isPureHumanGate(step) || hasTrailingGate(step)) {
+            skipToHumanGate = false;
+          } else {
+            this.pushStep(steps, {
+              stepId: step.id,
+              phaseId: phase.id,
+              outcome: 'skipped',
+              attempts: 1,
+              error: 'sprint has incomplete or blocked tasks — closing stage skipped',
+            });
+            this.host.reportStep(step.id, 'done');
+            this.host.log?.(
+              'warn',
+              `skipping '${step.id}': sprint has incomplete/blocked tasks; advancing to the human gate`,
+            );
+            i += 1;
+            continue;
+          }
+        }
+
         // ── Host-driven parallel fan-out (programmatic plane only) ───────────
         // A step that declares `fanOut` AND has an injected driver resolves a
         // runtime item set; when non-empty, the host walks each item through the
@@ -199,6 +232,16 @@ export class WorkflowController {
               this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'canceled', attempts: 1 });
               this.host.reportStep(step.id, 'done');
               return this.finish({ outcome: 'canceled', steps, failedStepId: step.id }, runId);
+            }
+            // One or more lanes failed ⇒ the sprint is incomplete. Gate the closing
+            // stages: subsequent automated steps are skipped until the next human
+            // gate (set here, honored at the top of the step loop).
+            if (fanResult.incompleteCount > 0) {
+              skipToHumanGate = true;
+              this.host.log?.(
+                'warn',
+                `fan-out '${step.id}' settled with ${fanResult.incompleteCount} incomplete lane(s); gating the sprint's closing stages until the human gate`,
+              );
             }
             // The fan-out settled. If the OUTER step also carries a trailing human
             // checkpoint, open the gate now (fan-out-then-gate) and route the
@@ -375,11 +418,11 @@ export class WorkflowController {
     baseCtx: { runId: string; phaseId: string; stepIndex: number; signal?: AbortSignal },
     items: string[],
     signal: AbortSignal | undefined,
-  ): Promise<{ terminal: boolean }> {
+  ): Promise<{ terminal: boolean; incompleteCount: number }> {
     const fanOut = step.fanOut;
     const driver = this.host.fanOut;
     // Defensive: the caller only enters here with both present; narrow for TS.
-    if (fanOut === undefined || driver === undefined) return { terminal: false };
+    if (fanOut === undefined || driver === undefined) return { terminal: false, incompleteCount: 0 };
 
     const inner = fanOut.inner;
     const allowedStepIds: readonly string[] = inner.map((s) => s.id);
@@ -440,15 +483,18 @@ export class WorkflowController {
 
     // Process items in WAVES of at most SPRINT_BATCH_CAP, checking the abort
     // signal between waves. A 'canceled' outcome from any item in a wave ends
-    // the whole fan-out terminally; required-inner failures are NON-terminal.
+    // the whole fan-out terminally; required-inner failures are NON-terminal but
+    // are counted so the caller can gate the sprint's closing stages.
+    let incompleteCount = 0;
     for (let start = 0; start < items.length; start += SPRINT_BATCH_CAP) {
-      if (signal?.aborted) return { terminal: true };
+      if (signal?.aborted) return { terminal: true, incompleteCount };
       const wave = items.slice(start, start + SPRINT_BATCH_CAP);
       const outcomes = await Promise.all(wave.map((itemId) => driveItem(itemId)));
-      if (outcomes.includes('aborted') || signal?.aborted) return { terminal: true };
+      if (outcomes.includes('aborted') || signal?.aborted) return { terminal: true, incompleteCount };
+      incompleteCount += outcomes.filter((o) => o === 'failed').length;
     }
 
-    return { terminal: false };
+    return { terminal: false, incompleteCount };
   }
 
   /**
