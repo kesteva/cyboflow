@@ -1126,6 +1126,36 @@ describe('McpQueryHandler', () => {
         expect(row.kind).toBe('blocking');
       });
 
+      it('resolves display refs (TASK-001) and echoes the canonical opaque ids', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'analyze-deps',
+          stepsSnapshot: { 'analyze-deps': 'dependency-analyzer' },
+        });
+        const a = await createTask('run-1', 'A');
+        const b = await createTask('run-1', 'B');
+        const refA = (taskDb.prepare('SELECT ref FROM tasks WHERE id = ?').get(a) as { ref: string }).ref;
+        const refB = (taskDb.prepare('SELECT ref FROM tasks WHERE id = ?').get(b) as { ref: string }).ref;
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-add-task-dependency', requestId: 'dep-ref', runId: 'run-1', taskId: refA, dependsOnTaskId: refB },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        // The response echoes the RESOLVED opaque ids for BOTH endpoints — not the
+        // refs the caller sent — so it reflects what was actually stored.
+        const data = response.data as { task_id: string; depends_on_task_id: string; kind: string };
+        expect(data).toEqual({ task_id: a, depends_on_task_id: b, kind: 'blocking' });
+        // The stored edge keys on the opaque ids (aligning with the fan-out DAG).
+        const row = taskDb
+          .prepare('SELECT task_id, depends_on_task_id FROM task_dependencies WHERE task_id = ?')
+          .get(a) as { task_id: string; depends_on_task_id: string };
+        expect(row).toEqual({ task_id: a, depends_on_task_id: b });
+      });
+
       it('surfaces a cycle as ok:false error "dependency_cycle"', async () => {
         seedTaskRun(taskDb, {
           runId: 'run-1',

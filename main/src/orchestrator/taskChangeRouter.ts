@@ -367,7 +367,7 @@ export class TaskChangeRouter {
   async applyChange(
     projectId: number,
     change: TaskChange,
-  ): Promise<{ taskId: string; event: { id: number; seq: number } }> {
+  ): Promise<{ taskId: string; dependsOnTaskId?: string; event: { id: number; seq: number } }> {
     const result = (await this.getProjectQueue(projectId).add(() => {
       if (change.taskId === undefined) {
         return this.runCreate(projectId, change);
@@ -376,7 +376,7 @@ export class TaskChangeRouter {
         return this.runAddDependency(projectId, change);
       }
       return this.runUpdate(projectId, change);
-    })) as { taskId: string; event: { id: number; seq: number } };
+    })) as { taskId: string; dependsOnTaskId?: string; event: { id: number; seq: number } };
 
     // FIX-STAGE-MODEL (B): when a CREATE introduces the FIRST child of an idea
     // (an epic OR task carrying originatingIdeaId), the originating idea retires
@@ -1006,7 +1006,7 @@ export class TaskChangeRouter {
   private runAddDependency(
     projectId: number,
     change: TaskChange,
-  ): { taskId: string; event: { id: number; seq: number } } {
+  ): { taskId: string; dependsOnTaskId: string; event: { id: number; seq: number } } {
     const rawTaskId = change.taskId as string;
     const rawDependsOn = change.dependsOnTaskId as string;
     const kind: TaskDependencyKind = change.dependencyKind ?? 'blocking';
@@ -1107,7 +1107,7 @@ export class TaskChangeRouter {
       this.emitChange(projectId, 'task', blockedId, 'updated');
     }
 
-    return { taskId: blockedId, event: { id: eventId, seq: eventSeq } };
+    return { taskId: blockedId, dependsOnTaskId: prereqId, event: { id: eventId, seq: eventSeq } };
   }
 
   /**

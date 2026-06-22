@@ -1142,16 +1142,18 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       const router = TaskChangeRouter.initialize(dbAdapter(db));
       const [a, b] = await makeTasks(db, router, 2);
 
-      const { taskId } = await router.applyChange(1, {
+      const { taskId, dependsOnTaskId } = await router.applyChange(1, {
         actor: 'agent:executor',
         entityType: 'task',
         taskId: refOf(db, a),
         dependsOnTaskId: refOf(db, b),
       });
 
-      // The returned id AND the stored edge are the OPAQUE ids — not the refs the
-      // caller sent — so the edge aligns with the fan-out lane/DAG item ids.
+      // The returned ids AND the stored edge are the OPAQUE ids — not the refs the
+      // caller sent — so the edge aligns with the fan-out lane/DAG item ids and the
+      // MCP response echoes what was actually stored.
       expect(taskId).toBe(a);
+      expect(dependsOnTaskId).toBe(b);
       const row = db
         .prepare('SELECT task_id, depends_on_task_id, kind FROM task_dependencies WHERE task_id = ?')
         .get(a) as { task_id: string; depends_on_task_id: string; kind: string };

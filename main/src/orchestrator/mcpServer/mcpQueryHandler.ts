@@ -978,14 +978,20 @@ export class McpQueryHandler {
     };
 
     try {
-      const { taskId } = await TaskChangeRouter.getInstance().applyChange(ctx.projectId, change);
+      const { taskId, dependsOnTaskId } = await TaskChangeRouter.getInstance().applyChange(
+        ctx.projectId,
+        change,
+      );
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,
         ok: true,
         data: {
+          // Echo the RESOLVED canonical ids for BOTH endpoints (the caller may
+          // have passed display refs, e.g. TASK-001) so the response reflects
+          // what was actually stored, not the raw input handles.
           task_id: taskId,
-          depends_on_task_id: msg.dependsOnTaskId,
+          depends_on_task_id: dependsOnTaskId ?? msg.dependsOnTaskId,
           kind: msg.dependencyKind ?? 'blocking',
         },
       });
