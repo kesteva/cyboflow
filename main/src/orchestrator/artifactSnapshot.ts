@@ -2,10 +2,13 @@
  * artifactSnapshot — on-disk durability snapshot for COMMITTED artifacts.
  *
  * When an artifact is committed (ArtifactRouter.runCommit flips committed=1) we
- * write a small JSON manifest of the committed row to disk under the run's
- * worktree, so the deliverable survives a later DELETE of the originating entity
- * (idea / epic / task). The DB row remains the source of truth; this manifest is
- * a best-effort, fail-soft mirror — a disk error must NEVER fail the commit.
+ * write a small JSON manifest of the committed row to disk under the configured
+ * commit directory (global `artifactCommitDir`, resolved against the owning
+ * project's ROOT — NOT the run's worktree, which is torn down on dismiss), so
+ * the deliverable survives both that teardown and a later DELETE of the
+ * originating entity (idea / epic / task). The DB row remains the source of
+ * truth; this manifest is a best-effort, fail-soft mirror — a disk error must
+ * NEVER fail the commit.
  *
  * Standalone-typecheck invariant (mirrors artifactRouter.ts): NO import from
  * 'electron', 'better-sqlite3', or main/src/services/* — disk work uses
@@ -24,6 +27,7 @@
  */
 import * as fs from 'fs/promises';
 import * as path from 'node:path';
+import { DEFAULT_ARTIFACT_COMMIT_DIR } from '../../../shared/types/artifacts';
 import type { LoggerLike } from './types';
 import type { ArtifactDbRow } from './artifactRouter';
 
@@ -45,15 +49,26 @@ export interface ArtifactSnapshotManifest {
   committedAt: string | null;
 }
 
-/** Relative directory (under the worktree) that holds artifact manifests. */
-export const ARTIFACT_SNAPSHOT_DIR = path.join('.cyboflow', 'artifacts');
+/**
+ * Resolve the FINAL commit directory for an artifact snapshot.
+ *
+ * A RELATIVE `configured` value resolves against the owning project's ROOT — so
+ * the manifest survives a later teardown of the run's worktree (the FU3 bug this
+ * fixes). An ABSOLUTE value is used verbatim. Blank input floors to
+ * DEFAULT_ARTIFACT_COMMIT_DIR. Pure (no I/O).
+ */
+export function resolveArtifactCommitDir(projectRoot: string, configured: string): string {
+  const dir = configured.trim() || DEFAULT_ARTIFACT_COMMIT_DIR;
+  return path.isAbsolute(dir) ? dir : path.join(projectRoot, dir);
+}
 
 /**
- * Compute the absolute manifest path for a committed row under a worktree.
- * Filename = `<atype>__<artifactId>.json`.
+ * Compute the absolute manifest path inside an already-resolved commit directory.
+ * `commitDir` is the FINAL destination directory (see resolveArtifactCommitDir) —
+ * the filename is `<atype>__<artifactId>.json`.
  */
-export function snapshotPathFor(worktreePath: string, row: Pick<ArtifactDbRow, 'id' | 'atype'>): string {
-  return path.join(worktreePath, ARTIFACT_SNAPSHOT_DIR, `${row.atype}__${row.id}.json`);
+export function snapshotPathFor(commitDir: string, row: Pick<ArtifactDbRow, 'id' | 'atype'>): string {
+  return path.join(commitDir, `${row.atype}__${row.id}.json`);
 }
 
 /** Build the manifest object for a committed row. Pure (no I/O). */
@@ -82,9 +97,11 @@ function parsePayload(payloadJson: string | null): unknown {
 }
 
 /**
- * Write the committed-artifact manifest to disk under the run's worktree.
+ * Write the committed-artifact manifest to disk under the resolved commit
+ * directory (see resolveArtifactCommitDir — typically `<projectRoot>/.cyboflow/
+ * artifacts`, NOT the run's worktree, so the manifest survives worktree teardown).
  *
- * FAIL-SOFT: this never throws. Any disk error (missing/unwritable worktree,
+ * FAIL-SOFT: this never throws. Any disk error (missing/unwritable directory,
  * permission denied) is caught and logged, then swallowed — the DB row already
  * carries committed=1 and is the source of truth. Callers MUST invoke this
  * OUTSIDE the chokepoint DB transaction so a slow/failed disk write cannot roll
@@ -93,11 +110,11 @@ function parsePayload(payloadJson: string | null): unknown {
  * @returns the absolute manifest path on success, or null when the write failed.
  */
 export async function snapshotCommittedArtifact(
-  worktreePath: string,
+  commitDir: string,
   row: ArtifactDbRow,
   logger?: LoggerLike,
 ): Promise<string | null> {
-  const target = snapshotPathFor(worktreePath, row);
+  const target = snapshotPathFor(commitDir, row);
   try {
     await fs.mkdir(path.dirname(target), { recursive: true });
     const manifest = buildSnapshotManifest(row);

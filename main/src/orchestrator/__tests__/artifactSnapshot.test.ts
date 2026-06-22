@@ -3,14 +3,17 @@
  * artifacts (FEATURE #3).
  *
  * Covered:
- *  - snapshotPathFor composes <worktree>/.cyboflow/artifacts/<atype>__<id>.json.
+ *  - resolveArtifactCommitDir joins a RELATIVE dir under the project root, uses an
+ *    ABSOLUTE dir verbatim, and floors a blank dir to DEFAULT_ARTIFACT_COMMIT_DIR.
+ *  - snapshotPathFor composes <commitDir>/<atype>__<id>.json (the passed dir is
+ *    the FINAL destination — no .cyboflow/artifacts suffix is appended).
  *  - buildSnapshotManifest captures the row + schemaVersion:1 and PARSES a JSON
  *    payload (canvas url / screenshots fileNames) into an object/array.
  *  - a non-JSON payload falls back to the raw string; a NULL payload -> null
  *    (the templated-artifact case: row + sourceRef pointer, no rendered markdown).
- *  - snapshotCommittedArtifact writes the manifest (mkdir -p), creating the
- *    .cyboflow/artifacts dir; returns the absolute path.
- *  - FAIL-SOFT: an unwritable target (worktree path is a FILE, not a dir) does
+ *  - snapshotCommittedArtifact writes the manifest (mkdir -p) into the commit dir;
+ *    returns the absolute path.
+ *  - FAIL-SOFT: an unwritable target (commit dir under a FILE, not a dir) does
  *    NOT throw — it resolves to null.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -20,11 +23,12 @@ import * as path from 'node:path';
 import {
   snapshotCommittedArtifact,
   snapshotPathFor,
+  resolveArtifactCommitDir,
   buildSnapshotManifest,
-  ARTIFACT_SNAPSHOT_DIR,
   ARTIFACT_SNAPSHOT_SCHEMA_VERSION,
   type ArtifactSnapshotManifest,
 } from '../artifactSnapshot';
+import { DEFAULT_ARTIFACT_COMMIT_DIR } from '../../../../shared/types/artifacts';
 import type { ArtifactDbRow } from '../artifactRouter';
 
 function makeRow(over: Partial<ArtifactDbRow> = {}): ArtifactDbRow {
@@ -57,10 +61,30 @@ afterEach(async () => {
   await rm(dir, { recursive: true, force: true });
 });
 
+describe('resolveArtifactCommitDir', () => {
+  it('joins a RELATIVE configured dir under the project root', () => {
+    expect(resolveArtifactCommitDir('/proj', '.cyboflow/artifacts')).toBe(
+      path.join('/proj', '.cyboflow/artifacts'),
+    );
+    expect(resolveArtifactCommitDir('/proj', 'docs/deliverables')).toBe(
+      path.join('/proj', 'docs/deliverables'),
+    );
+  });
+
+  it('uses an ABSOLUTE configured dir verbatim (ignores the project root)', () => {
+    expect(resolveArtifactCommitDir('/proj', '/var/artifacts')).toBe('/var/artifacts');
+  });
+
+  it('floors a blank/whitespace configured dir to DEFAULT_ARTIFACT_COMMIT_DIR under the root', () => {
+    expect(resolveArtifactCommitDir('/proj', '')).toBe(path.join('/proj', DEFAULT_ARTIFACT_COMMIT_DIR));
+    expect(resolveArtifactCommitDir('/proj', '   ')).toBe(path.join('/proj', DEFAULT_ARTIFACT_COMMIT_DIR));
+  });
+});
+
 describe('snapshotPathFor', () => {
-  it('composes <worktree>/.cyboflow/artifacts/<atype>__<id>.json', () => {
-    const p = snapshotPathFor('/wt', makeRow({ id: 'art_x', atype: 'screenshots' }));
-    expect(p).toBe(path.join('/wt', ARTIFACT_SNAPSHOT_DIR, 'screenshots__art_x.json'));
+  it('composes <commitDir>/<atype>__<id>.json (the dir is the final destination)', () => {
+    const p = snapshotPathFor('/wt/.cyboflow/artifacts', makeRow({ id: 'art_x', atype: 'screenshots' }));
+    expect(p).toBe(path.join('/wt/.cyboflow/artifacts', 'screenshots__art_x.json'));
   });
 });
 
@@ -102,7 +126,7 @@ describe('buildSnapshotManifest', () => {
 });
 
 describe('snapshotCommittedArtifact', () => {
-  it('writes the manifest (creating .cyboflow/artifacts) and returns the path', async () => {
+  it('writes the manifest into the commit dir (mkdir -p) and returns the path', async () => {
     const row = makeRow();
     const target = await snapshotCommittedArtifact(dir, row);
     expect(target).toBe(snapshotPathFor(dir, row));
@@ -136,8 +160,8 @@ describe('snapshotCommittedArtifact', () => {
     expect(result).toBeNull();
   });
 
-  it('skips a write but still returns null shape when the dir already exists (idempotent overwrite)', async () => {
-    await mkdir(path.join(dir, ARTIFACT_SNAPSHOT_DIR), { recursive: true });
+  it('overwrites in place when the commit dir already exists (idempotent re-commit)', async () => {
+    await mkdir(dir, { recursive: true });
     const row = makeRow({ label: 'first' });
     await snapshotCommittedArtifact(dir, row);
     const updated = await snapshotCommittedArtifact(dir, makeRow({ label: 'second' }));

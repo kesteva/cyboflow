@@ -72,6 +72,18 @@ export function isCanvasArtifact(atype: ArtifactType): boolean {
   return ARTIFACT_RENDER_MODE[atype] === 'canvas';
 }
 
+/**
+ * Default on-disk location for COMMITTED-artifact manifests, written when the
+ * user explicitly commits an artifact (FEATURE #3 durability snapshot). A
+ * RELATIVE value resolves against the owning project's ROOT (not the run's
+ * worktree — worktrees are torn down on dismiss, taking the snapshot with them).
+ * An ABSOLUTE value is used verbatim. Overridable via the global
+ * `AppConfig.artifactCommitDir` setting; the ConfigManager getter floors to this
+ * constant. Single source of truth — imported by both the main config layer and
+ * the snapshot resolver.
+ */
+export const DEFAULT_ARTIFACT_COMMIT_DIR = '.cyboflow/artifacts';
+
 // ===========================================================================
 // Data model — the run-scoped artifacts subsystem (migration 029).
 //

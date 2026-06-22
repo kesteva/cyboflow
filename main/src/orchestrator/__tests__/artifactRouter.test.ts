@@ -32,7 +32,7 @@ import {
   artifactChangeEvents,
   artifactProjectChannel,
 } from '../artifactRouter';
-import { snapshotPathFor } from '../artifactSnapshot';
+import { snapshotPathFor, resolveArtifactCommitDir } from '../artifactSnapshot';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import type { ArtifactChangedEvent } from '../../../../shared/types/artifacts';
 
@@ -89,17 +89,6 @@ function seedRunInProject(db: Database.Database, runId: string, projectId: numbe
     `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
      VALUES (?, ?, ?, 'running', 'default')`,
   ).run(runId, wfId, projectId);
-}
-
-/** Seed a project-1 run whose worktree_path points at a real (tmp) directory. */
-function seedRunWithWorktree(db: Database.Database, runId: string, worktreePath: string): void {
-  db.prepare(
-    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'planner', '{}')`,
-  ).run();
-  db.prepare(
-    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path)
-     VALUES (?, 'wf-1', 1, 'running', 'default', ?)`,
-  ).run(runId, worktreePath);
 }
 
 function countEvents(db: Database.Database, artifactId: string): number {
@@ -346,12 +335,15 @@ describe('ArtifactRouter', () => {
     expect(lastDelta('payload_json')).toMatchObject({ from: 'present', to: 'cleared' });
   });
 
-  it('commit writes an on-disk durability snapshot under the run worktree (FEATURE #3)', async () => {
+  it('commit writes an on-disk durability snapshot in the resolved commit dir (FEATURE #3)', async () => {
     const db = buildDb();
-    const wt = mkdtempSync(join(tmpdir(), 'artifact-router-wt-'));
+    // The resolver resolves a RELATIVE configured dir against a PROJECT ROOT (a
+    // tmp dir here) — NOT the run's worktree — so the manifest survives teardown.
+    const projectRoot = mkdtempSync(join(tmpdir(), 'artifact-router-proj-'));
+    const commitDir = resolveArtifactCommitDir(projectRoot, '.cyboflow/artifacts');
     try {
-      seedRunWithWorktree(db, 'run-1', wt);
-      const router = ArtifactRouter.initialize(dbAdapter(db));
+      seedRun(db, 'run-1');
+      const router = ArtifactRouter.initialize(dbAdapter(db), undefined, () => commitDir);
       const { artifactId } = await router.apply(1, {
         op: 'create',
         runId: 'run-1',
@@ -367,8 +359,8 @@ describe('ArtifactRouter', () => {
       const row = db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId) as Record<string, unknown>;
       expect(row.committed).toBe(1);
 
-      // And a manifest exists on disk capturing the committed row.
-      const manifestPath = snapshotPathFor(wt, { id: artifactId, atype: 'ui-prototype' });
+      // And a manifest exists on disk (under <projectRoot>/.cyboflow/artifacts).
+      const manifestPath = snapshotPathFor(commitDir, { id: artifactId, atype: 'ui-prototype' });
       expect(existsSync(manifestPath)).toBe(true);
       const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as {
         schemaVersion: number;
@@ -393,21 +385,21 @@ describe('ArtifactRouter', () => {
       expect(manifest.payloadJson).toEqual({ url: 'http://localhost:8081' });
       expect(manifest.committedAt).not.toBeNull();
     } finally {
-      rmSync(wt, { recursive: true, force: true });
+      rmSync(projectRoot, { recursive: true, force: true });
     }
   });
 
   it('a snapshot write failure does NOT fail the commit (row stays committed=1, fail-soft)', async () => {
     const db = buildDb();
-    // Point worktree_path at a path that cannot be a directory: a child of a FILE.
+    // Resolve a commit dir that cannot be created: a path *under* a regular FILE,
+    // so mkdir -p underneath fails.
     const base = mkdtempSync(join(tmpdir(), 'artifact-router-bad-'));
-    const fileAsWorktree = join(base, 'regular-file');
-    // Create a regular file, then use a path *under* it as the worktree so mkdir -p fails.
-    writeFileSync(fileAsWorktree, 'x', 'utf-8');
-    const unwritableWorktree = join(fileAsWorktree, 'nested');
+    const fileAsRoot = join(base, 'regular-file');
+    writeFileSync(fileAsRoot, 'x', 'utf-8');
+    const unwritableDir = join(fileAsRoot, 'nested');
     try {
-      seedRunWithWorktree(db, 'run-1', unwritableWorktree);
-      const router = ArtifactRouter.initialize(dbAdapter(db));
+      seedRun(db, 'run-1');
+      const router = ArtifactRouter.initialize(dbAdapter(db), undefined, () => unwritableDir);
       const { artifactId } = await router.apply(1, {
         op: 'create',
         runId: 'run-1',
@@ -426,21 +418,69 @@ describe('ArtifactRouter', () => {
       };
       expect(row.committed).toBe(1);
       // No manifest was written.
-      expect(existsSync(snapshotPathFor(unwritableWorktree, { id: artifactId, atype: 'generic' }))).toBe(false);
+      expect(existsSync(snapshotPathFor(unwritableDir, { id: artifactId, atype: 'generic' }))).toBe(false);
     } finally {
       rmSync(base, { recursive: true, force: true });
     }
   });
 
-  it('a run with NULL worktree_path commits cleanly with no snapshot (skipped silently)', async () => {
+  it('skips the snapshot (commit still succeeds) when no commit-dir resolver is wired', async () => {
     const db = buildDb();
-    seedRun(db, 'run-1'); // seedRun leaves worktree_path NULL
+    seedRun(db, 'run-1');
+    // No third arg → resolveCommitDir is undefined → maybeSnapshot is a no-op.
     const router = ArtifactRouter.initialize(dbAdapter(db));
     const { artifactId } = await router.apply(1, {
-      op: 'create', runId: 'run-1', atype: 'generic', label: 'g', payloadJson: '{"url":"http://x"}', actor: 'user',
+      op: 'create',
+      runId: 'run-1',
+      atype: 'generic',
+      label: 'canvas',
+      payloadJson: '{"url":"http://x"}',
+      actor: 'agent:executor',
     });
-    await expect(router.apply(1, { op: 'commit', artifactId, actor: 'user' })).resolves.toMatchObject({ artifactId });
-    const row = db.prepare('SELECT committed FROM artifacts WHERE id = ?').get(artifactId) as { committed: number };
-    expect(row.committed).toBe(1);
+    await expect(router.apply(1, { op: 'commit', artifactId, actor: 'user' })).resolves.toMatchObject({
+      artifactId,
+    });
+    expect((db.prepare('SELECT committed FROM artifacts WHERE id = ?').get(artifactId) as { committed: number }).committed).toBe(1);
+  });
+
+  it('skips the snapshot (commit still succeeds) when the resolver returns null', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(dbAdapter(db), undefined, () => null);
+    const { artifactId } = await router.apply(1, {
+      op: 'create',
+      runId: 'run-1',
+      atype: 'generic',
+      label: 'canvas',
+      payloadJson: '{"url":"http://x"}',
+      actor: 'agent:executor',
+    });
+    await expect(router.apply(1, { op: 'commit', artifactId, actor: 'user' })).resolves.toMatchObject({
+      artifactId,
+    });
+    expect((db.prepare('SELECT committed FROM artifacts WHERE id = ?').get(artifactId) as { committed: number }).committed).toBe(1);
+  });
+
+  it('snapshots independently of worktree_path: a NULL-worktree run still writes the manifest (FU3 fix)', async () => {
+    // The FU3 fix moved snapshot resolution off the run's worktree onto the
+    // injected commit-dir resolver. Proving the manifest is written even when
+    // workflow_runs.worktree_path is NULL is exactly what guarantees the snapshot
+    // survives the worktree being torn down on Dismiss — the bug this fixed.
+    const db = buildDb();
+    const commitDir = mkdtempSync(join(tmpdir(), 'artifact-router-nowt-'));
+    try {
+      seedRun(db, 'run-1'); // seedRun leaves worktree_path NULL on purpose
+      const router = ArtifactRouter.initialize(dbAdapter(db), undefined, () => commitDir);
+      const { artifactId } = await router.apply(1, {
+        op: 'create', runId: 'run-1', atype: 'generic', label: 'g', payloadJson: '{"url":"http://x"}', actor: 'user',
+      });
+      await expect(router.apply(1, { op: 'commit', artifactId, actor: 'user' })).resolves.toMatchObject({ artifactId });
+      const row = db.prepare('SELECT committed FROM artifacts WHERE id = ?').get(artifactId) as { committed: number };
+      expect(row.committed).toBe(1);
+      // Manifest written under the resolver's dir despite the NULL worktree_path.
+      expect(existsSync(snapshotPathFor(commitDir, { id: artifactId, atype: 'generic' }))).toBe(true);
+    } finally {
+      rmSync(commitDir, { recursive: true, force: true });
+    }
   });
 });

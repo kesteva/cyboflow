@@ -34,6 +34,7 @@ import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { ArtifactRouter } from './orchestrator/artifactRouter';
+import { resolveArtifactCommitDir } from './orchestrator/artifactSnapshot';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
@@ -642,7 +643,22 @@ async function initializeServices() {
   // for `artifacts`; the cyboflow.artifacts tRPC router + the report/commit-artifact
   // MCP handlers reach it via getInstance(). Its artifactChangeEvents emitter is
   // consumed directly by cyboflow.artifacts.onArtifactChanged (no bridge needed).
-  ArtifactRouter.initialize(cyboflowDb, cyboflowLogger);
+  //
+  // The third arg resolves WHERE a committed artifact's durability snapshot
+  // (FEATURE #3) is written: the global `artifactCommitDir` setting resolved
+  // against the owning project's ROOT (durable across worktree teardown). Kept as
+  // a closure over configManager + databaseService so the router stays free of
+  // ConfigManager/service imports (standalone-typecheck invariant). Fail-soft:
+  // any lookup error returns null → the snapshot is skipped, never the commit.
+  ArtifactRouter.initialize(cyboflowDb, cyboflowLogger, (projectId: number) => {
+    try {
+      const project = databaseService.getProject(projectId);
+      if (!project?.path) return null;
+      return resolveArtifactCommitDir(project.path, configManager.getArtifactCommitDir());
+    } catch {
+      return null;
+    }
+  });
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).
   // The CLI managers attach it to each run's EventRouter pipeline via

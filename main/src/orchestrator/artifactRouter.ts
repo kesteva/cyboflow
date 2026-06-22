@@ -21,6 +21,17 @@ import { randomBytes } from 'node:crypto';
 import PQueue from 'p-queue';
 import type { DatabaseLike, LoggerLike } from './types';
 import { snapshotCommittedArtifact } from './artifactSnapshot';
+
+/**
+ * Resolves the FINAL on-disk commit directory for a just-committed artifact,
+ * keyed by the artifact's owning project. Injected at initialize() time from
+ * main/src/index.ts as a closure over ConfigManager.getArtifactCommitDir() +
+ * the project root (resolveArtifactCommitDir) — kept as a plain callback so the
+ * router never imports ConfigManager / databaseService and the standalone-
+ * typecheck invariant holds. Returns null to SKIP the snapshot (project gone,
+ * resolution failed, or — in unit tests — no resolver was wired).
+ */
+export type ArtifactCommitDirResolver = (projectId: number) => string | null;
 import {
   ARTIFACT_RENDER_MODE,
   type Artifact,
@@ -102,7 +113,8 @@ export interface ArtifactUpdate {
 }
 
 /** Persist the artifact (flips committed; runCommit also writes a fail-soft
- *  on-disk durability snapshot under the run worktree — see artifactSnapshot.ts). */
+ *  on-disk durability snapshot under the configured commit directory, resolved
+ *  against the owning project's root — see artifactSnapshot.ts). */
 export interface ArtifactCommit {
   op: 'commit';
   artifactId: string;
@@ -157,10 +169,15 @@ export class ArtifactRouter {
   constructor(
     private readonly db: DatabaseLike,
     private readonly logger?: LoggerLike,
+    private readonly resolveCommitDir?: ArtifactCommitDirResolver,
   ) {}
 
-  static initialize(db: DatabaseLike, logger?: LoggerLike): ArtifactRouter {
-    ArtifactRouter.instance = new ArtifactRouter(db, logger);
+  static initialize(
+    db: DatabaseLike,
+    logger?: LoggerLike,
+    resolveCommitDir?: ArtifactCommitDirResolver,
+  ): ArtifactRouter {
+    ArtifactRouter.instance = new ArtifactRouter(db, logger, resolveCommitDir);
     return ArtifactRouter.instance;
   }
 
@@ -470,32 +487,42 @@ export class ArtifactRouter {
     this.emitChange(trueProject, runId, change.artifactId, atype, 'committed', this.readById(change.artifactId));
 
     // Durability snapshot (FEATURE #3): now that committed=1 is persisted, mirror
-    // the committed row to disk under the run's worktree so the deliverable
-    // survives a later DELETE of the originating entity. Strictly OUTSIDE the txn
-    // and FAIL-SOFT — a disk error must never undo or block the commit.
-    await this.maybeSnapshot(change.artifactId);
+    // the committed row to disk under the CONFIGURED commit directory (resolved
+    // against the owning project's ROOT, so it survives a later teardown of the
+    // run's worktree AND a DELETE of the originating entity). Strictly OUTSIDE the
+    // txn and FAIL-SOFT — a disk error must never undo or block the commit.
+    await this.maybeSnapshot(trueProject, change.artifactId);
 
     return { artifactId: change.artifactId, event: { id: eventId, seq: eventSeq } };
   }
 
   /**
    * Best-effort on-disk snapshot of a just-committed artifact. Re-reads the full
-   * committed row, resolves the owning run's worktree_path, and writes the
-   * manifest via the (fail-soft, never-throwing) artifactSnapshot module. A run
-   * with no worktree_path (NULL) is skipped silently. Errors are swallowed inside
-   * snapshotCommittedArtifact, so this never throws.
+   * committed row, resolves the configured commit directory for the artifact's
+   * owning project via the injected `resolveCommitDir` callback, and writes the
+   * manifest via the (fail-soft, never-throwing) artifactSnapshot module.
+   *
+   * Skipped silently when no resolver is wired (unit tests) or the resolver
+   * returns null (project gone / resolution failed). FAIL-SOFT end to end: the
+   * commit is already persisted, so any error here is caught and logged, never
+   * thrown — a snapshot problem must not surface to the commit caller.
    */
-  private async maybeSnapshot(artifactId: string): Promise<void> {
-    const row = this.db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId) as
-      | ArtifactDbRow
-      | undefined;
-    if (!row) return;
-    const runRow = this.db
-      .prepare('SELECT worktree_path AS worktreePath FROM workflow_runs WHERE id = ?')
-      .get(row.run_id) as { worktreePath: string | null } | undefined;
-    const worktreePath = runRow?.worktreePath;
-    if (!worktreePath) return;
-    await snapshotCommittedArtifact(worktreePath, row, this.logger);
+  private async maybeSnapshot(projectId: number, artifactId: string): Promise<void> {
+    try {
+      const row = this.db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId) as
+        | ArtifactDbRow
+        | undefined;
+      if (!row) return;
+      const commitDir = this.resolveCommitDir?.(projectId) ?? null;
+      if (!commitDir) return;
+      await snapshotCommittedArtifact(commitDir, row, this.logger);
+    } catch (err) {
+      const msg = `[artifactRouter] commit-dir snapshot for ${artifactId} failed (fail-soft): ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      if (this.logger) this.logger.warn(msg, { artifactId, projectId });
+      else console.warn(msg);
+    }
   }
 
   // ------------------------------------------------------------------------

@@ -16,6 +16,10 @@ export interface AppConfig {
   interactivePtyOnly?: boolean;
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
+  // On-disk location for COMMITTED-artifact manifests (FEATURE #3 durability
+  // snapshot). Relative paths resolve against the project ROOT; absolute paths
+  // are used verbatim. Floors to '.cyboflow/artifacts' when unset.
+  artifactCommitDir?: string;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;
