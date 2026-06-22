@@ -61,8 +61,15 @@ export interface UnifiedComposerProps {
 
   /** SDK quick only — image/large-text attach is wired to the SDK send path. */
   supportsAttachments?: boolean;
-  /** read-only model label (e.g. "Sonnet 4.5"), SDK only. */
+  /** read-only model label (e.g. "Sonnet 4.5"), SDK only. Used only when
+   *  `modelSlot` is absent (e.g. a flow run, or a running quick turn). */
   modelLabel?: string | null;
+  /** interactive model selector (quick SDK, idle) — host supplies the node;
+   *  when present it replaces the read-only model pill. */
+  modelSlot?: React.ReactNode;
+  /** interactive permission-mode selector (quick SDK) — host supplies the node;
+   *  rendered next to the model affordance. */
+  permissionSlot?: React.ReactNode;
   /** read-only effort label (e.g. "ultracode"). Shown whenever set, independent
    *  of substrate — cyboflow's only effort value is the interactive-only
    *  'ultracode', so it must not be gated on the SDK-only model affordance. */
@@ -97,6 +104,8 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
     onTogglePtyOpen,
     supportsAttachments = false,
     modelLabel,
+    modelSlot,
+    permissionSlot,
     effortLabel,
     onToggleSettings,
     checkpointSlot,
@@ -335,9 +344,9 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
             effort value is 'ultracode', an interactive-only opt-in, so the
             effort pill is decoupled from the SDK-gated model pill and renders
             whenever the session carries one (session config; edit deferred). */}
-        {visibility.showModelEffort && modelLabel && (
-          <ReadonlyPill label={modelLabel} />
-        )}
+        {visibility.showModelEffort &&
+          (modelSlot ?? (modelLabel ? <ReadonlyPill label={modelLabel} /> : null))}
+        {visibility.showModelEffort && permissionSlot}
         {effortLabel && <ReadonlyPill label={`effort: ${effortLabel}`} />}
 
         {/* checkpoint / commit-mode (quick) */}

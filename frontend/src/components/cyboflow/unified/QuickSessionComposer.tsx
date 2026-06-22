@@ -3,6 +3,7 @@ import type { Session } from '../../../types/session';
 import { API } from '../../../utils/api';
 import type { IPCResponse } from '../../../utils/api';
 import { CommitModePill } from '../../CommitModeToggle';
+import { ModelPill } from './ModelPill';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { UnifiedComposer } from './UnifiedComposer';
 import { resolveChatVisibility } from './useChatVisibility';
@@ -138,6 +139,15 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       ? MODEL_LABELS[modelId] ?? modelId
       : null;
 
+  // Interactive model selector for an IDLE quick SDK session — replaces the
+  // read-only "Sonnet 🔒" pill. While running, fall through to the read-only
+  // modelLabel pill (a model change only takes effect on the next turn, and the
+  // in-flight turn already chose its model). PTY/flow runs never get this.
+  const modelSlot =
+    !interactive && !running && panelId ? (
+      <ModelPill panelId={panelId} currentModel={modelId} onModelChange={setModelId} />
+    ) : undefined;
+
   // Read-only effort pill (set at session start; migration 029). Today the only
   // value is 'ultracode' — an interactive-only opt-in, so it shows on the PTY
   // composer (where the SDK-gated model pill never appears). null → no pill.
@@ -194,6 +204,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       onTogglePtyOpen={interactive ? onTogglePtyOpen : undefined}
       supportsAttachments={!interactive}
       modelLabel={modelLabel}
+      modelSlot={modelSlot}
       effortLabel={effortLabel}
       onToggleSettings={!interactive ? onToggleSettings : undefined}
       checkpointSlot={checkpointSlot}
