@@ -638,9 +638,11 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
     // The click handler's async chain (createQuick → createPanel → runStart)
     // settles across microtasks, so gate on waitFor rather than asserting
     // synchronously — a bare expect here races and flakes on slow CI runners.
+    // The explicit timeout gives loaded CI runners headroom (the default 1s
+    // expired once on GitHub Actions while the chain was still settling).
     await waitFor(() => {
       expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1 });
-    });
+    }, { timeout: 5000 });
     expect(panelApi.createPanel).toHaveBeenCalledWith({ sessionId: 'session-quick-001', type: 'claude' });
     expect(panelApi.createPanel).toHaveBeenCalledWith({
       sessionId: 'session-quick-001',
@@ -661,7 +663,7 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
     // setActiveRun nested the run under its parent session: BOTH ids are set.
     await waitFor(() => {
       expect(useCyboflowStore.getState().activeRunId).toBe('run-test-001');
-    });
+    }, { timeout: 5000 });
     expect(useCyboflowStore.getState().selectedSessionId).toBe('session-quick-001');
   });
 
