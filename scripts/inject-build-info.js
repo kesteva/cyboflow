@@ -52,9 +52,9 @@ const buildInfo = {
   platform: process.platform,
   arch: process.arch,
   isCanary: isCanaryBuild,
-  // Which app variant this build is: 'stable' (default) or 'beta'. Surfaced in
+  // Which app variant this build is: 'stable' (default) or 'dev'. Surfaced in
   // the About dialog and used to confirm the right artifact was built.
-  variant: process.env.BUILD_VARIANT === 'beta' ? 'beta' : 'stable'
+  variant: process.env.BUILD_VARIANT === 'dev' ? 'dev' : 'stable'
 };
 
 // Write build info to a file in the main dist directory

@@ -15,13 +15,13 @@ Cloudflare R2  ──►  version: Y   →   app sees Y > X
 swap bundle → "Restart to update"
 ```
 
-`<variant>` is `stable` or `beta` — Cyboflow ships as **two separate side-by-side
-apps**, each with its own feed (see "Stable vs Beta" below). The feed is fixed at
+`<variant>` is `stable` or `dev` — Cyboflow ships as **two separate side-by-side
+apps**, each with its own feed (see "Stable vs Dev" below). The feed is fixed at
 build time, baked into the packaged `app-update.yml`; there is no in-app channel
 switch.
 
 The artifacts live in a **Cloudflare R2** bucket served at `updates.cyboflow.com`,
-under `stable/` and `beta/` prefixes. R2 is S3-compatible (so we publish with the
+under `stable/` and `dev/` prefixes. R2 is S3-compatible (so we publish with the
 S3 SDK) but serves public downloads with **zero egress fees** and **no credentials
 in the app** — the source repo stays private. See
 [`scripts/publish-update.mjs`](../scripts/publish-update.mjs).
@@ -92,7 +92,7 @@ Mach-Os. The trade-off is that the release is a few explicit steps rather than o
 
 1. Bump `version` in `package.json` (e.g. `0.1.2` → `0.1.3`). The updater compares
    this baked-in version against the manifest, so this is what gates the prompt.
-   For beta, a `-beta.N` suffix is conventional (e.g. `0.1.3-beta.1`).
+   For dev, a `-dev.N` suffix is conventional (e.g. `0.1.3-dev.1`).
 2. Load the release secrets, **aborting loudly if any are missing** (a missing var
    silently ships an *unsigned* build). Add this guarded wrapper to `~/.zshrc`:
    ```bash
@@ -101,11 +101,11 @@ Mach-Os. The trade-off is that the release is a few explicit steps rather than o
      : "${CSC_LINK:?missing Apple signing vars}" "${R2_ACCESS_KEY_ID:?missing R2 vars}"
    }
    ```
-3. Build, sign + notarize each arch (separate runs). Beta example:
+3. Build, sign + notarize each arch (separate runs). Dev example:
    ```bash
    cybosecrets
-   pnpm build:mac:beta:arm64   # → dist-electron/Cyboflow-Beta-<v>-macOS-arm64.{dmg,zip,blockmap}
-   pnpm build:mac:beta:x64     # → dist-electron/Cyboflow-Beta-<v>-macOS-x64.{dmg,zip,blockmap}
+   pnpm build:mac:dev:arm64   # → dist-electron/Cyboflow-Dev-<v>-macOS-arm64.{dmg,zip,blockmap}
+   pnpm build:mac:dev:x64     # → dist-electron/Cyboflow-Dev-<v>-macOS-x64.{dmg,zip,blockmap}
    ```
    Stable is the same with `build:mac:arm64` / `build:mac:x64`.
 4. **Generate the combined `latest-mac.yml`.** Each per-arch build writes its own
@@ -116,8 +116,8 @@ Mach-Os. The trade-off is that the release is a few explicit steps rather than o
    Pass the **arm64 zip first** (it becomes the legacy `path` fallback):
    ```bash
    node scripts/gen-mac-latest-yml.mjs dist-electron/latest-mac.yml \
-     Cyboflow-Beta-<v>-macOS-arm64.zip Cyboflow-Beta-<v>-macOS-arm64.dmg \
-     Cyboflow-Beta-<v>-macOS-x64.zip  Cyboflow-Beta-<v>-macOS-x64.dmg
+     Cyboflow-Dev-<v>-macOS-arm64.zip Cyboflow-Dev-<v>-macOS-arm64.dmg \
+     Cyboflow-Dev-<v>-macOS-x64.zip  Cyboflow-Dev-<v>-macOS-x64.dmg
    ```
    electron-updater's `MacUpdater.filterFilesForArch` selects purely on whether the
    filename contains `arm64` (arm64 Macs incl. Rosetta → the arm64 file; x64 Macs →
@@ -127,36 +127,36 @@ Mach-Os. The trade-off is that the release is a few explicit steps rather than o
    comma-separated basenames) — never the bare glob, which would cross-contaminate
    the feeds. Dry-run first:
    ```bash
-   FILES="Cyboflow-Beta-<v>-macOS-arm64.dmg,Cyboflow-Beta-<v>-macOS-arm64.dmg.blockmap,\
-   Cyboflow-Beta-<v>-macOS-arm64.zip,Cyboflow-Beta-<v>-macOS-arm64.zip.blockmap,\
-   Cyboflow-Beta-<v>-macOS-x64.dmg,Cyboflow-Beta-<v>-macOS-x64.dmg.blockmap,\
-   Cyboflow-Beta-<v>-macOS-x64.zip,Cyboflow-Beta-<v>-macOS-x64.zip.blockmap,latest-mac.yml"
-   BUILD_VARIANT=beta PUBLISH_ONLY="$FILES" UPDATE_DRY_RUN=true pnpm publish:r2
-   BUILD_VARIANT=beta PUBLISH_ONLY="$FILES" pnpm publish:r2        # real upload → beta/
+   FILES="Cyboflow-Dev-<v>-macOS-arm64.dmg,Cyboflow-Dev-<v>-macOS-arm64.dmg.blockmap,\
+   Cyboflow-Dev-<v>-macOS-arm64.zip,Cyboflow-Dev-<v>-macOS-arm64.zip.blockmap,\
+   Cyboflow-Dev-<v>-macOS-x64.dmg,Cyboflow-Dev-<v>-macOS-x64.dmg.blockmap,\
+   Cyboflow-Dev-<v>-macOS-x64.zip,Cyboflow-Dev-<v>-macOS-x64.zip.blockmap,latest-mac.yml"
+   BUILD_VARIANT=dev PUBLISH_ONLY="$FILES" UPDATE_DRY_RUN=true pnpm publish:r2
+   BUILD_VARIANT=dev PUBLISH_ONLY="$FILES" pnpm publish:r2        # real upload → dev/
    ```
-   (Stable: drop `BUILD_VARIANT=beta`, use the non-`Beta` filenames → `stable/`.)
+   (Stable: drop `BUILD_VARIANT=dev`, use the non-`Dev` filenames → `stable/`.)
 
 `publish:r2` uploads each allowlisted `*.yml`/`*.zip`/`*.dmg`/`*.blockmap` to the
-bucket under the variant prefix (`stable/` or `beta/`, from `BUILD_VARIANT`). The
+bucket under the variant prefix (`stable/` or `dev/`, from `BUILD_VARIANT`). The
 `.yml` manifest is uploaded `no-cache` (it changes every release); the binaries are
 uploaded `immutable` (their version is in the filename).
 
 The website's "Download" buttons point at the per-arch DMGs for first installs —
 auto-update only upgrades an already-installed app:
 - `https://updates.cyboflow.com/stable/Cyboflow-<version>-macOS-arm64.dmg`
-- `https://updates.cyboflow.com/beta/Cyboflow-Beta-<version>-macOS-arm64.dmg` (and the `-x64.dmg` for Intel)
+- `https://updates.cyboflow.com/dev/Cyboflow-Dev-<version>-macOS-arm64.dmg` (and the `-x64.dmg` for Intel)
 
 ### Typical flow
 
 ```
-bump version → build:mac:beta:{arm64,x64} → gen-mac-latest-yml → publish (beta/)
-            → test the Beta app → fix → repeat
+bump version → build:mac:dev:{arm64,x64} → gen-mac-latest-yml → publish (dev/)
+            → test the Dev app → fix → repeat
             → on green: build:mac:{arm64,x64} → gen-mac-latest-yml → publish (stable/)
 ```
 
-Because Beta is a distinct app (own data dir), you can run it alongside Stable
-without risk. Bump the version for each Beta you want existing Beta installs to
-auto-update to (a `-beta.N` prerelease suffix is conventional, e.g. `0.1.3-beta.1`).
+Because Dev is a distinct app (own data dir), you can run it alongside Stable
+without risk. Bump the version for each Dev you want existing Dev installs to
+auto-update to (a `-dev.N` prerelease suffix is conventional, e.g. `0.1.3-dev.1`).
 
 ---
 
@@ -170,8 +170,8 @@ auto-update to (a `-beta.N` prerelease suffix is conventional, e.g. `0.1.3-beta.
   About dialog).
 - electron-builder bakes `build.publish` (the generic `updates.cyboflow.com/<variant>`
   URL) into the packaged `app-update.yml`, so the app knows where to poll with no
-  extra config. The stable URL is in `package.json`; the beta build overrides it
-  with `--config.publish.url=.../beta` (see `build:mac:beta`).
+  extra config. The stable URL is in `package.json`; the dev build overrides it
+  with `--config.publish.url=.../dev` (see `build:mac:dev`).
 
 ---
 
@@ -184,31 +184,31 @@ auto-update to (a `-beta.N` prerelease suffix is conventional, e.g. `0.1.3-beta.
 | **Manifest must not be cached** | `latest-mac.yml` is uploaded `no-cache`. If you front it with extra CDN caching, the app won't see new releases until the cache expires. |
 | **First install is still manual** | The updater upgrades an installed app only. New users download the `.dmg` from the website. |
 | **Per-arch manifests must be merged** | Each per-arch build overwrites `latest-mac.yml`. Always regenerate it with `scripts/gen-mac-latest-yml.mjs` listing *both* arches before publishing, or one arch's users get no updates. |
-| **Publish with an allowlist** | `dist-electron` holds a mix of variants/arches/stale files. Use `PUBLISH_ONLY` so a release publishes exactly its own files — the bare glob cross-contaminates the `stable/` and `beta/` feeds. |
+| **Publish with an allowlist** | `dist-electron` holds a mix of variants/arches/stale files. Use `PUBLISH_ONLY` so a release publishes exactly its own files — the bare glob cross-contaminates the `stable/` and `dev/` feeds. |
 
 ---
 
-## Stable vs Beta — two separate apps
+## Stable vs Dev — two separate apps
 
-Beta is **not** an in-app toggle. It's a distinct application that installs
+Dev is **not** an in-app toggle. It's a distinct application that installs
 side-by-side with Stable, the way VS Code Insiders or Chrome Canary do. Everything
-that differs is fixed at build time by `build:mac:beta`:
+that differs is fixed at build time by `build:mac:dev`:
 
-| | Stable | Beta |
+| | Stable | Dev |
 |---|---|---|
-| App name (`productName`) | Cyboflow | Cyboflow Beta |
-| Bundle id (`appId`) | `com.cyboflow.app` | `com.cyboflow.app.beta` |
-| Data dir | `~/.cyboflow` | `~/.cyboflow-beta` |
-| Update feed | `updates.cyboflow.com/stable` | `updates.cyboflow.com/beta` |
-| Artifact name | `Cyboflow-<v>-…` | `Cyboflow-Beta-<v>-…` |
+| App name (`productName`) | Cyboflow | Cyboflow Dev |
+| Bundle id (`appId`) | `com.cyboflow.app` | `com.cyboflow.app.dev` |
+| Data dir | `~/.cyboflow` | `~/.cyboflow-dev` |
+| Update feed | `updates.cyboflow.com/stable` | `updates.cyboflow.com/dev` |
+| Artifact name | `Cyboflow-<v>-…` | `Cyboflow-Dev-<v>-…` |
 
 **Why separate apps (not a channel setting):** the SQLite DB is forward-only
-migrated. If one install ran a newer beta migration on a *shared* database, the
+migrated. If one install ran a newer dev migration on a *shared* database, the
 older stable binary could no longer open it. Distinct `appId`s give each variant
 its own data dir (resolved by `cyboflowDirName()` in
 `main/src/utils/cyboflowDirectory.ts` via the `__CFBundleIdentifier` macOS sets),
-so a beta install can never corrupt stable's data. Each app only ever updates
+so a dev install can never corrupt stable's data. Each app only ever updates
 within its own feed.
 
-Users get the beta by **downloading the separate Cyboflow Beta app** from the
+Users get the dev by **downloading the separate Cyboflow Dev app** from the
 website (Settings → Updates points them there) — there is no in-app opt-in.

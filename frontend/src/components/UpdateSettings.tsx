@@ -7,7 +7,7 @@ import { SettingsSection } from './ui/SettingsSection';
 /**
  * Settings → Updates. Shows the current version and drives the manual
  * check → download → restart flow against the main-process AppUpdater. The
- * update feed (stable vs beta) is fixed per app variant at build time — beta is
+ * update feed (stable vs dev) is fixed per app variant at build time — dev is
  * a separate side-by-side app, not an in-app toggle (see docs/UPDATES.md).
  */
 export function UpdateSettings() {
@@ -114,7 +114,7 @@ export function UpdateSettings() {
           )}
 
           <p className="text-xs text-text-tertiary mt-4 pt-3 border-t border-border-secondary">
-            Want early builds? Cyboflow Beta is a separate app you can install alongside this one,
+            Want early builds? Cyboflow Dev is a separate app you can install alongside this one,
             with its own data and update feed. Download it from the Cyboflow website.
           </p>
         </SettingsSection>

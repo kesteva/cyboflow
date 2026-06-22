@@ -8,7 +8,7 @@
  *
  *   Case A: CSC_DISABLE=true       → unsigned posture (hardenedRuntime false, notarize false, no entitlements)
  *   Case B: All Apple env vars set → signed posture (hardenedRuntime true, notarize truthy, entitlements set)
- *   Case C: BUILD_VARIANT=beta     → beta appId / productName / artifactName / publish URL overrides
+ *   Case C: BUILD_VARIANT=dev      → dev appId / productName / artifactName / publish URL overrides
  *
  * Every case also asserts that package.json on disk is byte-for-byte UNCHANGED (the whole
  * point of the generated-config approach) and that the on-disk generated file matches the
@@ -139,22 +139,22 @@ try {
 }
 
 try {
-  // Case C: BUILD_VARIANT=beta → beta overrides baked into the generated config
+  // Case C: BUILD_VARIANT=dev → dev overrides baked into the generated config
   runCase(
-    'Case C: BUILD_VARIANT=beta (beta overrides)',
-    { BUILD_VARIANT: 'beta', CSC_DISABLE: 'true' },
+    'Case C: BUILD_VARIANT=dev (dev overrides)',
+    { BUILD_VARIANT: 'dev', CSC_DISABLE: 'true' },
     function (config) {
-      assert(config.appId === 'com.cyboflow.app.beta', 'beta appId should be applied');
-      assert(config.productName === 'Cyboflow Beta', 'beta productName should be applied');
+      assert(config.appId === 'com.cyboflow.app.dev', 'dev appId should be applied');
+      assert(config.productName === 'Cyboflow Dev', 'dev productName should be applied');
       assert(
-        config.mac.artifactName === 'Cyboflow-Beta-${version}-macOS-${arch}.${ext}',
-        'beta artifactName should be applied with literal electron-builder tokens'
+        config.mac.artifactName === 'Cyboflow-Dev-${version}-macOS-${arch}.${ext}',
+        'dev artifactName should be applied with literal electron-builder tokens'
       );
       assert(
-        config.publish && config.publish.url === 'https://updates.cyboflow.com/beta',
-        'beta publish URL should be applied'
+        config.publish && config.publish.url === 'https://updates.cyboflow.com/dev',
+        'dev publish URL should be applied'
       );
-      assert(config.publish.provider === 'generic', 'beta publish should preserve the base provider');
+      assert(config.publish.provider === 'generic', 'dev publish should preserve the base provider');
     }
   );
 } catch (err) {

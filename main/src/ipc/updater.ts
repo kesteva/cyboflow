@@ -11,7 +11,7 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
   const { app, getMainWindow, logger } = services;
 
   // The in-app auto-updater (electron-updater). Constructed + wired once here; a
-  // no-op in dev (see AppUpdater.init). The update feed (stable vs beta) is fixed
+  // no-op in dev (see AppUpdater.init). The update feed (stable vs dev) is fixed
   // at build time per app variant — there is no in-app channel switch. Lifecycle
   // events reach the renderer over the 'updater:event' channel; check/download/
   // install are user-triggered from the UI (Settings → Updates, About dialog).
@@ -50,7 +50,7 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
       let gitCommit: string | undefined;
       let buildTimestamp: number | undefined;
       let worktreeName: string | undefined;
-      let variant: 'stable' | 'beta' | undefined;
+      let variant: 'stable' | 'dev' | undefined;
 
       // Try to read build info if in packaged app
       if (app.isPackaged) {
@@ -61,7 +61,7 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
             buildDate = buildInfo.buildDate;
             gitCommit = buildInfo.gitCommit;
             buildTimestamp = buildInfo.buildTimestamp;
-            variant = buildInfo.variant === 'beta' ? 'beta' : 'stable';
+            variant = buildInfo.variant === 'dev' ? 'dev' : 'stable';
           }
         } catch (err) {
           console.log('Could not read build info:', err);
@@ -114,7 +114,7 @@ export function registerUpdaterHandlers(ipcMain: IpcMain, services: AppServices)
         gitCommit?: string;
         buildTimestamp?: number;
         worktreeName?: string;
-        variant?: 'stable' | 'beta';
+        variant?: 'stable' | 'dev';
       } = {
         current: app.getVersion(),
         name: app.getName(),

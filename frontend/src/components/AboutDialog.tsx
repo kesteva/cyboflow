@@ -11,7 +11,7 @@ interface VersionInfo {
   gitCommit?: string;
   buildTimestamp?: number;
   worktreeName?: string;
-  variant?: 'stable' | 'beta';
+  variant?: 'stable' | 'dev';
 }
 
 interface AboutDialogProps {
@@ -100,10 +100,10 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
           {/* App Info */}
           <div className="text-center space-y-2">
             <h3 className="text-lg font-medium text-text-primary flex items-center justify-center gap-2">
-              {versionInfo?.variant === 'beta' ? 'Cyboflow Beta' : 'Cyboflow'}
-              {versionInfo?.variant === 'beta' && (
+              {versionInfo?.variant === 'dev' ? 'Cyboflow Dev' : 'Cyboflow'}
+              {versionInfo?.variant === 'dev' && (
                 <span className="rounded-[4px] border border-interactive px-1.5 py-px text-[10px] font-bold tracking-wide text-interactive">
-                  BETA
+                  DEV
                 </span>
               )}
             </h3>

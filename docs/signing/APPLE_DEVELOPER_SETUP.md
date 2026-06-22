@@ -339,7 +339,7 @@ pnpm run build:mac:universal
 
 ### Signed but not notarized
 
-For a quick local or **beta** build that skips the (slow) notarization
+For a quick local or **dev** build that skips the (slow) notarization
 round-trip but still signs with your Developer ID, provide only the two `CSC_*`
 cert vars and withhold the notarization trio. The cleanest way is to source the
 full `.envrc.local` and unset the three notarization vars:
@@ -349,7 +349,7 @@ source ./.envrc.local
 unset APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_APP_PASSWORD
 
 pnpm run build:mac:arm64     # or build:mac:universal
-pnpm run build:mac:beta      # beta variant (universal) → "Cyboflow-Beta-<version>-macOS-universal.dmg"
+pnpm run build:mac:dev      # dev variant (universal) → "Cyboflow-Dev-<version>-macOS-universal.dmg"
 ```
 
 `configure-build.js` then reports `Can Sign: ✓ / Can Notarize: ✗` and writes a

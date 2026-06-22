@@ -68,7 +68,7 @@ export function Sidebar({
   const [version, setVersion] = useState<string>('');
   const [gitCommit, setGitCommit] = useState<string>('');
   const [worktreeName, setWorktreeName] = useState<string>('');
-  const [isBeta, setIsBeta] = useState<boolean>(false);
+  const [isDev, setIsDev] = useState<boolean>(false);
   useEffect(() => {
     // Fetch version info on component mount
     const fetchVersion = async () => {
@@ -92,7 +92,7 @@ export function Sidebar({
           } else {
             console.log('[Sidebar Debug] No worktreeName in response');
           }
-          setIsBeta(result.data.variant === 'beta');
+          setIsDev(result.data.variant === 'dev');
         }
       } catch (error) {
         console.error('Failed to fetch version:', error);
@@ -131,13 +131,13 @@ export function Sidebar({
           <div className="flex items-center space-x-2 min-w-0">
             <img src={cyboflowLogo} alt="Cyboflow" className="h-6 w-6 flex-shrink-0" />
             <h1 className="text-xl font-bold truncate">Cyboflow</h1>
-            {isBeta && (
+            {isDev && (
               <span
                 className="flex-shrink-0 rounded-[4px] border border-interactive px-1.5 py-px text-[10px] font-bold uppercase tracking-wide text-interactive"
-                title="Beta build"
-                data-testid="beta-chip"
+                title="Dev build"
+                data-testid="dev-chip"
               >
-                Beta
+                Dev
               </span>
             )}
             {demoModeEnabled && (

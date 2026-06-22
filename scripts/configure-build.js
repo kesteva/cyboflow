@@ -9,12 +9,12 @@
  * to electron-builder via `--config`, which uses it INSTEAD of package.json's `build`
  * (electron-builder reads a `--config` file exclusively; it does not merge package.json
  * `build` on top — see app-builder-lib getConfig). This keeps the tracked package.json
- * clean across signed, unsigned, and beta builds.
+ * clean across signed, unsigned, and dev builds.
  *
  * Adjustments:
  *   - Signing/notarization posture is toggled based on the presence of Apple credentials.
- *   - When BUILD_VARIANT=beta, the beta appId / productName / artifactName / publish URL
- *     overrides are baked in (these used to be inline `--config.*` flags on build:mac:beta).
+ *   - When BUILD_VARIANT=dev, the dev appId / productName / artifactName / publish URL
+ *     overrides are baked in (these used to be inline `--config.*` flags on build:mac:dev).
  */
 
 const fs = require('fs');
@@ -37,7 +37,7 @@ function configureBuild() {
 
   const canSign = !signingDisabled && hasAppleCertificate;
   const canNotarize = canSign && hasAppleId && hasTeamId && hasAppPassword;
-  const isBeta = process.env.BUILD_VARIANT === 'beta';
+  const isDev = process.env.BUILD_VARIANT === 'dev';
 
   console.log('Environment check:');
   console.log(`  - Signing Disabled: ${signingDisabled ? '✓' : '✗'}`);
@@ -47,7 +47,7 @@ function configureBuild() {
   console.log(`  - App Password: ${hasAppPassword ? '✓' : '✗'}`);
   console.log(`  - Can Sign: ${canSign ? '✓' : '✗'}`);
   console.log(`  - Can Notarize: ${canNotarize ? '✓' : '✗'}`);
-  console.log(`  - Build Variant: ${isBeta ? 'beta' : 'stable'}`);
+  console.log(`  - Build Variant: ${isDev ? 'dev' : 'stable'}`);
 
   // Read the canonical config from package.json (source of truth — not mutated)
   const packageJson = JSON.parse(fs.readFileSync(PACKAGE_JSON_PATH, 'utf8'));
@@ -78,14 +78,14 @@ function configureBuild() {
     config.mac.entitlementsInherit = 'build/entitlements.mac.plist';
   }
 
-  // Beta-variant overrides (previously inline --config.* flags on build:mac:beta).
+  // Dev-variant overrides (previously inline --config.* flags on build:mac:dev).
   // Template tokens like ${version} are electron-builder placeholders and must stay literal.
-  if (isBeta) {
-    console.log('Applying beta-variant overrides...');
-    config.appId = 'com.cyboflow.app.beta';
-    config.productName = 'Cyboflow Beta';
-    config.mac.artifactName = 'Cyboflow-Beta-${version}-macOS-${arch}.${ext}';
-    config.publish = { ...(config.publish || {}), url: 'https://updates.cyboflow.com/beta' };
+  if (isDev) {
+    console.log('Applying dev-variant overrides...');
+    config.appId = 'com.cyboflow.app.dev';
+    config.productName = 'Cyboflow Dev';
+    config.mac.artifactName = 'Cyboflow-Dev-${version}-macOS-${arch}.${ext}';
+    config.publish = { ...(config.publish || {}), url: 'https://updates.cyboflow.com/dev' };
   }
 
   // Lean per-arch packaging. The claude-agent-sdk ships its (~200 MB) native

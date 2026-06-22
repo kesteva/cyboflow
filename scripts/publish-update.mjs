@@ -18,14 +18,14 @@
  *   - <variant>/*.dmg / *.dmg.blockmap   (first-install download for the website)
  *
  * The prefix MUST match the build's --config.publish.url path (see package.json
- * build:mac / build:mac:beta) or the updater won't resolve the artifacts.
+ * build:mac / build:mac:dev) or the updater won't resolve the artifacts.
  *
  * Required env (set these in your release shell / CI secrets — see docs/UPDATES.md):
  *   R2_ACCOUNT_ID          Cloudflare account id (subdomain of the S3 endpoint)
  *   R2_ACCESS_KEY_ID       R2 API token access key id
  *   R2_SECRET_ACCESS_KEY   R2 API token secret
  * Optional:
- *   BUILD_VARIANT=beta     publish to the beta feed (default: stable)
+ *   BUILD_VARIANT=dev      publish to the dev feed (default: stable)
  *   R2_BUCKET              bucket name (default: cyboflow-updates)
  *   R2_ENDPOINT            full S3 endpoint override (default derived from account id)
  *   UPDATE_DRY_RUN=true    list what would upload, but don't upload
@@ -43,7 +43,7 @@ import { Upload } from '@aws-sdk/lib-storage';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DIST_DIR = join(__dirname, '..', 'dist-electron');
-const VARIANT = process.env.BUILD_VARIANT === 'beta' ? 'beta' : 'stable';
+const VARIANT = process.env.BUILD_VARIANT === 'dev' ? 'dev' : 'stable';
 const PUBLIC_BASE = `https://updates.cyboflow.com/${VARIANT}`;
 
 // File extensions we publish, with their content type. The .yml manifest is the
