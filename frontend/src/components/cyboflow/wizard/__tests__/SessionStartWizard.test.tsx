@@ -580,3 +580,186 @@ describe('SessionStartWizard — workflow preselect', () => {
     expect(screen.queryByTestId('wizard-cta')).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Triage-tray finding seed (D4) — the Insights "Run compounding session" CTA
+// opens the wizard preselecting `compound` and carrying the human's selected
+// finding ids. The wizard threads those ids into runs.start as `findingIds`,
+// but ONLY for a compound launch (the seed is compound-only); every other flow
+// omits them. substrate / permission still flow from the step-③ controls, and
+// the launchRun closure must read the LIVE ids (no stale capture).
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — compound finding seed (D4)', () => {
+  it('threads selected findingIds into a compound runs.start launch', async () => {
+    // Both the default (sprint) + the compound preselect target are present so
+    // the name preselect — not the default — wins and auto-advances to ③.
+    mockWorkflowsList.mockResolvedValue([SPRINT_WORKFLOW_ROW, COMPOUND_WORKFLOW_ROW]);
+    act(() => {
+      useNavigationStore.setState({
+        view: 'wizard',
+        wizardOpts: {
+          lockProjectId: 1,
+          preselectWorkflowName: 'compound',
+          selectedFindingIds: ['finding-1', 'finding-2', 'finding-3'],
+        },
+      });
+    });
+    render(<SessionStartWizard />);
+
+    // The preselect lands the user on ③ Configure with compound selected.
+    await screen.findByTestId('wizard-step3');
+    expect(screen.getByTestId('wizard-cta')).toHaveTextContent('Run /compound');
+
+    // Launch — compound is not gated, so the CTA fires runs.start directly.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workflowId: 'wf-compound',
+        projectId: 1,
+        sessionId: 'session-ensured-001',
+        // substrate + permission still flow from the step-③ controls.
+        substrate: 'sdk',
+        permissionMode: 'default',
+        findingIds: ['finding-1', 'finding-2', 'finding-3'],
+      }),
+    );
+  });
+
+  it('surfaces the selected-findings count in the step-③ launch summary', async () => {
+    mockWorkflowsList.mockResolvedValue([SPRINT_WORKFLOW_ROW, COMPOUND_WORKFLOW_ROW]);
+    act(() => {
+      useNavigationStore.setState({
+        view: 'wizard',
+        wizardOpts: {
+          lockProjectId: 1,
+          preselectWorkflowName: 'compound',
+          selectedFindingIds: ['finding-1', 'finding-2'],
+        },
+      });
+    });
+    render(<SessionStartWizard />);
+
+    await screen.findByTestId('wizard-step3');
+    expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('2 selected');
+  });
+
+  it('threads an explicit per-run substrate + permission override alongside the seed', async () => {
+    // Proves the seed object does not break the step-③ control threading — the
+    // overridden substrate/permission ride the same conditional-spread mutate.
+    mockWorkflowsList.mockResolvedValue([SPRINT_WORKFLOW_ROW, COMPOUND_WORKFLOW_ROW]);
+    act(() => {
+      useNavigationStore.setState({
+        view: 'wizard',
+        wizardOpts: {
+          lockProjectId: 1,
+          preselectWorkflowName: 'compound',
+          selectedFindingIds: ['finding-1'],
+        },
+      });
+    });
+    render(<SessionStartWizard />);
+
+    await screen.findByTestId('wizard-step3');
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Permission mode: Auto'));
+    });
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select CLI substrate'), {
+        target: { value: 'interactive' },
+      });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({
+        substrate: 'interactive',
+        permissionMode: 'auto',
+        findingIds: ['finding-1'],
+      }),
+    );
+  });
+
+  it('reads the LIVE findingIds (no stale closure) when the opts change after mount', async () => {
+    // Stale-closure guard: launchRun lists selectedFindingIds in its useCallback
+    // dep array. If opts change while the wizard stays mounted (re-opened with a
+    // different selection), the launch must use the UPDATED ids — without the dep
+    // the closure would fire runs.start with the FIRST set. Mutating only
+    // selectedFindingIds (same preselectWorkflowName) keeps step ③ + the compound
+    // selection latched (loadWorkflows does not re-run on this field).
+    mockWorkflowsList.mockResolvedValue([SPRINT_WORKFLOW_ROW, COMPOUND_WORKFLOW_ROW]);
+    act(() => {
+      useNavigationStore.setState({
+        view: 'wizard',
+        wizardOpts: {
+          lockProjectId: 1,
+          preselectWorkflowName: 'compound',
+          selectedFindingIds: ['stale-1'],
+        },
+      });
+    });
+    render(<SessionStartWizard />);
+    await screen.findByTestId('wizard-step3');
+
+    // Re-open with a DIFFERENT selection (same preselect name → no list reload,
+    // step ③ + compound selection latched).
+    act(() => {
+      useNavigationStore.setState({
+        wizardOpts: {
+          lockProjectId: 1,
+          preselectWorkflowName: 'compound',
+          selectedFindingIds: ['fresh-1', 'fresh-2'],
+        },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(
+      expect.objectContaining({ findingIds: ['fresh-1', 'fresh-2'] }),
+    );
+  });
+
+  it('does NOT thread findingIds for a NON-compound flow even when ids are carried', async () => {
+    // The seed is compound-only: a non-compound launch must omit findingIds even
+    // if the wizard was opened with a selection (defensive — the CTA only ever
+    // carries ids alongside a compound preselect, but the gate is meta?.name).
+    // Preselect the custom flow by its unambiguous row id so we land on ③ with a
+    // non-compound selection.
+    mockWorkflowsList.mockResolvedValue([CUSTOM_WORKFLOW_ROW]);
+    act(() => {
+      useNavigationStore.setState({
+        view: 'wizard',
+        wizardOpts: {
+          lockProjectId: 1,
+          preselectWorkflowId: 'wf-1',
+          selectedFindingIds: ['finding-1', 'finding-2'],
+        },
+      });
+    });
+    render(<SessionStartWizard />);
+
+    await screen.findByTestId('wizard-step3');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    const callArg = mockRunStart.mock.calls[0]?.[0];
+    expect(callArg).toEqual(
+      expect.objectContaining({ workflowId: 'wf-1', projectId: 1 }),
+    );
+    // findingIds is conditionally spread off meta?.name==='compound', so a custom
+    // flow must never carry it.
+    expect(callArg).not.toHaveProperty('findingIds');
+    // The launch summary likewise omits the Findings row for a non-compound flow.
+    expect(screen.getByTestId('wizard-launch-summary')).not.toHaveTextContent('selected');
+  });
+});

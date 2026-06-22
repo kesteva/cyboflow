@@ -30,6 +30,13 @@ export interface WizardOpts {
    * session" button).
    */
   preselectWorkflowId?: string;
+  /**
+   * Selected finding ids (`review_items.id`) carried by the Insights triage
+   * tray's "Run compounding session" CTA. The wizard threads these into
+   * `runs.start` as `findingIds` — but ONLY when the launched workflow is
+   * `compound` (the seed is compound-only). Ignored for every other flow.
+   */
+  selectedFindingIds?: string[];
 }
 
 interface NavigationState {

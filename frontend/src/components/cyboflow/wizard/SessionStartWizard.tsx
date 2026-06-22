@@ -156,6 +156,11 @@ export default function SessionStartWizard(): React.JSX.Element {
   // review-queue "Start a new session"), where the card appears in step 2 once a
   // project is chosen. Not tied to `locked`, so the unlocked path can offer it.
   const allowQuick = opts?.allowQuick === true;
+  // Selected finding ids carried by the Insights triage tray CTA. Threaded into
+  // runs.start as `findingIds` ONLY when the launched flow is `compound` (the
+  // seed is compound-only); see launchRun. Read off the live store via the
+  // launchRun dep array so the launch closure never captures a stale set.
+  const selectedFindingIds = opts?.selectedFindingIds;
 
   // Step state. Locked mode opens on ② Workflow (project pinned); unlocked opens
   // on ① Project. ③ Configure is the shared launch step.
@@ -389,17 +394,29 @@ export default function SessionStartWizard(): React.JSX.Element {
         // (workflow_runs.session_id null), with nothing to bind the close-out
         // (Merge / PR / Dismiss) or the File Explorer / Diff to.
         const sessionId = await ensureSessionForLaunch(selectedProjectId, { forceNew: true });
-        const result: RunStartResult = await trpc.cyboflow.runs.start.mutate(
-          ideaId === undefined
-            ? { workflowId, projectId: selectedProjectId, sessionId, substrate, permissionMode }
-            : { workflowId, projectId: selectedProjectId, sessionId, substrate, permissionMode, ideaId },
-        );
+        // Resolve the launched flow's meta BEFORE the mutate so the seed gate can
+        // read meta?.name — the triage-tray finding ids are only seeded into a
+        // `compound` run.
+        const meta = workflowMetas.find((m) => m.id === workflowId);
+        // Single conditional-spread object (exactOptionalPropertyTypes-safe): the
+        // optional `ideaId` (planner) and `findingIds` (compound-only triage seed)
+        // are spread in only when present, so neither is ever sent as undefined.
+        const result: RunStartResult = await trpc.cyboflow.runs.start.mutate({
+          workflowId,
+          projectId: selectedProjectId,
+          sessionId,
+          substrate,
+          permissionMode,
+          ...(ideaId !== undefined ? { ideaId } : {}),
+          ...(selectedFindingIds?.length && meta?.name === 'compound'
+            ? { findingIds: selectedFindingIds }
+            : {}),
+        });
         // Nest the run under its session so the close-out + panels resolve
         // (setActiveRun's parentSessionId sets selectedSessionId).
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
         useNavigationStore.getState().setActiveProjectId(selectedProjectId);
 
-        const meta = workflowMetas.find((m) => m.id === workflowId);
         const slash = meta?.slashCommand ?? '/workflow';
         setToast(`Launching ${slash} on ${banner.name} ⌥ ${result.branchName}`);
 
@@ -411,7 +428,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode],
+    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, selectedFindingIds],
   );
 
   // Sprint launch — ONE session-hosted run seeded with the multi-selected task
@@ -749,6 +766,13 @@ export default function SessionStartWizard(): React.JSX.Element {
               {selection.kind === 'ultracode' && (
                 <SummaryRow label="Effort" value="ultracode (xhigh + auto workflows)" />
               )}
+              {/* Triage-tray seed: surfaced only for a compound launch carrying
+                  selected findings (the seed is compound-only). */}
+              {selectedFindingIds !== undefined &&
+                selectedFindingIds.length > 0 &&
+                selectedMeta?.name === 'compound' && (
+                  <SummaryRow label="Findings" value={`${selectedFindingIds.length} selected`} />
+                )}
             </div>
 
             {/* Launch CTA — last element inside the card. */}
