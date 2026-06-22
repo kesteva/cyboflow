@@ -8,6 +8,8 @@
  *   (c) clicking a quick session (no runId) → setActiveQuickSession(id, undefined) + setActiveProjectId
  *   (d) clicking a runId-backed session → setActiveQuickSession(id, runId) + setActiveProjectId
  *       (panel surface, NOT setActiveRun — avoids the __quick__ workflow-pane bug)
+ *   (d2) clicking a session that HOSTS an active workflow run → setActiveRun (run pane,
+ *        not the resting QuickSessionCanvas)
  *   (e) status indicator dot class differs across session statuses
  *   (f) empty session list renders the per-project "Start new session" CTA
  */
@@ -383,6 +385,30 @@ describe('DraggableProjectTreeView — active-session tree', () => {
     expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-wf', 'run-xyz');
     expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
     expect(mockSetActiveRun).not.toHaveBeenCalled();
+    expect(mockCloseHumanReview).toHaveBeenCalled();
+  });
+
+  it('(d2) clicking a session that HOSTS an active workflow run opens the run pane via setActiveRun', async () => {
+    // Regression: a session co-hosting a live (non-terminal) workflow run must open
+    // the RUN pane, not the resting "No active run" QuickSessionCanvas — the
+    // mismatch where clicking the run vs. its session gave two different views.
+    // The run is matched by workflow_runs.session_id in runsByProject (which is
+    // already terminal-filtered and excludes the __quick__ sentinel).
+    mockSessions = [makeSession({ id: 'sess-host', name: 'host-CLICK', projectId: 1, runId: null })];
+    mockRunsByProject = {
+      1: [makeRun({ id: 'run-live-1', session_id: 'sess-host', status: 'running' })],
+    };
+
+    await renderExpanded();
+    await waitFor(() => expect(screen.getByText('host-CLICK')).toBeInTheDocument());
+
+    const row = screen.getByText('host-CLICK').closest('[role="button"]');
+    expect(row).not.toBeNull();
+    fireEvent.click(row!);
+
+    expect(mockSetActiveRun).toHaveBeenCalledWith('run-live-1', 'sess-host');
+    expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
+    expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
     expect(mockCloseHumanReview).toHaveBeenCalled();
   });
 

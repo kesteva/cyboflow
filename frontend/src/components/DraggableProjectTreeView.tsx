@@ -877,17 +877,32 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   // ---------------------------------------------------------------------------
 
   const handleSessionClick = (session: Session) => {
-    // Rail sessions are quick sessions: open them via the panel surface, the same
-    // way useQuickSession does on creation. Passing runId (when the row was
-    // backfilled per TASK-788) starts the approval subscription; routing through
-    // setActiveRun instead would drive the workflow-run pane, which throws on the
-    // __quick__ sentinel in getPhaseState and renders a degraded text-only history.
-    // Picking a session leaves the human-review overview for its panel surface.
-    // Done unconditionally (not gated on projectId) so a quick session with a
-    // null projectId still dismisses the review pane.
+    // Picking a session leaves the human-review overview. Done unconditionally
+    // (not gated on projectId) so a quick session with a null projectId still
+    // dismisses the review pane.
     useNavigationStore.getState().closeHumanReview();
     useNavigationStore.getState().closeBacklog();
-    useCyboflowStore.getState().setActiveQuickSession(session.id, session.runId ?? undefined);
+
+    // If this session co-hosts an ACTIVE (non-terminal) workflow run, open the
+    // RUN pane instead of the resting QuickSessionCanvas. Otherwise the session
+    // view shows "No active run / Add a workflow" while a workflow is plainly
+    // running in it — the exact mismatch where clicking the run vs. the session
+    // gave two different views. runsByProject is already terminal-filtered AND
+    // excludes the quick session's __quick__ sentinel, so a hit here is a real,
+    // live workflow run; routing it through setActiveRun is therefore safe (no
+    // __quick__-sentinel throw in getPhaseState). Mirrors handleActiveRunClick.
+    const hostedRun =
+      session.projectId != null
+        ? (runsByProject[session.projectId] ?? []).find((r) => r.session_id === session.id)
+        : undefined;
+    if (hostedRun) {
+      useCyboflowStore.getState().setActiveRun(hostedRun.id, session.id);
+    } else {
+      // Rail sessions are quick sessions: open them via the panel surface, the
+      // same way useQuickSession does on creation. Passing runId (when the row
+      // was backfilled per TASK-788) starts the approval subscription.
+      useCyboflowStore.getState().setActiveQuickSession(session.id, session.runId ?? undefined);
+    }
     if (session.projectId != null) {
       useNavigationStore.getState().setActiveProjectId(session.projectId);
     }
