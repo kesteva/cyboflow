@@ -375,6 +375,72 @@ describe('SprintLaneStore', () => {
       }
     });
 
+    it('accepts a caller-supplied allowedStepIds value (in-set step writes; out-of-set rejected)', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      const allowedStepIds = ['design', 'build', 'ship'] as const;
+
+      // An id inside the custom vocabulary writes even though it is NOT a
+      // SPRINT_LANE_STEP_IDS member.
+      const lane = store.updateLane({
+        runId: 'run-1',
+        batchId,
+        taskId: 'tsk_a',
+        currentStepId: 'build',
+        allowedStepIds,
+      });
+      expect(lane.currentStepId).toBe('build');
+
+      // An id outside the custom vocabulary is rejected (no write).
+      try {
+        store.updateLane({
+          runId: 'run-1',
+          batchId,
+          taskId: 'tsk_a',
+          currentStepId: 'deploy',
+          allowedStepIds,
+        });
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect((err as SprintLaneError).code).toBe('bad_request');
+      }
+      const row = db
+        .prepare('SELECT current_step_id FROM sprint_batch_tasks WHERE batch_id = ?')
+        .get(batchId) as { current_step_id: string | null };
+      // Last successful write stands; the rejected 'deploy' did not land.
+      expect(row.current_step_id).toBe('build');
+    });
+
+    it('rejects a SPRINT_LANE_STEP_IDS step when a custom allowedStepIds excludes it', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      try {
+        store.updateLane({
+          runId: 'run-1',
+          batchId,
+          taskId: 'tsk_a',
+          // 'implement' is a real sprint lane step, but absent from this vocabulary.
+          currentStepId: 'implement',
+          allowedStepIds: ['design', 'build'],
+        });
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect((err as SprintLaneError).code).toBe('bad_request');
+      }
+    });
+
+    it('with no allowedStepIds still enforces SPRINT_LANE_STEP_IDS (orchestrated parity)', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      // A SPRINT_LANE_STEP_IDS member still writes.
+      const ok = store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', currentStepId: 'implement' });
+      expect(ok.currentStepId).toBe('implement');
+      // A non-member is still rejected (default vocabulary unchanged).
+      try {
+        store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', currentStepId: 'build' });
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect((err as SprintLaneError).code).toBe('bad_request');
+      }
+    });
+
     it('emits a SprintLaneChangedEvent on sprintLaneChannel(runId) after the write', () => {
       const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
 

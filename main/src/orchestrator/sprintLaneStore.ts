@@ -235,11 +235,17 @@ export class SprintLaneStore {
    * Rejections (SprintLaneError):
    *   - 'bad_request'    — neither status nor currentStepId given, status not
    *                        in the SprintBatchTaskStatus domain, a non-null
-   *                        currentStepId outside SPRINT_LANE_STEP_IDS, or an
+   *                        currentStepId outside the allowed step-id set, or an
    *                        attempt that is not an integer >= 1.
    *   - 'lane_not_found' — no (batch_id, task_id) row.
    *
    * `currentStepId` semantics: undefined = leave unchanged; null = clear.
+   * `allowedStepIds` semantics: the lane-step vocabulary a non-null
+   * `currentStepId` is validated against. undefined ⇒ defaults to
+   * SPRINT_LANE_STEP_IDS (the orchestrated / sprint contract — byte-identical
+   * to the pre-generalization behavior). The host fan-out driver passes a
+   * per-fanOut-step inner-id set so non-sprint flows declare their own lane
+   * vocabulary.
    * `attempt` semantics: sets the attempts column verbatim (1-based; the
    * orchestrator reports 2, 3, ... when re-delegating implement after a
    * verify failure — see SprintLaneRow.attempts). undefined = leave unchanged.
@@ -253,6 +259,7 @@ export class SprintLaneStore {
     status?: SprintBatchTaskStatus;
     currentStepId?: string | null;
     attempt?: number;
+    allowedStepIds?: readonly string[];
   }): SprintLaneRow {
     const { runId, batchId, taskId, status, currentStepId, attempt } = args;
 
@@ -262,14 +269,11 @@ export class SprintLaneStore {
     if (status !== undefined && !LANE_STATUSES.includes(status)) {
       throw new SprintLaneError('bad_request', `unknown lane status '${String(status)}'`);
     }
-    if (
-      currentStepId !== undefined &&
-      currentStepId !== null &&
-      !(SPRINT_LANE_STEP_IDS as readonly string[]).includes(currentStepId)
-    ) {
+    const allowed = args.allowedStepIds ?? (SPRINT_LANE_STEP_IDS as readonly string[]);
+    if (currentStepId !== undefined && currentStepId !== null && !allowed.includes(currentStepId)) {
       throw new SprintLaneError(
         'bad_request',
-        `unknown lane step '${currentStepId}' (expected one of ${SPRINT_LANE_STEP_IDS.join(', ')})`,
+        `unknown lane step '${currentStepId}' (expected one of ${allowed.join(', ')})`,
       );
     }
     if (attempt !== undefined && (!Number.isInteger(attempt) || attempt < 1)) {
