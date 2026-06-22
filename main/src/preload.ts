@@ -1,3 +1,4 @@
+import '@sentry/electron/preload';
 import { contextBridge, ipcRenderer } from 'electron';
 import { exposeElectronTRPC } from 'trpc-electron/main';
 import type { CreateSessionRequest, Session } from './types/session';
@@ -333,6 +334,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     update: (updates: UpdateConfigRequest): Promise<IPCResponse> => ipcRenderer.invoke('config:update', updates),
     getSessionPreferences: (): Promise<IPCResponse> => ipcRenderer.invoke('config:get-session-preferences'),
     updateSessionPreferences: (preferences: AppConfig['sessionCreationPreferences']): Promise<IPCResponse> => ipcRenderer.invoke('config:update-session-preferences', preferences),
+  },
+
+  // Telemetry (fire-and-forget renderer -> main)
+  telemetry: {
+    track: (eventName: string, properties?: Record<string, string | number | boolean>): void => {
+      ipcRenderer.send('telemetry:track', { eventName, properties });
+    },
   },
 
   // Prompts

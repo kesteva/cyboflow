@@ -21,6 +21,7 @@ import { registerEditorPanelHandlers } from './editorPanel';
 import { registerNimbalystHandlers } from './nimbalyst';
 import { registerCyboflowHandlers } from './cyboflow';
 import { registerIdeaAttachmentHandlers } from './ideaAttachments';
+import { registerTelemetryHandlers } from './telemetry';
 
 
 export function registerIpcHandlers(services: AppServices): void {
@@ -45,4 +46,5 @@ export function registerIpcHandlers(services: AppServices): void {
   registerNimbalystHandlers(ipcMain, services);
   registerCyboflowHandlers(ipcMain, services);
   registerIdeaAttachmentHandlers(ipcMain, services);
+  registerTelemetryHandlers(ipcMain, services);
 }
