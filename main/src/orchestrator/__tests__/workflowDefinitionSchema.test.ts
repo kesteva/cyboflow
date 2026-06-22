@@ -187,6 +187,90 @@ describe('validateWorkflowDefinition (reject cases)', () => {
   });
 });
 
+describe('workflowDefinitionSchema (fan-out)', () => {
+  // -------------------------------------------------------------------------
+  // Accept: a step that declares a valid fanOut spec passes the strict schema.
+  // -------------------------------------------------------------------------
+  it('accepts a step with a valid fanOut spec', () => {
+    const def = makeValidDefinition();
+    def.phases[1].steps[0].fanOut = {
+      over: 'tasks',
+      inner: [
+        { id: 'implement', agent: 'implement', name: 'Implement' },
+        { id: 'task-verify', agent: 'task-verify', name: 'Verify', optional: true },
+      ],
+    };
+    expect(() => validateWorkflowDefinition(def)).not.toThrow();
+    expect(validateWorkflowDefinition(def)).toEqual(def);
+  });
+
+  // -------------------------------------------------------------------------
+  // Reject: an empty inner array.
+  // -------------------------------------------------------------------------
+  it('rejects a fanOut with an empty inner array', () => {
+    const def = makeValidDefinition();
+    def.phases[1].steps[0].fanOut = { over: 'tasks', inner: [] };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  // -------------------------------------------------------------------------
+  // Reject: a missing/empty `over`.
+  // -------------------------------------------------------------------------
+  it('rejects a fanOut with an empty over key', () => {
+    const def = makeValidDefinition();
+    def.phases[1].steps[0].fanOut = {
+      over: '',
+      inner: [{ id: 'implement', agent: 'implement' }],
+    };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  // -------------------------------------------------------------------------
+  // Reject: duplicate inner step ids (superRefine, per-step).
+  // -------------------------------------------------------------------------
+  it('rejects duplicate fanOut inner step ids', () => {
+    const def = makeValidDefinition();
+    def.phases[1].steps[0].fanOut = {
+      over: 'tasks',
+      inner: [
+        { id: 'implement', agent: 'implement' },
+        { id: 'implement', agent: 'write-tests' },
+      ],
+    };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  // -------------------------------------------------------------------------
+  // Reject: an inner loopback that targets a non-existent inner id.
+  // -------------------------------------------------------------------------
+  it('rejects a fanOut inner loopback to a missing inner id', () => {
+    const def = makeValidDefinition();
+    def.phases[1].steps[0].fanOut = {
+      over: 'tasks',
+      inner: [
+        { id: 'implement', agent: 'implement' },
+        { id: 'task-verify', agent: 'task-verify', loopback: 'does-not-exist' },
+      ],
+    };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  // -------------------------------------------------------------------------
+  // Accept: an inner loopback that targets an existing inner id.
+  // -------------------------------------------------------------------------
+  it('accepts a fanOut inner loopback to an existing inner id', () => {
+    const def = makeValidDefinition();
+    def.phases[1].steps[0].fanOut = {
+      over: 'tasks',
+      inner: [
+        { id: 'implement', agent: 'implement' },
+        { id: 'task-verify', agent: 'task-verify', loopback: 'implement' },
+      ],
+    };
+    expect(() => validateWorkflowDefinition(def)).not.toThrow();
+  });
+});
+
 describe('workflowDefinitionSchema (direct .safeParse use as a tRPC input)', () => {
   // -------------------------------------------------------------------------
   // The schema is exported for direct use as a tRPC .input() field. Confirm it

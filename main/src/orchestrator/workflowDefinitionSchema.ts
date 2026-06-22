@@ -35,6 +35,28 @@ const hexColor = z
   .regex(/^#[0-9a-fA-F]{6}$/, 'must be a 6-digit hex colour, e.g. #3b6dd6');
 
 /**
+ * One inner step of a fan-out chain. Mirrors `FanOutInnerStep`. Inner-id
+ * uniqueness and inner-loopback targeting are enforced at the definition level
+ * (they need sibling context — see `superRefine`).
+ */
+const fanOutInnerStepSchema = z.object({
+  id: kebabCaseId,
+  agent: z.string().min(1, 'fan-out inner step agent is required'),
+  optional: z.boolean().optional(),
+  loopback: z.string().optional(),
+  name: z.string().optional(),
+});
+
+/**
+ * A fan-out spec: an item-source key (`over`) plus a non-empty ordered inner
+ * chain. Mirrors `FanOutSpec`.
+ */
+const fanOutSchema = z.object({
+  over: z.string().min(1, 'fanOut.over is required'),
+  inner: z.array(fanOutInnerStepSchema).min(1, 'fanOut.inner needs at least one step'),
+});
+
+/**
  * A single step. Required: id (kebab), name, agent. Optional fields mirror
  * `WorkflowStep`. No invariants are enforced here — uniqueness and loopback
  * targeting are validated at the definition level (they need sibling context).
@@ -49,6 +71,7 @@ export const workflowStepSchema = z.object({
   human: z.boolean().optional(),
   loopback: z.string().optional(),
   desc: z.string().optional(),
+  fanOut: fanOutSchema.optional(),
 }) satisfies z.ZodType<WorkflowStep>;
 
 /**
@@ -100,6 +123,31 @@ export const workflowDefinitionSchema = z
           });
         }
         seenStepIds.add(step.id);
+
+        // Per-step fan-out invariants: inner ids unique, inner loopbacks
+        // reference an inner id within the SAME chain.
+        if (step.fanOut !== undefined) {
+          const seenInnerIds = new Set<string>();
+          step.fanOut.inner.forEach((inner, innerIndex) => {
+            if (seenInnerIds.has(inner.id)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `duplicate fan-out inner step id '${inner.id}' in step '${step.id}'`,
+                path: ['phases', phaseIndex, 'steps', stepIndex, 'fanOut', 'inner', innerIndex, 'id'],
+              });
+            }
+            seenInnerIds.add(inner.id);
+          });
+          step.fanOut.inner.forEach((inner, innerIndex) => {
+            if (inner.loopback !== undefined && !seenInnerIds.has(inner.loopback)) {
+              ctx.addIssue({
+                code: z.ZodIssueCode.custom,
+                message: `fan-out loopback '${inner.loopback}' must reference an inner step id within step '${step.id}'`,
+                path: ['phases', phaseIndex, 'steps', stepIndex, 'fanOut', 'inner', innerIndex, 'loopback'],
+              });
+            }
+          });
+        }
       });
 
       // Loopback targets must be intra-phase (reference a step in this phase).

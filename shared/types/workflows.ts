@@ -189,6 +189,39 @@ export type CyboflowWorkflowName = (typeof CYBOFLOW_WORKFLOW_NAMES)[number];
 // ─── Phase / Step data model ─────────────────────────────────────────────────
 
 /**
+ * One inner step of a fan-out chain. The host walks EACH resolved item through
+ * the inner chain sequentially; `id` becomes the lane `currentStepId` vocabulary
+ * for the owning fanOut step (generalizing SPRINT_LANE_STEP_IDS).
+ */
+export interface FanOutInnerStep {
+  /** Stable kebab-case id — becomes a lane currentStepId value. */
+  id: string;
+  /** Agent id string (delegates to cyboflow-<agent>); same contract as WorkflowStep.agent. */
+  agent: string;
+  /** When true a failed inner step is skipped (lane continues) rather than failing the item. */
+  optional?: boolean;
+  /** Intra-chain loopback target id (v1: reserved/simple — see controller note). */
+  loopback?: string;
+  /** Human-readable name for prompts/UI; falls back to id when absent. */
+  name?: string;
+}
+
+/**
+ * Declares an OUTER step as a parallel per-item fan-out. The host resolves the
+ * runtime item set keyed by `over` (e.g. 'tasks' → the run's batch lane task ids)
+ * and walks each item through `inner` with bounded concurrency, driving a lane
+ * per item. ONLY honored on the programmatic plane; ignored (the step runs as a
+ * normal single agent step) on the orchestrated plane and whenever no item set
+ * resolves.
+ */
+export interface FanOutSpec {
+  /** Runtime item-source key. v1 recognizes 'tasks' (→ batch lane task ids). */
+  over: string;
+  /** Ordered inner chain each item walks; ids form the lane step vocabulary. */
+  inner: FanOutInnerStep[];
+}
+
+/**
  * A single step within a workflow phase.
  *
  * @remarks
@@ -227,6 +260,12 @@ export interface WorkflowStep {
   loopback?: string;
   /** Short description shown in the phase editor tooltip / right-rail feed. */
   desc?: string;
+  /**
+   * Optional parallel fan-out. When present AND the run is programmatic AND an
+   * item set resolves, the host walks each item through `fanOut.inner` driving a
+   * per-item lane. Additive — absent ⇒ a normal step (today's behavior).
+   */
+  fanOut?: FanOutSpec;
 }
 
 /**
