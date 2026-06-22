@@ -311,3 +311,114 @@ describe('SprintSwimlaneCanvas — summary, merge gate, plan + verify columns', 
     expect(screen.getByTestId('swimlane-execute-header')).toHaveTextContent('EXECUTE / PARALLEL ×7');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Generalized lane strip — derives the per-lane step cards from the active
+// fanOut step's inner ids (sprint = byte-identical; non-sprint defs render
+// their own inner-chain ids).
+// ---------------------------------------------------------------------------
+
+describe('SprintSwimlaneCanvas — generalized fanOut lane strip', () => {
+  it('renders the canonical 5 sprint lane step cards for a sprint def (regression)', async () => {
+    await renderCanvas();
+
+    // The fixed SPRINT_LANE_STEP_IDS strip survives the generalization unchanged.
+    for (const stepId of ['implement', 'write-tests', 'code-review', 'task-verify', 'visual-verify']) {
+      expect(screen.getByTestId(`swimlane-step-t1-${stepId}`)).toBeInTheDocument();
+    }
+    // No extra/foreign step cards leak in.
+    expect(screen.queryByTestId('swimlane-step-t1-deploy')).toBeNull();
+  });
+
+  it('derives the lane step strip from a non-sprint fanOut def with 3 inner ids', async () => {
+    // A synthetic non-sprint definition whose middle step declares a 3-step
+    // fanOut chain — the lane strip must derive those 3 ids, not the sprint 5.
+    const fanOutPhaseState: UseWorkflowPhaseStateResult = {
+      definition: {
+        id: 'custom-fan',
+        phases: [
+          {
+            id: 'plan',
+            label: 'Plan',
+            color: '#3b6dd6',
+            steps: [{ id: 'scope', name: 'Scope', agent: 'planner', mcps: [], retries: 0 }],
+          },
+          {
+            id: 'execute',
+            label: 'Execute',
+            color: '#c96442',
+            steps: [
+              {
+                id: 'fan-step',
+                name: 'Fan step',
+                agent: 'executor',
+                mcps: [],
+                retries: 0,
+                fanOut: {
+                  over: 'tasks',
+                  inner: [
+                    { id: 'build', agent: 'builder', name: 'Build' },
+                    { id: 'lint', agent: 'linter', name: 'Lint' },
+                    { id: 'deploy', agent: 'deployer', optional: true },
+                  ],
+                },
+              },
+            ],
+          },
+          {
+            id: 'verify',
+            label: 'Verify',
+            color: '#2d8a5b',
+            steps: [{ id: 'final-review', name: 'Final review', agent: 'reviewer', mcps: [], retries: 0 }],
+          },
+        ],
+      },
+      currentStepId: 'fan-step',
+      stepStates: [],
+      isLoading: false,
+      error: null,
+    };
+
+    // A single running lane on the second inner step ('lint').
+    const customLanes: SprintLaneRow[] = [
+      {
+        ...baseLane,
+        taskId: 'tc1',
+        status: 'running',
+        currentStepId: 'lint',
+        ref: 'TASK-C1',
+        title: 'Custom task',
+        attempts: 0,
+        blockedByRefs: [],
+      },
+    ];
+    lanesQuerySpy.mockResolvedValue(customLanes);
+
+    render(
+      <SprintSwimlaneCanvas runId="run-2" phaseState={fanOutPhaseState} sprintStatus="running" />,
+    );
+    await screen.findByTestId('swimlane-lane-tc1');
+
+    // Exactly the 3 fanOut inner ids render (label = name ?? id).
+    expect(screen.getByTestId('swimlane-step-tc1-build')).toHaveTextContent('Build');
+    expect(screen.getByTestId('swimlane-step-tc1-lint')).toHaveTextContent('Lint');
+    // 'deploy' has no name → falls back to its id as the label.
+    expect(screen.getByTestId('swimlane-step-tc1-deploy')).toHaveTextContent('deploy');
+
+    // The sprint vocabulary is absent for a non-sprint def.
+    expect(screen.queryByTestId('swimlane-step-tc1-implement')).toBeNull();
+    expect(screen.queryByTestId('swimlane-step-tc1-code-review')).toBeNull();
+
+    // Status derivation honors the derived strip order: before-current done,
+    // current running, after pending.
+    expect(
+      screen.getByTestId('swimlane-step-tc1-build').getAttribute('data-status'),
+    ).toBe('done');
+    expect(
+      screen.getByTestId('swimlane-step-tc1-lint').getAttribute('data-status'),
+    ).toBe('running');
+    expect(
+      screen.getByTestId('swimlane-step-tc1-deploy').getAttribute('data-status'),
+    ).toBe('pending');
+  });
+});

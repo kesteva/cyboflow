@@ -27,6 +27,7 @@
 import { useSprintLanes } from '../../hooks/useSprintLanes';
 import type { SprintLane } from '../../hooks/useSprintLanes';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
+import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import { WorkflowStepCard } from './WorkflowStepCard';
 import type { StepStatus } from './WorkflowStepCard';
 import {
@@ -67,6 +68,41 @@ const LANE_STEP_SHORT_LABEL: Readonly<Record<SprintLaneStepId, string>> = {
   'visual-verify': 'Visual check',
 };
 
+/** One column of the lane step strip — id (lane currentStepId vocabulary) + label. */
+interface LaneStepColumn {
+  id: string;
+  label: string;
+  optional: boolean;
+}
+
+/**
+ * Derives the lane step strip (ids + labels) from the active workflow definition.
+ *
+ * Generalizes the fixed SPRINT_LANE_STEP_IDS strip to any fanOut step: scans the
+ * definition's phases for the FIRST step that declares `fanOut` and maps its
+ * `inner` chain to columns (label = inner.name ?? inner.id; optional from the
+ * inner step). When no fanOut step is present (e.g. an orchestrated/legacy def or
+ * a null definition) it falls back to SPRINT_LANE_STEP_IDS with the canonical
+ * short labels — so the sprint flow renders byte-identically.
+ */
+function laneStepIdsFor(definition: WorkflowDefinition | null): LaneStepColumn[] {
+  const fanOutStep = definition?.phases
+    .flatMap((p) => p.steps)
+    .find((s) => s.fanOut !== undefined);
+  if (fanOutStep?.fanOut !== undefined) {
+    return fanOutStep.fanOut.inner.map((inner) => ({
+      id: inner.id,
+      label: inner.name ?? inner.id,
+      optional: inner.optional === true,
+    }));
+  }
+  return SPRINT_LANE_STEP_IDS.map((id) => ({
+    id,
+    label: LANE_STEP_SHORT_LABEL[id],
+    optional: id === 'visual-verify',
+  }));
+}
+
 /**
  * Derives the five per-step states from the lane:
  *   integrated      → all done;
@@ -74,23 +110,20 @@ const LANE_STEP_SHORT_LABEL: Readonly<Record<SprintLaneStepId, string>> = {
  *                     (failed styling on a failed lane), after pending;
  *   queued/blocked  → all pending (also when current_step_id is null/unknown).
  */
-function laneStepStatuses(lane: SprintLane): LaneStepStatus[] {
+function laneStepStatuses(lane: SprintLane, stepIds: readonly string[]): LaneStepStatus[] {
   if (lane.status === 'integrated') {
-    return SPRINT_LANE_STEP_IDS.map(() => 'done');
+    return stepIds.map(() => 'done');
   }
   if (lane.status === 'running' || lane.status === 'failed') {
-    const idx =
-      lane.currentStepId === null
-        ? -1
-        : (SPRINT_LANE_STEP_IDS as readonly string[]).indexOf(lane.currentStepId);
-    return SPRINT_LANE_STEP_IDS.map((_, i) => {
+    const idx = lane.currentStepId === null ? -1 : stepIds.indexOf(lane.currentStepId);
+    return stepIds.map((_, i) => {
       if (idx === -1) return 'pending';
       if (i < idx) return 'done';
       if (i === idx) return lane.status === 'failed' ? 'failed' : 'running';
       return 'pending';
     });
   }
-  return SPRINT_LANE_STEP_IDS.map(() => 'pending');
+  return stepIds.map(() => 'pending');
 }
 
 /** Lane chip per contract #6. */
@@ -155,11 +188,13 @@ const CHIP_DOT_COLOR: Readonly<Record<LaneChip, string>> = {
 function LaneStepCard({
   taskId,
   stepId,
+  label,
   status,
   optional,
 }: {
   taskId: string;
-  stepId: SprintLaneStepId;
+  stepId: string;
+  label: string;
   status: LaneStepStatus;
   optional: boolean;
 }) {
@@ -255,7 +290,7 @@ function LaneStepCard({
             textOverflow: 'ellipsis',
           }}
         >
-          {LANE_STEP_SHORT_LABEL[stepId]}
+          {label}
         </span>
         {optional && (
           <span
@@ -289,6 +324,10 @@ export function SprintSwimlaneCanvas({
 }: SprintSwimlaneCanvasProps) {
   const { lanes } = useSprintLanes(runId);
   const definition = phaseState.definition;
+
+  // Lane step strip — derived from the active fanOut step's inner ids (falls back
+  // to SPRINT_LANE_STEP_IDS for sprint / non-fanOut defs, so sprint is identical).
+  const laneSteps = laneStepIdsFor(definition);
 
   // ── Workflow-step state derivation (same ordering rule as WorkflowCanvas) ──
   const stepIds = definition?.phases.flatMap((p) => p.steps.map((s) => s.id)) ?? [];
@@ -460,7 +499,7 @@ export function SprintSwimlaneCanvas({
             {lanes.map((lane) => {
               const chip = laneChip(lane);
               const contextLabel = laneContextLabel(lane);
-              const stepStatuses = laneStepStatuses(lane);
+              const stepStatuses = laneStepStatuses(lane, laneSteps.map((s) => s.id));
               const displayRef = lane.ref ?? lane.taskId;
 
               return (
@@ -548,15 +587,16 @@ export function SprintSwimlaneCanvas({
                     </span>
                   </div>
 
-                  {/* Five lane step cards */}
+                  {/* Lane step cards — derived from the active fanOut inner ids */}
                   <div style={{ display: 'flex', gap: 6 }}>
-                    {SPRINT_LANE_STEP_IDS.map((stepId, i) => (
+                    {laneSteps.map((laneStep, i) => (
                       <LaneStepCard
-                        key={stepId}
+                        key={laneStep.id}
                         taskId={lane.taskId}
-                        stepId={stepId}
+                        stepId={laneStep.id}
+                        label={laneStep.label}
                         status={stepStatuses[i]}
-                        optional={stepId === 'visual-verify'}
+                        optional={laneStep.optional}
                       />
                     ))}
                   </div>
