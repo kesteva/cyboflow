@@ -5,6 +5,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { resolveClaudeExecutablePath } from './claudeExecutablePath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
+import { CONTEXT_1M_BETA, modelSupportsContext1M } from './modelContext';
 import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
 import type Database from 'better-sqlite3';
@@ -755,6 +756,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
     if (options.model && options.model !== 'auto') {
       sdkOptions.model = options.model;
+    }
+
+    // Enable the 1M-token context window for Sonnet 4/4.5 (the only family the SDK
+    // beta supports). Without this a Sonnet run reports a 200k window, so the chat
+    // context meter caps at 200k even though the model is 1M-capable.
+    if (modelSupportsContext1M(options.model)) {
+      sdkOptions.betas = [CONTEXT_1M_BETA];
     }
 
     // Piece C — idle-chat nudge. An explicit resumeSessionId (threaded by
