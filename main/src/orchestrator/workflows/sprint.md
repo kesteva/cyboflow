@@ -42,10 +42,17 @@ The pattern for every phase:
 ### Phase 1 — Plan
 
 1. **Analyze dependencies** → report the step, then delegate to
-   `cyboflow-dependency-analyzer`, passing it the sprint's seeded tasks — for each
-   task: its id, title, body, acceptance criteria, and the files it is expected to
-   touch. Ask it to return a `## Dependencies` section listing proposed
-   `task → depends-on` **blocking** edges, each with a one-line reason.
+   `cyboflow-dependency-analyzer`, passing it **exactly** the tasks in the
+   `# Sprint tasks` block prepended above — every one of them, and no others. That
+   block is the authoritative in-scope set (the same set the Execute phase fans out
+   over) and the single source of truth for which tasks are in this sprint and
+   whether a task is in scope. **Never** read on-disk or worktree state files to
+   decide the task set or a task's status — any task-tracking file or plugin state
+   directory a target repo may still carry is NOT cyboflow's source of truth and may
+   be stale. For each in-scope task pass its id, title, body, acceptance criteria,
+   and the files it is expected to touch. Ask it to return a `## Dependencies`
+   section listing proposed `task → depends-on` **blocking** edges, each with a
+   one-line reason.
 2. **Write the edges.** For **each** edge in the analyzer's `## Dependencies`
    result, call `cyboflow_add_task_dependency` with `task_id` = the blocked task,
    `depends_on_task_id` = the prerequisite, and `kind: "blocking"`. The write
@@ -148,6 +155,11 @@ Enter this phase only after **every** lane is terminal (`integrated` or `failed`
   subagents return results and you persist them. Never write task state to disk — no
   per-task markdown files and no plugin state directory. The database is the only
   store.
+- **Task scope is fixed at launch.** The in-scope tasks are exactly the
+  `# Sprint tasks` block prepended to this prompt. Dependency analysis, every
+  per-task chain, and sprint-verify all operate on that exact set — never add,
+  drop, or re-scope tasks, and never re-derive the task list or a task's status
+  from disk, a plugin state directory, or the live backlog mid-run.
 - **Lane discipline.** Every lane transition goes through
   `cyboflow_update_sprint_task` at the moment it happens — never batch or backfill
   lane updates.
