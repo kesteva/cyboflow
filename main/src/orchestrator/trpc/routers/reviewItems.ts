@@ -7,6 +7,10 @@
  *   - resolve          : mutation     -> { reviewItemId } (ReviewItemRouter triage)
  *   - dismiss          : mutation     -> { reviewItemId } (ReviewItemRouter triage)
  *   - promoteToTask    : mutation     -> { reviewItemId, taskId } (TWO chokepoints)
+ *   - setTag           : mutation     -> { reviewItemId } (findings triage — re-tag)
+ *   - setPriority      : mutation     -> { reviewItemId } (findings triage — re-prioritize)
+ *   - approve          : mutation     -> { reviewItemId, staged } (untriaged -> ready)
+ *   - setSelected      : mutation     -> { count } (batch compound-selection toggle)
  *   - onReviewItemChanged : subscription -> ReviewItemChangedEvent (project-scoped)
  *
  * Triage validation lives ENTIRELY in the chokepoint (ReviewItemRouter). This
@@ -145,9 +149,17 @@ function assertNotOpenQuestionGate(db: DatabaseLike, reviewItemId: string, proje
 export const reviewItemsRouter = router({
   /**
    * List the review inbox for a project, newest-first, with optional filters on
-   * status / kind / blocking / runId. Returns ReviewItem[] so the inferred
-   * AppRouter type carries the full read-model (incl. parsed payload + boolean
-   * `blocking`) to the renderer.
+   * status / kind / blocking / runId / staged / selected. Returns ReviewItem[]
+   * so the inferred AppRouter type carries the full read-model (incl. parsed
+   * payload + boolean `blocking` + finding-scoped priority/staged_at/selected)
+   * to the renderer.
+   *
+   * SINGLE-FETCH CONTRACT (findings triage): the Insights store derives BOTH the
+   * UNTRIAGED and READY sections from ONE call
+   * `list({ projectId, kind: 'finding', status: 'pending' })` — untriaged =
+   * `staged_at` null, ready = `staged_at` set. The optional `staged`/`selected`
+   * filters exist for targeted reads but the triage view deliberately fetches
+   * once and partitions client-side.
    */
   list: protectedProcedure
     .input(
@@ -157,6 +169,10 @@ export const reviewItemsRouter = router({
         kind: kindSchema.optional(),
         blocking: z.boolean().optional(),
         runId: z.string().min(1).optional(),
+        /** true => staged_at IS NOT NULL (ready); false => staged_at IS NULL (untriaged). */
+        staged: z.boolean().optional(),
+        /** true => selected = 1; false => selected = 0. */
+        selected: z.boolean().optional(),
       }),
     )
     .query(async ({ input, ctx }): Promise<ReviewItem[]> => {
@@ -179,14 +195,30 @@ export const reviewItemsRouter = router({
         clauses.push('ri.run_id = ?');
         params.push(input.runId);
       }
-      // Hide orphaned PENDING items whose bound run has gone terminal
+      if (input.staged !== undefined) {
+        clauses.push(input.staged ? 'ri.staged_at IS NOT NULL' : 'ri.staged_at IS NULL');
+      }
+      if (input.selected !== undefined) {
+        clauses.push('ri.selected = ?');
+        params.push(input.selected ? 1 : 0);
+      }
+      // Hide orphaned UNTRIAGED PENDING items whose bound run has gone terminal
       // (canceled/failed/completed): the gate can never be actioned — there is
       // no live run to resume — so it must not clutter the queue or inflate the
       // blocking count (ReviewQueueView derives both list + blockingCount from
       // this query). Items with no run binding (run_id NULL) and items already
       // resolved/dismissed are unaffected — the LEFT JOIN keeps them.
+      //
+      // STAGED findings survive (staged_at IS NOT NULL): the human explicitly
+      // approved them into READY-to-compound, so they must remain even after the
+      // producing run goes terminal — the human's keep signal overrides the
+      // orphan-hide. This relaxation is finding-scoped only in effect: it KEEPS
+      // a staged row, and a staged row is necessarily a finding (only findings
+      // are stageable). The Review Queue's blocking/permission view filters
+      // `kind != 'finding'`, so a kept staged finding can NEVER leak into the
+      // blocking count or the gate/permission list (verified: ReviewQueueView).
       clauses.push(
-        `NOT (ri.status = 'pending' AND ri.run_id IS NOT NULL AND r.status IN ${TERMINAL_RUN_STATUSES_SQL_IN})`,
+        `NOT (ri.status = 'pending' AND ri.staged_at IS NULL AND ri.run_id IS NOT NULL AND r.status IN ${TERMINAL_RUN_STATUSES_SQL_IN})`,
       );
       const rows = db
         .prepare(
@@ -370,6 +402,121 @@ export const reviewItemsRouter = router({
         });
 
         return { reviewItemId, taskId };
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * Re-tag a finding (findings triage). Forwards op='mutate' with the new
+   * proposedTarget as actor='user' to the chokepoint, which rewrites the item's
+   * payload (applied-not-consumed; untriaged-only). A non-finding or already-
+   * staged item surfaces ReviewItemError -> TRPCError ('invalid_payload' ->
+   * BAD_REQUEST, 'invalid_status' -> CONFLICT).
+   */
+  setTag: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.number().int().positive(),
+        reviewItemId: z.string().min(1),
+        proposedTarget: z.enum(['backlog', 'docs', 'prompt', 'fix']),
+      }),
+    )
+    .mutation(async ({ input, ctx }): Promise<{ reviewItemId: string }> => {
+      requireDb(ctx.db, 'setTag');
+      try {
+        const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
+          op: 'mutate',
+          actor: 'user',
+          reviewItemId: input.reviewItemId,
+          proposedTarget: input.proposedTarget,
+        });
+        return { reviewItemId };
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * Re-prioritize a finding (findings triage). Forwards op='mutate' with the new
+   * priority as actor='user' to the chokepoint (applied-not-consumed; untriaged-
+   * only). An already-staged item surfaces 'invalid_status' -> CONFLICT.
+   */
+  setPriority: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.number().int().positive(),
+        reviewItemId: z.string().min(1),
+        priority: z.enum(['P0', 'P1', 'P2']),
+      }),
+    )
+    .mutation(async ({ input, ctx }): Promise<{ reviewItemId: string }> => {
+      requireDb(ctx.db, 'setPriority');
+      try {
+        const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
+          op: 'mutate',
+          actor: 'user',
+          reviewItemId: input.reviewItemId,
+          priority: input.priority,
+        });
+        return { reviewItemId };
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * Approve an untriaged finding into READY-to-compound (findings triage).
+   * Forwards op='approve' as actor='user'; the chokepoint sets
+   * `staged_at = CURRENT_TIMESTAMP, selected = 1` (untriaged-only). A non-pending
+   * or already-staged item surfaces 'invalid_status' -> CONFLICT.
+   */
+  approve: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.number().int().positive(),
+        reviewItemId: z.string().min(1),
+      }),
+    )
+    .mutation(async ({ input, ctx }): Promise<{ reviewItemId: string; staged: true }> => {
+      requireDb(ctx.db, 'approve');
+      try {
+        const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
+          op: 'approve',
+          actor: 'user',
+          reviewItemId: input.reviewItemId,
+        });
+        return { reviewItemId, staged: true };
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
+  /**
+   * Batch-toggle the compound-selection flag on one or more READY findings
+   * (findings triage). Forwards op='set-selected' as actor='user'; the chokepoint
+   * UPDATEs `selected` over the explicit id list (only staged items are
+   * selectable) and emits one 'selection-changed' event per affected id. Returns
+   * the count of ids requested (the renderer reconciles via the per-id events).
+   */
+  setSelected: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.number().int().positive(),
+        reviewItemIds: z.array(z.string().min(1)).min(1),
+        selected: z.boolean(),
+      }),
+    )
+    .mutation(async ({ input, ctx }): Promise<{ count: number }> => {
+      requireDb(ctx.db, 'setSelected');
+      try {
+        await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
+          op: 'set-selected',
+          actor: 'user',
+          reviewItemIds: input.reviewItemIds,
+          selected: input.selected,
+        });
+        return { count: input.reviewItemIds.length };
       } catch (err) {
         rethrowAsTRPCError(err);
       }

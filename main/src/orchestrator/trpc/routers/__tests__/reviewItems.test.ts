@@ -60,6 +60,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '032_findings_triage.sql'), 'utf-8'));
   return db;
 }
 
@@ -159,6 +160,66 @@ describe('cyboflow.reviewItems.list / get', () => {
     expect(blocking.map((i) => i.id)).toEqual([live.reviewItemId]);
   });
 
+  it('surfaces finding-scoped priority/staged_at/selected on shaped items', async () => {
+    const { caller, db } = buildCaller();
+
+    const created = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create',
+      actor: 'agent:executor',
+      kind: 'finding',
+      title: 'has triage columns',
+    });
+
+    // Fresh finding: priority NULL, staged_at NULL (untriaged), selected false.
+    const fresh = await caller.cyboflow.reviewItems.list({ projectId: 1, kind: 'finding', status: 'pending' });
+    expect(fresh).toHaveLength(1);
+    expect(fresh[0].priority).toBeNull();
+    expect(fresh[0].staged_at).toBeNull();
+    expect(fresh[0].selected).toBe(false);
+
+    // Drive the columns directly (set-priority + stage + select) and re-read.
+    await caller.cyboflow.reviewItems.setPriority({ projectId: 1, reviewItemId: created.reviewItemId, priority: 'P0' });
+    await caller.cyboflow.reviewItems.approve({ projectId: 1, reviewItemId: created.reviewItemId });
+
+    const staged = await caller.cyboflow.reviewItems.list({ projectId: 1, kind: 'finding', status: 'pending' });
+    expect(staged).toHaveLength(1);
+    expect(staged[0].priority).toBe('P0');
+    expect(staged[0].staged_at).not.toBeNull(); // approve set CURRENT_TIMESTAMP
+    expect(staged[0].selected).toBe(true); // approve pre-selects
+
+    // shapeRow normalizes the raw 0/1 INTEGER to a boolean.
+    const raw = db.prepare('SELECT selected FROM review_items WHERE id = ?').get(created.reviewItemId) as {
+      selected: number;
+    };
+    expect(raw.selected).toBe(1);
+  });
+
+  it('keeps a STAGED finding after its run goes terminal, hides an UNTRIAGED one', async () => {
+    const { caller, db } = buildCaller();
+
+    db.prepare(`INSERT INTO workflows (id, project_id, name) VALUES ('wf-1-compound', 1, 'compound')`).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, branch_name, status, policy_json)
+       VALUES ('run-done', 'wf-1-compound', 1, '/w/done', 'b/done', 'completed', '{}')`,
+    ).run();
+
+    // Two findings on the SAME terminal run: one staged (kept), one untriaged (hidden).
+    const staged = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:executor', kind: 'finding', title: 'staged on done run', runId: 'run-done',
+    });
+    const untriaged = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:executor', kind: 'finding', title: 'untriaged on done run', runId: 'run-done',
+    });
+
+    // Stage one of them (untriaged-only approve before the run is read again).
+    await caller.cyboflow.reviewItems.approve({ projectId: 1, reviewItemId: staged.reviewItemId });
+
+    const pending = await caller.cyboflow.reviewItems.list({ projectId: 1, kind: 'finding', status: 'pending' });
+    const ids = pending.map((i) => i.id);
+    expect(ids).toContain(staged.reviewItemId); // staged_at set => human keep signal survives terminal run
+    expect(ids).not.toContain(untriaged.reviewItemId); // untriaged on a dead run stays hidden
+  });
+
   it('get returns the single item, or null when absent', async () => {
     const { caller } = buildCaller();
     const created = await ReviewItemRouter.getInstance().applyReviewItem(1, {
@@ -230,6 +291,152 @@ describe('cyboflow.reviewItems.resolve / dismiss', () => {
       title: 'T',
     });
     await caller.cyboflow.reviewItems.resolve({ projectId: 1, reviewItemId: created.reviewItemId });
+    await expect(
+      caller.cyboflow.reviewItems.resolve({ projectId: 1, reviewItemId: created.reviewItemId }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'CONFLICT');
+  });
+});
+
+describe('cyboflow.reviewItems findings-triage mutations', () => {
+  it('setTag forwards op=mutate / actor=user and re-tags the finding payload', async () => {
+    const { caller, db } = buildCaller();
+    const created = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:executor', kind: 'finding', title: 'tag me',
+    });
+
+    const res = await caller.cyboflow.reviewItems.setTag({
+      projectId: 1, reviewItemId: created.reviewItemId, proposedTarget: 'fix',
+    });
+    expect(res).toEqual({ reviewItemId: created.reviewItemId });
+
+    const row = db.prepare('SELECT payload_json FROM review_items WHERE id = ?').get(created.reviewItemId) as {
+      payload_json: string | null;
+    };
+    const payload = JSON.parse(row.payload_json ?? '{}') as { proposedTarget?: string };
+    expect(payload.proposedTarget).toBe('fix');
+
+    // entity_events records the mutate as actor='user' on the chokepoint.
+    const actor = db
+      .prepare(
+        `SELECT actor FROM entity_events WHERE entity_type = 'review_item' AND entity_id = ?
+          ORDER BY seq DESC LIMIT 1`,
+      )
+      .get(created.reviewItemId) as { actor: string };
+    expect(actor.actor).toBe('user');
+  });
+
+  it('setPriority forwards op=mutate / actor=user and sets the priority column', async () => {
+    const { caller, db } = buildCaller();
+    const created = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:executor', kind: 'finding', title: 'prioritize me',
+    });
+
+    const res = await caller.cyboflow.reviewItems.setPriority({
+      projectId: 1, reviewItemId: created.reviewItemId, priority: 'P1',
+    });
+    expect(res).toEqual({ reviewItemId: created.reviewItemId });
+
+    const row = db.prepare('SELECT priority FROM review_items WHERE id = ?').get(created.reviewItemId) as {
+      priority: string | null;
+    };
+    expect(row.priority).toBe('P1');
+  });
+
+  it('approve returns {reviewItemId, staged:true} and stages + pre-selects the finding', async () => {
+    const { caller, db } = buildCaller();
+    const created = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:executor', kind: 'finding', title: 'approve me',
+    });
+
+    const res = await caller.cyboflow.reviewItems.approve({ projectId: 1, reviewItemId: created.reviewItemId });
+    expect(res).toEqual({ reviewItemId: created.reviewItemId, staged: true });
+
+    const row = db.prepare('SELECT status, staged_at, selected FROM review_items WHERE id = ?').get(
+      created.reviewItemId,
+    ) as { status: string; staged_at: string | null; selected: number };
+    expect(row.status).toBe('pending'); // status NOT overloaded
+    expect(row.staged_at).not.toBeNull();
+    expect(row.selected).toBe(1);
+  });
+
+  it('approve on an already-staged finding throws CONFLICT (invalid_status)', async () => {
+    const { caller } = buildCaller();
+    const created = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:executor', kind: 'finding', title: 'approve twice',
+    });
+    await caller.cyboflow.reviewItems.approve({ projectId: 1, reviewItemId: created.reviewItemId });
+    await expect(
+      caller.cyboflow.reviewItems.approve({ projectId: 1, reviewItemId: created.reviewItemId }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'CONFLICT');
+  });
+
+  it('setTag on an unknown item maps to NOT_FOUND', async () => {
+    const { caller } = buildCaller();
+    await expect(
+      caller.cyboflow.reviewItems.setTag({ projectId: 1, reviewItemId: 'rvw_nope', proposedTarget: 'docs' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND');
+  });
+
+  it('setSelected batch-toggles selected over staged findings and returns the count', async () => {
+    const { caller, db } = buildCaller();
+    const a = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:executor', kind: 'finding', title: 'a',
+    });
+    const b = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:executor', kind: 'finding', title: 'b',
+    });
+    // Stage both (approve pre-selects selected=1).
+    await caller.cyboflow.reviewItems.approve({ projectId: 1, reviewItemId: a.reviewItemId });
+    await caller.cyboflow.reviewItems.approve({ projectId: 1, reviewItemId: b.reviewItemId });
+
+    // Deselect both in one batch.
+    const res = await caller.cyboflow.reviewItems.setSelected({
+      projectId: 1, reviewItemIds: [a.reviewItemId, b.reviewItemId], selected: false,
+    });
+    expect(res).toEqual({ count: 2 });
+
+    const rows = db
+      .prepare('SELECT id, selected, staged_at FROM review_items WHERE id IN (?, ?)')
+      .all(a.reviewItemId, b.reviewItemId) as Array<{ id: string; selected: number; staged_at: string | null }>;
+    for (const r of rows) {
+      expect(r.selected).toBe(0); // cleared
+      expect(r.staged_at).not.toBeNull(); // stays in READY
+    }
+  });
+
+  it('setSelected rejects an empty id array at the Zod boundary (.min(1))', async () => {
+    const { caller } = buildCaller();
+    await expect(
+      caller.cyboflow.reviewItems.setSelected({ projectId: 1, reviewItemIds: [], selected: true }),
+    ).rejects.toThrow();
+  });
+});
+
+describe('cyboflow.reviewItems open-question guard (regression)', () => {
+  it('still blocks resolving a decision item with an open question (CONFLICT)', async () => {
+    const { caller, db } = buildCaller();
+
+    // The guard reads the `questions` table (migration 010); create a minimal one
+    // here so the regression path is exercised without perturbing the shared chain.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS questions (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+      );
+    `);
+    db.prepare(`INSERT INTO workflows (id, project_id, name) VALUES ('wf-1-planner', 1, 'planner')`).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, branch_name, status, policy_json)
+       VALUES ('run-q', 'wf-1-planner', 1, '/w/q', 'b/q', 'awaiting_review', '{}')`,
+    ).run();
+    db.prepare(`INSERT INTO questions (id, run_id, status) VALUES ('q1', 'run-q', 'pending')`).run();
+
+    // A question-sourced decision item bound to that run.
+    const created = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:planner', kind: 'decision', title: 'pick a path', source: 'question', runId: 'run-q',
+    });
+
     await expect(
       caller.cyboflow.reviewItems.resolve({ projectId: 1, reviewItemId: created.reviewItemId }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'CONFLICT');
