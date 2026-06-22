@@ -24,6 +24,7 @@ import type { RunEventBridge, BridgeEventsOptions } from './runEventBridge';
 import { bridgeEvents as bridgeEventsImpl } from './runEventBridge';
 import type { StreamEventPublisher } from './runLauncher';
 import { rollupRunUsage } from './runUsageRollup';
+import { buildSeedTasksBlock } from './seedTasksBlock';
 
 // ---------------------------------------------------------------------------
 // Narrow interfaces (no concrete imports)
@@ -1123,40 +1124,9 @@ export class RunExecutor {
     const run = this.registry.getRunById(runId);
     const batchId = run?.batch_id ?? null;
     if (!batchId) return null;
-
-    let taskIds: string[];
-    try {
-      taskIds = this.sprintLaneTaskIds.listLaneTaskIds(batchId);
-    } catch (err) {
-      this.logger.warn(`RunExecutor.buildSeedTasksBlock: lane listing failed for batch ${batchId} (run ${runId}): ${err instanceof Error ? err.message : String(err)}`);
-      return null;
-    }
-    if (taskIds.length === 0) return null;
-
-    const sections: string[] = [];
-    for (const taskId of taskIds) {
-      try {
-        const task = this.ideaBodyReader.read(taskId);
-        if (!task) continue;
-        const title = task.title?.trim() ?? '';
-        const summary = task.summary?.trim() ?? '';
-        const body = task.body?.trim() ?? '';
-        if (title === '' && summary === '' && body === '') continue;
-
-        const refOrId = task.ref?.trim() || taskId;
-        const parts: string[] = [title !== '' ? `## ${refOrId}: ${title}` : `## ${refOrId}`];
-        if (summary !== '') parts.push(summary);
-        if (body !== '') parts.push(body);
-        sections.push(parts.join('\n\n'));
-      } catch (err) {
-        // Fail-soft per id — one unresolvable task never sinks the sprint prompt.
-        this.logger.warn(`RunExecutor.buildSeedTasksBlock: could not resolve task ${taskId} for batch ${batchId}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-    if (sections.length === 0) return null;
-
-    const intro = `This sprint covers ${sections.length} task${sections.length === 1 ? '' : 's'}. Execute ALL of them.`;
-    return [intro, ...sections].join('\n\n');
+    // Shared renderer — the programmatic path (composeStepPrompt's taskScope) feeds
+    // the same helper, so both planes emit byte-identical `# Sprint tasks` bodies.
+    return buildSeedTasksBlock(batchId, this.sprintLaneTaskIds, this.ideaBodyReader, this.logger);
   }
 
   /**

@@ -72,6 +72,7 @@ import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, No
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
 import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
+import { buildSeedTasksBlock } from './orchestrator/seedTasksBlock';
 import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
 import { buildStepTransitionEvent, resolveInitialStepId } from './orchestrator/stepTransitionBridge';
 import {
@@ -910,6 +911,19 @@ async function initializeServices() {
         },
       };
     },
+    // Sprint task-scope provider (grounding fix, 2026-06-22): resolve the
+    // `# Sprint tasks` block body for a sprint run's batch so the programmatic step
+    // prompts carry the real task set (reuses the SAME buildSeedTasksBlock helper +
+    // readers the orchestrated getPrompt path uses, so both planes emit identical
+    // scope). Without it the analyze-dependencies step agent never sees the tasks,
+    // concludes "No dependencies", and the dependents fan out concurrently and fail.
+    seedTasksProvider: (batchId) =>
+      buildSeedTasksBlock(
+        batchId,
+        { listLaneTaskIds: (b) => sprintLaneStore.listLanes(b).map((lane) => lane.taskId) },
+        ideaBodyReader,
+        cyboflowLogger,
+      ),
     // Per-step result sink (migration 033): persist each settled step so results
     // are queryable + crash-safe resume can skip individually-completed steps.
     stepResultRecorder: (runId, report) =>

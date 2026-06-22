@@ -247,4 +247,56 @@ describe('DefaultProgrammaticRunner', () => {
     await expect(runner.run(ctxFor(oneStepDef()))).resolves.toBeUndefined();
     expect(fanOutDriverFactory).not.toHaveBeenCalled();
   });
+
+  // ── Sprint task-scope grounding (2026-06-22) ────────────────────────────────
+  it('threads the seedTasksProvider scope into the step prompt for a sprint run', async () => {
+    const spawner = makeSpawner();
+    const seedTasksProvider = vi.fn((batchId: string) => `## TASK-001: Init Vite\n\nScaffold for ${batchId}.`);
+
+    const runner = new DefaultProgrammaticRunner({
+      spawner,
+      reporter,
+      gate: gateOf('approve'),
+      seedTasksProvider,
+    });
+
+    await expect(runner.run(ctxFor(oneStepDef(), { batchId: 'batch-7' }))).resolves.toBeUndefined();
+
+    // Resolved ONCE from the run's batch_id, and the body reached the step prompt.
+    expect(seedTasksProvider).toHaveBeenCalledWith('batch-7');
+    const prompt = vi.mocked(spawner.spawnCliProcess).mock.calls[0][0].prompt;
+    expect(prompt).toContain('# Sprint tasks');
+    expect(prompt).toContain('## TASK-001: Init Vite');
+    expect(prompt).toContain('Scaffold for batch-7.');
+  });
+
+  it('does NOT call the provider or inject a task block for a non-sprint run', async () => {
+    const spawner = makeSpawner();
+    const seedTasksProvider = vi.fn((b: string) => `scope ${b}`);
+
+    const runner = new DefaultProgrammaticRunner({
+      spawner,
+      reporter,
+      gate: gateOf('approve'),
+      seedTasksProvider,
+    });
+
+    await expect(runner.run(ctxFor(oneStepDef()))).resolves.toBeUndefined(); // no batch_id
+
+    expect(seedTasksProvider).not.toHaveBeenCalled();
+    expect(vi.mocked(spawner.spawnCliProcess).mock.calls[0][0].prompt).not.toContain('# Sprint tasks');
+  });
+
+  it('injects no task block when the provider returns null', async () => {
+    const spawner = makeSpawner();
+    const runner = new DefaultProgrammaticRunner({
+      spawner,
+      reporter,
+      gate: gateOf('approve'),
+      seedTasksProvider: () => null,
+    });
+
+    await expect(runner.run(ctxFor(oneStepDef(), { batchId: 'batch-7' }))).resolves.toBeUndefined();
+    expect(vi.mocked(spawner.spawnCliProcess).mock.calls[0][0].prompt).not.toContain('# Sprint tasks');
+  });
 });

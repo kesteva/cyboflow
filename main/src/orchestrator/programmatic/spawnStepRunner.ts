@@ -36,6 +36,14 @@ export interface SpawnStepRunnerOptions {
   worktreePath: string;
   workflowName: string;
   agentPermissionMode?: PermissionMode;
+  /**
+   * The sprint's task-scope block (the `# Sprint tasks` body), resolved once per
+   * run by DefaultProgrammaticRunner from the run's batch_id. Threaded into EVERY
+   * step prompt (each step is a fresh SDK session with no memory of prior steps),
+   * so a sprint step agent always sees the real task set instead of hunting on
+   * disk. Absent for non-sprint runs ⇒ no task block (output unchanged).
+   */
+  taskScope?: string;
 }
 
 export class SpawnStepRunner implements StepRunner {
@@ -54,6 +62,7 @@ export class SpawnStepRunner implements StepRunner {
       workflowName: this.opts.workflowName,
       attempt: ctx.attempt,
       ...(ctx.item ? { item: ctx.item } : {}),
+      ...(this.opts.taskScope ? { taskScope: this.opts.taskScope } : {}),
     });
     try {
       await this.spawner.spawnCliProcess({

@@ -72,6 +72,16 @@ export interface DefaultProgrammaticRunnerDeps {
    * returns undefined (e.g. no batch) likewise yields no host-driven fan-out.
    */
   fanOutDriverFactory?: (ctx: { runId: string; batchId: string | null }) => FanOutDriver | undefined;
+  /**
+   * Sprint task-scope provider (grounding fix, 2026-06-22). Called once per
+   * sprint-style run (a non-empty `batch_id`) to resolve the `# Sprint tasks`
+   * block body — the SAME text the orchestrated `getPrompt` path prepends. The
+   * runner threads the result into every step prompt via SpawnStepRunner so the
+   * step agent always sees the real task set (programmatic step prompts otherwise
+   * carry none, which made the analyze-dependencies agent conclude "No
+   * dependencies" and the dependents fail). Absent / returns null ⇒ no task block.
+   */
+  seedTasksProvider?: (batchId: string) => string | null;
   logger?: LoggerLike;
 }
 
@@ -86,6 +96,13 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       );
     }
 
+    // Resolve the sprint batch + task scope up front: a seeded sprint (non-empty
+    // batch_id) gets its `# Sprint tasks` block threaded into every step prompt so
+    // the step agent always sees the real task set. Non-sprint runs ⇒ no block.
+    const batchId =
+      typeof ctx.run.batch_id === 'string' && ctx.run.batch_id.length > 0 ? ctx.run.batch_id : null;
+    const taskScope = batchId ? (this.deps.seedTasksProvider?.(batchId) ?? undefined) : undefined;
+
     const runner = new SpawnStepRunner(
       this.deps.spawner,
       {
@@ -95,6 +112,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         worktreePath: ctx.worktreePath,
         workflowName: ctx.workflow.name,
         agentPermissionMode: ctx.run.permission_mode_snapshot,
+        ...(taskScope ? { taskScope } : {}),
       },
       this.deps.logger,
     );
@@ -117,10 +135,9 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     }
 
     // Host-driven fan-out (programmatic plane): build a per-run lane driver ONLY
-    // when the run is a seeded sprint (a non-empty `batch_id`). Absent driver ⇒
-    // host.fanOut is undefined ⇒ the controller never fans out — byte-identical to
-    // today for every non-sprint run.
-    const batchId = typeof ctx.run.batch_id === 'string' && ctx.run.batch_id.length > 0 ? ctx.run.batch_id : null;
+    // when the run is a seeded sprint (a non-empty `batch_id`, resolved above).
+    // Absent driver ⇒ host.fanOut is undefined ⇒ the controller never fans out —
+    // byte-identical to today for every non-sprint run.
     const fanOutDriver = batchId
       ? this.deps.fanOutDriverFactory?.({ runId: ctx.runId, batchId })
       : undefined;
