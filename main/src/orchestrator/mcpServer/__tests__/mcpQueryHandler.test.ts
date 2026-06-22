@@ -1735,6 +1735,59 @@ describe('McpQueryHandler', () => {
       });
     });
 
+    it("maps a proposed_target of 'fix' into the finding payload (findings-triage redesign)", async () => {
+      // 'fix' = a quick in-place fix bucket, added with the findings-triage
+      // redesign — buildFindingExtras must accept it alongside backlog/docs/prompt.
+      seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'review', stepsSnapshot: { review: 'reviewer' } });
+
+      const { socket, writes } = makeSocketDouble();
+      await reviewHandler.handleMessage(
+        {
+          type: 'mcp-report-finding',
+          requestId: 'rf-fix',
+          runId: 'run-1',
+          title: 'Quick fix candidate',
+          body: 'b',
+          proposedTarget: 'fix',
+        },
+        socket,
+      );
+
+      expect(parseLastWrite(writes).ok).toBe(true);
+      await drain();
+      const row = reviewDb
+        .prepare("SELECT payload_json FROM review_items WHERE run_id = 'run-1'")
+        .get() as { payload_json: string };
+      expect(JSON.parse(row.payload_json)).toEqual({ kind: 'finding', proposedTarget: 'fix' });
+    });
+
+    it('DROPS a garbage proposed_target value without failing the write', async () => {
+      // An out-of-vocabulary proposed_target is dropped (agent-typo-can-never-
+      // fail-a-write discipline) — the finding persists with a NULL payload.
+      seedReviewRun(reviewDb, { runId: 'run-1', currentStepId: 'review', stepsSnapshot: { review: 'reviewer' } });
+
+      const { socket, writes } = makeSocketDouble();
+      await reviewHandler.handleMessage(
+        {
+          type: 'mcp-report-finding',
+          requestId: 'rf-bad-target',
+          runId: 'run-1',
+          title: 'Bad target',
+          body: 'b',
+          proposedTarget: 'wherever',
+        } as unknown as McpQueryMessage,
+        socket,
+      );
+
+      expect(parseLastWrite(writes).ok).toBe(true);
+      await drain();
+      const row = reviewDb
+        .prepare("SELECT payload_json FROM review_items WHERE run_id = 'run-1'")
+        .get() as { payload_json: string | null };
+      // No surviving extra → payload stays NULL (the garbage target was dropped).
+      expect(row.payload_json).toBeNull();
+    });
+
     it('never throws on a DB fault during the async create (the run is already replied to)', async () => {
       // The chokepoint's late failure is fire-and-forget — the synchronous reply
       // is ok:true and the handler returns without awaiting. Even if we surface a
@@ -2653,6 +2706,318 @@ describe('shell-approval-request -> auto-derive sprint lane', () => {
     expect(readLane(laneDb, batchId, 'tsk_a')).toMatchObject({
       status: 'running',
       current_step_id: 'task-verify',
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. mcp-get-selected-findings / mcp-resolve-finding — compound-run findings.
+//     The triage tray seeds a compound run with workflow_runs.seed_finding_ids
+//     (migration 032). get-selected-findings re-reads that set (read-only);
+//     resolve-finding resolves a consumed finding via the ReviewItemRouter
+//     chokepoint, AWAITED so a failure surfaces. Both are mid-run-only — a
+//     terminal run is rejected by the shared run-context guard (run_not_active).
+// ---------------------------------------------------------------------------
+
+describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding)', () => {
+  // The handlers reach selectFindingForSeed (reads review_items.priority +
+  // workflow_runs.seed_finding_ids) and ReviewItemRouter.applyReviewItem, so the
+  // DB needs the full review schema PLUS migration 032 (findings-triage columns).
+  function buildFindingsDb(): Database.Database {
+    const fdb = new Database(':memory:');
+    fdb.pragma('foreign_keys = ON');
+    fdb.exec(`
+      CREATE TABLE projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    fdb.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
+
+    const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
+    fdb.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+    fdb.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
+    fdb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
+    fdb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
+    fdb.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+    fdb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
+    fdb.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
+    fdb.exec(readFileSync(join(migDir, '032_findings_triage.sql'), 'utf-8'));
+    return fdb;
+  }
+
+  /** Seed a 'compound' run optionally stamped with a JSON seed_finding_ids array. */
+  function seedCompoundRun(
+    fdb: Database.Database,
+    opts: { runId: string; status?: string; seedFindingIds?: string[] | null; stepsSnapshot?: Record<string, string> | null; currentStepId?: string | null },
+  ): void {
+    fdb
+      .prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-c', 1, 'compound', '{}')`)
+      .run();
+    fdb
+      .prepare(
+        `INSERT INTO workflow_runs
+           (id, workflow_id, project_id, status, current_step_id, steps_snapshot_json, seed_finding_ids)
+         VALUES (?, 'wf-c', 1, ?, ?, ?, ?)`,
+      )
+      .run(
+        opts.runId,
+        opts.status ?? 'running',
+        opts.currentStepId ?? 'compound',
+        opts.stepsSnapshot ? JSON.stringify(opts.stepsSnapshot) : '{"compound":"compounder"}',
+        opts.seedFindingIds ? JSON.stringify(opts.seedFindingIds) : null,
+      );
+  }
+
+  /** Insert a pending finding row directly (the chokepoint shape, no PQueue needed for reads). */
+  function seedFinding(
+    fdb: Database.Database,
+    opts: { id: string; title: string; priority?: 'P0' | 'P1' | 'P2' | null; payload?: object | null; severity?: 'info' | 'warning' | 'error' | null; runId?: string | null },
+  ): void {
+    fdb
+      .prepare(
+        `INSERT INTO review_items
+           (id, project_id, kind, status, blocking, title, body, severity, source, priority, payload_json, run_id)
+         VALUES (?, 1, 'finding', 'pending', 0, ?, 'body', ?, 'agent:reviewer', ?, ?, ?)`,
+      )
+      .run(
+        opts.id,
+        opts.title,
+        opts.severity ?? null,
+        opts.priority ?? null,
+        opts.payload ? JSON.stringify(opts.payload) : null,
+        opts.runId ?? null,
+      );
+  }
+
+  /** Drain the per-project review queue so an awaited resolve commits. */
+  async function drain(): Promise<void> {
+    await ReviewItemRouter.getInstance()._queueForProject(1).onIdle();
+  }
+
+  let fdb: Database.Database;
+  let fHandler: McpQueryHandler;
+
+  beforeEach(() => {
+    fdb = buildFindingsDb();
+    ReviewItemRouter.initialize(dbAdapter(fdb));
+    fHandler = new McpQueryHandler(dbAdapter(fdb));
+  });
+
+  afterEach(() => {
+    ReviewItemRouter._resetForTesting();
+    reviewItemChangeEvents.removeAllListeners();
+    fdb.close();
+  });
+
+  // -------------------------------------------------------------------------
+  // get-selected-findings
+  // -------------------------------------------------------------------------
+
+  describe('mcp-get-selected-findings', () => {
+    it("returns the run's seeded findings, shaped for compounding", async () => {
+      seedFinding(fdb, {
+        id: 'ri_1',
+        title: 'Quick fix me',
+        priority: 'P0',
+        severity: 'warning',
+        payload: { kind: 'finding', proposedTarget: 'fix', suggestedFix: 'do the thing', locations: [{ path: 'a.ts', line: 4 }] },
+      });
+      seedFinding(fdb, { id: 'ri_2', title: 'Doc update', priority: 'P2', payload: { kind: 'finding', proposedTarget: 'docs' } });
+      seedCompoundRun(fdb, { runId: 'run-c', seedFindingIds: ['ri_1', 'ri_2'] });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-get-selected-findings', requestId: 'gs-1', runId: 'run-c' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      const data = response.data as { findings: Array<{ id: string; title: string; priority: string | null; proposedTarget: string | null; suggestedFix: string | null; locations: Array<{ path: string; line?: number }> | null }> };
+      expect(data.findings).toHaveLength(2);
+      expect(data.findings[0]).toMatchObject({
+        id: 'ri_1',
+        title: 'Quick fix me',
+        priority: 'P0',
+        proposedTarget: 'fix',
+        suggestedFix: 'do the thing',
+      });
+      expect(data.findings[0].locations).toEqual([{ path: 'a.ts', line: 4 }]);
+      expect(data.findings[1]).toMatchObject({ id: 'ri_2', proposedTarget: 'docs', priority: 'P2' });
+    });
+
+    it('returns an empty array when seed_finding_ids is null', async () => {
+      seedCompoundRun(fdb, { runId: 'run-c', seedFindingIds: null });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-get-selected-findings', requestId: 'gs-2', runId: 'run-c' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      expect(response.data).toEqual({ findings: [] });
+    });
+
+    it('skips an id that does not resolve to a finding (fail-soft)', async () => {
+      seedFinding(fdb, { id: 'ri_real', title: 'Real', priority: 'P1', payload: { kind: 'finding', proposedTarget: 'backlog' } });
+      seedCompoundRun(fdb, { runId: 'run-c', seedFindingIds: ['ri_real', 'ri_missing'] });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-get-selected-findings', requestId: 'gs-3', runId: 'run-c' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      const data = response.data as { findings: Array<{ id: string }> };
+      expect(data.findings).toHaveLength(1);
+      expect(data.findings[0].id).toBe('ri_real');
+    });
+
+    it('rejects the "orchestrator" sentinel with "finding_requires_real_run"', async () => {
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        { type: 'mcp-get-selected-findings', requestId: 'gs-4', runId: 'orchestrator' },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('finding_requires_real_run');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // resolve-finding
+  // -------------------------------------------------------------------------
+
+  describe('mcp-resolve-finding', () => {
+    it('promoted + task_id builds promoted:<taskId> and resolves the finding via the chokepoint', async () => {
+      seedFinding(fdb, { id: 'ri_p', title: 'Promote me', payload: { kind: 'finding', proposedTarget: 'backlog' } });
+      seedCompoundRun(fdb, { runId: 'run-c', seedFindingIds: ['ri_p'] });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        {
+          type: 'mcp-resolve-finding',
+          requestId: 'rs-1',
+          runId: 'run-c',
+          reviewItemId: 'ri_p',
+          resolutionKind: 'promoted',
+          taskId: 'TASK-042',
+        },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      expect(response.data).toEqual({ resolved: true, review_item_id: 'ri_p' });
+
+      await drain();
+      const row = fdb
+        .prepare("SELECT status, resolution FROM review_items WHERE id = 'ri_p'")
+        .get() as { status: string; resolution: string };
+      expect(row.status).toBe('resolved');
+      expect(row.resolution).toBe('promoted:TASK-042');
+    });
+
+    it('fixed builds fixed:<note> with the supplied note', async () => {
+      seedFinding(fdb, { id: 'ri_f', title: 'Fix me', payload: { kind: 'finding', proposedTarget: 'fix' } });
+      seedCompoundRun(fdb, { runId: 'run-c', seedFindingIds: ['ri_f'] });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        {
+          type: 'mcp-resolve-finding',
+          requestId: 'rs-2',
+          runId: 'run-c',
+          reviewItemId: 'ri_f',
+          resolutionKind: 'fixed',
+          note: 'compound',
+        },
+        socket,
+      );
+
+      expect(parseLastWrite(writes).ok).toBe(true);
+      await drain();
+      const row = fdb.prepare("SELECT resolution FROM review_items WHERE id = 'ri_f'").get() as { resolution: string };
+      expect(row.resolution).toBe('fixed:compound');
+    });
+
+    it('triaged builds triaged:<note> (empty tail when no note)', async () => {
+      seedFinding(fdb, { id: 'ri_t', title: 'Triage me', payload: { kind: 'finding', proposedTarget: 'docs' } });
+      seedCompoundRun(fdb, { runId: 'run-c', seedFindingIds: ['ri_t'] });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        {
+          type: 'mcp-resolve-finding',
+          requestId: 'rs-3',
+          runId: 'run-c',
+          reviewItemId: 'ri_t',
+          resolutionKind: 'triaged',
+        },
+        socket,
+      );
+
+      expect(parseLastWrite(writes).ok).toBe(true);
+      await drain();
+      const row = fdb.prepare("SELECT resolution FROM review_items WHERE id = 'ri_t'").get() as { resolution: string };
+      expect(row.resolution).toBe('triaged:');
+    });
+
+    it('rejects resolving on a terminal run with "run_not_active" (mid-run-only)', async () => {
+      seedFinding(fdb, { id: 'ri_late', title: 'Too late', payload: { kind: 'finding', proposedTarget: 'fix' } });
+      seedCompoundRun(fdb, { runId: 'run-done', status: 'completed', seedFindingIds: ['ri_late'] });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        {
+          type: 'mcp-resolve-finding',
+          requestId: 'rs-4',
+          runId: 'run-done',
+          reviewItemId: 'ri_late',
+          resolutionKind: 'fixed',
+        },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('run_not_active');
+
+      // The finding stays pending — the terminal-seam close-out (RunExecutor) is
+      // the safety net, not a batched resolve at run end.
+      await drain();
+      const row = fdb.prepare("SELECT status FROM review_items WHERE id = 'ri_late'").get() as { status: string };
+      expect(row.status).toBe('pending');
+    });
+
+    it('surfaces a not_found resolve as an ok:false error (await — not silently swallowed)', async () => {
+      seedCompoundRun(fdb, { runId: 'run-c', seedFindingIds: ['ri_x'] });
+
+      const { socket, writes } = makeSocketDouble();
+      await fHandler.handleMessage(
+        {
+          type: 'mcp-resolve-finding',
+          requestId: 'rs-5',
+          runId: 'run-c',
+          reviewItemId: 'ri_does_not_exist',
+          resolutionKind: 'fixed',
+        },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('not_found');
     });
   });
 });

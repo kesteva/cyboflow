@@ -56,7 +56,8 @@ import { ACCEPT_EDITS_AUTO_APPROVE_TOOLS } from '../permissionModeMapper';
 import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
 import type { TaskChange, TaskActor, TaskDependencyKind } from '../taskChangeRouter';
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
-import type { ReviewActor, ReviewItemCreate } from '../reviewItemRouter';
+import type { ReviewActor, ReviewItemCreate, ReviewItemTriage } from '../reviewItemRouter';
+import { selectFindingForSeed } from '../reviewItemListing';
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../shared/types/sprintBatch';
 import type { SprintBatchTaskStatus, SprintLaneStepId } from '../../../../shared/types/sprintBatch';
@@ -67,10 +68,16 @@ import type { Priority, TaskType } from '../../../../shared/types/tasks';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import type {
   FindingPayload,
+  FindingProposedTarget,
   ReviewItemEntityType,
   ReviewItemKind,
   ReviewItemPayload,
   ReviewItemSeverity,
+} from '../../../../shared/types/reviews';
+import {
+  RESOLUTION_PREFIX_FIXED,
+  RESOLUTION_PREFIX_TRIAGED,
+  RESOLUTION_PREFIX_PROMOTED,
 } from '../../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
@@ -184,6 +191,24 @@ export type McpQueryMessage =
       payloadJson?: string;
     }
   | {
+      type: 'mcp-get-selected-findings';
+      requestId: string;
+      runId: string;
+    }
+  | {
+      type: 'mcp-resolve-finding';
+      requestId: string;
+      runId: string;
+      /** The review_items.id of the finding the run consumed. */
+      reviewItemId: string;
+      /** How the finding was resolved — maps to the matching resolution prefix. */
+      resolutionKind: 'fixed' | 'triaged' | 'promoted';
+      /** Optional free-text note appended to the resolution (e.g. 'compound'). */
+      note?: string;
+      /** Optional minted task id; recorded when resolutionKind='promoted'. */
+      taskId?: string;
+    }
+  | {
       type: 'shell-approval-request';
       requestId: string;
       runId: string;
@@ -274,10 +299,11 @@ function buildFindingExtras(
   const extras: Partial<Omit<FindingPayload, 'kind'>> = {};
   if (typeof msg.category === 'string') extras.category = msg.category;
   if (typeof msg.suggestedFix === 'string') extras.suggestedFix = msg.suggestedFix;
-  // proposedTarget must be one of the three routing literals; anything else is
+  // proposedTarget must be one of the four routing literals ('fix' = a quick
+  // in-place fix, added with the findings-triage redesign); anything else is
   // DROPPED (same agent-typo-can-never-fail-a-write discipline as the rest).
-  if (msg.proposedTarget === 'backlog' || msg.proposedTarget === 'docs' || msg.proposedTarget === 'prompt') {
-    extras.proposedTarget = msg.proposedTarget;
+  if (['backlog', 'docs', 'prompt', 'fix'].includes(msg.proposedTarget as string)) {
+    extras.proposedTarget = msg.proposedTarget as FindingProposedTarget;
   }
   const locations = parseFindingLocations(msg.locations);
   if (locations !== undefined) extras.locations = locations;
@@ -390,6 +416,16 @@ export class McpQueryHandler {
           // NON-BLOCKING: writes its response synchronously after enqueuing the
           // review-item create — the run is NEVER paused waiting on the inbox.
           this.handleReportFinding(msg, client);
+          break;
+        case 'mcp-get-selected-findings':
+          // Read-only: returns the findings the human seeded into THIS compound
+          // run (workflow_runs.seed_finding_ids). Never writes.
+          this.handleGetSelectedFindings(msg, client);
+          break;
+        case 'mcp-resolve-finding':
+          // AWAITED (unlike fire-and-forget report-finding) so a failed resolve
+          // surfaces to the agent rather than silently leaving the finding pending.
+          await this.handleResolveFinding(msg, client);
           break;
         case 'shell-approval-request':
           // Async-deferred — the FIRST handler that does NOT writeResponse
@@ -1551,6 +1587,136 @@ export class McpQueryHandler {
       ok: true,
       data: { accepted: true, kind, blocking: msg.blocking ?? false },
     });
+  }
+
+  // --------------------------------------------------------------------------
+  // Compound-run findings (cyboflow_get_selected_findings / _resolve_finding)
+  //
+  // The triage tray seeds a compound run with the EXACT findings the human
+  // selected (workflow_runs.seed_finding_ids, migration 032). These two handlers
+  // let the seeded compound agent re-read that set and resolve each finding as it
+  // acts on it. get-selected-findings is READ-ONLY; resolve-finding routes the
+  // resolve through the SINGLE review-item chokepoint and is AWAITED (so a failed
+  // resolve surfaces — diverging from the fire-and-forget report-finding path).
+  // Both reuse the run-context guard, so they are callable only mid-run
+  // (resolveReviewItemRunContext rejects terminal runs with run_not_active).
+  // --------------------------------------------------------------------------
+
+  /**
+   * Return the findings the human seeded into THIS compound run, read from
+   * workflow_runs.seed_finding_ids and shaped via selectFindingForSeed. Read-only
+   * — never writes. Replies { findings: [] } when the column is null/unparseable
+   * or no id resolves to a finding (a fail-soft empty set, not an error).
+   */
+  private handleGetSelectedFindings(
+    msg: Extract<McpQueryMessage, { type: 'mcp-get-selected-findings' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = this.resolveReviewItemRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: ctx.error,
+      });
+      return;
+    }
+
+    const runRow = this.db
+      .prepare('SELECT seed_finding_ids AS seedFindingIds FROM workflow_runs WHERE id = ?')
+      .get(msg.runId) as { seedFindingIds?: unknown } | undefined;
+    const seedJson =
+      typeof runRow?.seedFindingIds === 'string' && runRow.seedFindingIds.length > 0
+        ? runRow.seedFindingIds
+        : null;
+
+    let ids: string[] = [];
+    if (seedJson) {
+      try {
+        const parsed: unknown = JSON.parse(seedJson);
+        if (Array.isArray(parsed)) {
+          ids = parsed.filter((id): id is string => typeof id === 'string' && id.length > 0);
+        }
+      } catch {
+        // Unparseable seed → fail-soft empty set (no error to the agent).
+        ids = [];
+      }
+    }
+
+    const findings = ids
+      .map((id) => selectFindingForSeed(this.db, id))
+      .filter((f): f is NonNullable<typeof f> => f !== null);
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { findings },
+    });
+  }
+
+  /**
+   * Resolve a finding the compound run consumed. Builds the resolution string
+   * from resolutionKind using the SHARED prefix consts (never hand-typed, so the
+   * parseResolutionKind convention cannot drift), routes the resolve through the
+   * ReviewItemRouter chokepoint, and AWAITs it — a failed resolve must surface to
+   * the agent rather than silently leave the finding pending.
+   *
+   * Mid-run-only: resolveReviewItemRunContext returns run_not_active for a
+   * terminal run, so the agent must call this immediately after each finding's
+   * action lands (NOT batched at run end); the RunExecutor terminal-seam close-out
+   * is the safety net for whatever was missed.
+   */
+  private async handleResolveFinding(
+    msg: Extract<McpQueryMessage, { type: 'mcp-resolve-finding' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = this.resolveReviewItemRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: ctx.error,
+      });
+      return;
+    }
+
+    // Build the resolution from the matching prefix const. 'promoted' carries the
+    // minted task id (mirrors the promote-to-task path); 'fixed'/'triaged' carry
+    // the optional free-text note (e.g. 'compound') when present.
+    let resolution: string;
+    if (msg.resolutionKind === 'promoted') {
+      const tail = msg.taskId ?? msg.note ?? '';
+      resolution = `${RESOLUTION_PREFIX_PROMOTED}${tail}`;
+    } else if (msg.resolutionKind === 'fixed') {
+      resolution = `${RESOLUTION_PREFIX_FIXED}${msg.note ?? ''}`;
+    } else {
+      resolution = `${RESOLUTION_PREFIX_TRIAGED}${msg.note ?? ''}`;
+    }
+
+    const triage: ReviewItemTriage = {
+      op: 'resolve',
+      actor: ctx.actor,
+      reviewItemId: msg.reviewItemId,
+      resolution,
+      runId: msg.runId,
+    };
+
+    try {
+      // AWAIT — a failed resolve must surface (diverges from fire-and-forget
+      // report-finding so the agent can retry rather than silently move on).
+      await ReviewItemRouter.getInstance().applyReviewItem(ctx.projectId, triage);
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { resolved: true, review_item_id: msg.reviewItemId },
+      });
+    } catch (err) {
+      this.writeReviewItemError(client, msg.requestId, err);
+    }
   }
 
   /**

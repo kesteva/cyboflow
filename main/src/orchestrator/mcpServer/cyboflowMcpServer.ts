@@ -323,7 +323,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               },
             },
             suggested_fix: { type: 'string', description: 'Optional prose suggesting how to fix the finding' },
-            proposed_target: { type: 'string', enum: ['backlog', 'docs', 'prompt'], description: 'Optional hint for where accepting the finding should land: backlog = promote to task, docs = a docs/ edit, prompt = a workflow-prompt/CLAUDE.md edit' },
+            proposed_target: { type: 'string', enum: ['backlog', 'docs', 'prompt', 'fix'], description: 'Optional hint for where accepting the finding should land: backlog = promote to task, docs = a docs/ edit, prompt = a workflow-prompt/CLAUDE.md edit, fix = a quick fix applied in-place' },
             impact: {
               type: 'object',
               description: 'Optional verification impact (all members optional)',
@@ -337,6 +337,31 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             payload_json: { type: 'string', description: 'Optional per-kind payload JSON; its discriminant must equal kind' },
           },
           required: ['title', 'body'],
+        },
+      },
+      {
+        name: 'cyboflow_get_selected_findings',
+        description:
+          'Return the findings the human selected to compound for THIS run; read-only; bound from CYBOFLOW_RUN_ID.',
+        inputSchema: { type: 'object', properties: {}, required: [] },
+      },
+      {
+        name: 'cyboflow_resolve_finding',
+        description:
+          'Resolve a finding the run consumed; records the correct resolution prefix; routes through the review-item chokepoint. Call this immediately after each finding\'s action lands — resolves are rejected once the run reaches a terminal status.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            review_item_id: { type: 'string', description: 'The review_items.id of the finding to resolve (required)' },
+            resolution_kind: {
+              type: 'string',
+              enum: ['fixed', 'triaged', 'promoted'],
+              description: "How the finding was resolved: fixed = quick fix applied in-place, triaged = reviewed/dispositioned (e.g. a docs edit), promoted = minted a backlog task (pair with task_id)",
+            },
+            note: { type: 'string', description: 'Optional free-text note appended to the resolution (e.g. compound)' },
+            task_id: { type: 'string', description: 'Optional minted task id; recorded when resolution_kind=promoted' },
+          },
+          required: ['review_item_id', 'resolution_kind'],
         },
       },
     ],
@@ -942,6 +967,56 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (impact !== undefined) queryParams['impact'] = impact;
       if (payload_json !== undefined) queryParams['payloadJson'] = payload_json;
       return executeMcpQuery('mcp-report-finding', queryParams);
+    }
+
+    case 'cyboflow_get_selected_findings': {
+      // Read-only; bound from CYBOFLOW_RUN_ID — no arguments.
+      return executeMcpQuery('mcp-get-selected-findings', {});
+    }
+
+    case 'cyboflow_resolve_finding': {
+      const args = (request.params.arguments ?? {}) as {
+        review_item_id?: unknown;
+        resolution_kind?: unknown;
+        note?: unknown;
+        task_id?: unknown;
+      };
+      const { review_item_id, resolution_kind, note, task_id } = args;
+      if (typeof review_item_id !== 'string' || review_item_id.length === 0) {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'review_item_id: string' }) },
+          ],
+        };
+      }
+      if (resolution_kind !== 'fixed' && resolution_kind !== 'triaged' && resolution_kind !== 'promoted') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "resolution_kind: 'fixed' | 'triaged' | 'promoted'" }),
+            },
+          ],
+        };
+      }
+      if (note !== undefined && typeof note !== 'string') {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'note: string (optional)' }) },
+          ],
+        };
+      }
+      if (task_id !== undefined && typeof task_id !== 'string') {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'task_id: string (optional)' }) },
+          ],
+        };
+      }
+      const queryParams: Record<string, unknown> = { reviewItemId: review_item_id, resolutionKind: resolution_kind };
+      if (note !== undefined) queryParams['note'] = note;
+      if (task_id !== undefined) queryParams['taskId'] = task_id;
+      return executeMcpQuery('mcp-resolve-finding', queryParams);
     }
 
     default:

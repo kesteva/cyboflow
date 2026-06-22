@@ -171,6 +171,17 @@ describe('cyboflowMcpServer ListTools', () => {
     expect(finding!.description.toLowerCase()).toContain('non-blocking');
   });
 
+  it("cyboflow_report_finding's proposed_target enum includes 'fix' (findings-triage redesign)", async () => {
+    const tools = await listTools();
+    const finding = tools.find((t) => t.name === 'cyboflow_report_finding');
+    expect(finding!.inputSchema.properties['proposed_target'].enum).toEqual([
+      'backlog',
+      'docs',
+      'prompt',
+      'fix',
+    ]);
+  });
+
   it('declares cyboflow_add_task_dependency with the documented inputSchema', async () => {
     const tools = await listTools();
     const names = tools.map((t) => t.name);
@@ -398,5 +409,80 @@ describe('cyboflowMcpServer CallTool cyboflow_update_sprint_task validation', ()
       attempt: 2,
     });
     expect(withAttempt['error']).not.toBe('invalid_arguments');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cyboflow_get_selected_findings / cyboflow_resolve_finding — declaration +
+// CallTool validation (findings-triage redesign).
+// ---------------------------------------------------------------------------
+
+describe('cyboflowMcpServer ListTools compound-run findings tools', () => {
+  it('declares cyboflow_get_selected_findings with an empty inputSchema', async () => {
+    const tools = await listTools();
+    const names = tools.map((t) => t.name);
+    expect(names).toContain('cyboflow_get_selected_findings');
+
+    const tool = tools.find((t) => t.name === 'cyboflow_get_selected_findings');
+    expect(tool).toBeDefined();
+    expect(tool!.inputSchema.properties).toEqual({});
+    expect(tool!.inputSchema.required).toEqual([]);
+    // Read-only contract is documented.
+    expect(tool!.description.toLowerCase()).toContain('read-only');
+  });
+
+  it('declares cyboflow_resolve_finding with the documented inputSchema', async () => {
+    const tools = await listTools();
+    const names = tools.map((t) => t.name);
+    expect(names).toContain('cyboflow_resolve_finding');
+
+    const tool = tools.find((t) => t.name === 'cyboflow_resolve_finding');
+    expect(tool).toBeDefined();
+    const schema = tool!.inputSchema;
+    expect(schema.required).toEqual(['review_item_id', 'resolution_kind']);
+    expect(schema.properties['review_item_id'].type).toBe('string');
+    expect(schema.properties['resolution_kind'].enum).toEqual(['fixed', 'triaged', 'promoted']);
+    expect(schema.properties['note'].type).toBe('string');
+    expect(schema.properties['task_id'].type).toBe('string');
+  });
+});
+
+describe('cyboflowMcpServer CallTool cyboflow_resolve_finding validation', () => {
+  it('rejects a missing or empty review_item_id', async () => {
+    expect(await callTool('cyboflow_resolve_finding', { resolution_kind: 'fixed' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+    expect(
+      await callTool('cyboflow_resolve_finding', { review_item_id: '', resolution_kind: 'fixed' }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+  });
+
+  it('rejects a missing or out-of-enum resolution_kind', async () => {
+    expect(await callTool('cyboflow_resolve_finding', { review_item_id: 'ri_1' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+    expect(
+      await callTool('cyboflow_resolve_finding', { review_item_id: 'ri_1', resolution_kind: 'dismissed' }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+  });
+
+  it('rejects a non-string note / task_id', async () => {
+    expect(
+      await callTool('cyboflow_resolve_finding', { review_item_id: 'ri_1', resolution_kind: 'fixed', note: 7 }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+    expect(
+      await callTool('cyboflow_resolve_finding', { review_item_id: 'ri_1', resolution_kind: 'promoted', task_id: 42 }),
+    ).toMatchObject({ error: 'invalid_arguments' });
+  });
+
+  it('passes validation with valid args and reaches the dispatch path (mocked connection error)', async () => {
+    const res = await callTool('cyboflow_resolve_finding', {
+      review_item_id: 'ri_1',
+      resolution_kind: 'promoted',
+      task_id: 'TASK-001',
+    });
+    // The net mock reports destroyed:true so sendQuery rejects immediately; the
+    // point is that arg validation PASSED (no 'invalid_arguments').
+    expect(res['error']).not.toBe('invalid_arguments');
   });
 });
