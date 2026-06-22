@@ -406,11 +406,10 @@ export function WorkflowEditorModal({
     setIsBusy(true);
     try {
       const targetWorkflowId = await persist();
-      // Ensure the run executes INSIDE a session. forceNew: launching from the
-      // blueprint editor is an explicit NEW run, not an "add a workflow to the
-      // session I'm viewing", so it always gets a fresh session — never absorbs the
-      // selected quick session (only in-session useLaunchWorkflow reuses).
-      const sessionId = await ensureSessionForLaunch(projectId, { forceNew: true });
+      // "Run with modifications" re-runs the ACTIVE run's edited workflow in place,
+      // so it REUSES the active session (no forceNew) — it is the "iterate on the
+      // run I'm viewing" path, not an explicit new-session launch.
+      const sessionId = await ensureSessionForLaunch(projectId);
       const result = await trpc.cyboflow.runs.start.mutate({
         workflowId: targetWorkflowId,
         projectId,

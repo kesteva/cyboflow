@@ -29,14 +29,15 @@
  * `forceNew` skips the reuse short-circuit entirely and ALWAYS creates a fresh
  * session. This is the correct mode for every EXPLICIT "start a new session/run"
  * launcher — the SessionStartWizard ("Start new session"), the top-bar "Choose
- * workflow", the backlog "Run", the blueprint editor's "Save and run", and the
- * "Add a workflow" flow on an interactive (PTY) session. None of these should
- * silently absorb whatever quick session the user happens to have selected.
+ * workflow", the backlog "Run", and the "Add a workflow" flow on an interactive
+ * (PTY) session. None of these should silently absorb whatever quick session the
+ * user happens to have selected.
  *
- * Reusing the current selection (omit `forceNew`) is reserved for the ONE
- * in-session "Add a workflow" fast lane — `useLaunchWorkflow` (the
- * QuickSessionCanvas workflow chips) and its "Browse all" picker — which is, by
- * design, "promote THIS resting session into a structured run".
+ * Reusing the current selection (omit `forceNew`) is reserved for the
+ * "operate on the session/run I'm viewing" paths: the in-session "Add a
+ * workflow" fast lane — `useLaunchWorkflow` (the QuickSessionCanvas workflow
+ * chips) and its "Browse all" picker — and the blueprint editor's "Run with
+ * modifications", which re-runs the active run's edited workflow in place.
  */
 import { API } from './api';
 import { panelApi } from '../services/panelApi';
