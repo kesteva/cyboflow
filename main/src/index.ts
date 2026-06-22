@@ -865,6 +865,41 @@ async function initializeServices() {
           })(),
         }
       : {}),
+    // Host-driven fan-out lane substrate (generalize-parallel-fan-out): builds a
+    // per-run FanOutDriver bound to the run's batch_id so the WorkflowController can
+    // resolve a fanOut step's item set + drive a sprint lane per item ON THE
+    // PROGRAMMATIC PLANE. Reuses the SAME sprintLaneStore already wired below — the
+    // lane events fire on sprintLaneChannel(runId), so useSprintLanes lights up live
+    // with zero new subscription. Returns undefined when the run carries no batch_id
+    // (not a seeded sprint) ⇒ the host gets no driver ⇒ no host-driven fan-out
+    // (byte-identical to today; orchestrated sprints still drive lanes via the MCP
+    // backstop). driveLane is fail-soft — a lane-store error is swallowed + logged so
+    // a broken lane write never aborts the controller walk.
+    fanOutDriverFactory: ({ batchId }) => {
+      if (!batchId) return undefined;
+      return {
+        resolveItems: (_runId, over) =>
+          over === 'tasks' ? sprintLaneStore.listLanes(batchId).map((lane) => lane.taskId) : [],
+        driveLane: ({ runId: rid, itemId, status, currentStepId, allowedStepIds }) => {
+          try {
+            sprintLaneStore.updateLane({
+              runId: rid,
+              batchId,
+              taskId: itemId,
+              allowedStepIds,
+              ...(status !== undefined ? { status } : {}),
+              ...(currentStepId !== undefined ? { currentStepId } : {}),
+            });
+          } catch (err) {
+            cyboflowLogger.debug('[fanOutDriver] driveLane skipped (fail-soft)', {
+              runId: rid,
+              itemId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        },
+      };
+    },
     // Per-step result sink (migration 032): persist each settled step so results
     // are queryable + crash-safe resume can skip individually-completed steps.
     stepResultRecorder: (runId, report) =>

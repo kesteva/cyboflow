@@ -4,6 +4,7 @@ import type { StepReporter } from '../programmaticRunHost';
 import type { HumanGateResolver } from '../humanGate';
 import { MonitorRegistry, type MonitorContext, type MonitorSession } from '../monitor';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions, ProgrammaticRunContext } from '../../runExecutor';
+import type { FanOutDriver } from '../types';
 import type { WorkflowDefinition, WorkflowRow, WorkflowRunRow } from '../../../../../shared/types/workflows';
 
 function makeSpawner(impl?: () => Promise<void>): ClaudeSpawnerLike {
@@ -18,7 +19,7 @@ function gateOf(d: 'approve' | 'reject' | 'revise'): HumanGateResolver {
 }
 
 /** Build a ProgrammaticRunContext whose workflow.spec_json encodes `def`. */
-function ctxFor(def: WorkflowDefinition): ProgrammaticRunContext {
+function ctxFor(def: WorkflowDefinition, opts?: { batchId?: string | null }): ProgrammaticRunContext {
   const workflow: WorkflowRow = {
     id: 'wf',
     project_id: 1,
@@ -38,6 +39,7 @@ function ctxFor(def: WorkflowDefinition): ProgrammaticRunContext {
     branch_name: null,
     created_at: 'now',
     updated_at: 'now',
+    ...(opts?.batchId !== undefined ? { batch_id: opts.batchId } : {}),
   };
   return {
     runId: 'run-1',
@@ -56,6 +58,29 @@ function oneStepDef(): WorkflowDefinition {
 }
 function gateDef(): WorkflowDefinition {
   return { id: 'd', phases: [{ id: 'p', label: 'P', color: '#3b6dd6', steps: [{ id: 'g', name: 'Gate', agent: 'human', mcps: [], retries: 0, human: true }] }] };
+}
+/** A def whose single step declares a fanOut over 'tasks' (exercises the driver seam). */
+function fanOutDef(): WorkflowDefinition {
+  return {
+    id: 'd',
+    phases: [
+      {
+        id: 'p',
+        label: 'P',
+        color: '#3b6dd6',
+        steps: [
+          {
+            id: 'a',
+            name: 'A',
+            agent: 'executor',
+            mcps: [],
+            retries: 0,
+            fanOut: { over: 'tasks', inner: [{ id: 'impl', agent: 'executor', name: 'Impl' }] },
+          },
+        ],
+      },
+    ],
+  };
 }
 
 describe('DefaultProgrammaticRunner', () => {
@@ -157,5 +182,69 @@ describe('DefaultProgrammaticRunner', () => {
     const runner = new DefaultProgrammaticRunner({ spawner: makeSpawner(), reporter, gate: gateOf('approve') });
     await expect(runner.run(ctxFor(oneStepDef()))).resolves.toBeUndefined();
     expect(MonitorRegistry.getInstance().get('run-1')).toBeUndefined();
+  });
+
+  // ── Fan-out driver wiring (generalize-parallel-fan-out, commit #5) ──────────
+  it('builds a fan-out driver from the factory for a run WITH a batch_id and threads it into the host', async () => {
+    // A spy driver: resolveItems returns one item so the controller actually fans
+    // out, proving the built driver reached the host (host.fanOut !== undefined).
+    const driver: FanOutDriver = {
+      resolveItems: vi.fn(() => ['task-1']),
+      driveLane: vi.fn(),
+    };
+    const fanOutDriverFactory = vi.fn<(ctx: { runId: string; batchId: string | null }) => FanOutDriver | undefined>(
+      () => driver,
+    );
+
+    const runner = new DefaultProgrammaticRunner({
+      spawner: makeSpawner(),
+      reporter,
+      gate: gateOf('approve'),
+      fanOutDriverFactory,
+    });
+
+    await expect(runner.run(ctxFor(fanOutDef(), { batchId: 'batch-9' }))).resolves.toBeUndefined();
+
+    // The factory was invoked once with the run's batchId (built ONLY because the
+    // run carries a non-empty batch_id).
+    expect(fanOutDriverFactory).toHaveBeenCalledTimes(1);
+    expect(fanOutDriverFactory).toHaveBeenCalledWith({ runId: 'run-1', batchId: 'batch-9' });
+    // And the built driver was threaded into the host: the controller resolved the
+    // item set + drove its lane through it (proves host.fanOut was set).
+    expect(driver.resolveItems).toHaveBeenCalledWith('run-1', 'tasks');
+    expect(driver.driveLane).toHaveBeenCalled();
+  });
+
+  it('does NOT build a fan-out driver for a run with a null batch_id (no host-driven fan-out)', async () => {
+    const fanOutDriverFactory = vi.fn<(ctx: { runId: string; batchId: string | null }) => FanOutDriver | undefined>(
+      () => ({ resolveItems: vi.fn(() => ['x']), driveLane: vi.fn() }),
+    );
+
+    const runner = new DefaultProgrammaticRunner({
+      spawner: makeSpawner(),
+      reporter,
+      gate: gateOf('approve'),
+      fanOutDriverFactory,
+    });
+
+    // The run has no batch_id ⇒ the factory is never invoked ⇒ host.fanOut is
+    // undefined ⇒ the fanOut step runs as a normal single agent step.
+    await expect(runner.run(ctxFor(fanOutDef(), { batchId: null }))).resolves.toBeUndefined();
+    expect(fanOutDriverFactory).not.toHaveBeenCalled();
+  });
+
+  it('does NOT build a fan-out driver when the run carries no batch_id at all', async () => {
+    const fanOutDriverFactory = vi.fn<(ctx: { runId: string; batchId: string | null }) => FanOutDriver | undefined>(
+      () => ({ resolveItems: vi.fn(() => []), driveLane: vi.fn() }),
+    );
+    const runner = new DefaultProgrammaticRunner({
+      spawner: makeSpawner(),
+      reporter,
+      gate: gateOf('approve'),
+      fanOutDriverFactory,
+    });
+
+    await expect(runner.run(ctxFor(oneStepDef()))).resolves.toBeUndefined();
+    expect(fanOutDriverFactory).not.toHaveBeenCalled();
   });
 });

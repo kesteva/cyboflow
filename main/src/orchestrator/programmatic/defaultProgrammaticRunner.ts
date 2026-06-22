@@ -27,7 +27,7 @@ import { resolveWorkflowDefinition } from '../../../../shared/types/workflows';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { ClaudeSpawnerLike, ProgrammaticRunner, ProgrammaticRunContext } from '../runExecutor';
 import type { LoggerLike } from '../types';
-import type { StepReport } from './types';
+import type { FanOutDriver, StepReport } from './types';
 import { WorkflowController } from './workflowController';
 import { SpawnStepRunner } from './spawnStepRunner';
 import { ProgrammaticRunHost, type StepReporter } from './programmaticRunHost';
@@ -63,6 +63,15 @@ export interface DefaultProgrammaticRunnerDeps {
    * crash-safe resume. Absent ⇒ results live only in the returned trace.
    */
   stepResultRecorder?: (runId: string, report: StepReport) => void;
+  /**
+   * Fan-out lane substrate (optional). Called once per run to build a per-run
+   * `FanOutDriver` bound to the run's `batch_id` (sprint-lane backed in
+   * production). The runner only invokes it when `ctx.run.batch_id` is a non-empty
+   * string (the run is a seeded sprint); otherwise the host receives no driver and
+   * the controller never fans out (byte-identical to today). A factory that itself
+   * returns undefined (e.g. no batch) likewise yields no host-driven fan-out.
+   */
+  fanOutDriverFactory?: (ctx: { runId: string; batchId: string | null }) => FanOutDriver | undefined;
   logger?: LoggerLike;
 }
 
@@ -107,6 +116,15 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       MonitorRegistry.getInstance().register(ctx.runId, monitor);
     }
 
+    // Host-driven fan-out (programmatic plane): build a per-run lane driver ONLY
+    // when the run is a seeded sprint (a non-empty `batch_id`). Absent driver ⇒
+    // host.fanOut is undefined ⇒ the controller never fans out — byte-identical to
+    // today for every non-sprint run.
+    const batchId = typeof ctx.run.batch_id === 'string' && ctx.run.batch_id.length > 0 ? ctx.run.batch_id : null;
+    const fanOutDriver = batchId
+      ? this.deps.fanOutDriverFactory?.({ runId: ctx.runId, batchId })
+      : undefined;
+
     const host = new ProgrammaticRunHost({
       runId: ctx.runId,
       projectId: ctx.run.project_id,
@@ -115,6 +133,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       ...(monitor ? { monitor } : {}),
       injectEvent: ctx.injectEvent,
       ...(this.deps.stepResultRecorder ? { recordStepResult: this.deps.stepResultRecorder } : {}),
+      ...(fanOutDriver ? { fanOutDriver } : {}),
       logger: this.deps.logger,
     });
 

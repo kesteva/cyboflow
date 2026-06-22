@@ -4,7 +4,7 @@ import type { HumanGateResolver } from '../humanGate';
 import type { MonitorSession } from '../monitor';
 import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
-import type { ControllerStepContext } from '../types';
+import type { ControllerStepContext, FanOutDriver } from '../types';
 
 function step(p: Partial<WorkflowStep> & { id: string }): WorkflowStep {
   return { name: p.id, agent: 'human', mcps: [], retries: 0, ...p };
@@ -155,5 +155,23 @@ describe('ProgrammaticRunHost', () => {
 
     const none = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve') });
     expect(() => none.recordStepResult({ stepId: 'a', phaseId: 'p', outcome: 'done', attempts: 1 })).not.toThrow();
+  });
+
+  // ── Fan-out lane driver (generalize-parallel-fan-out) ───────────────────────
+  it('exposes the injected fan-out driver on host.fanOut', () => {
+    const fanOutDriver: FanOutDriver = {
+      resolveItems: vi.fn(() => ['t1', 't2']),
+      driveLane: vi.fn(),
+    };
+    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), fanOutDriver });
+
+    expect(host.fanOut).toBe(fanOutDriver);
+    // And it is callable through the host (the controller resolves items via it).
+    expect(host.fanOut?.resolveItems('r', 'tasks')).toEqual(['t1', 't2']);
+  });
+
+  it('host.fanOut is undefined when no driver is injected (the controller never fans out)', () => {
+    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve') });
+    expect(host.fanOut).toBeUndefined();
   });
 });

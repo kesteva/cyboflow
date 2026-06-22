@@ -27,7 +27,7 @@
 import type { WorkflowStep } from '../../../../shared/types/workflows';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { LoggerLike } from '../types';
-import type { ControllerHost, ControllerStepContext, HumanGateDecision, StepReport, TriageDecision } from './types';
+import type { ControllerHost, ControllerStepContext, FanOutDriver, HumanGateDecision, StepReport, TriageDecision } from './types';
 import type { HumanGateResolver } from './humanGate';
 import type { MonitorSession } from './monitor';
 import { buildAssistantTextEvent } from './syntheticEvents';
@@ -66,6 +66,14 @@ export interface ProgrammaticRunHostArgs {
    * queryable per-step results + crash-safe resume. Absent ⇒ not recorded.
    */
   recordStepResult?: (runId: string, report: StepReport) => void;
+  /**
+   * Optional fan-out lane driver (sprint-lane backed). Exposed verbatim on the
+   * host's `fanOut` getter so the WorkflowController can resolve a step's item set
+   * + drive a lane per item. Present ONLY for a seeded sprint-style run (a
+   * non-empty `batch_id`); absent ⇒ `host.fanOut` is undefined ⇒ the controller
+   * never fans out (a `fanOut` step runs as a normal single agent step).
+   */
+  fanOutDriver?: FanOutDriver;
   logger?: LoggerLike;
 }
 
@@ -153,6 +161,16 @@ export class ProgrammaticRunHost implements ControllerHost {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * Fan-out lane driver (sprint-lane backed). Wired only for seeded sprint-style
+   * runs; `ControllerHost.fanOut` is optional so an absent driver (undefined) is a
+   * valid "never fans out" host — the controller treats a `fanOut` step as a normal
+   * single agent step.
+   */
+  get fanOut(): FanOutDriver | undefined {
+    return this.args.fanOutDriver;
   }
 
   log(level: 'info' | 'warn', message: string): void {
