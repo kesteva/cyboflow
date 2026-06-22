@@ -1,4 +1,5 @@
 import React, { Component, ReactNode } from 'react';
+import * as Sentry from '@sentry/electron/renderer';
 import { AlertCircle } from 'lucide-react';
 import { Button } from './ui/Button';
 
@@ -26,6 +27,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
   componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     console.error('Error caught by boundary:', error, errorInfo);
     console.error('Component stack:', errorInfo.componentStack);
+    Sentry.captureException(error);
     this.setState({ errorInfo });
 
     // Log to file in development mode for debugging
