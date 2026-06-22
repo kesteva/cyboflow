@@ -32,7 +32,10 @@ import { reviewItemChangeEvents, reviewItemProjectChannel } from '../../reviewIt
 import { buildStepTransitionEvent } from '../../stepTransitionBridge';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions, ProgrammaticRunContext } from '../../runExecutor';
-import type { WorkflowRow, WorkflowRunRow } from '../../../../../shared/types/workflows';
+import type { WorkflowDefinition, WorkflowRow, WorkflowRunRow } from '../../../../../shared/types/workflows';
+import type { SprintBatchTaskStatus } from '../../../../../shared/types/sprintBatch';
+import { SPRINT_BATCH_CAP } from '../../../../../shared/types/sprintBatch';
+import type { FanOutDriver } from '../types';
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
@@ -115,6 +118,153 @@ function reviewRows(db: Database.Database, runId: string): Array<{ status: strin
   return db
     .prepare('SELECT status, source, resolution FROM review_items WHERE run_id = ? ORDER BY created_at ASC, id ASC')
     .all(runId) as Array<{ status: string; source: string; resolution: string | null }>;
+}
+
+// ── Fan-out integration fixtures ─────────────────────────────────────────────
+// A 2-phase custom definition whose MIDDLE step ('execute-tasks') declares a
+// fanOut over 'tasks'. The outer phase steps (plan → execute-tasks → verify) are
+// plain agent steps; only 'execute-tasks' fans out. The inner ids form the lane
+// step vocabulary the driver receives as `allowedStepIds` / `currentStepId`.
+const FANOUT_INNER_IDS = ['implement', 'write-tests', 'task-verify'] as const;
+
+function fanOutDef(): WorkflowDefinition {
+  return {
+    id: 'fanout-flow',
+    phases: [
+      {
+        id: 'plan',
+        label: 'Plan',
+        color: '#3b6dd6',
+        steps: [{ id: 'plan-step', name: 'Plan', agent: 'planner', mcps: [], retries: 0 }],
+      },
+      {
+        id: 'execute',
+        label: 'Execute',
+        color: '#d68a3b',
+        steps: [
+          {
+            id: 'execute-tasks',
+            name: 'Execute tasks',
+            agent: 'implement',
+            mcps: [],
+            retries: 0,
+            fanOut: {
+              over: 'tasks',
+              inner: FANOUT_INNER_IDS.map((id) => ({ id, agent: id, name: id })),
+            },
+          },
+          { id: 'verify', name: 'Verify', agent: 'verifier', mcps: [], retries: 0 },
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * Seed a `workflows` row whose spec_json IS the custom fanOut definition (so the
+ * stepTransitionBridge's stepId validation accepts the OUTER step ids) + a run
+ * referencing it, optionally stamped with a batch_id (the seeded-sprint marker
+ * the runner reads to build a FanOutDriver).
+ */
+function seedFanOutRun(db: Database.Database, runId: string): string {
+  const specJson = JSON.stringify(fanOutDef());
+  db.prepare(
+    `INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-fanout', 1, 'fanout-flow', ?)`,
+  ).run(specJson);
+  db.prepare(
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, worktree_path, permission_mode_snapshot)
+     VALUES (?, 'wf-fanout', 1, 'running', '/wt', 'auto')`,
+  ).run(runId);
+  return specJson;
+}
+
+function fanOutCtx(runId: string, specJson: string, batchId: string | null): ProgrammaticRunContext {
+  const workflow: WorkflowRow = {
+    id: 'wf-fanout',
+    project_id: 1,
+    name: 'fanout-flow',
+    workflow_path: null,
+    permission_mode: 'default',
+    spec_json: specJson,
+    created_at: 'now',
+  };
+  const run: WorkflowRunRow = {
+    id: runId,
+    workflow_id: 'wf-fanout',
+    project_id: 1,
+    status: 'running',
+    permission_mode_snapshot: 'auto',
+    worktree_path: '/wt',
+    branch_name: null,
+    batch_id: batchId,
+    created_at: 'now',
+    updated_at: 'now',
+  };
+  return {
+    runId,
+    panelId: runId,
+    sessionId: runId,
+    worktreePath: '/wt',
+    run,
+    workflow,
+    signal: new AbortController().signal,
+    injectEvent: () => {},
+  };
+}
+
+/** One lane's accumulated state in the in-memory fake. */
+interface FakeLane {
+  status: SprintBatchTaskStatus;
+  /** Ordered currentStepId values seen (running seeds inner[0], then each inner id). */
+  stepTrail: string[];
+}
+
+/**
+ * In-memory, lane-backed FakeFanOutDriver — the headless stand-in for the
+ * production `SprintLaneStore`-backed driver. `resolveItems('tasks')` returns the
+ * seeded item ids; `driveLane` records each status/currentStepId transition into a
+ * per-item lane map. It also tracks max in-flight concurrency so the test can
+ * assert the wave cap. Fail-soft like the real driver (it never throws).
+ */
+function makeFakeFanOutDriver(itemIds: string[]): FanOutDriver & {
+  lanes: Map<string, FakeLane>;
+  resolveCalls: Array<{ runId: string; over: string }>;
+  maxConcurrent: number;
+} {
+  const lanes = new Map<string, FakeLane>();
+  const resolveCalls: Array<{ runId: string; over: string }> = [];
+  const inFlight = new Set<string>();
+  const tracker = { maxConcurrent: 0 };
+  return {
+    lanes,
+    resolveCalls,
+    get maxConcurrent(): number {
+      return tracker.maxConcurrent;
+    },
+    resolveItems(runId: string, over: string): string[] {
+      resolveCalls.push({ runId, over });
+      return over === 'tasks' ? [...itemIds] : [];
+    },
+    driveLane(args): void {
+      const lane = lanes.get(args.itemId) ?? { status: 'queued', stepTrail: [] };
+      if (args.status !== undefined) {
+        lane.status = args.status;
+        // 'running' opens an in-flight slot; a terminal status closes it. This
+        // mirrors the real lane's per-item lifecycle so the wave-cap assertion
+        // observes the controller's concurrency, not the fake's bookkeeping.
+        if (args.status === 'running') {
+          inFlight.add(args.itemId);
+          if (inFlight.size > tracker.maxConcurrent) tracker.maxConcurrent = inFlight.size;
+        } else if (args.status === 'integrated' || args.status === 'failed') {
+          inFlight.delete(args.itemId);
+        }
+      }
+      if (args.currentStepId !== undefined && args.currentStepId !== null) {
+        lane.stepTrail.push(args.currentStepId);
+      }
+      lanes.set(args.itemId, lane);
+    },
+  };
 }
 
 afterEach(() => {
@@ -370,5 +520,125 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     expect(reviewItemChangeEvents.listenerCount(reviewItemProjectChannel(1))).toBe(0);
     // The run never advanced past the plan phase into refine.
     expect(spawner.calls.some((c) => c.prompt.includes('`epics`'))).toBe(false);
+  });
+});
+
+describe('programmatic integration — host-driven fanOut walk drives lanes to integrated', () => {
+  it('drives every lane running → each inner → integrated and rests the run completed (concurrency cap respected)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const mgr = HumanStepManager.initialize(adapter);
+    const specJson = seedFanOutRun(db, 'run-fan');
+
+    const spawner = makeSpawner();
+    const reporter: StepReporter = { report: (rid, sid, s) => void buildStepTransitionEvent(rid, sid, s, adapter) };
+    const gate = new ReviewQueueHumanGate(mgr, reviewItemChangeEvents, reviewItemProjectChannel);
+
+    // 3 items fan out over 'tasks'; the fake driver is lane-backed (in-memory).
+    const itemIds = ['t-1', 't-2', 't-3'];
+    const driver = makeFakeFanOutDriver(itemIds);
+
+    const runner = new DefaultProgrammaticRunner({
+      spawner,
+      reporter,
+      gate,
+      // Only invoked for a seeded sprint (the run carries batch_id); returns our
+      // fake lane-backed driver bound to the run's batch.
+      fanOutDriverFactory: ({ runId, batchId }) => {
+        expect(runId).toBe('run-fan');
+        expect(batchId).toBe('batch-fan');
+        return driver;
+      },
+    });
+
+    // The custom def has NO human steps → no gate round-trip; the walk resolves
+    // (completed) once every lane integrates.
+    await expect(runner.run(fanOutCtx('run-fan', specJson, 'batch-fan'))).resolves.toBeUndefined();
+
+    // resolveItems was consulted once for the fanOut step, keyed 'tasks'.
+    expect(driver.resolveCalls).toEqual([{ runId: 'run-fan', over: 'tasks' }]);
+
+    // EVERY lane reached 'integrated' and walked the full inner chain in order:
+    // 'running' seeds inner[0], then one currentStepId update per inner step ⇒
+    // the trail is [inner[0], inner[0], inner[1], inner[2]] (the duplicate first id
+    // is the seed-on-running followed by the explicit first inner drive).
+    expect([...driver.lanes.keys()].sort()).toEqual(itemIds);
+    for (const id of itemIds) {
+      const lane = driver.lanes.get(id);
+      expect(lane?.status).toBe('integrated');
+      expect(lane?.stepTrail).toEqual([
+        FANOUT_INNER_IDS[0], // seeded with the running status
+        FANOUT_INNER_IDS[0],
+        FANOUT_INNER_IDS[1],
+        FANOUT_INNER_IDS[2],
+      ]);
+    }
+
+    // The outer phase steps ran via the spawn surface (plan-step + verify) AND
+    // each (item × inner) inner step spawned a scoped agent turn (3 items × 3
+    // inner = 9), scoped to its item via the fan-out prompt block.
+    const innerSpawns = spawner.calls.filter((c) => c.prompt.includes('PARALLEL fan-out'));
+    expect(innerSpawns).toHaveLength(itemIds.length * FANOUT_INNER_IDS.length);
+    for (const id of itemIds) {
+      expect(innerSpawns.some((c) => c.prompt.includes(`item **${id}**`))).toBe(true);
+    }
+    // The outer 'execute-tasks' agent step itself did NOT spawn (it fanned out).
+    expect(spawner.calls.some((c) => c.prompt.includes('`execute-tasks`'))).toBe(false);
+    expect(spawner.calls.some((c) => c.prompt.includes('`plan-step`'))).toBe(true);
+    expect(spawner.calls.some((c) => c.prompt.includes('`verify`'))).toBe(true);
+
+    // Concurrency cap: at most SPRINT_BATCH_CAP lanes are ever in-flight at once
+    // (3 items ≤ the cap here, so all 3 run in a single wave).
+    expect(driver.maxConcurrent).toBeLessThanOrEqual(SPRINT_BATCH_CAP);
+    expect(driver.maxConcurrent).toBe(itemIds.length);
+
+    // The live timeline advanced to the terminal OUTER step ('verify'); the
+    // fanOut step's reporter boundary used the OUTER id, not an inner id.
+    const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-fan') as {
+      current_step_id: string | null;
+    };
+    expect(finalStep.current_step_id).toBe('verify');
+    // sanity: the resolved def is the custom fanOut def (not a built-in).
+    expect((JSON.parse(specJson) as WorkflowDefinition).id).toBe('fanout-flow');
+  });
+
+  it('control: the SAME def with NO fanOut driver (no batch_id) runs the outer step ONCE — byte-identical', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const mgr = HumanStepManager.initialize(adapter);
+    // No batch_id ⇒ the runner never invokes the factory ⇒ host.fanOut is
+    // undefined ⇒ the controller treats 'execute-tasks' as a normal agent step.
+    const specJson = seedFanOutRun(db, 'run-nofan');
+
+    const spawner = makeSpawner();
+    const reporter: StepReporter = { report: (rid, sid, s) => void buildStepTransitionEvent(rid, sid, s, adapter) };
+    const gate = new ReviewQueueHumanGate(mgr, reviewItemChangeEvents, reviewItemProjectChannel);
+
+    let factoryCalls = 0;
+    const runner = new DefaultProgrammaticRunner({
+      spawner,
+      reporter,
+      gate,
+      fanOutDriverFactory: () => {
+        factoryCalls += 1;
+        return makeFakeFanOutDriver(['t-1']);
+      },
+    });
+
+    await expect(runner.run(fanOutCtx('run-nofan', specJson, null))).resolves.toBeUndefined();
+
+    // The factory was NEVER consulted (the run carries no batch_id).
+    expect(factoryCalls).toBe(0);
+    // No item-scoped inner spawns occurred — the def's fanOut field is inert.
+    expect(spawner.calls.some((c) => c.prompt.includes('PARALLEL fan-out'))).toBe(false);
+    // The outer 'execute-tasks' agent step ran exactly ONCE as a normal step.
+    expect(spawner.calls.filter((c) => c.prompt.includes('`execute-tasks`'))).toHaveLength(1);
+    // All three outer steps ran once each in order; the walk completed.
+    expect(spawner.calls.map((c) => c.prompt).filter((p) => p.includes('`plan-step`'))).toHaveLength(1);
+    expect(spawner.calls.map((c) => c.prompt).filter((p) => p.includes('`verify`'))).toHaveLength(1);
+    const finalStep = db.prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?').get('run-nofan') as {
+      current_step_id: string | null;
+    };
+    expect(finalStep.current_step_id).toBe('verify');
   });
 });
