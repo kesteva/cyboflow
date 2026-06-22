@@ -4,6 +4,7 @@ import { API } from '../../../utils/api';
 import type { IPCResponse } from '../../../utils/api';
 import { CommitModePill } from '../../CommitModeToggle';
 import { ModelPill } from './ModelPill';
+import { PermissionModePill } from './PermissionModePill';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { UnifiedComposer } from './UnifiedComposer';
 import { resolveChatVisibility } from './useChatVisibility';
@@ -148,6 +149,18 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       <ModelPill panelId={panelId} currentModel={modelId} onModelChange={setModelId} />
     ) : undefined;
 
+  // Interactive agent-permission selector for an IDLE quick SDK session, next to
+  // the model pill. Persists to sessions.agent_permission_mode (next-turn apply)
+  // and mirrors the change into the session store for an instant label refresh.
+  const permissionSlot =
+    !interactive && !running ? (
+      <PermissionModePill
+        sessionId={activeSession.id}
+        currentMode={activeSession.agentPermissionMode ?? 'default'}
+        onModeChange={(mode) => updateSession({ ...activeSession, agentPermissionMode: mode })}
+      />
+    ) : undefined;
+
   // Read-only effort pill (set at session start; migration 029). Today the only
   // value is 'ultracode' — an interactive-only opt-in, so it shows on the PTY
   // composer (where the SDK-gated model pill never appears). null → no pill.
@@ -205,6 +218,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       supportsAttachments={!interactive}
       modelLabel={modelLabel}
       modelSlot={modelSlot}
+      permissionSlot={permissionSlot}
       effortLabel={effortLabel}
       onToggleSettings={!interactive ? onToggleSettings : undefined}
       checkpointSlot={checkpointSlot}

@@ -143,6 +143,7 @@ export interface UpdateSessionData {
   auto_commit?: boolean;
   commit_mode?: 'structured' | 'checkpoint' | 'disabled';
   commit_mode_settings?: string; // JSON string of CommitModeSettings
+  agent_permission_mode?: PermissionMode;
   skip_continue_next?: boolean;
 }
 

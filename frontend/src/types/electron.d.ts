@@ -7,6 +7,7 @@ import type { ToolPanel } from '../../../shared/types/panels';
 import type { CreateSessionRequest } from './session';
 import type { AppConfig } from './config';
 import type { ExecutionDiff, GitDiffResult } from './diff';
+import type { PermissionMode } from '../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/updater';
 
@@ -145,6 +146,7 @@ interface ElectronAPI {
     rename: (sessionId: string, newName: string) => Promise<IPCResponse<void>>;
     toggleFavorite: (sessionId: string) => Promise<IPCResponse<void>>;
     toggleAutoCommit: (sessionId: string) => Promise<IPCResponse<void>>;
+    updateAgentPermissionMode: (sessionId: string, mode: PermissionMode) => Promise<IPCResponse<void>>;
 
     // Main repo session
     getOrCreateMainRepoSession: (projectId: number) => Promise<IPCResponse<Session>>;

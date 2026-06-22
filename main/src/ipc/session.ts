@@ -22,7 +22,7 @@ import type { SessionOutput } from '../types/session';
 import type { Logger } from '../utils/logger';
 import { transitionToRunning } from '../services/cyboflow/transitions';
 import { assertTransitionAllowed } from '../services/cyboflow/stateMachine';
-import { isPermissionMode } from '../../../shared/types/workflows';
+import { isPermissionMode, type PermissionMode } from '../../../shared/types/workflows';
 import { stampSessionRunsOutcome } from '../orchestrator/runRecovery';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 import { isCliSubstrate } from '../../../shared/types/substrate';
@@ -1833,6 +1833,35 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         console.error('Error stack:', error.stack);
       }
       return { success: false, error: 'Failed to toggle favorite status' };
+    }
+  });
+
+  // Update the per-session agent permission mode (4-mode) mid-session — driven by
+  // the composer permission pill. resolveSessionAgentPermissionMode re-reads
+  // sessions.agent_permission_mode on each SDK spawn, so the change takes effect
+  // on the next turn (no respawn). Mirrors sessions:toggle-favorite for the
+  // persist + runtime-session mutate + 'session-updated' emit.
+  ipcMain.handle('sessions:update-agent-permission-mode', async (_event, sessionId: string, mode: PermissionMode) => {
+    try {
+      if (!isPermissionMode(mode)) {
+        return { success: false, error: `Invalid agent permission mode: ${String(mode)}` };
+      }
+      const updated = databaseService.updateSession(sessionId, { agent_permission_mode: mode });
+      if (!updated) {
+        return { success: false, error: 'Session not found' };
+      }
+      const session = sessionManager.getSession(sessionId);
+      if (session) {
+        session.agentPermissionMode = mode;
+        sessionManager.emit('session-updated', session);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to update agent permission mode:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to update agent permission mode',
+      };
     }
   });
 

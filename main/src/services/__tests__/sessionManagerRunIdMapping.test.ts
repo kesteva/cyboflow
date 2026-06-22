@@ -163,6 +163,22 @@ describe('convertDbSessionToSession — run_id → runId mapping', () => {
     const legacySession = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(legacy);
     expect(legacySession.effort).toBeUndefined();
   });
+
+  it('copies agent_permission_mode to agentPermissionMode; a row without it maps to undefined (migration 021)', () => {
+    // Mirror of the effort projection guard: without this mapping the persisted
+    // permission mode is dropped on read, so the composer permission pill shows a
+    // stale/default value (silent-drop / projection-omission).
+    const stamped = makeDbSession({ agent_permission_mode: 'auto' });
+    const mgr = new SessionManager(
+      makeDbMock(stamped) as unknown as ConstructorParameters<typeof SessionManager>[0]
+    );
+    const session = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(stamped);
+    expect(session.agentPermissionMode).toBe('auto');
+
+    const legacy = makeDbSession();
+    const legacySession = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(legacy);
+    expect(legacySession.agentPermissionMode).toBeUndefined();
+  });
 });
 
 // ------------------------------------------------------------------

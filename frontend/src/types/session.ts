@@ -112,6 +112,13 @@ export interface Session {
    * Mirror of main/src/types/session.ts Session.
    */
   effort?: 'ultracode';
+  /**
+   * The per-session agent permission mode (4-mode: default|acceptEdits|auto|
+   * dontAsk). Persisted to sessions.agent_permission_mode (migration 021), seeded
+   * at create-quick and editable mid-session from the composer permission pill.
+   * Mirror of main/src/types/session.ts Session.
+   */
+  agentPermissionMode?: PermissionMode;
 }
 
 export interface GitStatus {

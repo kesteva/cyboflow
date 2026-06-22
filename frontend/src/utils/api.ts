@@ -2,6 +2,7 @@
 import type { CreateSessionRequest } from '../types/session';
 import type { Project } from '../types/project';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
+import type { PermissionMode } from '../../../shared/types/workflows';
 
 // Type for IPC response.
 // T defaults to `unknown` (not `any`) so callers must narrow before reading .data.
@@ -238,6 +239,11 @@ export class API {
     async toggleAutoCommit(sessionId: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.toggleAutoCommit(sessionId);
+    },
+
+    async updateAgentPermissionMode(sessionId: string, mode: PermissionMode) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.sessions.updateAgentPermissionMode(sessionId, mode);
     },
 
     async getGitCommands(sessionId: string) {
