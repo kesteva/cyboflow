@@ -68,6 +68,7 @@
   --green-accent:    #2d8a5b;
   --amber-accent:    #d4a72c;
   --warm-red:        #b5482f;
+  --severity-error:  #b23b2e;  /* findings-triage error severity dot (OD-2) */
   --human:           #d99a3d;  /* human-checkpoint fill */
   --human-hatch:     #c98a2d;  /* hatched-head stripe */
   --human-border:    #a86b1d;  /* human-checkpoint border */
