@@ -54,7 +54,16 @@ const buildInfo = {
   isCanary: isCanaryBuild,
   // Which app variant this build is: 'stable' (default) or 'dev'. Surfaced in
   // the About dialog and used to confirm the right artifact was built.
-  variant: process.env.BUILD_VARIANT === 'dev' ? 'dev' : 'stable'
+  variant: process.env.BUILD_VARIANT === 'dev' ? 'dev' : 'stable',
+  // Telemetry environment. ONLY the release pipeline sets CYBOFLOW_BUILD_ENV
+  // (release:mac -> 'stable', release:mac:dev -> 'dev'). A plain local
+  // `build:mac` .dmg leaves it unset, so it stays 'local' and usage metrics
+  // never fire for it. Distinct from `variant`, which is About-dialog / updater
+  // metadata and is 'stable' even for unreleased local builds.
+  environment:
+    process.env.CYBOFLOW_BUILD_ENV === 'stable' || process.env.CYBOFLOW_BUILD_ENV === 'dev'
+      ? process.env.CYBOFLOW_BUILD_ENV
+      : 'local'
 };
 
 // Write build info to a file in the main dist directory
