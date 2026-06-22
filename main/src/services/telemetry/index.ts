@@ -35,9 +35,11 @@ function resolveTelemetryEnvironment(): TelemetryEnvironment {
  * is enabled AND its credential env var is present; otherwise it is skipped
  * silently. Telemetry must never throw into app code.
  *
- * Errors are reported in ALL environments (tagged dev/stable/beta so dev noise
- * is filterable). Usage metrics fire ONLY for release builds — never under
- * `pnpm dev` or a local dev `.dmg`.
+ * Errors are reported only from PACKAGED (.dmg) builds — both the dev .dmg used
+ * for active testing (tagged 'development') and releases (tagged 'stable'/'beta')
+ * — never under `pnpm dev`, where errors surface directly in the console.
+ * Usage metrics fire ONLY for release builds — never under `pnpm dev` or a
+ * local dev `.dmg`.
  */
 export function initTelemetry(cfg: {
   errorReportingEnabled: boolean;
@@ -45,9 +47,12 @@ export function initTelemetry(cfg: {
   installId: string;
 }): void {
   const environment = resolveTelemetryEnvironment();
+  const isPackagedBuild = app.isPackaged;
   const isReleaseBuild = environment !== 'development';
 
-  if (cfg.errorReportingEnabled && process.env.SENTRY_DSN) {
+  // Errors are .dmg-only: under `pnpm dev` (unpackaged) they are tracked
+  // directly in the console, so Sentry stays off to avoid dev noise.
+  if (isPackagedBuild && cfg.errorReportingEnabled && process.env.SENTRY_DSN) {
     try {
       Sentry.init({
         dsn: process.env.SENTRY_DSN,
