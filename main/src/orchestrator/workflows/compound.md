@@ -45,8 +45,53 @@ from plugin state files:
   tokens + cost, plus pending / resolved / dismissed finding counts). When the
   digest is absent, lean on `cyboflow_get_run` + git only — do not invent usage
   numbers.
+- A **`## Selected findings`** section, when this run was launched from the
+  Insights **triage tray**. The human has already triaged the review queue and
+  hand-picked the exact findings to compound; the block lists each one with its
+  **priority** (`P0` / `P1` / `P2`, or `—` when unset), its **target bucket**
+  (`quick` / `doc` / `task`), its **source**, and its **body** — already ordered
+  P0 → P1 → P2. When this section is present the run is **SEEDED**: act ONLY on
+  the listed findings, in the listed order, and **skip the open-ended git-mining
+  of Phase 1** (`load-sprint` / `extract`). The seeded branch below replaces
+  Phase 1's discovery work; the human did the discovery. When the section is
+  absent, run the unseeded Phase 1 git-mining path as the fallback.
 
 ### Phase 1 — Compound
+
+> **Seeded run (launched from the triage tray).** When a `## Selected findings`
+> block is present in this prompt, take this branch INSTEAD of the unseeded
+> `load-sprint` / `extract` discovery below. The human already triaged, so there
+> is no extraction step and **the `approve-learnings` `AskUserQuestion` gate is
+> SKIPPED** — you act directly on the curated set. (The doc-edit `decision` gate
+> in the `doc` branch below still applies.)
+>
+> 1. **load-sprint** → call `cyboflow_get_selected_findings` (read-only; bound to
+>    THIS run) to re-read the exact set the human selected. Report the step as you
+>    begin. Do **not** delegate to the subagent and do **not** git-mine — the
+>    findings ARE the work.
+> 2. **write-back** → walk the findings **in the order returned** (already
+>    P0 → P1 → P2). For each finding, apply the action for its target bucket and
+>    then **IMMEDIATELY** call `cyboflow_resolve_finding` for that finding —
+>    before moving to the next one:
+>    - **`quick`** (target `fix`) → apply the fix in-place in the worktree, then
+>      `cyboflow_resolve_finding(review_item_id:<id>, resolution_kind:"fixed")`.
+>    - **`doc`** (target `docs`, incl. legacy `prompt`) → make the docs /
+>      CLAUDE.md / CODE-PATTERNS.md edit. If the change must be human-gated, emit a
+>      blocking `decision` review item via `cyboflow_report_finding`
+>      (`kind: 'decision'`, `blocking: true`) and let the human apply it; either
+>      way, then `cyboflow_resolve_finding(review_item_id:<id>,
+>      resolution_kind:"triaged")`.
+>    - **`task`** (target `backlog`) → `cyboflow_create_task` (title, body,
+>      acceptance criteria, file / dependency hints), then
+>      `cyboflow_resolve_finding(review_item_id:<id>, resolution_kind:"promoted",
+>      task_id:<the new task id>)`.
+>
+> **NEVER batch the resolves into a final cleanup step.** `cyboflow_resolve_finding`
+> is rejected once the run reaches a terminal status (`run_not_active` guard), so a
+> resolve deferred to the end is silently dropped — call it the instant each
+> finding's action lands. Honor the `P0 → P1 → P2` order. Any finding you fail to
+> resolve mid-run is deselected by the terminal-seam close-out (it stays in
+> *Ready* for the human to re-decide, never silently auto-re-compounded).
 
 1. **load-sprint** → delegate to `cyboflow-compounder`. Pass the base branch + the
    ids of the recently merged / completed runs (from the digest when present, else
@@ -91,19 +136,29 @@ from plugin state files:
   `category: 'post-merge-bug'`.
 - Every code finding carries `locations` with `path` + `line` so the queue can
   group and jump to the exact spot.
-- **Resolution prefixes** (`fixed:` / `triaged:` / `promoted:`) are applied by the
-  human when they triage the item later — never prepend them yourself.
+- **Resolution prefixes** (`fixed:` / `triaged:` / `promoted:`) for findings you
+  *emit* on the unseeded path are applied by the human when they triage the item
+  later — never prepend them yourself. On a **seeded** run, by contrast, the human
+  has already triaged, so YOU resolve each consumed finding via
+  `cyboflow_resolve_finding` (`resolution_kind: "fixed" | "triaged" | "promoted"`);
+  the tool records the correct prefix server-side — you still never hand-type the
+  prefix string.
 
 ## Hard rules
 
 - **You are the single writer.** Only this session calls the `cyboflow_*` write
-  tools (`cyboflow_create_task`, `cyboflow_report_finding`); the `compounder`
-  subagent returns results and you persist them. Never write learnings to disk —
-  no per-learning markdown files, no plugin state directory, no direct edits to
-  CLAUDE.md / CODE-PATTERNS.md (those go through gated `decision` items).
-- **Nothing lands without the gate.** Use **AskUserQuestion** for the
-  `approve-learnings` gate and emit blocking `decision` items for every proposed
-  doc edit; never silently fold a learning back. `cyboflow_report_step` is
-  observational only and never substitutes for a gate.
+  tools (`cyboflow_create_task`, `cyboflow_report_finding`, and — on a seeded run —
+  `cyboflow_resolve_finding`); the `compounder` subagent returns results and you
+  persist them. (`cyboflow_get_selected_findings` is read-only and likewise
+  parent-only.) Never write learnings to disk — no per-learning markdown files, no
+  plugin state directory, no direct edits to CLAUDE.md / CODE-PATTERNS.md (those go
+  through gated `decision` items).
+- **Nothing lands without the gate.** On the **unseeded** path, use
+  **AskUserQuestion** for the `approve-learnings` gate and emit blocking `decision`
+  items for every proposed doc edit; never silently fold a learning back. On a
+  **seeded** run the `approve-learnings` gate is SKIPPED (the human already
+  triaged the set in the Insights tray), but you STILL emit a blocking `decision`
+  item for any `doc` finding whose edit must be human-gated before applying it.
+  `cyboflow_report_step` is observational only and never substitutes for a gate.
 - Report every step transition via `cyboflow_report_step` from this main session —
   including the steps whose work you delegated to the subagent.
