@@ -53,10 +53,12 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
           return null;
         }
         // Phase 3 (session<->run restructure): a backlog "Run" must be session-hosted
-        // like every other launch surface — ensure a session (the active one, else a
-        // fresh one) so the run executes in the session worktree and Diff/File-Explorer
-        // can follow it. Without this the run takes the legacy parentless path.
-        const sessionId = await ensureSessionForLaunch(projectId);
+        // like every other launch surface — ensure a session so the run executes in
+        // the session worktree and Diff/File-Explorer can follow it. forceNew: a
+        // backlog run is an explicit NEW launch, not an "add a workflow to the session
+        // I'm viewing" — it must never silently absorb the selected quick session
+        // (only the in-session useLaunchWorkflow affordance reuses the selection).
+        const sessionId = await ensureSessionForLaunch(projectId, { forceNew: true });
         // Seed by entity type: idea → ideaId (`# Selected idea` block + attachment
         // paths); task → Sprint batch of one (taskIds); epic → taskId link.
         const seed =

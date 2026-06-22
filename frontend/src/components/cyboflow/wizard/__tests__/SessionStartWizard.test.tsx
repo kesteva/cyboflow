@@ -112,12 +112,14 @@ import { useConfigStore } from '../../../../stores/configStore';
 import { useNavigationStore } from '../../../../stores/navigationStore';
 import { API } from '../../../../utils/api';
 import { trpc } from '../../../../trpc/client';
+import { ensureSessionForLaunch } from '../../../../utils/ensureSessionForLaunch';
 import type { AppConfig } from '../../../../types/config';
 import type { WorkflowRow } from '../../../../../../shared/types/workflows';
 
 const mockRunStart = vi.mocked(trpc.cyboflow.runs.start.mutate);
 const mockWorkflowsList = vi.mocked(trpc.cyboflow.workflows.list.query);
 const mockCreateQuick = vi.mocked(API.sessions.createQuick);
+const mockEnsureSession = vi.mocked(ensureSessionForLaunch);
 
 /** A non-gated custom workflow row (neither planner nor sprint → direct launch). */
 const CUSTOM_WORKFLOW_ROW: WorkflowRow = {
@@ -280,6 +282,20 @@ describe('SessionStartWizard — step ③ launch threading', () => {
         permissionMode: 'default',
       }),
     );
+  });
+
+  it('always forces a NEW session — never absorbs the selected quick session', async () => {
+    // Regression: the wizard IS the explicit "Start a new session" surface, so it
+    // must call ensureSessionForLaunch with forceNew:true. Without this it silently
+    // reused whatever quick session was selected, absorbing it into the new run.
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockEnsureSession).toHaveBeenCalledWith(1, { forceNew: true });
   });
 
   it('threads an explicit per-run substrate + permission override', async () => {

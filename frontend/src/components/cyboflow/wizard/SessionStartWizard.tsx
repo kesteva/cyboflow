@@ -378,12 +378,15 @@ export default function SessionStartWizard(): React.JSX.Element {
       setLaunchError(null);
       setIsLaunching(true);
       try {
-        // Ensure the run executes INSIDE a session (the active one if selected,
-        // else a freshly created session) — mirrors WorkflowPicker / the backlog
-        // launcher. Without this the wizard took the legacy PARENTLESS path
-        // (workflow_runs.session_id null), leaving the run with no session to bind
-        // the close-out (Merge / PR / Dismiss) or the File Explorer / Diff to.
-        const sessionId = await ensureSessionForLaunch(selectedProjectId);
+        // Ensure the run executes INSIDE a session. This wizard IS the explicit
+        // "Start a new session" surface, so it ALWAYS creates a fresh session
+        // (forceNew) — it must never silently absorb the quick session the user
+        // happens to have selected. (Reusing the selection is reserved for the
+        // in-session "Add a workflow" affordance via useLaunchWorkflow.) Without
+        // a session the run would take the legacy PARENTLESS path
+        // (workflow_runs.session_id null), with nothing to bind the close-out
+        // (Merge / PR / Dismiss) or the File Explorer / Diff to.
+        const sessionId = await ensureSessionForLaunch(selectedProjectId, { forceNew: true });
         const result: RunStartResult = await trpc.cyboflow.runs.start.mutate(
           ideaId === undefined
             ? { workflowId, projectId: selectedProjectId, sessionId, substrate, permissionMode }
@@ -423,7 +426,8 @@ export default function SessionStartWizard(): React.JSX.Element {
       setLaunchError(null);
       setIsLaunching(true);
       try {
-        const sessionId = await ensureSessionForLaunch(selectedProjectId);
+        // forceNew: the wizard always starts a NEW session (see launchRun).
+        const sessionId = await ensureSessionForLaunch(selectedProjectId, { forceNew: true });
         const result: RunStartResult = await trpc.cyboflow.runs.start.mutate({
           workflowId,
           projectId: selectedProjectId,

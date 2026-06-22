@@ -241,8 +241,14 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           ← Cyboflow home
         </button>
 
+        {/* Top-bar "Choose workflow" is a global NEW-workflow launcher (not the
+            in-session "Add a workflow" affordance), so it forces a fresh session —
+            it must never silently absorb the quick session the user is viewing. */}
         <button
-          onClick={() => setIsPickerOpen(true)}
+          onClick={() => {
+            setPickerForceNew(true);
+            setIsPickerOpen(true);
+          }}
           className="rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
           data-testid="open-workflow-picker"
         >
@@ -376,7 +382,13 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                     session={effectiveSession}
                     projectId={projectId}
                     projectName={projectName}
-                    onBrowseAll={() => setIsPickerOpen(true)}
+                    onBrowseAll={() => {
+                      // "Browse all" is the in-session add-a-workflow path (only
+                      // reached for SDK sessions; PTY routes to the confirm below),
+                      // so it REUSES this session — explicit forceNew=false.
+                      setPickerForceNew(false);
+                      setIsPickerOpen(true);
+                    }}
                     onAddWorkflowToNewSession={() => setAddWorkflowConfirmOpen(true)}
                   />
                 </div>
@@ -406,7 +418,10 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
             <div className="flex h-full flex-col items-center justify-center gap-4 p-4">
               <p className="text-sm text-text-secondary">Choose a workflow to start</p>
               <button
-                onClick={() => setIsPickerOpen(true)}
+                onClick={() => {
+                  setPickerForceNew(true);
+                  setIsPickerOpen(true);
+                }}
                 className="rounded-button bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover"
                 data-testid="open-workflow-picker-cta"
               >
