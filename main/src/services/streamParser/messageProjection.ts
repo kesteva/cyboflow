@@ -329,24 +329,32 @@ export class MessageProjection {
       }
     }
 
-    // Step 3: gather any text blocks. A user turn may carry genuine user text
-    // (e.g. the on-demand monitor's injected conversation turns) alongside or
-    // instead of tool_result blocks. If there is ≥1 non-empty text block, render
-    // it as a user-role message.
-    const userText = content
-      .filter((block): block is TextBlock => block.type === 'text')
-      .map(block => block.text.trim())
-      .filter(text => text.length > 0)
-      .join('\n');
+    // Step 3: render a user-text turn ONLY for a TOP-LEVEL (parentless) user event —
+    // the on-demand monitor's injected conversation turns. A user event carrying a
+    // `parent_tool_use_id` is a SUB-AGENT's INPUT PROMPT (the Task tool's prompt,
+    // echoed by the SDK nested under its tool_use) — internal plumbing, never a chat
+    // turn. Rendering those leaked giant agent prompts ("You are implementing
+    // TASK-002…", "You are the sprint dependency-analyzer…") into the Chat pane as
+    // "You" bubbles (smoke 2026-06-22). The parent guard restores the pre-widening
+    // null behavior for agent prompts while still surfacing the monitor's parentless
+    // turns. (DB-confirmed: every leaked prompt was parented; only the monitor's
+    // injected turn was parentless.)
+    if (!event.parent_tool_use_id) {
+      const userText = content
+        .filter((block): block is TextBlock => block.type === 'text')
+        .map(block => block.text.trim())
+        .filter(text => text.length > 0)
+        .join('\n');
 
-    if (userText.length > 0) {
-      return {
-        id: `user_msg_${++this.messageIdCounter}`,
-        role: 'user',
-        timestamp: new Date().toISOString(),
-        segments: [{ type: 'text', content: userText }],
-        metadata: {},
-      };
+      if (userText.length > 0) {
+        return {
+          id: `user_msg_${++this.messageIdCounter}`,
+          role: 'user',
+          timestamp: new Date().toISOString(),
+          segments: [{ type: 'text', content: userText }],
+          metadata: {},
+        };
+      }
     }
 
     // User events carrying only tool_result blocks are internal plumbing —

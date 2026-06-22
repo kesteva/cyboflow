@@ -386,6 +386,24 @@ describe('MessageProjection', () => {
     expect(result).toBeNull();
   });
 
+  it('returns null for a user TEXT event that carries a parent_tool_use_id (sub-agent INPUT PROMPT, not a chat turn)', () => {
+    // The SDK echoes a Task-spawned sub-agent's input prompt as a user-text event
+    // nested under its tool_use (parent_tool_use_id set). These are internal plumbing
+    // — rendering them leaked giant agent prompts as "You" bubbles (smoke 2026-06-22).
+    // Only TOP-LEVEL (parentless) user-text — the monitor's injected turns — renders.
+    const subAgentPromptEvent: UserEvent = {
+      type: 'user',
+      message: {
+        role: 'user',
+        content: [{ type: 'text', text: 'You are implementing **TASK-002** for the current sprint.' }],
+      },
+      parent_tool_use_id: TOOL_USE_ID,
+    };
+
+    const result = projection.project(subAgentPromptEvent);
+    expect(result).toBeNull();
+  });
+
   // -------------------------------------------------------------------------
   // 9. result/success → null
   // -------------------------------------------------------------------------
