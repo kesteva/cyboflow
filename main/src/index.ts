@@ -13,6 +13,7 @@ import { Logger } from './utils/logger';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
 import { initializeCommitManager } from './services/commitManager';
 import { setCyboflowDirectory, getCyboflowSubdirectory } from './utils/cyboflowDirectory';
+import { initTelemetry } from './services/telemetry';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
 import { setupEventListeners } from './events';
@@ -486,6 +487,12 @@ async function createWindow() {
 async function initializeServices() {
   configManager = new ConfigManager();
   await configManager.initialize();
+
+  // Initialize telemetry (error reporting + usage metrics) as early as
+  // possible, immediately after config is available so boot errors can be
+  // captured. Silent no-op when env credentials or config flags are absent.
+  const __cfg = configManager.getConfig();
+  if (__cfg.telemetry) initTelemetry(__cfg.telemetry);
 
   // Initialize logger early so it can capture all logs
   logger = new Logger(configManager);
