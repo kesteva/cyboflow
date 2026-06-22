@@ -339,10 +339,12 @@ export interface EntityEventRow {
 }
 
 /**
- * `review_items` row (migration 016) — the unified human-attention inbox. The
- * (entity_type, entity_id) pair is a SOFT polymorphic link (both nullable,
- * code-validated, NO hard FK). SQLite stores BOOLEAN as 0/1, so `blocking`
- * surfaces as `number` (0|1) on read — consumers normalize to boolean. The
+ * `review_items` row (migrations 016 + 032) — the unified human-attention inbox.
+ * The (entity_type, entity_id) pair is a SOFT polymorphic link (both nullable,
+ * code-validated, NO hard FK). SQLite stores BOOLEAN as 0/1, so `blocking` and
+ * `selected` surface as `number` (0|1) on read — consumers normalize to boolean.
+ * `priority`/`staged_at`/`selected` (migration 032) are finding-triage columns:
+ * meaningful only for kind='finding' (same convention as `severity`). The
  * shared READ-model + chokepoint types live in shared/types/reviews.ts; the
  * reviewItemSchemaParity test pins this interface against the table columns.
  */
@@ -358,6 +360,9 @@ export interface ReviewItemRow {
   title: string;
   body: string | null;
   severity: 'info' | 'warning' | 'error' | null;
+  priority: 'P0' | 'P1' | 'P2' | null; // migration 032 — NULL = un-prioritized
+  staged_at: string | null; // migration 032 — non-NULL == approved into READY
+  selected: number; // 0 | 1 (migration 032 — SQLite BOOLEAN-as-number, mirrors `blocking`)
   source: string | null;
   payload_json: string | null;
   created_at: string;

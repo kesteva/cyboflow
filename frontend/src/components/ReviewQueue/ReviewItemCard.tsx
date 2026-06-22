@@ -44,6 +44,7 @@ const TARGET_CHIP_LABEL: Record<FindingProposedTarget, string> = {
   backlog: '→ Backlog',
   docs: '→ Docs',
   prompt: '→ Prompt',
+  fix: '→ Quick fix',
 };
 
 // ---------------------------------------------------------------------------
@@ -97,7 +98,7 @@ function findingProposedTarget(item: ReviewItem): FindingProposedTarget | null {
   const payload: unknown = item.payload;
   if (payload === null || typeof payload !== 'object') return null;
   const target = (payload as { proposedTarget?: unknown }).proposedTarget;
-  if (target === 'backlog' || target === 'docs' || target === 'prompt') return target;
+  if (target === 'backlog' || target === 'docs' || target === 'prompt' || target === 'fix') return target;
   return null;
 }
 
@@ -133,8 +134,12 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
   };
 
   // Accept a docs/prompt finding: resolve with 'triaged:accepted-<target>' (the
-  // human applies the edit). 'backlog' never reaches here — it uses handlePromote.
-  const handleAccept = (target: Exclude<FindingProposedTarget, 'backlog'>): void => {
+  // human applies the edit). 'backlog' never reaches here — it uses handlePromote;
+  // 'fix' never reaches here either — a quick-fix finding is COMPOUNDED, not
+  // human-applied-as-docs, so the param is pinned to the manual-accept literals
+  // (matching acceptedResolution in shared/types/reviews.ts) — a tripwire that
+  // forces a compile error if a 'fix' caller is ever added.
+  const handleAccept = (target: 'docs' | 'prompt'): void => {
     void acceptFinding(item.project_id, item.id, target).then((r) => {
       if (r !== null) onResolved?.();
     });

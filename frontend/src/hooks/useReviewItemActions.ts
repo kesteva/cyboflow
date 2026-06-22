@@ -23,7 +23,7 @@
  */
 import { useCallback, useState } from 'react';
 import { trpc } from '../trpc/client';
-import { acceptedResolution, type FindingProposedTarget } from '../../../shared/types/reviews';
+import { acceptedResolution } from '../../../shared/types/reviews';
 
 export interface ReviewItemActionsState {
   /** Review item id whose mutation is currently in flight (or null when idle). */
@@ -47,7 +47,7 @@ export interface ReviewItemActionsState {
   acceptFinding: (
     projectId: number,
     reviewItemId: string,
-    target: Exclude<FindingProposedTarget, 'backlog'>,
+    target: 'docs' | 'prompt',
   ) => Promise<{ resumed: boolean } | null>;
   /** Dismiss a review item (cruft). Returns true on success, false on error. */
   dismiss: (projectId: number, reviewItemId: string, resolution?: string) => Promise<boolean>;
@@ -99,7 +99,7 @@ export function useReviewItemActions(): ReviewItemActionsState {
     (
       projectId: number,
       reviewItemId: string,
-      target: Exclude<FindingProposedTarget, 'backlog'>,
+      target: 'docs' | 'prompt',
     ): Promise<{ resumed: boolean } | null> =>
       resolve(projectId, reviewItemId, acceptedResolution(target)),
     [resolve],

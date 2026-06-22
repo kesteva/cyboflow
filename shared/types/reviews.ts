@@ -62,13 +62,43 @@ export type ReviewItemSource = string;
  * routing hint — it does NOT make the edit, only steers the human's primary
  * action (mockup F4: accept → editor / docs / backlog "apply now"):
  *   - 'backlog' — promote the finding to a real backlog task (the existing
- *                 promote-to-task path).
- *   - 'docs'    — a docs/ change the human applies manually.
+ *                 promote-to-task path). Maps to the Task-candidate bucket.
+ *   - 'docs'    — a docs/ change the human applies manually. Documentation bucket.
  *   - 'prompt'  — a workflow-prompt / CLAUDE.md edit the human applies manually.
+ *                 Folds into the Documentation bucket for DISPLAY ONLY (no data
+ *                 migration — the persisted value stays 'prompt').
+ *   - 'fix'     — a quick in-place code fix the compound run applies directly.
+ *                 Maps to the Quick fix bucket (findings-triage redesign).
  * 'docs'/'prompt' resolve the item with a 'triaged:accepted-<target>' note (the
  * decision is recorded per the resolution-prefix convention; no task is minted).
+ * See {@link findingBucket} for the canonical target → bucket mapping.
  */
-export type FindingProposedTarget = 'backlog' | 'docs' | 'prompt';
+export type FindingProposedTarget = 'backlog' | 'docs' | 'prompt' | 'fix';
+
+/**
+ * Finding priority — a first-class, SQL-sortable column on review_items
+ * (migration 032). NULL = un-prioritized legacy finding; consumers render NULL
+ * as an explicit "unset" badge and sort it LAST (never fabricate a 'P2' label).
+ */
+export const FINDING_PRIORITIES = ['P0', 'P1', 'P2'] as const;
+export type FindingPriority = (typeof FINDING_PRIORITIES)[number];
+export function isFindingPriority(v: unknown): v is FindingPriority {
+  return typeof v === 'string' && (FINDING_PRIORITIES as readonly string[]).includes(v);
+}
+
+/**
+ * Triage bucket a finding's {@link FindingProposedTarget} maps to — the SINGLE
+ * source of truth reused by the seed block and the Insights triage UI:
+ *   - 'quick' ← 'fix'      (Quick fix)
+ *   - 'task'  ← 'backlog'  (Task candidate)
+ *   - 'doc'   ← 'docs', legacy 'prompt', and null/unknown (Documentation update)
+ */
+export type FindingTagBucket = 'quick' | 'doc' | 'task';
+export function findingBucket(t: FindingProposedTarget | null | undefined): FindingTagBucket {
+  if (t === 'fix') return 'quick';
+  if (t === 'backlog') return 'task';
+  return 'doc'; // 'docs' and legacy 'prompt' fold here; null/unknown defaults to doc
+}
 
 /**
  * Finding payload — a non-blocking observation. `category` lets the UI group
@@ -164,6 +194,22 @@ export interface ReviewItem {
   body: string | null;
   /** Only meaningful for findings; null otherwise. */
   severity: ReviewItemSeverity | null;
+  /**
+   * First-class finding priority (migration 032). Finding-scoped — null for
+   * non-finding kinds AND for un-prioritized legacy findings.
+   */
+  priority: FindingPriority | null;
+  /**
+   * Non-null == the human approved this finding into READY (migration 032);
+   * doubles as staging order. Finding-scoped — null for non-finding kinds and
+   * for still-untriaged findings.
+   */
+  staged_at: string | null;
+  /**
+   * The per-finding "compound this" checkbox (migration 032; 0/1 normalized to
+   * boolean in shapeRow). Finding-scoped — always false for non-finding kinds.
+   */
+  selected: boolean;
   source: ReviewItemSource | null;
   /** Parsed payload_json (null when unset or unparseable). */
   payload: ReviewItemPayload | null;
@@ -200,8 +246,14 @@ export const RESOLUTION_PREFIX_TRIAGED = 'triaged:';
  * 'triaged:accepted-docs'. Parses as 'triaged' (no code fix was applied here;
  * the human makes the edit). A 'backlog' target does NOT use this — it goes
  * through promote-to-task and records 'promoted:<taskId>' instead.
+ *
+ * The param is PINNED to the explicit literal `'docs' | 'prompt'` — NOT
+ * `Exclude<FindingProposedTarget, 'backlog'>` — so widening the union with 'fix'
+ * can NEVER silently broaden this manual-accept path. A 'fix' finding is
+ * *compounded* (applied in-place by a compound run), never human-applied as
+ * docs, so it must produce a compile error if it ever reaches here.
  */
-export function acceptedResolution(target: Exclude<FindingProposedTarget, 'backlog'>): string {
+export function acceptedResolution(target: 'docs' | 'prompt'): string {
   return `${RESOLUTION_PREFIX_TRIAGED}accepted-${target}`;
 }
 
@@ -227,11 +279,23 @@ export function parseResolutionKind(resolution: string | null): ResolutionKind |
 
 /**
  * The action a committed review-item change represents.
- *   - created   — a new review item entered the inbox.
- *   - resolved  — triaged as resolved (incl. promote-to-task).
- *   - dismissed — triaged as dismissed (cruft).
+ *   - created           — a new review item entered the inbox.
+ *   - resolved          — triaged as resolved (incl. promote-to-task).
+ *   - dismissed         — triaged as dismissed (cruft).
+ *   - mutated           — a finding was re-tagged (proposedTarget) and/or
+ *                         re-prioritized while still untriaged (migration 032).
+ *   - staged            — a finding was approved untriaged → ready
+ *                         (staged_at set, selected pre-checked; migration 032).
+ *   - selection-changed — a ready finding's compound-this checkbox toggled
+ *                         (selected 0↔1; migration 032).
  */
-export type ReviewItemChangeAction = 'created' | 'resolved' | 'dismissed';
+export type ReviewItemChangeAction =
+  | 'created'
+  | 'resolved'
+  | 'dismissed'
+  | 'mutated'
+  | 'staged'
+  | 'selection-changed';
 
 /**
  * Emitted on the project-scoped channel after every committed review-item

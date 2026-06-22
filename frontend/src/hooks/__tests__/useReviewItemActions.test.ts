@@ -4,6 +4,8 @@
  * Covers:
  *   - resolve forwards { projectId, reviewItemId } and surfaces the backend
  *     `resumed` flag (decision flow-advancement signal).
+ *   - acceptFinding (target PINNED to 'docs' | 'prompt') resolves with the
+ *     'triaged:accepted-<target>' note — 'fix' can never reach this path.
  *   - dismiss forwards correctly and returns true on success.
  *   - promoteToTask forwards overrides and returns the minted { taskId }.
  *   - error path: a rejecting mutation sets `error` and returns null/false.
@@ -70,6 +72,25 @@ describe('useReviewItemActions', () => {
     });
 
     expect(mockResolve).toHaveBeenCalledWith({ projectId: 1, reviewItemId: 'rvw_2' });
+    expect(res).toEqual({ resumed: false });
+  });
+
+  it('acceptFinding resolves with the triaged:accepted-<target> note', async () => {
+    // The target param is pinned to 'docs' | 'prompt' so a widened
+    // FindingProposedTarget ('fix') can never reach the manual-accept path.
+    mockResolve.mockResolvedValue({ reviewItemId: 'rvw_a', resumed: false });
+    const { result } = renderHook(() => useReviewItemActions());
+
+    let res: { resumed: boolean } | null = null;
+    await act(async () => {
+      res = await result.current.acceptFinding(5, 'rvw_a', 'docs');
+    });
+
+    expect(mockResolve).toHaveBeenCalledWith({
+      projectId: 5,
+      reviewItemId: 'rvw_a',
+      resolution: 'triaged:accepted-docs',
+    });
     expect(res).toEqual({ resumed: false });
   });
 

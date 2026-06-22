@@ -156,6 +156,10 @@ interface ReviewItemDbRow {
   title: string;
   body: string | null;
   severity: ReviewItemSeverity | null;
+  // Finding-scoped triage columns (migration 032). NULL/0 for non-finding kinds.
+  priority: 'P0' | 'P1' | 'P2' | null;
+  staged_at: string | null;
+  selected: number; // 0 | 1
   source: string | null;
   payload_json: string | null;
   created_at: string;
@@ -473,6 +477,9 @@ export class ReviewItemRouter {
       title: row.title,
       body: row.body,
       severity: row.severity,
+      priority: row.priority,
+      staged_at: row.staged_at,
+      selected: row.selected === 1,
       source: row.source,
       payload,
       created_at: row.created_at,

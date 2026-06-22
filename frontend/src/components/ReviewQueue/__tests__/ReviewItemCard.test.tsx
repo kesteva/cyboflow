@@ -75,6 +75,9 @@ function makeItem(
     title: overrides.title ?? `${kind} title`,
     body: overrides.body ?? null,
     severity: overrides.severity ?? null,
+    priority: overrides.priority ?? null,
+    staged_at: overrides.staged_at ?? null,
+    selected: overrides.selected ?? false,
     source: overrides.source ?? null,
     payload,
     created_at: '2026-01-01T00:00:00.000Z',
@@ -182,6 +185,20 @@ describe('ReviewItemCard', () => {
       expect(chip).toHaveAttribute('data-target', target);
       unmount();
     }
+  });
+
+  it("renders the proposed-target chip for a 'fix' finding (runtime guard widened)", () => {
+    // Regression: the findingProposedTarget runtime guard must admit 'fix' (the
+    // D3 union widening) — a missing branch would SILENTLY DROP the chip and fall
+    // the card back to legacy Promote (FIND-SPRINT-024-4 class), not crash.
+    render(
+      <ReviewItemCard
+        item={makeItem('finding', { id: 'rvw_fix' }, { kind: 'finding', proposedTarget: 'fix' })}
+      />,
+    );
+    const chip = screen.getByTestId('proposed-target-chip');
+    expect(chip).toHaveAttribute('data-target', 'fix');
+    expect(chip).toHaveTextContent('→ Quick fix');
   });
 
   it("proposedTarget 'docs' Accept resolves with triaged:accepted-docs", async () => {
