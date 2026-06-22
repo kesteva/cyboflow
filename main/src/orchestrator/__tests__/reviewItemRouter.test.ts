@@ -10,6 +10,13 @@
  *  - soft entity link validation: entityType/entityId must be set together.
  *  - triage: resolve + dismiss set status/resolved_by/resolution + write a delta
  *    event; re-triaging a terminal item is rejected (invalid_status).
+ *  - findings-triage ops (migration 032): mutate (re-tag without clobbering
+ *    siblings + re-prioritize, untriaged-only, rejects staged/non-finding),
+ *    approve (untriaged → ready, sets staged_at + selected=1, rejects
+ *    non-pending/already-staged), set-selected (batch toggle, only staged
+ *    findings selectable, one event per id, orchestrator close-out path).
+ *  - exhaustive-switch dispatch: a new op does NOT fall through to runTriage.
+ *  - shapeRow normalizes selected 0/1 → boolean + surfaces priority/staged_at.
  *  - blocking boolean round-trips (0/1 <-> boolean) on the emitted item.
  *  - concurrent writes serialize per project (the PQueue is concurrency=1).
  *  - FK cascade: deleting the project removes its review items.
@@ -30,7 +37,7 @@ import type { DatabaseLike } from '../types';
 import type { ReviewItemChangedEvent } from '../../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
-// Test DB builder: projects + 006 + 011 + 014 + 015 + 016.
+// Test DB builder: projects + 006 + 011 + 014 + 015 + 016 + 032.
 // ---------------------------------------------------------------------------
 
 function buildDb(): Database.Database {
@@ -54,7 +61,58 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+  // 032 adds the finding-triage columns (priority/staged_at/selected) the
+  // mutate/approve/set-selected ops read + write.
+  db.exec(readFileSync(join(migDir, '032_findings_triage.sql'), 'utf-8'));
   return db;
+}
+
+/** Create a finding and return its minted id (DRY helper for triage tests). */
+async function createFinding(
+  router: ReviewItemRouter,
+  opts: {
+    projectId?: number;
+    title?: string;
+    actor?: 'user' | 'orchestrator' | `agent:${string}` | 'linear';
+    payload?: { kind: 'finding'; category?: string; suggestedFix?: string; proposedTarget?: 'backlog' | 'docs' | 'prompt' | 'fix' };
+  } = {},
+): Promise<string> {
+  const { reviewItemId } = await router.applyReviewItem(opts.projectId ?? 1, {
+    op: 'create',
+    actor: opts.actor ?? 'agent:executor',
+    kind: 'finding',
+    title: opts.title ?? 'A finding',
+    payload: opts.payload ?? null,
+  });
+  return reviewItemId;
+}
+
+/** Read the finding-triage columns off a row. */
+function triageCols(
+  db: Database.Database,
+  reviewItemId: string,
+): { status: string; priority: string | null; staged_at: string | null; selected: number; payload_json: string | null } {
+  return db
+    .prepare('SELECT status, priority, staged_at, selected, payload_json FROM review_items WHERE id = ?')
+    .get(reviewItemId) as {
+    status: string;
+    priority: string | null;
+    staged_at: string | null;
+    selected: number;
+    payload_json: string | null;
+  };
+}
+
+/** Read the last (highest-seq) entity_events row for a review item. */
+function lastEntityEvent(
+  db: Database.Database,
+  reviewItemId: string,
+): { kind: string; actor: string; changes_json: string } {
+  return db
+    .prepare(
+      "SELECT kind, actor, changes_json FROM entity_events WHERE entity_type = 'review_item' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
+    )
+    .get(reviewItemId) as { kind: string; actor: string; changes_json: string };
 }
 
 function seedRun(db: Database.Database, runId: string): void {
@@ -304,6 +362,398 @@ describe('ReviewItemRouter (unified review inbox)', () => {
     await expect(
       router.applyReviewItem(1, { op: 'resolve', actor: 'user', reviewItemId: 'rvw_nope' }),
     ).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  // -------------------------------------------------------------------------
+  // mutate — re-tag / re-prioritize (applied-not-consumed, untriaged-only)
+  // -------------------------------------------------------------------------
+
+  it('mutate re-tags a finding (sets payload.proposedTarget incl "fix") without clobbering siblings', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createFinding(router, {
+      payload: { kind: 'finding', category: 'perf', suggestedFix: 'batch the reads' },
+    });
+
+    await router.applyReviewItem(1, {
+      op: 'mutate',
+      actor: 'user',
+      reviewItemId,
+      proposedTarget: 'fix',
+    });
+
+    const cols = triageCols(db, reviewItemId);
+    expect(cols.status).toBe('pending'); // applied-not-consumed
+    expect(cols.staged_at).toBeNull();
+    const payload = JSON.parse(cols.payload_json ?? '{}') as {
+      kind: string;
+      category?: string;
+      suggestedFix?: string;
+      proposedTarget?: string;
+    };
+    expect(payload.proposedTarget).toBe('fix');
+    // siblings preserved
+    expect(payload.kind).toBe('finding');
+    expect(payload.category).toBe('perf');
+    expect(payload.suggestedFix).toBe('batch the reads');
+  });
+
+  it('mutate synthesizes a finding payload when the row has no payload yet', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createFinding(router, { payload: undefined });
+
+    await router.applyReviewItem(1, {
+      op: 'mutate',
+      actor: 'user',
+      reviewItemId,
+      proposedTarget: 'docs',
+    });
+
+    const cols = triageCols(db, reviewItemId);
+    const payload = JSON.parse(cols.payload_json ?? '{}') as { kind: string; proposedTarget?: string };
+    expect(payload.kind).toBe('finding');
+    expect(payload.proposedTarget).toBe('docs');
+  });
+
+  it('mutate re-prioritizes a finding (sets the priority column)', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createFinding(router);
+
+    await router.applyReviewItem(1, { op: 'mutate', actor: 'user', reviewItemId, priority: 'P0' });
+
+    const cols = triageCols(db, reviewItemId);
+    expect(cols.priority).toBe('P0');
+    expect(cols.status).toBe('pending');
+    expect(cols.staged_at).toBeNull();
+  });
+
+  it('mutate re-tags AND re-prioritizes in one call', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createFinding(router, {
+      payload: { kind: 'finding', category: 'security' },
+    });
+
+    await router.applyReviewItem(1, {
+      op: 'mutate',
+      actor: 'user',
+      reviewItemId,
+      proposedTarget: 'backlog',
+      priority: 'P1',
+    });
+
+    const cols = triageCols(db, reviewItemId);
+    expect(cols.priority).toBe('P1');
+    const payload = JSON.parse(cols.payload_json ?? '{}') as { proposedTarget?: string; category?: string };
+    expect(payload.proposedTarget).toBe('backlog');
+    expect(payload.category).toBe('security'); // sibling preserved
+  });
+
+  it('mutate writes a "mutated" entity_events delta carrying from/to', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createFinding(router, {
+      payload: { kind: 'finding', proposedTarget: 'docs' },
+    });
+
+    await router.applyReviewItem(1, {
+      op: 'mutate',
+      actor: 'user',
+      reviewItemId,
+      proposedTarget: 'fix',
+      priority: 'P0',
+    });
+
+    const ev = lastEntityEvent(db, reviewItemId);
+    expect(ev.kind).toBe('mutated');
+    expect(ev.actor).toBe('user');
+    const deltas = JSON.parse(ev.changes_json) as Array<{ field: string; from: unknown; to: unknown }>;
+    expect(deltas).toContainEqual({ field: 'proposedTarget', from: 'docs', to: 'fix' });
+    expect(deltas).toContainEqual({ field: 'priority', from: null, to: 'P0' });
+  });
+
+  it('mutate emits a "mutated" ReviewItemChangedEvent on review-project-<id>', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createFinding(router);
+
+    const events: ReviewItemChangedEvent[] = [];
+    reviewItemChangeEvents.on(reviewItemProjectChannel(1), (e: ReviewItemChangedEvent) => events.push(e));
+
+    await router.applyReviewItem(1, { op: 'mutate', actor: 'user', reviewItemId, priority: 'P2' });
+
+    expect(events.map((e) => e.action)).toEqual(['mutated']);
+    expect(events[0].item.priority).toBe('P2');
+  });
+
+  it('mutate rejects a staged (ready) finding with invalid_status', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createFinding(router);
+    await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId });
+
+    await expect(
+      router.applyReviewItem(1, { op: 'mutate', actor: 'user', reviewItemId, priority: 'P0' }),
+    ).rejects.toMatchObject({ code: 'invalid_status' });
+  });
+
+  it('mutate rejects a non-finding kind with invalid_payload', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const { reviewItemId } = await router.applyReviewItem(1, {
+      op: 'create',
+      actor: 'user',
+      kind: 'decision',
+      title: 'Approve plan?',
+      payload: { kind: 'decision', gate: 'approve-plan' },
+    });
+
+    await expect(
+      router.applyReviewItem(1, { op: 'mutate', actor: 'user', reviewItemId, proposedTarget: 'fix' }),
+    ).rejects.toMatchObject({ code: 'invalid_payload' });
+  });
+
+  // -------------------------------------------------------------------------
+  // approve — untriaged → ready (pre-selected)
+  // -------------------------------------------------------------------------
+
+  it('approve sets staged_at + selected=1 and writes a "staged" event', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createFinding(router);
+
+    await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId });
+
+    const cols = triageCols(db, reviewItemId);
+    expect(cols.status).toBe('pending'); // status NOT overloaded
+    expect(cols.staged_at).not.toBeNull();
+    expect(cols.selected).toBe(1);
+
+    const ev = lastEntityEvent(db, reviewItemId);
+    expect(ev.kind).toBe('staged');
+    const deltas = JSON.parse(ev.changes_json) as Array<{ field: string; from: unknown; to: unknown }>;
+    expect(deltas).toContainEqual({ field: 'staged_at', from: null, to: 'set' });
+    expect(deltas).toContainEqual({ field: 'selected', from: false, to: true });
+  });
+
+  it('approve emits a "staged" ReviewItemChangedEvent with selected=true', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createFinding(router);
+
+    const events: ReviewItemChangedEvent[] = [];
+    reviewItemChangeEvents.on(reviewItemProjectChannel(1), (e: ReviewItemChangedEvent) => events.push(e));
+
+    await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId });
+
+    expect(events.map((e) => e.action)).toEqual(['staged']);
+    expect(events[0].item.selected).toBe(true);
+    expect(events[0].item.staged_at).not.toBeNull();
+  });
+
+  it('approve rejects a non-pending (resolved) finding with invalid_status', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createFinding(router);
+    await router.applyReviewItem(1, { op: 'resolve', actor: 'user', reviewItemId });
+
+    await expect(
+      router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId }),
+    ).rejects.toMatchObject({ code: 'invalid_status' });
+  });
+
+  it('approve rejects an already-staged finding with invalid_status', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createFinding(router);
+    await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId });
+
+    await expect(
+      router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId }),
+    ).rejects.toMatchObject({ code: 'invalid_status' });
+  });
+
+  // -------------------------------------------------------------------------
+  // set-selected — batch toggle of the compound-this checkbox
+  // -------------------------------------------------------------------------
+
+  it('set-selected batch-toggles selected over the explicit id list', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const a = await createFinding(router, { title: 'a' });
+    const b = await createFinding(router, { title: 'b' });
+    await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId: a });
+    await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId: b });
+
+    // both start selected=1 (approve pre-selects); clear both
+    await router.applyReviewItem(1, {
+      op: 'set-selected',
+      actor: 'user',
+      reviewItemIds: [a, b],
+      selected: false,
+    });
+    expect(triageCols(db, a).selected).toBe(0);
+    expect(triageCols(db, b).selected).toBe(0);
+
+    // re-select only a
+    await router.applyReviewItem(1, {
+      op: 'set-selected',
+      actor: 'user',
+      reviewItemIds: [a],
+      selected: true,
+    });
+    expect(triageCols(db, a).selected).toBe(1);
+    expect(triageCols(db, b).selected).toBe(0);
+  });
+
+  it('set-selected emits one "selection-changed" event per affected id', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const a = await createFinding(router, { title: 'a' });
+    const b = await createFinding(router, { title: 'b' });
+    await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId: a });
+    await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId: b });
+
+    const events: ReviewItemChangedEvent[] = [];
+    reviewItemChangeEvents.on(reviewItemProjectChannel(1), (e: ReviewItemChangedEvent) => events.push(e));
+
+    await router.applyReviewItem(1, {
+      op: 'set-selected',
+      actor: 'user',
+      reviewItemIds: [a, b],
+      selected: false,
+    });
+
+    expect(events).toHaveLength(2);
+    expect(events.every((e) => e.action === 'selection-changed')).toBe(true);
+    expect(new Set(events.map((e) => e.reviewItemId))).toEqual(new Set([a, b]));
+    expect(events.every((e) => e.item.selected === false)).toBe(true);
+  });
+
+  it('set-selected rejects an unstaged id with invalid_status (whole batch rolls back)', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const staged = await createFinding(router, { title: 'staged' });
+    const untriaged = await createFinding(router, { title: 'untriaged' });
+    await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId: staged });
+
+    await expect(
+      router.applyReviewItem(1, {
+        op: 'set-selected',
+        actor: 'user',
+        reviewItemIds: [staged, untriaged],
+        selected: false,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_status' });
+    // atomic: the staged row's selected is unchanged (still 1 from approve)
+    expect(triageCols(db, staged).selected).toBe(1);
+  });
+
+  it('set-selected with selected=false clears selection (orchestrator close-out path)', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    seedRun(db, 'run-x'); // entity_events.run_id FKs workflow_runs — the close-out passes a real runId
+    const reviewItemId = await createFinding(router);
+    await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId });
+    expect(triageCols(db, reviewItemId).selected).toBe(1);
+
+    await router.applyReviewItem(1, {
+      op: 'set-selected',
+      actor: 'orchestrator',
+      reviewItemIds: [reviewItemId],
+      selected: false,
+      runId: 'run-x',
+    });
+
+    const cols = triageCols(db, reviewItemId);
+    expect(cols.selected).toBe(0);
+    expect(cols.staged_at).not.toBeNull(); // stays in READY for the human to re-decide
+
+    const ev = lastEntityEvent(db, reviewItemId);
+    expect(ev.kind).toBe('selection-changed');
+    expect(ev.actor).toBe('orchestrator');
+  });
+
+  // -------------------------------------------------------------------------
+  // exhaustive-switch dispatch — a new op does NOT fall through to runTriage
+  // -------------------------------------------------------------------------
+
+  it('mutate/approve/set-selected do NOT fall through to the resolve/dismiss path', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createFinding(router);
+
+    // mutate must NOT resolve/dismiss the row (the old ternary would have).
+    await router.applyReviewItem(1, { op: 'mutate', actor: 'user', reviewItemId, priority: 'P1' });
+    expect(triageCols(db, reviewItemId).status).toBe('pending');
+    expect(db.prepare('SELECT resolved_by FROM review_items WHERE id = ?').get(reviewItemId)).toMatchObject({
+      resolved_by: null,
+    });
+
+    // approve must NOT set status terminal.
+    await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId });
+    expect(triageCols(db, reviewItemId).status).toBe('pending');
+
+    // set-selected must NOT set status terminal.
+    await router.applyReviewItem(1, {
+      op: 'set-selected',
+      actor: 'user',
+      reviewItemIds: [reviewItemId],
+      selected: false,
+    });
+    expect(triageCols(db, reviewItemId).status).toBe('pending');
+  });
+
+  // -------------------------------------------------------------------------
+  // shapeRow — normalizes selected + surfaces priority/staged_at
+  // -------------------------------------------------------------------------
+
+  it('shapeRow normalizes selected 0/1 → boolean and surfaces priority/staged_at', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const reviewItemId = await createFinding(router);
+
+    // untriaged baseline
+    const beforeRow = db.prepare('SELECT * FROM review_items WHERE id = ?').get(reviewItemId) as Parameters<
+      typeof ReviewItemRouter.shapeRow
+    >[0];
+    const before = ReviewItemRouter.shapeRow(beforeRow);
+    expect(before.selected).toBe(false);
+    expect(before.priority).toBeNull();
+    expect(before.staged_at).toBeNull();
+
+    await router.applyReviewItem(1, { op: 'mutate', actor: 'user', reviewItemId, priority: 'P0' });
+    await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId });
+
+    const afterRow = db.prepare('SELECT * FROM review_items WHERE id = ?').get(reviewItemId) as Parameters<
+      typeof ReviewItemRouter.shapeRow
+    >[0];
+    const after = ReviewItemRouter.shapeRow(afterRow);
+    expect(after.selected).toBe(true);
+    expect(after.priority).toBe('P0');
+    expect(after.staged_at).not.toBeNull();
+  });
+
+  it('serializes mutate/approve/set-selected per project (PQueue concurrency=1)', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+    const ids = await Promise.all(
+      Array.from({ length: 5 }, (_, i) => createFinding(router, { title: `f${i}` })),
+    );
+    // fan out interleaved triage ops; the per-project queue must serialize them.
+    await Promise.all([
+      ...ids.map((id) => router.applyReviewItem(1, { op: 'mutate', actor: 'user', reviewItemId: id, priority: 'P2' })),
+    ]);
+    await Promise.all(ids.map((id) => router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId: id })));
+
+    for (const id of ids) {
+      const cols = triageCols(db, id);
+      expect(cols.priority).toBe('P2');
+      expect(cols.selected).toBe(1);
+      expect(cols.staged_at).not.toBeNull();
+    }
   });
 
   // -------------------------------------------------------------------------
