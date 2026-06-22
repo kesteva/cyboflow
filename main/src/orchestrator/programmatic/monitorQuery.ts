@@ -40,11 +40,14 @@ export const SUPERVISOR_QUERY_TIMEOUT_MS = 120_000;
 const MONITOR_ALLOWED_TOOLS = ['Read', 'Grep', 'Glob'] as const;
 
 /**
- * Small turn budget: enough turns to inspect the worktree (read-only tools) before
- * emitting the final structured verdict / answer, but bounded so a single query
- * stays cheap. The monitor is on-demand — it acts rarely, but must be able to look.
+ * Turn budget: enough turns to inspect the worktree (read-only Read/Grep/Glob) AND
+ * emit the final verdict / answer. The monitor is on-demand — it acts rarely, so a
+ * generous budget is cheap. 6 was too tight: a single "what's the current state?"
+ * answer reads several files and blew past it, so the SDK threw `error_max_turns`
+ * and the user saw a fail-soft apology on the first ask (smoke 2026-06-22). The hard
+ * `SUPERVISOR_QUERY_TIMEOUT_MS` deadline is the real safety bound, not this count.
  */
-const MONITOR_MAX_TURNS = 6;
+const MONITOR_MAX_TURNS = 24;
 
 /**
  * A one-shot STRUCTURED SDK query: send `prompt`, enforce `schema` via the SDK's
@@ -179,6 +182,11 @@ export function makeSdkTextQuery(
 ): TextQueryFn {
   return async ({ prompt, cwd, model, signal }) => {
     const { controller, didTimeOut, cleanup } = makeDeadline(timeoutMs, signal);
+    // Keep the LAST assistant message's text — later turns supersede earlier ones
+    // (the monitor may speak mid-inspection, but its final turn is the answer).
+    // Hoisted out of the try so a mid-stream error (e.g. the SDK throwing
+    // `error_max_turns`) can still return whatever the monitor had already said.
+    let answer = '';
     try {
       const q = query({
         prompt,
@@ -192,9 +200,6 @@ export function makeSdkTextQuery(
         },
       });
 
-      // Keep the LAST assistant message's text — later turns supersede earlier ones
-      // (the monitor may speak mid-inspection, but its final turn is the answer).
-      let answer = '';
       for await (const msg of q) {
         if (msg.type === 'assistant') {
           const text = assistantText(msg.message);
@@ -210,6 +215,11 @@ export function makeSdkTextQuery(
           ? err.message
           : String(err);
       logger?.warn('[monitorQuery] text query failed', { error: message });
+      // Graceful degradation: if the monitor produced a partial answer before the
+      // error (a turn-cap hit mid-investigation, a timeout after it spoke), surface
+      // THAT rather than throwing → the user sees a useful (if incomplete) reply
+      // instead of a bare apology. Only rethrow when there is nothing to show.
+      if (answer.trim().length > 0) return answer;
       throw new Error(message);
     } finally {
       cleanup();

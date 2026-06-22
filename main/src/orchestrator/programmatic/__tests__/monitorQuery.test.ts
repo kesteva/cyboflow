@@ -39,6 +39,24 @@ function rejectingIterable(error: Error): AsyncIterable<unknown> {
 }
 
 /**
+ * An async iterable that yields the given messages, THEN its next `next()` rejects —
+ * models the SDK iterator producing output and then throwing (e.g. `error_max_turns`
+ * after the monitor has already spoken). Used to assert graceful partial-answer
+ * degradation in the text query.
+ */
+function yieldsThenRejects(messages: unknown[], error: Error): AsyncIterable<unknown> {
+  let i = 0;
+  return {
+    [Symbol.asyncIterator]: () => ({
+      next: () =>
+        i < messages.length
+          ? Promise.resolve({ value: messages[i++], done: false })
+          : Promise.reject(error),
+    }),
+  };
+}
+
+/**
  * Build a blocking async generator for `queryMock` that completes (without yielding)
  * once its run's abortController fires — models a hung query unblocked by the
  * deadline timer or the caller's abort signal. `onAbort` observes the abort firing.
@@ -167,10 +185,26 @@ describe('makeSdkTextQuery', () => {
     expect(opts.allowedTools).toEqual(['Read', 'Grep', 'Glob']);
   });
 
-  it('throws when the SDK iterator throws', async () => {
+  it('throws when the SDK iterator throws BEFORE the monitor speaks (no partial to show)', async () => {
     queryMock.mockImplementation(() => rejectingIterable(new Error('text boom')));
     const fn = makeSdkTextQuery();
     await expect(fn({ prompt: 'p', cwd: '/wt' })).rejects.toThrow('text boom');
+  });
+
+  it('returns the partial answer when the SDK throws AFTER the monitor spoke (e.g. error_max_turns)', async () => {
+    // The smoke-2026-06-22 failure: the monitor produced an answer, then the SDK
+    // threw error_max_turns. Graceful degradation surfaces the partial answer the
+    // user can use instead of a bare apology (the brain only apologizes on a true
+    // empty/throw). Higher MONITOR_MAX_TURNS makes this rare; this is the backstop.
+    queryMock.mockImplementation(({ options }: { options: unknown }) => {
+      lastOptions = options;
+      return yieldsThenRejects(
+        [{ type: 'assistant', message: { content: [{ type: 'text', text: 'partial state summary' }] } }],
+        new Error('Claude Code returned an error result: Reached maximum number of turns (24)'),
+      );
+    });
+    const fn = makeSdkTextQuery();
+    expect(await fn({ prompt: 'p', cwd: '/wt' })).toBe('partial state summary');
   });
 
   it('aborts and throws on timeout', async () => {
