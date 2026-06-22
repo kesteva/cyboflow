@@ -147,6 +147,17 @@ export interface FanOutDriver {
    */
   resolveItems(runId: string, over: string): string[];
   /**
+   * Resolve the BLOCKING dependency edges among the item set: a map from item id to
+   * the ids of the items it must wait for (its prerequisites). The controller uses
+   * it to schedule DAG waves — a task is dispatched only once all of its in-scope
+   * prerequisites have integrated. OPTIONAL: absent (or an empty map) ⇒ every task
+   * is ready immediately and the fan-out runs flat cap-sized waves (byte-identical
+   * to the pre-DAG behavior). MAY hit the DB (the production driver reads
+   * `task_dependencies`); a throw is contained by the controller (treated as no
+   * dependencies), so a transient error degrades to a flat run rather than crashing.
+   */
+  dependencies?(runId: string, over: string): Map<string, string[]>;
+  /**
    * Drive a lane's status/step for ONE item. Fail-soft — MUST never throw (the
    * controller does not wrap this); the production driver swallows lane-store
    * errors and logs. `allowedStepIds` is the fanOut step's inner-id vocabulary,

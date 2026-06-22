@@ -407,10 +407,13 @@ export class WorkflowController {
    * fan-out — sibling items continue and the outer step still settles 'done'
    * (the holistic verify/review OUTER steps after the fanOut catch real defects).
    *
-   * v1 simplification: a FLAT concurrency cap + a strictly SEQUENTIAL inner chain
-   * per item — NO DAG / same-file serialization (the prose DAG of `sprint.md` is
-   * deliberately dropped). Inner `loopback` is parsed/validated upstream but is
-   * NOT re-driven here (reserved for a future revision).
+   * Scheduling is DAG-aware (2026-06-22): a task is dispatched only once all of its
+   * in-scope blocking prerequisites have integrated (via `host.fanOut.dependencies`);
+   * a task whose prerequisite failed is marked failed (blocked). When the driver
+   * exposes no dependencies this degrades to flat cap-sized waves. Still a v1
+   * simplification on two axes: NO same-file serialization within a wave, and inner
+   * `loopback` is parsed/validated upstream but NOT re-driven here (both reserved for
+   * a future revision).
    */
   private async runFanOut(
     runId: string,
@@ -481,17 +484,85 @@ export class WorkflowController {
       return 'done';
     };
 
-    // Process items in WAVES of at most SPRINT_BATCH_CAP, checking the abort
-    // signal between waves. A 'canceled' outcome from any item in a wave ends
-    // the whole fan-out terminally; required-inner failures are NON-terminal but
-    // are counted so the caller can gate the sprint's closing stages.
+    // DAG-aware wave scheduling: dispatch a task only once ALL of its in-scope
+    // blocking prerequisites have INTEGRATED. A task whose prerequisite FAILED can
+    // never satisfy its preconditions, so its lane is marked failed (blocked) and
+    // counts as incomplete. When the driver exposes no dependencies (or an empty
+    // map) every task is ready immediately, so this degrades to flat cap-sized waves
+    // — byte-identical to the pre-DAG behavior for non-dependency fan-outs.
+    // Prerequisites are restricted to the in-scope item set; an out-of-scope prereq
+    // (e.g. a task already integrated in a prior run and excluded from `items`) is
+    // treated as satisfied.
+    const inScope = new Set(items);
+    let rawDeps: Map<string, string[]> | undefined;
+    try {
+      rawDeps = driver.dependencies?.(runId, fanOut.over);
+    } catch (err) {
+      this.host.log?.(
+        'warn',
+        `fan-out dependencies('${fanOut.over}') threw; running without DAG ordering: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const prereqs = new Map<string, string[]>();
+    for (const itemId of items) {
+      prereqs.set(itemId, (rawDeps?.get(itemId) ?? []).filter((p) => inScope.has(p) && p !== itemId));
+    }
+
+    const integrated = new Set<string>();
+    const failed = new Set<string>();
+    const remaining = new Set(items);
     let incompleteCount = 0;
-    for (let start = 0; start < items.length; start += SPRINT_BATCH_CAP) {
+
+    /** Mark a lane failed (a blocked/unrunnable task) and count it incomplete. */
+    const markBlocked = (itemId: string, reason: string): void => {
+      driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+      this.host.log?.('warn', `fan-out item '${itemId}': ${reason}; lane failed`);
+      remaining.delete(itemId);
+      failed.add(itemId);
+      incompleteCount += 1;
+    };
+
+    while (remaining.size > 0) {
       if (signal?.aborted) return { terminal: true, incompleteCount };
-      const wave = items.slice(start, start + SPRINT_BATCH_CAP);
+
+      const ready: string[] = [];
+      let blockedThisPass = false;
+      for (const itemId of remaining) {
+        const ps = prereqs.get(itemId) ?? [];
+        if (ps.some((p) => failed.has(p))) {
+          markBlocked(itemId, 'a blocking prerequisite failed');
+          blockedThisPass = true;
+        } else if (ps.every((p) => integrated.has(p))) {
+          ready.push(itemId);
+        }
+        // else: still waiting on a pending prerequisite.
+      }
+
+      if (ready.length === 0) {
+        if (blockedThisPass) continue; // made progress — re-evaluate readiness
+        // Nothing ready and nothing newly blocked, yet items remain ⇒ their
+        // prerequisites are unresolvable (a cycle, or a prereq that never runs).
+        // Fail them rather than spin forever.
+        for (const itemId of [...remaining]) {
+          markBlocked(itemId, 'unresolvable blocking dependencies (cycle?)');
+        }
+        break;
+      }
+
+      // Dispatch ONE cap-sized wave of ready tasks concurrently, then re-evaluate
+      // (tasks unblocked by this wave's integrations join the next wave).
+      const wave = ready.slice(0, SPRINT_BATCH_CAP);
       const outcomes = await Promise.all(wave.map((itemId) => driveItem(itemId)));
       if (outcomes.includes('aborted') || signal?.aborted) return { terminal: true, incompleteCount };
-      incompleteCount += outcomes.filter((o) => o === 'failed').length;
+      wave.forEach((itemId, idx) => {
+        remaining.delete(itemId);
+        if (outcomes[idx] === 'failed') {
+          failed.add(itemId);
+          incompleteCount += 1;
+        } else {
+          integrated.add(itemId);
+        }
+      });
     }
 
     return { terminal: false, incompleteCount };

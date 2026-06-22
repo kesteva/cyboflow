@@ -864,5 +864,82 @@ describe('WorkflowController', () => {
       expect(byId['sprint-verify']).toBe('done');
       expect(host.gateCalls).toEqual(['human-review']);
     });
+
+    // ── DAG-aware wave scheduling (driver.dependencies) ─────────────────────────
+    it('dispatches a task only after its blocking prerequisite integrates', async () => {
+      // t2 and t3 both depend on t1 ⇒ wave 1 = [t1], wave 2 = [t2, t3].
+      const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+      const base = makeFanOutDriver(['t1', 't2', 't3']);
+      const driver: FanOutDriver = {
+        ...base,
+        dependencies: () =>
+          new Map([
+            ['t2', ['t1']],
+            ['t3', ['t1']],
+          ]),
+      };
+      const order: string[] = [];
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          if (ctx.item) order.push(ctx.item.id);
+          return { status: 'ok' };
+        },
+      };
+      const host = makeFanHost(driver);
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      // t1 ran FIRST (alone); t2 & t3 only after it integrated.
+      expect(order[0]).toBe('t1');
+      expect(new Set(order.slice(1))).toEqual(new Set(['t2', 't3']));
+      // Every lane integrated.
+      const integrated = base.lanes.filter((l) => l.status === 'integrated').map((l) => l.itemId);
+      expect(new Set(integrated)).toEqual(new Set(['t1', 't2', 't3']));
+    });
+
+    it('blocks (fails) a dependent task when its prerequisite fails — never dispatching it', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+      const base = makeFanOutDriver(['t1', 't2']);
+      const driver: FanOutDriver = { ...base, dependencies: () => new Map([['t2', ['t1']]]) };
+      const order: string[] = [];
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          if (ctx.item) order.push(ctx.item.id);
+          return ctx.item?.id === 't1' ? { status: 'failed', error: 'boom' } : { status: 'ok' };
+        },
+      };
+      const host = makeFanHost(driver);
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed'); // a failed/blocked lane is non-terminal
+      // t1 ran (and failed); t2 was NEVER dispatched (blocked by t1).
+      expect(order).toEqual(['t1']);
+      const failedLanes = base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId);
+      expect(new Set(failedLanes)).toEqual(new Set(['t1', 't2']));
+    });
+
+    it('fails tasks with unresolvable (cyclic) dependencies instead of spinning', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+      const base = makeFanOutDriver(['t1', 't2']);
+      const driver: FanOutDriver = {
+        ...base,
+        dependencies: () =>
+          new Map([
+            ['t1', ['t2']],
+            ['t2', ['t1']],
+          ]),
+      };
+      const runner = makeRunner();
+      const host = makeFanHost(driver);
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(runner.calls.length).toBe(0); // neither task could ever run
+      const failedLanes = base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId);
+      expect(new Set(failedLanes)).toEqual(new Set(['t1', 't2']));
+    });
   });
 });

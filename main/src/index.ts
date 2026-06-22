@@ -891,6 +891,29 @@ async function initializeServices() {
                 .filter((lane) => lane.status !== 'integrated' && lane.status !== 'failed')
                 .map((lane) => lane.taskId)
             : [],
+        // DAG ordering (2026-06-22): expose the batch's BLOCKING edges so the
+        // controller dispatches a task only after its prerequisites integrate.
+        // Reads task_dependencies for the batch's lane task ids; returns taskId →
+        // [prerequisite taskIds]. An empty map ⇒ flat waves (no dependencies).
+        dependencies: (_runId, over) => {
+          const map = new Map<string, string[]>();
+          if (over !== 'tasks') return map;
+          const taskIds = sprintLaneStore.listLanes(batchId).map((lane) => lane.taskId);
+          if (taskIds.length === 0) return map;
+          const placeholders = taskIds.map(() => '?').join(',');
+          const rows = rawDb
+            .prepare(
+              `SELECT task_id, depends_on_task_id FROM task_dependencies
+                 WHERE kind = 'blocking' AND task_id IN (${placeholders})`,
+            )
+            .all(...taskIds) as Array<{ task_id: string; depends_on_task_id: string }>;
+          for (const row of rows) {
+            const prereqs = map.get(row.task_id) ?? [];
+            prereqs.push(row.depends_on_task_id);
+            map.set(row.task_id, prereqs);
+          }
+          return map;
+        },
         driveLane: ({ runId: rid, itemId, status, currentStepId, allowedStepIds }) => {
           try {
             sprintLaneStore.updateLane({
