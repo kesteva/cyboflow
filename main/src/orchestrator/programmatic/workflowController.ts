@@ -25,6 +25,7 @@
  */
 import type { WorkflowDefinition, WorkflowStep } from '../../../../shared/types/workflows';
 import { HUMAN_GATE_AGENT } from '../../../../shared/types/agentIdentity';
+import { SPRINT_BATCH_CAP } from '../../../../shared/types/sprintBatch';
 import type {
   ControllerHost,
   ControllerResult,
@@ -164,6 +165,37 @@ export class WorkflowController {
           continue;
         }
 
+        // ── Host-driven parallel fan-out (programmatic plane only) ───────────
+        // A step that declares `fanOut` AND has an injected driver resolves a
+        // runtime item set; when non-empty, the host walks each item through the
+        // inner chain (driving a lane per item) instead of running the step once.
+        // An EMPTY item set (or an absent driver) falls through to the normal
+        // single agent-step path below — byte-identical to today.
+        if (step.fanOut !== undefined && this.host.fanOut !== undefined) {
+          const items = this.host.fanOut.resolveItems(runId, step.fanOut.over);
+          if (items.length > 0) {
+            this.host.reportStep(step.id, 'running');
+            const fanResult = await this.runFanOut(
+              runId,
+              step,
+              { runId, phaseId: phase.id, stepIndex: i, signal },
+              items,
+              signal,
+            );
+            if (fanResult.terminal) {
+              // Mark the outer step canceled in the trace before the terminal.
+              this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'canceled', attempts: 1 });
+              this.host.reportStep(step.id, 'done');
+              return this.finish({ outcome: 'canceled', steps, failedStepId: step.id }, runId);
+            }
+            this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'done', attempts: 1 });
+            this.host.reportStep(step.id, 'done');
+            i += 1;
+            continue;
+          }
+          // No items resolved ⇒ fall through to the normal agent-step path.
+        }
+
         const baseCtx = { runId, phaseId: phase.id, stepIndex: i, signal };
         this.host.reportStep(step.id, 'running');
 
@@ -280,6 +312,111 @@ export class WorkflowController {
   private finish(result: ControllerResult, runId: string): ControllerResult {
     this.emit({ kind: 'run-finished', runId, outcome: result.outcome, stepId: result.failedStepId });
     return result;
+  }
+
+  /**
+   * Walk a `fanOut` outer step: drive ONE lane per resolved item through the
+   * step's inner chain, with bounded parallelism. Each item's lane goes
+   * `running` (at the first inner step) → one `currentStepId` update per inner
+   * step → `integrated` (all inner steps succeeded) or `failed` (a required inner
+   * step failed). Items run in WAVES of at most `SPRINT_BATCH_CAP` via
+   * `Promise.all`; the abort signal is checked between waves AND per inner step,
+   * so a canceled run returns a terminal 'canceled' promptly. Lane writes go
+   * through the injected fail-soft `host.fanOut.driveLane` (never throws); the
+   * controller itself performs NO DB/IPC.
+   *
+   * Returns `{ terminal: false }` when the whole item set settled (the caller
+   * then marks the outer step done), or `{ terminal: true }` ONLY on cancellation
+   * (the caller ends the run 'canceled'). A required inner-step failure on ONE
+   * item marks THAT lane 'failed' and stops that item, but does NOT terminate the
+   * fan-out — sibling items continue and the outer step still settles 'done'
+   * (the holistic verify/review OUTER steps after the fanOut catch real defects).
+   *
+   * v1 simplification: a FLAT concurrency cap + a strictly SEQUENTIAL inner chain
+   * per item — NO DAG / same-file serialization (the prose DAG of `sprint.md` is
+   * deliberately dropped). Inner `loopback` is parsed/validated upstream but is
+   * NOT re-driven here (reserved for a future revision).
+   */
+  private async runFanOut(
+    runId: string,
+    step: WorkflowStep,
+    baseCtx: { runId: string; phaseId: string; stepIndex: number; signal?: AbortSignal },
+    items: string[],
+    signal: AbortSignal | undefined,
+  ): Promise<{ terminal: boolean }> {
+    const fanOut = step.fanOut;
+    const driver = this.host.fanOut;
+    // Defensive: the caller only enters here with both present; narrow for TS.
+    if (fanOut === undefined || driver === undefined) return { terminal: false };
+
+    const inner = fanOut.inner;
+    const allowedStepIds: readonly string[] = inner.map((s) => s.id);
+
+    /**
+     * Walk ONE item through the inner chain. Fail-soft per inner step:
+     *  - required inner failure (or abort) → mark the lane (failed) + stop;
+     *  - optional inner failure → skip that inner step, continue the lane;
+     *  - all inner steps ok → mark the lane 'integrated'.
+     * Returns 'aborted' when the signal fired mid-walk so the wave can short out.
+     */
+    const driveItem = async (itemId: string): Promise<'done' | 'failed' | 'aborted'> => {
+      driver.driveLane({
+        runId,
+        itemId,
+        status: 'running',
+        currentStepId: inner[0].id,
+        allowedStepIds,
+      });
+
+      for (let k = 0; k < inner.length; k++) {
+        if (signal?.aborted) return 'aborted';
+        const innerStep = inner[k];
+        driver.driveLane({ runId, itemId, currentStepId: innerStep.id, allowedStepIds });
+
+        // Synthesize a minimal WorkflowStep for the inner step + thread item
+        // context so the spawner scopes the agent to THIS item.
+        const synthesized: WorkflowStep = {
+          id: innerStep.id,
+          name: innerStep.name ?? innerStep.id,
+          agent: innerStep.agent,
+          mcps: [],
+          retries: 0,
+          ...(innerStep.optional !== undefined ? { optional: innerStep.optional } : {}),
+        };
+        const ctx: ControllerStepContext = {
+          ...baseCtx,
+          attempt: 1,
+          item: { id: itemId, over: fanOut.over },
+        };
+        const result = await this.runner.runStep(synthesized, ctx);
+
+        if (result.status === 'aborted') return 'aborted';
+        if (result.status === 'failed') {
+          if (innerStep.optional === true) {
+            this.host.log?.('warn', `fan-out item '${itemId}': optional step '${innerStep.id}' failed; skipping`);
+            continue;
+          }
+          driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+          this.host.log?.('warn', `fan-out item '${itemId}': step '${innerStep.id}' failed; lane failed`);
+          return 'failed';
+        }
+      }
+
+      driver.driveLane({ runId, itemId, status: 'integrated', allowedStepIds });
+      return 'done';
+    };
+
+    // Process items in WAVES of at most SPRINT_BATCH_CAP, checking the abort
+    // signal between waves. A 'canceled' outcome from any item in a wave ends
+    // the whole fan-out terminally; required-inner failures are NON-terminal.
+    for (let start = 0; start < items.length; start += SPRINT_BATCH_CAP) {
+      if (signal?.aborted) return { terminal: true };
+      const wave = items.slice(start, start + SPRINT_BATCH_CAP);
+      const outcomes = await Promise.all(wave.map((itemId) => driveItem(itemId)));
+      if (outcomes.includes('aborted') || signal?.aborted) return { terminal: true };
+    }
+
+    return { terminal: false };
   }
 
   /**

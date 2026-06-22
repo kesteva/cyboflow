@@ -22,6 +22,7 @@
  * 'fs', or any concrete service in main/src/services/*. Shared types only.
  */
 import type { WorkflowStep } from '../../../../shared/types/workflows';
+import type { SprintBatchTaskStatus } from '../../../../shared/types/sprintBatch';
 
 /**
  * Terminal status of a single step-agent invocation.
@@ -67,6 +68,13 @@ export interface ControllerStepContext {
   stepIndex: number;
   attempt: number;
   signal?: AbortSignal;
+  /**
+   * Fan-out item context — present ONLY when this is one item's inner step (the
+   * host walks a fanOut step). Absent for every normal single-step invocation, so
+   * the single-step prompt path stays byte-identical. The downstream
+   * `SpawnStepRunner`/`composeStepPrompt` scope the agent to this item.
+   */
+  item?: { id: string; over: string };
 }
 
 /**
@@ -121,6 +129,36 @@ export interface SupervisorEvent {
 }
 
 /**
+ * Resolves the runtime item set + drives one lane per item for a `fanOut` step
+ * (host-driven parallel fan-out on the PROGRAMMATIC plane). Injected on
+ * `ControllerHost.fanOut` so the controller stays free of DB/IPC — the production
+ * implementation is sprint-lane backed (writes `sprint_batch_tasks` via
+ * `SprintLaneStore`, which emits on `sprintLaneChannel`); test hosts fake it.
+ * Absent ⇒ the controller never fans out (a fanOut step runs as a normal step).
+ */
+export interface FanOutDriver {
+  /**
+   * Resolve the item ids for `over` (e.g. 'tasks' → the run's batch lane task
+   * ids). An empty result ⇒ NO fan-out — the controller falls through to the
+   * normal single agent-step path (byte-identical to today).
+   */
+  resolveItems(runId: string, over: string): string[];
+  /**
+   * Drive a lane's status/step for ONE item. Fail-soft — MUST never throw (the
+   * controller does not wrap this); the production driver swallows lane-store
+   * errors and logs. `allowedStepIds` is the fanOut step's inner-id vocabulary,
+   * threaded so the lane store validates `currentStepId` against it.
+   */
+  driveLane(args: {
+    runId: string;
+    itemId: string;
+    status?: SprintBatchTaskStatus;
+    currentStepId?: string | null;
+    allowedStepIds: readonly string[];
+  }): void;
+}
+
+/**
  * The cyboflow-side effect surface the controller drives. `reportStep` +
  * `requestHumanGate` are owned by the host so the controller stays free of
  * DB/IPC/Electron concerns. The optional `triageFailure` seam consults the
@@ -170,6 +208,16 @@ export interface ControllerHost {
    * returned ControllerResult.
    */
   recordStepResult?(report: StepReport): void;
+
+  /**
+   * Optional fan-out lane driver. Present ONLY on the programmatic host for a
+   * seeded sprint-style run (a `batch_id` exists). When present AND a step
+   * declares `fanOut` AND the driver resolves a non-empty item set, the
+   * controller walks each item through the inner chain, driving a lane per item.
+   * Absent ⇒ the controller never fans out (a `fanOut` step runs as a normal
+   * single agent step — today's behavior for orchestrated runs and tests).
+   */
+  fanOut?: FanOutDriver;
 
   /** Optional structured log sink; absent ⇒ the controller stays silent. */
   log?(level: 'info' | 'warn', message: string): void;

@@ -9,12 +9,15 @@ import { describe, it, expect } from 'vitest';
 import { WorkflowController, MAX_STEP_LOOPBACKS } from '../workflowController';
 import type {
   ControllerHost,
+  FanOutDriver,
   HumanGateDecision,
   StepRunResult,
   StepRunner,
   SupervisorEvent,
   TriageDecision,
 } from '../types';
+import type { SprintBatchTaskStatus } from '../../../../../shared/types/sprintBatch';
+import { SPRINT_BATCH_CAP } from '../../../../../shared/types/sprintBatch';
 import type {
   WorkflowDefinition,
   WorkflowPhase,
@@ -514,5 +517,229 @@ describe('WorkflowController', () => {
     const result = await new WorkflowController(runner, makeHost()).run('r', d);
 
     expect(result.outcome).toBe('completed'); // no false "execution bound exceeded" throw
+  });
+
+  // ── host-driven parallel fan-out (programmatic plane) ────────────────────────
+  describe('fan-out', () => {
+    /** A recording fake FanOutDriver: resolves a fixed item set + logs lane writes. */
+    function makeFanOutDriver(items: string[]): FanOutDriver & {
+      lanes: Array<{
+        itemId: string;
+        status?: SprintBatchTaskStatus;
+        currentStepId?: string | null;
+        allowedStepIds: readonly string[];
+      }>;
+    } {
+      const lanes: Array<{
+        itemId: string;
+        status?: SprintBatchTaskStatus;
+        currentStepId?: string | null;
+        allowedStepIds: readonly string[];
+      }> = [];
+      return {
+        lanes,
+        resolveItems() {
+          return [...items];
+        },
+        driveLane({ itemId, status, currentStepId, allowedStepIds }) {
+          lanes.push({ itemId, status, currentStepId, allowedStepIds });
+        },
+      };
+    }
+
+    /** A host carrying an injected FanOutDriver (extends makeHost). */
+    function makeFanHost(driver: FanOutDriver | undefined): ReturnType<typeof makeHost> {
+      const host = makeHost();
+      host.fanOut = driver;
+      return host;
+    }
+
+    const fanStep = (id: string, innerIds: string[]): WorkflowStep =>
+      step({
+        id,
+        agent: 'orchestrate',
+        fanOut: {
+          over: 'tasks',
+          inner: innerIds.map((iid) => ({ id: iid, agent: iid })),
+        },
+      });
+
+    it('walks each resolved item through the inner chain: running → steps → integrated', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'])])]);
+      const driver = makeFanOutDriver(['t1', 't2', 't3']);
+      // Runner default = ok for every inner step.
+      const runner = makeRunner();
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      // Outer step recorded done once.
+      expect(result.steps.map((s) => s.stepId)).toEqual(['execute']);
+      expect(result.steps[0]).toMatchObject({ stepId: 'execute', outcome: 'done' });
+
+      // Each item: running(@implement) → implement → verify → integrated.
+      for (const item of ['t1', 't2', 't3']) {
+        const itemLanes = driver.lanes.filter((l) => l.itemId === item);
+        expect(itemLanes[0]).toMatchObject({ status: 'running', currentStepId: 'implement' });
+        expect(itemLanes.map((l) => l.currentStepId)).toEqual([
+          'implement', // running seed
+          'implement', // step 1
+          'verify', // step 2
+          undefined, // integrated (no currentStepId)
+        ]);
+        expect(itemLanes[itemLanes.length - 1].status).toBe('integrated');
+        // allowedStepIds threads the inner vocabulary into every lane write.
+        expect(itemLanes.every((l) => l.allowedStepIds.join(',') === 'implement,verify')).toBe(true);
+      }
+
+      // Each item ran both inner steps via the runner (3 items × 2 inner = 6).
+      expect(runner.calls.filter((c) => c.id === 'implement').length).toBe(3);
+      expect(runner.calls.filter((c) => c.id === 'verify').length).toBe(3);
+      // Item context threaded into the spawn ctx — verified via a context-capturing
+      // runner below; here just assert the outer step never hit the runner.
+      expect(runner.calls.some((c) => c.id === 'execute')).toBe(false);
+    });
+
+    it('threads per-item context into the synthesized inner-step runStep call', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const seen: Array<{ id: string; over?: string; itemId?: string }> = [];
+      const runner: StepRunner = {
+        async runStep(s, ctx) {
+          seen.push({ id: s.id, over: ctx.item?.over, itemId: ctx.item?.id });
+          return { status: 'ok' };
+        },
+      };
+
+      await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+      expect(seen).toEqual([
+        { id: 'implement', over: 'tasks', itemId: 't1' },
+        { id: 'implement', over: 'tasks', itemId: 't2' },
+      ]);
+    });
+
+    it('respects the SPRINT_BATCH_CAP concurrency cap (items run in waves)', async () => {
+      // More items than the cap → at most SPRINT_BATCH_CAP run concurrently.
+      const items = Array.from({ length: SPRINT_BATCH_CAP + 3 }, (_, k) => `t${k}`);
+      const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+      const driver = makeFanOutDriver(items);
+
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const runner: StepRunner = {
+        async runStep() {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          // Yield so concurrently-started items overlap before resolving.
+          await new Promise((res) => setTimeout(res, 1));
+          inFlight -= 1;
+          return { status: 'ok' };
+        },
+      };
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(maxInFlight).toBeLessThanOrEqual(SPRINT_BATCH_CAP);
+      // Every item integrated.
+      const integrated = driver.lanes.filter((l) => l.status === 'integrated').map((l) => l.itemId);
+      expect(new Set(integrated)).toEqual(new Set(items));
+    });
+
+    it('marks a lane failed on a required inner-step failure while siblings integrate', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'])])]);
+      const driver = makeFanOutDriver(['t1', 't2']);
+      // t1's 'implement' fails (required) → t1 lane fails, t2 integrates.
+      // The runner is keyed by step id only, so distinguish by failing the FIRST
+      // implement call: use a single-shot fail on 'implement'.
+      const runner = makeRunner({ implement: [{ status: 'failed', error: 'boom' }] });
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+      // The fan-out still settles the outer step done (non-terminal item failure).
+      expect(result.outcome).toBe('completed');
+      expect(result.steps[0]).toMatchObject({ stepId: 'execute', outcome: 'done' });
+
+      // Exactly one lane failed and one integrated.
+      const failed = driver.lanes.filter((l) => l.status === 'failed');
+      const integrated = driver.lanes.filter((l) => l.status === 'integrated');
+      expect(failed.length).toBe(1);
+      expect(integrated.length).toBe(1);
+    });
+
+    it('continues the lane when an OPTIONAL inner step fails (no lane failure)', async () => {
+      const d = def([
+        phase('p1', [
+          step({
+            id: 'execute',
+            agent: 'orchestrate',
+            fanOut: {
+              over: 'tasks',
+              inner: [
+                { id: 'implement', agent: 'implement' },
+                { id: 'visual', agent: 'visual', optional: true },
+                { id: 'verify', agent: 'verify' },
+              ],
+            },
+          }),
+        ]),
+      ]);
+      const driver = makeFanOutDriver(['t1']);
+      const runner = makeRunner({ visual: [{ status: 'failed', error: 'flaky' }] });
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      // The optional failure did NOT fail the lane — it integrated.
+      expect(driver.lanes.some((l) => l.status === 'failed')).toBe(false);
+      expect(driver.lanes.some((l) => l.status === 'integrated')).toBe(true);
+      // 'verify' still ran after the optional skip.
+      expect(runner.calls.some((c) => c.id === 'verify')).toBe(true);
+    });
+
+    it('cancels the run when the signal aborts mid fan-out', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'])])]);
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const ac = new AbortController();
+      // Abort as soon as the first inner step runs.
+      const runner: StepRunner = {
+        async runStep() {
+          ac.abort();
+          return { status: 'aborted' };
+        },
+      };
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d, ac.signal);
+
+      expect(result.outcome).toBe('canceled');
+      expect(result.failedStepId).toBe('execute');
+    });
+
+    it('falls back to the normal agent path when the driver resolves [] (byte-identical)', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement', 'verify']), step({ id: 'next' })])]);
+      const driver = makeFanOutDriver([]); // no items → no fan-out
+      const runner = makeRunner();
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      // The OUTER step ran exactly once via the runner (normal single-step path),
+      // and no lanes were driven.
+      expect(runner.calls.filter((c) => c.id === 'execute').length).toBe(1);
+      expect(driver.lanes).toEqual([]);
+      expect(runner.calls.map((c) => c.id)).toEqual(['execute', 'next']);
+    });
+
+    it('runs a fanOut step as a normal step when host.fanOut is undefined', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'])])]);
+      const runner = makeRunner();
+
+      // No driver on the host ⇒ the fanOut field is inert.
+      const result = await new WorkflowController(runner, makeFanHost(undefined)).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(runner.calls.filter((c) => c.id === 'execute').length).toBe(1);
+    });
   });
 });
