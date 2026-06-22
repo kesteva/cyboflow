@@ -370,6 +370,56 @@ describe('RunExecutor.executeProgrammatic — inject seam (monitor-unify)', () =
   });
 
   /**
+   * At-rest chat lifetime: the inject plumbing must SURVIVE walk-drain (teardownRun)
+   * so the user can chat with the monitor while the run rests in awaiting_review.
+   * It is torn down only by disposeMonitorResources (called at terminal close-out).
+   */
+  it('keeps inject working after the run drains, until disposeMonitorResources tears it down', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const published: Array<{ runId: string; type: string }> = [];
+    const publisher: StreamEventPublisher = {
+      publish(runId, envelope) {
+        published.push({ runId, type: (envelope as { type: string }).type });
+      },
+    };
+    const db = makeRawEventsDb();
+
+    // Capture the run's injectEvent so the test can call it AFTER the walk drains.
+    let capturedInject: ((event: ReturnType<typeof buildAssistantTextEvent>) => void) | undefined;
+    const runner: ProgrammaticRunner = {
+      run: vi.fn((ctx: ProgrammaticRunContext) => {
+        capturedInject = ctx.injectEvent;
+        return Promise.resolve();
+      }),
+    };
+
+    const executor = new TestableRunExecutor(
+      makeSpawner(), registry, makeSpyLogger(),
+      undefined, undefined, publisher, db, undefined, undefined, undefined, undefined, undefined, runner,
+    );
+
+    await executor.execute(run.id); // walk completes → drains → teardownRun fires
+
+    expect(capturedInject).toBeDefined();
+    // The walk has drained and teardownRun has run — yet an at-rest inject STILL
+    // persists + publishes (the monitor plumbing survived).
+    capturedInject!(buildAssistantTextEvent('at rest'));
+    expect(countRawEvents(db, run.id)).toBe(1);
+    expect(published.filter((e) => e.runId === run.id).length).toBe(1);
+
+    // Terminal close-out disposes the plumbing — a subsequent inject is a silent no-op.
+    executor.disposeMonitorResources(run.id);
+    capturedInject!(buildAssistantTextEvent('after close-out'));
+    expect(countRawEvents(db, run.id)).toBe(1); // unchanged
+    expect(published.filter((e) => e.runId === run.id).length).toBe(1); // unchanged
+  });
+
+  /**
    * Guard: with no publisher/db wired (the common test construction), no
    * persisting bridge exists, injectEvent is a no-op, and nothing is persisted —
    * the runner can still call it unconditionally without throwing.

@@ -382,6 +382,17 @@ export interface RunCloseoutDeps {
    */
   clearPendingApprovalsForRun: (runId: string) => void;
   /**
+   * Dispose the run's ON-DEMAND monitor at terminal close-out (the monitor-unify
+   * refactor): tears down the per-run inject plumbing (progSource/progBridge) AND
+   * unregisters the MonitorRegistry entry. Unlike the rest of the run's per-run
+   * state (disposed at walk-drain by RunExecutor.teardownRun), the monitor survives
+   * the walk so the user can chat with it while the run rests — so it must be
+   * disposed HERE, where the worktree is removed (merge / createPr / dismiss). A
+   * no-op for runs that never had an SDK monitor. Backed by
+   * RunExecutor.disposeMonitorResources + MonitorRegistry.unregister.
+   */
+  disposeMonitorResources: (runId: string) => void;
+  /**
    * Optional native-task stage deriver (migration 014). When wired, the merge /
    * createPr / dismiss mutations stamp workflow_runs.outcome and recompute the
    * linked task's derived execution stage through the chokepoint. The run's
@@ -1136,6 +1147,10 @@ export const runsRouter = router({
       // Drop any pending approvals for the run so close-out doesn't leave
       // orphaned items in the review queue.
       deps!.clearPendingApprovalsForRun(input.runId);
+      // Dispose the run's on-demand monitor (inject plumbing + registry entry): it
+      // outlived the walk so the user could chat with it at rest, and close-out
+      // (worktree removed above) is where it finally goes away. No-op without a monitor.
+      deps!.disposeMonitorResources(input.runId);
       ctx.db
         .prepare(
           `UPDATE workflow_runs
@@ -1197,6 +1212,10 @@ export const runsRouter = router({
       // Drop any pending approvals for the run so close-out doesn't leave
       // orphaned items in the review queue.
       deps!.clearPendingApprovalsForRun(input.runId);
+      // Dispose the run's on-demand monitor (inject plumbing + registry entry): it
+      // outlived the walk so the user could chat with it at rest, and close-out
+      // (worktree removed above) is where it finally goes away. No-op without a monitor.
+      deps!.disposeMonitorResources(input.runId);
       ctx.db
         .prepare(
           `UPDATE workflow_runs
@@ -1248,6 +1267,10 @@ export const runsRouter = router({
       // Drop any pending approvals for the run so close-out doesn't leave
       // orphaned items in the review queue.
       deps!.clearPendingApprovalsForRun(input.runId);
+      // Dispose the run's on-demand monitor (inject plumbing + registry entry): it
+      // outlived the walk so the user could chat with it at rest, and close-out
+      // (worktree removed above) is where it finally goes away. No-op without a monitor.
+      deps!.disposeMonitorResources(input.runId);
       ctx.db
         .prepare(
           `UPDATE workflow_runs

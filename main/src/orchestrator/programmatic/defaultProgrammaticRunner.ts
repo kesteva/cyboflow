@@ -118,22 +118,20 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       logger: this.deps.logger,
     });
 
-    let result;
-    try {
-      result = await new WorkflowController(runner, host).run(
-        ctx.runId,
-        def,
-        ctx.signal,
-        ctx.resumeFromStepId,
-        ctx.completedStepIds,
-      );
-    } finally {
-      // Always unregister the monitor — the on-demand brain has no live session to
-      // tear down (each query is one-shot), so a simple registry cleanup suffices.
-      if (monitor) {
-        MonitorRegistry.getInstance().unregister(ctx.runId);
-      }
-    }
+    // NOTE: the monitor is intentionally NOT unregistered when the walk ends. The
+    // on-demand brain has no live session to tear down (each query is one-shot), and
+    // it must stay reachable AFTER the walk so the user can chat with it about a run
+    // resting in awaiting_review (or sitting failed / canceled-but-kept). It is
+    // unregistered + its inject plumbing disposed at TERMINAL close-out (merge /
+    // createPr / dismiss) by the composition-root close-out wiring
+    // (RunExecutor.disposeMonitorResources + MonitorRegistry.unregister).
+    const result = await new WorkflowController(runner, host).run(
+      ctx.runId,
+      def,
+      ctx.signal,
+      ctx.resumeFromStepId,
+      ctx.completedStepIds,
+    );
 
     if (result.outcome === 'failed') {
       throw new Error(

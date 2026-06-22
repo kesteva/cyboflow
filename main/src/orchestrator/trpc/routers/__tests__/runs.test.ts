@@ -921,6 +921,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
       worktreeManager: wm,
       sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
       clearPendingApprovalsForRun: clearApprovals,
+      disposeMonitorResources: vi.fn(),
     });
   }
 
@@ -943,6 +944,7 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
       worktreeManager: makeWmStub(),
       sessionManager: { getProjectById: () => undefined },
       clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources: vi.fn(),
     });
   });
 
@@ -965,6 +967,24 @@ describe('cyboflow.runs.merge / dismiss (GAP-B)', () => {
     expect(wm.mergeWorktreeToMain).not.toHaveBeenCalled();
     expect(wm.removeWorktreeByPath).toHaveBeenCalledWith('/projects/p', '/tmp/wt/run-merge-1');
     expect(getStatus('run-merge-1')).toBe('completed');
+  });
+
+  it('merge disposes the run on-demand monitor at close-out (monitor-unify at-rest lifetime)', async () => {
+    // The monitor outlives the walk so the user can chat with it at rest; close-out
+    // (worktree removed) is where it is finally torn down.
+    seedRun(db, { id: 'run-mon-dispose', status: 'awaiting_review', worktreePath: '/tmp/wt/run-mon-dispose' });
+    const disposeMonitorResources = vi.fn();
+    setRunCloseoutDeps({
+      worktreeManager: makeWmStub(),
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+      clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources,
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.merge({ runId: 'run-mon-dispose', strategy: 'preserve' });
+
+    expect(disposeMonitorResources).toHaveBeenCalledWith('run-mon-dispose');
   });
 
   it('merge(preserve) from stuck replays commits without a squash message', async () => {
@@ -1337,6 +1357,7 @@ describe('cyboflow.runs.merge / dismiss — interactive endSession close-out (ID
       worktreeManager: makeWmStub(),
       sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
       clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources: vi.fn(),
     });
   });
 
@@ -1346,6 +1367,7 @@ describe('cyboflow.runs.merge / dismiss — interactive endSession close-out (ID
       worktreeManager: makeWmStub(),
       sessionManager: { getProjectById: () => undefined },
       clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources: vi.fn(),
     });
     // Reset the relay bag so the wired spy does not leak into other describe blocks.
     setRelayDeps(makeUnwiredRelayDeps());
@@ -1389,6 +1411,7 @@ describe('cyboflow.runs.merge / dismiss — interactive endSession close-out (ID
       worktreeManager: { ...makeWmStub(), removeWorktreeByPath },
       sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
       clearPendingApprovalsForRun: vi.fn(),
+      disposeMonitorResources: vi.fn(),
     });
     setRelayDeps({
       relayInput: vi.fn<RelayDeps['relayInput']>(),

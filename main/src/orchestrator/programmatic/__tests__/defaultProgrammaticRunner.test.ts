@@ -105,7 +105,7 @@ describe('DefaultProgrammaticRunner', () => {
     await expect(runner.run(badCtx)).rejects.toThrow('no resolvable workflow definition');
   });
 
-  it('builds the monitor from the factory, registers it for the run, and unregisters on finish', async () => {
+  it('builds the monitor from the factory, registers it, and KEEPS it registered after the walk (close-out owns disposal)', async () => {
     let observed: MonitorContext | undefined;
     let registeredDuringRun = false;
     const monitor: MonitorSession = {
@@ -116,8 +116,7 @@ describe('DefaultProgrammaticRunner', () => {
       observed = ctx;
       return monitor;
     };
-    // A spawner that observes the monitor is registered WHILE the run is executing
-    // (the runner registers it before driving the controller, unregisters after).
+    // A spawner that observes the monitor is registered WHILE the run is executing.
     const spawner = makeSpawner(async () => {
       registeredDuringRun = MonitorRegistry.getInstance().get('run-1') === monitor;
     });
@@ -127,12 +126,15 @@ describe('DefaultProgrammaticRunner', () => {
 
     // The factory was handed the run's MonitorContext.
     expect(observed).toEqual({ runId: 'run-1', projectId: 1, workflowName: 'custom', worktreePath: '/wt' });
-    // It was registered during the walk and unregistered after the run settles.
+    // It was registered during the walk AND stays registered after — the monitor must
+    // remain reachable so the user can chat with it while the run rests in
+    // awaiting_review. It is unregistered only at terminal close-out (merge / createPr
+    // / dismiss), which the runner does NOT drive.
     expect(registeredDuringRun).toBe(true);
-    expect(MonitorRegistry.getInstance().get('run-1')).toBeUndefined();
+    expect(MonitorRegistry.getInstance().get('run-1')).toBe(monitor);
   });
 
-  it('unregisters the monitor even when the run throws (no leaked registry entry)', async () => {
+  it('keeps the monitor registered even when the run throws (chat-about-the-failure; close-out disposes)', async () => {
     const monitor: MonitorSession = {
       triage: vi.fn().mockResolvedValue({ decision: 'fail', rationale: '' }),
       answer: vi.fn().mockResolvedValue(''),
@@ -145,8 +147,10 @@ describe('DefaultProgrammaticRunner', () => {
     });
 
     // The monitor triages 'fail' → the controller fails the run → the runner throws.
+    // The failed run keeps its worktree, so the monitor stays registered for at-rest
+    // chat ("why did it fail?") until the user dismisses it.
     await expect(runner.run(ctxFor(oneStepDef()))).rejects.toThrow("failed at step 'a'");
-    expect(MonitorRegistry.getInstance().get('run-1')).toBeUndefined();
+    expect(MonitorRegistry.getInstance().get('run-1')).toBe(monitor);
   });
 
   it('does NOT register a monitor when no factory is provided (default review-queue path)', async () => {

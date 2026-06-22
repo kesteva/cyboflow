@@ -36,6 +36,7 @@ import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
 import {
   DefaultMonitorSession,
   DefaultHistoryReader,
+  MonitorRegistry,
   type MonitorContext,
   type MonitorSession,
 } from './orchestrator/programmatic/monitor';
@@ -1415,6 +1416,13 @@ app.whenReady().then(async () => {
       // items in the review queue.
       clearPendingApprovalsForRun: (runId) =>
         ApprovalRouter.getInstance().clearPendingForRun(runId),
+      // Monitor-unify: at terminal close-out, tear down the run's on-demand monitor —
+      // its per-run inject plumbing (RunExecutor) AND its registry entry. The monitor
+      // outlives the walk (chat-at-rest), so this is the ONLY place it goes away.
+      disposeMonitorResources: (runId) => {
+        runExecutor.disposeMonitorResources(runId);
+        MonitorRegistry.getInstance().unregister(runId);
+      },
       // Native task-tracking (migration 014): merge/createPr/dismiss stamp the
       // run's outcome and recompute the linked task's derived execution stage.
       // getInstance() resolves the singleton initialized during service construction.

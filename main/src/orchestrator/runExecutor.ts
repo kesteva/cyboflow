@@ -746,6 +746,29 @@ export class RunExecutor {
   }
 
   /**
+   * Dispose a programmatic run's MONITOR inject plumbing (the per-run progSource +
+   * its persisting bridge). Anchored to TERMINAL close-out (merge / createPr /
+   * dismiss — wherever the worktree is removed), NOT to walk-drain: the monitor
+   * stays reachable while the run rests in awaiting_review (or sits failed /
+   * canceled-but-kept) so the user can still chat with it. The MonitorRegistry
+   * entry is unregistered by the composition-root close-out wiring alongside this
+   * call. Idempotent; a no-op for orchestrated runs (no entry) and for an already-
+   * disposed run.
+   */
+  disposeMonitorResources(runId: string): void {
+    const progBridge = this.progBridges.get(runId);
+    if (progBridge) {
+      progBridge.dispose();
+      this.progBridges.delete(runId);
+    }
+    const progSource = this.progSources.get(runId);
+    if (progSource) {
+      progSource.removeAllListeners();
+      this.progSources.delete(runId);
+    }
+  }
+
+  /**
    * Mark a programmatic run for crash-safe RESUME at `stepId` (boot recovery).
    * Called before re-driving execute(runId) on a run whose previous process died
    * mid-walk; executeProgrammatic threads it into the controller so already-done
@@ -886,22 +909,14 @@ export class RunExecutor {
       bridge.dispose();
       this.bridges.delete(runId);
     }
-    // Dispose the per-run PROGRAMMATIC inject bridge (monitor-unify seam) — the
-    // second bridge a programmatic run wires (over progSources). Disposed here
-    // alongside the facade `bridges` handle above. Empty for orchestrated runs.
-    const progBridge = this.progBridges.get(runId);
-    if (progBridge) {
-      progBridge.dispose();
-      this.progBridges.delete(runId);
-    }
-    // Strip any remaining listeners on the per-run PROGRAMMATIC source and drop the
-    // map entry so a re-init does not leak emitters. (progBridge.dispose() above
-    // already removed its own 'output' listener.) Empty for orchestrated runs.
-    const progSource = this.progSources.get(runId);
-    if (progSource) {
-      progSource.removeAllListeners();
-      this.progSources.delete(runId);
-    }
+    // NOTE: the per-run PROGRAMMATIC inject bridge (progBridges/progSources) is
+    // deliberately NOT disposed here. teardownRun fires at walk-drain
+    // (awaiting_review REST), but the monitor must stay reachable AFTER the walk so
+    // the user can chat with it about a run that is resting / failed / canceled-but-
+    // kept (the worktree survives until close-out). Those resources are disposed by
+    // `disposeMonitorResources(runId)`, called from the terminal close-out paths
+    // (merge / createPr / dismiss) where the worktree is removed. Empty for
+    // orchestrated runs regardless.
     // Remove the per-run 'turn-end' listener (interactive runs only — the map is
     // empty for SDK runs). For a persistent interactive run teardownRun fires
     // only AFTER the spawn promise settles on explicit end-session / kill (the

@@ -46,10 +46,12 @@ behind fakeable boundaries). The tRPC contract is `cyboflow.monitor`
 (`isActive` / `send` / `stepResults`); `send` delegates to `MonitorSession.converse`
 (inject the human turn → answer over the whole history → inject the reply), and the
 turns surface via the run's normal stream → `raw_events` → `runs.listUnifiedMessages`
-live-refresh. Remaining designed-only: per-step structured `outputFormat` +
-host-side router writes, subagent direct-to-review-queue routing, crash-safe
-"awaiting triage" resume, and chat with the monitor AFTER the run rests in
-`awaiting_review` (today the monitor is registered only while the walk runs).
+live-refresh. The monitor stays reachable while the run RESTS (the registry entry +
+inject plumbing outlive the walk; they are disposed at terminal close-out —
+merge / createPr / dismiss), so the user can chat with it at `awaiting_review`.
+Remaining designed-only: per-step structured `outputFormat` + host-side router
+writes, subagent direct-to-review-queue routing, and crash-safe "awaiting triage"
+resume.
 
 This document describes how cyboflow runs the SAME workflow two ways — an
 **orchestrator-driven** model (an agent walks the DAG) and a **programmatic**
@@ -243,12 +245,19 @@ through the router" rule. Only the *actor* differs.
   Send → `cyboflow.monitor.send` with no optimistic insert. The old `SupervisorChatPanel`
   / `SupervisorChatDock` / `supervisorChatTranscript` / `cyboflow.supervisorChat` are
   deleted.
+- **At-rest chat lifetime.** The monitor's registry entry + per-run inject plumbing
+  (progSource/progBridge) deliberately OUTLIVE the walk: `RunExecutor.teardownRun`
+  (which fires at walk-drain) no longer disposes them. They are torn down only at
+  TERMINAL close-out (`runs.merge` / `createPr` / `dismiss`, where the worktree is
+  removed) via `RunExecutor.disposeMonitorResources` + `MonitorRegistry.unregister`,
+  wired through `RunCloseoutDeps`. So the user can chat with the monitor while the run
+  rests in `awaiting_review` (or sits failed / canceled-but-kept), and it goes away
+  cleanly when the run is closed out.
   **Still designed-only:** per-step structured `outputFormat` + host-side router writes
   (per-step writes still go through the agent's `cyboflow_*` MCP); subagent
-  direct-to-review-queue routing; an "awaiting triage" phase state with crash-safe
+  direct-to-review-queue routing; and an "awaiting triage" phase state with crash-safe
   resume (the gate open/await is in-process only — a mid-gate restart still strands the
-  run); and chat with the monitor AFTER the run rests in `awaiting_review` (the monitor
-  is currently registered only while the walk runs, so the composer disables at rest).
+  run).
 
 ## Adversarial review of Stages 0–2 — fixes landed (`3a7e7176` / `98ef086e`)
 
