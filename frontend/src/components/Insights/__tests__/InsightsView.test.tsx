@@ -45,7 +45,7 @@ let mockWorkflowStats: WorkflowRunStats[] = [];
 let mockWorkflowUsage: WorkflowUsageStats[] = [];
 let mockReviewSummary: ReviewItemSummary | null = null;
 let mockQualityFindings: QualityFinding[] = [];
-let mockPendingFindings: ReviewItem[] = [];
+let mockTriageFindings: ReviewItem[] = [];
 let mockStepTokens: Record<string, StepTokenBucket[]> = {};
 let mockUsageTrends: Record<string, UsageTrendPoint[]> = {};
 
@@ -64,7 +64,7 @@ function snapshot() {
     workflowUsage: mockWorkflowUsage,
     reviewSummary: mockReviewSummary,
     qualityFindings: mockQualityFindings,
-    pendingFindings: mockPendingFindings,
+    triageFindings: mockTriageFindings,
     stepTokens: mockStepTokens,
     usageTrends: mockUsageTrends,
     // Static at this integration level — StatsSection.test owns their behavior.
@@ -131,6 +131,18 @@ vi.mock('../charts/Sparkline', () => ({
   Sparkline: () => <svg data-testid="sparkline" />,
 }));
 
+// Stub FindingsSection to a marker — the rebuilt triage tree (selectors +
+// triage rows) is exercised by FindingsSection.test.tsx. Here we only verify
+// InsightsView mounts the section; rendering the real one would require the full
+// store-selector surface this integration mock deliberately replaces.
+vi.mock('../FindingsSection', () => ({
+  FindingsSection: () => (
+    <section data-testid="findings-section">
+      <span>01 Findings</span>
+    </section>
+  ),
+}));
+
 import { InsightsView } from '../InsightsView';
 
 // ---------------------------------------------------------------------------
@@ -148,7 +160,7 @@ beforeEach(() => {
   mockWorkflowUsage = [];
   mockReviewSummary = { total: 0, pending: 0, resolved: 0, dismissed: 0, pendingByKind: { finding: 0, permission: 0, decision: 0, human_task: 0 } };
   mockQualityFindings = [];
-  mockPendingFindings = [];
+  mockTriageFindings = [];
   mockStepTokens = {};
   mockUsageTrends = {};
   // jsdom does not implement scrollIntoView — stub it for the chip handlers.
@@ -279,41 +291,6 @@ describe('InsightsView', () => {
     expect(banner).toHaveTextContent(/network down/);
     // Content stays — the error is non-fatal.
     expect(screen.getByTestId('stats-section')).toBeInTheDocument();
-  });
-
-  it('renders pending findings through ReviewItemCard, else the empty state', () => {
-    // Empty first.
-    const { unmount } = render(<InsightsView />);
-    expect(screen.getByTestId('findings-empty')).toBeInTheDocument();
-    unmount();
-
-    mockPendingFindings = [
-      {
-        id: 'ri-1',
-        project_id: 1,
-        run_id: 'run-1',
-        entity_type: null,
-        entity_id: null,
-        kind: 'finding',
-        status: 'pending',
-        blocking: false,
-        title: 'Unhandled promise rejection',
-        body: null,
-        severity: 'warning',
-        priority: null,
-        staged_at: null,
-        selected: false,
-        source: 'agent:executor',
-        payload: { kind: 'finding' },
-        created_at: '2026-06-10T00:00:00.000Z',
-        updated_at: '2026-06-10T00:00:00.000Z',
-        resolved_by: null,
-        resolution: null,
-      },
-    ];
-    render(<InsightsView />);
-    expect(screen.getByTestId('review-item-card')).toHaveTextContent('Unhandled promise rejection');
-    expect(screen.queryByTestId('findings-empty')).not.toBeInTheDocument();
   });
 
   it('renders a workflow stats card merging run-stats + usage by workflowId', () => {

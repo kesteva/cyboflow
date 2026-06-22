@@ -41,6 +41,8 @@ interface SubscribeHandlers {
 
 /** Captured onData callbacks for the run-status subscription (the debounce trigger we drive). */
 let runStatusOnData: Array<(event: unknown) => void>;
+/** Captured per-project onReviewItemChanged onData callbacks (the review-item delta trigger). */
+let reviewItemOnData: Array<(event: unknown) => void>;
 
 let mockWorkflowStatsQuery: ReturnType<typeof vi.fn>;
 let mockWorkflowUsageQuery: ReturnType<typeof vi.fn>;
@@ -51,6 +53,11 @@ let mockStepTokensQuery: ReturnType<typeof vi.fn>;
 let mockUsageTrendQuery: ReturnType<typeof vi.fn>;
 let mockRevisionHistoryQuery: ReturnType<typeof vi.fn>;
 let mockReviewItemsListQuery: ReturnType<typeof vi.fn>;
+let mockApproveMutate: ReturnType<typeof vi.fn>;
+let mockDismissMutate: ReturnType<typeof vi.fn>;
+let mockSetTagMutate: ReturnType<typeof vi.fn>;
+let mockSetPriorityMutate: ReturnType<typeof vi.fn>;
+let mockSetSelectedMutate: ReturnType<typeof vi.fn>;
 let mockProjectsGetAll: ReturnType<typeof vi.fn>;
 
 vi.mock('../../trpc/client', () => ({
@@ -68,6 +75,17 @@ vi.mock('../../trpc/client', () => ({
       },
       reviewItems: {
         list: { get query() { return mockReviewItemsListQuery; } },
+        approve: { get mutate() { return mockApproveMutate; } },
+        dismiss: { get mutate() { return mockDismissMutate; } },
+        setTag: { get mutate() { return mockSetTagMutate; } },
+        setPriority: { get mutate() { return mockSetPriorityMutate; } },
+        setSelected: { get mutate() { return mockSetSelectedMutate; } },
+        onReviewItemChanged: {
+          subscribe: (_input: { projectId: number }, handlers: SubscribeHandlers) => {
+            reviewItemOnData.push(handlers.onData);
+            return { unsubscribe: vi.fn() };
+          },
+        },
       },
       events: {
         onRunStatusChanged: {
@@ -225,6 +243,7 @@ async function loadStore(): Promise<InsightsModule> {
 
 beforeEach(() => {
   runStatusOnData = [];
+  reviewItemOnData = [];
   mockWorkflowStatsQuery = vi.fn().mockResolvedValue([
     makeStats({ workflowId: 'wf-sprint', lastRunAt: '2026-06-10T00:00:00.000Z' }),
   ]);
@@ -238,6 +257,11 @@ beforeEach(() => {
   mockReviewItemsListQuery = vi.fn().mockResolvedValue([
     makeReviewItem({ id: 'f1', kind: 'finding', status: 'pending' }),
   ]);
+  mockApproveMutate = vi.fn().mockResolvedValue({ reviewItemId: 'f1', staged: true });
+  mockDismissMutate = vi.fn().mockResolvedValue({ reviewItemId: 'f1' });
+  mockSetTagMutate = vi.fn().mockResolvedValue({ reviewItemId: 'f1' });
+  mockSetPriorityMutate = vi.fn().mockResolvedValue({ reviewItemId: 'f1' });
+  mockSetSelectedMutate = vi.fn().mockResolvedValue({ count: 1 });
   mockProjectsGetAll = vi.fn().mockResolvedValue({
     success: true,
     data: [{ id: 1, name: 'p1' }],
@@ -327,8 +351,10 @@ describe('init()', () => {
     expect(mockDailyUsageQuery).toHaveBeenCalledWith({ projectId: null });
     expect(s.reviewSummary).toEqual(makeSummary());
     expect(s.qualityFindings.map((f) => f.id)).toEqual(['q1']);
-    // pendingFindings fanned out via reviewItems.list (kept finding/pending).
-    expect(s.pendingFindings.map((f) => f.id)).toEqual(['f1']);
+    // triageFindings fanned out via reviewItems.list (kept finding/pending), each
+    // mapped to a TriageFinding view-model carrying a derived triageState.
+    expect(s.triageFindings.map((f) => f.id)).toEqual(['f1']);
+    expect(s.triageFindings[0].triageState).toBe('untriaged');
     // per-workflow detail keyed by workflowId for the single run workflow.
     expect(s.stepTokens['wf-sprint']).toEqual(STEP_BUCKET);
     expect(s.usageTrends['wf-sprint']).toEqual(TREND_POINTS);
@@ -341,7 +367,7 @@ describe('init()', () => {
     const { useInsightsStore } = await loadStore();
     await useInsightsStore.getState().init();
     expect(mockWorkflowStatsQuery).toHaveBeenCalledWith({ projectId: null });
-    // pendingFindings enumerated the project list for the cross-project case.
+    // triageFindings enumerated the project list for the cross-project case.
     expect(mockProjectsGetAll).toHaveBeenCalledTimes(1);
     expect(mockReviewItemsListQuery).toHaveBeenCalledWith({
       projectId: 1,
@@ -601,5 +627,266 @@ describe('debounced live refresh', () => {
     await vi.advanceTimersByTimeAsync(2000);
     await vi.runAllTimersAsync();
     expect(mockWorkflowStatsQuery).toHaveBeenCalledTimes(3);
+  });
+
+  it('per-project onReviewItemChanged delta triggers a debounced refresh', async () => {
+    vi.useFakeTimers();
+    const { useInsightsStore } = await loadStore();
+    const initPromise = useInsightsStore.getState().init();
+    await vi.runAllTimersAsync();
+    await initPromise;
+
+    // The single (cross-project, one project) review-item subscription was wired.
+    expect(reviewItemOnData).toHaveLength(1);
+    expect(mockWorkflowStatsQuery).toHaveBeenCalledTimes(1);
+
+    // A ReviewItemRouter delta (dismiss/re-tag/select from any surface) refreshes.
+    reviewItemOnData[0]({ projectId: 1, item: { id: 'f1' } });
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.runAllTimersAsync();
+    expect(mockWorkflowStatsQuery).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Optimistic triage actions — patch in place, roll back on reject, infer types
+// ---------------------------------------------------------------------------
+
+/**
+ * Seed the store with a known triageFindings set by pointing the list mock at
+ * the given review items, then init().
+ */
+async function loadStoreWith(items: ReviewItem[]): Promise<InsightsModule> {
+  mockReviewItemsListQuery.mockResolvedValue(items);
+  const mod = await loadStore();
+  await mod.useInsightsStore.getState().init();
+  return mod;
+}
+
+describe('approveFinding (optimistic)', () => {
+  it('stages + pre-selects + flips the row to ready, then awaits approve', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: null, selected: false }),
+    ]);
+
+    await useInsightsStore.getState().approveFinding(1, 'f1');
+
+    const row = useInsightsStore.getState().triageFindings.find((f) => f.id === 'f1');
+    expect(row?.triageState).toBe('ready');
+    expect(row?.staged_at).not.toBeNull();
+    expect(row?.selected).toBe(true);
+    expect(mockApproveMutate).toHaveBeenCalledWith({ projectId: 1, reviewItemId: 'f1' });
+    expect(useInsightsStore.getState().error).toBeNull();
+  });
+
+  it('rolls back the optimistic patch and records the error on reject', async () => {
+    mockApproveMutate.mockRejectedValueOnce(new Error('approve boom'));
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: null, selected: false }),
+    ]);
+
+    await useInsightsStore.getState().approveFinding(1, 'f1');
+
+    const row = useInsightsStore.getState().triageFindings.find((f) => f.id === 'f1');
+    // Restored to the untriaged snapshot.
+    expect(row?.triageState).toBe('untriaged');
+    expect(row?.staged_at).toBeNull();
+    expect(row?.selected).toBe(false);
+    expect(useInsightsStore.getState().error).toContain('approve boom');
+  });
+});
+
+describe('dismissFinding (optimistic, counter bump)', () => {
+  it('removes the row and bumps the Dismissed counter WITHOUT a run-lifecycle event', async () => {
+    const { useInsightsStore, selectFindingsCounters } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: null, selected: false }),
+    ]);
+    const before = useInsightsStore.getState();
+    const countsBefore = selectFindingsCounters(before.qualityFindings, before.reviewSummary);
+
+    await useInsightsStore.getState().dismissFinding(1, 'f1');
+
+    const after = useInsightsStore.getState();
+    // Row gone from the triage set.
+    expect(after.triageFindings.find((f) => f.id === 'f1')).toBeUndefined();
+    const countsAfter = selectFindingsCounters(after.qualityFindings, after.reviewSummary);
+    // Pending decremented, Dismissed incremented — no lifecycle event fired.
+    expect(countsAfter.pending).toBe(countsBefore.pending - 1);
+    expect(countsAfter.dismissed).toBe(countsBefore.dismissed + 1);
+    expect(mockDismissMutate).toHaveBeenCalledWith({ projectId: 1, reviewItemId: 'f1' });
+  });
+
+  it('rolls back the removal AND the counter on reject', async () => {
+    mockDismissMutate.mockRejectedValueOnce(new Error('dismiss boom'));
+    const { useInsightsStore, selectFindingsCounters } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: null, selected: false }),
+    ]);
+    const before = useInsightsStore.getState();
+    const countsBefore = selectFindingsCounters(before.qualityFindings, before.reviewSummary);
+
+    await useInsightsStore.getState().dismissFinding(1, 'f1');
+
+    const after = useInsightsStore.getState();
+    expect(after.triageFindings.find((f) => f.id === 'f1')).toBeDefined();
+    const countsAfter = selectFindingsCounters(after.qualityFindings, after.reviewSummary);
+    expect(countsAfter).toEqual(countsBefore);
+    expect(after.error).toContain('dismiss boom');
+  });
+});
+
+describe('setFindingTag / setFindingPriority (optimistic)', () => {
+  it('re-tags in place without clobbering sibling payload fields', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({
+        id: 'f1',
+        staged_at: null,
+        payload: { kind: 'finding', category: 'security', proposedTarget: 'docs' },
+      }),
+    ]);
+
+    await useInsightsStore.getState().setFindingTag(1, 'f1', 'fix');
+
+    const row = useInsightsStore.getState().triageFindings.find((f) => f.id === 'f1');
+    expect(row?.payload).toEqual({ kind: 'finding', category: 'security', proposedTarget: 'fix' });
+    expect(mockSetTagMutate).toHaveBeenCalledWith({
+      projectId: 1,
+      reviewItemId: 'f1',
+      proposedTarget: 'fix',
+    });
+  });
+
+  it('synthesizes a finding payload when re-tagging a finding with none', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: null, payload: null }),
+    ]);
+    await useInsightsStore.getState().setFindingTag(1, 'f1', 'backlog');
+    const row = useInsightsStore.getState().triageFindings.find((f) => f.id === 'f1');
+    expect(row?.payload).toEqual({ kind: 'finding', proposedTarget: 'backlog' });
+  });
+
+  it('re-prioritizes in place and rolls back on reject', async () => {
+    mockSetPriorityMutate.mockRejectedValueOnce(new Error('prio boom'));
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: null, priority: null }),
+    ]);
+
+    await useInsightsStore.getState().setFindingPriority(1, 'f1', 'P0');
+
+    const row = useInsightsStore.getState().triageFindings.find((f) => f.id === 'f1');
+    // Rolled back to the null-priority snapshot.
+    expect(row?.priority).toBeNull();
+    expect(useInsightsStore.getState().error).toContain('prio boom');
+  });
+});
+
+describe('selection toggles (optimistic)', () => {
+  it('toggleFindingSelected flips one ready row and forwards [id]', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: '2026-06-06T00:00:00.000Z', selected: false }),
+    ]);
+
+    await useInsightsStore.getState().toggleFindingSelected(1, 'f1');
+
+    const row = useInsightsStore.getState().triageFindings.find((f) => f.id === 'f1');
+    expect(row?.selected).toBe(true);
+    expect(mockSetSelectedMutate).toHaveBeenCalledWith({
+      projectId: 1,
+      reviewItemIds: ['f1'],
+      selected: true,
+    });
+  });
+
+  it('selectAllReady toggles every ready row (untriaged untouched)', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'r1', staged_at: '2026-06-06T00:00:00.000Z', selected: false }),
+      makeReviewItem({ id: 'r2', staged_at: '2026-06-06T00:00:01.000Z', selected: false }),
+      makeReviewItem({ id: 'u1', staged_at: null, selected: false }),
+    ]);
+
+    await useInsightsStore.getState().selectAllReady(1, true);
+
+    const s = useInsightsStore.getState();
+    expect(s.triageFindings.find((f) => f.id === 'r1')?.selected).toBe(true);
+    expect(s.triageFindings.find((f) => f.id === 'r2')?.selected).toBe(true);
+    // The untriaged row was not part of the selection set.
+    expect(s.triageFindings.find((f) => f.id === 'u1')?.selected).toBe(false);
+    expect(mockSetSelectedMutate).toHaveBeenCalledWith({
+      projectId: 1,
+      reviewItemIds: ['r1', 'r2'],
+      selected: true,
+    });
+  });
+
+  it('selectBucket toggles only the matching bucket and rolls back on reject', async () => {
+    mockSetSelectedMutate.mockRejectedValueOnce(new Error('select boom'));
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({
+        id: 'q1',
+        staged_at: '2026-06-06T00:00:00.000Z',
+        selected: false,
+        payload: { kind: 'finding', proposedTarget: 'fix' },
+      }),
+      makeReviewItem({
+        id: 't1',
+        staged_at: '2026-06-06T00:00:01.000Z',
+        selected: false,
+        payload: { kind: 'finding', proposedTarget: 'backlog' },
+      }),
+    ]);
+
+    await useInsightsStore.getState().selectBucket(1, 'quick', true);
+
+    const s = useInsightsStore.getState();
+    // Rejected → both restored to the unselected snapshot.
+    expect(s.triageFindings.find((f) => f.id === 'q1')?.selected).toBe(false);
+    expect(s.triageFindings.find((f) => f.id === 't1')?.selected).toBe(false);
+    expect(mockSetSelectedMutate).toHaveBeenCalledWith({
+      projectId: 1,
+      reviewItemIds: ['q1'],
+      selected: true,
+    });
+    expect(s.error).toContain('select boom');
+  });
+});
+
+describe('reconcile-by-id against the subscription (no duplicate/flicker)', () => {
+  it('a refresh replaces the optimistic row by id rather than appending', async () => {
+    const { useInsightsStore } = await loadStoreWith([
+      makeReviewItem({ id: 'f1', staged_at: null, selected: false }),
+    ]);
+
+    // Optimistically approve (row flips to ready locally).
+    await useInsightsStore.getState().approveFinding(1, 'f1');
+    expect(useInsightsStore.getState().triageFindings).toHaveLength(1);
+
+    // Server truth now returns the same id, staged (the subscription's refresh).
+    mockReviewItemsListQuery.mockResolvedValueOnce([
+      makeReviewItem({ id: 'f1', staged_at: '2026-06-06T00:00:00.000Z', selected: true }),
+    ]);
+    await useInsightsStore.getState().refresh();
+
+    const s = useInsightsStore.getState();
+    // Reconciled by id — exactly one row, no duplicate.
+    expect(s.triageFindings).toHaveLength(1);
+    expect(s.triageFindings[0].id).toBe('f1');
+    expect(s.triageFindings[0].triageState).toBe('ready');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// UI toggles
+// ---------------------------------------------------------------------------
+
+describe('view-only toggles', () => {
+  it('toggleUntriagedExpand / toggleReadyShowAll flip their flags', async () => {
+    const { useInsightsStore } = await loadStore();
+    expect(useInsightsStore.getState().untriagedExpanded).toBe(false);
+    expect(useInsightsStore.getState().readyShowAll).toBe(false);
+
+    useInsightsStore.getState().toggleUntriagedExpand();
+    useInsightsStore.getState().toggleReadyShowAll();
+
+    expect(useInsightsStore.getState().untriagedExpanded).toBe(true);
+    expect(useInsightsStore.getState().readyShowAll).toBe(true);
   });
 });

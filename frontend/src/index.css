@@ -158,6 +158,25 @@ body.light {
   animation: typing-dots 1.5s ease-in-out infinite;
 }
 
+/* Findings-triage compounding-tray pulse dot (cf = compound flow). */
+@keyframes cf-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.cf-pulse {
+  animation: cf-pulse 1.4s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .cf-pulse {
+    animation: none;
+  }
+}
+
 .xterm .xterm-screen {
   margin: 6px;
 }

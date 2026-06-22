@@ -27,11 +27,13 @@
  *   - revisionHistory — per-workflow per-spec_hash run stats (version history),
  *                       keyed by workflowId. Same 6-workflow cap / fan-out.
  *
- * `pendingFindings` is the kind='finding', status='pending' subset of the review
- * inbox, fetched via `cyboflow.reviewItems.list` (NOT the insights router). The
- * `list` query is project-scoped (its input requires a positive projectId), so
- * the cross-project case enumerates projects and fans out per project — the same
- * shape landingStore uses for its review-item fan-out (the small loop is
+ * `triageFindings` is the kind='finding', status='pending' subset of the review
+ * inbox, fetched via `cyboflow.reviewItems.list` (NOT the insights router), each
+ * mapped to a {@link TriageFinding} view-model that carries a derived
+ * `triageState` ('untriaged' when `staged_at` is null, 'ready' once approved).
+ * The `list` query is project-scoped (its input requires a positive projectId),
+ * so the cross-project case enumerates projects and fans out per project — the
+ * same shape landingStore uses for its review-item fan-out (the small loop is
  * duplicated here deliberately rather than importing landingStore internals).
  *
  * ## Idempotency + live refresh (mirrors reviewQueueStore / backlogStore)
@@ -41,9 +43,13 @@
  * `init()` wires the three GLOBAL lifecycle subscriptions activeRunsStore/
  * landingStore also use (`events.onRunStatusChanged` / `onApprovalCreated` /
  * `onApprovalDecided`) — each signals run-lifecycle or review-item activity that
- * can change any insights aggregate. On any of those events we DEBOUNCE for 2s,
- * then `refresh()`. The unsubscribe handles live in MODULE scope (the closure),
- * so `init()` cannot double-subscribe.
+ * can change any insights aggregate — PLUS a per-project
+ * `reviewItems.onReviewItemChanged` subscription (the landingStore pattern,
+ * re-wired when the project set changes) so a same-session/Review-Queue
+ * Dismiss/re-tag/select reconciles BOTH the rows and the findings-scoped counter
+ * strip (none of the three lifecycle signals fire on a ReviewItemRouter write).
+ * On any of those events we DEBOUNCE for 2s, then `refresh()`. The unsubscribe
+ * handles live in MODULE scope (the closure), so `init()` cannot double-subscribe.
  *
  * ## Stale-on-error + non-flashing refresh
  *
@@ -61,7 +67,13 @@ import { create } from 'zustand';
 import { trpc } from '../trpc/client';
 import { API } from '../utils/api';
 import type { Project } from '../types/project';
-import type { ReviewItem } from '../../../shared/types/reviews';
+import type {
+  ReviewItem,
+  FindingProposedTarget,
+  FindingPriority,
+  FindingTagBucket,
+} from '../../../shared/types/reviews';
+import { findingBucket } from '../../../shared/types/reviews';
 import type {
   WorkflowRunStats,
   WorkflowUsageStats,
@@ -72,6 +84,14 @@ import type {
   WorkflowRevisionStats,
   DailyModelUsagePoint,
 } from '../../../shared/types/insights';
+import {
+  READY_BUCKETS,
+  sortWithinBucket,
+  allocateReadyRows,
+  type RowsByBucket,
+  type ReadyAllocation,
+  type TallyCounts,
+} from '../components/Insights/findingsTagMeta';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -115,6 +135,142 @@ export function filterPendingFindings(items: ReviewItem[]): ReviewItem[] {
 }
 
 // ---------------------------------------------------------------------------
+// Triage view-model + pure triage selectors — exported for unit testing.
+// ---------------------------------------------------------------------------
+
+/**
+ * The triage view-model for one pending finding: the raw {@link ReviewItem}
+ * plus a derived `triageState`. `staged_at === null` ⇒ 'untriaged' (the human
+ * has not approved it into READY); a non-null `staged_at` ⇒ 'ready' (approved,
+ * possibly de-selected). `status` is NOT overloaded — both states are
+ * `status='pending'`; only Dismiss/compound-consume change `status` (mig 032).
+ */
+export type TriageFinding = ReviewItem & { triageState: 'untriaged' | 'ready' };
+
+/** Map a pending finding ReviewItem to its TriageFinding view-model. */
+function toTriageFinding(item: ReviewItem): TriageFinding {
+  return { ...item, triageState: item.staged_at === null ? 'untriaged' : 'ready' };
+}
+
+/**
+ * Findings-scoped counter strip (OD-11). Pending comes from the
+ * finding-scoped `pendingByKind.finding` (`reviewSummary.pending/resolved/
+ * dismissed` are WHOLE-INBOX and would inflate the strip); Resolved/Dismissed
+ * are client-derived by counting `status` over the already-fetched
+ * `qualityFindings` (each carries `status`). Resilient to a null summary.
+ */
+export function selectFindingsCounters(
+  qualityFindings: QualityFinding[],
+  reviewSummary: ReviewItemSummary | null,
+): { pending: number; resolved: number; dismissed: number } {
+  let resolved = 0;
+  let dismissed = 0;
+  for (const f of qualityFindings) {
+    if (f.status === 'resolved') resolved += 1;
+    else if (f.status === 'dismissed') dismissed += 1;
+  }
+  return {
+    pending: reviewSummary?.pendingByKind.finding ?? 0,
+    resolved,
+    dismissed,
+  };
+}
+
+/**
+ * Untriaged findings (`triageState==='untriaged'`), newest-first with a
+ * P0→P1→P2 tiebreak (null priority sorts last). Pure + exported.
+ */
+export function selectUntriaged(findings: TriageFinding[]): TriageFinding[] {
+  return findings
+    .filter((f) => f.triageState === 'untriaged')
+    .sort((a, b) => {
+      // Newest-first by created_at (ISO strings sort lexically).
+      const byAge = b.created_at.localeCompare(a.created_at);
+      if (byAge !== 0) return byAge;
+      // Tiebreak: P0→P1→P2, null last (OD-8).
+      return priorityRankForUntriaged(a.priority) - priorityRankForUntriaged(b.priority);
+    });
+}
+
+/** P0=0, P1=1, P2=2, null LAST — the untriaged tiebreak rank (OD-8). */
+function priorityRankForUntriaged(priority: FindingPriority | null): number {
+  if (priority === 'P0') return 0;
+  if (priority === 'P1') return 1;
+  if (priority === 'P2') return 2;
+  return 3;
+}
+
+/**
+ * Partition the READY findings (`triageState==='ready'`) into the three buckets
+ * via the canonical {@link findingBucket} mapping, each side `sortWithinBucket`ed
+ * (P0→P1→P2, null last, created_at tiebreak). Pure + exported.
+ */
+export function selectReadyBuckets(findings: TriageFinding[]): RowsByBucket<TriageFinding> {
+  const byBucket: Record<FindingTagBucket, TriageFinding[]> = { quick: [], doc: [], task: [] };
+  for (const f of findings) {
+    if (f.triageState !== 'ready') continue;
+    byBucket[findingBucket(readyTarget(f))].push(f);
+  }
+  return {
+    quick: sortWithinBucket(byBucket.quick),
+    doc: sortWithinBucket(byBucket.doc),
+    task: sortWithinBucket(byBucket.task),
+  };
+}
+
+/** Lift the finding's proposedTarget from its payload (null when absent). */
+function readyTarget(f: TriageFinding): FindingProposedTarget | null {
+  const payload = f.payload;
+  if (payload && payload.kind === 'finding' && payload.proposedTarget !== undefined) {
+    return payload.proposedTarget;
+  }
+  return null;
+}
+
+/**
+ * Greedy 5-row budget over the (already-bucketed) ready rows in fixed bucket
+ * order — `showAll` expands to everything. Delegates to the pure
+ * {@link allocateReadyRows} allocator. Header full counts are taken from the
+ * RAW buckets by the consumer (`buckets[k].length`), NOT this allocation.
+ */
+export function selectGreedyReadyRows(
+  buckets: RowsByBucket<TriageFinding>,
+  showAll: boolean,
+  budget = 5,
+): ReadyAllocation<TriageFinding> {
+  return allocateReadyRows(buckets, showAll ? Infinity : budget);
+}
+
+/**
+ * Per-bucket SELECTED tally over the READY findings (only `selected` ready rows
+ * count) feeding the compounding-tray pluralization. Pure + exported.
+ */
+export function selectTallyParts(findings: TriageFinding[]): TallyCounts {
+  const counts: TallyCounts = { count: 0, quick: 0, doc: 0, task: 0 };
+  for (const f of findings) {
+    if (f.triageState !== 'ready' || !f.selected) continue;
+    counts.count += 1;
+    counts[findingBucket(readyTarget(f))] += 1;
+  }
+  return counts;
+}
+
+/**
+ * The selected READY finding ids, in stable bucket-then-within-bucket order
+ * (the order the wizard / compound seed consume). Pure + exported.
+ */
+export function selectSelectedFindingIds(findings: TriageFinding[]): string[] {
+  const buckets = selectReadyBuckets(findings);
+  const ids: string[] = [];
+  for (const bucket of READY_BUCKETS) {
+    for (const row of buckets[bucket]) {
+      if (row.selected) ids.push(row.id);
+    }
+  }
+  return ids;
+}
+
+// ---------------------------------------------------------------------------
 // Store state
 // ---------------------------------------------------------------------------
 
@@ -135,14 +291,24 @@ export interface InsightsState {
   dailyUsage: DailyModelUsagePoint[];
   reviewSummary: ReviewItemSummary | null;
   qualityFindings: QualityFinding[];
-  /** kind='finding', status='pending' review items. */
-  pendingFindings: ReviewItem[];
+  /**
+   * kind='finding', status='pending' review items mapped to the triage
+   * view-model ({@link TriageFinding}). One fetch feeds BOTH the UNTRIAGED and
+   * READY-to-compound sections (untriaged = staged_at null; ready = staged_at
+   * set) — the UI consumes the exported triage selectors, never this raw array.
+   */
+  triageFindings: TriageFinding[];
   /** Per-step token attribution, keyed by workflowId. */
   stepTokens: Record<string, StepTokenBucket[]>;
   /** Time-bucketed usage trend points, keyed by workflowId. */
   usageTrends: Record<string, UsageTrendPoint[]>;
   /** Per-spec_hash revision run stats (version history), keyed by workflowId. */
   revisionHistory: Record<string, WorkflowRevisionStats[]>;
+
+  /** View-only: whether the UNTRIAGED section shows all rows (not just top-5). */
+  untriagedExpanded: boolean;
+  /** View-only: whether the READY section shows all rows (not the greedy-5 budget). */
+  readyShowAll: boolean;
 
   /**
    * Bootstrap the insights dashboard: first fetch (loading=true) for the current
@@ -170,6 +336,45 @@ export interface InsightsState {
    * in-flight set, so opening a drill-down does not double-fetch.
    */
   ensureWorkflowDetail: (workflowId: string) => Promise<void>;
+
+  /** Toggle the UNTRIAGED section's expanded ("show N more") state. */
+  toggleUntriagedExpand: () => void;
+  /** Toggle the READY section's show-all (vs greedy-5 budget) state. */
+  toggleReadyShowAll: () => void;
+
+  /**
+   * Optimistic triage actions. Each: snapshot → in-place set() patch → await the
+   * tRPC mutation (result type INFERRED from the client, never a local mirror) →
+   * on reject restore the snapshot + record the error. Successful mutations do
+   * NOT refresh() — the per-project `onReviewItemChanged` subscription reconciles
+   * the rows + counter (reconcile-by-id; the optimistic patch holds until then).
+   */
+  /** Approve an untriaged finding into READY (staged + pre-selected). */
+  approveFinding: (projectId: number, reviewItemId: string) => Promise<void>;
+  /**
+   * Dismiss a finding: optimistically remove its row AND bump the derived
+   * Dismissed counter (`qualityFindings` gains a dismissed row, `pendingByKind`
+   * decremented) so the strip is live before the subscription debounce true-ups.
+   */
+  dismissFinding: (projectId: number, reviewItemId: string) => Promise<void>;
+  /** Re-tag an untriaged finding's proposed target (applied-not-consumed). */
+  setFindingTag: (
+    projectId: number,
+    reviewItemId: string,
+    proposedTarget: FindingProposedTarget,
+  ) => Promise<void>;
+  /** Re-prioritize an untriaged finding (applied-not-consumed). */
+  setFindingPriority: (
+    projectId: number,
+    reviewItemId: string,
+    priority: FindingPriority,
+  ) => Promise<void>;
+  /** Toggle the compound-selection flag on ONE ready finding. */
+  toggleFindingSelected: (projectId: number, reviewItemId: string) => Promise<void>;
+  /** Select/deselect EVERY ready finding (the section-level Select-all). */
+  selectAllReady: (projectId: number, selected: boolean) => Promise<void>;
+  /** Select/deselect every ready finding in ONE bucket (the header checkbox). */
+  selectBucket: (projectId: number, bucket: FindingTagBucket, selected: boolean) => Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +388,16 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
   let initialized = false;
   // Global lifecycle subscriptions (created once, after the first fetch).
   const lifecycleSubs: Array<{ unsubscribe: () => void }> = [];
+  // Per-project review-item delta subscriptions, keyed by projectId. A
+  // ReviewItemRouter write emits on 'review-project-<id>' ONLY — none of the
+  // three global lifecycle signals fire on it — so without this a same-session /
+  // Review-Queue dismiss/re-tag/select never refreshes the Insights findings.
+  // Re-wired whenever the resolved project set changes (the landingStore pattern).
+  const reviewItemSubs = new Map<number, { unsubscribe: () => void }>();
+  // The project ids the latest committed fetch resolved over — used to wire the
+  // per-project review-item subscriptions in init() AFTER the global subs exist
+  // (runFetch runs once BEFORE init wires lifecycleSubs, so its wire call no-ops).
+  let lastProjectIds: number[] = [];
   let refreshTimer: ReturnType<typeof setTimeout> | null = null;
   // Monotonic fetch generation: a stale in-flight fan-out (whose projectFilter
   // changed mid-flight) must not clobber a newer one's committed slices.
@@ -213,16 +428,18 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
   };
 
   /**
-   * Fetch the pending-findings inbox for the resolved project set. The
-   * `reviewItems.list` query is project-scoped, so we fan out per project (the
-   * landingStore pattern, duplicated deliberately) and keep only the
-   * kind='finding', status='pending' rows. Per-project failures are caught and
+   * Fetch the pending-findings inbox for the resolved project set and map each
+   * to its {@link TriageFinding} view-model. The `reviewItems.list` query is
+   * project-scoped, so we fan out per project (the landingStore pattern,
+   * duplicated deliberately) and keep only the kind='finding', status='pending'
+   * rows. ONE fetch feeds BOTH the untriaged and ready sections (the triage
+   * state derives from `staged_at`). Per-project failures are caught and
    * recorded but never abort the other projects' fetches.
    */
-  const fetchPendingFindings = async (
+  const fetchTriageFindings = async (
     projectIds: number[],
     recordError: (msg: string) => void,
-  ): Promise<ReviewItem[]> => {
+  ): Promise<TriageFinding[]> => {
     const lists = await Promise.all(
       projectIds.map(async (projectId) => {
         try {
@@ -237,7 +454,7 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
         }
       }),
     );
-    return filterPendingFindings(lists.flat());
+    return filterPendingFindings(lists.flat()).map(toTriageFinding);
   };
 
   /**
@@ -250,7 +467,7 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
     const generation = ++fetchGeneration;
     const filter = get().projectFilter;
     // `insights.*` queries take projectId number|null directly (cross-project
-    // when null); only pendingFindings needs the enumerated project set.
+    // when null); only triageFindings needs the enumerated project set.
     const projectId = filter;
 
     // First-failure-wins error accumulator for THIS fan-out.
@@ -289,11 +506,17 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
       projectIdsPromise,
     ]);
 
-    const pendingFindings =
-      projectIds.length > 0 ? await fetchPendingFindings(projectIds, recordError) : undefined;
+    const triageFindings =
+      projectIds.length > 0 ? await fetchTriageFindings(projectIds, recordError) : undefined;
 
     // A newer fetch superseded us — drop everything we computed.
     if (generation !== fetchGeneration) return;
+
+    // Remember the resolved set, then re-wire the per-project review-item delta
+    // subscriptions to it (no-op pre-init; init() re-wires once after the global
+    // subs exist, and later filter flips re-wire here directly).
+    lastProjectIds = projectIds;
+    wireReviewItemSubscriptions(projectIds);
 
     // -- Phase 2: per-workflow stepTokens + usageTrend + revisionHistory for the
     // capped set, derived from whichever workflowStats we just got (or the prior
@@ -349,7 +572,7 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
       dailyUsage: dailyUsage ?? prev.dailyUsage,
       reviewSummary: reviewSummary ?? prev.reviewSummary,
       qualityFindings: qualityFindings ?? prev.qualityFindings,
-      pendingFindings: pendingFindings ?? prev.pendingFindings,
+      triageFindings: triageFindings ?? prev.triageFindings,
       stepTokens,
       usageTrends,
       revisionHistory,
@@ -366,6 +589,63 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
     }, REFRESH_DEBOUNCE_MS);
   };
 
+  /**
+   * (Re)subscribe to per-project review-item deltas for exactly `projectIds`,
+   * dropping subscriptions for projects no longer in the set (the landingStore
+   * pattern). Any delta — created/resolved/dismissed/mutated/staged/
+   * selection-changed — schedules a debounced refresh that reconciles both the
+   * triage rows and the findings-scoped counter strip. The onData payload is
+   * AppRouter-inferred; we ignore it and only use it as a debounce trigger (the
+   * 2000ms window coalesces the N per-id `selection-changed` events a batch
+   * `setSelected` emits). No-op until `init()` has wired the global subs.
+   */
+  const wireReviewItemSubscriptions = (projectIds: number[]): void => {
+    if (lifecycleSubs.length === 0) return; // not subscribed yet (pre-init).
+    const wanted = new Set(projectIds);
+    for (const [pid, sub] of reviewItemSubs) {
+      if (!wanted.has(pid)) {
+        sub.unsubscribe();
+        reviewItemSubs.delete(pid);
+      }
+    }
+    for (const projectId of projectIds) {
+      if (reviewItemSubs.has(projectId)) continue;
+      const sub = trpc.cyboflow.reviewItems.onReviewItemChanged.subscribe(
+        { projectId },
+        {
+          onData: () => scheduleRefresh(),
+          onError: (err: unknown) =>
+            console.warn('[insightsStore] onReviewItemChanged error for project', projectId, err),
+        },
+      );
+      reviewItemSubs.set(projectId, sub);
+    }
+  };
+
+  /**
+   * Shared optimistic selection toggle for one/all/bucket: snapshot, flip
+   * `selected` on the given ids in place, await `reviewItems.setSelected` (result
+   * type INFERRED from the client, never a local `{count}` mirror), and roll back
+   * to the snapshot + record the error on reject.
+   */
+  const applySelection = async (
+    projectId: number,
+    reviewItemIds: string[],
+    selected: boolean,
+  ): Promise<void> => {
+    const snapshot = get().triageFindings;
+    const idSet = new Set(reviewItemIds);
+    set({ triageFindings: snapshot.map((f) => (idSet.has(f.id) ? { ...f, selected } : f)) });
+    try {
+      await trpc.cyboflow.reviewItems.setSelected.mutate({ projectId, reviewItemIds, selected });
+    } catch (err: unknown) {
+      set({
+        triageFindings: snapshot,
+        error: err instanceof Error ? err.message : 'setSelected failed',
+      });
+    }
+  };
+
   return {
     initialized: false,
     loading: false,
@@ -376,10 +656,12 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
     dailyUsage: [],
     reviewSummary: null,
     qualityFindings: [],
-    pendingFindings: [],
+    triageFindings: [],
     stepTokens: {},
     usageTrends: {},
     revisionHistory: {},
+    untriagedExpanded: false,
+    readyShowAll: false,
 
     init: async () => {
       // Closure-private guard makes init idempotent even before the async fetch
@@ -418,6 +700,11 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
             console.warn('[insightsStore] onApprovalDecided error:', err),
         }),
       );
+
+      // Now that the global subs exist, wire the per-project review-item delta
+      // subscriptions for the project set the first fetch resolved over (the
+      // wire call inside runFetch no-op'd because lifecycleSubs was still empty).
+      wireReviewItemSubscriptions(lastProjectIds);
     },
 
     refresh: async () => {
@@ -479,5 +766,186 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
         detailInFlight.delete(workflowId);
       }
     },
+
+    toggleUntriagedExpand: () => set((s) => ({ untriagedExpanded: !s.untriagedExpanded })),
+    toggleReadyShowAll: () => set((s) => ({ readyShowAll: !s.readyShowAll })),
+
+    approveFinding: async (projectId, reviewItemId) => {
+      const snapshot = get().triageFindings;
+      // Optimistically stage + pre-select + flip the row to READY. The real
+      // staged_at lands via the subscription; a non-null sentinel is enough for
+      // the view-model derivation (triageState='ready') in the interim.
+      set({
+        triageFindings: snapshot.map((f) =>
+          f.id === reviewItemId
+            ? {
+                ...f,
+                staged_at: f.staged_at ?? new Date().toISOString(),
+                selected: true,
+                triageState: 'ready',
+              }
+            : f,
+        ),
+      });
+      try {
+        // Result type inferred from the tRPC client (never a local {staged:true} mirror).
+        await trpc.cyboflow.reviewItems.approve.mutate({ projectId, reviewItemId });
+      } catch (err: unknown) {
+        set({
+          triageFindings: snapshot,
+          error: err instanceof Error ? err.message : 'approve failed',
+        });
+      }
+    },
+
+    dismissFinding: async (projectId, reviewItemId) => {
+      const findingsBefore = get().triageFindings;
+      const summaryBefore = get().reviewSummary;
+      const qualityBefore = get().qualityFindings;
+      const target = findingsBefore.find((f) => f.id === reviewItemId);
+
+      // Optimistically remove the row, decrement findings-pending, and reflect a
+      // dismissed quality finding so the strip's derived Dismissed bumps live
+      // (before the debounced onReviewItemChanged refresh true-ups).
+      const nextFindings = findingsBefore.filter((f) => f.id !== reviewItemId);
+      const nextSummary = summaryBefore
+        ? {
+            ...summaryBefore,
+            pendingByKind: {
+              ...summaryBefore.pendingByKind,
+              finding: Math.max(0, summaryBefore.pendingByKind.finding - 1),
+            },
+          }
+        : summaryBefore;
+      const nextQuality = applyDismissedToQuality(qualityBefore, target);
+      set({ triageFindings: nextFindings, reviewSummary: nextSummary, qualityFindings: nextQuality });
+
+      try {
+        await trpc.cyboflow.reviewItems.dismiss.mutate({ projectId, reviewItemId });
+      } catch (err: unknown) {
+        set({
+          triageFindings: findingsBefore,
+          reviewSummary: summaryBefore,
+          qualityFindings: qualityBefore,
+          error: err instanceof Error ? err.message : 'dismiss failed',
+        });
+      }
+    },
+
+    setFindingTag: async (projectId, reviewItemId, proposedTarget) => {
+      const snapshot = get().triageFindings;
+      set({
+        triageFindings: snapshot.map((f) =>
+          f.id === reviewItemId ? withProposedTarget(f, proposedTarget) : f,
+        ),
+      });
+      try {
+        await trpc.cyboflow.reviewItems.setTag.mutate({ projectId, reviewItemId, proposedTarget });
+      } catch (err: unknown) {
+        set({
+          triageFindings: snapshot,
+          error: err instanceof Error ? err.message : 'setTag failed',
+        });
+      }
+    },
+
+    setFindingPriority: async (projectId, reviewItemId, priority) => {
+      const snapshot = get().triageFindings;
+      set({
+        triageFindings: snapshot.map((f) => (f.id === reviewItemId ? { ...f, priority } : f)),
+      });
+      try {
+        await trpc.cyboflow.reviewItems.setPriority.mutate({ projectId, reviewItemId, priority });
+      } catch (err: unknown) {
+        set({
+          triageFindings: snapshot,
+          error: err instanceof Error ? err.message : 'setPriority failed',
+        });
+      }
+    },
+
+    toggleFindingSelected: async (projectId, reviewItemId) => {
+      const target = get().triageFindings.find((f) => f.id === reviewItemId);
+      if (!target) return;
+      await applySelection(projectId, [reviewItemId], !target.selected);
+    },
+
+    selectAllReady: async (projectId, selected) => {
+      const ids = get()
+        .triageFindings.filter((f) => f.triageState === 'ready')
+        .map((f) => f.id);
+      if (ids.length === 0) return;
+      await applySelection(projectId, ids, selected);
+    },
+
+    selectBucket: async (projectId, bucket, selected) => {
+      const buckets = selectReadyBuckets(get().triageFindings);
+      const ids = buckets[bucket].map((f) => f.id);
+      if (ids.length === 0) return;
+      await applySelection(projectId, ids, selected);
+    },
   };
 });
+
+// ---------------------------------------------------------------------------
+// Optimistic-action helpers (module-private, pure — no store closure dependency).
+// ---------------------------------------------------------------------------
+
+/**
+ * Return a copy of the finding with `proposedTarget` set on its payload WITHOUT
+ * clobbering sibling payload fields (mirrors the backend `runMutate` merge): when
+ * the payload is absent it synthesizes a minimal `{ kind:'finding', proposedTarget }`.
+ */
+function withProposedTarget(f: TriageFinding, proposedTarget: FindingProposedTarget): TriageFinding {
+  const payload = f.payload;
+  if (payload && payload.kind === 'finding') {
+    return { ...f, payload: { ...payload, proposedTarget } };
+  }
+  return { ...f, payload: { kind: 'finding', proposedTarget } };
+}
+
+/**
+ * Reflect a dismissed finding in the `qualityFindings` array so the strip's
+ * client-derived Dismissed counter bumps live: flip an existing matching row's
+ * status, else append a minimal dismissed QualityFinding synthesized from the
+ * triage row. Returns the prior array untouched when there is no target.
+ */
+function applyDismissedToQuality(
+  quality: QualityFinding[],
+  target: TriageFinding | undefined,
+): QualityFinding[] {
+  if (!target) return quality;
+  const existing = quality.find((q) => q.id === target.id);
+  if (existing) {
+    return quality.map((q) => (q.id === target.id ? { ...q, status: 'dismissed' } : q));
+  }
+  return [...quality, triageToQualityDismissed(target)];
+}
+
+/** Synthesize a minimal dismissed QualityFinding from a triage row (counter-only). */
+function triageToQualityDismissed(target: TriageFinding): QualityFinding {
+  const payload = target.payload;
+  const locations =
+    payload && payload.kind === 'finding' && payload.locations ? payload.locations : [];
+  const category = payload && payload.kind === 'finding' ? (payload.category ?? null) : null;
+  return {
+    id: target.id,
+    projectId: target.project_id,
+    title: target.title,
+    severity: target.severity,
+    status: 'dismissed',
+    source: target.source,
+    sourceStep:
+      target.source && target.source.startsWith('agent:')
+        ? target.source.slice('agent:'.length)
+        : null,
+    category,
+    locations,
+    createdAt: target.created_at,
+    resolution: null,
+    runId: target.run_id,
+    runOutcome: null,
+    runEndedAt: null,
+    workflowName: null,
+  };
+}
