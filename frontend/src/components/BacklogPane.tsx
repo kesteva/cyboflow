@@ -39,13 +39,17 @@ import {
   countArchived,
   bucketByStage,
   deriveCounts,
+  isExecutionStage,
+  readyForDevChildTaskIds,
 } from './Backlog/backlogSelectors';
 import { Dropdown, type DropdownItem } from './ui/Dropdown';
 import { KanbanView } from './Backlog/KanbanView';
 import { ListView } from './Backlog/ListView';
 import { NewTaskDialog } from './Backlog/NewTaskDialog';
 import { useTaskRunLauncher } from './Backlog/useTaskRunLauncher';
+import { TaskBatchPickerModal } from './cyboflow/TaskBatchPickerModal';
 import type { BacklogTaskItem, BoardStage } from '../../../shared/types/tasks';
+import { DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
 import type { LayoutMode } from '../stores/backlogStore';
 
 const NOW_REFRESH_MS = 60_000;
@@ -305,8 +309,17 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
   const setLayoutMode = useBacklogStore((s) => s.setLayoutMode);
   const toggleShowArchived = useBacklogStore((s) => s.toggleShowArchived);
 
-  const { launchingTaskId, error: launchError, launch } = useTaskRunLauncher();
+  const { launchingTaskId, error: launchError, launch, launchSprintBatch } = useTaskRunLauncher();
   const [isNewOpen, setIsNewOpen] = useState(false);
+
+  // Sprint batch picker, opened when Run is clicked on an epic that is past
+  // planning ("Ready for development" or later). `taskIds` pre-selects the
+  // epic's ready-for-dev child tasks; `epicId` drives the card spinner on launch.
+  const [batchPicker, setBatchPicker] = useState<{
+    epicId: string;
+    projectId: number;
+    taskIds: string[];
+  } | null>(null);
 
   // Shared clock tick so every "Nm ago" agrees and refreshes minutely.
   const [now, setNow] = useState(() => Date.now());
@@ -338,6 +351,19 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
   // Launch in the task's OWN project — in All-projects mode the pane prop may
   // point at a different (or no) project.
   const handleRun = (task: BacklogTaskItem): void => {
+    // An epic at "Ready for development" or later is past planning — Run should
+    // EXECUTE its ready tasks via Sprint, not re-plan it via Planner. Open the
+    // sprint batch picker pre-seeded with the epic's ready-for-dev child tasks so
+    // the user confirms/adjusts the batch. Planning-stage epics/ideas (and tasks)
+    // keep their direct one-click launch.
+    if (task.type === 'epic' && isExecutionStage(task.stage_position)) {
+      setBatchPicker({
+        epicId: task.id,
+        projectId: task.project_id,
+        taskIds: readyForDevChildTaskIds(task),
+      });
+      return;
+    }
     void launch(task.id, task.project_id, task.type);
   };
 
@@ -388,6 +414,24 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
         projectId={projectId}
         onClose={() => setIsNewOpen(false)}
       />
+
+      {/* Sprint batch picker for a ready epic — pre-seeded with the epic's
+          ready-for-dev child tasks; on launch, Sprint runs over the confirmed
+          batch (the epic id drives the card spinner). */}
+      {batchPicker !== null && (
+        <TaskBatchPickerModal
+          isOpen
+          projectId={batchPicker.projectId}
+          substrate={DEFAULT_SUBSTRATE}
+          preselectedTaskIds={batchPicker.taskIds}
+          onClose={() => setBatchPicker(null)}
+          onPicked={(taskIds) => {
+            const { epicId, projectId: pid } = batchPicker;
+            setBatchPicker(null);
+            void launchSprintBatch(epicId, taskIds, pid);
+          }}
+        />
+      )}
     </div>
   );
 }

@@ -31,6 +31,13 @@ export interface TaskRunLaunchState {
   error: string | null;
   /** Launch a run for `taskId` (of `type`) in `projectId`. Resolves to the new runId or null. */
   launch: (taskId: string, projectId: number, type: TaskType) => Promise<string | null>;
+  /**
+   * Launch a parallel **Sprint** over an explicit batch of task ids — e.g. the
+   * ready-for-development child tasks of an epic, confirmed in the batch picker.
+   * `spinnerId` drives the card spinner (the epic's id); `taskIds` seeds the
+   * sprint batch. Resolves to the new runId or null (no-op on an empty batch).
+   */
+  launchSprintBatch: (spinnerId: string, taskIds: string[], projectId: number) => Promise<string | null>;
 }
 
 export function useTaskRunLauncher(): TaskRunLaunchState {
@@ -84,5 +91,39 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
     [],
   );
 
-  return { launchingTaskId, error, launch };
+  const launchSprintBatch = useCallback(
+    async (spinnerId: string, taskIds: string[], projectId: number): Promise<string | null> => {
+      if (taskIds.length === 0) return null;
+      setError(null);
+      setLaunchingTaskId(spinnerId);
+      try {
+        const workflows = await trpc.cyboflow.workflows.list.query({ projectId });
+        // Sprint is the task-execution flow; resolve it by name (built-in
+        // ordering is not a contract). Fall back to the first flow.
+        const workflowId = workflows.find((w) => w.name === 'sprint')?.id ?? workflows[0]?.id;
+        if (!workflowId) {
+          setError('No workflow available to run');
+          return null;
+        }
+        // Session-hosted like every other launch surface; forceNew so the batch
+        // run never silently absorbs the selected quick session (mirrors `launch`).
+        const sessionId = await ensureSessionForLaunch(projectId, { forceNew: true });
+        const result = await trpc.cyboflow.runs.start.mutate({
+          workflowId,
+          projectId,
+          sessionId,
+          taskIds,
+        });
+        return result.runId;
+      } catch (err: unknown) {
+        setError(err instanceof Error ? err.message : 'Failed to launch sprint');
+        return null;
+      } finally {
+        setLaunchingTaskId(null);
+      }
+    },
+    [],
+  );
+
+  return { launchingTaskId, error, launch, launchSprintBatch };
 }

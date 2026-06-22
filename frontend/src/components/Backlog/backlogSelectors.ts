@@ -142,6 +142,42 @@ export function unifiedStages(
  */
 export const DECOMPOSED_POSITION = 12;
 
+// Board stage positions (seedDefaultBoard / migration 014). Position 6
+// ("Ready for development") is the planning→execution boundary; 6–8 are the
+// non-terminal execution stages (6 ready, 7 in development, 8 ready to merge),
+// 9+ are terminal. An entity at a position < 6 is still in planning.
+export const READY_FOR_DEV_POSITION = 6;
+export const LAST_EXECUTION_POSITION = 8;
+
+/**
+ * True when a stage position is a non-terminal EXECUTION stage (6–8). The
+ * backlog "Run" action routes an epic at an execution stage to Sprint (execute
+ * its ready tasks) rather than Planner (re-plan it).
+ */
+export function isExecutionStage(position: number): boolean {
+  return position >= READY_FOR_DEV_POSITION && position <= LAST_EXECUTION_POSITION;
+}
+
+/**
+ * The ids of an epic's child tasks that are AT "Ready for development" and
+ * eligible to seed a sprint batch — a real task, not done, not archived, not
+ * already in flight. Used to PRE-SELECT the sprint batch picker when Run is
+ * clicked on a ready epic; returns [] for a non-epic or an epic with no loaded /
+ * no ready children (the picker then opens with nothing pre-checked).
+ */
+export function readyForDevChildTaskIds(epic: BacklogTaskItem): string[] {
+  return (epic.children ?? [])
+    .filter(
+      (c) =>
+        c.type === 'task' &&
+        c.stage_position === READY_FOR_DEV_POSITION &&
+        !c.isDone &&
+        c.archived_at === null &&
+        c.inFlow.length === 0,
+    )
+    .map((c) => c.id);
+}
+
 /** The board stage a row currently sits in, or null when its stage_id is unknown to the board. */
 export function findStageById(board: Board, stageId: string): BoardStage | null {
   return board.stages.find((s) => s.id === stageId) ?? null;

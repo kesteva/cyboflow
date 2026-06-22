@@ -262,6 +262,45 @@ describe('TaskBatchPickerModal — multi-select + onPicked payload', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 2b. Pre-selection (an epic's ready-for-dev tasks, opened from the backlog Run)
+// ---------------------------------------------------------------------------
+
+describe('TaskBatchPickerModal — pre-selection', () => {
+  it('pre-checks eligible preselectedTaskIds, drops in-flight ones, and launches the survivors', async () => {
+    const onPicked = vi.fn();
+    mockList.mockResolvedValue(
+      structuredClone([
+        makeItem({ id: 'TASK-1', ref: 'TASK-1' }),
+        makeItem({ id: 'TASK-2', ref: 'TASK-2' }),
+        // In-flight: rendered disabled and NOT pre-checked even though preselected.
+        makeItem({ id: 'TASK-3', ref: 'TASK-3', inFlow: [{ agent: 'sprint', runId: 'r1', stepId: null }] }),
+      ]),
+    );
+    render(
+      <TaskBatchPickerModal
+        isOpen
+        projectId={1}
+        substrate="sdk"
+        preselectedTaskIds={['TASK-1', 'TASK-3']}
+        onClose={vi.fn()}
+        onPicked={onPicked}
+      />,
+    );
+    await screen.findByTestId('task-batch-picker-list');
+
+    expect(screen.getByLabelText('Select TASK-1')).toBeChecked();
+    expect(screen.getByLabelText('Select TASK-2')).not.toBeChecked();
+    expect(screen.getByLabelText('Select TASK-3')).not.toBeChecked();
+    expect(screen.getByLabelText('Select TASK-3')).toBeDisabled();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('task-batch-picker-launch'));
+    });
+    expect(onPicked).toHaveBeenCalledWith(['TASK-1']);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 3. Cap enforcement by substrate (10 interactive vs 15 sdk)
 // ---------------------------------------------------------------------------
 

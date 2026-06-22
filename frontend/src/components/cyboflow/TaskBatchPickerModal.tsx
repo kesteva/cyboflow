@@ -39,6 +39,15 @@ interface TaskBatchPickerModalProps {
    * N matches what runs.start would stamp; this is the requested level.
    */
   substrate: CliSubstrate;
+  /**
+   * Task ids to PRE-CHECK when the modal opens (e.g. an epic's
+   * ready-for-development child tasks, when Run is clicked on a ready epic from
+   * the backlog). Intersected with the eligible set (in-flight ids are dropped)
+   * and capped at the substrate's batch limit. Absent/empty ⇒ no pre-selection
+   * (the WorkflowPicker path). Pass a STABLE reference (state, not an inline
+   * array) — it is a load-effect dependency.
+   */
+  preselectedTaskIds?: string[];
   onClose: () => void;
   /** Called with the multi-selected task ids when the user launches the batch. */
   onPicked: (taskIds: string[]) => void;
@@ -48,6 +57,7 @@ export function TaskBatchPickerModal({
   isOpen,
   projectId,
   substrate,
+  preselectedTaskIds,
   onClose,
   onPicked,
 }: TaskBatchPickerModalProps): React.JSX.Element {
@@ -83,13 +93,25 @@ export function TaskBatchPickerModal({
           (r) => r.type === 'task' && !r.isDone && r.archived_at === null,
         );
         setTasks(batchable);
-        // Prune any prior selection that is no longer eligible.
+        // On open, seed the selection from the caller's pre-selection (e.g. an
+        // epic's ready-for-development child tasks) intersected with what's
+        // eligible (not in-flight) and capped at the substrate limit; absent a
+        // pre-selection, prune any prior selection to what's still eligible.
+        const eligibleSet = new Set(
+          batchable.filter((t) => t.inFlow.length === 0).map((t) => t.id),
+        );
+        const seedCap = SPRINT_BATCH_MAX_TASKS[substrate];
         setSelectedIds((prev) => {
-          const stillEligible = new Set(
-            batchable.filter((t) => t.inFlow.length === 0).map((t) => t.id),
-          );
+          const source =
+            preselectedTaskIds && preselectedTaskIds.length > 0
+              ? preselectedTaskIds
+              : Array.from(prev);
           const next = new Set<string>();
-          for (const id of prev) if (stillEligible.has(id)) next.add(id);
+          for (const id of source) {
+            if (!eligibleSet.has(id)) continue;
+            if (next.size >= seedCap) break;
+            next.add(id);
+          }
           return next;
         });
       })
@@ -99,7 +121,7 @@ export function TaskBatchPickerModal({
       .finally(() => {
         setIsLoading(false);
       });
-  }, [isOpen, projectId]);
+  }, [isOpen, projectId, preselectedTaskIds, substrate]);
 
   // Re-resolve the effective substrate (drives the cap) whenever the requested
   // substrate or the open state changes.

@@ -18,6 +18,8 @@ import {
   findStageById,
   selectableStages,
   friendlyStageError,
+  isExecutionStage,
+  readyForDevChildTaskIds,
 } from '../backlogSelectors';
 import type { BacklogTaskItem, Board, BoardStage } from '../../../../../shared/types/tasks';
 
@@ -346,5 +348,44 @@ describe('friendlyStageError', () => {
   it('falls back to a generic message for a non-Error / empty message', () => {
     expect(friendlyStageError('boom')).toMatch(/could not complete/i);
     expect(friendlyStageError(new Error(''))).toMatch(/could not complete/i);
+  });
+});
+
+describe('isExecutionStage', () => {
+  it('is true only for non-terminal execution positions 6–8 (Ready for dev → Ready to merge)', () => {
+    // Planning (1–5): false.
+    for (const p of [1, 2, 3, 4, 5]) expect(isExecutionStage(p)).toBe(false);
+    // Execution (6–8): true.
+    for (const p of [6, 7, 8]) expect(isExecutionStage(p)).toBe(true);
+    // Terminal (9, 10, 12): false.
+    for (const p of [9, 10, 12]) expect(isExecutionStage(p)).toBe(false);
+  });
+});
+
+describe('readyForDevChildTaskIds', () => {
+  it('returns the epic\'s child tasks AT Ready-for-development, excluding done/archived/in-flight/non-task/other-stage', () => {
+    const epic = item({
+      id: 'EPIC-1',
+      type: 'epic',
+      stage_position: 6,
+      children: [
+        item({ id: 'TASK-a', stage_position: 6 }), // ✓ ready
+        item({ id: 'TASK-b', stage_position: 6 }), // ✓ ready
+        item({ id: 'TASK-c', stage_position: 5 }), // ✗ still in planning
+        item({ id: 'TASK-d', stage_position: 6, isDone: true }), // ✗ done
+        item({ id: 'TASK-e', stage_position: 6, archived_at: '2026-06-10T00:00:00Z' }), // ✗ archived
+        item({ id: 'TASK-f', stage_position: 6, inFlow: [{ agent: 'sprint', runId: 'r1', stepId: null }] }), // ✗ in flight
+      ],
+    });
+    expect(readyForDevChildTaskIds(epic)).toEqual(['TASK-a', 'TASK-b']);
+  });
+
+  it('returns [] for an epic with no children or no ready children', () => {
+    expect(readyForDevChildTaskIds(item({ id: 'EPIC-2', type: 'epic' }))).toEqual([]);
+    expect(
+      readyForDevChildTaskIds(
+        item({ id: 'EPIC-3', type: 'epic', children: [item({ id: 'TASK-x', stage_position: 5 })] }),
+      ),
+    ).toEqual([]);
   });
 });
