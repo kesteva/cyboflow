@@ -41,6 +41,31 @@ describe('SpawnStepRunner', () => {
     expect(passed.prompt).toContain('`epics`'); // the step-scoped prompt
   });
 
+  it('forwards ctx.item into the composed prompt (fan-out item scope)', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    await runner.runStep(step({ id: 'implement', agent: 'implement' }), {
+      ...ctx,
+      item: { id: 'TASK-42', over: 'tasks' },
+    });
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).toContain('PARALLEL fan-out');
+    expect(passed.prompt).toContain('**TASK-42**');
+    expect(passed.prompt).toContain('**tasks**');
+  });
+
+  it('omits the fan-out block from the prompt when ctx has no item', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    await runner.runStep(step({ id: 'a' }), ctx);
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).not.toContain('PARALLEL fan-out');
+  });
+
   it('returns failed (not throws) when the spawned turn rejects, carrying the error', async () => {
     const spawner = makeSpawner(() => Promise.reject(new Error('turn aborted')));
     const runner = new SpawnStepRunner(spawner, opts);

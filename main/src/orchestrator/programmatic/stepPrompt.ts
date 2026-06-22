@@ -23,6 +23,13 @@ export interface ComposeStepPromptArgs {
   workflowName: string;
   /** 1-based attempt number; >1 means a prior attempt failed and is being retried. */
   attempt: number;
+  /**
+   * Fan-out item context — present ONLY when this step is one item's inner step
+   * of a host-driven fan-out. Absent for every normal single-step invocation, so
+   * the single-step prompt output stays byte-identical. When present the agent is
+   * scoped to exactly this item (do not touch other items).
+   */
+  item?: { id: string; over: string };
 }
 
 export function composeStepPrompt(args: ComposeStepPromptArgs): string {
@@ -32,10 +39,13 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
       ? `\n\nThis is **attempt ${attempt}** — a previous attempt at this step did not complete. Diagnose what went wrong and try again.`
       : '';
   const desc = step.desc !== undefined && step.desc.length > 0 ? `\n\n${step.desc}` : '';
+  const itemNote = args.item
+    ? `\n\nThis step is part of a PARALLEL fan-out over **${args.item.over}**. You are working on item **${args.item.id}** ONLY — do not touch other items.`
+    : '';
 
   return `You are executing **one step** of the "${workflowName}" workflow in this git worktree.
 
-Step: **${step.name}** (id: \`${step.id}\`)${desc}
+Step: **${step.name}** (id: \`${step.id}\`)${desc}${itemNote}
 
 Do ONLY this step:
 

@@ -49,7 +49,12 @@ export class SpawnStepRunner implements StepRunner {
     // Already canceled before we even spawn — short-circuit.
     if (ctx.signal?.aborted) return { status: 'aborted' };
 
-    const prompt = composeStepPrompt({ step, workflowName: this.opts.workflowName, attempt: ctx.attempt });
+    const prompt = composeStepPrompt({
+      step,
+      workflowName: this.opts.workflowName,
+      attempt: ctx.attempt,
+      ...(ctx.item ? { item: ctx.item } : {}),
+    });
     try {
       await this.spawner.spawnCliProcess({
         panelId: this.opts.panelId,
