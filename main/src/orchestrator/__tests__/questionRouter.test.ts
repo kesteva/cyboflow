@@ -660,29 +660,37 @@ describe('QuestionRouter', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Case 9: recoverStaleAwaitingInput transitions awaiting_input rows to failed
+  // Case 9: recoverStaleAwaitingInput rests resumable runs in awaiting_review
+  //         (reopenable) and fails ONLY sessionless ones.
   // -------------------------------------------------------------------------
-  it('recoverStaleAwaitingInput transitions awaiting_input rows to failed', () => {
-    const db = createTestDb({ includeQuestionsTable: true });
+  it('recoverStaleAwaitingInput rests resumable runs in awaiting_review and fails only sessionless ones', () => {
+    // includeWorkflowRunTaskColumns adds claude_session_id (migration 018) — the
+    // resumability signal the recovery now keys on.
+    const db = createTestDb({ includeQuestionsTable: true, includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const router = QuestionRouter.initialize(adapter);
 
-    seedRun(db, { id: 'qrun-R1', status: 'awaiting_input' });
-    seedRun(db, { id: 'qrun-R2', status: 'awaiting_input' });
-    seedRun(db, { id: 'qrun-R3', status: 'running' });
+    seedRun(db, { id: 'qrun-R1', status: 'awaiting_input' }); // resumable (captured a session)
+    seedRun(db, { id: 'qrun-R2', status: 'awaiting_input' }); // sessionless
+    seedRun(db, { id: 'qrun-R3', status: 'running' });        // untouched
+    // R1 was mid-gate when the app quit but captured an SDK conversation id, so
+    // it can be re-opened via --resume.
+    db.prepare("UPDATE workflow_runs SET claude_session_id = 'sess-abc' WHERE id = ?").run('qrun-R1');
 
     const count = router.recoverStaleAwaitingInput();
 
-    // Return value must be 2.
+    // Both awaiting_input rows were recovered (the running one was not).
     expect(count).toBe(2);
 
-    // The two awaiting_input rows are now 'failed' with error_message='app_restart'.
+    // R1 is reopenable: rests in awaiting_review (NOT failed), session preserved.
     const r1 = db
-      .prepare("SELECT status, error_message FROM workflow_runs WHERE id = ?")
-      .get('qrun-R1') as { status: string; error_message: string };
-    expect(r1.status).toBe('failed');
-    expect(r1.error_message).toBe('app_restart');
+      .prepare("SELECT status, error_message, claude_session_id FROM workflow_runs WHERE id = ?")
+      .get('qrun-R1') as { status: string; error_message: string | null; claude_session_id: string | null };
+    expect(r1.status).toBe('awaiting_review');
+    expect(r1.error_message).toBeNull();
+    expect(r1.claude_session_id).toBe('sess-abc');
 
+    // R2 had no captured session → genuinely unresumable → failed.
     const r2 = db
       .prepare("SELECT status, error_message FROM workflow_runs WHERE id = ?")
       .get('qrun-R2') as { status: string; error_message: string };

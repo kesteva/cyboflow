@@ -750,52 +750,89 @@ export class QuestionRouter extends EventEmitter {
   }
 
   /**
-   * Boot-time recovery. Any workflow_runs row in 'awaiting_input' from a
-   * previous session cannot be resumed (the SDK session is gone). Transition
-   * them to 'failed' with error_message='app_restart' and flip any orphaned
-   * pending questions to 'timed_out' for audit consistency.
+   * Boot-time recovery for workflow_runs left in 'awaiting_input' by a previous
+   * session (the SDK iterator is one-shot and is gone after a restart).
    *
-   * Returns the number of workflow_runs rows transitioned.
+   * The SDK *process* being gone does NOT mean the *conversation* is gone: a run
+   * that captured a `claude_session_id` (stamped at the first system/init event)
+   * can be re-opened via `--resume` (runs.nudge re-drives the same conversation).
+   * So we split the stale runs:
+   *   - RESUMABLE (claude_session_id present) → 'awaiting_review'. The run lands
+   *     in the review queue and is nudge-resumable — NOT a dead end. (This is the
+   *     "reopen after timeout" fix; mirrors the in-session teardown settle in
+   *     clearPendingForRun.)
+   *   - SESSIONLESS (no captured session) → 'failed' (error_message='app_restart')
+   *     — genuinely unresumable, the original conservative behavior.
+   *
+   * For BOTH buckets the orphaned in-flight gate is dead, so pending questions are
+   * flipped to 'timed_out' and folded decision review_items resolved (audit
+   * consistency + no lingering blocking items). A resumable run re-opens via a
+   * fresh nudge turn, not by answering the stale gate.
+   *
+   * Returns the total number of workflow_runs rows transitioned.
    */
   recoverStaleAwaitingInput(): number {
     const transition = this.db.transaction(() => {
-      const staleRunIds = this.db
-        .prepare(`SELECT id FROM workflow_runs WHERE status = 'awaiting_input'`)
-        .all() as { id: string }[];
-      if (staleRunIds.length === 0) return 0;
-      const placeholders = staleRunIds.map(() => '?').join(',');
-      const ids = staleRunIds.map(r => r.id);
+      const staleRuns = this.db
+        .prepare(`SELECT id, claude_session_id FROM workflow_runs WHERE status = 'awaiting_input'`)
+        .all() as { id: string; claude_session_id: string | null }[];
+      if (staleRuns.length === 0) return { resumable: 0, failed: 0 };
+
+      const isResumable = (r: { claude_session_id: string | null }): boolean =>
+        r.claude_session_id !== null && r.claude_session_id !== '';
+      const resumableIds = staleRuns.filter(isResumable).map((r) => r.id);
+      const failedIds = staleRuns.filter((r) => !isResumable(r)).map((r) => r.id);
+      const allIds = staleRuns.map((r) => r.id);
+
+      if (resumableIds.length > 0) {
+        const ph = resumableIds.map(() => '?').join(',');
+        this.db
+          .prepare(`UPDATE workflow_runs
+                       SET status = 'awaiting_review', updated_at = CURRENT_TIMESTAMP
+                     WHERE id IN (${ph})`)
+          .run(...resumableIds);
+      }
+      if (failedIds.length > 0) {
+        const ph = failedIds.map(() => '?').join(',');
+        this.db
+          .prepare(`UPDATE workflow_runs
+                       SET status = 'failed',
+                           error_message = 'app_restart',
+                           ended_at = CURRENT_TIMESTAMP,
+                           updated_at = CURRENT_TIMESTAMP
+                     WHERE id IN (${ph})`)
+          .run(...failedIds);
+      }
+
+      // Settle the dead gate for ALL recovered runs (both buckets).
+      const allPh = allIds.map(() => '?').join(',');
       this.db
-        .prepare(`UPDATE workflow_runs
-                     SET status = 'failed',
-                         error_message = 'app_restart',
-                         ended_at = CURRENT_TIMESTAMP,
-                         updated_at = CURRENT_TIMESTAMP
-                   WHERE id IN (${placeholders})`)
-        .run(...ids);
-      this.db
-        .prepare(`UPDATE questions SET status = 'timed_out', answered_at = CURRENT_TIMESTAMP WHERE run_id IN (${placeholders}) AND status = 'pending'`)
-        .run(...ids);
+        .prepare(`UPDATE questions SET status = 'timed_out', answered_at = CURRENT_TIMESTAMP WHERE run_id IN (${allPh}) AND status = 'pending'`)
+        .run(...allIds);
       // Reconcile the folded inbox: orphaned pending question-sourced decision
-      // review_items for these recovered runs can never resolve, so resolve them
-      // too so they don't linger as stale blocking items. No-op pre-016.
+      // review_items can never resolve via the dead gate, so resolve them too so
+      // they don't linger as stale blocking items. No-op pre-016.
       if (hasReviewItemsTable(this.db)) {
         const now = new Date().toISOString();
         this.db
           .prepare(
             `UPDATE review_items
                 SET status = 'resolved', resolved_by = 'system', resolution = 'app_restart', updated_at = ?
-              WHERE kind = 'decision' AND status = 'pending' AND source = 'question' AND run_id IN (${placeholders})`,
+              WHERE kind = 'decision' AND status = 'pending' AND source = 'question' AND run_id IN (${allPh})`,
           )
-          .run(now, ...ids);
+          .run(now, ...allIds);
       }
-      return staleRunIds.length;
+      return { resumable: resumableIds.length, failed: failedIds.length };
     });
-    const count = transition();
-    if (count > 0) {
-      console.log(`[QuestionRouter] Boot recovery transitioned ${count} stale awaiting_input run(s) to failed`);
+    const { resumable, failed } = transition();
+    const total = resumable + failed;
+    if (total > 0) {
+      console.log(
+        `[QuestionRouter] Boot recovery: ${total} stale awaiting_input run(s) — ` +
+        `${resumable} rested in awaiting_review (resumable), ${failed} failed (no session)`,
+      );
     }
-    return count;
+    return total;
   }
 
   /**
