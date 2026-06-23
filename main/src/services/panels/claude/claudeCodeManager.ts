@@ -274,6 +274,19 @@ export class ClaudeCodeManager extends AbstractCliManager {
    */
   private readonly bundleWorktrees = new Map<string, string>();
 
+  /**
+   * Per-sessionId refcount of live spawns that provisioned the cyboflow-* command
+   * bundle (SUB-HAZARD: SHARED BUNDLE). A programmatic fan-out drives multiple
+   * lanes under ONE sessionId, all sharing the same `.claude/commands` bundle in
+   * the shared worktree. removeBundleForSession(sessionId) strips that bundle, so
+   * the FIRST lane to finish would delete it out from under a still-live sibling
+   * (the sibling's next `/cyboflow-<phase>` command then 404s mid-turn). Increment
+   * on every spawn that installs/uses the bundle; removeBundleForSession only
+   * actually removes when the count returns to 0 (the LAST lane). For a single
+   * (non-fan-out) spawn the count is 1→0, so removal happens exactly as before.
+   */
+  private readonly bundleRefcountBySession = new Map<string, number>();
+
   constructor(
     sessionManager: import('../../sessionManager').SessionManager,
     logger: Logger | undefined,
@@ -367,6 +380,20 @@ export class ClaudeCodeManager extends AbstractCliManager {
   private removeBundleForSession(sessionId: string): void {
     const worktreePath = this.bundleWorktrees.get(sessionId);
     if (worktreePath === undefined) return;
+    // SHARED-BUNDLE refcount (SUB-HAZARD): decrement this session's live-spawn
+    // count and only strip the bundle when it reaches 0 (the LAST lane). A
+    // finishing fan-out lane must NOT delete the shared `.claude/commands` bundle
+    // while a sibling lane is still mid-turn. The refcount is incremented in
+    // spawnCliProcess right after installWorkflowBundle. Guard against an
+    // unexpected double-cleanup driving the count negative (treat <=0 as the last
+    // lane). For a single non-fan-out spawn the count is 1→0, so removal happens
+    // exactly as before.
+    const remaining = (this.bundleRefcountBySession.get(sessionId) ?? 1) - 1;
+    if (remaining > 0) {
+      this.bundleRefcountBySession.set(sessionId, remaining);
+      return;
+    }
+    this.bundleRefcountBySession.delete(sessionId);
     this.bundleWriter.remove(worktreePath);
     this.bundleWorktrees.delete(sessionId);
   }
@@ -396,8 +423,21 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // the run panel and passes the AbstractAIPanelManager output gate. For a
     // non-fan-out path spawnKey === panelId, so this is a no-op there.
     const displayPanelId = options.panelId;
+    // M5(1) — RESUME is dead for lanes. Only a TOP-LEVEL run may take the SDK
+    // resume path; a fan-out lane (spawnKey set AND distinct from panelId) is a
+    // fresh per-item turn that must NEVER inherit isResume / resumeSessionId.
+    // Resolving the run's stored claude_session_id for a lane would either fail
+    // the resume validation (panel has no claude session id) or, worse, splice
+    // every lane into the SAME prior conversation. Strip both resume signals for
+    // lanes here so buildSdkOptions and the resume-validation block below treat
+    // the lane as a clean spawn. Non-lane spawns (spawnKey === panelId) pass
+    // through byte-identical.
+    const isLaneSpawn = options.spawnKey !== undefined && options.spawnKey !== options.panelId;
+    const effectiveOptions: ClaudeSpawnOptions = isLaneSpawn
+      ? { ...options, isResume: false, resumeSessionId: undefined }
+      : options;
     return await withLock(`claude-spawn-${spawnKey}`, async () => {
-      const { panelId, sessionId, isResume } = options;
+      const { panelId, sessionId, isResume } = effectiveOptions;
 
       // Guard: reject duplicate spawns of the SAME lane (keyed by spawnKey so
       // concurrent fan-out lanes under one panelId do not collide).
@@ -444,9 +484,17 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // worktreePath is recorded by sessionId so cleanupCliResources can remove it.
       installWorkflowBundle(this.db, this.bundleWriter, runId, options.worktreePath, makeLoggerLike(this.logger));
       this.bundleWorktrees.set(sessionId, options.worktreePath);
+      // SHARED-BUNDLE refcount: this spawn now relies on the bundle for the rest
+      // of its turn. Increment so a finishing sibling lane (same sessionId) cannot
+      // remove the bundle out from under this one — removeBundleForSession only
+      // strips it when the LAST lane decrements back to 0.
+      this.bundleRefcountBySession.set(sessionId, (this.bundleRefcountBySession.get(sessionId) ?? 0) + 1);
 
-      // Build SDK options (uses runId for the approval-router hook).
-      const sdkOptions = await this.buildSdkOptions({ ...options, runId });
+      // Build SDK options (uses runId for the approval-router hook). Built from
+      // effectiveOptions so a lane spawn's stripped resume signals (M5(1)) reach
+      // buildSdkOptions — a lane never resumes. Non-lane spawns: effectiveOptions
+      // === options, so this is byte-identical.
+      const sdkOptions = await this.buildSdkOptions({ ...effectiveOptions, runId });
 
       // Set up the per-run pipeline (EventRouter + RawEventsSink).
       const router = new EventRouter();
