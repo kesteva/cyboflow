@@ -32,6 +32,8 @@ export function roleColorVar(role: string): string {
       return 'var(--color-phase-execute)';
     case 'compound':
       return 'var(--color-phase-compound)';
+    case 'ship':
+      return 'var(--color-phase-execute)';
     default:
       return 'var(--color-text-tertiary)';
   }
@@ -42,6 +44,7 @@ export const ROLE_COLOR = {
   planner: 'var(--color-phase-plan)',
   sprint: 'var(--color-phase-execute)',
   compound: 'var(--color-phase-compound)',
+  ship: 'var(--color-phase-execute)',
 } as const;
 
 /** Rough token estimate from a prompt string: ~4 chars per token. */

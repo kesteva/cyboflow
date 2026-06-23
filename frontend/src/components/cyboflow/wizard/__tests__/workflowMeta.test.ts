@@ -94,6 +94,20 @@ describe('buildWorkflowMeta', () => {
     expect(sprint.subtitle).toBe('Parallel task fan-out → sprint review');
   });
 
+  it('(a2) ship resolves its built-in title + subtitle', () => {
+    const meta = buildWorkflowMeta(
+      [makeWorkflow({ id: 'wf-ship', name: 'ship', spec_json: '{}' })],
+      [],
+    );
+
+    const ship = meta.find((m) => m.name === 'ship')!;
+    expect(ship.title).toBe('Ship');
+    expect(ship.slashCommand).toBe('/ship');
+    expect(ship.subtitle).toBe(
+      'Idea → epics → tasks → execute → integrate (planner + sprint, end to end)',
+    );
+  });
+
   it('(b) a custom workflow with a broken/empty spec yields zero counts and a blank subtitle', () => {
     const meta = buildWorkflowMeta(
       [
@@ -118,6 +132,7 @@ describe('buildWorkflowMeta', () => {
       [
         makeWorkflow({ id: 'wf-planner', name: 'planner' }),
         makeWorkflow({ id: 'wf-sprint', name: 'sprint' }),
+        makeWorkflow({ id: 'wf-ship', name: 'ship', spec_json: '{}' }),
         makeWorkflow({ id: 'wf-custom', name: 'my-custom', spec_json: '{}' }),
       ],
       [],
@@ -126,6 +141,8 @@ describe('buildWorkflowMeta', () => {
     expect(DEFAULT_WORKFLOW_NAME).toBe('sprint');
     expect(meta.find((m) => m.name === 'sprint')!.isDefault).toBe(true);
     expect(meta.find((m) => m.name === 'planner')!.isDefault).toBe(false);
+    // Ship is a full end-to-end flow but must NOT be the wizard default.
+    expect(meta.find((m) => m.name === 'ship')!.isDefault).toBe(false);
     expect(meta.find((m) => m.name === 'my-custom')!.isDefault).toBe(false);
   });
 

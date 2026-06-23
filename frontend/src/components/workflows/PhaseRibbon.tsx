@@ -40,6 +40,10 @@ function phaseAbbrev(label: string): string {
     case 'review':
     case 'sprint review':
       return 'REVIEW';
+    case 'sprint plan':
+      return 'SPLAN';
+    case 'materialize':
+      return 'MATL';
     case 'compound':
       return 'COMP';
     case 'prune':
