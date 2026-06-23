@@ -59,6 +59,15 @@ import { listRunOwnedIdeaIds, listRunCreatedTaskIds } from './runEntityOwnership
 export type { QuestionRequest, QuestionAnswer, QuestionPayload };
 
 /**
+ * Boot recovery only rests a resumable awaiting_input run (one with a captured
+ * claude_session_id) in 'awaiting_review' when it was last touched within this
+ * many days. Beyond it the local SDK --resume session data is unlikely to still
+ * exist, so the run is failed instead — this caps the review queue so it cannot
+ * accumulate ancient reopen candidates across many restarts.
+ */
+const STALE_RESUMABLE_RECOVERY_DAYS = 7;
+
+/**
  * FIX-STAGE-MODEL (D): the planner step id whose Approve answer flips the run's
  * tasks to Ready-for-development, and the board position they land on. Verified
  * against database.ts seedDefaultBoard (position 6 = 'Ready for development').
@@ -757,12 +766,15 @@ export class QuestionRouter extends EventEmitter {
    * that captured a `claude_session_id` (stamped at the first system/init event)
    * can be re-opened via `--resume` (runs.nudge re-drives the same conversation).
    * So we split the stale runs:
-   *   - RESUMABLE (claude_session_id present) → 'awaiting_review'. The run lands
-   *     in the review queue and is nudge-resumable — NOT a dead end. (This is the
+   *   - RESUMABLE (claude_session_id present AND last touched within
+   *     STALE_RESUMABLE_RECOVERY_DAYS) → 'awaiting_review'. The run lands in the
+   *     review queue and is nudge-resumable — NOT a dead end. (This is the
    *     "reopen after timeout" fix; mirrors the in-session teardown settle in
    *     clearPendingForRun.)
-   *   - SESSIONLESS (no captured session) → 'failed' (error_message='app_restart')
-   *     — genuinely unresumable, the original conservative behavior.
+   *   - SESSIONLESS or STALE (no captured session, or older than the cap) →
+   *     'failed' (error_message='app_restart') — genuinely unresumable, the
+   *     original conservative behavior. The age cap keeps the review queue from
+   *     accumulating ancient reopen candidates across many restarts.
    *
    * For BOTH buckets the orphaned in-flight gate is dead, so pending questions are
    * flipped to 'timed_out' and folded decision review_items resolved (audit
@@ -774,12 +786,23 @@ export class QuestionRouter extends EventEmitter {
   recoverStaleAwaitingInput(): number {
     const transition = this.db.transaction(() => {
       const staleRuns = this.db
-        .prepare(`SELECT id, claude_session_id FROM workflow_runs WHERE status = 'awaiting_input'`)
-        .all() as { id: string; claude_session_id: string | null }[];
+        .prepare(
+          `SELECT id, claude_session_id,
+                  CASE WHEN julianday('now') - julianday(updated_at) <= ? THEN 1 ELSE 0 END AS is_fresh
+             FROM workflow_runs WHERE status = 'awaiting_input'`,
+        )
+        .all(STALE_RESUMABLE_RECOVERY_DAYS) as {
+          id: string;
+          claude_session_id: string | null;
+          is_fresh: number;
+        }[];
       if (staleRuns.length === 0) return { resumable: 0, failed: 0 };
 
-      const isResumable = (r: { claude_session_id: string | null }): boolean =>
-        r.claude_session_id !== null && r.claude_session_id !== '';
+      // Reopenable = captured an SDK conversation AND recovered recently enough
+      // (is_fresh) that the local --resume session data plausibly still exists.
+      // Anything else (sessionless OR stale) is failed instead.
+      const isResumable = (r: { claude_session_id: string | null; is_fresh: number }): boolean =>
+        r.claude_session_id !== null && r.claude_session_id !== '' && r.is_fresh === 1;
       const resumableIds = staleRuns.filter(isResumable).map((r) => r.id);
       const failedIds = staleRuns.filter((r) => !isResumable(r)).map((r) => r.id);
       const allIds = staleRuns.map((r) => r.id);
@@ -829,7 +852,7 @@ export class QuestionRouter extends EventEmitter {
     if (total > 0) {
       console.log(
         `[QuestionRouter] Boot recovery: ${total} stale awaiting_input run(s) — ` +
-        `${resumable} rested in awaiting_review (resumable), ${failed} failed (no session)`,
+        `${resumable} rested in awaiting_review (resumable), ${failed} failed (no session / stale > ${STALE_RESUMABLE_RECOVERY_DAYS}d)`,
       );
     }
     return total;

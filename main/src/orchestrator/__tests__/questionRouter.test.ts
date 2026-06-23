@@ -670,17 +670,20 @@ describe('QuestionRouter', () => {
     const adapter = dbAdapter(db);
     const router = QuestionRouter.initialize(adapter);
 
-    seedRun(db, { id: 'qrun-R1', status: 'awaiting_input' }); // resumable (captured a session)
+    seedRun(db, { id: 'qrun-R1', status: 'awaiting_input' }); // resumable + fresh
     seedRun(db, { id: 'qrun-R2', status: 'awaiting_input' }); // sessionless
     seedRun(db, { id: 'qrun-R3', status: 'running' });        // untouched
+    seedRun(db, { id: 'qrun-R4', status: 'awaiting_input' }); // resumable but STALE
     // R1 was mid-gate when the app quit but captured an SDK conversation id, so
     // it can be re-opened via --resume.
     db.prepare("UPDATE workflow_runs SET claude_session_id = 'sess-abc' WHERE id = ?").run('qrun-R1');
+    // R4 also has a session but was last touched long ago → past the age cap.
+    db.prepare("UPDATE workflow_runs SET claude_session_id = 'sess-old', updated_at = datetime('now','-30 days') WHERE id = ?").run('qrun-R4');
 
     const count = router.recoverStaleAwaitingInput();
 
-    // Both awaiting_input rows were recovered (the running one was not).
-    expect(count).toBe(2);
+    // All three awaiting_input rows were recovered (the running one was not).
+    expect(count).toBe(3);
 
     // R1 is reopenable: rests in awaiting_review (NOT failed), session preserved.
     const r1 = db
@@ -702,6 +705,13 @@ describe('QuestionRouter', () => {
       .prepare("SELECT status FROM workflow_runs WHERE id = ?")
       .get('qrun-R3') as { status: string };
     expect(r3.status).toBe('running');
+
+    // R4 has a session but is past the age cap → failed (review queue stays lean).
+    const r4 = db
+      .prepare("SELECT status, error_message FROM workflow_runs WHERE id = ?")
+      .get('qrun-R4') as { status: string; error_message: string };
+    expect(r4.status).toBe('failed');
+    expect(r4.error_message).toBe('app_restart');
   });
 });
 
