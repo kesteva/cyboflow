@@ -2,18 +2,23 @@
  * CounterStrip — the findings-scoped Pending / Resolved / Dismissed counter strip
  * that sits directly above the two triage sections.
  *
- * Findings-scoped (NOT whole-inbox): Pending is `triageFindings.length` — the
- * exact rows the UNTRIAGED + READY sections render (the same orphan-hidden fetch
- * they partition) — while Resolved/Dismissed are derived client-side from the
- * already-fetched `qualityFindings`, both via the store's
- * {@link selectFindingsCounters} selector. The strip sits directly above the
- * sections that enumerate "what is pending", so it MUST equal what they show;
- * the whole-inbox `reviewSummary.pendingByKind.finding` would over-count (it
- * includes orphaned findings whose run went terminal that the list hides). Live
- * via the store's `onReviewItemChanged` subscription (+ the optimistic dismiss
+ * Findings-scoped (NOT whole-inbox): Pending is the length of the VISIBLE triage
+ * set (`useVisibleTriageFindings` — the orphan-hidden fetch, further narrowed to
+ * the selection-locked project), i.e. the exact rows the UNTRIAGED + READY sections
+ * render — while Resolved/Dismissed are derived client-side from the already-fetched
+ * `qualityFindings`, both via the store's {@link selectFindingsCounters} selector.
+ * The strip sits directly above the sections that enumerate "what is pending", so it
+ * MUST equal what they show; the whole-inbox `reviewSummary.pendingByKind.finding`
+ * would over-count (it includes orphaned findings whose run went terminal that the
+ * list hides, plus other projects' findings once a selection locks the surface).
+ * Live via the store's `onReviewItemChanged` subscription (+ the optimistic dismiss
  * removal, which drops the row from `triageFindings` and so decrements Pending).
  */
-import { useInsightsStore, selectFindingsCounters } from '../../stores/insightsStore';
+import {
+  useInsightsStore,
+  useVisibleTriageFindings,
+  selectFindingsCounters,
+} from '../../stores/insightsStore';
 
 /**
  * One labelled cell in the counter strip — a value-over-label stack. Kept tiny +
@@ -38,7 +43,7 @@ function CounterCell({
 
 /** The findings-scoped counter strip — see the file header. No props. */
 export function CounterStrip(): React.JSX.Element {
-  const triageFindings = useInsightsStore((s) => s.triageFindings);
+  const triageFindings = useVisibleTriageFindings();
   const qualityFindings = useInsightsStore((s) => s.qualityFindings);
   const { pending, resolved, dismissed } = selectFindingsCounters(triageFindings, qualityFindings);
 

@@ -4,18 +4,21 @@
  * (N) →" CTA that routes the human's EXACT selection into the start wizard.
  *
  * The CTA opens {@link useNavigationStore.goToWizard} preselecting the `compound`
- * flow and carrying the selected finding ids (`selectedFindingIds`); the wizard
- * still has the user pick substrate / permission / project before launch (D4). The
- * ids come from {@link selectSelectedFindingIds} in stable bucket order. When the
- * Insights view is scoped to a single project, that id is threaded as
- * `lockProjectId`; cross-project, the wizard's chosen project scopes the launch
- * (OD-4). Gated on having at least one project (the wizard's first step is project
- * selection).
+ * flow and carrying the selected finding ids (`selectedFindingIds`) in stable
+ * bucket order ({@link selectSelectedFindingIds}). Because a compound run is
+ * single-project and the surface narrows to the selection's project the moment a
+ * finding is checked, the selection ALWAYS has one project — so the CTA always
+ * threads `lockProjectId` (the explicit `projectFilter` when the view is scoped,
+ * else {@link selectLockProjectId} derived from the selection). With the project
+ * pinned AND `compound` preselected, the wizard skips both the project and workflow
+ * steps and opens straight on ③ Configure. Gated on having at least one project.
  */
 import { Button } from '../ui/Button';
 import {
   useInsightsStore,
+  useVisibleTriageFindings,
   selectSelectedFindingIds,
+  selectLockProjectId,
   selectTallyParts,
 } from '../../stores/insightsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
@@ -24,7 +27,7 @@ import { pluralizeTally } from './findingsTagMeta';
 
 /** CompoundingTray — see the file header. */
 export function CompoundingTray(): React.JSX.Element | null {
-  const triageFindings = useInsightsStore((s) => s.triageFindings);
+  const triageFindings = useVisibleTriageFindings();
   // Gate on having at least one project — the wizard's first step is project
   // selection, so the CTA is pointless without one.
   const hasProjects = useProjectsCount() > 0;
@@ -33,12 +36,18 @@ export function CompoundingTray(): React.JSX.Element | null {
   const n = tally.count;
 
   const handleRun = (): void => {
-    const ids = selectSelectedFindingIds(useInsightsStore.getState().triageFindings);
+    const findings = useInsightsStore.getState().triageFindings;
+    const ids = selectSelectedFindingIds(findings);
+    // The selection is single-project (the surface locks to the selected finding's
+    // project), so we can always pin the wizard's project — skipping the project
+    // step. Prefer an explicit scoped `projectFilter`, else derive it from the
+    // selection; both resolve to the same project when a finding is selected.
     const projectFilter = useInsightsStore.getState().projectFilter;
+    const lockProjectId = projectFilter ?? selectLockProjectId(findings);
     useNavigationStore.getState().goToWizard({
       preselectWorkflowName: 'compound',
       selectedFindingIds: ids,
-      ...(projectFilter !== null ? { lockProjectId: projectFilter } : {}),
+      ...(lockProjectId !== null ? { lockProjectId } : {}),
     });
   };
 

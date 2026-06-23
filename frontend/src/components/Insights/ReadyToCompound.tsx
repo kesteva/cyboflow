@@ -8,35 +8,27 @@
  * starved by the budget is hidden entirely, while PRESENT buckets still show their
  * FULL header counts (taken from the raw buckets, not the allocation). The
  * section-toggle is labelled with the exact hidden count.
+ *
+ * Selection is SINGLE-PROJECT: the rendered set is {@link useVisibleTriageFindings}
+ * (narrowed to the selection's project once anything is selected), and Select all /
+ * per-bucket selection target one project — the locked one, or the top finding's
+ * project on the first cross-project pick — so the compound selection never spans
+ * projects.
  */
 import {
   useInsightsStore,
+  useVisibleTriageFindings,
   selectReadyBuckets,
   selectGreedyReadyRows,
+  selectLockProjectId,
 } from '../../stores/insightsStore';
 import { ReadyBucket } from './ReadyBucket';
 import { READY_BUCKETS } from './findingsTagMeta';
-import type { TriageFinding } from '../../stores/insightsStore';
 import type { FindingTagBucket } from '../../../../shared/types/reviews';
-
-/**
- * The project the section-level Select all / Deselect all forwards to. Cross-
- * project ready findings can span projects, so we forward each bucket-level action
- * with the right project; the global Select-all groups ids by project.
- */
-function groupIdsByProject(rows: readonly TriageFinding[]): Map<number, string[]> {
-  const byProject = new Map<number, string[]>();
-  for (const row of rows) {
-    const existing = byProject.get(row.project_id);
-    if (existing) existing.push(row.id);
-    else byProject.set(row.project_id, [row.id]);
-  }
-  return byProject;
-}
 
 /** ReadyToCompound — see the file header. */
 export function ReadyToCompound(): React.JSX.Element {
-  const triageFindings = useInsightsStore((s) => s.triageFindings);
+  const triageFindings = useVisibleTriageFindings();
   const showAll = useInsightsStore((s) => s.readyShowAll);
   const toggleShowAll = useInsightsStore((s) => s.toggleReadyShowAll);
   const selectAllReady = useInsightsStore((s) => s.selectAllReady);
@@ -51,18 +43,24 @@ export function ReadyToCompound(): React.JSX.Element {
   const totalSelected = allReady.filter((f) => f.selected).length;
   const allSelected = totalReady > 0 && totalSelected === totalReady;
 
-  // The global Select all / Deselect all fans out per project (the cross-project
-  // view mixes findings from several projects; each project's PQueue serializes).
+  // Bulk selection (Select all / per-bucket) must stay single-project: a compound
+  // run is single-project, and selecting any finding narrows the surface to its
+  // project. The target is the already-locked project (something selected) or — on
+  // the first bulk pick from the cross-project view — the project of the top ready
+  // finding (resp. the bucket's top finding). Once it fires, the surface filters to
+  // that project and every later bulk action stays within it.
+  const lockedProjectId = selectLockProjectId(triageFindings);
+
   const handleSelectAll = (selected: boolean): void => {
-    for (const projectId of groupIdsByProject(allReady).keys()) {
-      void selectAllReady(projectId, selected);
-    }
+    const target = lockedProjectId ?? allReady[0]?.project_id ?? null;
+    if (target === null) return;
+    void selectAllReady(target, selected);
   };
 
   const handleToggleBucket = (bucket: FindingTagBucket, selected: boolean): void => {
-    for (const projectId of groupIdsByProject(buckets[bucket]).keys()) {
-      void selectBucket(projectId, bucket, selected);
-    }
+    const target = lockedProjectId ?? buckets[bucket][0]?.project_id ?? null;
+    if (target === null) return;
+    void selectBucket(target, bucket, selected);
   };
 
   return (

@@ -22,6 +22,8 @@ import {
   selectTallyParts,
   selectSelectedFindingIds,
   selectFindingsCounters,
+  selectLockProjectId,
+  selectVisibleFindings,
   type TriageFinding,
 } from '../insightsStore';
 import type {
@@ -43,6 +45,7 @@ interface TriageOverrides {
   proposedTarget?: FindingProposedTarget | null;
   created_at?: string;
   staged_at?: string | null;
+  project_id?: number;
 }
 
 /** Build a TriageFinding with the fields the selectors read. */
@@ -52,7 +55,7 @@ function tf(o: TriageOverrides): TriageFinding {
   const proposedTarget = o.proposedTarget;
   const base: ReviewItem = {
     id: o.id,
-    project_id: 1,
+    project_id: o.project_id ?? 1,
     run_id: null,
     entity_type: null,
     entity_id: null,
@@ -299,5 +302,65 @@ describe('selectFindingsCounters', () => {
       resolved: 1,
       dismissed: 0,
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// selectLockProjectId — the selection-locked project (single-project guard)
+// ---------------------------------------------------------------------------
+
+describe('selectLockProjectId', () => {
+  it('returns null when nothing is selected', () => {
+    expect(
+      selectLockProjectId([
+        tf({ id: 'a', project_id: 1, triageState: 'ready', selected: false }),
+        tf({ id: 'b', project_id: 2, triageState: 'untriaged' }),
+      ]),
+    ).toBeNull();
+  });
+
+  it("returns the first selected READY finding's project", () => {
+    expect(
+      selectLockProjectId([
+        tf({ id: 'a', project_id: 1, triageState: 'ready', selected: false }),
+        tf({ id: 'b', project_id: 7, triageState: 'ready', selected: true }),
+        tf({ id: 'c', project_id: 9, triageState: 'ready', selected: true }),
+      ]),
+    ).toBe(7);
+  });
+
+  it('ignores a selected UNTRIAGED finding (only ready rows are selectable)', () => {
+    expect(
+      selectLockProjectId([tf({ id: 'u', project_id: 4, triageState: 'untriaged', selected: true })]),
+    ).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// selectVisibleFindings — narrow to the selection-locked project
+// ---------------------------------------------------------------------------
+
+describe('selectVisibleFindings', () => {
+  const cross = [
+    tf({ id: 'a1', project_id: 1, triageState: 'untriaged' }),
+    tf({ id: 'a2', project_id: 1, triageState: 'ready', selected: true }),
+    tf({ id: 'b1', project_id: 2, triageState: 'untriaged' }),
+    tf({ id: 'b2', project_id: 2, triageState: 'ready' }),
+  ];
+
+  it('returns everything unchanged when lockProjectId is null', () => {
+    expect(selectVisibleFindings(cross, null)).toBe(cross);
+  });
+
+  it('narrows to the locked project across BOTH untriaged and ready rows', () => {
+    const visible = selectVisibleFindings(cross, 1);
+    expect(visible.map((f) => f.id)).toEqual(['a1', 'a2']);
+  });
+
+  it('composes with selectLockProjectId so a selection hides other projects', () => {
+    // a2 (project 1) is selected -> the surface locks to project 1 and project 2
+    // disappears entirely (the request-1 single-project guard).
+    const visible = selectVisibleFindings(cross, selectLockProjectId(cross));
+    expect(visible.map((f) => f.id)).toEqual(['a1', 'a2']);
   });
 });

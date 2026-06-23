@@ -6,9 +6,15 @@
  *
  * The list is project-scoped only at the action layer: each finding carries its
  * `project_id`, so the row actions forward the right project to the store (the
- * cross-project view mixes findings from several projects).
+ * cross-project view mixes findings from several projects). The rendered set comes
+ * from {@link useVisibleTriageFindings}, so once a finding is selected the list
+ * narrows to that selection's project alongside the rest of the surface.
  */
-import { useInsightsStore, selectUntriaged } from '../../stores/insightsStore';
+import {
+  useInsightsStore,
+  useVisibleTriageFindings,
+  selectUntriaged,
+} from '../../stores/insightsStore';
 import type { TriageFinding } from '../../stores/insightsStore';
 import { UntriagedRow } from './UntriagedRow';
 import type { FindingProposedTarget, FindingPriority } from '../../../../shared/types/reviews';
@@ -34,7 +40,7 @@ interface UntriagedListProps {
 
 /** UntriagedList — see the file header. */
 export function UntriagedList({ openModifyId, onOpenModify }: UntriagedListProps): React.JSX.Element {
-  const triageFindings = useInsightsStore((s) => s.triageFindings);
+  const triageFindings = useVisibleTriageFindings();
   const expanded = useInsightsStore((s) => s.untriagedExpanded);
   const toggleExpand = useInsightsStore((s) => s.toggleUntriagedExpand);
   const approveFinding = useInsightsStore((s) => s.approveFinding);

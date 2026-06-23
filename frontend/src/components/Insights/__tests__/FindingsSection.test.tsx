@@ -228,7 +228,14 @@ vi.mock('../../../stores/insightsStore', async (importOriginal) => {
     return selector(mockSelectState());
   };
   useInsightsStore.getState = () => mockSelectState();
-  return { ...actual, useInsightsStore };
+  // The real useVisibleTriageFindings closes over the REAL (empty) zustand store,
+  // so override it to read the MOCK state through the mock hook + the REAL pure
+  // selectors (the selection-locked project filter under test).
+  const useVisibleTriageFindings = (): TriageFinding[] => {
+    const findings = useInsightsStore((s) => s.triageFindings) as TriageFinding[];
+    return actual.selectVisibleFindings(findings, actual.selectLockProjectId(findings));
+  };
+  return { ...actual, useInsightsStore, useVisibleTriageFindings };
 });
 
 const mockGoToWizard = vi.fn();
@@ -617,7 +624,7 @@ describe('FindingsSection — compounding tray', () => {
     expect(screen.getByTestId('run-compounding-session')).toBeDisabled();
   });
 
-  it('routes the CTA through goToWizard with compound + selected ids (ALL projects)', () => {
+  it('routes the CTA through goToWizard with compound + selected ids + the selection-derived lockProjectId', () => {
     setFindings([
       ready('fix', 'P0', { id: 'q1', selected: true }),
       ready('docs', 'P0', { id: 'd1', selected: true }),
@@ -626,9 +633,13 @@ describe('FindingsSection — compounding tray', () => {
     render(<FindingsSection />);
     fireEvent.click(screen.getByTestId('run-compounding-session'));
     expect(mockGoToWizard).toHaveBeenCalledTimes(1);
+    // No explicit projectFilter, but the selection is single-project (the fixtures
+    // default to project 1), so lockProjectId is derived from it → the wizard skips
+    // the project step and lands on Configure.
     expect(mockGoToWizard).toHaveBeenCalledWith({
       preselectWorkflowName: 'compound',
       selectedFindingIds: ['q1', 'd1'],
+      lockProjectId: 1,
     });
   });
 
@@ -649,6 +660,64 @@ describe('FindingsSection — compounding tray', () => {
     setFindings([ready('fix', 'P0', { id: 'q1', selected: true })]);
     render(<FindingsSection />);
     expect(screen.queryByTestId('compounding-tray')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Single-project selection lock (request 1): selecting a finding narrows the
+// WHOLE surface to that finding's project.
+// ---------------------------------------------------------------------------
+
+describe('FindingsSection — single-project selection lock', () => {
+  it('renders ALL projects when nothing is selected', () => {
+    setFindings([
+      finding({ id: 'a-u', project_id: 1, title: 'A untriaged' }),
+      finding({ id: 'b-u', project_id: 2, title: 'B untriaged' }),
+      ready('fix', 'P0', { id: 'a-r', project_id: 1 }),
+      ready('docs', 'P0', { id: 'b-r', project_id: 2 }),
+    ]);
+    render(<FindingsSection />);
+    expect(screen.getByText('A untriaged')).toBeInTheDocument();
+    expect(screen.getByText('B untriaged')).toBeInTheDocument();
+    expect(screen.getByTestId('ready-bucket-quick')).toBeInTheDocument();
+    expect(screen.getByTestId('ready-bucket-doc')).toBeInTheDocument();
+  });
+
+  it('hides other projects (untriaged + ready) once a finding is selected', () => {
+    setFindings([
+      finding({ id: 'a-u', project_id: 1, title: 'A untriaged' }),
+      finding({ id: 'b-u', project_id: 2, title: 'B untriaged' }),
+      ready('fix', 'P0', { id: 'a-r', project_id: 1 }), // quick bucket, project 1
+      ready('docs', 'P0', { id: 'b-r', project_id: 2 }), // doc bucket, project 2
+    ]);
+    render(<FindingsSection />);
+    // Click the project-1 quick row (the only row in the quick bucket) to select it.
+    fireEvent.click(within(screen.getByTestId('ready-bucket-quick')).getByTestId('ready-row'));
+    expect(toggleFindingSelected).toHaveBeenCalledWith(1, 'a-r');
+
+    // Surface now locked to project 1: project-2 rows are gone from BOTH sections.
+    expect(screen.getByText('A untriaged')).toBeInTheDocument();
+    expect(screen.queryByText('B untriaged')).not.toBeInTheDocument();
+    expect(screen.getByTestId('ready-bucket-quick')).toBeInTheDocument();
+    expect(screen.queryByTestId('ready-bucket-doc')).not.toBeInTheDocument();
+
+    // The Pending counter follows the narrowed surface (2 project-1 rows, not 4).
+    expect(within(screen.getByTestId('findings-counter-pending')).getByText('2')).toBeInTheDocument();
+  });
+
+  it('the tray CTA threads the selection-derived lockProjectId (cross-project, no filter)', () => {
+    setFindings([
+      ready('fix', 'P0', { id: 'a-r', project_id: 1 }),
+      ready('docs', 'P0', { id: 'b-r', project_id: 2 }),
+    ]);
+    render(<FindingsSection />);
+    fireEvent.click(within(screen.getByTestId('ready-bucket-quick')).getByTestId('ready-row'));
+    fireEvent.click(screen.getByTestId('run-compounding-session'));
+    expect(mockGoToWizard).toHaveBeenCalledWith({
+      preselectWorkflowName: 'compound',
+      selectedFindingIds: ['a-r'],
+      lockProjectId: 1,
+    });
   });
 });
 

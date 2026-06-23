@@ -63,6 +63,7 @@
  * payload interface, no `(evt: unknown)` — CLAUDE.md rule); the callbacks ignore
  * the payload entirely and only use the event as a debounce trigger.
  */
+import { useMemo } from 'react';
 import { create } from 'zustand';
 import { trpc } from '../trpc/client';
 import { API } from '../utils/api';
@@ -274,6 +275,38 @@ export function selectSelectedFindingIds(findings: TriageFinding[]): string[] {
     }
   }
   return ids;
+}
+
+/**
+ * The project a current selection has pinned the surface to, or null when nothing
+ * is selected. A compound run executes inside ONE project, so the moment the human
+ * selects a READY finding the whole surface narrows to that finding's project (see
+ * {@link selectVisibleFindings}) — which keeps every subsequent selection in the
+ * same project. Returns the project_id of the FIRST selected READY finding (stable
+ * across renders given the same set); once the filter is in effect every selected
+ * row necessarily shares it. Pure + exported.
+ */
+export function selectLockProjectId(findings: TriageFinding[]): number | null {
+  for (const f of findings) {
+    if (f.triageState === 'ready' && f.selected) return f.project_id;
+  }
+  return null;
+}
+
+/**
+ * Narrow the triage findings to the selection-locked project (no-op when nothing
+ * is selected, i.e. `lockProjectId` is null). This is the single-project guard the
+ * compounding flow needs: once a finding is selected, only same-project findings
+ * remain visible/selectable, so the tray's selection can never span projects. In a
+ * single-project Insights view the filter is a no-op (every row already shares the
+ * project). Pure + exported.
+ */
+export function selectVisibleFindings(
+  findings: TriageFinding[],
+  lockProjectId: number | null,
+): TriageFinding[] {
+  if (lockProjectId === null) return findings;
+  return findings.filter((f) => f.project_id === lockProjectId);
 }
 
 // ---------------------------------------------------------------------------
@@ -877,21 +910,50 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
     },
 
     selectAllReady: async (projectId, selected) => {
+      // Scope to the passed project: a compound run is single-project and
+      // `runSetSelected` rejects ids whose project_id ≠ projectId (readRow is
+      // `WHERE id=? AND project_id=?`), so a cross-project id batch would throw.
       const ids = get()
-        .triageFindings.filter((f) => f.triageState === 'ready')
+        .triageFindings.filter((f) => f.triageState === 'ready' && f.project_id === projectId)
         .map((f) => f.id);
       if (ids.length === 0) return;
       await applySelection(projectId, ids, selected);
     },
 
     selectBucket: async (projectId, bucket, selected) => {
-      const buckets = selectReadyBuckets(get().triageFindings);
+      // Project-scoped for the same reason as selectAllReady (single-project
+      // batch; the chokepoint rejects foreign-project ids).
+      const buckets = selectReadyBuckets(
+        get().triageFindings.filter((f) => f.project_id === projectId),
+      );
       const ids = buckets[bucket].map((f) => f.id);
       if (ids.length === 0) return;
       await applySelection(projectId, ids, selected);
     },
   };
 });
+
+// ---------------------------------------------------------------------------
+// Derived hooks
+// ---------------------------------------------------------------------------
+
+/**
+ * Subscribe to the triage findings narrowed to the selection-locked project (see
+ * {@link selectLockProjectId} / {@link selectVisibleFindings}). Every triage
+ * section (counter strip, untriaged list, ready buckets, compounding tray) reads
+ * THIS rather than the raw `triageFindings` slice, so the moment a finding is
+ * selected the whole surface filters to that finding's project — keeping the
+ * compound selection single-project. Memoized on the stable `triageFindings` slice
+ * so it never returns a fresh array reference on unrelated re-renders (the
+ * landingStore `useAggregatedReviewItems` pattern).
+ */
+export function useVisibleTriageFindings(): TriageFinding[] {
+  const triageFindings = useInsightsStore((s) => s.triageFindings);
+  return useMemo(
+    () => selectVisibleFindings(triageFindings, selectLockProjectId(triageFindings)),
+    [triageFindings],
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Optimistic-action helpers (module-private, pure — no store closure dependency).
