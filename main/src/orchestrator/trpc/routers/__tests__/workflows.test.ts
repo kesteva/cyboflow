@@ -135,19 +135,20 @@ describe('cyboflow.workflows.list', () => {
     const result = await caller.cyboflow.workflows.list({ projectId: 1 });
 
     // list() reconciles the built-ins as ONE GLOBAL set on every call (migration
-    // 030): the 3 `wf-global-<name>` rows are UPSERTed and surface for project 1
-    // via the project_id-IS-NULL union, ALONGSIDE the 2 manually-seeded
+    // 030): one `wf-global-<name>` row per built-in is UPSERTed and surfaces for
+    // project 1 via the project_id-IS-NULL union, ALONGSIDE the 2 manually-seeded
     // project-scoped rows (the preserved edited built-ins). The renderer dedupes
-    // global vs project rows by id; the router returns the raw union (5 rows).
+    // global vs project rows by id; the router returns the raw union (the 2
+    // project-scoped rows + one global row per built-in workflow).
     // The foreign project's row (wf-2-sprint) is still excluded.
     const ids = result.map((r) => r.id);
     expect(ids).toContain('wf-1-sprint');
     expect(ids).toContain('wf-1-planner');
-    expect(ids).toContain('wf-global-planner');
-    expect(ids).toContain('wf-global-sprint');
-    expect(ids).toContain('wf-global-compound');
+    for (const name of CYBOFLOW_WORKFLOW_NAMES) {
+      expect(ids).toContain(`wf-global-${name}`);
+    }
     expect(ids).not.toContain('wf-2-sprint');
-    expect(result).toHaveLength(5);
+    expect(result).toHaveLength(2 + CYBOFLOW_WORKFLOW_NAMES.length);
 
     // The global built-ins carry NULL project_id; the preserved per-project rows
     // carry project 1.
