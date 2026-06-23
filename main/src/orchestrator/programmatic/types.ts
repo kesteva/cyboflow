@@ -75,6 +75,14 @@ export interface ControllerStepContext {
    * `SpawnStepRunner`/`composeStepPrompt` scope the agent to this item.
    */
   item?: { id: string; over: string };
+  /**
+   * Additive per-lane spawn identity (`runId + ':' + itemId`). Set ONLY for a
+   * fan-out item's inner step so concurrent lanes each spawn under a distinct
+   * key (their own spawn lock / dup-guard / per-spawn maps) instead of
+   * serializing on the shared run panelId. Absent for every non-fan-out path,
+   * where the spawner defaults it to panelId (byte-identical behavior).
+   */
+  spawnKey?: string;
 }
 
 /**

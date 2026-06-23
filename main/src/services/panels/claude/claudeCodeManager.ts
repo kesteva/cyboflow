@@ -130,6 +130,14 @@ interface ClaudeSpawnOptions {
    * dbSession-only path.
    */
   systemPromptAppend?: string;
+  /**
+   * Additive per-lane spawn identity (`runId + ':' + itemId`), set ONLY for a
+   * programmatic fan-out lane. FIELD ONLY at this milestone — spawnCliProcess
+   * does NOT read it yet; the spawn lock, dup-guard, and per-spawn maps still
+   * key on panelId. A later milestone keys those on spawnKey (defaulting to
+   * panelId when absent) so non-fan-out paths stay byte-identical.
+   */
+  spawnKey?: string;
 }
 
 /**

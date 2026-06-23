@@ -72,6 +72,10 @@ export class SpawnStepRunner implements StepRunner {
         worktreePath: this.opts.worktreePath,
         prompt,
         ...(this.opts.agentPermissionMode ? { agentPermissionMode: this.opts.agentPermissionMode } : {}),
+        // Additive per-lane spawn identity — forwarded ONLY when present so the
+        // non-fan-out (no-item) case stays byte-identical; the spawner defaults
+        // spawnKey to panelId when absent.
+        ...(ctx.spawnKey ? { spawnKey: ctx.spawnKey } : {}),
       });
       // The SDK treats an aborted turn as a clean drain, so a resolved spawn after
       // a cancel is NOT a real success — consult the signal to tell them apart.

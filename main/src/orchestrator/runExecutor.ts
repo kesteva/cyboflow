@@ -130,6 +130,13 @@ export interface ClaudeSpawnerOptions {
    * nudge exists for the run; absent (and thus byte-identical) on a fresh run.
    */
   resumeSessionId?: string;
+  /**
+   * Additive per-lane spawn identity (`runId + ':' + itemId`), set ONLY for a
+   * programmatic fan-out lane so concurrent lanes spawn under distinct keys
+   * instead of serializing on the shared run panelId. Pure plumbing here; the
+   * spawner defaults it to panelId when absent (every non-fan-out path).
+   */
+  spawnKey?: string;
 }
 
 /**

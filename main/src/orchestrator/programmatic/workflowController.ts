@@ -465,6 +465,10 @@ export class WorkflowController {
           ...baseCtx,
           attempt: 1,
           item: { id: itemId, over: fanOut.over },
+          // Additive per-lane spawn identity so concurrent lanes each spawn
+          // under a distinct key instead of serializing on the shared run
+          // panelId (which deadlocks waiting lanes on the spawn mutex).
+          spawnKey: `${runId}:${itemId}`,
         };
         const result = await this.runner.runStep(synthesized, ctx);
 
