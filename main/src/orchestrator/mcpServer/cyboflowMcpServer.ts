@@ -279,6 +279,23 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'cyboflow_create_sprint_batch',
+        description:
+          "Materialize the approved task plan into a sprint batch for THIS run, stamping the run's batch_id MID-RUN (the 'ship' workflow handoff seam: planner decomposition → sprint execution in one continuous run). Run-bound (no run argument — derived from CYBOFLOW_RUN_ID). Pass task_ids to materialize the human-approved subset from the approve-plan gate; omit it to materialize ALL tasks this run created. IDEMPOTENT: if the batch already exists this returns created:false without re-minting. Each id is intersected with the tasks this run actually created; unknown ids are dropped. After this succeeds, cyboflow_update_sprint_task lane writes work and the swimlane canvas appears. Errors: ship_no_tasks_to_materialize (nothing to batch), ship_batch_too_large (subset exceeds the substrate cap).",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            task_ids: {
+              type: 'array',
+              description:
+                'Optional human-approved task id subset to materialize (the approve-plan selection). Omit to materialize ALL tasks this run created.',
+              items: { type: 'string' },
+            },
+          },
+          required: [],
+        },
+      },
+      {
         name: 'cyboflow_report_finding',
         description:
           'Report a NON-BLOCKING observation, decision, or human action item into THIS project\'s unified review queue (the human-attention inbox). The item is run-bound (no project argument — the project is derived from CYBOFLOW_RUN_ID), routes through the single review-item chokepoint, and surfaces in the review queue. By default findings are NON-BLOCKING (the run is never paused, status is unchanged, the user is not interrupted); set blocking:true only for items that should gate run resume. This is OBSERVATIONAL — contrast with the PreToolUse approval gate.',
@@ -793,6 +810,29 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (current_step !== undefined) queryParams['currentStepId'] = current_step;
       if (attempt !== undefined) queryParams['attempt'] = attempt;
       return executeMcpQuery('mcp-update-sprint-task', queryParams);
+    }
+
+    case 'cyboflow_create_sprint_batch': {
+      const args = (request.params.arguments ?? {}) as { task_ids?: unknown };
+      const { task_ids } = args;
+      const queryParams: Record<string, unknown> = {};
+      if (task_ids !== undefined) {
+        if (!Array.isArray(task_ids) || task_ids.some((id) => typeof id !== 'string' || id.length === 0)) {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'invalid_arguments',
+                  expected: 'task_ids: string[] (optional, non-empty strings)',
+                }),
+              },
+            ],
+          };
+        }
+        queryParams['taskIds'] = task_ids;
+      }
+      return executeMcpQuery('mcp-create-sprint-batch', queryParams);
     }
 
     case 'cyboflow_report_finding': {
