@@ -75,6 +75,15 @@ const READY_FOR_DEVELOPMENT_POSITION = 6;
 const DECOMPOSE_STEP_ID = 'decompose';
 const DECOMPOSED_POSITION = 12;
 
+/**
+ * Ship (defense-in-depth): the `ship` workflow concatenates planner → sprint in
+ * one orchestrated run and drops planner's terminal `decompose` step, so the
+ * planner finalizer must never seal a ship run. Guarded by workflow name so a
+ * future ship spec edit that reuses the `decompose` step id can't complete the
+ * run before its sprint tasks execute.
+ */
+const SHIP_WORKFLOW_NAME = 'ship';
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -555,6 +564,23 @@ export class QuestionRouter extends EventEmitter {
         .get(runId) as { projectId?: unknown; currentStepId?: unknown } | undefined;
       if (!run) return;
       if (run.currentStepId !== DECOMPOSE_STEP_ID) return;
+
+      // Defense-in-depth (Ship): the `ship` workflow concatenates planner →
+      // sprint in one run and DROPS planner's terminal `decompose` step, so this
+      // finalizer never fires for ship today. Guard anyway so a future ship spec
+      // edit that reuses the `decompose` step id can't seal a ship run before its
+      // sprint tasks execute. Defensive + fail-soft: the workflow-name lookup is
+      // a LEFT JOIN read (a missing workflows row yields a null name → no skip),
+      // and any throw is caught below → no-op.
+      const wf = this.db
+        .prepare(
+          `SELECT w.name AS workflowName
+           FROM workflow_runs r
+           LEFT JOIN workflows w ON w.id = r.workflow_id
+           WHERE r.id = ?`,
+        )
+        .get(runId) as { workflowName?: unknown } | undefined;
+      if (typeof wf?.workflowName === 'string' && wf.workflowName === SHIP_WORKFLOW_NAME) return;
 
       const projectId = typeof run.projectId === 'number' ? run.projectId : Number(run.projectId);
 
