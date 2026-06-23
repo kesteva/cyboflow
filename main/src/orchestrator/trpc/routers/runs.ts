@@ -55,6 +55,11 @@ import {
   type ResumeRunDeps,
   type ResumeRunResult,
 } from '../../resumeRunHandler';
+import {
+  reopenRunHandler,
+  type ReopenRunDeps,
+  type ReopenRunResult,
+} from '../../reopenRunHandler';
 import { stepTransitionEvents, eventToAsyncIterable, runStatusEvents } from './events';
 
 // ---------------------------------------------------------------------------
@@ -168,6 +173,27 @@ let nudgeRunDeps: NudgeRunDeps | null = null;
  */
 export function setNudgeRunDeps(deps: NudgeRunDeps): void {
   nudgeRunDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// reopen dependency bag (session reopen-on-timeout follow-up)
+//
+// Injected at boot by main/src/index.ts via setReopenRunDeps(), reusing the SAME
+// RunExecutor instance nudge/resume use. Until wired the mutation throws
+// METHOD_NOT_SUPPORTED — same pattern as nudge/resume.
+// ---------------------------------------------------------------------------
+
+let reopenRunDeps: ReopenRunDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the SDK-only `reopen` mutation.
+ *
+ * Called once at boot by main/src/index.ts after the DB, RunQueueRegistry, and
+ * RunExecutor have been initialized. Until this is called the mutation throws
+ * METHOD_NOT_SUPPORTED.
+ */
+export function setReopenRunDeps(deps: ReopenRunDeps): void {
+  reopenRunDeps = deps;
 }
 
 // ---------------------------------------------------------------------------
@@ -1055,6 +1081,35 @@ export const runsRouter = router({
         });
       }
       return nudgeRunHandler(input.runId, input.text, nudgeRunDeps);
+    }),
+
+  /**
+   * Reopen a FAILED workflow run (session reopen-on-timeout follow-up).
+   *
+   * Revives a terminal 'failed' run: flips it back to running (clearing the
+   * failure stamp) and re-drives the SAME SDK conversation via --resume with the
+   * user's text as a follow-up turn. The escape hatch for a run that errored /
+   * timed out while a gate was open and is still resumable.
+   *
+   * Returns:
+   *   { delivered: true }    — the run was revived + re-driven with the text.
+   *   { noOp: true; reason } — rejected: 'empty' / 'not_found' /
+   *     'interactive_unsupported' (PTY has no --resume) / 'not_failed' /
+   *     'no_session' (no captured claude_session_id) / 'race' / 'execute_failed'.
+   *
+   * Standalone-typecheck invariant: collaborators are injected via
+   * setReopenRunDeps(). Until wired the mutation throws METHOD_NOT_SUPPORTED.
+   */
+  reopen: protectedProcedure
+    .input(z.object({ runId: z.string().min(1), text: z.string() }))
+    .mutation(async ({ input }): Promise<ReopenRunResult> => {
+      if (!reopenRunDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'reopen dependencies not wired yet. Call setReopenRunDeps() at boot.',
+        });
+      }
+      return reopenRunHandler(input.runId, input.text, reopenRunDeps);
     }),
 
   /**

@@ -47,7 +47,7 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps } from './orchestrator/trpc/routers/runs';
 import { RunShellManager } from './services/runShellManager';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
@@ -1428,6 +1428,21 @@ app.whenReady().then(async () => {
       logger: loggerLike,
     });
     console.log('[Main] runs.resume deps wired');
+
+    // Reopen revives a FAILED run (session reopen-on-timeout follow-up): flips
+    // failed -> running, clears the failure stamp, and re-drives the SAME SDK
+    // conversation via --resume with the user's text (using the SAME RunExecutor
+    // instance + pendingNudge map as nudge). Same deps shape as Resume; rides the
+    // SAME runStatusEvents 'changed' channel.
+    setReopenRunDeps({
+      db,
+      runQueues,
+      runExecutor,
+      emitRunStatusChanged: (runId, status) =>
+        runStatusEvents.emit('changed', { runId, status }),
+      logger: loggerLike,
+    });
+    console.log('[Main] runs.reopen deps wired');
 
     setStartRunDeps({
       runLauncher,

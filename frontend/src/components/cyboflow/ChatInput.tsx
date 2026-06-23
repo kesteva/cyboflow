@@ -59,6 +59,40 @@ import { resolveChatVisibility } from './unified/useChatVisibility';
  */
 const SUBMIT_DELAY_MS = 300;
 
+/** Human-readable message for a nudge no-op reason (falls back to the raw reason). */
+function nudgeReasonMessage(reason: string): string {
+  switch (reason) {
+    case 'blocked':
+      return 'Resolve the blocking review item(s) for this run first.';
+    case 'no_session':
+      return 'This run has no resumable session to continue.';
+    case 'not_idle':
+      return 'This run is no longer awaiting review.';
+    case 'terminal':
+      return 'This run has ended and cannot be nudged.';
+    case 'execute_failed':
+      return 'The agent could not be re-driven — check the run logs.';
+    default:
+      return `Nudge ignored: ${reason}`;
+  }
+}
+
+/** Human-readable message for a reopen no-op reason (falls back to the raw reason). */
+function reopenReasonMessage(reason: string): string {
+  switch (reason) {
+    case 'no_session':
+      return 'This run has no resumable session to reopen.';
+    case 'not_failed':
+      return 'This run is no longer in a failed state.';
+    case 'interactive_unsupported':
+      return 'Interactive (PTY) runs cannot be reopened — only SDK runs resume.';
+    case 'execute_failed':
+      return 'The agent could not be re-driven — check the run logs.';
+    default:
+      return `Reopen ignored: ${reason}`;
+  }
+}
+
 export interface ChatInputProps {
   runId: string | null;
 }
@@ -177,7 +211,13 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
 
   const isIdleNudgeable = mode === 'workflow-idle' && activeRun?.status === 'awaiting_review';
   const isPaused = mode === 'workflow-idle' && activeRun?.status === 'paused';
-  const isDisabled = mode === 'workflow-idle' && !isIdleNudgeable;
+  // A FAILED sdk run can be REOPENED — re-driven from its preserved SDK session
+  // (runs.reopen). The escape hatch for a run that died at a gate. Interactive
+  // runs have no --resume, so they stay disabled (isInteractive normalizes an
+  // absent substrate to sdk, matching this component's substrate handling).
+  const isReopenable =
+    mode === 'workflow-idle' && activeRun?.status === 'failed' && !isInteractive;
+  const isDisabled = mode === 'workflow-idle' && !isIdleNudgeable && !isReopenable;
 
   // -- send dispatch --------------------------------------------------------
   const handleSend = async (): Promise<void> => {
@@ -257,9 +297,28 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
       try {
         const result = await trpc.cyboflow.runs.nudge.mutate({ runId, text });
         if ('delivered' in result) setText('');
-        else setSendError(`Nudge ignored: ${result.reason}`);
+        else setSendError(nudgeReasonMessage(result.reason));
       } catch (err: unknown) {
         setSendError(err instanceof Error ? err.message : 'Nudge failed');
+      } finally {
+        setIsSending(false);
+      }
+      return;
+    }
+
+    if (mode === 'workflow-idle' && isReopenable) {
+      if (runId == null) {
+        console.warn('[ChatInput] workflow-idle reopen but runId is null at send time');
+        return;
+      }
+      setIsSending(true);
+      setSendError(null);
+      try {
+        const result = await trpc.cyboflow.runs.reopen.mutate({ runId, text });
+        if ('delivered' in result) setText('');
+        else setSendError(reopenReasonMessage(result.reason));
+      } catch (err: unknown) {
+        setSendError(err instanceof Error ? err.message : 'Reopen failed');
       } finally {
         setIsSending(false);
       }
@@ -275,6 +334,8 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
         ? 'Run paused — Resume to continue'
         : isIdleNudgeable
           ? 'Nudge the agent — continues the conversation…'
+          : isReopenable
+          ? 'Reopen — re-drive this failed run…'
           : mode === 'workflow-interactive'
             ? 'Message the running session — relayed safely…'
             : mode === 'workflow-monitor'

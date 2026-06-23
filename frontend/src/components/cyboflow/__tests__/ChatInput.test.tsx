@@ -41,6 +41,7 @@ vi.mock('../../../trpc/client', () => ({
       // idle-chat nudge (Piece C) + live-input relay (TASK-817) — both ride runs.*.
       runs: {
         nudge: { mutate: vi.fn(async () => ({ delivered: true })) },
+        reopen: { mutate: vi.fn(async () => ({ delivered: true })) },
         relayInput: { mutate: vi.fn(async () => ({ success: true })) },
         relayResize: { mutate: vi.fn(async () => ({ success: true })) },
       },
@@ -383,7 +384,10 @@ describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send' }));
 
     await waitFor(() => {
-      expect(screen.getByRole('alert')).toHaveTextContent('Nudge ignored: blocked');
+      // 'blocked' surfaces as a human-readable hint (not the raw reason code).
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'Resolve the blocking review item(s) for this run first.',
+      );
     });
     // Text retained so the user can retry once the gate clears.
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('try anyway');
@@ -398,6 +402,74 @@ describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
     render(<ChatInput runId={RUN_ID} />);
     expect(screen.getByRole('textbox')).toBeDisabled();
     expect(vi.mocked(trpc.cyboflow.runs.nudge.mutate)).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChatInput — workflow-idle reopen (failed)', () => {
+  const RUN_ID = 'run-idle-001';
+  const PROJECT_ID = 9;
+
+  function makeFailedRow(): ActiveRunRow {
+    return {
+      id: RUN_ID,
+      workflow_id: 'wf-1',
+      project_id: PROJECT_ID,
+      status: 'failed',
+      substrate: 'sdk',
+      worktree_path: '/Users/me/worktrees/idea-x',
+      branch_name: 'ship/idea-x',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      started_at: null,
+      ended_at: null,
+      stuck_reason: null,
+      workflowName: 'ship',
+    };
+  }
+
+  beforeEach(() => {
+    vi.mocked(trpc.cyboflow.runs.reopen.mutate).mockClear();
+    vi.mocked(trpc.cyboflow.runs.reopen.mutate).mockResolvedValue({ delivered: true });
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({ runsByProject: { [PROJECT_ID]: [makeFailedRow()] } });
+    });
+  });
+
+  it('enables the input for a failed sdk run (reopen escape hatch)', () => {
+    render(<ChatInput runId={RUN_ID} />);
+    expect(screen.getByRole('textbox')).not.toBeDisabled();
+  });
+
+  it('sends a reopen via trpc.cyboflow.runs.reopen and clears the textarea on delivery', async () => {
+    render(<ChatInput runId={RUN_ID} />);
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'pick it back up' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.reopen.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        text: 'pick it back up',
+      });
+    });
+    expect(vi.mocked(trpc.cyboflow.runs.nudge.mutate)).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    });
+  });
+
+  it('a failed INTERACTIVE run offers no reopen composer (hidden behind ⌃G; no --resume)', () => {
+    act(() => {
+      useActiveRunsStore.setState({
+        runsByProject: { [PROJECT_ID]: [{ ...makeFailedRow(), substrate: 'interactive' }] },
+      });
+    });
+    render(<ChatInput runId={RUN_ID} />);
+    // Interactive composers are hidden (relay behind ⌃G) — there is no reopen
+    // textbox to type into, and reopen is never invoked.
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(vi.mocked(trpc.cyboflow.runs.reopen.mutate)).not.toHaveBeenCalled();
   });
 });
 
