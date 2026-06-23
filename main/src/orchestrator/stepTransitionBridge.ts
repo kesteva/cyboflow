@@ -61,6 +61,7 @@ const INITIAL_STEP_IDS: Record<CyboflowWorkflowName, string> = {
   planner:  'context',
   sprint:   'analyze-dependencies',
   compound: 'load-sprint',
+  ship:     'context',
 } as const;
 
 /**

@@ -182,7 +182,7 @@ export interface WorkflowRunListRow {
  * `WorkflowRegistry.listByProject`.
 
  */
-export const CYBOFLOW_WORKFLOW_NAMES = ['planner', 'sprint', 'compound'] as const;
+export const CYBOFLOW_WORKFLOW_NAMES = ['planner', 'sprint', 'compound', 'ship'] as const;
 
 export type CyboflowWorkflowName = (typeof CYBOFLOW_WORKFLOW_NAMES)[number];
 
@@ -553,6 +553,165 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem'],
             retries: 0,
             desc: 'Apply only approved items: create tasks + emit findings via cyboflow_*.',
+          },
+        ],
+      },
+    ],
+  },
+
+  // ship — planner (idea → epics → tasks) concatenated with sprint (execute
+  // every task to integration) in ONE continuous orchestrated run. The existing
+  // approve-plan human gate doubles as the pre-execution gate: the human
+  // approves the plan AND selects which tasks execute now. At materialize-batch
+  // the orchestrator calls cyboflow_create_sprint_batch to mint the sprint batch
+  // + lanes and stamp workflow_runs.batch_id (the handoff seam). The original
+  // idea is retired to the terminal Decomposed board stage at the FINAL
+  // human-review gate (on Approve), prose-driven via cyboflow_set_task_stage —
+  // not earlier. Planner's terminal 'decompose' step is dropped; sprint's 'plan'
+  // phase id is renamed 'sprint-plan' to avoid colliding with planner's 'plan'.
+  ship: {
+    id: 'ship',
+    phases: [
+      {
+        id: 'plan',
+        label: 'Plan',
+        color: '#3b6dd6',
+        steps: [
+          {
+            id: 'context',
+            name: 'Get context on user idea',
+            agent: 'context',
+            mcps: ['filesystem', 'web-search'],
+            retries: 0,
+            human: true,
+            desc: "Parse the user's prompt, scan the codebase, capture the idea in the DB.",
+          },
+          {
+            id: 'research',
+            name: 'Research',
+            agent: 'research',
+            mcps: ['web-search', 'context7'],
+            retries: 1,
+            optional: true,
+            desc: 'Optional research pass before the idea is locked.',
+          },
+          {
+            id: 'approve-idea',
+            name: 'Approve idea spec',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            human: true,
+            desc: 'You approve, edit, or reject the idea spec.',
+          },
+        ],
+      },
+      {
+        id: 'refine',
+        label: 'Refine',
+        color: '#5a4ad6',
+        steps: [
+          {
+            id: 'epics',
+            name: 'Create epics',
+            agent: 'epics',
+            mcps: ['filesystem'],
+            retries: 0,
+            desc: 'Decompose the idea into epics with dependency edges.',
+          },
+          {
+            id: 'tasks',
+            name: 'Fill out task details',
+            agent: 'tasks',
+            mcps: ['filesystem'],
+            retries: 0,
+            desc: 'Capture each task via cyboflow_create_task with acceptance criteria.',
+          },
+          {
+            id: 'approve-plan',
+            name: 'Approve task plan',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            human: true,
+            desc: 'You sign off on scope and select which tasks execute now before they queue for the sprint.',
+          },
+        ],
+      },
+      {
+        id: 'materialize',
+        label: 'Materialize',
+        color: '#8a6d3b',
+        steps: [
+          {
+            id: 'materialize-batch',
+            name: 'Materialize sprint batch',
+            agent: 'implement',
+            mcps: ['filesystem'],
+            retries: 1,
+            desc: 'Mint the sprint batch + lanes from the approved tasks; stamp batch_id.',
+          },
+        ],
+      },
+      {
+        id: 'sprint-plan',
+        label: 'Sprint plan',
+        color: '#5a4ad6',
+        steps: [
+          {
+            id: 'analyze-dependencies',
+            name: 'Analyze dependencies',
+            agent: 'dependency-analyzer',
+            mcps: ['filesystem'],
+            retries: 1,
+            desc: 'Maps task→task blocking edges across the batch to derive the fan-out order.',
+          },
+        ],
+      },
+      {
+        id: 'execute',
+        label: 'Execute',
+        color: '#c96442',
+        steps: [
+          {
+            id: 'execute-tasks',
+            name: 'Execute tasks',
+            agent: 'implement',
+            mcps: ['filesystem'],
+            retries: 3,
+            desc: 'Parallel per-task fan-out — per-task progress in sprint lanes',
+          },
+        ],
+      },
+      {
+        id: 'verify',
+        label: 'Sprint review',
+        color: '#a87a2c',
+        steps: [
+          {
+            id: 'sprint-verify',
+            name: 'Sprint verification',
+            agent: 'sprint-verify',
+            mcps: ['filesystem', 'bash', 'playwright'],
+            retries: 1,
+            desc: 'Runs the full suite after the last task is archived.',
+          },
+          {
+            id: 'sprint-review',
+            name: 'Code review',
+            agent: 'sprint-review',
+            mcps: ['filesystem', 'git'],
+            retries: 0,
+            desc: 'Taste pass over the whole sprint diff; emit issues via cyboflow_report_finding.',
+          },
+          {
+            id: 'human-review',
+            name: 'Human review',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            human: true,
+            desc: 'Final taste check; on approve, retire the idea to Decomposed and seal the sprint.',
           },
         ],
       },

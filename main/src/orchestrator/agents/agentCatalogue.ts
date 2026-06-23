@@ -22,7 +22,7 @@ import type { CliTool } from '../../../../shared/types/cliTools';
 import { parseBundledAgent } from './bundledAgentParser';
 
 /** A workflow role a built-in agent's bundle belongs to. */
-export type BuiltInAgentRole = 'planner' | 'sprint' | 'compound';
+export type BuiltInAgentRole = 'planner' | 'sprint' | 'compound' | 'ship';
 
 /**
  * One fully-parsed built-in agent. `name` is the frontmatter `name:`
@@ -52,6 +52,13 @@ export function loadBuiltInAgents(): Map<string, BuiltInAgent> {
   for (const wf of CYBOFLOW_WORKFLOW_NAMES) {
     const bundle = resolveWorkflowBundle(join(__dirname, '..', 'workflows', `${wf}.md`));
     for (const file of bundle.agents) {
+      // FIRST-WINS: ship's bundle copies planner/sprint agent basenames so its
+      // own `workflows/ship/agents/` dir is self-contained, but the canonical
+      // catalogue entry (and its `role`) must come from the original owning
+      // workflow. Guarding the set keeps planner/sprint roles authoritative and
+      // prevents ship's duplicates from overwriting them or inflating the size
+      // past CANONICAL_AGENT_KEYS.length. (No-op for today's disjoint set.)
+      if (catalogue.has(file.name)) continue;
       const parsed = parseBundledAgent(file.content);
       catalogue.set(file.name, {
         agentKey: file.name,
