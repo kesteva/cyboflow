@@ -431,6 +431,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
           transport={isInteractive ? 'interactive' : 'sdk'}
           mode="flow"
           running={running}
+          runStatus={run?.status ?? null}
         />
 
         <div className="relative flex-1 overflow-hidden">

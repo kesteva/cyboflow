@@ -24,8 +24,42 @@ export type ChatTransport = 'sdk' | 'interactive';
 /** quick session vs. flow run. */
 export type ChatMode = 'quick' | 'flow';
 
-/** The four states of the mode-identity status pill. */
-export type ChatStatusKind = 'interactive' | 'generating' | 'paused' | 'executing';
+/**
+ * States of the mode-identity status pill. Quick sessions use interactive /
+ * generating; flow runs use the rest, which mirror the real run lifecycle (see
+ * {@link resolveFlowStatusPill}) so the pill never lies — the old derive-from-
+ * `running` collapsed every idle flow to "paused", incl. awaiting_review / done /
+ * failed. The pill renders the kind string as its label, so each reads cleanly
+ * uppercased.
+ */
+export type ChatStatusKind =
+  | 'interactive' // idle quick session
+  | 'generating' // quick session producing output
+  | 'executing' // flow actively running (running / starting / queued)
+  | 'awaiting' // flow blocked on a gate (awaiting_input)
+  | 'review' // flow drained, resting for human review (awaiting_review)
+  | 'paused' // flow explicitly paused
+  | 'stuck' // flow flagged stuck
+  | 'done' // flow completed
+  | 'failed' // flow failed
+  | 'canceled'; // flow canceled
+
+/**
+ * Real workflow-run statuses the flow pill maps from. Local mirror of shared
+ * `WorkflowRunStatus` (same rationale as {@link ChatTransport} mirroring
+ * `CliSubstrate`) so this module stays free of cross-package imports.
+ */
+export type FlowRunStatus =
+  | 'queued'
+  | 'starting'
+  | 'running'
+  | 'awaiting_review'
+  | 'awaiting_input'
+  | 'stuck'
+  | 'completed'
+  | 'failed'
+  | 'canceled'
+  | 'paused';
 
 export interface ChatVisibilityInput {
   transport: ChatTransport;
@@ -88,10 +122,43 @@ export function resolveChatVisibility(input: ChatVisibilityInput): ChatVisibilit
  * The mode-identity status pill, derived purely from (mode, running):
  *   flow  → executing (running) | paused (idle, waiting at a gate)
  *   quick → generating (running) | interactive (idle)
+ *
+ * NOTE: for FLOW runs prefer {@link resolveFlowStatusPill}, which reflects the
+ * real run status (awaiting_review / done / failed / …) instead of collapsing
+ * every idle flow to "paused". This (mode, running) form is the quick-session
+ * pill + the fallback when a flow run's real status is unavailable.
  */
 export function resolveChatStatus(input: Pick<ChatVisibilityInput, 'mode' | 'running'>): ChatStatusKind {
   if (input.mode === 'flow') {
     return input.running ? 'executing' : 'paused';
   }
   return input.running ? 'generating' : 'interactive';
+}
+
+/**
+ * Map a flow run's REAL lifecycle status to the pill kind, so the pill shows
+ * "REVIEW" / "DONE" / "FAILED" / "AWAITING" rather than a blanket "PAUSED".
+ * 'paused' is reserved for an actually-paused run.
+ */
+export function resolveFlowStatusPill(status: FlowRunStatus): ChatStatusKind {
+  switch (status) {
+    case 'queued':
+    case 'starting':
+    case 'running':
+      return 'executing';
+    case 'awaiting_input':
+      return 'awaiting';
+    case 'awaiting_review':
+      return 'review';
+    case 'paused':
+      return 'paused';
+    case 'stuck':
+      return 'stuck';
+    case 'completed':
+      return 'done';
+    case 'failed':
+      return 'failed';
+    case 'canceled':
+      return 'canceled';
+  }
 }

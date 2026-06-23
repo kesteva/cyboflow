@@ -1,8 +1,10 @@
 import { ChatStatusPill } from './ChatStatusPill';
 import {
   resolveChatStatus,
+  resolveFlowStatusPill,
   type ChatMode,
   type ChatTransport,
+  type FlowRunStatus,
 } from './useChatVisibility';
 
 /**
@@ -19,6 +21,12 @@ export interface ModeIdentityStripProps {
   transport: ChatTransport;
   mode: ChatMode;
   running: boolean;
+  /**
+   * The flow run's REAL lifecycle status. When provided for a `flow` mode, the
+   * pill reflects it (REVIEW / DONE / FAILED / AWAITING / …) instead of the
+   * blanket "PAUSED" the (mode, running) fallback yields. Ignored for quick mode.
+   */
+  runStatus?: FlowRunStatus | null;
 }
 
 export function ModeIdentityStrip({
@@ -26,8 +34,12 @@ export function ModeIdentityStrip({
   transport,
   mode,
   running,
+  runStatus,
 }: ModeIdentityStripProps): React.ReactElement {
-  const status = resolveChatStatus({ mode, running });
+  const status =
+    mode === 'flow' && runStatus != null
+      ? resolveFlowStatusPill(runStatus)
+      : resolveChatStatus({ mode, running });
   const transportLabel = transport === 'sdk' ? 'SDK' : 'PTY';
   return (
     <div

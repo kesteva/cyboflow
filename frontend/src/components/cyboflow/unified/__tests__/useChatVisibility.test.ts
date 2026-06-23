@@ -2,7 +2,9 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveChatVisibility,
   resolveChatStatus,
+  resolveFlowStatusPill,
   type ChatVisibilityInput,
+  type FlowRunStatus,
 } from '../useChatVisibility';
 
 /**
@@ -89,5 +91,31 @@ describe('resolveChatStatus', () => {
     expect(resolveChatStatus({ mode: 'quick', running: true })).toBe('generating');
     expect(resolveChatStatus({ mode: 'flow', running: false })).toBe('paused');
     expect(resolveChatStatus({ mode: 'flow', running: true })).toBe('executing');
+  });
+});
+
+describe('resolveFlowStatusPill', () => {
+  it('reflects the real flow run status (never a blanket "paused")', () => {
+    const cases: Array<[FlowRunStatus, string]> = [
+      ['queued', 'executing'],
+      ['starting', 'executing'],
+      ['running', 'executing'],
+      ['awaiting_input', 'awaiting'],
+      ['awaiting_review', 'review'],
+      ['paused', 'paused'],
+      ['stuck', 'stuck'],
+      ['completed', 'done'],
+      ['failed', 'failed'],
+      ['canceled', 'canceled'],
+    ];
+    for (const [status, pill] of cases) {
+      expect(resolveFlowStatusPill(status)).toBe(pill);
+    }
+  });
+
+  it('regression: a drained awaiting_review flow shows REVIEW, not PAUSED', () => {
+    // The bug that made a finished run read "PAUSED" — now distinct.
+    expect(resolveFlowStatusPill('awaiting_review')).toBe('review');
+    expect(resolveFlowStatusPill('awaiting_review')).not.toBe('paused');
   });
 });
