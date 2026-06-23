@@ -128,4 +128,33 @@ describe('SpawnStepRunner', () => {
 
     expect(result.status).toBe('aborted');
   });
+
+  // ── additive per-lane spawnKey forwarding (Option A — parallel lane spawns) ──
+  it('forwards ctx.spawnKey into the spawn options when present (fan-out lane)', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    await runner.runStep(step({ id: 'implement', agent: 'implement' }), {
+      ...ctx,
+      item: { id: 'TASK-7', over: 'tasks' },
+      spawnKey: 'r:TASK-7',
+    });
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.spawnKey).toBe('r:TASK-7');
+    // panelId is NEVER overloaded by the lane key — it stays the run panel id.
+    expect(passed.panelId).toBe('r');
+  });
+
+  it('OMITS spawnKey from the spawn options when ctx.spawnKey is undefined (byte-identity, no-item path)', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    await runner.runStep(step({ id: 'a' }), ctx);
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    // The conditional spread leaves the key entirely ABSENT — not present-with-undefined —
+    // so the spawner defaults spawnKey to panelId and every non-fan-out path stays byte-identical.
+    expect('spawnKey' in passed).toBe(false);
+  });
 });

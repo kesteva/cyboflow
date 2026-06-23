@@ -619,6 +619,49 @@ describe('WorkflowController', () => {
       ]);
     });
 
+    it('sets ctx.spawnKey to `${runId}:${itemId}` on each lane (additive per-lane identity)', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'])])]);
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const seen: Array<{ itemId?: string; spawnKey?: string }> = [];
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          seen.push({ itemId: ctx.item?.id, spawnKey: ctx.spawnKey });
+          return { status: 'ok' };
+        },
+      };
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('run-xyz', d);
+
+      expect(result.outcome).toBe('completed');
+      // Every inner-step ctx for an item carries spawnKey = `${runId}:${itemId}`.
+      for (const s of seen) {
+        expect(s.spawnKey).toBe(`run-xyz:${s.itemId}`);
+      }
+      // Distinct lanes ⇒ distinct spawnKeys (the whole point — lanes don't share a key).
+      expect(new Set(seen.map((s) => s.spawnKey))).toEqual(new Set(['run-xyz:t1', 'run-xyz:t2']));
+    });
+
+    it('settles every lane to canceled (no integration) when the signal aborts mid-wave', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'])])]);
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const ac = new AbortController();
+      // Abort as the first inner step runs; the SDK substrate reports a canceled
+      // turn as 'aborted' (a clean drain), which the controller reads as a cancel.
+      const runner: StepRunner = {
+        async runStep() {
+          ac.abort();
+          return { status: 'aborted' };
+        },
+      };
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d, ac.signal);
+
+      // The whole run settles canceled at the fanOut outer step — no lane integrates.
+      expect(result.outcome).toBe('canceled');
+      expect(result.failedStepId).toBe('execute');
+      expect(driver.lanes.some((l) => l.status === 'integrated')).toBe(false);
+    });
+
     it('respects the SPRINT_BATCH_CAP concurrency cap (items run in waves)', async () => {
       // More items than the cap → at most SPRINT_BATCH_CAP run concurrently.
       const items = Array.from({ length: SPRINT_BATCH_CAP + 3 }, (_, k) => `t${k}`);

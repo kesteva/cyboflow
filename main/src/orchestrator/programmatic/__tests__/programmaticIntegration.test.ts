@@ -582,6 +582,23 @@ describe('programmatic integration — host-driven fanOut walk drives lanes to i
     for (const id of itemIds) {
       expect(innerSpawns.some((c) => c.prompt.includes(`item **${id}**`))).toBe(true);
     }
+    // Every inner (lane) spawn carries the additive per-lane spawnKey
+    // (`${runId}:${itemId}`) so the spawner keys its lock / dup-guard / per-spawn
+    // maps per lane instead of serializing all lanes on the shared run panelId.
+    // panelId stays the run id on every spawn (it is NEVER overloaded by the key).
+    for (const c of innerSpawns) {
+      expect(c.panelId).toBe('run-fan');
+      expect(itemIds.map((id) => `run-fan:${id}`)).toContain(c.spawnKey);
+    }
+    // Each of the 3 lanes used a DISTINCT spawnKey (one per item).
+    expect(new Set(innerSpawns.map((c) => c.spawnKey))).toEqual(
+      new Set(itemIds.map((id) => `run-fan:${id}`)),
+    );
+    // The OUTER (non-fan-out) steps spawn WITHOUT a spawnKey — byte-identical to a
+    // normal single-step turn (the spawner then defaults spawnKey to panelId).
+    const outerSpawns = spawner.calls.filter((c) => !c.prompt.includes('PARALLEL fan-out'));
+    expect(outerSpawns.length).toBeGreaterThan(0);
+    expect(outerSpawns.every((c) => c.spawnKey === undefined)).toBe(true);
     // The outer 'execute-tasks' agent step itself did NOT spawn (it fanned out).
     expect(spawner.calls.some((c) => c.prompt.includes('`execute-tasks`'))).toBe(false);
     expect(spawner.calls.some((c) => c.prompt.includes('`plan-step`'))).toBe(true);
