@@ -577,7 +577,7 @@ contextBridge.exposeInMainWorld('electron', {
     const validChannels = [
       'permission:request'
     ];
-    if (validChannels.includes(channel) || channel.startsWith('cyboflow:stream:') || channel.startsWith('cyboflow:pty:')) {
+    if (validChannels.includes(channel) || channel.startsWith('cyboflow:stream:') || channel.startsWith('cyboflow:pty:') || channel.startsWith('cyboflow:shell:')) {
       const wrapper = (_event: Electron.IpcRendererEvent, ...args: unknown[]) => callback(...args);
       if (!electronListenerWrappers.has(channel)) {
         electronListenerWrappers.set(channel, new Map());
@@ -590,7 +590,7 @@ contextBridge.exposeInMainWorld('electron', {
     const validChannels = [
       'permission:request'
     ];
-    if (validChannels.includes(channel) || channel.startsWith('cyboflow:stream:') || channel.startsWith('cyboflow:pty:')) {
+    if (validChannels.includes(channel) || channel.startsWith('cyboflow:stream:') || channel.startsWith('cyboflow:pty:') || channel.startsWith('cyboflow:shell:')) {
       const inner = electronListenerWrappers.get(channel);
       if (inner) {
         const wrapper = inner.get(callback);

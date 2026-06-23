@@ -317,6 +317,65 @@ export function setRelayDeps(deps: RelayDeps): void {
 }
 
 // ---------------------------------------------------------------------------
+// run user-shell dependency bag (worktree-terminal feature)
+//
+// Backs the run "Shell" tab: a plain $SHELL PTY in the run's worktree, keyed by
+// runId. Flow runs (planner/sprint/compound/ship) never create a `sessions` row
+// (workflow_runs.session_id is always NULL — migration 019), so the panel/session
+// terminal stack (TerminalPanelManager) cannot host them; this bag is the
+// run-scoped substitute. Injected at boot by main/src/index.ts via
+// setRunShellDeps(), backed by RunShellManager. Function-reference shape keeps the
+// router free of any services/* import (standalone-typecheck invariant). Until
+// wired, the shell procedures throw METHOD_NOT_SUPPORTED — same stub pattern as
+// the relay bag. The user shell is wholly independent of the agent PTY pipeline
+// (relayInput/getPtyBacklog), so the structured SDK/interactive stream is
+// untouched (Q3 panel-preservation).
+// ---------------------------------------------------------------------------
+
+export interface RunShellDeps {
+  /** Lazily spawn the run's worktree shell (idempotent). `ok:false` +
+   *  `reason:'no_worktree'` when the run has no worktree to anchor it in. */
+  open(runId: string): { ok: boolean; reason?: string };
+  /** Write user keystrokes verbatim into the run's shell. */
+  write(runId: string, data: string): void;
+  /** Relay an xterm geometry change into the run's shell. */
+  resize(runId: string, cols: number, rows: number): void;
+  /** The retained scrollback tail, replayed into a (re)mounting xterm. */
+  getBacklog(runId: string): string;
+  /** Terminate + forget the run's shell (close-out, before worktree removal). */
+  close(runId: string): void;
+}
+
+let runShellDeps: RunShellDeps | null = null;
+
+/**
+ * Wire up the RunShellManager-backed collaborators for the shell* procedures.
+ * Called once at boot by main/src/index.ts. Until called the procedures throw
+ * METHOD_NOT_SUPPORTED.
+ */
+export function setRunShellDeps(deps: RunShellDeps): void {
+  runShellDeps = deps;
+}
+
+/**
+ * Tear down a run's user shell as part of close-out (merge / createPr / dismiss),
+ * before worktree removal so no shell process (or a dev server it launched) keeps
+ * the worktree dir open during removal. Fail-soft + opt-in: a missing bag or a
+ * throwing close is swallowed so close-out still proceeds.
+ */
+function closeRunShell(runId: string): void {
+  if (!runShellDeps) return;
+  try {
+    runShellDeps.close(runId);
+  } catch (err) {
+    console.error(
+      `[runs.closeout] run shell close failed (run ${runId}):`,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
 // run close-out dependency bag (GAP-B)
 //
 // Planner / workflow runs never create a `sessions` row (a sessions row would
@@ -1072,6 +1131,76 @@ export const runsRouter = router({
     }),
 
   /**
+   * Lazily spawn (idempotent) the run's plain worktree shell — the backend for
+   * the run "Shell" tab. This is the USER's shell ($SHELL in the run's worktree)
+   * for running commands (e.g. a dev server) against the code a flow built — NOT
+   * the agent PTY (relayInput/getPtyBacklog). Returns { ok:false,
+   * reason:'no_worktree' } when the run has no worktree yet. Throws
+   * METHOD_NOT_SUPPORTED until setRunShellDeps() is wired.
+   */
+  shellOpen: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .mutation(({ input }): { ok: boolean; reason?: string } => {
+      if (!runShellDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'run shell dependencies not wired yet. Call setRunShellDeps() at boot.',
+        });
+      }
+      return runShellDeps.open(input.runId);
+    }),
+
+  /** Write keystrokes verbatim into the run's worktree shell. */
+  shellInput: protectedProcedure
+    .input(z.object({ runId: z.string().min(1), text: z.string() }))
+    .mutation(({ input }): { success: true } => {
+      if (!runShellDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'run shell dependencies not wired yet. Call setRunShellDeps() at boot.',
+        });
+      }
+      runShellDeps.write(input.runId, input.text);
+      return { success: true };
+    }),
+
+  /** Relay a PTY geometry change into the run's worktree shell. */
+  shellResize: protectedProcedure
+    .input(z.object({
+      runId: z.string().min(1),
+      cols: z.number().int().positive(),
+      rows: z.number().int().positive(),
+    }))
+    .mutation(({ input }): { success: true } => {
+      if (!runShellDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'run shell dependencies not wired yet. Call setRunShellDeps() at boot.',
+        });
+      }
+      runShellDeps.resize(input.runId, input.cols, input.rows);
+      return { success: true };
+    }),
+
+  /**
+   * The retained scrollback tail for the run's worktree shell. The Shell tab
+   * fetches this once on mount and replays it into the xterm so a (re)mounting
+   * terminal reconstructs recent output instead of rendering blank (mirrors
+   * getPtyBacklog for the agent PTY). '' for an unknown run.
+   */
+  shellBacklog: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .query(({ input }): { backlog: string } => {
+      if (!runShellDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'run shell dependencies not wired yet. Call setRunShellDeps() at boot.',
+        });
+      }
+      return { backlog: runShellDeps.getBacklog(input.runId) };
+    }),
+
+  /**
    * Merge a workflow run's worktree into the project's main branch (GAP-B).
    *
    * strategy='squash'   → squash all commits into one with `commitMessage`.
@@ -1133,6 +1262,9 @@ export const runsRouter = router({
         // benign: nothing to merge (output already in DB) → continue close-out.
       }
 
+      // Tear down the run's user shell (and any dev server it launched) BEFORE
+      // removing the worktree dir, so no shell process holds it open.
+      closeRunShell(input.runId);
       // Remove the worktree and mark the run terminal. The worktree removal is
       // idempotent; mark-completed is guarded so it no-ops on an already-terminal
       // run rather than throwing.
@@ -1204,10 +1336,12 @@ export const runsRouter = router({
       await wm.gitPush(worktreePath);
       const { remoteUrl, branchName } = await wm.getRemoteUrlAndBranch(worktreePath);
 
-      // Artifact delivered to origin — close the run out. Remove the local
-      // worktree (the branch now lives on origin) and mark the run completed.
-      // The local branch is intentionally NOT deleted here: it tracks the
-      // pushed origin branch the user is about to open a PR from.
+      // Artifact delivered to origin — close the run out. Tear down the run's
+      // user shell BEFORE removing the worktree so no shell process holds it open.
+      closeRunShell(input.runId);
+      // Remove the local worktree (the branch now lives on origin) and mark the
+      // run completed. The local branch is intentionally NOT deleted here: it
+      // tracks the pushed origin branch the user is about to open a PR from.
       await wm.removeWorktreeByPath(projectPath, worktreePath);
       // Drop any pending approvals for the run so close-out doesn't leave
       // orphaned items in the review queue.
@@ -1257,6 +1391,9 @@ export const runsRouter = router({
       // spawn-promise settle on kill is the designed RunExecutor close path. NO-OP
       // for the SDK substrate and when the relay bag is unwired.
       await killLiveInteractiveSession(input.runId);
+      // Tear down the run's user shell (and any dev server it launched) BEFORE
+      // removing the worktree dir, so no shell process holds it open.
+      closeRunShell(input.runId);
       await deps!.worktreeManager.removeWorktreeByPath(projectPath, worktreePath);
       // Dismiss discards the run — force-delete its branch too (its commits go
       // with it), so close-out doesn't leave an orphaned ref. No-op when the run

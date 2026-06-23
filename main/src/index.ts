@@ -47,7 +47,9 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setSprintLaneDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps } from './orchestrator/trpc/routers/runs';
+import { RunShellManager } from './services/runShellManager';
+import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
@@ -146,6 +148,9 @@ let executionTracker: ExecutionTracker;
 let databaseService: DatabaseService;
 let runCommandManager: RunCommandManager;
 let archiveProgressManager: ArchiveProgressManager;
+// Run user-shells (worktree-terminal feature). Module-level so the before-quit
+// handler (outside the orchestrator-setup block) can destroyAll() on app quit.
+let runShellManager: RunShellManager | null = null;
 
 // Store original console methods before overriding
 // These must be captured immediately when the module loads
@@ -1470,6 +1475,36 @@ app.whenReady().then(async () => {
     });
     console.log('[Main] runs.relayInput/relayResize/endSession/killSession/getPtyBacklog deps wired');
 
+    // Wire the run user-shell (worktree-terminal feature): a plain $SHELL PTY in
+    // the run's worktree, keyed by runId, backing the run "Shell" tab. The cwd is
+    // resolved from workflow_runs.worktree_path (flow runs have no sessions row,
+    // so they can't use the panel/session terminal stack). Raw bytes stream to the
+    // renderer on `cyboflow:shell:<runId>` (mirrors the agent PTY's
+    // cyboflow:pty:<runId>); input/resize/backlog ride tRPC (setRunShellDeps).
+    // Independent of the RunExecutor, so a shell — and any dev server it launched —
+    // SURVIVES run completion; close() fires at run close-out and destroyAll() at
+    // app quit.
+    runShellManager = new RunShellManager(
+      (runId) => {
+        const row = db
+          .prepare('SELECT worktree_path FROM workflow_runs WHERE id = ?')
+          .get(runId) as { worktree_path: string | null } | undefined;
+        return row?.worktree_path ?? null;
+      },
+      (runId, chunk) => {
+        mainWindow?.webContents.send(`cyboflow:shell:${runId}`, chunk);
+      },
+      (file, args, options) => pty.spawn(file, args, options),
+    );
+    setRunShellDeps({
+      open: (runId) => runShellManager!.open(runId),
+      write: (runId, data) => runShellManager!.write(runId, data),
+      resize: (runId, cols, rows) => runShellManager!.resize(runId, cols, rows),
+      getBacklog: (runId) => runShellManager!.getBacklog(runId),
+      close: (runId) => runShellManager!.close(runId),
+    });
+    console.log('[Main] runs.shellOpen/shellInput/shellResize/shellBacklog deps wired');
+
     // GAP-B: wire the run close-out (merge / dismiss + worktree cleanup) deps.
     // worktreeManager.removeWorktreeByPath takes the run's absolute nested
     // worktree path; getProjectById resolves the project path from project_id.
@@ -1614,6 +1649,14 @@ app.on('before-quit', async (event) => {
     console.log('[Main] Shutting down CLI manager factory and all CLI processes...');
     await cliManagerFactory.shutdown();
     console.log('[Main] CLI manager factory shutdown complete');
+  }
+
+  // Tear down all run user-shells (and any dev servers they launched) so none
+  // orphan on quit. RunShellManager is independent of the CLI factory above.
+  if (runShellManager) {
+    console.log('[Main] Destroying all run user-shells...');
+    runShellManager.destroyAll();
+    console.log('[Main] Run user-shells destroyed');
   }
 
   // Close task queue
