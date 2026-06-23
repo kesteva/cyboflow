@@ -16,7 +16,7 @@ let aptabaseActive = false;
 
 /** Resolve the telemetry environment by reading the packaged buildInfo.json. */
 function resolveTelemetryEnvironment(): TelemetryEnvironment {
-  if (!app.isPackaged) return 'development';
+  if (!app.isPackaged) return 'local';
   let buildInfo: { environment?: unknown } | null = null;
   try {
     const buildInfoPath = path.join(process.resourcesPath, 'app', 'main', 'dist', 'buildInfo.json');
@@ -35,11 +35,11 @@ function resolveTelemetryEnvironment(): TelemetryEnvironment {
  * is enabled AND its credential env var is present; otherwise it is skipped
  * silently. Telemetry must never throw into app code.
  *
- * Errors are reported only from PACKAGED (.dmg) builds — both the dev .dmg used
- * for active testing (tagged 'development') and releases (tagged 'stable'/'beta')
- * — never under `pnpm dev`, where errors surface directly in the console.
- * Usage metrics fire ONLY for release builds — never under `pnpm dev` or a
- * local dev `.dmg`.
+ * Errors are reported only from PACKAGED (.dmg) builds — both the Cyboflow Dev
+ * release .dmg used for active testing (tagged 'dev') and stable releases
+ * (tagged 'stable') — never under `pnpm dev`, where errors surface directly in
+ * the console. Usage metrics fire ONLY for release builds ('dev' / 'stable') —
+ * never under `pnpm dev` or an unstamped local `build:mac` .dmg.
  */
 export function initTelemetry(cfg: {
   errorReportingEnabled: boolean;
@@ -48,7 +48,7 @@ export function initTelemetry(cfg: {
 }): void {
   const environment = resolveTelemetryEnvironment();
   const isPackagedBuild = app.isPackaged;
-  const isReleaseBuild = environment !== 'development';
+  const isReleaseBuild = environment !== 'local';
 
   // Errors are .dmg-only: under `pnpm dev` (unpackaged) they are tracked
   // directly in the console, so Sentry stays off to avoid dev noise.
@@ -72,8 +72,8 @@ export function initTelemetry(cfg: {
     }
   }
 
-  // Usage metrics are release-only: a dev build (unpackaged OR an unstamped
-  // local dev .dmg) resolves to 'development' and is skipped entirely.
+  // Usage metrics are release-only: a non-release build (unpackaged OR an
+  // unstamped local `build:mac` .dmg) resolves to 'local' and is skipped.
   if (isReleaseBuild && cfg.usageMetricsEnabled && process.env.APTABASE_APP_KEY) {
     try {
       aptabaseInitialize(process.env.APTABASE_APP_KEY);
