@@ -389,6 +389,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // spawnKey NEVER replaces panelId — panelId remains the run id used for event
     // attribution and the substrate registry lookup.
     const spawnKey = options.spawnKey ?? options.panelId;
+    // M3 — re-attribution invariant. Internal lookups/maps (lock string,
+    // dup-guard, processes / sdkRuns / pipelines, spawnKeysByRunId) key on
+    // spawnKey so concurrent fan-out lanes stay isolated; but EVERY outbound
+    // event carries the run DISPLAY panelId so a lane's output interleaves under
+    // the run panel and passes the AbstractAIPanelManager output gate. For a
+    // non-fan-out path spawnKey === panelId, so this is a no-op there.
+    const displayPanelId = options.panelId;
     return await withLock(`claude-spawn-${spawnKey}`, async () => {
       const { panelId, sessionId, isResume } = options;
 
@@ -405,7 +412,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
           const errMsg = `Cannot resume: no Claude session_id stored for Cyboflow session ${sessionId}`;
           this.logger?.error(`[ClaudeCodeManager] ${errMsg}`);
           this.emit('output', {
-            panelId,
+            panelId: displayPanelId,
             sessionId,
             type: 'json',
             data: {
@@ -486,7 +493,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         timestamp: new Date().toISOString()
       };
       this.emit('output', {
-        panelId,
+        panelId: displayPanelId,
         sessionId,
         type: 'json',
         data: sessionInfoMessage,
@@ -514,8 +521,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
       (this.processes as Map<string, StubCliProcess>).set(spawnKey, stub);
 
       // Wire up the ClaudeSdkRun entry. runSdkQuery's finally tears down by
-      // spawnKey, so it is threaded in.
-      const iteratorDone = this.runSdkQuery(spawnKey, panelId, sessionId, finalPrompt, sdkOptions, abortController, router, runId);
+      // spawnKey, so it is threaded in. displayPanelId (the run/session panel) is
+      // threaded too so every event runSdkQuery emits re-attributes to the run
+      // panel, never to the per-lane spawnKey.
+      const iteratorDone = this.runSdkQuery(spawnKey, displayPanelId, sessionId, finalPrompt, sdkOptions, abortController, router, runId);
 
       const run: ClaudeSdkRun = {
         abortController,
@@ -527,9 +536,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
       this.sdkRuns.set(spawnKey, run);
 
       // Emit spawned — matching the upstream AbstractAIPanelManager listener.
-      this.emit('spawned', { panelId, sessionId });
+      // Re-attributed to the run display panelId so a fan-out lane's spawn shows
+      // under the run panel, not its per-lane spawnKey.
+      this.emit('spawned', { panelId: displayPanelId, sessionId });
 
-      this.logger?.info(`[ClaudeCodeManager] SDK query started for panel ${panelId} (session ${sessionId})`);
+      this.logger?.info(`[ClaudeCodeManager] SDK query started for panel ${displayPanelId} (session ${sessionId})`);
 
       // Wait for the SDK iterator to drain before returning. Callers (RunExecutor,
       // continueConversation) await spawnCliProcess to know when the turn is done —
@@ -546,10 +557,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
   /**
    * Drive the query() async iterator. Emits output / exit / error events
    * that AbstractAIPanelManager.setupEventHandlers forwards upstream.
+   *
+   * M3 re-attribution: internal teardown keys on `spawnKey` (per-lane on a
+   * programmatic fan-out), but every OUTBOUND event carries `displayPanelId`
+   * (the run/session panel) so a lane's output interleaves under the run panel
+   * and passes the AbstractAIPanelManager output gate. For a non-fan-out spawn
+   * displayPanelId === spawnKey, so this is identical to the pre-M2 behavior.
    */
   private async runSdkQuery(
     spawnKey: string,
-    panelId: string,
+    displayPanelId: string,
     sessionId: string,
     prompt: string,
     sdkOptions: Options,
@@ -590,9 +607,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
           this.logger?.warn(`[ClaudeCodeManager] EventRouter emit error: ${routerErr instanceof Error ? routerErr.message : String(routerErr)}`);
         }
 
-        // Forward to AbstractAIPanelManager via 'output' event.
+        // Forward to AbstractAIPanelManager via 'output' event. Re-attributed to
+        // displayPanelId so a fan-out lane's output lands under the run panel.
         this.emit('output', {
-          panelId,
+          panelId: displayPanelId,
           sessionId,
           type: 'json',
           data: event,
@@ -602,12 +620,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
     } catch (err) {
       if (abortController.signal.aborted) {
         // Intentional abort — treat as clean exit.
-        this.logger?.info(`[ClaudeCodeManager] SDK query aborted for panel ${panelId}`);
+        this.logger?.info(`[ClaudeCodeManager] SDK query aborted for panel ${displayPanelId}`);
       } else {
         exitCode = 1;
         const errMsg = err instanceof Error ? err.message : String(err);
-        this.logger?.error(`[ClaudeCodeManager] SDK query error for panel ${panelId}: ${errMsg}`);
-        this.emit('error', { panelId, sessionId, error: errMsg });
+        this.logger?.error(`[ClaudeCodeManager] SDK query error for panel ${displayPanelId}: ${errMsg}`);
+        this.emit('error', { panelId: displayPanelId, sessionId, error: errMsg });
       }
     } finally {
       this.cleanupPipeline(spawnKey);
@@ -626,8 +644,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
       this.processes.delete(spawnKey);
       this.sdkRuns.delete(spawnKey);
       this.forgetSpawnKey(runId, spawnKey);
+      // Re-attributed to displayPanelId. NOTE (M3 step 3): emitting this 'exit'
+      // does NOT, by itself, flip the run to a terminal state — this handler
+      // writes NO workflow_runs terminal status. Terminal run state is the
+      // WorkflowController's job once ALL lanes of the fan-out have settled.
       this.emit('exit', {
-        panelId,
+        panelId: displayPanelId,
         sessionId,
         exitCode,
         signal: null
