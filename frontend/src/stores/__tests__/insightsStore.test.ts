@@ -702,14 +702,14 @@ describe('dismissFinding (optimistic, counter bump)', () => {
       makeReviewItem({ id: 'f1', staged_at: null, selected: false }),
     ]);
     const before = useInsightsStore.getState();
-    const countsBefore = selectFindingsCounters(before.qualityFindings, before.reviewSummary);
+    const countsBefore = selectFindingsCounters(before.triageFindings, before.qualityFindings);
 
     await useInsightsStore.getState().dismissFinding(1, 'f1');
 
     const after = useInsightsStore.getState();
     // Row gone from the triage set.
     expect(after.triageFindings.find((f) => f.id === 'f1')).toBeUndefined();
-    const countsAfter = selectFindingsCounters(after.qualityFindings, after.reviewSummary);
+    const countsAfter = selectFindingsCounters(after.triageFindings, after.qualityFindings);
     // Pending decremented, Dismissed incremented — no lifecycle event fired.
     expect(countsAfter.pending).toBe(countsBefore.pending - 1);
     expect(countsAfter.dismissed).toBe(countsBefore.dismissed + 1);
@@ -722,13 +722,13 @@ describe('dismissFinding (optimistic, counter bump)', () => {
       makeReviewItem({ id: 'f1', staged_at: null, selected: false }),
     ]);
     const before = useInsightsStore.getState();
-    const countsBefore = selectFindingsCounters(before.qualityFindings, before.reviewSummary);
+    const countsBefore = selectFindingsCounters(before.triageFindings, before.qualityFindings);
 
     await useInsightsStore.getState().dismissFinding(1, 'f1');
 
     const after = useInsightsStore.getState();
     expect(after.triageFindings.find((f) => f.id === 'f1')).toBeDefined();
-    const countsAfter = selectFindingsCounters(after.qualityFindings, after.reviewSummary);
+    const countsAfter = selectFindingsCounters(after.triageFindings, after.qualityFindings);
     expect(countsAfter).toEqual(countsBefore);
     expect(after.error).toContain('dismiss boom');
   });

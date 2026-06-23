@@ -29,7 +29,7 @@ import type {
   FindingProposedTarget,
   ReviewItem,
 } from '../../../../shared/types/reviews';
-import type { QualityFinding, ReviewItemSummary } from '../../../../shared/types/insights';
+import type { QualityFinding } from '../../../../shared/types/insights';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -97,16 +97,6 @@ function qf(id: string, status: QualityFinding['status']): QualityFinding {
     runOutcome: null,
     runEndedAt: null,
     workflowName: null,
-  };
-}
-
-function summary(findingPending: number): ReviewItemSummary {
-  return {
-    total: findingPending,
-    pending: findingPending,
-    resolved: 0,
-    dismissed: 0,
-    pendingByKind: { finding: findingPending, permission: 0, decision: 0, human_task: 0 },
   };
 }
 
@@ -287,29 +277,24 @@ describe('selectSelectedFindingIds', () => {
 // ---------------------------------------------------------------------------
 
 describe('selectFindingsCounters', () => {
-  it('Pending = pendingByKind.finding; Resolved/Dismissed client-derived from qualityFindings', () => {
+  it('Pending = triageFindings.length (untriaged ∪ ready); Resolved/Dismissed client-derived from qualityFindings', () => {
     const counters = selectFindingsCounters(
+      [tf({ id: 'u1' }), tf({ id: 'u2' }), tf({ id: 'r1', triageState: 'ready' })],
       [qf('a', 'pending'), qf('b', 'resolved'), qf('c', 'dismissed'), qf('d', 'resolved')],
-      summary(3),
     );
     expect(counters).toEqual({ pending: 3, resolved: 2, dismissed: 1 });
   });
 
-  it('is findings-scoped — does NOT use the whole-inbox reviewSummary.pending', () => {
-    const wholeInbox: ReviewItemSummary = {
-      total: 10,
-      pending: 8, // whole-inbox; would inflate the strip if used
-      resolved: 1,
-      dismissed: 1,
-      pendingByKind: { finding: 2, permission: 4, decision: 2, human_task: 0 },
-    };
-    const counters = selectFindingsCounters([qf('a', 'pending')], wholeInbox);
-    // Pending uses the finding-scoped 2, NOT the whole-inbox 8.
-    expect(counters.pending).toBe(2);
+  it('counts only the rows the sections render — NOT a larger whole-inbox total (orphan-hidden findings are never in triageFindings)', () => {
+    // `triageFindings` is already the orphan-hidden list the sections partition,
+    // so its length IS the pending count regardless of how many findings the
+    // whole inbox holds. One visible triage row -> pending = 1.
+    const counters = selectFindingsCounters([tf({ id: 'u1' })], [qf('a', 'pending')]);
+    expect(counters.pending).toBe(1);
   });
 
-  it('is resilient to a null summary (pending = 0)', () => {
-    expect(selectFindingsCounters([qf('a', 'resolved')], null)).toEqual({
+  it('is resilient to an empty triage list (pending = 0)', () => {
+    expect(selectFindingsCounters([], [qf('a', 'resolved')])).toEqual({
       pending: 0,
       resolved: 1,
       dismissed: 0,

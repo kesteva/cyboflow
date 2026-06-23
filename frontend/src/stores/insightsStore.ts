@@ -153,15 +153,21 @@ function toTriageFinding(item: ReviewItem): TriageFinding {
 }
 
 /**
- * Findings-scoped counter strip (OD-11). Pending comes from the
- * finding-scoped `pendingByKind.finding` (`reviewSummary.pending/resolved/
- * dismissed` are WHOLE-INBOX and would inflate the strip); Resolved/Dismissed
- * are client-derived by counting `status` over the already-fetched
- * `qualityFindings` (each carries `status`). Resilient to a null summary.
+ * Findings-scoped counter strip (OD-11). Pending is the COUNT OF ROWS THE TWO
+ * SECTIONS ACTUALLY RENDER — `triageFindings.length` (untriaged ∪ ready) — NOT
+ * the whole-inbox `reviewSummary.pendingByKind.finding`. The summary count also
+ * includes ORPHANED pending findings whose producing run has gone terminal
+ * (canceled/failed/completed), which the `reviewItems.list` orphan-hide clause
+ * deliberately suppresses from the list — so a summary-driven strip reads (e.g.)
+ * "56 pending" above ~17 visible rows. The strip sits directly above the sections
+ * that enumerate "what is pending", so it MUST equal what they show; deriving it
+ * from `triageFindings` (the same orphan-hidden fetch the sections partition)
+ * guarantees that. Resolved/Dismissed are client-derived by counting `status`
+ * over the already-fetched `qualityFindings` (each carries `status`).
  */
 export function selectFindingsCounters(
+  triageFindings: TriageFinding[],
   qualityFindings: QualityFinding[],
-  reviewSummary: ReviewItemSummary | null,
 ): { pending: number; resolved: number; dismissed: number } {
   let resolved = 0;
   let dismissed = 0;
@@ -170,7 +176,7 @@ export function selectFindingsCounters(
     else if (f.status === 'dismissed') dismissed += 1;
   }
   return {
-    pending: reviewSummary?.pendingByKind.finding ?? 0,
+    pending: triageFindings.length,
     resolved,
     dismissed,
   };

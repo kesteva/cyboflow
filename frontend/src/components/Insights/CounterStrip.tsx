@@ -2,14 +2,16 @@
  * CounterStrip — the findings-scoped Pending / Resolved / Dismissed counter strip
  * that sits directly above the two triage sections.
  *
- * Findings-scoped (NOT whole-inbox): Pending comes from the store's
- * finding-scoped `pendingByKind.finding`, while Resolved/Dismissed are derived
- * client-side from the already-fetched `qualityFindings` — both via the store's
- * {@link selectFindingsCounters} selector. Placing the strip directly above the
- * sections that enumerate "what is pending" makes any inflation obvious, so the
- * whole-inbox `reviewSummary.pending/resolved/dismissed` would be wrong here. Live
+ * Findings-scoped (NOT whole-inbox): Pending is `triageFindings.length` — the
+ * exact rows the UNTRIAGED + READY sections render (the same orphan-hidden fetch
+ * they partition) — while Resolved/Dismissed are derived client-side from the
+ * already-fetched `qualityFindings`, both via the store's
+ * {@link selectFindingsCounters} selector. The strip sits directly above the
+ * sections that enumerate "what is pending", so it MUST equal what they show;
+ * the whole-inbox `reviewSummary.pendingByKind.finding` would over-count (it
+ * includes orphaned findings whose run went terminal that the list hides). Live
  * via the store's `onReviewItemChanged` subscription (+ the optimistic dismiss
- * counter bump).
+ * removal, which drops the row from `triageFindings` and so decrements Pending).
  */
 import { useInsightsStore, selectFindingsCounters } from '../../stores/insightsStore';
 
@@ -36,9 +38,9 @@ function CounterCell({
 
 /** The findings-scoped counter strip — see the file header. No props. */
 export function CounterStrip(): React.JSX.Element {
+  const triageFindings = useInsightsStore((s) => s.triageFindings);
   const qualityFindings = useInsightsStore((s) => s.qualityFindings);
-  const reviewSummary = useInsightsStore((s) => s.reviewSummary);
-  const { pending, resolved, dismissed } = selectFindingsCounters(qualityFindings, reviewSummary);
+  const { pending, resolved, dismissed } = selectFindingsCounters(triageFindings, qualityFindings);
 
   return (
     <div className="mt-3 flex gap-7" data-testid="findings-counter-strip">

@@ -657,18 +657,14 @@ describe('FindingsSection — compounding tray', () => {
 // ---------------------------------------------------------------------------
 
 describe('FindingsSection — selector contract', () => {
-  it('selectFindingsCounters is findings-scoped', () => {
-    const summary: ReviewItemSummary = {
-      total: 9,
-      pending: 9,
-      resolved: 0,
-      dismissed: 0,
-      pendingByKind: { finding: 3, permission: 6, decision: 0, human_task: 0 },
-    };
+  it('selectFindingsCounters is findings-scoped — pending = the rendered triage rows', () => {
+    // pending = triageFindings.length (untriaged ∪ ready), NOT a whole-inbox
+    // finding total: orphan-hidden findings are never in this list.
+    const triage: TriageFinding[] = [finding({ id: 'a' }), finding({ id: 'b' }), finding({ id: 'c' })];
     const quality: QualityFinding[] = [qualityDismissed(finding({ id: 'x' }))];
     quality[0].status = 'resolved';
-    const counters = selectFindingsCounters(quality, summary);
-    expect(counters.pending).toBe(3); // NOT the whole-inbox 9
+    const counters = selectFindingsCounters(triage, quality);
+    expect(counters.pending).toBe(3); // = triageFindings.length
     expect(counters.resolved).toBe(1);
   });
 
