@@ -13,13 +13,14 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { buildBuiltInWorkflows } from '../builtInWorkflows';
-import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
+import { CYBOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../../shared/types/workflows';
+import { CANONICAL_AGENT_KEYS, HUMAN_GATE_AGENT } from '../../../../../shared/types/agentIdentity';
 
 describe('buildBuiltInWorkflows', () => {
-  it('maps exactly the cyboflow built-in names (planner + sprint + compound)', () => {
+  it('maps exactly the cyboflow built-in names (planner + sprint + compound + ship)', () => {
     const descriptors = buildBuiltInWorkflows();
     const names = descriptors.map((d) => d.name).sort();
-    expect(names).toEqual(['compound', 'planner', 'sprint']);
+    expect(names).toEqual(['compound', 'planner', 'ship', 'sprint']);
     // Keyed by CYBOFLOW_WORKFLOW_NAMES — same set, no extras, no omissions.
     expect(names).toEqual([...CYBOFLOW_WORKFLOW_NAMES].sort());
   });
@@ -109,5 +110,42 @@ describe('buildBuiltInWorkflows', () => {
     expect(body, 'compound traces regressions to merged work as post-merge-bug').toMatch(
       /post-merge-bug/,
     );
+  });
+
+  it('ship is planner (idea → epics → tasks) concatenated with sprint to integration', () => {
+    const ship = buildBuiltInWorkflows().find((d) => d.name === 'ship');
+    expect(ship, 'ship descriptor present').toBeDefined();
+    expect(ship!.path, 'ship path').toMatch(/ship\.md$/);
+    const body = readFileSync(ship!.path, 'utf-8');
+    expect(body.trim().length, 'ship prompt body non-empty').toBeGreaterThan(0);
+  });
+
+  it('ship definition has 6 phases, 12 steps, unique ids, and canonical/human agents', () => {
+    const def = WORKFLOW_DEFINITIONS.ship;
+    expect(def, 'WORKFLOW_DEFINITIONS.ship present').toBeDefined();
+    expect(def.id).toBe('ship');
+
+    // 6 phases in the locked Ship DAG: plan, refine, materialize, sprint-plan,
+    // execute, verify.
+    expect(def.phases).toHaveLength(6);
+    const phaseIds = def.phases.map((p) => p.id);
+    expect(phaseIds).toEqual(['plan', 'refine', 'materialize', 'sprint-plan', 'execute', 'verify']);
+    // Phase ids are globally unique.
+    expect(new Set(phaseIds).size, 'phase ids are unique').toBe(phaseIds.length);
+
+    // 12 steps total, with globally-unique step ids.
+    const steps = def.phases.flatMap((p) => p.steps);
+    expect(steps).toHaveLength(12);
+    const stepIds = steps.map((s) => s.id);
+    expect(new Set(stepIds).size, 'step ids are globally unique').toBe(stepIds.length);
+
+    // Every step.agent is either a canonical agent key or the human gate.
+    const validAgents = new Set<string>([...CANONICAL_AGENT_KEYS, HUMAN_GATE_AGENT]);
+    for (const step of steps) {
+      expect(
+        validAgents.has(step.agent),
+        `step ${step.id} agent "${step.agent}" must be a canonical key or '${HUMAN_GATE_AGENT}'`,
+      ).toBe(true);
+    }
   });
 });

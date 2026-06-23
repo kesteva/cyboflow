@@ -52,10 +52,15 @@ describe('isCyboflowWorkflowName', () => {
   // -------------------------------------------------------------------------
   // Case 1: every built-in name is recognised
   // -------------------------------------------------------------------------
-  it('returns true for each built-in workflow name (planner/sprint)', () => {
+  it('returns true for each built-in workflow name (planner/sprint/compound/ship)', () => {
     for (const name of CYBOFLOW_WORKFLOW_NAMES) {
       expect(isCyboflowWorkflowName(name)).toBe(true);
     }
+    // Explicit coverage for the built-ins, incl. the Ship flow.
+    expect(isCyboflowWorkflowName('planner')).toBe(true);
+    expect(isCyboflowWorkflowName('sprint')).toBe(true);
+    expect(isCyboflowWorkflowName('compound')).toBe(true);
+    expect(isCyboflowWorkflowName('ship')).toBe(true);
   });
 
   // -------------------------------------------------------------------------
@@ -169,6 +174,9 @@ describe('resolveWorkflowDefinition', () => {
     expect(resolveWorkflowDefinition('planner', '{}')).toEqual(WORKFLOW_DEFINITIONS.planner);
     expect(resolveWorkflowDefinition('sprint', null)).toEqual(WORKFLOW_DEFINITIONS.sprint);
     expect(resolveWorkflowDefinition('planner', '')).toEqual(WORKFLOW_DEFINITIONS.planner);
+    // Ship is a built-in: a no-spec resolve round-trips to WORKFLOW_DEFINITIONS.ship.
+    expect(resolveWorkflowDefinition('ship', '{}')).toEqual(WORKFLOW_DEFINITIONS.ship);
+    expect(resolveWorkflowDefinition('ship', null)).toEqual(WORKFLOW_DEFINITIONS.ship);
   });
 
   // -------------------------------------------------------------------------
