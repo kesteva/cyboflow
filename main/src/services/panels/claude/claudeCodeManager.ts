@@ -132,16 +132,18 @@ interface ClaudeSpawnOptions {
   systemPromptAppend?: string;
   /**
    * Additive per-lane spawn identity (`runId + ':' + itemId`), set ONLY for a
-   * programmatic fan-out lane. FIELD ONLY at this milestone — spawnCliProcess
-   * does NOT read it yet; the spawn lock, dup-guard, and per-spawn maps still
-   * key on panelId. A later milestone keys those on spawnKey (defaulting to
-   * panelId when absent) so non-fan-out paths stay byte-identical.
+   * programmatic fan-out lane. spawnCliProcess keys the spawn lock, the
+   * dup-guard, and the per-spawn maps (processes / sdkRuns / pipelines) on this
+   * value, DEFAULTING to panelId when absent — so every non-fan-out path stays
+   * byte-identical. It NEVER replaces panelId: panelId remains the run id used
+   * for event attribution and the substrate-registry lookup.
    */
   spawnKey?: string;
 }
 
 /**
- * A running SDK query, keyed by panelId in the sdkRuns map.
+ * A running SDK query, keyed by spawnKey in the sdkRuns map (per-lane on a
+ * programmatic fan-out, else === panelId).
  * abortController cancels the in-flight query(); iteratorDone resolves when
  * the async-for loop finishes (naturally or on abort).
  */
@@ -196,11 +198,36 @@ export class ClaudeCodeManager extends AbstractCliManager {
     this.cachedNodePathPromise = findNodeExecutable();
   }
 
-  /** Active SDK runs, keyed by panelId. */
+  /**
+   * Active SDK runs, keyed by spawnKey (`runId + ':' + itemId` for a
+   * programmatic fan-out lane, else === panelId). One entry per concurrent lane.
+   */
   private readonly sdkRuns = new Map<string, ClaudeSdkRun>();
 
-  /** Per-run pipeline (router → sink). */
+  /**
+   * Per-spawn pipeline (router → sink), keyed by spawnKey (per-lane for a
+   * programmatic fan-out, else === panelId). The stored tuple carries the runId
+   * so cleanup can still tear down run-scoped subscriptions.
+   */
   private readonly pipelines = new Map<string, PipelineTuple>();
+
+  /**
+   * Registry of the live spawnKeys for each runId. Fan-out drives multiple lanes
+   * under ONE runId (panelId), each with a distinct spawnKey. M4 uses this to
+   * abort every lane of a run from a single run-scoped kill. A spawnKey is added
+   * on spawn and removed on cleanup; the Set is deleted when it empties.
+   */
+  private readonly spawnKeysByRunId = new Map<string, Set<string>>();
+
+  /**
+   * Refcount of live spawns per runId for the DynamicWorkflowTracker
+   * attach/detach (SUB-HAZARD A). The tracker is a singleton keyed by runId, so
+   * with multiple fan-out lanes sharing one runId the FIRST lane must attach and
+   * only the LAST lane's cleanup may detach — otherwise a sibling lane's
+   * detector subscription is torn down while it is still live. Increment on
+   * spawn (attach only on 0→1), decrement on cleanup (detach only on 1→0).
+   */
+  private readonly trackerRefcountByRunId = new Map<string, number>();
 
   /**
    * Optional orchestrator IPC socket path.  When set, composeMcpServers()
@@ -356,12 +383,19 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * Override spawnCliProcess to run query() in-process instead of spawning a PTY.
    */
   override async spawnCliProcess(options: ClaudeSpawnOptions): Promise<void> {
-    return await withLock(`claude-spawn-${options.panelId}`, async () => {
+    // Additive per-lane identity. For a programmatic fan-out lane this is
+    // `runId + ':' + itemId`; for every other path it DEFAULTS to panelId, so the
+    // lock string, dup-guard, and per-spawn maps stay byte-identical to before.
+    // spawnKey NEVER replaces panelId — panelId remains the run id used for event
+    // attribution and the substrate registry lookup.
+    const spawnKey = options.spawnKey ?? options.panelId;
+    return await withLock(`claude-spawn-${spawnKey}`, async () => {
       const { panelId, sessionId, isResume } = options;
 
-      // Guard: reject duplicate spawns.
-      if (this.processes.has(panelId)) {
-        throw new Error(`Claude process already running for panel ${panelId}`);
+      // Guard: reject duplicate spawns of the SAME lane (keyed by spawnKey so
+      // concurrent fan-out lanes under one panelId do not collide).
+      if (this.processes.has(spawnKey)) {
+        throw new Error(`Claude process already running for spawn ${spawnKey}`);
       }
 
       // Resume validation.
@@ -411,12 +445,32 @@ export class ClaudeCodeManager extends AbstractCliManager {
       const router = new EventRouter();
       const sink = new RawEventsSink(this.db, this.logger);
       sink.attachToRouter(router, runId);
-      this.pipelines.set(panelId, { router, sink, runId });
+      this.pipelines.set(spawnKey, { router, sink, runId });
+
+      // Track this lane under its runId so a run-scoped kill (M4) can abort every
+      // lane, and so the DynamicWorkflowTracker refcount below knows when this
+      // run's first/last lane attaches/detaches.
+      let keySet = this.spawnKeysByRunId.get(runId);
+      if (keySet === undefined) {
+        keySet = new Set<string>();
+        this.spawnKeysByRunId.set(runId, keySet);
+      }
+      keySet.add(spawnKey);
 
       // Passive dynamic-workflow detection: watch this run's normalized event
       // stream for Workflow-tool launches. Fail-soft when the tracker singleton
       // is not initialized (unit tests / early boot).
-      DynamicWorkflowTracker.tryGetInstance()?.attachToRouter(router, { runId, sessionId });
+      //
+      // SUB-HAZARD A: the tracker is a runId-keyed singleton, so with multiple
+      // fan-out lanes per runId only the FIRST lane attaches (0→1); the per-lane
+      // routers are separate, but re-attaching for the same runId would tear down
+      // the prior lane's subscription. Refcount so attach happens once and detach
+      // waits for the last lane (cleanupPipeline decrements / detaches on 1→0).
+      const priorRefcount = this.trackerRefcountByRunId.get(runId) ?? 0;
+      this.trackerRefcountByRunId.set(runId, priorRefcount + 1);
+      if (priorRefcount === 0) {
+        DynamicWorkflowTracker.tryGetInstance()?.attachToRouter(router, { runId, sessionId });
+      }
 
       // Abort controller for cancellation.
       const abortController = new AbortController();
@@ -456,10 +510,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
       };
       // Cast: AbstractCliManager.processes is Map<string, CliProcess> where
       // CliProcess.process is pty.IPty. We never access .process on SDK paths.
-      (this.processes as Map<string, StubCliProcess>).set(panelId, stub);
+      // Keyed by spawnKey so concurrent fan-out lanes do not overwrite each other.
+      (this.processes as Map<string, StubCliProcess>).set(spawnKey, stub);
 
-      // Wire up the ClaudeSdkRun entry.
-      const iteratorDone = this.runSdkQuery(panelId, sessionId, finalPrompt, sdkOptions, abortController, router, runId);
+      // Wire up the ClaudeSdkRun entry. runSdkQuery's finally tears down by
+      // spawnKey, so it is threaded in.
+      const iteratorDone = this.runSdkQuery(spawnKey, panelId, sessionId, finalPrompt, sdkOptions, abortController, router, runId);
 
       const run: ClaudeSdkRun = {
         abortController,
@@ -468,7 +524,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
         sessionId,
         worktreePath: options.worktreePath
       };
-      this.sdkRuns.set(panelId, run);
+      this.sdkRuns.set(spawnKey, run);
 
       // Emit spawned — matching the upstream AbstractAIPanelManager listener.
       this.emit('spawned', { panelId, sessionId });
@@ -492,6 +548,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * that AbstractAIPanelManager.setupEventHandlers forwards upstream.
    */
   private async runSdkQuery(
+    spawnKey: string,
     panelId: string,
     sessionId: string,
     prompt: string,
@@ -553,17 +610,22 @@ export class ClaudeCodeManager extends AbstractCliManager {
         this.emit('error', { panelId, sessionId, error: errMsg });
       }
     } finally {
-      this.cleanupPipeline(panelId);
+      this.cleanupPipeline(spawnKey);
       // Clear pending approvals and questions under runId — the same id passed to
-      // requestApproval() / requestQuestion() via makePreToolUseHook.
+      // requestApproval() / requestQuestion() via makePreToolUseHook. STAYS on
+      // runId (run-scoped, not per-lane) — see M5 for the fan-out hazard.
       ApprovalRouter.getInstance().clearPendingForRun(runId);
       QuestionRouter.getInstance().clearPendingForRun(runId);
       // Remove the run's cyboflow-* command/agent bundle on normal completion
       // (cleanupCliResources only fires on the abort path) — single-sourced with
       // it via removeBundleForSession so the bundleWorktrees entry never leaks.
+      // STAYS on sessionId; its refcount hazard is handled in M5.
       this.removeBundleForSession(sessionId);
-      this.processes.delete(panelId);
-      this.sdkRuns.delete(panelId);
+      // Per-spawn teardown keyed by spawnKey so a finishing lane never evicts a
+      // still-live sibling lane sharing the same panelId.
+      this.processes.delete(spawnKey);
+      this.sdkRuns.delete(spawnKey);
+      this.forgetSpawnKey(runId, spawnKey);
       this.emit('exit', {
         panelId,
         sessionId,
@@ -1123,17 +1185,44 @@ export class ClaudeCodeManager extends AbstractCliManager {
   }
 
   /**
-   * Dispose and remove the pipeline tuple for panelId.
-   * Idempotent: safe to call multiple times.
+   * Dispose and remove the pipeline tuple for a spawnKey (per-lane on fan-out,
+   * else === panelId). Idempotent: safe to call multiple times.
+   *
+   * SUB-HAZARD A: the DynamicWorkflowTracker is a runId-keyed singleton shared by
+   * all fan-out lanes. Detach ONLY when this run's refcount falls to 0 (the last
+   * lane), so a finishing lane never tears down a sibling lane's detector. The
+   * per-lane sink/router ARE per-spawn and always disposed.
    */
-  private cleanupPipeline(panelId: string): void {
-    const pl = this.pipelines.get(panelId);
+  private cleanupPipeline(spawnKey: string): void {
+    const pl = this.pipelines.get(spawnKey);
     if (!pl) return;
-    // Stop dynamic-workflow detection/tailing for the run before sink disposal.
-    DynamicWorkflowTracker.tryGetInstance()?.detachRun(pl.runId);
+    // Decrement the per-run tracker refcount; detach only when the LAST lane of
+    // this run is cleaned up (1→0). Guard against double-cleanup driving it < 0.
+    const remaining = (this.trackerRefcountByRunId.get(pl.runId) ?? 0) - 1;
+    if (remaining <= 0) {
+      this.trackerRefcountByRunId.delete(pl.runId);
+      // Stop dynamic-workflow detection/tailing for the run before sink disposal.
+      DynamicWorkflowTracker.tryGetInstance()?.detachRun(pl.runId);
+    } else {
+      this.trackerRefcountByRunId.set(pl.runId, remaining);
+    }
     pl.sink.dispose(pl.runId);
     pl.router.clearRun(pl.runId);
-    this.pipelines.delete(panelId);
+    this.pipelines.delete(spawnKey);
+  }
+
+  /**
+   * Remove a spawnKey from its run's live-lane registry, deleting the Set once
+   * the run has no remaining lanes. Idempotent — safe on the abort + normal
+   * teardown paths.
+   */
+  private forgetSpawnKey(runId: string, spawnKey: string): void {
+    const keySet = this.spawnKeysByRunId.get(runId);
+    if (keySet === undefined) return;
+    keySet.delete(spawnKey);
+    if (keySet.size === 0) {
+      this.spawnKeysByRunId.delete(runId);
+    }
   }
 
   // ---------------------------------------------------------------------------
