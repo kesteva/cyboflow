@@ -421,4 +421,55 @@ describe('ClaudeCodeManager — per-lane parallel spawns', () => {
     await spawnB;
     expect(bundleRefcount(mgr).has(runId)).toBe(false);
   });
+
+  // -------------------------------------------------------------------------
+  // Leak guard: a spawn that fails in buildSdkOptions (BEFORE runSdkQuery owns
+  // teardown) must NOT strand the shared-bundle refcount — otherwise the
+  // genuinely-last lane can never strip the bundle. Regression for the M5
+  // increment/decrement skew: bump at spawn time, decrement only in
+  // runSdkQuery's finally, with a throwable `await buildSdkOptions` in between.
+  // -------------------------------------------------------------------------
+  it('unwinds the shared-bundle refcount when a sibling lane fails in buildSdkOptions', async () => {
+    const runId = 'run-leak';
+    const keyA = `${runId}:t1`;
+    const keyB = `${runId}:t2`;
+    const bundleRefcount = (m: ClaudeCodeManager): Map<string, number> =>
+      (m as unknown as { bundleRefcountBySession: Map<string, number> }).bundleRefcountBySession;
+
+    // Lane A spawns normally and parks mid-stream (refcount → 1).
+    const spawnA = mgr.spawnCliProcess({
+      panelId: runId, sessionId: runId, runId, worktreePath: '/tmp/wt',
+      prompt: 'A', permissionMode: 'ignore', spawnKey: keyA,
+    });
+    await waitForSpawn(mgr, keyA);
+    expect(bundleRefcount(mgr).get(runId)).toBe(1);
+
+    // Lane B (same sessionId) bumps the refcount (1 → 2) then FAILS in
+    // buildSdkOptions. The catch must decrement back to 1, not leave it at 2.
+    const buildSpy = vi
+      .spyOn(
+        mgr as unknown as { buildSdkOptions: (o: unknown) => Promise<unknown> },
+        'buildSdkOptions',
+      )
+      .mockRejectedValueOnce(new Error('build boom'));
+    await expect(
+      mgr.spawnCliProcess({
+        panelId: runId, sessionId: runId, runId, worktreePath: '/tmp/wt',
+        prompt: 'B', permissionMode: 'ignore', spawnKey: keyB,
+      }),
+    ).rejects.toThrow('build boom');
+    buildSpy.mockRestore();
+
+    // The failed lane left NO residue: refcount back to 1, and lane B registered
+    // nothing in the per-spawn / per-run maps (it threw before those installs).
+    expect(bundleRefcount(mgr).get(runId)).toBe(1);
+    expect(getSpawnKeysByRunId(mgr).get(runId)).toEqual(new Set([keyA]));
+    expect(getProcesses(mgr).has(keyB)).toBe(false);
+    expect(getPipelines(mgr).has(keyB)).toBe(false);
+
+    // The genuinely-LAST lane (A) can therefore still strip the bundle (1 → 0).
+    await mgr.killProcess(keyA);
+    await spawnA;
+    expect(bundleRefcount(mgr).has(runId)).toBe(false);
+  });
 });

@@ -475,6 +475,18 @@ export class ClaudeCodeManager extends AbstractCliManager {
       const sessionRow = this.sessionManager.getDbSession(sessionId);
       const runId = (sessionRow?.run_id as string | null) ?? panelId;
 
+      // Build the final prompt BEFORE any per-spawn / per-run resource is
+      // registered below. enhancePromptForStructuredCommit / getDbSession are the
+      // only synchronous throw points in the setup window; computing finalPrompt
+      // here means a throw leaks nothing — no bundle refcount, pipeline, tracker,
+      // or processes entry has been installed yet.
+      const dbSession = this.sessionManager.getDbSession(sessionId);
+      const finalPrompt = enhancePromptForStructuredCommit(
+        options.prompt,
+        dbSession || { id: sessionId },
+        this.logger
+      );
+
       // Install the run's co-located `/cyboflow-<phase>` command bundle (+ any
       // subagents) into `<worktree>/.claude/commands` | `.claude/agents` BEFORE
       // the query() runs. The SDK auto-discovers them via settingSources
@@ -494,7 +506,20 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // effectiveOptions so a lane spawn's stripped resume signals (M5(1)) reach
       // buildSdkOptions — a lane never resumes. Non-lane spawns: effectiveOptions
       // === options, so this is byte-identical.
-      const sdkOptions = await this.buildSdkOptions({ ...effectiveOptions, runId });
+      //
+      // SHARED-BUNDLE leak fix: buildSdkOptions assembles SDK options (mode
+      // resolution, env compose, hook wiring) and can REJECT. It runs AFTER the
+      // bundleRefcountBySession bump above but BEFORE runSdkQuery (whose finally
+      // owns the paired decrement), so a rejection here would strand the refcount
+      // at +1 — and the genuinely-last lane could then never strip the shared
+      // bundle. Undo the bump on failure, then rethrow so the caller still sees it.
+      let sdkOptions: Options;
+      try {
+        sdkOptions = await this.buildSdkOptions({ ...effectiveOptions, runId });
+      } catch (buildErr) {
+        this.removeBundleForSession(sessionId);
+        throw buildErr;
+      }
 
       // Set up the per-run pipeline (EventRouter + RawEventsSink).
       const router = new EventRouter();
@@ -547,14 +572,6 @@ export class ClaudeCodeManager extends AbstractCliManager {
         data: sessionInfoMessage,
         timestamp: new Date()
       });
-
-      // Build the final prompt.
-      const dbSession = this.sessionManager.getDbSession(sessionId);
-      const finalPrompt = enhancePromptForStructuredCommit(
-        options.prompt,
-        dbSession || { id: sessionId },
-        this.logger
-      );
 
       // Push stub into processes map so isPanelRunning / getAllProcesses work.
       const stub: StubCliProcess = {
