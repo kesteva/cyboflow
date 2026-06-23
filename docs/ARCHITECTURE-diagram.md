@@ -104,7 +104,7 @@ graph TB
 
             subgraph Data["Data Layer"]
                 DB[(better-sqlite3 11.7<br/>~/.cyboflow/<br/>WAL mode)]
-                Schema[schema.sql +<br/>migrations 003..030<br/>2-phase runner]
+                Schema[schema.sql +<br/>migrations 003..033<br/>2-phase runner]
                 DB --- Schema
             end
 
