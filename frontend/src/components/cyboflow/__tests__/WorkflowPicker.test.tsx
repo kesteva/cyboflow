@@ -700,6 +700,69 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
   });
 });
 
+describe('WorkflowPicker — Ship idea-selection gate (feat/ship-workflow)', () => {
+  beforeEach(() => {
+    mockRunStart.mockClear();
+    // A single Ship flow so "Start Run" hits the idea gate. Ship is IDEA-seeded
+    // like the planner (NOT the sprint batch picker) — the executable task subset
+    // is chosen later, at the in-run approve-plan gate.
+    mockWorkflowsList.mockResolvedValue([
+      { id: 'wf-ship', project_id: 1, name: 'ship', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+    ]);
+    mockTasksList.mockResolvedValue([]);
+  });
+
+  it('opens IdeaPickerModal (NOT the batch picker) on Start Run and does NOT launch until an idea is picked', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    // The idea picker opened — NOT the sprint task-batch picker.
+    expect(await screen.findByTestId('idea-picker-submit')).toBeInTheDocument();
+    expect(screen.queryByTestId('task-batch-picker-launch')).toBeNull();
+    expect(mockRunStart).not.toHaveBeenCalled();
+  });
+
+  it('threads the picked idea id into runs.start.mutate', async () => {
+    mockTasksList.mockResolvedValue([
+      {
+        id: 'IDEA-9', project_id: 1, type: 'idea', ref: 'IDEA-9', title: 'Seed idea', summary: null,
+        body: 'prose', priority: 'P2', repo: null, parent_epic_id: null, originating_idea_id: null,
+        scope: null, board_id: 'b', stage_id: 'idea', archived_at: null, stage_position: 1,
+        version: 1, inFlow: [], awaitingReview: false, isDone: false, created_at: '', updated_at: '',
+      },
+    ]);
+
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    // Pick the idea and confirm.
+    await screen.findByLabelText('Select idea');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-picker-submit'));
+    });
+
+    // ONE idea-seeded run — same launch shape as the planner (ideaId threaded,
+    // NO taskIds; the sprint batch is materialized mid-run by the orchestrator).
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: 'wf-ship',
+      projectId: 1,
+      substrate: 'sdk',
+      sessionId: 'session-quick-001',
+      permissionMode: 'default',
+      ideaId: 'IDEA-9',
+    });
+  });
+});
+
 describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)', () => {
   beforeEach(() => {
     mockRunStart.mockClear();

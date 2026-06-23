@@ -28,9 +28,11 @@
  *
  * Launch paths (all fire from step ③):
  *   - workflow: `trpc.cyboflow.runs.start.mutate` (threading substrate +
- *     permissionMode) → setActiveRun → goToSession. The Planner ('planner') is
- *     gated behind {@link IdeaPickerModal}; the chosen idea id is threaded as
- *     runs.start.mutate({ ideaId }).
+ *     permissionMode) → setActiveRun → goToSession. The Planner ('planner') AND
+ *     the Ship ('ship') flow are gated behind {@link IdeaPickerModal} (both are
+ *     IDEA-seeded; Ship runs planner ⊕ sprint in one continuous run and selects
+ *     the executable task subset later, at the in-run approve-plan gate); the
+ *     chosen idea id is threaded as runs.start.mutate({ ideaId }).
  *   - sprint: gated behind {@link TaskBatchPickerModal} — a sprint is ONE
  *     session-hosted run seeded with the multi-selected task ids (single-run
  *     lane model; the orchestrator agent fans the tasks out as subagents in the
@@ -472,8 +474,11 @@ export default function SessionStartWizard(): React.JSX.Element {
 
     // selection.kind === 'workflow'
     const meta = workflowMetas.find((m) => m.id === selection.workflowId);
-    if (meta?.name === 'planner') {
-      // Gate behind the idea picker — do NOT flip the latch yet.
+    if (meta?.name === 'planner' || meta?.name === 'ship') {
+      // Gate behind the idea picker — do NOT flip the latch yet. Ship (planner ⊕
+      // sprint in one continuous run) is IDEA-seeded like the planner, so it
+      // shares the idea gate; the human task-subset selection happens later, at
+      // the in-run approve-plan gate.
       setLaunchError(null);
       setPendingWorkflowId(selection.workflowId);
       setIdeaPickerOpen(true);

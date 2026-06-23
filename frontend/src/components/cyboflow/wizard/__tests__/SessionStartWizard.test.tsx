@@ -94,6 +94,18 @@ vi.mock('../../TaskBatchPickerModal', () => ({
   ),
 }));
 
+// IdeaPickerModal — stubbed to a button that reports a fixed idea id, so the
+// wizard's idea-gate WIRING (open → onPicked → runs.start({ ideaId }) →
+// goToSession) is tested in isolation. Shared by the Planner AND Ship flows
+// (both IDEA-seeded). The modal's own internals are covered by its test file.
+vi.mock('../../IdeaPickerModal', () => ({
+  IdeaPickerModal: ({ onPicked }: { onPicked: (id: string) => void }) => (
+    <button data-testid="mock-idea-pick" onClick={() => onPicked('IDEA-7')}>
+      pick idea
+    </button>
+  ),
+}));
+
 // API wrapper — projects (banner) + sessions.createQuick (quick launch).
 vi.mock('../../../../utils/api', () => ({
   API: {
@@ -136,6 +148,16 @@ const SPRINT_WORKFLOW_ROW: WorkflowRow = {
   id: 'wf-1',
   project_id: 1,
   name: 'sprint',
+  workflow_path: null,
+  spec_json: '{}',
+  permission_mode: 'default',
+  created_at: '',
+};
+/** The Ship built-in row (idea-gated, like the planner). */
+const SHIP_WORKFLOW_ROW: WorkflowRow = {
+  id: 'wf-1',
+  project_id: 1,
+  name: 'ship',
   workflow_path: null,
   spec_json: '{}',
   permission_mode: 'default',
@@ -415,6 +437,65 @@ describe('SessionStartWizard — Sprint batch gate', () => {
     );
     // The run is nested under its session and the wizard navigates INTO it
     // (same close-out path as any workflow run — not home).
+    expect(useCyboflowStore.getState().activeRunId).toBe('run-test-001');
+    expect(useCyboflowStore.getState().selectedSessionId).toBe('session-ensured-001');
+    expect(useNavigationStore.getState().view).toBe('session');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ship idea gate (feat/ship-workflow) — Ship runs planner ⊕ sprint in one
+// continuous run and is IDEA-seeded like the planner: the CTA opens the idea
+// picker (NOT the sprint task-batch picker), and a pick fires runs.start with the
+// chosen ideaId threaded (NO taskIds — the executable subset is selected later,
+// at the in-run approve-plan gate). Mirrors the Planner idea gate.
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — Ship idea gate', () => {
+  beforeEach(() => {
+    mockWorkflowsList.mockResolvedValue([SHIP_WORKFLOW_ROW]);
+  });
+
+  it('opens the idea picker (NOT the batch picker) when Ship is launched', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    // The idea picker is shown — NOT the sprint batch picker — and no run has
+    // launched yet (the gate is freely cancellable).
+    expect(screen.getByTestId('mock-idea-pick')).toBeInTheDocument();
+    expect(screen.queryByTestId('mock-batch-pick')).toBeNull();
+    expect(mockRunStart).not.toHaveBeenCalled();
+  });
+
+  it('fires runs.start with the picked ideaId (NO taskIds) and navigates to the session', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('mock-idea-pick'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    const startArg = mockRunStart.mock.calls[0][0];
+    expect(startArg).toEqual(
+      expect.objectContaining({
+        workflowId: 'wf-1',
+        projectId: 1,
+        sessionId: 'session-ensured-001',
+        substrate: 'sdk',
+        permissionMode: 'default',
+        ideaId: 'IDEA-7',
+      }),
+    );
+    // Ship is idea-seeded, never batch-seeded — no taskIds threaded.
+    expect(startArg).not.toHaveProperty('taskIds');
+    // The run is nested under its session and the wizard navigates INTO it.
     expect(useCyboflowStore.getState().activeRunId).toBe('run-test-001');
     expect(useCyboflowStore.getState().selectedSessionId).toBe('session-ensured-001');
     expect(useNavigationStore.getState().view).toBe('session');

@@ -12,10 +12,10 @@
  * Direction "Concept C" (design handoff): a single live "session node" wired to
  * real session metrics, joined by a dashed edge to an "add a workflow" node — the
  * first-class path to promote the session into a structured run. Workflow buttons
- * read the REAL catalogue (cyboflow.workflows.list → planner / sprint), never a
- * hardcoded list; clicking one launches it onto THIS session (Planner via the
- * idea-picker gate, Sprint via the task-batch picker gate). "Browse all" opens
- * the full WorkflowPicker.
+ * read the REAL catalogue (cyboflow.workflows.list → planner / sprint / ship /
+ * any custom flows), never a hardcoded list; clicking one launches it onto THIS
+ * session (Planner AND Ship via the idea-picker gate, Sprint via the task-batch
+ * picker gate). "Browse all" opens the full WorkflowPicker.
  */
 import { useEffect, useMemo, useState, useCallback } from 'react';
 import { trpc } from '../../trpc/client';
@@ -265,8 +265,10 @@ export function QuickSessionCanvas({
         return;
       }
       // Planner is idea-gated, Sprint is task-batch-gated — open the matching
-      // picker; other workflows launch directly.
-      if (row.name === 'planner') {
+      // picker; other workflows launch directly. Ship (planner ⊕ sprint in one
+      // run) is IDEA-seeded like the planner, so it shares the idea gate (the
+      // task-subset choice happens later, at the in-run approve-plan gate).
+      if (row.name === 'planner' || row.name === 'ship') {
         setPlannerIdForGate(row.id);
         return;
       }

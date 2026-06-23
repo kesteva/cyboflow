@@ -1,6 +1,6 @@
 /**
- * WorkflowPicker — dropdown of the cyboflow workflows (Planner + Sprint) +
- * Start Run button.
+ * WorkflowPicker — dropdown of the cyboflow workflows (Planner + Sprint + Ship +
+ * any custom flows) + Start Run button.
  *
  * Accepts a `projectId` prop; on mount it calls `trpc.cyboflow.workflows.list`
  * and populates a `<select>`.  Clicking "Start Run" calls
@@ -220,9 +220,10 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     if (selectedId === null || startInFlightRef.current) return;
     // Planner is gated behind the idea picker, Sprint behind the batch picker.
     // Workflow `name` is the lowercase CyboflowWorkflowName seeded by
-    // WorkflowRegistry — compare to 'planner' / 'sprint'.
+    // WorkflowRegistry — compare to 'planner' / 'sprint'. Ship (planner ⊕ sprint
+    // in one run) is IDEA-seeded like the planner, so it shares the idea gate.
     const selected = workflows.find((wf) => wf.id === selectedId);
-    if (selected?.name === 'planner') {
+    if (selected?.name === 'planner' || selected?.name === 'ship') {
       setError(null);
       setIdeaPickerOpen(true);
       return;
