@@ -347,6 +347,92 @@ describe('QuestionRouter', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Case 4b: clearPendingForRun settles a run still wedged at 'awaiting_input'
+  //          to 'awaiting_review' (nudge-resumable) instead of leaving it stuck.
+  // -------------------------------------------------------------------------
+  it('clearPendingForRun flips a still-awaiting_input run to awaiting_review (not left wedged)', async () => {
+    const db = createTestDb({ includeQuestionsTable: true });
+    const adapter = dbAdapter(db);
+    const socketReply = vi.fn<(answer: QuestionAnswer) => void>();
+    const router = QuestionRouter.initialize(adapter);
+
+    const runId = 'qrun-004b';
+    seedRun(db, { id: runId, status: 'running' });
+
+    const questions = [
+      {
+        question: 'Approve and retire?',
+        header: 'Done',
+        multiSelect: false,
+        options: [
+          { label: 'Approve', description: 'approve' },
+          { label: 'Reject', description: 'reject' },
+        ],
+      },
+    ];
+
+    const questionPromise = router.requestQuestion(runId, 'tool-use-id-004b', questions, socketReply);
+    await router['getQuestionQueue'](runId).onIdle();
+
+    // requestQuestion opened the gate → run parked at 'awaiting_input'.
+    const before = db
+      .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+      .get(runId) as { status: string };
+    expect(before.status).toBe('awaiting_input');
+
+    // Tear the run down while the gate is open (the SDK query finally / shutdown).
+    router.clearPendingForRun(runId);
+    await questionPromise; // must not hang
+
+    // The run rests in 'awaiting_review' (review queue + nudge-resumable), NOT
+    // wedged at 'awaiting_input'.
+    const after = db
+      .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+      .get(runId) as { status: string };
+    expect(after.status).toBe('awaiting_review');
+  });
+
+  // -------------------------------------------------------------------------
+  // Case 4c: the awaiting_review settle is GUARDED — a run already moved to a
+  //          terminal status (e.g. a concurrent cancel) is never resurrected.
+  // -------------------------------------------------------------------------
+  it('clearPendingForRun does NOT flip a run that already reached a terminal status', async () => {
+    const db = createTestDb({ includeQuestionsTable: true });
+    const adapter = dbAdapter(db);
+    const socketReply = vi.fn<(answer: QuestionAnswer) => void>();
+    const router = QuestionRouter.initialize(adapter);
+
+    const runId = 'qrun-004c';
+    seedRun(db, { id: runId, status: 'running' });
+
+    const questions = [
+      {
+        question: 'Approve?',
+        header: 'Q',
+        multiSelect: false,
+        options: [
+          { label: 'Yes', description: 'y' },
+          { label: 'No', description: 'n' },
+        ],
+      },
+    ];
+
+    const questionPromise = router.requestQuestion(runId, 'tool-use-id-004c', questions, socketReply);
+    await router['getQuestionQueue'](runId).onIdle();
+
+    // Simulate a concurrent cancel stamping the run terminal before teardown.
+    db.prepare("UPDATE workflow_runs SET status = 'canceled' WHERE id = ?").run(runId);
+
+    router.clearPendingForRun(runId);
+    await questionPromise;
+
+    const after = db
+      .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+      .get(runId) as { status: string };
+    expect(after.status).toBe('canceled');
+  });
+
+  // -------------------------------------------------------------------------
   // Case 5: respond after run is canceled does NOT revive the run and still
   //         resolves the awaiting caller with empty-answers payload
   // -------------------------------------------------------------------------

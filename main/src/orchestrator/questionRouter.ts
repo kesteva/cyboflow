@@ -711,6 +711,42 @@ export class QuestionRouter extends EventEmitter {
       entry.resolve(emptyAnswer);
       this.emit('questionAnswered', { questionId, status: 'timed_out' });
     }
+
+    // Settle the OWNING run if it is still wedged at 'awaiting_input'.
+    // clearPendingForRun fires on run teardown (the SDK query's finally block,
+    // cancel, shutdown). The question rows + folded review items above are now
+    // settled, but the run row itself is untouched — so a run torn down WHILE a
+    // gate was open lingers at 'awaiting_input' with no pending question and no
+    // live SDK session: the gate UI has nothing to act on and the composer's
+    // only enable path (awaiting_review nudge / a live question) never fires, so
+    // the run is unreachable until recoverStaleAwaitingInput at the NEXT app boot
+    // flips it to 'failed'. Rest it in 'awaiting_review' instead, so it lands in
+    // the review queue and is nudge-resumable (runs.nudge requires
+    // awaiting_review + a captured claude_session_id, both of which a torn-down
+    // run has). Guarded `WHERE status='awaiting_input'`: a cancel / fail path
+    // that already stamped (or, like cancelRunHandler, later stamps under
+    // `status NOT IN terminal`) a terminal status always wins, and an
+    // already-terminal run never matches. Fail-soft — a DB error during teardown
+    // must never throw.
+    try {
+      const settledAt = new Date().toISOString();
+      const settle = this.db
+        .prepare(
+          `UPDATE workflow_runs SET status = 'awaiting_review', updated_at = ?
+           WHERE id = ? AND status = 'awaiting_input'`,
+        )
+        .run(settledAt, runId) as { changes: number };
+      if (settle.changes > 0) {
+        runStatusEvents.emit(
+          'changed',
+          { runId, status: 'awaiting_review' } satisfies RunStatusChangedEvent,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        `[QuestionRouter] clearPendingForRun: run-status settle failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
