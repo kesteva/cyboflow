@@ -1182,8 +1182,19 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
   /**
    * Override killProcess to abort the SDK run instead of killing a PTY.
+   *
+   * Fan-out dispatch: a programmatic fan-out run drives multiple lanes under ONE
+   * runId (panelId), each registered in spawnKeysByRunId. When panelId is such a
+   * runId, delegate to killRun so EVERY lane is aborted — aborting the single
+   * spawn keyed by panelId would leave sibling lanes running. Every non-fan-out
+   * path (quick sessions, single-step, orchestrated runs) has no lane-registry
+   * entry, so it takes the EXISTING single-abort path below, byte-identical.
    */
   override async killProcess(panelId: string): Promise<void> {
+    if (this.spawnKeysByRunId.has(panelId)) {
+      await this.killRun(panelId);
+      return;
+    }
     // Deliberate ordering: await abortCurrentRun first so the SDK iterator's
     // finally block (in runSdkQuery) disposes the pipeline and clears pending
     // approvals BEFORE we return. Calling the pipeline-dispose helper here
@@ -1196,14 +1207,37 @@ export class ClaudeCodeManager extends AbstractCliManager {
   }
 
   /**
-   * Abort the running SDK query for panelId and wait for it to settle.
+   * Abort EVERY lane spawn of a programmatic fan-out run and wait for them all
+   * to settle. Reads the run's live spawnKeys from spawnKeysByRunId and routes
+   * each through the single-spawn abort routine (abortCurrentRun, keyed by
+   * spawnKey since the sdkRuns / processes maps are spawnKey-keyed). Tolerates an
+   * absent or empty set as a no-op. Snapshots the set first because each lane's
+   * teardown (forgetSpawnKey) mutates it.
    */
-  private async abortCurrentRun(panelId: string): Promise<void> {
-    const run = this.sdkRuns.get(panelId);
+  async killRun(runId: string): Promise<void> {
+    const keySet = this.spawnKeysByRunId.get(runId);
+    if (keySet === undefined || keySet.size === 0) return;
+    const spawnKeys = Array.from(keySet);
+    await Promise.all(
+      spawnKeys.map(async (spawnKey) => {
+        await this.abortCurrentRun(spawnKey);
+        this.processes.delete(spawnKey);
+      })
+    );
+  }
+
+  /**
+   * Abort the running SDK query for a single spawn and wait for it to settle.
+   * The key is a spawnKey: on a non-fan-out path it === panelId (so existing
+   * callers pass panelId unchanged); on a fan-out lane killRun passes the lane's
+   * spawnKey. The sdkRuns map is spawnKey-keyed, so this resolves the right run.
+   */
+  private async abortCurrentRun(spawnKey: string): Promise<void> {
+    const run = this.sdkRuns.get(spawnKey);
     if (!run) return;
     run.abortController.abort();
     await run.iteratorDone.catch(() => {});
-    this.sdkRuns.delete(panelId);
+    this.sdkRuns.delete(spawnKey);
   }
 
   /**
