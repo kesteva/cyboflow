@@ -12,6 +12,11 @@
  *   - the DENOMINATOR (`contextWindow`, e.g. 200000) only appears in `result`
  *     events' `modelUsage.<model>.contextWindow` (cyboflow's typed `system/init`
  *     carries no window). So the meter stays "--%" until the first `result`.
+ *     A result's OWN token counts (modelUsage.<model>.{inputTokens,cache*}) are
+ *     CUMULATIVE over the whole run, not a live snapshot — for a long agentic
+ *     run they reach millions (every turn's cache re-read summed) and would peg
+ *     the meter at 100%, so they are deliberately NOT used as the numerator; the
+ *     window is all we take from a result.
  *   - the NUMERATOR (current prompt size) updates more often, on each
  *     `assistant` event's `message.usage` — the sum of the disjoint token
  *     partitions input + cache_read + cache_creation ≈ the live context size.
@@ -46,6 +51,10 @@ export function deriveRunContextUsage(events: readonly StreamEvent[]): string | 
     }
 
     if (ev.type === 'result') {
+      // A `result` carries the context WINDOW only. Its modelUsage token counts
+      // are cumulative over the whole run (not the live prompt size), so we do
+      // NOT touch `used` here — that comes solely from per-turn `assistant`
+      // usage above. See the file header for why.
       const mu = ev.payload.modelUsage;
       if (mu === undefined) continue;
       // modelUsage is keyed by model name; take the first model that reports a
@@ -57,12 +66,6 @@ export function deriveRunContextUsage(events: readonly StreamEvent[]): string | 
         const cw = m.contextWindow;
         if (typeof cw !== 'number' || cw <= 0) continue;
         contextWindow = cw;
-        const input = typeof m.inputTokens === 'number' ? m.inputTokens : 0;
-        const cacheRead = typeof m.cacheReadInputTokens === 'number' ? m.cacheReadInputTokens : 0;
-        const cacheCreation =
-          typeof m.cacheCreationInputTokens === 'number' ? m.cacheCreationInputTokens : 0;
-        const n = input + cacheRead + cacheCreation;
-        if (n > 0) used = n;
         break;
       }
     }

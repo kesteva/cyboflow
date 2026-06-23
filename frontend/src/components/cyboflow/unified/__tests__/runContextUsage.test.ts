@@ -23,12 +23,41 @@ describe('deriveRunContextUsage', () => {
     expect(deriveRunContextUsage([assistant({ input_tokens: 5000, cache_read_input_tokens: 40000 })])).toBeNull();
   });
 
-  it('computes the %-string from a result modelUsage (window + input + cache)', () => {
+  it('takes the WINDOW from a result but the NUMERATOR from per-turn assistant usage', () => {
     const events = [
+      // result carries the window; its OWN (cumulative) token counts are ignored
       result({ [MODEL]: { contextWindow: 200000, inputTokens: 8000, cacheReadInputTokens: 120000, cacheCreationInputTokens: 0 } }),
+      assistant({ input_tokens: 2000, cache_read_input_tokens: 60000, cache_creation_input_tokens: 0 }),
     ];
-    // used = 8000 + 120000 = 128000 → 128k / 200k = 64%
-    expect(deriveRunContextUsage(events)).toBe('128k/200k tokens (64%)');
+    // used = the assistant turn (62000), NOT the result's cumulative 128000.
+    expect(deriveRunContextUsage(events)).toBe('62k/200k tokens (31%)');
+  });
+
+  it('returns null for a result with no preceding assistant usage (window only → "--%")', () => {
+    // A result establishes the window but its cumulative counts are not a live
+    // snapshot; with no per-turn assistant usage there is no numerator.
+    expect(
+      deriveRunContextUsage([result({ [MODEL]: { contextWindow: 200000, inputTokens: 8000, cacheReadInputTokens: 120000 } })]),
+    ).toBeNull();
+  });
+
+  it('does NOT let a trailing cumulative result peg the meter (regression: ctx 100% bug)', () => {
+    // Exact payloads from the wedged Ship run ee0f2a69: the final result's
+    // modelUsage summed 2.39M cumulative tokens (mostly cache re-reads) — the
+    // old deriver clamped that to the 1M window and showed 100%. The true live
+    // context is the last assistant turn (~96k = 10%).
+    const events = [
+      assistant({ input_tokens: 1, cache_read_input_tokens: 95708, cache_creation_input_tokens: 273 }),
+      result({
+        ['claude-opus-4-7[1m]']: {
+          contextWindow: 1_000_000,
+          inputTokens: 171,
+          cacheReadInputTokens: 2_156_264,
+          cacheCreationInputTokens: 235_454,
+        },
+      }),
+    ];
+    expect(deriveRunContextUsage(events)).toBe('96k/1000k tokens (10%)');
   });
 
   it('keeps the last-seen window and tracks the newer assistant usage (live update)', () => {
