@@ -1249,11 +1249,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * Override killProcess to abort the SDK run instead of killing a PTY.
    *
    * Fan-out dispatch: a programmatic fan-out run drives multiple lanes under ONE
-   * runId (panelId), each registered in spawnKeysByRunId. When panelId is such a
-   * runId, delegate to killRun so EVERY lane is aborted — aborting the single
-   * spawn keyed by panelId would leave sibling lanes running. Every non-fan-out
-   * path (quick sessions, single-step, orchestrated runs) has no lane-registry
-   * entry, so it takes the EXISTING single-abort path below, byte-identical.
+   * runId (panelId), each registered in spawnKeysByRunId. When panelId is a runId
+   * with registered spawns, delegate to killRun so EVERY lane is aborted —
+   * aborting only the spawn keyed by panelId would leave sibling lanes running.
+   * This guard ALSO catches single-lane workflow runs (panelId === runId, one
+   * registered spawnKey === panelId): killRun over that one-entry set is
+   * behaviorally identical to the single-abort path below. Only ids with NO
+   * registry entry — quick sessions (run_id ≠ panelId) and untracked panels —
+   * fall through to the EXISTING single-abort path, byte-identical.
    */
   override async killProcess(panelId: string): Promise<void> {
     if (this.spawnKeysByRunId.has(panelId)) {
