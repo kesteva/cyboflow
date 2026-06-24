@@ -27,9 +27,11 @@ import { SettingsSection } from './ui/SettingsSection';
 interface SettingsProps {
   isOpen: boolean;
   onClose: () => void;
+  /** Tab to show when the dialog opens (defaults to 'general'). */
+  initialTab?: 'general' | 'notifications' | 'updates';
 }
 
-export function Settings({ isOpen, onClose }: SettingsProps) {
+export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   const [_config, setConfig] = useState<AppConfig | null>(null);
   const [verbose, setVerbose] = useState(false);
   const [globalSystemPrompt, setGlobalSystemPrompt] = useState('');
@@ -54,7 +56,7 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   });
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'general' | 'notifications' | 'updates'>('general');
+  const [activeTab, setActiveTab] = useState<'general' | 'notifications' | 'updates'>(initialTab ?? 'general');
   const { updateSettings } = useNotifications();
   const { theme, setTheme } = useTheme();
   const { fetchConfig: refreshConfigStore } = useConfigStore();
@@ -62,8 +64,12 @@ export function Settings({ isOpen, onClose }: SettingsProps) {
   useEffect(() => {
     if (isOpen) {
       fetchConfig();
+      // Honor a requested tab each time the dialog is (re)opened.
+      if (initialTab) {
+        setActiveTab(initialTab);
+      }
     }
-  }, [isOpen]);
+  }, [isOpen, initialTab]);
 
   const fetchConfig = async () => {
     try {

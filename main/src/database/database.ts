@@ -46,8 +46,26 @@ interface ExecutionDiffRow {
   timestamp: string;
 }
 
+/**
+ * Result of the boot-time schema-version gate. `tooNew` is set when the database
+ * on disk was advanced (forward-migrated) by a NEWER build than the one now
+ * opening it — e.g. an older Cyboflow opening a DB that Cyboflow Dev already
+ * migrated, since both packaged variants share ~/.cyboflow. See docs/UPDATES.md.
+ */
+export interface SchemaVersionStatus {
+  /** PRAGMA user_version found on disk BEFORE this binary ran its migrations. */
+  onDisk: number;
+  /** Highest migration number this binary ships (its schema capability). */
+  appMax: number;
+  /** True when onDisk > appMax: the DB knows a schema this binary does not. */
+  tooNew: boolean;
+}
+
 export class DatabaseService {
   private db: Database.Database;
+
+  /** Populated by initialize(); read by the boot sequence for the upgrade gate. */
+  private schemaVersionStatus: SchemaVersionStatus | null = null;
 
   /** @internal — testing only: overrides the migrations directory used by runFileBasedMigrations() */
   private migrationsDirOverride: string | null = null;
@@ -114,8 +132,53 @@ export class DatabaseService {
   }
 
   initialize(): void {
+    // Schema-version gate (docs/UPDATES.md): both packaged variants share
+    // ~/.cyboflow, so a newer build (e.g. Cyboflow Dev) may have forward-migrated
+    // this DB past what THIS binary understands. Capture that BEFORE we touch the
+    // schema so the boot sequence can warn + offer an update instead of silently
+    // running old code against a newer schema (which destructive migrations such
+    // as 015_entity_model_rebuild would turn into corruption).
+    const onDisk = this.db.pragma('user_version', { simple: true }) as number;
+    const appMax = this.computeAppMaxMigrationVersion();
+    this.schemaVersionStatus = { onDisk, appMax, tooNew: onDisk > appMax };
+
     this.initializeSchema();
     this.runMigrations();
+
+    // Stamp the DB with the highest migration this binary knows so a future OLDER
+    // binary can detect that we advanced it. Only ever RAISE the marker — never
+    // lower a newer build's stamp (e.g. after the user chose "Open Anyway").
+    if (appMax > onDisk) {
+      this.db.pragma(`user_version = ${appMax}`);
+    }
+  }
+
+  /** The boot-time schema-version verdict, or null if initialize() hasn't run. */
+  getSchemaVersionStatus(): SchemaVersionStatus | null {
+    return this.schemaVersionStatus;
+  }
+
+  /**
+   * Highest `NNN_*.sql` migration prefix this binary ships — its schema
+   * capability. Returns 0 when the migrations directory is absent.
+   */
+  private computeAppMaxMigrationVersion(): number {
+    const migrationsDir = this.migrationsDirOverride ?? join(__dirname, 'migrations');
+    let entries: string[];
+    try {
+      entries = readdirSync(migrationsDir);
+    } catch {
+      return 0;
+    }
+    const PREFIX_RE = /^(\d{3})_.*\.sql$/;
+    let max = 0;
+    for (const name of entries) {
+      const match = PREFIX_RE.exec(name);
+      if (match) {
+        max = Math.max(max, parseInt(match[1], 10));
+      }
+    }
+    return max;
   }
 
   private initializeSchema(): void {

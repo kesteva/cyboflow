@@ -93,6 +93,11 @@ import { getBootDatabasePath, getDemoBootEnvironment, getDemoBootError } from '.
 
 export let mainWindow: BrowserWindow | null = null;
 
+// Set by the boot-time schema-version gate when the user picked "Check for
+// Updates" on a database that a newer build advanced. Consumed once by the
+// renderer (Sidebar) on mount to auto-open Settings → Updates.
+let pendingOpenUpdateSettings = false;
+
 /**
  * Set the application title based on development mode and worktree
  */
@@ -1176,6 +1181,50 @@ async function initializeServices() {
 app.whenReady().then(async () => {
   console.log('[Main] App is ready, initializing services...');
   await initializeServices();
+
+  // Schema-version gate: both packaged variants share ~/.cyboflow, so a newer
+  // build (e.g. Cyboflow Dev) may have forward-migrated the DB past what this
+  // binary understands. Warn before we build the UI on top of a schema this
+  // binary may not fully grasp. (Always allow "Open Anyway" per product choice.)
+  const schemaStatus = databaseService.getSchemaVersionStatus();
+  if (schemaStatus?.tooNew) {
+    logger.warn(
+      `[Main] Database schema (user_version=${schemaStatus.onDisk}) is newer than this build (max=${schemaStatus.appMax})`
+    );
+    const choice = dialog.showMessageBoxSync({
+      type: 'warning',
+      buttons: ['Check for Updates', 'Open Anyway', 'Quit'],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+      title: 'Cyboflow',
+      message: 'This database was created by a newer version of Cyboflow',
+      detail:
+        'Your data (~/.cyboflow) was last opened by a newer build — most likely ' +
+        'Cyboflow Dev. This copy of Cyboflow is older and may not understand the ' +
+        'updated database.\n\nOpening it anyway can corrupt data if the newer build ' +
+        'changed table structures. Updating to the matching version is recommended.',
+    });
+    if (choice === 2) {
+      logger.info('[Main] User chose Quit at schema-version gate — not opening the newer DB');
+      databaseService.close();
+      app.quit();
+      return;
+    }
+    if (choice === 0) {
+      pendingOpenUpdateSettings = true;
+    }
+    logger.info(`[Main] Continuing boot past schema-version gate (choice=${choice})`);
+  }
+
+  // One-shot pull (race-free vs a push): the renderer asks on mount whether the
+  // boot gate wants Settings → Updates opened, and we clear the flag.
+  ipcMain.handle('app:consume-open-update-settings', () => {
+    const open = pendingOpenUpdateSettings;
+    pendingOpenUpdateSettings = false;
+    return open;
+  });
+
   console.log('[Main] Services initialized, creating window...');
   await createWindow();
   console.log('[Main] Window created successfully');

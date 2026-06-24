@@ -217,11 +217,32 @@ The data-dir resolution lives in `getCyboflowDirectory()`
 non-packaged Electron dev server (`pnpm dev`) → `~/.cyboflow_dev` so local development
 never mutates or forward-migrates the installed apps' database.
 
-> ⚠️ Because the SQLite DB is **forward-only** migrated, running a Dev build whose
-> migrations are ahead of Stable will advance the shared `~/.cyboflow` DB, after which
-> the older Stable binary may refuse to open it. Keep Dev's schema in step with what
-> you intend Stable to run, or back up `~/.cyboflow` before testing a Dev build that
-> carries new migrations.
+### Schema-version gate (newer DB → warn, don't corrupt)
+
+Because the SQLite DB is **forward-only** migrated, running a Dev build whose
+migrations are ahead of Stable advances the shared `~/.cyboflow` DB. To stop an
+older binary from then silently running against a schema it doesn't understand (a
+real corruption risk — several migrations rebuild/drop tables), `initialize()`
+stamps `PRAGMA user_version` with the highest migration the build ships and, on the
+next boot, compares the on-disk value:
+
+- **on-disk ≤ this build** → normal boot; the stamp is raised to the current max.
+- **on-disk > this build** (DB advanced by a newer build) → a native dialog:
+  *"This database was created by a newer version of Cyboflow"* with
+  **[Check for Updates] [Open Anyway] [Quit]**.
+  - *Check for Updates* boots, then auto-opens **Settings → Updates** (one-shot,
+    via `app:consume-open-update-settings`).
+  - *Open Anyway* boots normally (the stamp is **not** lowered).
+  - *Quit* closes the DB without touching it.
+
+The gate lives in `DatabaseService.getSchemaVersionStatus()` +
+`computeAppMaxMigrationVersion()` (`main/src/database/database.ts`) and is consumed
+at boot in `main/src/index.ts`.
+
+> ⚠️ The gate prevents a silent crash/corruption, but it can't *merge* schemas. If
+> you advance `~/.cyboflow` with a Dev build, the matching Stable still needs those
+> migrations to use the data normally. Back up `~/.cyboflow` before testing a Dev
+> build that carries new migrations if you want a clean path back to the older Stable.
 
 Users get the dev by **downloading the separate Cyboflow Dev app** from the
 website (Settings → Updates points them there) — there is no in-app opt-in.

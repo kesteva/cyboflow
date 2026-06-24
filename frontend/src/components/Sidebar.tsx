@@ -63,6 +63,7 @@ export function Sidebar({
   onToggleWorkflows,
 }: SidebarProps) {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState<'general' | 'notifications' | 'updates'>('general');
   const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
   const [showStatusGuide, setShowStatusGuide] = useState(false);
   const [version, setVersion] = useState<string>('');
@@ -100,6 +101,24 @@ export function Sidebar({
     };
 
     fetchVersion();
+  }, []);
+
+  useEffect(() => {
+    // Boot-time schema-version gate: if the user picked "Check for Updates" when
+    // an older build opened a DB a newer build had advanced, the main process
+    // flags it. Consume the one-shot flag on mount and open Settings → Updates.
+    const consumeOpenUpdateSettings = async () => {
+      try {
+        const open = await window.electronAPI.invoke('app:consume-open-update-settings');
+        if (open === true) {
+          setSettingsInitialTab('updates');
+          setIsSettingsOpen(true);
+        }
+      } catch (error) {
+        console.error('Failed to consume open-update-settings flag:', error);
+      }
+    };
+    consumeOpenUpdateSettings();
   }, []);
 
   return (
@@ -152,7 +171,7 @@ export function Sidebar({
           </div>
           <div className="flex items-center space-x-2 flex-shrink-0">
             <IconButton
-              onClick={() => setIsSettingsOpen(true)}
+              onClick={() => { setSettingsInitialTab('general'); setIsSettingsOpen(true); }}
               aria-label="Settings"
               data-testid="settings-button"
               size="md"
@@ -316,7 +335,7 @@ export function Sidebar({
             <span className="flex-1 truncate text-[10.5px] text-text-secondary">kesteva</span>
             <button
               type="button"
-              onClick={() => setIsSettingsOpen(true)}
+              onClick={() => { setSettingsInitialTab('general'); setIsSettingsOpen(true); }}
               aria-label="Settings"
               className="text-text-tertiary hover:text-text-primary transition-colors"
             >
@@ -342,7 +361,7 @@ export function Sidebar({
         </div>
     </div>
 
-      <Settings isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} />
+      <Settings isOpen={isSettingsOpen} onClose={() => setIsSettingsOpen(false)} initialTab={settingsInitialTab} />
       
       {/* Status Guide Modal */}
       <Modal 
