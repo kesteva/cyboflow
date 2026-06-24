@@ -20,11 +20,6 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
   materialized into sprint lanes — its tasks carry the flow forward. (Existing stuck
   ideas are not retroactively retired.)
 
-### Notes
-
-- Ongoing narrowing/rebuild of the Crystal baseline into Cyboflow. See the git history and
-  `docs/ARCHITECTURE.md` for the current component layout.
-
 ## [0.1.3] — 2026-06-24
 
 ### Changed
