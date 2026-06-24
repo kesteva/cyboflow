@@ -2,6 +2,48 @@ import type Database from 'better-sqlite3';
 import type { ApprovalStatus, WorkflowRunStatus } from '../../../../shared/types/cyboflow';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../../../shared/types/cyboflow';
 import { assertTransitionAllowed } from './stateMachine';
+import { emitUsage } from '../../orchestrator/telemetrySink';
+import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
+import type { TelemetryFlow } from '../../../../shared/types/telemetry';
+
+/**
+ * Emit an anonymized `workflow_run_completed` usage event after a terminal
+ * transition. Best-effort: a single query derives the run's flow + duration; any
+ * failure (or a mock test DB without the schema) is swallowed so it can NEVER
+ * break the transition. No-op until the telemetry sink is registered at boot.
+ */
+function emitRunCompletedUsage(
+  db: Database.Database,
+  runId: string,
+  outcome: 'completed' | 'failed' | 'canceled',
+): void {
+  try {
+    const row = db
+      .prepare(
+        `SELECT wr.started_at AS started_at, w.name AS workflow_name
+           FROM workflow_runs wr
+           LEFT JOIN workflows w ON w.id = wr.workflow_id
+          WHERE wr.id = ?`,
+      )
+      .get(runId) as { started_at: string | null; workflow_name: string | null } | undefined;
+    const name = row?.workflow_name ?? undefined;
+    const flow: TelemetryFlow =
+      name !== undefined && (CYBOFLOW_WORKFLOW_NAMES as readonly string[]).includes(name)
+        ? (name as TelemetryFlow)
+        : 'custom';
+    let durationSeconds: number | undefined;
+    if (row?.started_at) {
+      // SQLite CURRENT_TIMESTAMP is UTC 'YYYY-MM-DD HH:MM:SS' (no zone marker).
+      const startedMs = new Date(row.started_at.replace(' ', 'T') + 'Z').getTime();
+      if (!Number.isNaN(startedMs)) {
+        durationSeconds = Math.max(0, Math.round((Date.now() - startedMs) / 1000));
+      }
+    }
+    emitUsage('workflow_run_completed', { outcome, flow, duration_seconds: durationSeconds });
+  } catch {
+    // Derivation/telemetry must never break a state transition.
+  }
+}
 
 /**
  * Thrown when a state transition is rejected because the source row was no
@@ -151,6 +193,7 @@ export function transitionToCompleted(
       { runId: params.runId, expectedStatus: params.fromStatus, entity: 'workflow_run' },
     );
   }
+  emitRunCompletedUsage(db, params.runId, 'completed');
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +273,7 @@ export function transitionToFailed(
       { runId: params.runId, expectedStatus: params.fromStatus, entity: 'workflow_run' },
     );
   }
+  emitRunCompletedUsage(db, params.runId, 'failed');
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +313,7 @@ export function transitionToCanceled(
       { runId: params.runId, expectedStatus: 'canceled', entity: 'workflow_run' },
     );
   }
+  emitRunCompletedUsage(db, params.runId, 'canceled');
 }
 
 // ---------------------------------------------------------------------------

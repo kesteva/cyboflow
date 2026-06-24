@@ -25,6 +25,7 @@ import type { Approval, ApproveRestOfRunResult, RejectRestOfRunResult } from '..
 import { ApprovalRouter, ApprovalNotFoundError } from '../../approvalRouter';
 import { selectPendingApprovals } from '../../approvalListing';
 import { withLock } from '../../../utils/mutex';
+import { emitUsage } from '../../telemetrySink';
 import type { DatabaseLike } from '../../types';
 
 // ---------------------------------------------------------------------------
@@ -89,6 +90,10 @@ async function decideRestOfRunHandler(
       }
     }
 
+    emitUsage('approval_decided', {
+      decision: decision === 'approved' ? 'approve' : 'reject',
+      scope: 'rest_of_run',
+    });
     return { decided };
   });
 }

@@ -15,6 +15,7 @@
  * All writes are in a single transaction so a crash mid-recovery leaves a
  * clean state.
  */
+import { emitUsage } from './telemetrySink';
 import type { DatabaseLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 
@@ -122,6 +123,9 @@ export function recoverActiveStateOrphans(
                 updated_at = CURRENT_TIMESTAMP
           WHERE id IN (${ph})`,
       ).run(...resumeIds);
+      for (let i = 0; i < resumeIds.length; i++) {
+        emitUsage('workflow_run_reopened', { via: 'boot_recovery' });
+      }
     }
 
     // Time out pending approvals only for the FORCE-FAILED runs (a resumed run's

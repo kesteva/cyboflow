@@ -24,6 +24,7 @@
  * execute run OUTSIDE it (execute() re-enters the same run queue — calling it
  * from inside the guard would self-deadlock, RunQueueRegistry no-recursive-enqueue).
  */
+import { emitUsage } from './telemetrySink';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 
@@ -161,6 +162,7 @@ export async function reopenRunHandler(
       return { ok: false as const, reason: 'race' as const };
     }
 
+    emitUsage('workflow_run_reopened', { via: 'composer' });
     return { ok: true as const };
   });
 

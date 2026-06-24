@@ -46,6 +46,7 @@
  */
 import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
+import { emitUsage } from './telemetrySink';
 import PQueue from 'p-queue';
 import type { DatabaseLike } from './types';
 import {
@@ -498,6 +499,7 @@ export class ApprovalRouter extends EventEmitter {
         resolve(decision);
         socketReply(decision);
         this.emit('approvalDecided', { approvalId, decision: 'approved' });
+        emitUsage('approval_decided', { decision: 'approve', scope: 'single' });
       } else {
         // deny: transition workflow_runs back to 'running' so the agent can
         // retry with a different tool/approach. The user denied this specific
@@ -520,6 +522,7 @@ export class ApprovalRouter extends EventEmitter {
         resolve(decision);
         socketReply(decision);
         this.emit('approvalDecided', { approvalId, decision: 'rejected' });
+        emitUsage('approval_decided', { decision: 'reject', scope: 'single' });
       }
     });
   }
