@@ -145,6 +145,33 @@ export function subscribeToPtyBytes({
 }
 
 /**
+ * Subscribe to the RAW user-shell byte stream for a run (worktree-terminal).
+ *
+ * Twin of {@link subscribeToPtyBytes} but for the PLAIN worktree shell behind the
+ * run "Shell" tab (RunShellManager), on the dedicated `cyboflow:shell:<runId>`
+ * channel. Same contract: raw ANSI `string` chunks fed straight to
+ * `xterm.Terminal.write()`, NOT an `IPCResponse`, NEVER routed into the structured
+ * cyboflow stream store (Q3 store-isolation). This is the USER's shell, wholly
+ * separate from the agent PTY on `cyboflow:pty:<runId>`.
+ */
+export function subscribeToShellBytes({
+  runId,
+  onData,
+}: {
+  runId: string;
+  onData: (chunk: string) => void;
+}): () => void {
+  const electron = requireElectron();
+  const channel = `cyboflow:shell:${runId}`;
+  // The IPC preload bridges events as (...args) where args[0] is the raw chunk.
+  const handler = (...args: unknown[]) => {
+    onData(args[0] as string);
+  };
+  electron.on(channel, handler);
+  return () => electron.off(channel, handler);
+}
+
+/**
  * Approve or deny a day-3 gate approval request.
  *
  * NOTE: The main-process handler is currently a NOT_IMPLEMENTED stub.
@@ -177,5 +204,6 @@ export async function approveRun({
 export const cyboflowApi = {
   subscribeToStreamEvents,
   subscribeToPtyBytes,
+  subscribeToShellBytes,
   approveRun,
 };
