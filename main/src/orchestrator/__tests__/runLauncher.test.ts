@@ -1257,13 +1257,13 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// RunLauncher.launch — findingIds (findings-triage redesign / migration 032)
+// RunLauncher.launch — findingIds (findings-triage redesign / migration 034)
 //
 // A session-less variant is used for simplicity: the seed path is independent of
 // whether the run is session-hosted. findingIds is the 11th positional launch arg
 // (AFTER projectId). The seed is a direct workflow_runs write — no store
 // dependency — so the only collaborators are the registry + worktree stubs. The
-// fixture layers the migration-032 seed_finding_ids column on top of the shared
+// fixture layers the migration-034 seed_finding_ids column on top of the shared
 // test DB (which does not carry it).
 // ---------------------------------------------------------------------------
 
@@ -1271,10 +1271,10 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
   /**
    * Build a launcher whose registry seeds a queued run row (createRun returns the
    * RESOLVED substrate, mirroring the real registry). `workflowName` controls the
-   * compound-only guard. The DB gains the migration-032 seed_finding_ids column.
+   * compound-only guard. The DB gains the migration-034 seed_finding_ids column.
    */
   function makeFindingFixture(db: Database.Database, tmpDir: string, workflowName: string) {
-    // Migration 032: seed_finding_ids is written by the launch path but is NOT in
+    // Migration 034: seed_finding_ids is written by the launch path but is NOT in
     // the shared fixture schema — layer the additive ALTER on top here.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
     const adapter = dbAdapter(db);
@@ -1341,7 +1341,8 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
         undefined, // baseBranch
         undefined, // seedTaskIds
         undefined, // projectId
-        ['rvw_a', 'rvw_b'], // findingIds (11th, LAST)
+        undefined, // requestedExecutionModel
+        ['rvw_a', 'rvw_b'], // findingIds (12th, LAST)
       );
 
       const row = db
@@ -1359,7 +1360,7 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
       await expect(
         launcher.launch(
           workflowId, tmpDir,
-          undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+          undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
           ['rvw_a'],
         ),
       ).rejects.toThrow("findingIds is only valid for the 'compound' workflow");
@@ -1377,7 +1378,7 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
       await expect(
         launcher.launch(
           workflowId, tmpDir,
-          undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+          undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
           [],
         ),
       ).rejects.toThrow('findingIds must contain at least one finding id');

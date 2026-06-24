@@ -1593,7 +1593,7 @@ export class McpQueryHandler {
   // Compound-run findings (cyboflow_get_selected_findings / _resolve_finding)
   //
   // The triage tray seeds a compound run with the EXACT findings the human
-  // selected (workflow_runs.seed_finding_ids, migration 032). These two handlers
+  // selected (workflow_runs.seed_finding_ids, migration 034). These two handlers
   // let the seeded compound agent re-read that set and resolve each finding as it
   // acts on it. get-selected-findings is READ-ONLY; resolve-finding routes the
   // resolve through the SINGLE review-item chokepoint and is AWAITED (so a failed

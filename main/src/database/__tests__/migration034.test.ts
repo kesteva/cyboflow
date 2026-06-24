@@ -1,7 +1,7 @@
 /**
- * Integration tests for migration 032_findings_triage.sql (findings-triage redesign).
+ * Integration tests for migration 034_findings_triage.sql (findings-triage redesign).
  *
- * Migration 032 carries ALL the findings-triage schema in a single file:
+ * Migration 034 carries ALL the findings-triage schema in a single file:
  *   - review_items:  + priority   TEXT CHECK (priority IN ('P0','P1','P2')) NULL
  *                    + staged_at  DATETIME NULL
  *                    + selected   INTEGER NOT NULL DEFAULT 0 CHECK (selected IN (0,1))
@@ -12,9 +12,9 @@
  * apply atomically inside the runner's transaction wrapper and pre-existing rows
  * backfill to the column defaults (selected=0, priority/staged_at NULL).
  *
- * We build the real pre-032 review_items shape from 016_review_items.sql (against a
+ * We build the real pre-034 review_items shape from 016_review_items.sql (against a
  * minimal projects table it FK-references) and the real post-019 workflow_runs shape
- * (mirroring migration020.test.ts's chain), then read + apply the real 032 SQL file.
+ * (mirroring migration020.test.ts's chain), then read + apply the real 034 SQL file.
  * Applying the file proves it is correct (not a hand-copied inline string).
  *
  * Targets:
@@ -22,10 +22,10 @@
  *       default/CHECK; pre-existing rows backfill (staged_at NULL, selected 0, priority NULL).
  *   (b) workflow_runs gains seed_finding_ids (nullable TEXT), round-trips a JSON array.
  *   (c) the CHECK rejects priority='P3'; round-trips P0/P1/P2/NULL and selected 0/1.
- *   (d) both new indexes exist after 032.
+ *   (d) both new indexes exist after 034.
  *   (e) idempotency: re-applying via the production path throws "duplicate column name:
  *       priority" on the FIRST ALTER and the transaction wrapper rolls the whole file
- *       back (the post-032 state stays intact).
+ *       back (the post-034 state stays intact).
  *   (f) the fresh-DB initialize() path includes the new columns + indexes.
  */
 
@@ -42,7 +42,7 @@ function readMigration(name: string): string {
 
 /**
  * Apply a migration SQL the way the production runner does: wrap in a single
- * transaction so a multi-ALTER file rolls back as a unit (032 does not toggle
+ * transaction so a multi-ALTER file rolls back as a unit (034 does not toggle
  * foreign_keys, but the helper keeps the FK-toggle handling for parity with
  * runFileBasedMigrations() / migration020.test.ts).
  */
@@ -69,12 +69,12 @@ interface TableInfoRow {
 }
 
 /**
- * Build the pre-032 DB: a minimal projects table, the real review_items table
+ * Build the pre-034 DB: a minimal projects table, the real review_items table
  * (migration 016, which FK-references projects + workflow_runs), and the real
  * post-019 workflow_runs shape (mirrors migration020.test.ts). Seeds one project,
  * one workflow_run, and one pre-existing review_items row so we can prove backfill.
  */
-function applyChainPre032(): Database.Database {
+function applyChainPre034(): Database.Database {
   const db = new Database(':memory:');
 
   db.exec(`
@@ -89,7 +89,7 @@ function applyChainPre032(): Database.Database {
   db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj One', '/tmp/p1');
 
   // Post-019 workflow_runs (006 base + 007 + 010 + the inline ALTERs through 019),
-  // mirroring migration020.test.ts so 032's workflow_runs ALTER has a real target.
+  // mirroring migration020.test.ts so 034's workflow_runs ALTER has a real target.
   db.exec(readMigration('006_cyboflow_schema.sql'));
   db.exec(readMigration('007_add_stuck_reason.sql'));
   db.exec(readMigration('010_questions.sql'));
@@ -133,10 +133,10 @@ function columnInfo(db: Database.Database, table: string, column: string): Table
   );
 }
 
-describe('Migration 032: findings-triage columns', () => {
+describe('Migration 034: findings-triage columns', () => {
   it('(a) adds priority/staged_at/selected to review_items with the right shape', () => {
-    const db = applyChainPre032();
-    runMigrationViaProductionPath(db, readMigration('032_findings_triage.sql'));
+    const db = applyChainPre034();
+    runMigrationViaProductionPath(db, readMigration('034_findings_triage.sql'));
 
     const priority = columnInfo(db, 'review_items', 'priority');
     expect(priority).toBeDefined();
@@ -161,8 +161,8 @@ describe('Migration 032: findings-triage columns', () => {
   });
 
   it('(a) backfills the pre-existing row (staged_at NULL, selected 0, priority NULL)', () => {
-    const db = applyChainPre032();
-    runMigrationViaProductionPath(db, readMigration('032_findings_triage.sql'));
+    const db = applyChainPre034();
+    runMigrationViaProductionPath(db, readMigration('034_findings_triage.sql'));
 
     const row = db
       .prepare('SELECT priority, staged_at, selected FROM review_items WHERE id = ?')
@@ -175,8 +175,8 @@ describe('Migration 032: findings-triage columns', () => {
   });
 
   it('(b) adds seed_finding_ids to workflow_runs (nullable TEXT) and round-trips a JSON array', () => {
-    const db = applyChainPre032();
-    runMigrationViaProductionPath(db, readMigration('032_findings_triage.sql'));
+    const db = applyChainPre034();
+    runMigrationViaProductionPath(db, readMigration('034_findings_triage.sql'));
 
     const seed = columnInfo(db, 'workflow_runs', 'seed_finding_ids');
     expect(seed).toBeDefined();
@@ -203,8 +203,8 @@ describe('Migration 032: findings-triage columns', () => {
   });
 
   it('(c) the priority CHECK accepts P0/P1/P2 + NULL and rejects P3', () => {
-    const db = applyChainPre032();
-    runMigrationViaProductionPath(db, readMigration('032_findings_triage.sql'));
+    const db = applyChainPre034();
+    runMigrationViaProductionPath(db, readMigration('034_findings_triage.sql'));
 
     const insert = db.prepare(
       `INSERT INTO review_items (id, project_id, kind, status, title, priority)
@@ -231,8 +231,8 @@ describe('Migration 032: findings-triage columns', () => {
   });
 
   it('(c) the selected CHECK accepts 0/1 and rejects 2', () => {
-    const db = applyChainPre032();
-    runMigrationViaProductionPath(db, readMigration('032_findings_triage.sql'));
+    const db = applyChainPre034();
+    runMigrationViaProductionPath(db, readMigration('034_findings_triage.sql'));
 
     const insert = db.prepare(
       `INSERT INTO review_items (id, project_id, kind, status, title, selected)
@@ -246,8 +246,8 @@ describe('Migration 032: findings-triage columns', () => {
   });
 
   it('(c) staged_at round-trips a timestamp string', () => {
-    const db = applyChainPre032();
-    runMigrationViaProductionPath(db, readMigration('032_findings_triage.sql'));
+    const db = applyChainPre034();
+    runMigrationViaProductionPath(db, readMigration('034_findings_triage.sql'));
 
     db.prepare(
       `INSERT INTO review_items (id, project_id, kind, status, title, staged_at, selected)
@@ -263,8 +263,8 @@ describe('Migration 032: findings-triage columns', () => {
   });
 
   it('(d) creates both new review_items indexes', () => {
-    const db = applyChainPre032();
-    runMigrationViaProductionPath(db, readMigration('032_findings_triage.sql'));
+    const db = applyChainPre034();
+    runMigrationViaProductionPath(db, readMigration('034_findings_triage.sql'));
 
     const rows = db
       .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='review_items'")
@@ -277,13 +277,13 @@ describe('Migration 032: findings-triage columns', () => {
   });
 
   it('(e) re-applying via the production path throws duplicate-column and rolls the file back', () => {
-    const db = applyChainPre032();
-    const sql = readMigration('032_findings_triage.sql');
+    const db = applyChainPre034();
+    const sql = readMigration('034_findings_triage.sql');
 
     // First application succeeds.
     runMigrationViaProductionPath(db, sql);
 
-    // Capture the post-032 shape so we can prove the rollback left it intact.
+    // Capture the post-034 shape so we can prove the rollback left it intact.
     const before = (db.prepare('PRAGMA table_info(review_items)').all() as TableInfoRow[]).map(
       (c) => c.name,
     );
@@ -305,7 +305,7 @@ describe('Migration 032: findings-triage columns', () => {
   });
 
   it('(f) the fresh-DB initialize() path includes the new columns + indexes', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration032-'));
+    const dir = mkdtempSync(join(tmpdir(), 'cyboflow-migration034-'));
     try {
       const svc = new DatabaseService(join(dir, 'test.db'));
       svc.setMigrationsDirForTesting(join(__dirname, '..', 'migrations'));

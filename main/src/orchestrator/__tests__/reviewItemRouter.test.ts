@@ -10,7 +10,7 @@
  *  - soft entity link validation: entityType/entityId must be set together.
  *  - triage: resolve + dismiss set status/resolved_by/resolution + write a delta
  *    event; re-triaging a terminal item is rejected (invalid_status).
- *  - findings-triage ops (migration 032): mutate (re-tag without clobbering
+ *  - findings-triage ops (migration 034): mutate (re-tag without clobbering
  *    siblings + re-prioritize, untriaged-only, rejects staged/non-finding),
  *    approve (untriaged → ready, sets staged_at WITHOUT selecting, rejects
  *    non-pending/already-staged), set-selected (batch toggle, only staged
@@ -37,7 +37,7 @@ import type { DatabaseLike } from '../types';
 import type { ReviewItemChangedEvent } from '../../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
-// Test DB builder: projects + 006 + 011 + 014 + 015 + 016 + 032.
+// Test DB builder: projects + 006 + 011 + 014 + 015 + 016 + 034.
 // ---------------------------------------------------------------------------
 
 function buildDb(): Database.Database {
@@ -61,9 +61,9 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
-  // 032 adds the finding-triage columns (priority/staged_at/selected) the
+  // 034 adds the finding-triage columns (priority/staged_at/selected) the
   // mutate/approve/set-selected ops read + write.
-  db.exec(readFileSync(join(migDir, '032_findings_triage.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '034_findings_triage.sql'), 'utf-8'));
   return db;
 }
 

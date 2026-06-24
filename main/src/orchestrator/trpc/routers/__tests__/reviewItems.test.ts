@@ -60,7 +60,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
-  db.exec(readFileSync(join(migDir, '032_findings_triage.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '034_findings_triage.sql'), 'utf-8'));
   // workflow_runs.session_id (migration 019) — added directly here: 019's backfill
   // UPDATE reads a `sessions` table this minimal fixture doesn't create, so we add
   // just the column the requireMergedSession merge-gate join needs (mirrors the

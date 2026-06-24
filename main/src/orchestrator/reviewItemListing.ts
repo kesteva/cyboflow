@@ -371,7 +371,7 @@ export function selectPendingBlockingReviewItems(db: DatabaseLike, runId: string
 
 // ---------------------------------------------------------------------------
 // Read helper: a single finding shaped for compound-run seed injection
-// (findings-triage redesign / migration 032)
+// (findings-triage redesign / migration 034)
 // ---------------------------------------------------------------------------
 
 /**
@@ -381,7 +381,7 @@ export function selectPendingBlockingReviewItems(db: DatabaseLike, runId: string
  *
  * `proposedTarget` / `suggestedFix` / `locations` are lifted out of the finding's
  * `payload_json` (the FindingPayload union); `priority` is the first-class column
- * (migration 032). All three are null when the finding carried no such hint.
+ * (migration 034). All three are null when the finding carried no such hint.
  */
 export interface FindingSeedRow {
   id: string;

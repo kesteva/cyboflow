@@ -77,7 +77,7 @@ export type FindingProposedTarget = 'backlog' | 'docs' | 'prompt' | 'fix';
 
 /**
  * Finding priority — a first-class, SQL-sortable column on review_items
- * (migration 032). NULL = un-prioritized legacy finding; consumers render NULL
+ * (migration 034). NULL = un-prioritized legacy finding; consumers render NULL
  * as an explicit "unset" badge and sort it LAST (never fabricate a 'P2' label).
  */
 export const FINDING_PRIORITIES = ['P0', 'P1', 'P2'] as const;
@@ -195,18 +195,18 @@ export interface ReviewItem {
   /** Only meaningful for findings; null otherwise. */
   severity: ReviewItemSeverity | null;
   /**
-   * First-class finding priority (migration 032). Finding-scoped — null for
+   * First-class finding priority (migration 034). Finding-scoped — null for
    * non-finding kinds AND for un-prioritized legacy findings.
    */
   priority: FindingPriority | null;
   /**
-   * Non-null == the human approved this finding into READY (migration 032);
+   * Non-null == the human approved this finding into READY (migration 034);
    * doubles as staging order. Finding-scoped — null for non-finding kinds and
    * for still-untriaged findings.
    */
   staged_at: string | null;
   /**
-   * The per-finding "compound this" checkbox (migration 032; 0/1 normalized to
+   * The per-finding "compound this" checkbox (migration 034; 0/1 normalized to
    * boolean in shapeRow). Finding-scoped — always false for non-finding kinds.
    */
   selected: boolean;
@@ -283,11 +283,11 @@ export function parseResolutionKind(resolution: string | null): ResolutionKind |
  *   - resolved          — triaged as resolved (incl. promote-to-task).
  *   - dismissed         — triaged as dismissed (cruft).
  *   - mutated           — a finding was re-tagged (proposedTarget) and/or
- *                         re-prioritized while still untriaged (migration 032).
+ *                         re-prioritized while still untriaged (migration 034).
  *   - staged            — a finding was approved untriaged → ready
- *                         (staged_at set, selected pre-checked; migration 032).
+ *                         (staged_at set, selected pre-checked; migration 034).
  *   - selection-changed — a ready finding's compound-this checkbox toggled
- *                         (selected 0↔1; migration 032).
+ *                         (selected 0↔1; migration 034).
  */
 export type ReviewItemChangeAction =
   | 'created'

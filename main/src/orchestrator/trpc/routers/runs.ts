@@ -24,6 +24,7 @@ import { withRunFileErrorMapping } from '../runFileErrors';
 import type { RunFileEntry, RunFileContent } from '../../../../../shared/types/runFiles';
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
+import type { ExecutionModel } from '../../../../../shared/types/executionModel';
 import type { SprintLaneRow, SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../../shared/types/sprintBatch';
 import { sprintLaneEvents, sprintLaneChannel, SprintLaneStore } from '../../sprintLaneStore';
@@ -221,7 +222,10 @@ export interface RunLauncherLike {
    * workflow's name === 'sprint'; `projectId` is the EXPLICIT launch project
    * (migration 030 — global workflows) threaded into WorkflowRegistry.createRun
    * (stamped onto workflow_runs.project_id) and SprintLaneStore.createForRun;
-   * `findingIds` (findings-triage redesign / migration 032) seeds the selected
+   * `requestedExecutionModel` carries the user's per-run execution-model choice
+   * (orchestrated vs programmatic) down to the resolver's highest-precedence rung
+   * in WorkflowRegistry.createRun (DORMANT until a picker surfaces it);
+   * `findingIds` (findings-triage redesign / migration 034) seeds the selected
    * findings of a `compound` run — only valid when the workflow's name ===
    * 'compound', written DIRECTLY to workflow_runs.seed_finding_ids. All are
    * OPTIONAL — when substrate is omitted the run falls through the resolver
@@ -233,7 +237,7 @@ export interface RunLauncherLike {
    * GLOBAL workflow launched without it throws); when findingIds is omitted the
    * run is not finding-seeded.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, findingIds?: string[]): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[]): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -757,7 +761,7 @@ export const runsRouter = router({
       // substrate-keyed selection cap N is enforced here (defense in depth — the
       // picker also enforces it client-side).
       taskIds: z.array(z.string().min(1)).optional(),
-      // Optional compound seed findings (findings-triage redesign / migration 032).
+      // Optional compound seed findings (findings-triage redesign / migration 034).
       // When supplied, the launcher writes workflow_runs.seed_finding_ids (a JSON
       // string array) directly; RunExecutor.getPrompt injects the selected findings
       // as a `## Selected findings` block, and the terminal-seam close-out clears
@@ -802,7 +806,7 @@ export const runsRouter = router({
       // (Phase 1 / migration 019), per-run agent permission override
       // (WorkflowPicker), and sprint seed tasks (feat/parallel-sprint), PLUS the
       // explicit launch projectId (migration 030 — global workflows) and the
-      // compound seed findings (findings-triage / migration 032). The projectId
+      // compound seed findings (findings-triage / migration 034). The projectId
       // MUST always be threaded now: a GLOBAL built-in / custom flow carries
       // workflow.project_id = NULL, so createRun has no fallback project and would
       // throw without it. (The earlier "legacy 2-arg shape when all optionals are

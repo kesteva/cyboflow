@@ -1,4 +1,4 @@
--- Migration 032: findings-triage redesign (Direction A).
+-- Migration 034: findings-triage redesign (Direction A).
 --
 -- review_items:
 --   priority    P0/P1/P2 first-class column (D2). NULL = un-prioritized legacy
@@ -34,8 +34,10 @@
 -- NOTE: No explicit BEGIN/COMMIT here — runFileBasedMigrations() in database.ts
 -- wraps every file in a this.transaction(...) call, so an inner BEGIN would nest.
 --
--- 032 CROSS-BRANCH COLLISION: sibling worktrees have collided on 029/030/031.
--- Keep ALL feature schema in this SINGLE file. On merge, if 032 is taken,
+-- CROSS-BRANCH COLLISION (renumbered 032 -> 034 on rebase onto main): sibling
+-- worktrees collided on 029/030/031, and main later took 032 (execution_model)
+-- + 033 (step_results), so this file moved to the next free number, 034. Keep
+-- ALL feature schema in this SINGLE file. On the next merge, if 034 is taken,
 -- renumber to the next free number and update the test chain + test filename
 -- in one pass.
 

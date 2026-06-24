@@ -82,7 +82,7 @@ export interface IdeaBodyReaderLike {
 }
 
 /**
- * Narrow injected reader for a SELECTED finding's content (migration 032).
+ * Narrow injected reader for a SELECTED finding's content (migration 034).
  *
  * The real implementation in main/src/index.ts delegates to
  * `selectFindingForSeed(cyboflowDb, id)` (reviewItemListing.ts) on the narrow
@@ -492,7 +492,7 @@ export class RunExecutor {
      */
     private readonly programmaticRunner?: ProgrammaticRunner,
     /**
-     * Optional selected-finding reader (migration 032). When injected and a
+     * Optional selected-finding reader (migration 034). When injected and a
      * COMPOUND run carries `seed_finding_ids`, getPrompt() prepends a
      * `# Selected findings` block (one section per seeded finding, sorted by
      * priority then bucket) to the compound run's MAIN prompt so the agent acts
@@ -1036,7 +1036,7 @@ export class RunExecutor {
    *   4. (Piece A) run.seed_idea_id set + idea body resolves → PREPEND a
    *      `# Selected idea` block to the MAIN prompt (never systemPromptAppend,
    *      which is invisible to the chat transcript).
-   *   5. (migration 032) compound run.seed_finding_ids resolve → PREPEND a
+   *   5. (migration 034) compound run.seed_finding_ids resolve → PREPEND a
    *      `# Selected findings` block (priority/bucket-ordered) to the MAIN prompt.
    *   6. none → return the base prompt verbatim (zero-behavior-change floor).
    *
@@ -1091,7 +1091,7 @@ export class RunExecutor {
       return Promise.resolve(`# Selected idea\n\n${seedBlock}\n\n${prompt}`);
     }
 
-    // Selected-findings injection (migration 032). When a COMPOUND run carries
+    // Selected-findings injection (migration 034). When a COMPOUND run carries
     // seed_finding_ids, prepend a `# Selected findings` block listing the
     // human-curated set in priority/bucket order. Checked AFTER the
     // nudge/resume branches (a resumed conversation already holds the block and
@@ -1192,7 +1192,7 @@ export class RunExecutor {
 
   /**
    * Resolve the `# Selected findings` block body for a compound run's
-   * seed_finding_ids (migration 032).
+   * seed_finding_ids (migration 034).
    *
    * Returns null (so getPrompt falls through to the base prompt) when: no
    * findingReader is injected, the run is missing or carries no seed_finding_ids,
@@ -1446,7 +1446,7 @@ export class RunExecutor {
     // swallowed there, so it can never break this transition.
     this.materializeRunUsage(runId, phase);
 
-    // Compound findings close-out (migration 032). At the SAME terminal seam,
+    // Compound findings close-out (migration 034). At the SAME terminal seam,
     // a seeded compound run that goes terminal clears `selected` on any seeded
     // finding still pending (the agent failed to resolve it) so the triage tray
     // never silently re-offers an already-applied fix as auto-selected. Routes
@@ -1458,7 +1458,7 @@ export class RunExecutor {
   }
 
   /**
-   * Terminal-seam close-out for seeded COMPOUND runs (migration 032).
+   * Terminal-seam close-out for seeded COMPOUND runs (migration 034).
    *
    * Fires only for the terminal phases (drained / failed / canceled) and only
    * when the run is a compound run carrying seed_finding_ids. Reads each seeded

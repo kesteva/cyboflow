@@ -145,7 +145,7 @@ export interface ReviewItemTriage {
  * Re-tag and/or re-prioritize an untriaged finding (applied-not-consumed — the
  * finding stays status='pending' AND staged_at IS NULL). Either or both of
  * `proposedTarget` (re-tag, patched into payload_json) and `priority` (re-set on
- * the column) may be present. Finding-scoped (migration 032; OD-5).
+ * the column) may be present. Finding-scoped (migration 034; OD-5).
  */
 export interface ReviewItemMutate {
   op: 'mutate';
@@ -160,7 +160,7 @@ export interface ReviewItemMutate {
 }
 
 /**
- * Approve an untriaged finding into READY (migration 032): sets staged_at +
+ * Approve an untriaged finding into READY (migration 034): sets staged_at +
  * pre-checks selected=1 in one UPDATE. Guarded to untriaged findings
  * (status='pending' AND staged_at IS NULL).
  */
@@ -174,7 +174,7 @@ export interface ReviewItemApprove {
 
 /**
  * Batch-toggle the "compound this" checkbox over an explicit id list (migration
- * 032). Only READY findings (staged_at IS NOT NULL) are selectable. Also the
+ * 034). Only READY findings (staged_at IS NOT NULL) are selectable. Also the
  * terminal-seam close-out path (actor:'orchestrator') that clears selected on
  * un-resolved seeded findings at compound-run end.
  */
@@ -210,7 +210,7 @@ interface ReviewItemDbRow {
   title: string;
   body: string | null;
   severity: ReviewItemSeverity | null;
-  // Finding-scoped triage columns (migration 032). NULL/0 for non-finding kinds.
+  // Finding-scoped triage columns (migration 034). NULL/0 for non-finding kinds.
   priority: 'P0' | 'P1' | 'P2' | null;
   staged_at: string | null;
   selected: number; // 0 | 1
@@ -305,7 +305,7 @@ export class ReviewItemRouter {
    * transaction. Re-resolving / re-dismissing an already-terminal item is
    * rejected with code='invalid_status'.
    *
-   * Findings-triage paths (migration 032), each finding-scoped, each atomic:
+   * Findings-triage paths (migration 034), each finding-scoped, each atomic:
    *  - mutate (re-tag and/or re-prioritize): untriaged-only. Re-tag merges
    *    payload_json.proposedTarget (siblings preserved); re-prioritize sets the
    *    priority column. Action 'mutated'. Rejects a staged/non-pending finding

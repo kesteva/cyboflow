@@ -979,7 +979,7 @@ async function initializeServices() {
     logger: cyboflowLogger,
   });
 
-  // Selected-finding reader (migration 032): resolves a compound run's
+  // Selected-finding reader (migration 034): resolves a compound run's
   // seed_finding_ids to each finding's content via selectFindingForSeed (which
   // already SELECTs only kind='finding' rows and lifts proposedTarget /
   // suggestedFix / locations from payload_json). Injected as the trailing

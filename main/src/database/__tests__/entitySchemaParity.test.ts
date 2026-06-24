@@ -47,7 +47,7 @@ function buildDb(): Database.Database {
   const migDir = join(__dirname, '..', 'migrations');
   // Production order: 006 (workflow_runs base) -> 011 (current_step_id) ->
   // 014 (unified tasks) -> 015 (entity-model rebuild) -> 016 (review_items) ->
-  // 024 (archived_at archive-in-place stamp) -> 032 (findings-triage columns:
+  // 024 (archived_at archive-in-place stamp) -> 034 (findings-triage columns:
   // priority/staged_at/selected on review_items + seed_finding_ids on
   // workflow_runs).
   db.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
@@ -58,7 +58,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '029_agent_overrides.sql'), 'utf-8'));
-  db.exec(readFileSync(join(migDir, '032_findings_triage.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '034_findings_triage.sql'), 'utf-8'));
   return db;
 }
 
@@ -66,7 +66,7 @@ function columnsOf(db: Database.Database, table: string): string[] {
   return (db.prepare(`PRAGMA table_info(${table})`).all() as TableInfoRow[]).map((r) => r.name).sort();
 }
 
-describe('entity schema parity (migrations 015 + 024 + 028 + 032)', () => {
+describe('entity schema parity (migrations 015 + 024 + 028 + 034)', () => {
   it('IdeaRow field names match the `ideas` columns exactly', () => {
     const db = buildDb();
     const ideaRowKeys: Array<keyof IdeaRow> = [
@@ -156,7 +156,7 @@ describe('entity schema parity (migrations 015 + 024 + 028 + 032)', () => {
     db.close();
   });
 
-  it('ReviewItemRow field names match the `review_items` columns exactly (migrations 016 + 032)', () => {
+  it('ReviewItemRow field names match the `review_items` columns exactly (migrations 016 + 034)', () => {
     const db = buildDb();
     const reviewItemRowKeys: Array<keyof ReviewItemRow> = [
       'id',
@@ -170,9 +170,9 @@ describe('entity schema parity (migrations 015 + 024 + 028 + 032)', () => {
       'title',
       'body',
       'severity',
-      'priority', // migration 032
-      'staged_at', // migration 032
-      'selected', // migration 032
+      'priority', // migration 034
+      'staged_at', // migration 034
+      'selected', // migration 034
       'source',
       'payload_json',
       'created_at',

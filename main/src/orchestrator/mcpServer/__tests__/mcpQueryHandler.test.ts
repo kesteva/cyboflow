@@ -2713,7 +2713,7 @@ describe('shell-approval-request -> auto-derive sprint lane', () => {
 // ---------------------------------------------------------------------------
 // 10. mcp-get-selected-findings / mcp-resolve-finding — compound-run findings.
 //     The triage tray seeds a compound run with workflow_runs.seed_finding_ids
-//     (migration 032). get-selected-findings re-reads that set (read-only);
+//     (migration 034). get-selected-findings re-reads that set (read-only);
 //     resolve-finding resolves a consumed finding via the ReviewItemRouter
 //     chokepoint, AWAITED so a failure surfaces. Both are mid-run-only — a
 //     terminal run is rejected by the shared run-context guard (run_not_active).
@@ -2722,7 +2722,7 @@ describe('shell-approval-request -> auto-derive sprint lane', () => {
 describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding)', () => {
   // The handlers reach selectFindingForSeed (reads review_items.priority +
   // workflow_runs.seed_finding_ids) and ReviewItemRouter.applyReviewItem, so the
-  // DB needs the full review schema PLUS migration 032 (findings-triage columns).
+  // DB needs the full review schema PLUS migration 034 (findings-triage columns).
   function buildFindingsDb(): Database.Database {
     const fdb = new Database(':memory:');
     fdb.pragma('foreign_keys = ON');
@@ -2745,7 +2745,7 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
     fdb.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
     fdb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
     fdb.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
-    fdb.exec(readFileSync(join(migDir, '032_findings_triage.sql'), 'utf-8'));
+    fdb.exec(readFileSync(join(migDir, '034_findings_triage.sql'), 'utf-8'));
     return fdb;
   }
 

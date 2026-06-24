@@ -231,7 +231,7 @@ export class RunLauncher {
     // 'orchestrated' floor (and the interactive substrate hard-pins 'orchestrated'
     // regardless). DORMANT until a picker surfaces it.
     requestedExecutionModel?: ExecutionModel,
-    // The selected compound findings (findings-triage redesign / migration 032).
+    // The selected compound findings (findings-triage redesign / migration 034).
     // When supplied, the run is a `compound` run seeded with these review_items.id
     // values: the launcher writes them (JSON-encoded) DIRECTLY to
     // workflow_runs.seed_finding_ids — NOT routed through any task/lane chokepoint
@@ -262,7 +262,7 @@ export class RunLauncher {
       }
     }
 
-    // Compound seed-finding validation (findings-triage redesign / migration 032)
+    // Compound seed-finding validation (findings-triage redesign / migration 034)
     // — BEFORE createRun so an invalid request never leaves a half-created run row
     // behind. Mirrors the seedTaskIds guard; no store dependency (the seed is a
     // direct workflow_runs write).
@@ -427,7 +427,7 @@ export class RunLauncher {
           .run(batchId, runId);
       }
 
-      // Compound seed findings (findings-triage redesign / migration 032). A direct
+      // Compound seed findings (findings-triage redesign / migration 034). A direct
       // workflow_runs write — NOT routed through any chokepoint (workflow_runs has
       // none), exactly like seed_idea_id / batch_id above. JSON-encoded so the
       // single TEXT column holds the selected review_items.id array;

@@ -144,7 +144,7 @@ export function filterPendingFindings(items: ReviewItem[]): ReviewItem[] {
  * plus a derived `triageState`. `staged_at === null` ⇒ 'untriaged' (the human
  * has not approved it into READY); a non-null `staged_at` ⇒ 'ready' (approved,
  * possibly de-selected). `status` is NOT overloaded — both states are
- * `status='pending'`; only Dismiss/compound-consume change `status` (mig 032).
+ * `status='pending'`; only Dismiss/compound-consume change `status` (mig 034).
  */
 export type TriageFinding = ReviewItem & { triageState: 'untriaged' | 'ready' };
 

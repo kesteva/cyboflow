@@ -95,7 +95,7 @@ export interface WorkflowRunRow {
   /** Sprint lane batch (migration 022) — soft link to sprint_batches.id. Stamped at launch on a session-hosted 'sprint' run seeded with taskIds (SprintLaneStore.createForRun); NULL for every other run. */
   batch_id?: string | null;
   /** Selected finding ids (review_items.id) seeded into a compound run at launch,
-   *  JSON-encoded string array (migration 032). NULL for non-compound runs.
+   *  JSON-encoded string array (migration 034). NULL for non-compound runs.
    *  Parsed + injected by RunExecutor.getPrompt buildSelectedFindingsBlock,
    *  and read by the terminal-seam close-out to clear selected on un-resolved
    *  findings. Mirrors seed_idea_id (017). */

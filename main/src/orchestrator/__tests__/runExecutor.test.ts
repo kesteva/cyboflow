@@ -2689,7 +2689,7 @@ describe('RunExecutor — event-driven rest (persistent interactive substrate)',
 });
 
 // ---------------------------------------------------------------------------
-// Migration 032 (findings triage): getPrompt selected-findings injection +
+// Migration 034 (findings triage): getPrompt selected-findings injection +
 // terminal-seam close-out.
 // ---------------------------------------------------------------------------
 
@@ -2711,7 +2711,7 @@ function makeFindingReader(entries: Record<string, ResolvedFinding>): FindingRea
   return { read: (id: string) => entries[id] ?? null };
 }
 
-/** Build a RunExecutor with the finding reader in the trailing (13th) slot. */
+/** Build a RunExecutor with the finding reader in the trailing (14th) slot. */
 function makeCompoundExecutor(
   spawner: ClaudeSpawnerLike,
   registry: WorkflowRegistryLike,
@@ -2731,11 +2731,12 @@ function makeCompoundExecutor(
     undefined, // taskStageDeriver
     undefined, // ideaBodyReader
     undefined, // sprintLaneTaskIds
-    findingReader, // findingReader (13th arg)
+    undefined, // programmaticRunner
+    findingReader, // findingReader (14th arg)
   );
 }
 
-describe('RunExecutor.getPrompt — selected-findings injection (migration 032)', () => {
+describe('RunExecutor.getPrompt — selected-findings injection (migration 034)', () => {
   const compoundReader = () =>
     makeStubReader({ '/fake/compound.md': { prompt: 'COMPOUND BODY', systemPromptAppend: '' } });
 
@@ -2913,6 +2914,7 @@ describe('RunExecutor.getPrompt — selected-findings injection (migration 032)'
       undefined, undefined, undefined, undefined, undefined, undefined,
       ideaReader,
       laneTaskIds,
+      undefined, // programmaticRunner
       findingReader,
     );
 
@@ -2951,6 +2953,7 @@ describe('RunExecutor.getPrompt — selected-findings injection (migration 032)'
       undefined, undefined, undefined, undefined, undefined, undefined,
       ideaReader,
       undefined,
+      undefined, // programmaticRunner
       findingReader,
     );
 
@@ -2964,7 +2967,7 @@ describe('RunExecutor.getPrompt — selected-findings injection (migration 032)'
 });
 
 // ---------------------------------------------------------------------------
-// Migration 032: terminal-seam compound findings close-out.
+// Migration 034: terminal-seam compound findings close-out.
 //
 // When a SEEDED compound run goes terminal (drained/failed/canceled), any
 // seeded finding STILL pending (the agent's per-finding cyboflow_resolve_finding
@@ -2995,7 +2998,7 @@ function buildReviewDb(): Database.Database {
   db.exec(readFileSync(joinPath(migDir, '014_native_tasks.sql'), 'utf-8'));
   db.exec(readFileSync(joinPath(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
   db.exec(readFileSync(joinPath(migDir, '016_review_items.sql'), 'utf-8'));
-  db.exec(readFileSync(joinPath(migDir, '032_findings_triage.sql'), 'utf-8'));
+  db.exec(readFileSync(joinPath(migDir, '034_findings_triage.sql'), 'utf-8'));
   return db;
 }
 
@@ -3058,7 +3061,7 @@ function makeTerminalSeamExecutor(
   );
 }
 
-describe('RunExecutor — terminal-seam compound findings close-out (migration 032)', () => {
+describe('RunExecutor — terminal-seam compound findings close-out (migration 034)', () => {
   afterEach(() => {
     ReviewItemRouter._resetForTesting();
     reviewItemChangeEvents.removeAllListeners();
