@@ -21,7 +21,7 @@
  * component is presentational glue.
  */
 import { useEffect, useState } from 'react';
-import { useVisibleTriageFindings, selectUntriaged } from '../../stores/insightsStore';
+import { useInsightsStore, selectUntriaged } from '../../stores/insightsStore';
 import { FindingsHeader } from './FindingsHeader';
 import { CounterStrip } from './CounterStrip';
 import { UntriagedList } from './UntriagedList';
@@ -30,15 +30,15 @@ import { CompoundingTray } from './CompoundingTray';
 
 /** FindingsSection — see the file header. Default export so InsightsView is unchanged. */
 export function FindingsSection(): React.JSX.Element {
-  const triageFindings = useVisibleTriageFindings();
+  const triageFindings = useInsightsStore((s) => s.triageFindings);
   // Single-open modify-drawer invariant (opening B closes A is enforced by the
   // single id; UntriagedList toggles it).
   const [openModifyId, setOpenModifyId] = useState<string | null>(null);
 
-  // Reset the open drawer when its row leaves the VISIBLE untriaged set — once a
-  // finding is Approved (→ READY), Dismissed, or filtered out by a selection
-  // locking the surface to another project, it no longer renders an UntriagedRow,
-  // so a stale openModifyId would point at a departed row.
+  // Reset the open drawer when its row leaves the untriaged set — once a finding is
+  // Approved (→ READY) or Dismissed it no longer renders an UntriagedRow, so a
+  // stale openModifyId would point at a departed row. (The untriaged list is
+  // unfiltered, so a selection lock never removes a row here.)
   useEffect(() => {
     if (openModifyId === null) return;
     const stillUntriaged = selectUntriaged(triageFindings).some((f) => f.id === openModifyId);

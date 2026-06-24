@@ -16,7 +16,6 @@
 import { Button } from '../ui/Button';
 import {
   useInsightsStore,
-  useVisibleTriageFindings,
   selectSelectedFindingIds,
   selectLockProjectId,
   selectTallyParts,
@@ -27,7 +26,10 @@ import { pluralizeTally } from './findingsTagMeta';
 
 /** CompoundingTray — see the file header. */
 export function CompoundingTray(): React.JSX.Element | null {
-  const triageFindings = useVisibleTriageFindings();
+  // The tally/CTA count off the raw set; the selection is single-project anyway
+  // (selecting a finding locks the READY section to its project), so a project
+  // filter here would be a no-op.
+  const triageFindings = useInsightsStore((s) => s.triageFindings);
   // Gate on having at least one project — the wizard's first step is project
   // selection, so the CTA is pointless without one.
   const hasProjects = useProjectsCount() > 0;

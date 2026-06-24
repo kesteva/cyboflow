@@ -666,7 +666,7 @@ async function loadStoreWith(items: ReviewItem[]): Promise<InsightsModule> {
 }
 
 describe('approveFinding (optimistic)', () => {
-  it('stages + pre-selects + flips the row to ready, then awaits approve', async () => {
+  it('stages (without selecting) + flips the row to ready, then awaits approve', async () => {
     const { useInsightsStore } = await loadStoreWith([
       makeReviewItem({ id: 'f1', staged_at: null, selected: false }),
     ]);
@@ -676,7 +676,7 @@ describe('approveFinding (optimistic)', () => {
     const row = useInsightsStore.getState().triageFindings.find((f) => f.id === 'f1');
     expect(row?.triageState).toBe('ready');
     expect(row?.staged_at).not.toBeNull();
-    expect(row?.selected).toBe(true);
+    expect(row?.selected).toBe(false); // approve stages a candidate; selection is separate
     expect(mockApproveMutate).toHaveBeenCalledWith({ projectId: 1, reviewItemId: 'f1' });
     expect(useInsightsStore.getState().error).toBeNull();
   });

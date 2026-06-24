@@ -819,16 +819,17 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
 
     approveFinding: async (projectId, reviewItemId) => {
       const snapshot = get().triageFindings;
-      // Optimistically stage + pre-select + flip the row to READY. The real
-      // staged_at lands via the subscription; a non-null sentinel is enough for
-      // the view-model derivation (triageState='ready') in the interim.
+      // Optimistically stage + flip the row to READY (but do NOT select it —
+      // selection for the next compound run is a separate explicit action). The
+      // real staged_at lands via the subscription; a non-null sentinel is enough
+      // for the view-model derivation (triageState='ready') in the interim.
       set({
         triageFindings: snapshot.map((f) =>
           f.id === reviewItemId
             ? {
                 ...f,
                 staged_at: f.staged_at ?? new Date().toISOString(),
-                selected: true,
+                selected: false,
                 triageState: 'ready',
               }
             : f,

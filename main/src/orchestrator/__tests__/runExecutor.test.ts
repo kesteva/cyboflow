@@ -2999,7 +2999,8 @@ function buildReviewDb(): Database.Database {
   return db;
 }
 
-/** Create a finding, approve it (→ staged + selected), and return its id. */
+/** Create a finding, approve it (→ staged) and explicitly select it (approve no
+ *  longer pre-selects), and return its id. */
 async function createStagedFinding(router: ReviewItemRouter): Promise<string> {
   const { reviewItemId } = await router.applyReviewItem(1, {
     op: 'create',
@@ -3009,6 +3010,12 @@ async function createStagedFinding(router: ReviewItemRouter): Promise<string> {
     payload: { kind: 'finding', proposedTarget: 'fix' },
   });
   await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId });
+  await router.applyReviewItem(1, {
+    op: 'set-selected',
+    actor: 'user',
+    reviewItemIds: [reviewItemId],
+    selected: true,
+  });
   return reviewItemId;
 }
 

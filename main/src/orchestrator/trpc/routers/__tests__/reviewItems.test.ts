@@ -190,9 +190,17 @@ describe('cyboflow.reviewItems.list / get', () => {
     expect(staged).toHaveLength(1);
     expect(staged[0].priority).toBe('P0');
     expect(staged[0].staged_at).not.toBeNull(); // approve set CURRENT_TIMESTAMP
-    expect(staged[0].selected).toBe(true); // approve pre-selects
+    expect(staged[0].selected).toBe(false); // approve stages but does NOT select
 
-    // shapeRow normalizes the raw 0/1 INTEGER to a boolean.
+    // Selection is a SEPARATE explicit action; drive it, then confirm shapeRow
+    // normalizes the raw 0/1 INTEGER to a boolean.
+    await caller.cyboflow.reviewItems.setSelected({
+      projectId: 1,
+      reviewItemIds: [created.reviewItemId],
+      selected: true,
+    });
+    const selectedList = await caller.cyboflow.reviewItems.list({ projectId: 1, kind: 'finding', status: 'pending' });
+    expect(selectedList[0].selected).toBe(true);
     const raw = db.prepare('SELECT selected FROM review_items WHERE id = ?').get(created.reviewItemId) as {
       selected: number;
     };
@@ -410,7 +418,7 @@ describe('cyboflow.reviewItems findings-triage mutations', () => {
     expect(row.priority).toBe('P1');
   });
 
-  it('approve returns {reviewItemId, staged:true} and stages + pre-selects the finding', async () => {
+  it('approve returns {reviewItemId, staged:true} and stages WITHOUT selecting the finding', async () => {
     const { caller, db } = buildCaller();
     const created = await ReviewItemRouter.getInstance().applyReviewItem(1, {
       op: 'create', actor: 'agent:executor', kind: 'finding', title: 'approve me',
@@ -423,8 +431,8 @@ describe('cyboflow.reviewItems findings-triage mutations', () => {
       created.reviewItemId,
     ) as { status: string; staged_at: string | null; selected: number };
     expect(row.status).toBe('pending'); // status NOT overloaded
-    expect(row.staged_at).not.toBeNull();
-    expect(row.selected).toBe(1);
+    expect(row.staged_at).not.toBeNull(); // moved to READY
+    expect(row.selected).toBe(0); // NOT selected — selection is a separate action
   });
 
   it('approve on an already-staged finding throws CONFLICT (invalid_status)', async () => {
@@ -453,9 +461,12 @@ describe('cyboflow.reviewItems findings-triage mutations', () => {
     const b = await ReviewItemRouter.getInstance().applyReviewItem(1, {
       op: 'create', actor: 'agent:executor', kind: 'finding', title: 'b',
     });
-    // Stage both (approve pre-selects selected=1).
+    // Stage both, then explicitly select them (approve no longer pre-selects).
     await caller.cyboflow.reviewItems.approve({ projectId: 1, reviewItemId: a.reviewItemId });
     await caller.cyboflow.reviewItems.approve({ projectId: 1, reviewItemId: b.reviewItemId });
+    await caller.cyboflow.reviewItems.setSelected({
+      projectId: 1, reviewItemIds: [a.reviewItemId, b.reviewItemId], selected: true,
+    });
 
     // Deselect both in one batch.
     const res = await caller.cyboflow.reviewItems.setSelected({

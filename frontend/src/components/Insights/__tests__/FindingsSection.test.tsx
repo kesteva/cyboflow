@@ -13,7 +13,7 @@
  *
  * Coverage (plan §7): top-5 untriaged + "Show N more"; Approve/Modify/Dismiss per
  * row; single-open Modify drawer (opening B closes A); re-tag/re-prioritize mutate
- * in place; Approve → ready bucket matching tag, pre-selected, closes drawer;
+ * in place; Approve → ready bucket matching tag, NOT selected, closes drawer;
  * Dismiss removes + increments Dismissed; empty states (untriaged/ready/cold-start);
  * READY collapsed renders EXACTLY 5 rows in bucket order, a budget-starved bucket
  * hidden while present buckets show full header counts; ONE section toggle;
@@ -72,7 +72,7 @@ const approveFinding = vi.fn(async (_projectId: number, id: string) => {
   patchFindings((findings) =>
     findings.map((f) =>
       f.id === id
-        ? { ...f, staged_at: f.staged_at ?? new Date().toISOString(), selected: true, triageState: 'ready' }
+        ? { ...f, staged_at: f.staged_at ?? new Date().toISOString(), selected: false, triageState: 'ready' }
         : f,
     ),
   );
@@ -398,15 +398,15 @@ describe('FindingsSection — untriaged top-5 + show more', () => {
 // ---------------------------------------------------------------------------
 
 describe('FindingsSection — row actions', () => {
-  it('Approve stages a finding into the matching ready bucket, pre-selected', () => {
+  it('Approve stages a finding into the matching ready bucket, NOT selected', () => {
     setFindings([finding({ id: 'a', payload: { kind: 'finding', proposedTarget: 'fix' } })]);
     render(<FindingsSection />);
     fireEvent.click(within(screen.getByTestId('untriaged-row')).getByTestId('untriaged-approve'));
     expect(approveFinding).toHaveBeenCalledWith(1, 'a');
-    // Now ready, in the quick bucket, pre-selected.
+    // Now ready, in the quick bucket, but UNSELECTED — selection is a separate action.
     expect(screen.queryByTestId('untriaged-row')).not.toBeInTheDocument();
     const quick = screen.getByTestId('ready-bucket-quick');
-    expect(within(quick).getByTestId('ready-row')).toHaveAttribute('data-selected', 'true');
+    expect(within(quick).getByTestId('ready-row')).toHaveAttribute('data-selected', 'false');
   });
 
   it('Approve of an UNTAGGED finding defaults it to the Quick fix bucket (OD-3)', () => {
@@ -664,8 +664,9 @@ describe('FindingsSection — compounding tray', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Single-project selection lock (request 1): selecting a finding narrows the
-// WHOLE surface to that finding's project.
+// Single-project selection lock: selecting a finding narrows ONLY the
+// READY-to-compound section to that finding's project. The untriaged list and
+// the Pending counter stay unfiltered (triage is cross-project).
 // ---------------------------------------------------------------------------
 
 describe('FindingsSection — single-project selection lock', () => {
@@ -683,7 +684,7 @@ describe('FindingsSection — single-project selection lock', () => {
     expect(screen.getByTestId('ready-bucket-doc')).toBeInTheDocument();
   });
 
-  it('hides other projects (untriaged + ready) once a finding is selected', () => {
+  it('filters ONLY the ready section once a finding is selected; untriaged + counter stay unfiltered', () => {
     setFindings([
       finding({ id: 'a-u', project_id: 1, title: 'A untriaged' }),
       finding({ id: 'b-u', project_id: 2, title: 'B untriaged' }),
@@ -695,14 +696,16 @@ describe('FindingsSection — single-project selection lock', () => {
     fireEvent.click(within(screen.getByTestId('ready-bucket-quick')).getByTestId('ready-row'));
     expect(toggleFindingSelected).toHaveBeenCalledWith(1, 'a-r');
 
-    // Surface now locked to project 1: project-2 rows are gone from BOTH sections.
-    expect(screen.getByText('A untriaged')).toBeInTheDocument();
-    expect(screen.queryByText('B untriaged')).not.toBeInTheDocument();
+    // READY section locks to project 1: project-2's doc bucket disappears.
     expect(screen.getByTestId('ready-bucket-quick')).toBeInTheDocument();
     expect(screen.queryByTestId('ready-bucket-doc')).not.toBeInTheDocument();
 
-    // The Pending counter follows the narrowed surface (2 project-1 rows, not 4).
-    expect(within(screen.getByTestId('findings-counter-pending')).getByText('2')).toBeInTheDocument();
+    // UNTRIAGED list stays UNFILTERED — both projects' untriaged rows remain.
+    expect(screen.getByText('A untriaged')).toBeInTheDocument();
+    expect(screen.getByText('B untriaged')).toBeInTheDocument();
+
+    // The Pending counter is the total backlog (all 4 pending), NOT narrowed.
+    expect(within(screen.getByTestId('findings-counter-pending')).getByText('4')).toBeInTheDocument();
   });
 
   it('the tray CTA threads the selection-derived lockProjectId (cross-project, no filter)', () => {

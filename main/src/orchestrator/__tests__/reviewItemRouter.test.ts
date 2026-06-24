@@ -12,7 +12,7 @@
  *    event; re-triaging a terminal item is rejected (invalid_status).
  *  - findings-triage ops (migration 032): mutate (re-tag without clobbering
  *    siblings + re-prioritize, untriaged-only, rejects staged/non-finding),
- *    approve (untriaged → ready, sets staged_at + selected=1, rejects
+ *    approve (untriaged → ready, sets staged_at WITHOUT selecting, rejects
  *    non-pending/already-staged), set-selected (batch toggle, only staged
  *    findings selectable, one event per id, orchestrator close-out path).
  *  - exhaustive-switch dispatch: a new op does NOT fall through to runTriage.
@@ -516,10 +516,10 @@ describe('ReviewItemRouter (unified review inbox)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // approve — untriaged → ready (pre-selected)
+  // approve — untriaged → ready (staged, NOT selected)
   // -------------------------------------------------------------------------
 
-  it('approve sets staged_at + selected=1 and writes a "staged" event', async () => {
+  it('approve sets staged_at WITHOUT selecting and writes a "staged" event', async () => {
     const db = buildDb();
     const router = ReviewItemRouter.initialize(dbAdapter(db));
     const reviewItemId = await createFinding(router);
@@ -529,16 +529,15 @@ describe('ReviewItemRouter (unified review inbox)', () => {
     const cols = triageCols(db, reviewItemId);
     expect(cols.status).toBe('pending'); // status NOT overloaded
     expect(cols.staged_at).not.toBeNull();
-    expect(cols.selected).toBe(1);
+    expect(cols.selected).toBe(0); // approve stages a candidate; selection is separate
 
     const ev = lastEntityEvent(db, reviewItemId);
     expect(ev.kind).toBe('staged');
     const deltas = JSON.parse(ev.changes_json) as Array<{ field: string; from: unknown; to: unknown }>;
-    expect(deltas).toContainEqual({ field: 'staged_at', from: null, to: 'set' });
-    expect(deltas).toContainEqual({ field: 'selected', from: false, to: true });
+    expect(deltas).toEqual([{ field: 'staged_at', from: null, to: 'set' }]); // no selected delta
   });
 
-  it('approve emits a "staged" ReviewItemChangedEvent with selected=true', async () => {
+  it('approve emits a "staged" ReviewItemChangedEvent with selected=false', async () => {
     const db = buildDb();
     const router = ReviewItemRouter.initialize(dbAdapter(db));
     const reviewItemId = await createFinding(router);
@@ -549,7 +548,7 @@ describe('ReviewItemRouter (unified review inbox)', () => {
     await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId });
 
     expect(events.map((e) => e.action)).toEqual(['staged']);
-    expect(events[0].item.selected).toBe(true);
+    expect(events[0].item.selected).toBe(false);
     expect(events[0].item.staged_at).not.toBeNull();
   });
 
@@ -587,7 +586,16 @@ describe('ReviewItemRouter (unified review inbox)', () => {
     await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId: a });
     await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId: b });
 
-    // both start selected=1 (approve pre-selects); clear both
+    // approve stages without selecting — select both explicitly, then clear both
+    await router.applyReviewItem(1, {
+      op: 'set-selected',
+      actor: 'user',
+      reviewItemIds: [a, b],
+      selected: true,
+    });
+    expect(triageCols(db, a).selected).toBe(1);
+    expect(triageCols(db, b).selected).toBe(1);
+
     await router.applyReviewItem(1, {
       op: 'set-selected',
       actor: 'user',
@@ -638,6 +646,9 @@ describe('ReviewItemRouter (unified review inbox)', () => {
     const staged = await createFinding(router, { title: 'staged' });
     const untriaged = await createFinding(router, { title: 'untriaged' });
     await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId: staged });
+    // approve no longer pre-selects — select the staged row so the rollback below
+    // has a non-default value to preserve.
+    await router.applyReviewItem(1, { op: 'set-selected', actor: 'user', reviewItemIds: [staged], selected: true });
 
     await expect(
       router.applyReviewItem(1, {
@@ -647,7 +658,7 @@ describe('ReviewItemRouter (unified review inbox)', () => {
         selected: false,
       }),
     ).rejects.toMatchObject({ code: 'invalid_status' });
-    // atomic: the staged row's selected is unchanged (still 1 from approve)
+    // atomic: the failed batch rolled back, so the staged row stays selected=1
     expect(triageCols(db, staged).selected).toBe(1);
   });
 
@@ -657,6 +668,8 @@ describe('ReviewItemRouter (unified review inbox)', () => {
     seedRun(db, 'run-x'); // entity_events.run_id FKs workflow_runs — the close-out passes a real runId
     const reviewItemId = await createFinding(router);
     await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId });
+    // approve no longer pre-selects — select it so the close-out has something to clear.
+    await router.applyReviewItem(1, { op: 'set-selected', actor: 'user', reviewItemIds: [reviewItemId], selected: true });
     expect(triageCols(db, reviewItemId).selected).toBe(1);
 
     await router.applyReviewItem(1, {
@@ -726,6 +739,8 @@ describe('ReviewItemRouter (unified review inbox)', () => {
 
     await router.applyReviewItem(1, { op: 'mutate', actor: 'user', reviewItemId, priority: 'P0' });
     await router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId });
+    // approve no longer pre-selects — select it so shapeRow's 1→true path is exercised.
+    await router.applyReviewItem(1, { op: 'set-selected', actor: 'user', reviewItemIds: [reviewItemId], selected: true });
 
     const afterRow = db.prepare('SELECT * FROM review_items WHERE id = ?').get(reviewItemId) as Parameters<
       typeof ReviewItemRouter.shapeRow
@@ -747,6 +762,11 @@ describe('ReviewItemRouter (unified review inbox)', () => {
       ...ids.map((id) => router.applyReviewItem(1, { op: 'mutate', actor: 'user', reviewItemId: id, priority: 'P2' })),
     ]);
     await Promise.all(ids.map((id) => router.applyReviewItem(1, { op: 'approve', actor: 'user', reviewItemId: id })));
+    // approve no longer pre-selects — select via the set-selected op (also exercises
+    // the third op the per-project queue must serialize).
+    await Promise.all(
+      ids.map((id) => router.applyReviewItem(1, { op: 'set-selected', actor: 'user', reviewItemIds: [id], selected: true })),
+    );
 
     for (const id of ids) {
       const cols = triageCols(db, id);

@@ -597,18 +597,18 @@ export class ReviewItemRouter {
         );
       }
 
+      // Approve STAGES the finding into READY-to-compound as a candidate, but does
+      // NOT select it for the next compound run — selection is a separate, explicit
+      // human action (the checkbox). staged_at moves it to READY; selected stays 0.
       this.db
         .prepare(
           `UPDATE review_items
-              SET staged_at = CURRENT_TIMESTAMP, selected = 1, updated_at = ?
+              SET staged_at = CURRENT_TIMESTAMP, updated_at = ?
             WHERE id = ?`,
         )
         .run(now, reviewItemId);
 
-      const deltas: FieldDelta[] = [
-        { field: 'staged_at', from: null, to: 'set' },
-        { field: 'selected', from: false, to: true },
-      ];
+      const deltas: FieldDelta[] = [{ field: 'staged_at', from: null, to: 'set' }];
 
       const ev = this.insertEvent(reviewItemId, 'staged', change.actor, change.runId ?? null, deltas, now);
       eventId = ev.id;
