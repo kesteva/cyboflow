@@ -14,6 +14,7 @@ import type { ExecException } from 'child_process';
 import { TaskChangeRouter } from '../orchestrator/taskChangeRouter';
 import { SprintLaneStore } from '../orchestrator/sprintLaneStore';
 import { stampSessionRunsOutcome, stampSessionRunsPrOpen } from '../orchestrator/runRecovery';
+import { trackUsage } from '../services/telemetry';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 
 // Extended type for git system virtual panels
@@ -205,6 +206,8 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
     } catch (error) {
       console.error(`[IPC:git] Failed to stamp merged outcome for session ${sessionId}:`, error);
     }
+    // Merge close-out reached only after a successful squash/rebase merge.
+    trackUsage('session_resolved', { action: 'merge', had_conflicts: false });
   };
 
   // Helper function to refresh git status after operations that only affect one session
@@ -1396,6 +1399,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         if (closed > 0) {
           console.log(`[IPC:git] Create-PR close-out: marked ${closed} run(s) completed/pr_open for session ${sessionId}`);
         }
+        trackUsage('session_resolved', { action: 'pr' });
       } catch (closeoutError) {
         console.error(`[IPC:git] Create-PR close-out failed for session ${sessionId} (push unaffected):`, closeoutError);
       }

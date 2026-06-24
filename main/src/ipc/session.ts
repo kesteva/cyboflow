@@ -7,6 +7,7 @@ import type { CreateSessionRequest } from '../types/session';
 import { getCyboflowSubdirectory } from '../utils/cyboflowDirectory';
 import { convertDbFolderToFolder } from './folders';
 import { panelManager } from '../services/panelManager';
+import { trackUsage } from '../services/telemetry';
 import {
   validateSessionExists,
   validatePanelSessionOwnership,
@@ -686,6 +687,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       } catch (stampError) {
         console.error(`[Main] Failed to stamp dismissed outcome for session ${sessionId}:`, stampError);
       }
+      trackUsage('session_resolved', { action: 'dismiss' });
 
       // Auto-resolve any open dynamic-workflow review items for this session —
       // dismissing the session IS the human's close-out action. Fire-and-forget:
