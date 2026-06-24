@@ -16,6 +16,10 @@
  *   - <variant>/latest-mac.yml      (the manifest the updater polls — must NOT be cached)
  *   - <variant>/*.zip / *.zip.blockmap   (what the updater downloads + delta map)
  *   - <variant>/*.dmg / *.dmg.blockmap   (first-install download for the website)
+ *   - <variant>/<product>-latest-macOS-<arch>.dmg
+ *                                   (stable, version-less alias the website links to —
+ *                                    server-side copied from the new .dmg every release so
+ *                                    a version bump never requires editing the site)
  *
  * The prefix MUST match the build's --config.publish.url path (see package.json
  * build:mac / build:mac:dev) or the updater won't resolve the artifacts.
@@ -38,7 +42,7 @@
 import { createReadStream, statSync, readdirSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { S3Client } from '@aws-sdk/client-s3';
+import { S3Client, CopyObjectCommand } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -59,6 +63,19 @@ const CONTENT_TYPES = {
 function fail(message) {
   console.error(`\n✗ ${message}\n`);
   process.exit(1);
+}
+
+/**
+ * Map a versioned .dmg name to its stable, version-less website alias:
+ *   Cyboflow-0.1.4-macOS-arm64.dmg      -> Cyboflow-latest-macOS-arm64.dmg      (stable feed)
+ *   Cyboflow-Dev-0.1.4-macOS-arm64.dmg  -> Cyboflow-Dev-latest-macOS-arm64.dmg  (dev feed)
+ * The /download (stable) and /dev pages link at these per-variant alias keys, so a
+ * version bump never requires editing the site. Returns null when the name carries no
+ * recognizable version (then aliasing is skipped rather than guessed).
+ */
+function latestAliasName(name) {
+  const aliased = name.replace(/-\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?-macOS-/, '-latest-macOS-');
+  return aliased === name ? null : aliased;
 }
 
 const accountId = process.env.R2_ACCOUNT_ID;
@@ -135,6 +152,14 @@ for (const name of artifacts) {
 
   if (dryRun) {
     console.log(`  • ${name}  (${sizeMb} MB, ${contentType}, cache=${cacheControl})`);
+    if (ext === '.dmg') {
+      const aliasName = latestAliasName(name);
+      console.log(
+        aliasName
+          ? `      ⤷ alias ${VARIANT}/${aliasName} (no-cache, server-side copy)`
+          : `      ! no -latest- alias derivable from ${name} — website link not repointed`,
+      );
+    }
     continue;
   }
 
@@ -153,6 +178,30 @@ for (const name of artifacts) {
   // eslint-disable-next-line no-await-in-loop -- sequential keeps progress legible + avoids R2 rate spikes
   await upload.done();
   console.log('done');
+
+  // Repoint the version-less `-latest-` website alias at this build via a
+  // server-side copy (no re-upload of the bytes). The alias content changes every
+  // release, so it must NOT inherit the source's immutable cache — give it
+  // `no-cache` so clients always revalidate (a cheap 304 until the next release).
+  if (ext === '.dmg') {
+    const aliasName = latestAliasName(name);
+    if (aliasName) {
+      // eslint-disable-next-line no-await-in-loop -- must follow the upload it aliases
+      await client.send(
+        new CopyObjectCommand({
+          Bucket: bucket,
+          Key: `${VARIANT}/${aliasName}`,
+          CopySource: `${bucket}/${VARIANT}/${name}`,
+          ContentType: contentType,
+          CacheControl: 'public, no-cache',
+          MetadataDirective: 'REPLACE',
+        }),
+      );
+      console.log(`  ⤷ alias ${VARIANT}/${aliasName} → ${name}`);
+    } else {
+      console.warn(`  ! could not derive a -latest- alias from ${name}; website link not repointed`);
+    }
+  }
 }
 
 console.log(`\n✓ Published. The app polls ${PUBLIC_BASE}/latest-mac.yml\n`);
