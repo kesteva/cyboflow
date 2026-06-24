@@ -1,6 +1,6 @@
 import { IpcMain } from 'electron';
 import type { AppServices } from './types';
-import { trackUsage } from '../services/telemetry';
+import { trackUsageFromRenderer } from '../services/telemetry';
 
 interface TelemetryTrackPayload {
   eventName: string;
@@ -21,7 +21,7 @@ export function registerTelemetryHandlers(ipcMain: IpcMain, _services: AppServic
       if (!isTelemetryTrackPayload(payload)) {
         return;
       }
-      trackUsage(payload.eventName, payload.properties);
+      trackUsageFromRenderer(payload.eventName, payload.properties);
     } catch {
       // Telemetry must never throw into app code.
     }

@@ -5,6 +5,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { scrubSentryEvent, scrubBreadcrumb } from './scrub';
 import { environmentFromBuildInfo, type TelemetryEnvironment } from './environment';
+import type { TelemetryEventMap, TelemetryEventName } from '../../../../shared/types/telemetry';
 
 export type { TelemetryEnvironment } from './environment';
 
@@ -78,24 +79,43 @@ export function initTelemetry(cfg: {
     try {
       aptabaseInitialize(process.env.APTABASE_APP_KEY);
       aptabaseActive = true;
-      trackUsage('app_started');
+      trackUsage('app_started', { environment });
     } catch {
       aptabaseActive = false;
     }
   }
 }
 
-/**
- * Record an anonymous usage event. No-op unless Aptabase was initialized.
- * Never throws into app code.
- */
-export function trackUsage(name: string, props?: Record<string, string | number | boolean>): void {
+function emitUsage(name: string, props?: Record<string, string | number | boolean>): void {
   if (!aptabaseActive) return;
   try {
     aptabaseTrack(name, props);
   } catch {
     // Swallow — telemetry must never throw into app code.
   }
+}
+
+/**
+ * Record an anonymous usage event (typed against the shared `TelemetryEventMap`).
+ * For main-process call sites. No-op unless Aptabase was initialized; never throws.
+ */
+export function trackUsage<E extends TelemetryEventName>(
+  event: E,
+  props?: TelemetryEventMap[E],
+): void {
+  emitUsage(event, props as Record<string, string | number | boolean> | undefined);
+}
+
+/**
+ * Forward a renderer-originated usage event over the `telemetry:track` IPC boundary.
+ * The event/props were already type-checked at the renderer's `trackEvent`; here they
+ * arrive as opaque JSON, so this entry point is intentionally stringly-typed.
+ */
+export function trackUsageFromRenderer(
+  eventName: string,
+  props?: Record<string, string | number | boolean>,
+): void {
+  emitUsage(eventName, props);
 }
 
 /** Whether Sentry error reporting was successfully initialized this boot. */
