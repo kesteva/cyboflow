@@ -13,3 +13,4 @@ not treat them as current. For live architecture and patterns, see `docs/ARCHITE
 | `global-workflow-scope-plan.md` | Global workflow scope (migration `030`) | yes |
 | `sdk-migration-smoke-results.md` | One-time SDK-migration smoke-test report | n/a (record) |
 | `CHANGELOG-crystal.md` | Upstream Crystal's changelog through `0.3.5` (the fork point) | n/a (record) |
+| `crystal-signing-0.3.5/` | First signed-build + Gatekeeper records, shipped at the inherited Crystal version `0.3.5` | n/a (record) |

@@ -470,44 +470,26 @@ Apple status page at https://developer.apple.com/system-status/.
 
 ## Recording a Signed Build
 
-After `pnpm run build:mac:universal` produces a signed-and-notarized DMG,
-capture the evidence immediately — do not reconstruct from memory or logs later.
+cyboflow does **not** keep a per-build dossier. The evidence that used to be
+transcribed by hand is already captured, durably, elsewhere:
 
-1. Create a new directory for this release version:
-   ```bash
-   mkdir -p docs/signing/builds/<version>
-   ```
+- **Artifact provenance** — `latest-mac.yml` (published to R2 alongside the DMG)
+  carries the sha512 + size of every distributed artifact. That is your
+  supply-chain anchor; you don't copy hashes into a doc.
+- **Release notes** — user-facing changes go in `CHANGELOG.md`.
+- **Toolchain versions** — electron-builder / Electron are pinned in
+  `package.json` + the lockfile, so "what changed since the last good build" is
+  already in git. The one datum git doesn't hold is the host macOS / Xcode CLT
+  version; note it in the changelog entry only when a bump is the reason a build
+  changed behavior.
+- **Clean-install gate** — run `docs/signing/GATEKEEPER_CHECKLIST.md` after any
+  signing-config change (cert, entitlements, toolchain bump) or before
+  announcing a release. It's a checklist, not a record — don't commit results;
+  if it fails, capture the cause + fix under "Known Build Pitfalls" below.
 
-2. Copy the build log template and fill in every `<TODO: ...>` placeholder as
-   you work through the build:
-   ```bash
-   cp docs/signing/builds/_template/BUILD_LOG_TEMPLATE.md \
-      docs/signing/builds/<version>/FIRST_SIGNED_BUILD_LOG.md
-   ```
-   Record submission IDs, SHA256 hashes, and timestamps directly from the
-   terminal output at the time each step completes.
-
-3. After the clean-account Gatekeeper test completes (separate task), copy and
-   fill in the Gatekeeper test template:
-   ```bash
-   cp docs/signing/builds/_template/GATEKEEPER_TEST_TEMPLATE.md \
-      docs/signing/builds/<version>/GATEKEEPER_ACCEPTANCE_TEST.md
-   ```
-
-4. Commit both files:
-   ```bash
-   git add docs/signing/builds/<version>/
-   git commit -m "docs: record signed build and Gatekeeper test for <version>"
-   ```
-
-See `docs/signing/builds/README.md` for the full lifecycle policy, including
-the never-overwrite rule: completed `builds/<version>/` directories are
-append-only audit records.
-
-> **This directory is the audit trail for distribution — never overwrite a
-> completed build's evidence.** If a rebuild is required, create a new
-> directory (e.g. `builds/<version>-rebuild/`) rather than editing the
-> original.
+The first signed build (shipped at the inherited Crystal version `0.3.5`) is
+preserved as a one-off legacy record under
+`docs/archive/crystal-signing-0.3.5/`.
 
 ---
 
