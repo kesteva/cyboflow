@@ -467,6 +467,7 @@ export class QuestionRouter extends EventEmitter {
       // rely on the agent calling cyboflow_set_task_stage). Fail-soft + idempotent;
       // runs AFTER the resume so a stage hiccup never delays the agent.
       await this.promoteTasksOnPlanApproval(request.runId, effectiveAnswer);
+      await this.retireShipIdeasOnPlanApproval(request.runId, effectiveAnswer);
       await this.finalizePlannerRun(request.runId, effectiveAnswer);
     });
   }
@@ -539,6 +540,66 @@ export class QuestionRouter extends EventEmitter {
     } catch (err) {
       console.warn(
         `[QuestionRouter] promoteTasksOnPlanApproval skipped for run ${runId} (fail-soft): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Ship: retire the run's owned idea(s) to the terminal Decomposed stage when the
+   * just-answered gate is `approve-plan` and the human chose Approve — i.e. the
+   * moment the tasks are approved. The ship workflow concatenates planner → sprint
+   * and DROPS planner's separate terminal decompose/Archive gate, so without this
+   * the seed idea lingers in its planning stage forever: a ship run interrupted any
+   * time after plan approval (before the create-sprint-batch materialize seam, or
+   * mid-execution, or before the final human-review gate) never reaches the agent's
+   * retirement. Approving the plan IS the decomposition — its tasks now carry the
+   * flow — so the idea is archived here, deterministically and independent of the
+   * agent surviving to a later step.
+   *
+   * Scoped to the `ship` workflow by name: planner runs ALSO answer an
+   * `approve-plan` gate, but a planner idea must retire only at its own later
+   * decompose/Archive gate (finalizePlannerRun), NEVER here.
+   *
+   * Backend-deterministic + idempotent (retireIdeaToDecomposed is a no-op once the
+   * idea is at Decomposed, so the later materialize seam / human-review retirement
+   * are harmless re-asserts) + fail-soft: reads current_step_id defensively (older
+   * DBs lack the column → the SELECT throws → caught → no-op). NEVER throws —
+   * respond() is unaffected.
+   */
+  private async retireShipIdeasOnPlanApproval(runId: string, answer: QuestionAnswer): Promise<void> {
+    try {
+      const run = this.db
+        .prepare(
+          'SELECT project_id AS projectId, current_step_id AS currentStepId FROM workflow_runs WHERE id = ?',
+        )
+        .get(runId) as { projectId?: unknown; currentStepId?: unknown } | undefined;
+      if (!run) return;
+      if (run.currentStepId !== APPROVE_PLAN_STEP_ID) return;
+      if (!this.isApproveAnswer(answer)) return;
+
+      // Ship-only — see finalizePlannerRun for the symmetric planner guard. The
+      // workflow-name lookup is a LEFT JOIN read (a missing workflows row yields a
+      // null name → no retire), matching the defensive pattern there.
+      const wf = this.db
+        .prepare(
+          `SELECT w.name AS workflowName
+             FROM workflow_runs r
+             LEFT JOIN workflows w ON w.id = r.workflow_id
+            WHERE r.id = ?`,
+        )
+        .get(runId) as { workflowName?: unknown } | undefined;
+      if (!(typeof wf?.workflowName === 'string' && wf.workflowName === SHIP_WORKFLOW_NAME)) return;
+
+      const projectId = typeof run.projectId === 'number' ? run.projectId : Number(run.projectId);
+      const router = TaskChangeRouter.getInstance();
+      for (const ideaId of listRunOwnedIdeaIds(this.db, runId)) {
+        await router.retireIdeaToDecomposed(projectId, ideaId).catch(() => {
+          /* per-idea best-effort */
+        });
+      }
+    } catch (err) {
+      console.warn(
+        `[QuestionRouter] retireShipIdeasOnPlanApproval skipped for run ${runId} (fail-soft): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

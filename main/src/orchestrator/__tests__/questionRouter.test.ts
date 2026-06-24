@@ -952,6 +952,202 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
 });
 
 // ---------------------------------------------------------------------------
+// Ship: answering the `approve-plan` gate with Approve retires the run's owned
+// idea(s) to the terminal Decomposed stage (position 12) — ship drops planner's
+// separate decompose/Archive gate, so "tasks approved" IS where the idea is
+// archived. Ship-scoped by workflow name (a planner approve-plan must NOT retire
+// here). Backend-deterministic; Revise/Reject and non-ship flows are no-ops.
+// ---------------------------------------------------------------------------
+
+describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed', () => {
+  // Same migration chain as the approve-plan promotion block.
+  function buildDb(): Database.Database {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    db.exec(`
+      CREATE TABLE projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p-ship');
+    const migDir = join(__dirname, '..', '..', 'database', 'migrations');
+    for (const f of [
+      '006_cyboflow_schema.sql',
+      '007_add_stuck_reason.sql',
+      '010_questions.sql',
+      '011_workflow_step_tracking.sql',
+      '014_native_tasks.sql',
+      '015_entity_model_rebuild.sql',
+      '016_review_items.sql',
+      '017_run_seed_idea.sql',
+      '024_archive_in_place.sql',
+      '028_idea_attachments.sql',
+    ]) {
+      db.exec(readFileSync(join(migDir, f), 'utf-8'));
+    }
+    return db;
+  }
+
+  function stageId(position: number): string {
+    return `stage-board-1-default-${position}`;
+  }
+
+  const DECOMPOSED_POSITION = 12;
+
+  function ideaStage(db: Database.Database, ideaId: string): string {
+    return (db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string }).stage_id;
+  }
+
+  /** Seed a run under a named workflow (ship or planner) at the given step. */
+  function seedRunForWorkflow(
+    db: Database.Database,
+    opts: { runId: string; workflowName: string; currentStepId: string },
+  ): void {
+    const wfId = `wf-${opts.workflowName}`;
+    db.prepare(
+      `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, '{}')`,
+    ).run(wfId, opts.workflowName);
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, current_step_id, seed_idea_id)
+       VALUES (?, ?, 1, 'running', ?, NULL)`,
+    ).run(opts.runId, wfId, opts.currentStepId);
+  }
+
+  function markCreatedByRun(
+    db: Database.Database,
+    entityType: 'idea' | 'task',
+    entityId: string,
+    runId: string,
+  ): void {
+    const maxRow = db
+      .prepare('SELECT MAX(seq) AS maxSeq FROM entity_events WHERE entity_type = ? AND entity_id = ?')
+      .get(entityType, entityId) as { maxSeq: number | null };
+    const seq = (maxRow.maxSeq ?? 0) + 1;
+    db.prepare(
+      `INSERT INTO entity_events (entity_type, entity_id, seq, kind, actor, run_id, changes_json, created_at)
+       VALUES (?, ?, ?, 'created', 'agent:ship', ?, '[]', ?)`,
+    ).run(entityType, entityId, seq, runId, new Date().toISOString());
+  }
+
+  /**
+   * Seed an idea + N tasks attributed to the run, deliberately WITHOUT
+   * originatingIdeaId on the tasks — this mirrors the real MCP `create_task`
+   * path (which threads only parentEpicId), so the chokepoint's FIX-STAGE-MODEL B
+   * auto-retire does NOT pre-empt the gate. The idea is left in its planning stage
+   * and linked to the run only via the created-event ownership projection.
+   */
+  async function seedOwnedIdea(
+    db: Database.Database,
+    taskRouter: TaskChangeRouter,
+    runId: string,
+    taskCount: number,
+  ): Promise<{ ideaId: string; taskIds: string[] }> {
+    const idea = await taskRouter.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Ship idea' });
+    const taskIds: string[] = [];
+    for (let i = 0; i < taskCount; i++) {
+      const t = await taskRouter.applyChange(1, { actor: 'user', entityType: 'task', title: `Ship task ${i}` });
+      taskIds.push(t.taskId);
+    }
+    await taskRouter._queueForProject(1).onIdle();
+    markCreatedByRun(db, 'idea', idea.taskId, runId);
+    for (const id of taskIds) markCreatedByRun(db, 'task', id, runId);
+    return { ideaId: idea.taskId, taskIds };
+  }
+
+  const PLAN_QUESTIONS: QuestionPayload[] = [
+    {
+      question: 'Approve the plan?',
+      header: 'Approve plan',
+      multiSelect: false,
+      options: [{ label: 'Approve' }, { label: 'Revise' }],
+    },
+  ];
+
+  async function answerPlanGate(
+    db: Database.Database,
+    router: QuestionRouter,
+    runId: string,
+    chosen: string,
+  ): Promise<void> {
+    const questionPromise = router.requestQuestion(runId, `tu-${runId}-${Math.random().toString(36).slice(2)}`, PLAN_QUESTIONS, vi.fn());
+    await router['getQuestionQueue'](runId).onIdle();
+    const questionId = (
+      db
+        .prepare("SELECT id FROM questions WHERE run_id = ? AND status = 'pending' ORDER BY created_at DESC, rowid DESC LIMIT 1")
+        .get(runId) as { id: string }
+    ).id;
+    await router.respond(questionId, { answers: { 'Approve the plan?': chosen } });
+    await questionPromise;
+    await TaskChangeRouter.getInstance()._queueForProject(1).onIdle();
+  }
+
+  afterEach(() => {
+    QuestionRouter._resetForTesting();
+    TaskChangeRouter._resetForTesting();
+    taskChangeEvents.removeAllListeners();
+  });
+
+  it('Approve on a SHIP approve-plan gate retires the run-owned idea to Decomposed (position 12)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedRunForWorkflow(db, { runId: 'run-ship', workflowName: 'ship', currentStepId: 'approve-plan' });
+    const { ideaId } = await seedOwnedIdea(db, taskRouter, 'run-ship', 2);
+    // Precondition: the idea is NOT yet retired (no originatingIdeaId auto-retire).
+    expect(ideaStage(db, ideaId)).not.toBe(stageId(DECOMPOSED_POSITION));
+
+    await answerPlanGate(db, router, 'run-ship', 'Approve');
+
+    expect(ideaStage(db, ideaId)).toBe(stageId(DECOMPOSED_POSITION));
+    // The retirement is orchestrator-attributed with the 'decomposed' action.
+    const ev = db
+      .prepare("SELECT actor, kind FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(ideaId) as { actor: string; kind: string };
+    expect(ev.actor).toBe('orchestrator');
+    expect(ev.kind).toBe('decomposed');
+  });
+
+  it('Revise on a SHIP approve-plan gate does NOT retire the idea', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedRunForWorkflow(db, { runId: 'run-ship', workflowName: 'ship', currentStepId: 'approve-plan' });
+    const { ideaId } = await seedOwnedIdea(db, taskRouter, 'run-ship', 1);
+    const before = ideaStage(db, ideaId);
+
+    await answerPlanGate(db, router, 'run-ship', 'Revise');
+
+    expect(ideaStage(db, ideaId)).toBe(before);
+    expect(ideaStage(db, ideaId)).not.toBe(stageId(DECOMPOSED_POSITION));
+  });
+
+  it('Approve on a PLANNER approve-plan gate does NOT retire the idea here (planner retires at its own decompose gate)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    // Same shape, but the workflow is planner — the ship-scoped retirement must skip it.
+    seedRunForWorkflow(db, { runId: 'run-plan', workflowName: 'planner', currentStepId: 'approve-plan' });
+    const { ideaId } = await seedOwnedIdea(db, taskRouter, 'run-plan', 1);
+    const before = ideaStage(db, ideaId);
+
+    await answerPlanGate(db, router, 'run-plan', 'Approve');
+
+    expect(ideaStage(db, ideaId)).toBe(before);
+    expect(ideaStage(db, ideaId)).not.toBe(stageId(DECOMPOSED_POSITION));
+  });
+});
+
+// ---------------------------------------------------------------------------
 // FIX-STAGE-MODEL (decompose): the planner's separate FINAL gate. Answering at
 // the `decompose` step COMPLETES the run; choosing Archive first retires the
 // run's owned ideas to the terminal Decomposed stage (position 12). The

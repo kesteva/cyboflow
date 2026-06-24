@@ -76,8 +76,9 @@ them between phases.
    `cyboflow_create_task` (title, body, acceptance criteria, file/dependency
    hints, parent epic/idea linkage). **Remember every task id and title you
    create** — you will present the full list at the next gate and pass the
-   approved subset to materialize. The idea is NOT retired here; it is retired to
-   Decomposed at the final `human-review` gate (step 12).
+   approved subset to materialize. The idea is NOT retired here; the backend
+   retires it to Decomposed the moment the plan is approved at `approve-plan`
+   (step 6) — see that step.
 6. **approve-plan** → **human gate, inline. This gate doubles as the
    pre-execution gate.** Use **AskUserQuestion** (header `Approve plan`):
    - Present the **FULL list** of tasks the run created — by ref/title — in the
@@ -91,9 +92,11 @@ them between phases.
      on `interactive`. If the approved subset exceeds the cap, ask the human to
      trim it to the cap before continuing — do not silently truncate.
    - The final answer the user gives **must start with "Approve"** so the backend
-     promotes the created tasks to Ready-for-development. Do **not** proceed until
-     they answer Approve. **Retain the approved subset of task ids** — you pass it
-     to materialize in the next phase.
+     promotes the created tasks to Ready-for-development **and retires the
+     originating idea(s) to Decomposed** (approving the plan IS the decomposition —
+     the idea's tasks now carry the flow). Do **not** proceed until they answer
+     Approve. **Retain the approved subset of task ids** — you pass it to
+     materialize in the next phase.
 
 ### Phase 3 — Materialize
 
@@ -217,14 +220,15 @@ Enter this phase only after **every** lane is terminal (`integrated` or
     the final taste-level sign-off on the whole sprint. Use the header
     `Approve sprint` with the options **Approve** / **Reject** (these exact
     labels). Do **not** self-approve and never silently proceed past a gate.
-    - On **Approve**: retire the originating idea(s) to the terminal **Decomposed**
-      board stage via `cyboflow_set_task_stage` (this is the ONLY place the idea
-      is retired — never earlier). Then post a final summary — a per-lane outcome
-      table (task ref, title, lane status, commit) — and **end**. The run drains
-      and rests in `awaiting_review`; the user merges the session from the UI. Do
-      NOT merge to main yourself.
-    - On **Reject**: summarize what was rejected, leave the lanes and the idea as
-      they stand (do NOT retire the idea), and end.
+    - On **Approve**: the originating idea(s) were already retired to **Decomposed**
+      when the plan was approved at `approve-plan` (the backend does this), so no
+      idea move is needed here. Post a final summary — a per-lane outcome table
+      (task ref, title, lane status, commit) — and **end**. The run drains and rests
+      in `awaiting_review`; the user merges the session from the UI. Do NOT merge to
+      main yourself.
+    - On **Reject**: summarize what was rejected and end. The idea stays at
+      Decomposed (it was retired at plan approval, not here) — this gate judges the
+      executed sprint, not the decomposition.
 
 ## Hard rules
 
@@ -250,8 +254,9 @@ Enter this phase only after **every** lane is terminal (`integrated` or
 - Emit out-of-scope issues as findings via `cyboflow_report_finding` (from the
   subagents' returned findings); do not widen any task. Carry `category` + code
   `locations` on every code finding so the queue can group and navigate to it.
-- **The idea retires only at `human-review`, on Approve** — never earlier, and
-  never on Reject. Drive it to **Decomposed** via `cyboflow_set_task_stage`.
+- **The idea retires at `approve-plan`, on Approve** — the backend drives it to
+  **Decomposed** the moment the plan is approved (its tasks now carry the flow),
+  so you never move the idea yourself and it is already retired by `human-review`.
 - **Failed lanes never block the gate** — they are reported at it. The user
   decides what to do with a partially-failed sprint.
 - Report every step transition via `cyboflow_report_step` from this main session —
