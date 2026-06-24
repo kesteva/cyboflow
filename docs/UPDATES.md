@@ -156,9 +156,10 @@ bump version → build:mac:dev:{arm64,x64} → gen-mac-latest-yml → publish (d
             → on green: build:mac:{arm64,x64} → gen-mac-latest-yml → publish (stable/)
 ```
 
-Because Dev is a distinct app (own data dir), you can run it alongside Stable
-without risk. Bump the version for each Dev you want existing Dev installs to
-auto-update to (a `-dev.N` prerelease suffix is conventional, e.g. `0.1.3-dev.1`).
+Dev installs side-by-side with Stable (distinct `appId`/name), but **both read the
+same local production database** (`~/.cyboflow`) — Dev is a separate update channel,
+not a separate dataset. Bump the version for each Dev you want existing Dev installs
+to auto-update to (a `-dev.N` prerelease suffix is conventional, e.g. `0.1.3-dev.1`).
 
 ---
 
@@ -201,17 +202,26 @@ that differs is fixed at build time by `build:mac:dev`:
 |---|---|---|
 | App name (`productName`) | Cyboflow | Cyboflow Dev |
 | Bundle id (`appId`) | `com.cyboflow.app` | `com.cyboflow.app.dev` |
-| Data dir | `~/.cyboflow` | `~/.cyboflow-dev` |
+| Data dir | `~/.cyboflow` | `~/.cyboflow` (shared) |
 | Update feed | `updates.cyboflow.com/stable` | `updates.cyboflow.com/dev` |
 | Artifact name | `Cyboflow-<v>-…` | `Cyboflow-Dev-<v>-…` |
 
-**Why separate apps (not a channel setting):** the SQLite DB is forward-only
-migrated. If one install ran a newer dev migration on a *shared* database, the
-older stable binary could no longer open it. Distinct `appId`s give each variant
-its own data dir (resolved by `cyboflowDirName()` in
-`main/src/utils/cyboflowDirectory.ts` via the `__CFBundleIdentifier` macOS sets),
-so a dev install can never corrupt stable's data. Each app only ever updates
-within its own feed.
+**Why separate apps (not a channel setting):** distinct `appId`/name lets Dev install
+side-by-side with Stable, the way VS Code Insiders does, and each app only ever updates
+within its own feed. **Both packaged variants intentionally share the production data
+dir `~/.cyboflow`** so the Dev build operates on the real local data — Dev is a separate
+*update channel*, not a separate dataset.
+
+The data-dir resolution lives in `getCyboflowDirectory()`
+(`main/src/utils/cyboflowDirectory.ts`): any packaged build → `~/.cyboflow`; the
+non-packaged Electron dev server (`pnpm dev`) → `~/.cyboflow_dev` so local development
+never mutates or forward-migrates the installed apps' database.
+
+> ⚠️ Because the SQLite DB is **forward-only** migrated, running a Dev build whose
+> migrations are ahead of Stable will advance the shared `~/.cyboflow` DB, after which
+> the older Stable binary may refuse to open it. Keep Dev's schema in step with what
+> you intend Stable to run, or back up `~/.cyboflow` before testing a Dev build that
+> carries new migrations.
 
 Users get the dev by **downloading the separate Cyboflow Dev app** from the
 website (Settings → Updates points them there) — there is no in-app opt-in.
