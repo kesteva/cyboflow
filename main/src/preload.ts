@@ -341,6 +341,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     track: (eventName: string, properties?: Record<string, string | number | boolean>): void => {
       ipcRenderer.send('telemetry:track', { eventName, properties });
     },
+    // Synchronous boot-time check: whether MAIN initialized Sentry. The renderer
+    // SDK forwards events over a custom `sentry-ipc://` protocol that ONLY exists
+    // when main's Sentry is active, so the renderer must gate its init on this.
+    isSentryActive: (): boolean => {
+      try {
+        return ipcRenderer.sendSync('telemetry:is-sentry-active') === true;
+      } catch {
+        return false;
+      }
+    },
   },
 
   // Prompts

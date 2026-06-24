@@ -8,9 +8,14 @@ import './index.css';
 import './styles/markdown-preview.css';
 
 // The DSN, opt-out gating, scrubbing, and transport all live in the MAIN process.
-// This renderer init is inert (a no-op) when main did not initialize Sentry, so no
-// extra gating is needed here.
-Sentry.init({});
+// The renderer SDK forwards events to main over a custom `sentry-ipc://` protocol
+// that ONLY exists once main initialized Sentry. Initializing the renderer SDK when
+// main did not floods the console with "sentry-ipc scheme not supported" errors on
+// every scope sync, so gate the renderer init on main's actual Sentry state (off
+// under `pnpm dev`, and in packaged builds that opted out or have no DSN).
+if (window.electronAPI?.telemetry?.isSentryActive?.()) {
+  Sentry.init({});
+}
 
 // Global error handlers to catch errors that React error boundaries can't
 window.addEventListener('unhandledrejection', (event) => {

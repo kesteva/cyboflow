@@ -236,7 +236,12 @@ interface ElectronAPI {
   };
 
   // Telemetry — fire-and-forget renderer → main usage tracking (returns void, never throws).
-  telemetry: { track(eventName: string, properties?: Record<string, string | number | boolean>): void };
+  // isSentryActive is a synchronous boot-time check so the renderer only inits its
+  // Sentry SDK when main's `sentry-ipc://` transport actually exists.
+  telemetry: {
+    track(eventName: string, properties?: Record<string, string | number | boolean>): void;
+    isSentryActive(): boolean;
+  };
 
   // Prompts — IPCDataResponse so callers can use response.data directly after success check
   prompts: {

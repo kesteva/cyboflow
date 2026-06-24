@@ -1,6 +1,6 @@
 import { IpcMain } from 'electron';
 import type { AppServices } from './types';
-import { trackUsageFromRenderer } from '../services/telemetry';
+import { trackUsageFromRenderer, isSentryActive } from '../services/telemetry';
 
 interface TelemetryTrackPayload {
   eventName: string;
@@ -25,5 +25,13 @@ export function registerTelemetryHandlers(ipcMain: IpcMain, _services: AppServic
     } catch {
       // Telemetry must never throw into app code.
     }
+  });
+
+  // Synchronous query used by the renderer at boot to decide whether to init its
+  // Sentry SDK. The renderer's `sentry-ipc://` transport only works when main's
+  // Sentry is active; gating on this avoids console-flooding scheme errors under
+  // `pnpm dev` and in packaged builds where reporting is opted out / has no DSN.
+  ipcMain.on('telemetry:is-sentry-active', (event) => {
+    event.returnValue = isSentryActive();
   });
 }
