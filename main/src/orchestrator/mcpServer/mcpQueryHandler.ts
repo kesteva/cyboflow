@@ -1309,6 +1309,15 @@ export class McpQueryHandler {
           error: emitErr instanceof Error ? emitErr.message : String(emitErr),
         });
       }
+
+      // Retire the run's owned idea(s) to the Decomposed terminal stage. Ship has
+      // no planner-style human Archive gate (its terminal `decompose` step is
+      // dropped), so without this a shipped idea lingers forever in its planning
+      // stage even though its tasks now carry the flow. Fired here — AFTER the
+      // human-approved plan is materialized into sprint lanes — and fire-and-forget
+      // + best-effort: a failure must never invalidate the committed batch or block
+      // the synchronous response below.
+      void this.retireRunOwnedIdeas(ctx.projectId, msg.runId);
     }
 
     this.writeResponse(client, {
@@ -1317,6 +1326,27 @@ export class McpQueryHandler {
       ok: true,
       data: { batch_id: outcome.batchId, created: outcome.created },
     });
+  }
+
+  /**
+   * Retire every idea the run owns (seed idea UNION run-created ideas, via
+   * listRunOwnedIdeaIds) to the Decomposed terminal stage. The ship handoff
+   * seam's follow-on — see handleCreateSprintBatch. Best-effort: each retire is
+   * idempotent (a no-op when the idea is already at Decomposed) and individually
+   * guarded so one failure can't starve the rest, and the whole pass is swallowed
+   * so it can never invalidate the already-committed batch.
+   */
+  private async retireRunOwnedIdeas(projectId: number, runId: string): Promise<void> {
+    try {
+      const router = TaskChangeRouter.getInstance();
+      for (const ideaId of listRunOwnedIdeaIds(this.db, runId)) {
+        await router.retireIdeaToDecomposed(projectId, ideaId).catch(() => {
+          /* per-idea best-effort */
+        });
+      }
+    } catch {
+      /* best-effort housekeeping — never disturb the committed batch */
+    }
   }
 
   // --------------------------------------------------------------------------

@@ -466,6 +466,46 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       );
     });
 
+    // The ship materialize-batch seam has no planner-style human Archive gate, so
+    // it calls this public method directly to retire a shipped run's seed idea
+    // once the approved plan is materialized into sprint lanes (see
+    // mcpQueryHandler.retireRunOwnedIdeas). Lock its contract: retire to
+    // Decomposed (position 12), idempotent, and a safe no-op for a missing idea.
+    it('retireIdeaToDecomposed retires an idea to Decomposed, idempotently and fail-soft', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Shipped idea' });
+      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
+        stageId(1),
+      );
+
+      // First retire: idea moves to Decomposed via an orchestrator 'decomposed' event.
+      await router.retireIdeaToDecomposed(1, idea.taskId);
+      await router._queueForProject(1).onIdle();
+      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
+        stageId(12),
+      );
+      const ev = db
+        .prepare(
+          "SELECT actor, kind FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
+        )
+        .get(idea.taskId) as { actor: string; kind: string };
+      expect(ev).toMatchObject({ actor: 'orchestrator', kind: 'decomposed' });
+      const eventsAfterFirst = eventCount(db, 'idea', idea.taskId);
+
+      // Second retire: already at Decomposed -> idempotent no-op, no new event.
+      await router.retireIdeaToDecomposed(1, idea.taskId);
+      await router._queueForProject(1).onIdle();
+      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
+        stageId(12),
+      );
+      expect(eventCount(db, 'idea', idea.taskId)).toBe(eventsAfterFirst);
+
+      // A missing idea is a safe no-op (best-effort housekeeping must never throw).
+      await expect(router.retireIdeaToDecomposed(1, 'ide_missing')).resolves.toBeUndefined();
+    });
+
     it('creating a task with originatingIdeaId auto-retires the idea to Decomposed', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));

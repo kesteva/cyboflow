@@ -389,7 +389,7 @@ export class TaskChangeRouter {
     if (change.taskId === undefined && change.originatingIdeaId) {
       const isChildType = (change.entityType ?? change.type ?? 'idea') !== 'idea';
       if (isChildType) {
-        await this.decomposeOriginatingIdea(projectId, change.originatingIdeaId).catch(() => {
+        await this.retireIdeaToDecomposed(projectId, change.originatingIdeaId).catch(() => {
           // Best-effort: the child already exists; a failure here must not bubble
           // up and fail the create the caller already observed as successful.
         });
@@ -400,15 +400,19 @@ export class TaskChangeRouter {
   }
 
   /**
-   * Retire an originating idea to the Decomposed terminal stage (FIX-STAGE-MODEL
-   * B). Idempotent: reads the idea's current stage position and no-ops when it is
+   * Retire an idea to the Decomposed terminal stage (FIX-STAGE-MODEL B).
+   * Idempotent: reads the idea's current stage position and no-ops when it is
    * already at the Decomposed position (or the idea / Decomposed stage cannot be
    * resolved). Routes through applyChange with actor='orchestrator' so the move
    * mints an entity_event and emits the 'decomposed' action like any other
    * idea->Decomposed transition. Called as a FOLLOW-ON (post-commit), never
    * nested inside another applyChange transaction.
+   *
+   * Public so the ship materialize-batch seam (which has no planner-style human
+   * Archive gate) can retire a shipped run's seed idea once its plan is approved
+   * and materialized into sprint lanes. See mcpQueryHandler.handleCreateSprintBatch.
    */
-  private async decomposeOriginatingIdea(projectId: number, ideaId: string): Promise<void> {
+  async retireIdeaToDecomposed(projectId: number, ideaId: string): Promise<void> {
     const idea = this.db
       .prepare('SELECT board_id, stage_id FROM ideas WHERE id = ? AND project_id = ?')
       .get(ideaId, projectId) as { board_id: string; stage_id: string } | undefined;
