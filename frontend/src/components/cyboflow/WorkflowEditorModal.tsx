@@ -29,6 +29,7 @@ import { Modal } from '../ui/Modal';
 import { trpc } from '../../trpc/client';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
+import { trackEvent } from '../../utils/telemetry';
 import { isCyboflowWorkflowName } from '../../../../shared/types/workflows';
 import type { WorkflowDefinition, PermissionMode } from '../../../../shared/types/workflows';
 import { useWorkflowEditorState } from '../../hooks/useWorkflowEditorState';
@@ -340,6 +341,7 @@ export function WorkflowEditorModal({
       try {
         if (choice.scope === 'global') {
           const savedId = await saveEdit();
+          trackEvent('workflow_saved', { scope: 'global' });
           // The row was edited in place — refresh the baseline so it is no longer
           // dirty and a re-save reopens the dialog cleanly.
           setBaseline({ definition: state.definition, name: state.name });
@@ -352,6 +354,7 @@ export function WorkflowEditorModal({
           // global-name-collision guard in createCustom. A residual collision (an
           // existing `<name>-copy` in that project) still surfaces the server CONFLICT.
           const newId = await saveCustom(`${state.name}-copy`, choice.projectId);
+          trackEvent('workflow_saved', { scope: 'project' });
           onSaved?.(newId);
           onClose();
         }
@@ -460,6 +463,7 @@ export function WorkflowEditorModal({
       setIsBusy(true);
       try {
         const newId = await saveCustom(name, saveAsNewTargetProjectId);
+        trackEvent('workflow_saved', { scope: saveAsNewTargetProjectId !== null ? 'project' : 'global' });
         onSaved?.(newId);
         onClose();
       } catch (err: unknown) {

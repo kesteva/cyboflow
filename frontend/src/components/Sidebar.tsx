@@ -7,6 +7,7 @@ import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { IconButton } from './ui/Button';
 import { Modal, ModalHeader, ModalBody } from './ui/Modal';
 import { useConfigStore } from '../stores/configStore';
+import { trackEvent } from '../utils/telemetry';
 
 interface SidebarProps {
   onAboutClick: () => void;
@@ -171,7 +172,7 @@ export function Sidebar({
           </div>
           <div className="flex items-center space-x-2 flex-shrink-0">
             <IconButton
-              onClick={() => { setSettingsInitialTab('general'); setIsSettingsOpen(true); }}
+              onClick={() => { setSettingsInitialTab('general'); setIsSettingsOpen(true); trackEvent('settings_opened'); }}
               aria-label="Settings"
               data-testid="settings-button"
               size="md"
@@ -335,7 +336,7 @@ export function Sidebar({
             <span className="flex-1 truncate text-[10.5px] text-text-secondary">kesteva</span>
             <button
               type="button"
-              onClick={() => { setSettingsInitialTab('general'); setIsSettingsOpen(true); }}
+              onClick={() => { setSettingsInitialTab('general'); setIsSettingsOpen(true); trackEvent('settings_opened'); }}
               aria-label="Settings"
               className="text-text-tertiary hover:text-text-primary transition-colors"
             >

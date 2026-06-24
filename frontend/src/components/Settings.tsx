@@ -3,6 +3,7 @@ import { NotificationSettings } from './NotificationSettings';
 import { UpdateSettings } from './UpdateSettings';
 import { useNotifications } from '../hooks/useNotifications';
 import { API } from '../utils/api';
+import { trackEvent } from '../utils/telemetry';
 import type { AppConfig } from '../types/config';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import { useConfigStore } from '../stores/configStore';
@@ -241,7 +242,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                     <button
                       key={id}
                       type="button"
-                      onClick={() => setTheme(id)}
+                      onClick={() => {
+                        setTheme(id);
+                        trackEvent('theme_changed', { theme: id });
+                      }}
                       aria-pressed={theme === id}
                       className={`flex flex-col items-start gap-1 px-3 py-3 rounded-button border transition-colors text-left ${
                         theme === id
@@ -311,7 +315,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                     <button
                       key={id}
                       type="button"
-                      onClick={() => setDefaultAgentPermissionMode(id)}
+                      onClick={() => {
+                        setDefaultAgentPermissionMode(id);
+                        trackEvent('permission_mode_changed', { mode: id });
+                      }}
                       aria-pressed={defaultAgentPermissionMode === id}
                       className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
                         defaultAgentPermissionMode === id
@@ -342,7 +349,12 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                     <button
                       key={label}
                       type="button"
-                      onClick={() => setInteractivePtyOnly(ptyOnly)}
+                      onClick={() => {
+                        setInteractivePtyOnly(ptyOnly);
+                        trackEvent('substrate_default_changed', {
+                          substrate: ptyOnly ? 'interactive' : 'sdk',
+                        });
+                      }}
                       aria-pressed={interactivePtyOnly === ptyOnly}
                       className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
                         interactivePtyOnly === ptyOnly
@@ -407,13 +419,25 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 <Checkbox
                   label="Send anonymized crash & error reports"
                   checked={errorReportingEnabled}
-                  onChange={(e) => setErrorReportingEnabled(e.target.checked)}
+                  onChange={(e) => {
+                    setErrorReportingEnabled(e.target.checked);
+                    trackEvent('telemetry_opt_out_changed', {
+                      channel: 'errors',
+                      enabled: e.target.checked,
+                    });
+                  }}
                 />
                 <div className="mt-4">
                   <Checkbox
                     label="Send anonymized feature usage metrics"
                     checked={usageMetricsEnabled}
-                    onChange={(e) => setUsageMetricsEnabled(e.target.checked)}
+                    onChange={(e) => {
+                      setUsageMetricsEnabled(e.target.checked);
+                      trackEvent('telemetry_opt_out_changed', {
+                        channel: 'usage',
+                        enabled: e.target.checked,
+                      });
+                    }}
                   />
                 </div>
                 <p className="text-xs text-text-tertiary mt-3">

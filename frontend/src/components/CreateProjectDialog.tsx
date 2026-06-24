@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Plus, Folder as FolderIcon, GitBranch, Hammer, Play } from 'lucide-react';
 import { API } from '../utils/api';
+import { trackEvent } from '../utils/telemetry';
 import type { Project, CreateProjectRequest } from '../types/project';
 import { useErrorStore } from '../stores/errorStore';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
@@ -99,6 +100,7 @@ export function CreateProjectDialog({ isOpen, onClose, onCreated }: CreateProjec
         return;
       }
       const createdProject = response.data;
+      trackEvent('project_created', {});
       resetForm();
       // Broadcast so the project rail picks up the new project regardless of
       // which call site (rail, landing empty state, wizard) opened the dialog.

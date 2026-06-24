@@ -28,6 +28,7 @@
 import React from 'react';
 import { Button } from '../ui/Button';
 import { formatAge } from '../../utils/approvalFormatters';
+import { trackEvent } from '../../utils/telemetry';
 import { trpc } from '../../trpc/client';
 import type { ReviewItem, ReviewItemKind, FindingProposedTarget } from '../../../../shared/types/reviews';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
@@ -117,19 +118,28 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
 
   const handleResolve = (): void => {
     void resolve(item.project_id, item.id).then((r) => {
-      if (r !== null) onResolved?.();
+      if (r !== null) {
+        trackEvent('review_item_resolved', { kind: item.kind, action: 'resolve', blocking: item.blocking });
+        onResolved?.();
+      }
     });
   };
 
   const handleDismiss = (): void => {
     void dismiss(item.project_id, item.id).then((ok) => {
-      if (ok) onResolved?.();
+      if (ok) {
+        trackEvent('review_item_resolved', { kind: item.kind, action: 'dismiss', blocking: item.blocking });
+        onResolved?.();
+      }
     });
   };
 
   const handlePromote = (): void => {
     void promoteToTask(item.project_id, item.id).then((r) => {
-      if (r !== null) onResolved?.();
+      if (r !== null) {
+        trackEvent('review_item_resolved', { kind: item.kind, action: 'promote_to_task', blocking: item.blocking });
+        onResolved?.();
+      }
     });
   };
 

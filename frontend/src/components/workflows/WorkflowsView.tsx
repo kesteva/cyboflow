@@ -27,6 +27,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useWorkflowsStore } from '../../stores/workflowsStore';
 import { API } from '../../utils/api';
 import { trpc } from '../../trpc/client';
+import { trackEvent } from '../../utils/telemetry';
 import type { Project } from '../../types/project';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { CreateProjectDialog } from '../CreateProjectDialog';
@@ -312,6 +313,7 @@ export function WorkflowsView(): React.JSX.Element {
     void (async () => {
       try {
         await trpc.cyboflow.workflows.delete.mutate({ workflowId: entry.row.id });
+        trackEvent('workflow_deleted');
         await useWorkflowsStore.getState().refresh();
         setDeleteTarget(null);
       } catch (err: unknown) {

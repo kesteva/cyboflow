@@ -24,6 +24,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Modal } from '../../ui/Modal';
 import { trpc } from '../../../trpc/client';
+import { trackEvent } from '../../../utils/telemetry';
 import { FlowNameDialog } from '../FlowNameDialog';
 import { AgentEditorForm } from './AgentEditorForm';
 import { AgentUsageInspector } from './AgentUsageInspector';
@@ -163,6 +164,7 @@ export function AgentEditorModal({
           tools: state.draft.enabledTools,
           role: state.draft.role,
         });
+        trackEvent('agent_saved', { custom: true });
         onSaved(created.agentKey);
         onClose();
         return;
@@ -176,6 +178,7 @@ export function AgentEditorModal({
         tools: state.draft.enabledTools,
         role: state.draft.role,
       });
+      trackEvent('agent_saved', { custom: isCustom });
       setEntry(saved);
       dispatch({ type: 'SEED', entry: saved });
       onSaved(saved.agentKey);
