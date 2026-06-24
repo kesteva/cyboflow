@@ -12,6 +12,15 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+### Added
+
+- **Anonymized, opt-out telemetry.** Sentry error reporting (packaged `.dmg` builds only —
+  every payload scrubbed of source code, file paths, repo names, and prompts) and Aptabase
+  usage metrics (release builds only, no identifiers). Both stay off under `pnpm dev`, are gated
+  by a `local`/`dev`/`stable` environment resolved from the build, and can be turned off in
+  **Settings → Privacy & Telemetry** (both default on). Credentials come from `SENTRY_DSN` /
+  `APTABASE_APP_KEY`; without them the SDKs are silent no-ops.
+
 ### Fixed
 
 - A shipped idea no longer lingers in its planning stage after being broken down. The

@@ -259,6 +259,41 @@ plugin cache.
 > async-deferred `shell-approval-request` branch on the interactive substrate and holds the
 > socket reply open until the user decides (the `socketReply` invariant).
 
+### Telemetry (`main/src/services/telemetry/`)
+
+Opt-out, anonymized. Both SDKs init once at boot from the resolved config (`initTelemetry` in
+`telemetry/index.ts`):
+
+- **Errors — Sentry** (`@sentry/electron`). Fires only from **packaged `.dmg` builds**
+  (`app.isPackaged`); under `pnpm dev` errors surface in the console, so Sentry stays off.
+  Every outbound event/breadcrumb passes through the **scrub chokepoint** (`telemetry/scrub.ts`):
+  stack-frame paths reduced to basenames, home dirs → `~`, `server_name`/`extra`/`user`
+  dropped, console breadcrumbs dropped — so user source, file paths, repo names, and prompts
+  never leave the machine.
+- **Usage — Aptabase** (`@aptabase/electron`, no identifiers). Fires only from **release**
+  builds. Renderer events flow through a typed closed-union helper
+  (`frontend/src/utils/telemetry.ts` → `trackEvent`) over the fire-and-forget `telemetry:track`
+  raw-IPC channel → `main/src/ipc/telemetry.ts` → `trackUsage`. Props are scalar/enum only by
+  construction (never user content).
+
+**Environment gating** (`telemetry/environment.ts`, `TelemetryEnvironment = 'local' | 'dev' | 'stable'`)
+resolves from `app.isPackaged` + a release stamp in `buildInfo.json`. Only the release pipeline
+stamps it: `release:mac` → `CYBOFLOW_BUILD_ENV=stable`, `release:mac:dev` → `dev` (consumed by
+`scripts/inject-build-info.js`). This `environment` is telemetry-only and **distinct from the
+`variant` field** (About-dialog/updater metadata), which is `stable` even for unreleased local builds.
+
+| Build | environment | Errors | Usage |
+|---|---|---|---|
+| `pnpm dev` (unpackaged) | `local` | off | off |
+| local `build:mac` `.dmg` (unstamped) | `local` | on (tagged `local`) | off |
+| Cyboflow Dev release (`release:mac:dev`) | `dev` | on (tagged `dev`) | on |
+| stable release (`release:mac`) | `stable` | on (tagged `stable`) | on |
+
+Credentials come from env (`SENTRY_DSN`, `APTABASE_APP_KEY`, e.g. `.envrc.local`); a missing key
+disables that SDK. Opt-out lives in config (`telemetry.errorReportingEnabled` /
+`usageMetricsEnabled`, both default `true`) alongside a one-time anonymous `installId`; UI in
+**Settings → Privacy & Telemetry**. Init reads config at boot, so toggles take effect next launch.
+
 ### IPC Layer
 
 Two parallel surfaces are wired today:
@@ -374,6 +409,11 @@ cross-package concern.
 - **trpc-electron 0.1.2** — Typed `electron-trpc` bridge between the renderer client and
   the main-process `appRouter`.
 - **p-queue 7.4.1** (via `simpleTaskQueue.ts` wrapper) — Per-run mutation serialization.
+- **@sentry/electron 7.13.0 + @aptabase/electron 0.3.1** — Anonymized, opt-out telemetry.
+  Sentry = crash/error reporting (main + renderer + native crashes); Aptabase = privacy-first
+  usage metrics (no identifiers). Both init in the main process behind opt-out config flags +
+  env-var credentials (`SENTRY_DSN`, `APTABASE_APP_KEY`); absent either → silent no-op. See the
+  **Telemetry** component below.
 - **Playwright** — E2E tests only.
 
 ## Data Model
@@ -570,3 +610,5 @@ exists yet; the invariant is preventive.
 See `docs/cyboflow_system_design.md` §2 (stack), §3 (fork rationale, cuts), §4 (principles).
 Key standing decisions: macOS-only v1; no Redis; no Codex/OpenAI; deterministic worktree names;
 orchestrator self-contained inside Electron main (extractable to Node service for team tier).
+Telemetry is opt-out + anonymized: errors (Sentry) only from packaged builds, usage (Aptabase)
+only from releases, all error payloads scrubbed of code/paths/prompts (see **Telemetry**).

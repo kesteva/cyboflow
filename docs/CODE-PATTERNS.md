@@ -518,6 +518,25 @@ async effect to flip it — that produces the correct steady state but a one-fra
 on every page reload for returning users. Consumers: `OnboardingCard`, `Welcome`,
 `DiscordPopup`, `AnalyticsConsentDialog` (audit via `grep -rln 'preferences:get' frontend/src`).
 
+### Telemetry: scrub chokepoint + environment gating
+
+All outbound telemetry is anonymized and gated in `main/src/services/telemetry/`:
+
+- **Errors never carry user content.** Every Sentry event/breadcrumb passes through `scrub.ts`
+  (`scrubSentryEvent` / `scrubBreadcrumb`) — the single chokepoint that basenames paths, redacts
+  home dirs, drops `extra`/`user`/`server_name`, and drops console breadcrumbs. Do NOT add Sentry
+  capture that bypasses `Sentry.init`'s `beforeSend` / `beforeBreadcrumb`.
+- **Usage events are a closed union.** Renderer code calls `trackEvent(event, props)`
+  (`frontend/src/utils/telemetry.ts`) where `TelemetryEvent` is a fixed union and `props` are
+  scalar/enum only — never repo names, prompts, file paths, or free text. New events extend the
+  union. Routed over the `telemetry:track` fire-and-forget IPC channel → `trackUsage`.
+- **Environment gating** (`environment.ts`): `local` (pnpm dev / unstamped local `.dmg`) gets no
+  usage and no errors; `dev` / `stable` (release-stamped via `CYBOFLOW_BUILD_ENV`) get both. Keep
+  the telemetry `environment` token distinct from the updater/About `variant` token.
+- **Telemetry must NEVER throw into app code** — every entry point is try/caught and is a no-op
+  when the SDK or its credential (`SENTRY_DSN` / `APTABASE_APP_KEY`) is absent.
+- **Canonical example:** `main/src/services/telemetry/{index,scrub,environment}.ts`.
+
 ## Build & Packaging
 
 ### macOS signing posture (`scripts/configure-build.js`)
