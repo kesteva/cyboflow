@@ -22,6 +22,7 @@
 import { useCallback, useState } from 'react';
 import { trpc } from '../../trpc/client';
 import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
+import { trackEvent } from '../../utils/telemetry';
 import type { TaskType } from '../../../../shared/types/tasks';
 
 export interface TaskRunLaunchState {
@@ -80,6 +81,7 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
           sessionId,
           ...seed,
         });
+        trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: wantName });
         return result.runId;
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to launch run');
@@ -114,6 +116,7 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
           sessionId,
           taskIds,
         });
+        trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: 'sprint' });
         return result.runId;
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to launch sprint');

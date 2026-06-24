@@ -41,6 +41,7 @@
  */
 import { API } from './api';
 import { panelApi } from '../services/panelApi';
+import { trackEvent } from './telemetry';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import { useActiveRunsStore } from '../stores/activeRunsStore';
 
@@ -96,5 +97,7 @@ export async function ensureSessionForLaunch(
     initialState: { cwd: worktreePath },
   });
 
+  // A session created here exists solely to host a workflow run launch.
+  trackEvent('session_created', { kind: 'flow_hosted' });
   return sessionId;
 }

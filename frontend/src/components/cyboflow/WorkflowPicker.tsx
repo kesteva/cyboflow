@@ -22,8 +22,10 @@ import { IdeaPickerModal } from './IdeaPickerModal';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { SubstrateSelector } from './SubstrateSelector';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
-import type { WorkflowRow } from '../../../../shared/types/workflows';
+import { type WorkflowRow, CYBOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
+import { trackEvent } from '../../utils/telemetry';
+import type { TelemetryFlow } from '../../../../shared/types/telemetry';
 
 interface WorkflowPickerProps {
   projectId: number;
@@ -142,6 +144,14 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     [loadWorkflows],
   );
 
+  // Map a workflow row id to its telemetry flow key (built-in name, else 'custom').
+  const flowOf = (workflowId: string): TelemetryFlow => {
+    const name = workflows.find((w) => w.id === workflowId)?.name;
+    return name && (CYBOFLOW_WORKFLOW_NAMES as readonly string[]).includes(name)
+      ? (name as TelemetryFlow)
+      : 'custom';
+  };
+
   /**
    * Fire the actual runs.start mutation. `ideaId` is the Planner's pre-launch
    * seed idea (migration 017) — undefined for Sprint (and any free Planner
@@ -167,6 +177,12 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
             : { workflowId, projectId, substrate, sessionId, permissionMode, ideaId },
         );
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
+        trackEvent('workflow_run_started', {
+          launch_surface: 'topbar',
+          flow: flowOf(workflowId),
+          substrate,
+          permission_mode: permissionMode,
+        });
         onWorkflowStarted?.(result.runId);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to start run');
@@ -175,7 +191,8 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         startInFlightRef.current = false;
       }
     },
-    [projectId, substrate, permissionMode, onWorkflowStarted, forceNewSession],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projectId, substrate, permissionMode, onWorkflowStarted, forceNewSession, workflows],
   );
 
   /**
@@ -205,6 +222,12 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           taskIds,
         });
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
+        trackEvent('workflow_run_started', {
+          launch_surface: 'topbar',
+          flow: flowOf(workflowId),
+          substrate,
+          permission_mode: permissionMode,
+        });
         onWorkflowStarted?.(result.runId);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to start sprint run');
@@ -213,7 +236,8 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         startInFlightRef.current = false;
       }
     },
-    [projectId, substrate, permissionMode, onWorkflowStarted, forceNewSession],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projectId, substrate, permissionMode, onWorkflowStarted, forceNewSession, workflows],
   );
 
   const handleStartRun = async () => {
@@ -270,7 +294,10 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       {!isLoading && workflows.length > 0 && (
         <select
           value={selectedId ?? ''}
-          onChange={(e) => setSelectedId(e.target.value)}
+          onChange={(e) => {
+            setSelectedId(e.target.value);
+            trackEvent('flow_selected', { flow: flowOf(e.target.value) });
+          }}
           className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
           aria-label="Select workflow"
         >

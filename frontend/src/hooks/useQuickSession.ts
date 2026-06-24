@@ -23,6 +23,7 @@
 import { useState, useCallback } from 'react';
 import { API } from '../utils/api';
 import { panelApi } from '../services/panelApi';
+import { trackEvent } from '../utils/telemetry';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
@@ -95,6 +96,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
         });
 
         useCyboflowStore.getState().setActiveQuickSession(sessionId, runId);
+        trackEvent('session_created', { kind: 'quick', substrate });
         opts.onSuccess?.(sessionId);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to create quick session');

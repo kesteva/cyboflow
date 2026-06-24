@@ -74,6 +74,9 @@ import { UltracodeCard } from './UltracodeCard';
 import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME } from './workflowMeta';
 import type { WorkflowCardMeta } from './workflowMeta';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
+import { trackEvent } from '../../../utils/telemetry';
+import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
+import type { TelemetryFlow } from '../../../../../shared/types/telemetry';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -420,6 +423,15 @@ export default function SessionStartWizard(): React.JSX.Element {
         const slash = meta?.slashCommand ?? '/workflow';
         setToast(`Launching ${slash} on ${banner.name} ⌥ ${result.branchName}`);
 
+        trackEvent('workflow_run_started', {
+          launch_surface: 'wizard',
+          flow:
+            meta && (CYBOFLOW_WORKFLOW_NAMES as readonly string[]).includes(meta.name)
+              ? (meta.name as TelemetryFlow)
+              : 'custom',
+          substrate,
+          permission_mode: permissionMode,
+        });
         useNavigationStore.getState().goToSession();
       } catch (err: unknown) {
         setLaunchError(err instanceof Error ? err.message : 'Failed to start run');

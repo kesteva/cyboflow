@@ -24,8 +24,10 @@ export interface TelemetryEventMap {
   project_created: { source?: 'wizard' | 'dialog' };
   flow_selected: { flow: TelemetryFlow };
   workflow_run_started: {
-    flow: TelemetryFlow;
     launch_surface: 'wizard' | 'topbar' | 'backlog' | 'in_session';
+    // Optional: some launch surfaces only have the workflow's DB id in scope, not
+    // its canonical flow name. Emitted where the flow name is cheaply available.
+    flow?: TelemetryFlow;
     substrate?: CliSubstrate;
     permission_mode?: PermissionMode;
   };

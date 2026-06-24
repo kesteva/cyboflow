@@ -25,6 +25,7 @@ import { useConfigStore } from '../stores/configStore';
 import { ensureSessionForLaunch } from '../utils/ensureSessionForLaunch';
 import { useForcedSubstrate } from './useForcedSubstrate';
 import { DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
+import { trackEvent } from '../utils/telemetry';
 
 /** Pre-launch seed — at most one of ideaId (planner) / taskIds (sprint). */
 export interface LaunchSeed {
@@ -84,6 +85,11 @@ export function useLaunchWorkflow(
               : base,
         );
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
+        trackEvent('workflow_run_started', {
+          launch_surface: 'in_session',
+          substrate: base.substrate,
+          permission_mode: globalPermissionMode,
+        });
         onLaunched?.(result.runId);
         return result.runId;
       } catch (err: unknown) {
