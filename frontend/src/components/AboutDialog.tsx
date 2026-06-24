@@ -190,7 +190,7 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
               {update.status === 'available' ? (
                 <button
                   onClick={downloadUpdate}
-                  className="flex items-center space-x-1.5 px-3 py-1.5 text-sm font-medium rounded-md bg-interactive text-interactive-on-dark hover:bg-interactive-hover transition-colors"
+                  className="flex items-center space-x-1.5 px-3 py-1.5 text-sm font-medium rounded-md bg-interactive text-text-on-interactive hover:bg-interactive-hover transition-colors"
                 >
                   <Download className="w-4 h-4" />
                   <span>Download {update.version}</span>
@@ -198,7 +198,7 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
               ) : update.status === 'downloaded' ? (
                 <button
                   onClick={installUpdate}
-                  className="flex items-center space-x-1.5 px-3 py-1.5 text-sm font-medium rounded-md bg-interactive text-interactive-on-dark hover:bg-interactive-hover transition-colors"
+                  className="flex items-center space-x-1.5 px-3 py-1.5 text-sm font-medium rounded-md bg-interactive text-text-on-interactive hover:bg-interactive-hover transition-colors"
                 >
                   <RefreshCw className="w-4 h-4" />
                   <span>Restart to update</span>
