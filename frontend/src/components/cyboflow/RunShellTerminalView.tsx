@@ -100,20 +100,28 @@ export function RunShellTerminalView({ runId }: { runId: string }): ReactElement
 
     // `opened` flips true after the first successful term.open() (the renderer has
     // no dimensions before that, so a write would crash in CompositionHelper).
-    // Bytes that arrive earlier are buffered and flushed once opened.
+    // `backlogSettled` flips once the one-shot server-backlog replay has been
+    // resolved (written, empty, or failed). Live bytes are BUFFERED until BOTH are
+    // true and then flushed AFTER the backlog, so on a remount of an
+    // actively-logging shell (e.g. a dev server) the prior scrollback is replayed
+    // in order rather than being skipped by an early live chunk. Because the xterm
+    // is recreated on every mount (no keep-alive cache), the server backlog is the
+    // ONLY history source and must never be dropped. The overlap between the
+    // backlog snapshot and the first few buffered live bytes is one IPC round-trip
+    // wide (negligible — a line or two at most), and duplicating it is preferable
+    // to a gap.
     let opened = false;
-    let liveSeen = false;
+    let backlogSettled = false;
     const pending: string[] = [];
 
     const unsubscribe = subscribeToShellBytes({
       runId,
       onData: (chunk) => {
-        liveSeen = true;
-        if (!opened) {
-          pending.push(chunk);
+        if (opened && backlogSettled) {
+          writeWithAutoScroll(term, chunk);
           return;
         }
-        writeWithAutoScroll(term, chunk);
+        pending.push(chunk);
       },
     });
 
@@ -123,9 +131,20 @@ export function RunShellTerminalView({ runId }: { runId: string }): ReactElement
     });
 
     const flushPending = (): void => {
-      if (disposed || !opened || pending.length === 0) return;
+      if (disposed || !opened || !backlogSettled || pending.length === 0) return;
       const buffered = pending.splice(0).join('');
       writeWithAutoScroll(term, buffered);
+    };
+
+    // Settle the one-shot backlog replay: prepend the snapshot (so it lands BEFORE
+    // any buffered live bytes), mark settled, and flush. Called on every resolution
+    // path (backlog present / absent / errored) so buffered live bytes are never
+    // stuck. Idempotent.
+    const settleBacklog = (backlog?: string): void => {
+      if (disposed || backlogSettled) return;
+      if (backlog) pending.unshift(backlog);
+      backlogSettled = true;
+      flushPending();
     };
 
     // Open + fit only once the container has a non-zero layout box (a flex child
@@ -179,41 +198,55 @@ export function RunShellTerminalView({ runId }: { runId: string }): ReactElement
       ensureOpen();
     });
 
-    // Lazily spawn the shell, then replay the server backlog ONCE (only if no live
-    // byte has arrived yet — a live chunk already reflects current state). Fail
-    // soft: an unwired/errored call just leaves the live path.
-    void trpc.cyboflow.runs.shellOpen
-      .mutate({ runId })
-      .then((res) => {
-        if (disposed) return undefined;
-        if (!res.ok) {
-          setError(
-            res.reason === 'no_worktree'
-              ? 'This run has no worktree yet — the shell becomes available once it starts.'
-              : 'Could not open a shell for this run.',
-          );
-          return undefined;
-        }
-        return trpc.cyboflow.runs.shellBacklog.query({ runId });
-      })
-      .then((backlogRes) => {
-        if (disposed || !backlogRes) return;
-        const { backlog } = backlogRes;
-        if (!backlog || liveSeen) return;
-        if (!opened) {
-          pending.unshift(backlog);
-          return;
-        }
-        writeWithAutoScroll(term, backlog);
-      })
-      .catch(() => {
-        /* fail-soft: proceed with live bytes only */
-      });
+    // Lazily spawn the shell, then replay the server backlog ONCE. The shell has
+    // no worktree to anchor it in until the run reaches 'starting'
+    // (workflow_runs.worktree_path is NULL while queued/launching), so a
+    // no_worktree result is RETRIED a bounded number of times to self-heal when
+    // the Shell tab is opened during that brief launch window. Fail soft: an
+    // unwired/errored call settles the backlog (unblocking buffered live bytes)
+    // and leaves the live path.
+    const MAX_OPEN_RETRIES = 10;
+    const RETRY_MS = 1500;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    const attemptOpen = (attemptsLeft: number): void => {
+      void trpc.cyboflow.runs.shellOpen
+        .mutate({ runId })
+        .then((res) => {
+          if (disposed) return undefined;
+          if (!res.ok) {
+            if (res.reason === 'no_worktree' && attemptsLeft > 0) {
+              setError('Waiting for the run worktree…');
+              retryTimer = setTimeout(() => attemptOpen(attemptsLeft - 1), RETRY_MS);
+              return undefined;
+            }
+            setError(
+              res.reason === 'no_worktree'
+                ? 'This run has no worktree — a shell is unavailable.'
+                : 'Could not open a shell for this run.',
+            );
+            settleBacklog();
+            return undefined;
+          }
+          setError(null);
+          return trpc.cyboflow.runs.shellBacklog.query({ runId });
+        })
+        .then((backlogRes) => {
+          if (disposed) return;
+          // `undefined` here is a retry/terminal-fail branch (already handled);
+          // a real result settles the backlog.
+          if (backlogRes) settleBacklog(backlogRes.backlog);
+        })
+        .catch(() => {
+          if (!disposed) settleBacklog();
+        });
+    };
+    attemptOpen(MAX_OPEN_RETRIES);
 
     return () => {
       disposed = true;
       if (openRaf !== undefined) cancelAnimationFrame(openRaf);
       if (resizeTimer) clearTimeout(resizeTimer);
+      if (retryTimer) clearTimeout(retryTimer);
       resizeObserver.disconnect();
       unsubscribe();
       inputDisposable.dispose();
