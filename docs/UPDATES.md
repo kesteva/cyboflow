@@ -90,9 +90,15 @@ macOS ships as **lean per-arch builds** — `arm64` and `x64` are built in
 Mach-Os. The trade-off is that the release is a few explicit steps rather than one
 `release:mac` command.
 
-1. Bump `version` in `package.json` (e.g. `0.1.2` → `0.1.3`). The updater compares
-   this baked-in version against the manifest, so this is what gates the prompt.
-   For dev, a `-dev.N` suffix is conventional (e.g. `0.1.3-dev.1`).
+1. **Prepare the release metadata** (both before building):
+   - Bump `version` in `package.json` — and the `frontend` / `main` / `shared`
+     workspace `package.json`s — to match (e.g. `0.1.2` → `0.1.3`). The updater
+     compares this baked-in version against the manifest, so this is what gates the
+     prompt. For dev, a `-dev.N` suffix is conventional (e.g. `0.1.3-dev.1`).
+   - Update **`CHANGELOG.md`**: add a dated `## [<version>] — <YYYY-MM-DD>` section
+     and move the relevant `[Unreleased]` notes under it (Added / Changed / Fixed).
+     This is what ships in the release notes — don't skip it, since the build below
+     bakes in whatever is on disk now.
 2. Load the release secrets, **aborting loudly if any are missing** (a missing var
    silently ships an *unsigned* build). Add this guarded wrapper to `~/.zshrc`:
    ```bash
@@ -151,7 +157,7 @@ auto-update only upgrades an already-installed app:
 ### Typical flow
 
 ```
-bump version → build:mac:dev:{arm64,x64} → gen-mac-latest-yml → publish (dev/)
+bump version + changelog → build:mac:dev:{arm64,x64} → gen-mac-latest-yml → publish (dev/)
             → test the Dev app → fix → repeat
             → on green: build:mac:{arm64,x64} → gen-mac-latest-yml → publish (stable/)
 ```
