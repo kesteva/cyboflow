@@ -12,6 +12,8 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.4] — 2026-06-24
+
 ### Added
 
 - **Anonymized, opt-out telemetry.** Sentry error reporting (packaged `.dmg` builds only —
@@ -20,14 +22,20 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
   by a `local`/`dev`/`stable` environment resolved from the build, and can be turned off in
   **Settings → Privacy & Telemetry** (both default on). Credentials come from `SENTRY_DSN` /
   `APTABASE_APP_KEY`; without them the SDKs are silent no-ops.
+- **Compounding findings triage.** The Insights findings surface is rebuilt into a triage
+  inbox: review the findings surfaced from merged sessions, select the ones worth acting on,
+  and seed a **Compound** run with exactly that selection in one loop.
 
 ### Fixed
 
-- A shipped idea no longer lingers in its planning stage after being broken down. The
-  **ship** workflow drops planner's human Archive gate, so its seed idea was never
-  retired; it now moves to the terminal **Decomposed** stage once the approved plan is
-  materialized into sprint lanes — its tasks carry the flow forward. (Existing stuck
-  ideas are not retroactively retired.)
+- A shipped idea now retires to the terminal **Decomposed** stage the moment its plan is
+  **approved** at the ship flow's `approve-plan` gate — not only at the later materialize or
+  final-review steps. A ship run interrupted any time after approval no longer leaves its seed
+  idea stranded in the planning column; its tasks carry the flow forward. (Existing stuck ideas
+  are not retroactively retired.)
+- The renderer no longer floods the devtools console with `sentry-ipc` scheme errors when error
+  reporting is inactive (under `pnpm dev`, or in a packaged build that opted out or has no DSN).
+  The renderer Sentry SDK now initializes only when the main process did.
 
 ## [0.1.3] — 2026-06-24
 
