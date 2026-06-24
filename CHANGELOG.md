@@ -36,6 +36,12 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
   (**Check for Updates** / **Open Anyway** / **Quit**) instead. *Check for Updates*
   opens Settings → Updates automatically.
 
+### Fixed
+
+- The **Download** / **Restart to update** buttons in Settings → Updates and the
+  About dialog rendered with an invisible label in the paper theme — accent-colored
+  text sat on the accent-colored fill. They now use the correct on-fill text token.
+
 ## [0.1.2] — 2026-06-23
 
 First signed, notarized, and auto-updating macOS builds.
