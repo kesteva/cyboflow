@@ -137,7 +137,7 @@ describe('initTelemetry gating (Sentry + Aptabase paths)', () => {
     const { initTelemetry } = await import('../index');
     initTelemetry(CFG);
     expect(aptabase.initialize).toHaveBeenCalledWith('A-US-0000000000');
-    expect(aptabase.trackEvent).toHaveBeenCalledWith('app_started', undefined);
+    expect(aptabase.trackEvent).toHaveBeenCalledWith('app_started', { environment: 'stable' });
   });
 
   it('initializes Aptabase for the Cyboflow Dev release channel (dev)', async () => {
@@ -147,7 +147,7 @@ describe('initTelemetry gating (Sentry + Aptabase paths)', () => {
     const { initTelemetry } = await import('../index');
     initTelemetry(CFG);
     expect(aptabase.initialize).toHaveBeenCalledTimes(1);
-    expect(aptabase.trackEvent).toHaveBeenCalledWith('app_started', undefined);
+    expect(aptabase.trackEvent).toHaveBeenCalledWith('app_started', { environment: 'dev' });
   });
 
   it('does NOT initialize Aptabase under pnpm dev (unpackaged → local), even with a key', async () => {
@@ -194,15 +194,15 @@ describe('initTelemetry gating (Sentry + Aptabase paths)', () => {
     const { initTelemetry, trackUsage } = await import('../index');
     initTelemetry(CFG);
     aptabase.trackEvent.mockClear(); // drop the app_started call
-    trackUsage('session_created', { count: 2 });
-    expect(aptabase.trackEvent).toHaveBeenCalledWith('session_created', { count: 2 });
+    trackUsage('session_created', { kind: 'quick' });
+    expect(aptabase.trackEvent).toHaveBeenCalledWith('session_created', { kind: 'quick' });
   });
 
   it('trackUsage is a silent no-op when Aptabase never initialized', async () => {
     setPackaged(false); // local → aptabase off
     const { initTelemetry, trackUsage } = await import('../index');
     initTelemetry(CFG);
-    trackUsage('session_created', { count: 2 });
+    trackUsage('session_created', { kind: 'quick' });
     expect(aptabase.trackEvent).not.toHaveBeenCalled();
   });
 
