@@ -1,17 +1,22 @@
 # Architecture Diagram
 
 Visual companion to `docs/ARCHITECTURE.md`. The prose doc is the source of truth for
-details; this diagram is the at-a-glance view that surfaces what is built today vs. what
-is still scoped as "not yet built."
+details; this diagram is the at-a-glance view of the live component layout.
 
 ## Legend
 
 | Style | Meaning |
 |---|---|
-| **Blue solid** | Live cyboflow-differentiator paths (review queue stores, live tRPC procedures, live raw IPC). |
+| **Blue solid** | Live cyboflow-differentiator paths (review queue stores, live tRPC procedures, live raw IPC, the approval lifecycle). |
 | **Amber solid** | Intentional extension point that must not be collapsed (`AbstractCliManager`). |
-| **Amber dashed** | Stub exists in source but does nothing meaningful (raw IPC `NOT_IMPLEMENTED`, tRPC throwing stubs, tRPC working stubs returning benign defaults). |
-| **Red dashed** | File does not exist yet; blocks the stubs above (`permissionIpcServer`, `ApprovalRouter` — both owned by epic 7). |
+| **Amber dashed** | Deprecated/superseded stub kept in source (the legacy `cyboflow:approveRun` raw IPC, now replaced by the `cyboflow.approvals.*` tRPC path). |
+
+> **History:** an earlier revision of this diagram showed an unbuilt "approval-router epic 7"
+> cluster (`permissionIpcServer` + `ApprovalRouter`). That work has since shipped — `ApprovalRouter`
+> (`main/src/orchestrator/approvalRouter.ts`) and the orchestrator Unix-domain socket
+> (`~/.cyboflow/sockets/orch.sock`, stood up in `main/src/index.ts`) are live and load-bearing,
+> and the `cyboflow.approvals.*` / `runs.*` / `workflows.*` tRPC procedures are live. The only
+> remaining stub is the superseded `cyboflow:approveRun` raw IPC handler.
 
 ## Diagram
 
@@ -53,10 +58,8 @@ graph TB
             subgraph CyboflowIPC["cyboflow.* transport status"]
                 direction TB
                 LiveRaw["LIVE raw IPC<br/>listWorkflows / startRun /<br/>listRuns / mcp-health"]
-                StubRaw["STUB raw IPC<br/>cyboflow:approveRun<br/>returns NOT_IMPLEMENTED"]
-                LiveTrpc["LIVE tRPC<br/>runs.cancelAndRestart<br/>runs.cancel"]
-                ThrowTrpc["THROWING tRPC stubs<br/>runs.getStuckInspection<br/>runs.list / workflows.list"]
-                WorkingTrpc["WORKING tRPC stubs<br/>approvals.listPending returns []<br/>approvals.approve/reject<br/>returns success:true"]
+                DeprecatedRaw["DEPRECATED raw IPC<br/>cyboflow:approveRun<br/>returns NOT_IMPLEMENTED<br/>(superseded by approvals.*)"]
+                LiveTrpc["LIVE tRPC<br/>runs.{list, cancel, cancelAndRestart,<br/>getStuckInspection} · workflows.list<br/>approvals.{listPending, approve, reject,<br/>approveRestOfRun, rejectRestOfRun}"]
             end
 
             subgraph Orch["Orchestrator - main/src/orchestrator/<br/>standalone-typecheck invariant"]
@@ -66,10 +69,14 @@ graph TB
                 Bridge[runEventBridge<br/>documented exception:<br/>imports streamParser]
                 MapPerm[permissionModeMapper<br/>buildPreToolUseHook]
                 Helper[preToolUseHookHelper<br/>routePreToolUseThroughApprovalRouter]
+                ApprovalRtr[ApprovalRouter<br/>DB-backed approval lifecycle<br/>requestApproval / respond + resolver]
+                OrchSock[Orchestrator IPC<br/>Unix socket orch.sock<br/>index.ts socket server]
                 Core --> RunQueues
                 Core --> StuckDet
                 Core --> Bridge
                 MapPerm --> Helper
+                Helper --> ApprovalRtr
+                ApprovalRtr --> OrchSock
             end
 
             subgraph Services["Services - main/src/services/"]
@@ -81,7 +88,9 @@ graph TB
                 subgraph CLI["panels/cli/ + panels/claude/"]
                     Abstract[AbstractCliManager<br/>EXTENSION POINT<br/>owns PTY spawn path]
                     Claude[ClaudeCodeManager<br/>Agent SDK query in-process<br/>overrides spawn]
+                    Interactive[InteractiveClaudeManager<br/>PTY substrate sibling]
                     Abstract -.subclass.-> Claude
+                    Abstract -.subclass.-> Interactive
                 end
 
                 subgraph PtyMgrs["Live PTY users"]
@@ -95,7 +104,7 @@ graph TB
 
             subgraph Data["Data Layer"]
                 DB[(better-sqlite3 11.7<br/>~/.cyboflow/<br/>WAL mode)]
-                Schema[schema.sql +<br/>migrations 003..007<br/>2-phase runner]
+                Schema[schema.sql +<br/>migrations 003..033<br/>2-phase runner]
                 DB --- Schema
             end
 
@@ -103,24 +112,17 @@ graph TB
                 McpSrv[cyboflowMcpServer.js<br/>stdio - separate node proc]
             end
 
-            subgraph NotBuilt["NOT YET BUILT - approval-router epic (7)"]
-                PermSrv[permissionIpcServer<br/>Unix-socket orchestrator bridge<br/>index.ts:533 throws]
-                ApprovalRouter[ApprovalRouter<br/>DB-backed approval state +<br/>PendingPromise resolver]
-            end
-
             RawIPC --> Services
             RawIPC --> Core
             AppRouter --> Core
             AppRouter --> Services
+            AppRouter --> ApprovalRtr
 
             Core --> Services
             Bridge --> StreamP
             Claude --> MapPerm
             Claude -. injects orchSocketPath .-> McpSrv
-
-            Claude -. expects future hook target .-> PermSrv
-            MapPerm -. routes future approvals via .-> ApprovalRouter
-            ApprovalRouter -. will live behind .-> PermSrv
+            McpSrv -. approval requests over .-> OrchSock
         end
     end
 
@@ -138,10 +140,6 @@ graph TB
     Term2 -. PTY .-> ExternalPty
     RunCmd -. PTY .-> ExternalPty
 
-    StubRaw -. blocked on .-> NotBuilt
-    WorkingTrpc -. blocked on .-> NotBuilt
-    ThrowTrpc -. blocked on .-> NotBuilt
-
     subgraph Shared["shared/types/ - contract layer"]
         Types[Crystal: models / panels / cliPanels / aiPanelConfig<br/>Cyboflow: cyboflow / workflows / approvals /<br/>mcpHealth / stuckDetection / unifiedMessage<br/>Transport: trpc - re-exports AppRouter]
     end
@@ -150,26 +148,27 @@ graph TB
     Main -.imports.-> Shared
 
     classDef extension fill:#fef3c7,stroke:#f59e0b,stroke-width:2px,color:#000
-    classDef notbuilt fill:#fee2e2,stroke:#ef4444,stroke-width:2px,stroke-dasharray: 6 4,color:#000
     classDef stub fill:#fef3c7,stroke:#f59e0b,stroke-dasharray: 4 3,color:#000
     classDef product fill:#dbeafe,stroke:#3b82f6,stroke-width:2px,color:#000
     class Abstract extension
-    class PermSrv,ApprovalRouter notbuilt
-    class StubRaw,ThrowTrpc,WorkingTrpc stub
-    class LiveRaw,LiveTrpc product
+    class DeprecatedRaw stub
+    class LiveRaw,LiveTrpc,ApprovalRtr,OrchSock product
     class CyboflowStores product
 ```
 
-## Reading the unbuilt cluster
+## Reading the approval path (now live)
 
-The red dashed `NotBuilt` cluster (`permissionIpcServer` + `ApprovalRouter`) is the
-single bottleneck behind three different stub buckets in source today:
+The approval lifecycle that an earlier revision marked "not yet built" is the live path today:
 
-- `StubRaw` (`cyboflow:approveRun` returning `NOT_IMPLEMENTED`)
-- `WorkingTrpc` (`cyboflow.approvals.{listPending,approve,reject}` returning benign defaults)
-- `ThrowTrpc` (workflow-runs procedures: `runs.getStuckInspection`, `runs.list`, `workflows.list`)
+- `permissionModeMapper` / `preToolUseHookHelper` route a tool-use decision into
+  `ApprovalRouter` (`main/src/orchestrator/approvalRouter.ts`), which co-writes the `approvals`
+  row, the `workflow_runs` status fold, and a blocking `review_items` inbox row inside one
+  `db.transaction()`, then resolves the in-process `decisionPromise` on `respond()`.
+- The MCP subprocess reaches the orchestrator over the Unix-domain socket
+  (`~/.cyboflow/sockets/orch.sock`) stood up in `main/src/index.ts`; `ClaudeCodeManager`
+  injects the live `orchSocketPath` into spawned sessions.
+- The renderer's `reviewQueueStore` reads/writes via the live `cyboflow.approvals.*` tRPC
+  procedures (`listPending` / `approve` / `reject` / `approveRestOfRun` / `rejectRestOfRun`).
 
-`ClaudeCodeManager` already injects an `orchSocketPath` toward a server that does not
-exist yet — only the listener side is missing. `permissionModeMapper` and
-`preToolUseHookHelper` already wire approval *routing*; they just route into a future
-`ApprovalRouter` rather than today's stub log lines.
+The only remaining stub is the legacy `cyboflow:approveRun` **raw** IPC handler, which returns
+`NOT_IMPLEMENTED` and is superseded by the tRPC approvals path above.

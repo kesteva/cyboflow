@@ -1,5 +1,12 @@
 # Adding New CLI Tools to Crystal
 
+> **HISTORICAL — Crystal-era guide.** Kept because the `AbstractCliManager` extension surface it
+> teaches is still live and intentional in cyboflow (see `CLAUDE.md` → "Preserved Extension
+> Points"). This is the **canonical** CLI-integration guide; the parallel
+> `IMPLEMENTING_NEW_CLI_AGENTS.md` was merged into it (see "Alternative manager patterns" at the
+> end). Caveat: the removed **Codex** panel that older revisions cited as a live example no
+> longer exists — read all tool examples (Aider, Codex) as illustrative, not live code.
+
 This guide explains how to extend Crystal to support additional CLI tools beyond Claude Code. Crystal's architecture has been designed with extensibility in mind, using abstract base classes and a registry pattern.
 
 ## Table of Contents
@@ -717,4 +724,109 @@ When adding a new CLI tool to Crystal:
 For questions or issues with CLI integration:
 1. Check existing CLI implementations (ClaudeCodeManager) for examples
 2. Review the AbstractCliManager base class documentation
+
+## Alternative manager patterns (merged from IMPLEMENTING_NEW_CLI_AGENTS)
+
+These patterns were the unique content of the former `IMPLEMENTING_NEW_CLI_AGENTS.md`, folded in
+here so this guide is the single source. They are Crystal-era illustrative examples.
+
+### Suggested file structure
+
+```
+crystal/
+├── main/src/services/panels/aider/           # Backend implementation
+│   ├── aiderManager.ts                       # Main manager class (required)
+│   ├── aiderProtocol.ts                      # Protocol handling (if needed)
+│   ├── aiderMessageParser.ts                 # Output parsing utilities
+│   └── types.ts                              # TypeScript interfaces
+│
+├── frontend/src/components/panels/aider/     # Frontend implementation
+│   ├── AiderPanel.tsx                        # Main panel component (required)
+│   ├── AiderOutput.tsx                       # Output display component
+│   ├── AiderInput.tsx                        # Input component
+│   ├── AiderToolCalls.tsx                    # Tool call visualization
+│   └── styles.css                            # Component-specific styles
+│
+└── shared/types/                             # Shared type definitions
+    └── aiderTypes.ts                         # Aider-specific types (optional)
+```
+
+### Protocol-based CLI manager
+
+For CLIs using JSON-RPC or similar protocols:
+
+```typescript
+export class ProtocolCliManager extends AbstractCliManager {
+  private protocol: ProtocolHandler;
+
+  constructor(sessionManager: any, logger?: Logger, configManager?: ConfigManager) {
+    super(sessionManager, logger, configManager);
+    this.protocol = new ProtocolHandler();
+  }
+
+  protected parseCliOutput(data: string, panelId: string, sessionId: string): Array<any> {
+    try {
+      const message = JSON.parse(data);
+      return this.protocol.handleMessage(message, panelId, sessionId);
+    } catch {
+      // Fallback to plain text
+      return super.parseCliOutput(data, panelId, sessionId);
+    }
+  }
+
+  async sendInput(panelId: string, input: string): Promise<void> {
+    const message = this.protocol.createInputMessage(input);
+    const process = this.processes.get(panelId);
+    process?.write(JSON.stringify(message) + '\n');
+  }
+}
+```
+
+### Pattern: handling authentication
+
+If your CLI requires authentication:
+
+```typescript
+protected async initializeCliEnvironment(options: any): Promise<Record<string, string>> {
+  const apiKey = this.configManager?.getConfig()?.aiderApiKey;
+  if (!apiKey) {
+    throw new Error('API key required. Please configure in Settings.');
+  }
+
+  return {
+    AIDER_API_KEY: apiKey,
+    ...process.env
+  };
+}
+```
+
+### Pattern: handling tool calls
+
+For CLIs that perform file operations:
+
+```typescript
+protected parseCliOutput(data: string, panelId: string, sessionId: string): Array<any> {
+  const events = [];
+
+  // Detect tool calls
+  if (this.isToolCall(data)) {
+    const toolCall = this.parseToolCall(data);
+    events.push({
+      type: 'tool_call',
+      tool: toolCall.name,
+      args: toolCall.args
+    });
+
+    // Emit file change event if applicable
+    if (toolCall.name === 'write_file') {
+      this.emit('files:changed', {
+        panelId,
+        files: [toolCall.args.path]
+      });
+    }
+  }
+
+  return events;
+}
+```
 3. Open an issue on the Crystal GitHub repository

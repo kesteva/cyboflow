@@ -154,9 +154,9 @@ command below and `APPLE_APP_SPECIFIC_PASSWORD` in the build environment.
 ### Step 4 — Create the notarytool keychain profile
 
 Store the Apple ID, Team ID, and app-specific password in the login keychain
-under the profile name `AC_PASSWORD`. This profile name is used by the build
-pipeline (future `afterSign.js` hook) to authenticate without exposing secrets
-in environment variables or shell history.
+under the profile name `AC_PASSWORD`. This profile name is used by
+electron-builder's built-in notarization hook to authenticate without exposing
+secrets in environment variables or shell history.
 
 ```bash
 xcrun notarytool store-credentials AC_PASSWORD \
@@ -191,8 +191,8 @@ If it exits with a non-zero status or prints an authentication error, check:
 ## Verify Your Setup
 
 Run all four commands after completing the provisioning steps. Every command
-must succeed (exit 0) before downstream signing tasks (TASK-052 through
-TASK-056) can produce a signed build.
+must succeed (exit 0) for the signing/notarization pipeline (now shipped) to
+produce a signed build.
 
 ### Check 1 — Xcode Command Line Tools present
 
@@ -389,10 +389,11 @@ source and is never rewritten.
 `configure-build.js`, leaving the signed/unsigned posture determined by whatever
 is committed in `package.json` rather than by the env vars in your shell.
 
-> TASK-052 flips the `hardenedRuntime` and `notarize` defaults in
-> `package.json`. TASK-053 creates `build/entitlements.mac.plist`. TASK-054
-> replaces `build/afterSign.js` with the actual `notarytool` submission call.
-> TASK-051 (this task) is the prerequisite for all of them.
+> **Shipped:** TASK-051..056 have all landed. `package.json` sets `build.mac.hardenedRuntime`
+> and `build.mac.notarize: true`; `build/entitlements.mac.plist` exists. Note that
+> `build/afterSign.js` does **not** submit to `notarytool` itself — notarization is delegated to
+> electron-builder's built-in hook (driven by `build.mac.notarize`); `afterSign.js` only strips
+> JAR files from the bundled `@anthropic-ai/claude-code/vendor/` so Gatekeeper isn't blocked.
 
 ---
 
@@ -469,44 +470,26 @@ Apple status page at https://developer.apple.com/system-status/.
 
 ## Recording a Signed Build
 
-After `pnpm run build:mac:universal` produces a signed-and-notarized DMG,
-capture the evidence immediately — do not reconstruct from memory or logs later.
+cyboflow does **not** keep a per-build dossier. The evidence that used to be
+transcribed by hand is already captured, durably, elsewhere:
 
-1. Create a new directory for this release version:
-   ```bash
-   mkdir -p docs/signing/builds/<version>
-   ```
+- **Artifact provenance** — `latest-mac.yml` (published to R2 alongside the DMG)
+  carries the sha512 + size of every distributed artifact. That is your
+  supply-chain anchor; you don't copy hashes into a doc.
+- **Release notes** — user-facing changes go in `CHANGELOG.md`.
+- **Toolchain versions** — electron-builder / Electron are pinned in
+  `package.json` + the lockfile, so "what changed since the last good build" is
+  already in git. The one datum git doesn't hold is the host macOS / Xcode CLT
+  version; note it in the changelog entry only when a bump is the reason a build
+  changed behavior.
+- **Clean-install gate** — run `docs/signing/GATEKEEPER_CHECKLIST.md` after any
+  signing-config change (cert, entitlements, toolchain bump) or before
+  announcing a release. It's a checklist, not a record — don't commit results;
+  if it fails, capture the cause + fix under "Known Build Pitfalls" below.
 
-2. Copy the build log template and fill in every `<TODO: ...>` placeholder as
-   you work through the build:
-   ```bash
-   cp docs/signing/builds/_template/BUILD_LOG_TEMPLATE.md \
-      docs/signing/builds/<version>/FIRST_SIGNED_BUILD_LOG.md
-   ```
-   Record submission IDs, SHA256 hashes, and timestamps directly from the
-   terminal output at the time each step completes.
-
-3. After the clean-account Gatekeeper test completes (separate task), copy and
-   fill in the Gatekeeper test template:
-   ```bash
-   cp docs/signing/builds/_template/GATEKEEPER_TEST_TEMPLATE.md \
-      docs/signing/builds/<version>/GATEKEEPER_ACCEPTANCE_TEST.md
-   ```
-
-4. Commit both files:
-   ```bash
-   git add docs/signing/builds/<version>/
-   git commit -m "docs: record signed build and Gatekeeper test for <version>"
-   ```
-
-See `docs/signing/builds/README.md` for the full lifecycle policy, including
-the never-overwrite rule: completed `builds/<version>/` directories are
-append-only audit records.
-
-> **This directory is the audit trail for distribution — never overwrite a
-> completed build's evidence.** If a rebuild is required, create a new
-> directory (e.g. `builds/<version>-rebuild/`) rather than editing the
-> original.
+The first signed build (shipped at the inherited Crystal version `0.3.5`) is
+preserved as a one-off legacy record under
+`docs/archive/crystal-signing-0.3.5/`.
 
 ---
 

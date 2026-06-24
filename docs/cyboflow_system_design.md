@@ -20,7 +20,7 @@ The remaining doc is a guide put together by Claude desktop
 
 ## 1. Product Thesis
 
-**The thing being built.** Cyboflow is a **self-contained** desktop app that orchestrates Claude Code as a multi-agent workflow runner. It ships **two native flows** — **Planner** (turn a raw idea into a reviewed backlog of epics + tasks) and **Sprint** (execute the ready tasks) — whose prompt bodies live in the app source; there is no runtime dependency on any external workflow-runner plugin. Users start a flow against a repo; the app spawns Claude Code in an isolated git worktree per run, parses the structured stream-json output, surfaces the work in a custom UI, writes the app's own DB-canonical backlog, and concentrates everything that needs human attention into a single review queue.
+**The thing being built.** Cyboflow is a **self-contained** desktop app that orchestrates Claude Code as a multi-agent workflow runner. It ships **three native flows** — **Planner** (turn a raw idea into a reviewed backlog of epics + tasks), **Sprint** (execute the ready tasks), and **Compound** (mine merged runs for durable learnings, launched from the Insights view) — whose prompt bodies live in the app source; there is no runtime dependency on any external workflow-runner plugin. Users start a flow against a repo; the app spawns Claude Code in an isolated git worktree per run, parses the structured stream-json output, surfaces the work in a custom UI, writes the app's own DB-canonical backlog, and concentrates everything that needs human attention into a single review queue.
 
 **The differentiator.** Everyone in this category is competing on agent autonomy, parallelism, or hand-off ergonomics. Cyboflow's bet is that the scarce resource is *human attention*, not agent time. The unified review queue — one pane aggregating tool-use approvals, agent findings, human-gate decisions, and manual tasks from every running flow — is the product. Everything else is the substrate that makes it possible.
 
@@ -153,7 +153,7 @@ SQLite via `better-sqlite3`, WAL mode, single-process. Hand-rolled migrations fo
 
 **Five new tables on top of Crystal's existing schema (original run-substrate design):**
 
-- `workflows` — registry of the built-in flow definitions (Planner + Sprint), keyed by project
+- `workflows` — registry of the built-in flow definitions (Planner + Sprint + Compound), keyed by project
 - `workflow_runs` — single execution of a workflow on a worktree; the central entity
 - `raw_events` — append-only audit log, one row per parsed stream event
 - `messages` — normalized conversation messages, derived from raw events for cheap reads

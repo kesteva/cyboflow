@@ -1,5 +1,10 @@
 # Tool Panel System Implementation Guidelines
 
+> **HISTORICAL — Crystal-era guide.** The panel architecture described here is largely intact,
+> but the **Codex** panel (`codexPanelManager.ts`, the `'codex'` panel type) was **removed** from
+> cyboflow — ignore Codex as a live example. The live AI panel is Claude only; see
+> `docs/ARCHITECTURE.md` for the current panel/manager layout.
+
 ⚠️ **IMPORTANT**: The tool panel system implements a flexible, extensible architecture for managing multiple tool instances per session.
 
 ## Architecture Overview

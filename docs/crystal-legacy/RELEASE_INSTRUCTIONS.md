@@ -1,5 +1,8 @@
 # Crystal Release Instructions
 
+> **HISTORICAL — Crystal release process.** cyboflow's signing/notarization and update pipeline
+> differ; see `docs/signing/APPLE_DEVELOPER_SETUP.md` and `docs/UPDATES.md` for the current process.
+
 This document outlines the process for releasing new versions of Crystal for macOS with automatic updates.
 
 ## Prerequisites

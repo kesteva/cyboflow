@@ -1,8 +1,12 @@
 # Custom-Flow Execution Plan — stock orchestrator harness + injected graph
 
-**Status:** planned, not started. Fixes the ship blocker on branch `bajada-badlands`
-(Workflows + Agents pane): custom flows are created but cannot execute their step
-graph. See `docs/plans/workflows-agents-pane-plan.md` for the feature this completes.
+> **ARCHIVED — shipped.** Custom-flow execution landed on `main` (option B fixed-harness +
+> injected `spec_json` graph). This document is kept for historical context only; the
+> "planned, not started" framing below is no longer current.
+
+Fixes the ship blocker on the Workflows + Agents pane: custom flows are created but cannot
+execute their step graph. See `docs/archive/workflows-agents-pane-plan.md` for the feature
+this completes.
 
 ## Goal
 

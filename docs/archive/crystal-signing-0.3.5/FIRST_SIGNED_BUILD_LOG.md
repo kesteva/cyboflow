@@ -1,5 +1,12 @@
 # First Signed and Notarized Universal DMG — Build Log
 
+> **ARCHIVED — legacy record.** This is the real audit record of cyboflow's first signed build,
+> which shipped at version **`0.3.5`** — the version number inherited from Crystal at the fork,
+> before cyboflow renumbered to its own `0.1.x` line (now `0.1.2`). The recorded hashes and
+> outputs are unchanged. cyboflow no longer keeps per-build dossiers; provenance comes from the
+> published `latest-mac.yml`, release notes from `CHANGELOG.md`, and the clean-install gate from
+> `docs/signing/GATEKEEPER_CHECKLIST.md`.
+
 ## Build Summary
 
 | Field | Value |

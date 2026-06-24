@@ -1,5 +1,9 @@
 # License Compatibility Guide
 
+> **HISTORICAL — Crystal-era guide.** The license policy still applies, but the tooling it cites
+> does **not** exist in cyboflow: there is no `scripts/check-license-compatibility.sh` and no
+> `pnpm build:notices` script. For cyboflow's fork/license posture see `docs/PROVENANCE.md`.
+
 Crystal is licensed under the MIT License, which is a permissive open-source license. This document explains our approach to dependency license compatibility.
 
 ## Compatible Licenses

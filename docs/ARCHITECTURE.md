@@ -20,9 +20,9 @@ flow remains an internal, picker-hidden lightweight path.
 
 This codebase is forked from `stravu/crystal` at tag `0.3.5` (commit `1e18e0b`). Crystal
 branding, IPC transport, and Crystal-specific features are being progressively replaced. See
-`docs/cyboflow_system_design.md` for the full product spec and cut decisions. The original
-`compound` / `prune` SoloFlow flows were dropped from the app; their prose is preserved under
-`docs/workflows-future/` for a future cyboflow-native rebuild.
+`docs/cyboflow_system_design.md` for the full product spec and cut decisions. `compound` was
+rebuilt natively (`compound.md`, launched from the Insights view); only the `prune` SoloFlow
+flow remains dropped, its prose preserved under `docs/workflows-future/` for a future rebuild.
 
 ## Entry Points
 
@@ -431,8 +431,11 @@ board**. The board's 12 canonical stages (seeded by migrations 014 + 015 and
 | 8 | Ready to merge | task | Checks green · awaiting merge — orchestrator-`derived` |
 | 9 | Done | task | Merged & archived — terminal |
 | 10 | Won't do | any | terminal · hidden by default |
-| 11 | Archived | any | terminal · hidden by default |
 | 12 | Decomposed | idea | Idea-only terminal: idea RETIRES here on decomposition; children carry the flow |
+
+> The board has **11 stages**. The former position-11 `Archived` stage was removed by
+> migration `024_archive_in_place`: archiving is now an in-place `archived_at` flag rather
+> than a board stage. `Decomposed` retains its canonical position 12.
 
 **Branch:** a small idea moves `3 → 5` (skipping epics); a large idea moves `3 → 4 → 5`. On
 decomposition the idea retires to `Decomposed` and its children carry the flow. The

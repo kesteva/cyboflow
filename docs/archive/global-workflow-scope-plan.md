@@ -1,9 +1,12 @@
 # Global Workflow Scope Plan
 
-**Status:** planned, not started. Branch `bajada-badlands` (Workflows + Agents pane,
-pre-ship). Fixes the scoping flaw: standard flows are seeded **per project**, so the
+> **ARCHIVED — shipped.** Global workflow scope landed on `main` (workflows.project_id
+> nullable, NULL = global; migration `030_global_workflows`). This document is kept for
+> historical context only; the "planned, not started" framing below is no longer current.
+
+Fixes the scoping flaw: standard flows are seeded **per project**, so the
 gallery shows 3×{planner,sprint,compound} instead of one global set. See
-`docs/plans/workflows-agents-pane-plan.md` and `custom-flow-execution-plan.md`.
+`docs/archive/workflows-agents-pane-plan.md` and `custom-flow-execution-plan.md`.
 
 ## Goal
 
