@@ -173,6 +173,15 @@ export const reviewItemsRouter = router({
         staged: z.boolean().optional(),
         /** true => selected = 1; false => selected = 0. */
         selected: z.boolean().optional(),
+        /**
+         * Findings-only merge gate (Insights compounding surface). When true, a
+         * FINDING is surfaced only if its session was MERGED (a run in the same
+         * session has outcome='merged') — unmerged work may never land, so its
+         * findings might not apply. Replaces the run-status orphan-hide FOR
+         * FINDINGS (gates still get the orphan-hide). Off by default so the
+         * pre-merge Review Queue is unaffected.
+         */
+        requireMergedSession: z.boolean().optional(),
       }),
     )
     .query(async ({ input, ctx }): Promise<ReviewItem[]> => {
@@ -217,9 +226,27 @@ export const reviewItemsRouter = router({
       // are stageable). The Review Queue's blocking/permission view filters
       // `kind != 'finding'`, so a kept staged finding can NEVER leak into the
       // blocking count or the gate/permission list (verified: ReviewQueueView).
-      clauses.push(
-        `NOT (ri.status = 'pending' AND ri.staged_at IS NULL AND ri.run_id IS NOT NULL AND r.status IN ${TERMINAL_RUN_STATUSES_SQL_IN})`,
-      );
+      if (input.requireMergedSession) {
+        // Insights compounding surface: a FINDING surfaces only if its session
+        // was MERGED — i.e. a run in the SAME session has outcome='merged' (the
+        // close-out signal; the producing run's own status may read 'canceled'
+        // after worktree teardown, so we key on the session's merge OUTCOME, not
+        // run status). Unmerged work may never land, so its findings might not
+        // apply. This REPLACES the run-status orphan-hide for findings; GATES
+        // (kind != 'finding') still get the orphan-hide below.
+        clauses.push(
+          `NOT (ri.kind != 'finding' AND ri.status = 'pending' AND ri.staged_at IS NULL AND ri.run_id IS NOT NULL AND r.status IN ${TERMINAL_RUN_STATUSES_SQL_IN})`,
+        );
+        clauses.push(
+          `(ri.kind != 'finding' OR EXISTS (
+             SELECT 1 FROM workflow_runs wrm
+              WHERE wrm.session_id = r.session_id AND wrm.outcome = 'merged'))`,
+        );
+      } else {
+        clauses.push(
+          `NOT (ri.status = 'pending' AND ri.staged_at IS NULL AND ri.run_id IS NOT NULL AND r.status IN ${TERMINAL_RUN_STATUSES_SQL_IN})`,
+        );
+      }
       const rows = db
         .prepare(
           `SELECT ri.* FROM review_items ri

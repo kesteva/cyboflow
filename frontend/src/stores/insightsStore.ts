@@ -474,6 +474,11 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
    * rows. ONE fetch feeds BOTH the untriaged and ready sections (the triage
    * state derives from `staged_at`). Per-project failures are caught and
    * recorded but never abort the other projects' fetches.
+   *
+   * `requireMergedSession: true` scopes the compounding surface to findings whose
+   * session was MERGED (a run in the same session has outcome='merged'); unmerged
+   * work may never land, so its findings might not apply. This is stricter than —
+   * and supersedes — the run-status orphan-hide for findings.
    */
   const fetchTriageFindings = async (
     projectIds: number[],
@@ -486,6 +491,9 @@ export const useInsightsStore = create<InsightsState>((set, get) => {
             projectId,
             status: 'pending',
             kind: 'finding',
+            // Compounding surfaces findings from MERGED sessions only — unmerged
+            // work may never land, so its findings might not apply.
+            requireMergedSession: true,
           });
         } catch (err: unknown) {
           recordError(err instanceof Error ? err.message : `reviewItems.list failed for ${projectId}`);

@@ -61,6 +61,11 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '032_findings_triage.sql'), 'utf-8'));
+  // workflow_runs.session_id (migration 019) — added directly here: 019's backfill
+  // UPDATE reads a `sessions` table this minimal fixture doesn't create, so we add
+  // just the column the requireMergedSession merge-gate join needs (mirrors the
+  // workflowRegistry fixture's seed_finding_ids ALTER).
+  db.exec(`ALTER TABLE workflow_runs ADD COLUMN session_id TEXT`);
   return db;
 }
 
@@ -218,6 +223,69 @@ describe('cyboflow.reviewItems.list / get', () => {
     const ids = pending.map((i) => i.id);
     expect(ids).toContain(staged.reviewItemId); // staged_at set => human keep signal survives terminal run
     expect(ids).not.toContain(untriaged.reviewItemId); // untriaged on a dead run stays hidden
+  });
+
+  it('requireMergedSession surfaces a finding from a MERGED session, hides an unmerged one', async () => {
+    const { caller, db } = buildCaller();
+
+    db.prepare(`INSERT INTO workflows (id, project_id, name) VALUES ('wf-1-sprint', 1, 'sprint')`).run();
+    // A MERGED session: its run carries outcome='merged' even though its status reads
+    // 'canceled' after worktree teardown (the real-world shape). And an unmerged one.
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, branch_name, status, outcome, session_id, policy_json)
+       VALUES ('run-merged', 'wf-1-sprint', 1, '/w/m', 'b/m', 'canceled', 'merged', 'sess-merged', '{}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, branch_name, status, outcome, session_id, policy_json)
+       VALUES ('run-failed', 'wf-1-sprint', 1, '/w/f', 'b/f', 'failed', 'failed', 'sess-failed', '{}')`,
+    ).run();
+
+    const merged = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:executor', kind: 'finding', title: 'from merged session', runId: 'run-merged',
+    });
+    const unmerged = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:executor', kind: 'finding', title: 'from failed session', runId: 'run-failed',
+    });
+
+    // Default (no flag): BOTH hidden — their runs are terminal (orphan-hide).
+    const orphan = await caller.cyboflow.reviewItems.list({ projectId: 1, kind: 'finding', status: 'pending' });
+    const orphanIds = orphan.map((i) => i.id);
+    expect(orphanIds).not.toContain(merged.reviewItemId);
+    expect(orphanIds).not.toContain(unmerged.reviewItemId);
+
+    // requireMergedSession: the merged-session finding surfaces; the unmerged stays hidden.
+    const mergedOnly = await caller.cyboflow.reviewItems.list({
+      projectId: 1, kind: 'finding', status: 'pending', requireMergedSession: true,
+    });
+    const ids = mergedOnly.map((i) => i.id);
+    expect(ids).toContain(merged.reviewItemId);
+    expect(ids).not.toContain(unmerged.reviewItemId);
+  });
+
+  it('requireMergedSession keeps the gate orphan-hide intact (a gate on a terminal run stays hidden)', async () => {
+    const { caller, db } = buildCaller();
+
+    db.prepare(`INSERT INTO workflows (id, project_id, name) VALUES ('wf-1-sprint', 1, 'sprint')`).run();
+    // A MERGED run hosting BOTH a finding (surfaces) and a decision gate (a gate
+    // needs a live run to resume, so it stays hidden even on a merged session).
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, branch_name, status, outcome, session_id, policy_json)
+       VALUES ('run-merged', 'wf-1-sprint', 1, '/w/m', 'b/m', 'canceled', 'merged', 'sess-merged', '{}')`,
+    ).run();
+
+    const finding = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:executor', kind: 'finding', title: 'finding on merged run', runId: 'run-merged',
+    });
+    const gate = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create', actor: 'agent:executor', kind: 'decision', title: 'decision on merged run', runId: 'run-merged',
+    });
+
+    const items = await caller.cyboflow.reviewItems.list({
+      projectId: 1, status: 'pending', requireMergedSession: true,
+    });
+    const ids = items.map((i) => i.id);
+    expect(ids).toContain(finding.reviewItemId); // finding from merged session surfaces
+    expect(ids).not.toContain(gate.reviewItemId); // gate on a terminal run stays orphan-hidden
   });
 
   it('get returns the single item, or null when absent', async () => {
