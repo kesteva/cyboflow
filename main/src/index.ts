@@ -13,7 +13,8 @@ import { Logger } from './utils/logger';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
 import { initializeCommitManager } from './services/commitManager';
 import { setCyboflowDirectory, getCyboflowSubdirectory } from './utils/cyboflowDirectory';
-import { initTelemetry } from './services/telemetry';
+import { initTelemetry, trackUsage } from './services/telemetry';
+import { setTelemetrySink } from './orchestrator/telemetrySink';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
 import { setupEventListeners } from './events';
@@ -494,6 +495,9 @@ async function initializeServices() {
   // captured. Silent no-op when env credentials or config flags are absent.
   const __cfg = configManager.getConfig();
   if (__cfg.telemetry) initTelemetry(__cfg.telemetry);
+  // Register the usage sink so orchestrator code (which can't import services/*)
+  // can emit events via emitUsage() — see orchestrator/telemetrySink.ts.
+  setTelemetrySink(trackUsage);
 
   // Initialize logger early so it can capture all logs
   logger = new Logger(configManager);
