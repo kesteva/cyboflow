@@ -126,6 +126,22 @@ failure is surfaced at the human gate.
 its stage changes, when it commits, when it fails. The lanes are the UI's only
 window into per-task progress.
 
+**Surface deliverables as artifacts (encouraged).** The run already gets baseline
+**Idea spec** + **Decomposed stories** tabs automatically. When the sprint produces
+something a human will want to *see*, report it as a run artifact via
+`cyboflow_report_artifact` so it gets its own center-pane tab (one artifact per
+`atype` per run; call again with the same `atype` to enrich it):
+
+- a runnable app / dev server → `atype: 'ui-prototype'`, `payload_json` with the
+  localhost URL, e.g. `{"url":"http://localhost:5173"}`.
+- captured screenshots (e.g. from visual-verify) → `atype: 'screenshots'`,
+  `payload_json` `{"fileNames":["home.png","detail.png"]}` (basenames of PNGs the
+  visual-verifier wrote under the run's artifacts dir).
+- any other generated report / live canvas → `atype: 'generic'`.
+
+This is purely additive — never a substitute for a `cyboflow_report_step` call or a
+gate.
+
 ### Phase 3 — Sprint review
 
 Enter this phase only after **every** lane is terminal (`integrated` or `failed`).
