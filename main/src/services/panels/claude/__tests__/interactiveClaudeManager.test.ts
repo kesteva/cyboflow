@@ -469,7 +469,7 @@ describe('InteractiveClaudeManager', () => {
       expect(args).not.toContain('--permission-mode');
     });
 
-    it('includes --mcp-config (pointing at the per-run config) and does NOT emit the dangling --settings flag (TASK-819)', () => {
+    it('includes --mcp-config (pointing at the per-run config) and emits ONLY the inline fast-mode --settings (no dangling settings-FILE flag, TASK-819)', () => {
       // buildCommandArgs emits --mcp-config ONLY when the per-run config exists on
       // disk — writeInteractiveMcpConfig writes `<worktree>/.cyboflow/interactive-
       // mcp.json` before args are built, and a MISSING path would make `claude`
@@ -488,11 +488,21 @@ describe('InteractiveClaudeManager', () => {
         });
         expect(args).toContain('--mcp-config');
         expect(args).toContain(mcpConfigPath);
-        // The dangling `--settings <.cyboflow/interactive-settings.json>` flag is
-        // dropped (TASK-819): the PreToolUse hook is installed by the writer into
-        // the worktree's default `.claude/settings.json` that `claude` reads, so
-        // no `--settings` flag is emitted.
-        expect(args).not.toContain('--settings');
+        // The dangling `--settings <.cyboflow/interactive-settings.json>` FILE
+        // flag is dropped (TASK-819): the PreToolUse hook is installed by the
+        // writer into the worktree's default `.claude/settings.json` that `claude`
+        // reads. A single `--settings <inline-json>` IS emitted to pin fast mode
+        // OFF by default + per-session (so a persisted `/fast` can't leak in); its
+        // value is INLINE JSON, never a settings-file path. No ultracode key for a
+        // plain spawn.
+        const settingsIdx = args.indexOf('--settings');
+        expect(settingsIdx).toBeGreaterThanOrEqual(0);
+        // exactly one --settings flag
+        expect(args.filter((a) => a === '--settings')).toHaveLength(1);
+        expect(JSON.parse(args[settingsIdx + 1])).toEqual({
+          fastMode: false,
+          fastModePerSessionOptIn: true,
+        });
       } finally {
         fs.rmSync(wt, { recursive: true, force: true });
       }

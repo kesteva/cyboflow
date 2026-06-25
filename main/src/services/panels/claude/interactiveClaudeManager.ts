@@ -9,6 +9,7 @@ import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
+import { resolveModelAlias } from './modelContext';
 import { ApprovalRouter } from '../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../orchestrator/questionRouter';
 import { DynamicWorkflowTracker } from '../../../orchestrator/dynamicWorkflows';
@@ -127,6 +128,13 @@ interface InteractiveClaudeSpawnOptions {
    * is NOT an `--effort` value. Omitted → no effort setting.
    */
   effort?: 'ultracode';
+  /**
+   * Per-launch opt-in for Anthropic "fast mode" (premium, Opus-only research
+   * preview). Threaded from the quick-session launch toggle. buildCommandArgs
+   * ALWAYS emits the fast-mode keys in `--settings` (default off + per-session)
+   * so a persisted `/fast` in the user's `~/.claude/settings.json` can't leak in.
+   */
+  fastMode?: boolean;
   /**
    * The workflow_runs row ID for ApprovalRouter / the per-run RawEventsSink. For
    * workflow runs this equals panelId (RunExecutor invariant). For quick sessions
@@ -438,8 +446,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     const args: string[] = [];
 
     // model: pass `--model X` ONLY for a concrete model; 'auto'/'default' omit.
-    if (options.model && options.model !== 'auto' && options.model !== 'default') {
-      args.push('--model', options.model);
+    // Pin the bare alias ('opus'/'sonnet'/'haiku') to the current concrete
+    // snapshot (mirrors the SDK seam) so the CLI doesn't resolve it to a
+    // previous-generation model.
+    const resolvedModel = resolveModelAlias(options.model);
+    if (resolvedModel && resolvedModel !== 'auto' && resolvedModel !== 'default') {
+      args.push('--model', resolvedModel);
     }
 
     // strictMcpConfig: isolate to per-run .mcp.json servers only.
@@ -459,20 +471,29 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       args.push('--permission-mode', 'auto');
     }
 
-    // effort 'ultracode' (the "Ultracode" wizard card). ultracode is a
-    // SESSION-ONLY setting, NOT an `--effort` value (`--effort` accepts only
-    // low|medium|high|xhigh|max — passing 'ultracode' there makes claude exit 1).
-    // The sanctioned launch mechanism is `--settings '{"ultracode":true}'`: an
-    // ADDITIVE, highest-precedence settings source, so the writer-installed
-    // PreToolUse hook in the worktree's .claude/settings.json is STILL discovered
-    // (it does not replace file-based settings). ultracode pairs xhigh reasoning
-    // with automatic workflow orchestration, so the agent fans substantive work
-    // out as dynamic background workflows (visualized by DynamicWorkflowTracker).
-    // Inline JSON is passed as a single argv element (pty spawn = no shell, so no
-    // quoting concerns); pushed before the end-of-options `--` separator.
+    // Session-only settings delivered via `--settings '<json>'`: an ADDITIVE,
+    // highest-precedence settings source, so the writer-installed PreToolUse hook
+    // in the worktree's .claude/settings.json is STILL discovered (it does not
+    // replace file-based settings). Inline JSON is passed as a single argv element
+    // (pty spawn = no shell, so no quoting concerns); pushed before the
+    // end-of-options `--` separator. Combine every session-only key into ONE
+    // object so a single flag carries them all:
+    //   - ultracode ("Ultracode" wizard card): pairs xhigh reasoning with
+    //     automatic workflow orchestration. It is NOT an `--effort` value
+    //     (`--effort` accepts only low|medium|high|xhigh|max — 'ultracode' there
+    //     makes claude exit 1).
+    //   - fastMode + fastModePerSessionOptIn: pin Anthropic fast mode OFF by
+    //     default and per-session (mirrors the SDK seam) so a persisted `/fast`
+    //     from the user's settings.json can't leak in; the launch toggle opts a
+    //     single session back in.
+    const sessionSettings: Record<string, unknown> = {
+      fastMode: options.fastMode === true,
+      fastModePerSessionOptIn: true,
+    };
     if (options.effort === 'ultracode') {
-      args.push('--settings', JSON.stringify({ ultracode: true }));
+      sessionSettings.ultracode = true;
     }
+    args.push('--settings', JSON.stringify(sessionSettings));
 
     // Inject the cyboflow MCP stdio entry ONLY when its config file is present on
     // disk. writeInteractiveMcpConfig (called by spawnCliProcess just before args
@@ -1377,6 +1398,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     permissionMode?: 'approve' | 'ignore',
     model?: string,
     effort?: 'ultracode',
+    fastMode?: boolean,
   ): Promise<void> {
     await this.spawnCliProcess({
       panelId,
@@ -1385,6 +1407,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       prompt,
       permissionMode,
       effort,
+      fastMode,
       // Quick/legacy interactive sessions resolve their 4-mode agent permission
       // here (per-session override else global default) — without it the
       // settings-writer's effectiveWriterMode never sees the 4-mode and ALWAYS

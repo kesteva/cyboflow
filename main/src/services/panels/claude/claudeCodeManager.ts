@@ -5,7 +5,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { resolveClaudeExecutablePath } from './claudeExecutablePath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
-import { CONTEXT_1M_BETA, modelSupportsContext1M } from './modelContext';
+import { CONTEXT_1M_BETA, modelSupportsContext1M, resolveModelAlias } from './modelContext';
 import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
 import type Database from 'better-sqlite3';
@@ -100,6 +100,14 @@ interface ClaudeSpawnOptions {
    */
   agentPermissionMode?: PermissionMode;
   model?: string;
+  /**
+   * Per-launch opt-in for Anthropic "fast mode" (premium, Opus-only research
+   * preview). Threaded from the quick-session launch toggle. When absent/false,
+   * buildSdkOptions pins fast mode OFF (and per-session) so a persisted `/fast`
+   * from the user's `~/.claude/settings.json` (loaded via settingSources) never
+   * leaks into a cyboflow run.
+   */
+  fastMode?: boolean;
   /**
    * The workflow_runs row ID for ApprovalRouter. For workflow runs this equals
    * panelId (RunExecutor invariant). For quick sessions it's resolved from
@@ -911,16 +919,35 @@ export class ClaudeCodeManager extends AbstractCliManager {
       sdkOptions.permissionMode = 'auto';
     }
 
-    if (options.model && options.model !== 'auto') {
-      sdkOptions.model = options.model;
+    // Pin the bare alias ('opus'/'sonnet'/'haiku') to the current concrete
+    // snapshot so the SDK can't resolve it to a previous-generation model (the
+    // opus→4.7 / sonnet→250k drift). 'auto'/undefined/concrete ids pass through.
+    const resolvedModel = resolveModelAlias(options.model);
+    if (resolvedModel && resolvedModel !== 'auto') {
+      sdkOptions.model = resolvedModel;
     }
 
-    // Enable the 1M-token context window for Sonnet 4/4.5 (the only family the SDK
-    // beta supports). Without this a Sonnet run reports a 200k window, so the chat
+    // Enable the 1M-token context window for Sonnet 4 ids (the only family the SDK
+    // beta supports) — gate on the RESOLVED id so the pinned `claude-sonnet-4-6`
+    // still matches. Without this a Sonnet run reports a 200k window, so the chat
     // context meter caps at 200k even though the model is 1M-capable.
-    if (modelSupportsContext1M(options.model)) {
+    if (modelSupportsContext1M(resolvedModel)) {
       sdkOptions.betas = [CONTEXT_1M_BETA];
     }
+
+    // Fast mode (premium, Opus-only research preview) is a per-launch opt-in.
+    // The SDK loads `Settings` from `settingSources: ['user','project']`, so a
+    // `/fast` the user once enabled in plain Claude Code PERSISTS in
+    // `~/.claude/settings.json` and would otherwise leak into every cyboflow
+    // spawn (the "model is in fast mode by default" report). Pin it via an inline
+    // `settings` overlay: `fastModePerSessionOptIn: true` makes each session
+    // start with fast mode OFF regardless of the inherited file, and `fastMode`
+    // re-enables it for exactly the session whose launch toggle requested it.
+    sdkOptions.settings = {
+      ...(typeof sdkOptions.settings === 'object' ? sdkOptions.settings : {}),
+      fastMode: options.fastMode === true,
+      fastModePerSessionOptIn: true,
+    };
 
     // Piece C — idle-chat nudge. An explicit resumeSessionId (threaded by
     // RunExecutor.execute from workflow_runs.claude_session_id) takes precedence
@@ -1359,7 +1386,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
     worktreePath: string,
     prompt: string,
     permissionMode?: 'approve' | 'ignore',
-    model?: string
+    model?: string,
+    fastMode?: boolean
   ): Promise<void> {
     const { validatePanelSessionOwnership, logValidationFailure } = require('../../../utils/sessionValidation');
     const validation = validatePanelSessionOwnership(panelId, sessionId);
@@ -1368,7 +1396,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       throw new Error(`Panel validation failed: ${validation.error}`);
     }
     console.log(`[ClaudeCodeManager] Validated panel ${panelId} belongs to session ${sessionId}`);
-    return this.spawnClaudeCode(panelId, sessionId, worktreePath, prompt, undefined, false, permissionMode, model);
+    return this.spawnClaudeCode(panelId, sessionId, worktreePath, prompt, undefined, false, permissionMode, model, fastMode);
   }
 
   async continuePanel(
@@ -1461,7 +1489,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
     conversationHistory?: string[],
     isResume = false,
     permissionMode?: 'approve' | 'ignore',
-    model?: string
+    model?: string,
+    fastMode?: boolean
   ): Promise<void> {
     const options: ClaudeSpawnOptions = {
       panelId,
@@ -1471,6 +1500,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       conversationHistory,
       isResume,
       permissionMode,
+      fastMode,
       // Quick/legacy SDK sessions resolve their 4-mode agent permission from the
       // per-session override (sessions.agent_permission_mode, migration 021) when
       // set, else the GLOBAL default — so both the Settings control AND the

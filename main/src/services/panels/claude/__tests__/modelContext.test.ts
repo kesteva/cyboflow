@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { CONTEXT_1M_BETA, modelSupportsContext1M } from '../modelContext';
+import { CONTEXT_1M_BETA, modelSupportsContext1M, resolveModelAlias } from '../modelContext';
 
 describe('modelContext', () => {
   it('CONTEXT_1M_BETA is the Sonnet 1M beta flag', () => {
@@ -34,6 +34,43 @@ describe('modelContext', () => {
     it('rejects older Sonnet 3.x ids (beta is Sonnet 4/4.5 only)', () => {
       expect(modelSupportsContext1M('claude-3-5-sonnet')).toBe(false);
       expect(modelSupportsContext1M('claude-sonnet-3-7')).toBe(false);
+    });
+  });
+
+  describe('resolveModelAlias', () => {
+    it('pins the bare aliases to current concrete snapshots', () => {
+      expect(resolveModelAlias('opus')).toBe('claude-opus-4-8');
+      expect(resolveModelAlias('sonnet')).toBe('claude-sonnet-4-6');
+      expect(resolveModelAlias('haiku')).toBe('claude-haiku-4-5');
+    });
+
+    it('matches aliases case/space-insensitively', () => {
+      expect(resolveModelAlias('Opus')).toBe('claude-opus-4-8');
+      expect(resolveModelAlias(' SONNET ')).toBe('claude-sonnet-4-6');
+    });
+
+    it('passes through "auto" (the SDK owns model choice)', () => {
+      expect(resolveModelAlias('auto')).toBe('auto');
+    });
+
+    it('passes through undefined/null/empty unchanged', () => {
+      expect(resolveModelAlias(undefined)).toBeUndefined();
+      expect(resolveModelAlias(null)).toBeUndefined();
+      expect(resolveModelAlias('')).toBe('');
+    });
+
+    it('leaves an already-concrete or unrecognized id exactly as pinned', () => {
+      // A caller that deliberately pinned an older snapshot is not "upgraded".
+      expect(resolveModelAlias('claude-opus-4-7')).toBe('claude-opus-4-7');
+      expect(resolveModelAlias('claude-sonnet-4-5')).toBe('claude-sonnet-4-5');
+      expect(resolveModelAlias('some-future-model')).toBe('some-future-model');
+    });
+
+    it('the pinned Sonnet id still qualifies for the 1M beta', () => {
+      // The pinning + 1M gate must compose: opus→4.8 keeps no beta, sonnet→4.6
+      // still matches the /sonnet-4/ gate so the 1M window is requested.
+      expect(modelSupportsContext1M(resolveModelAlias('sonnet'))).toBe(true);
+      expect(modelSupportsContext1M(resolveModelAlias('opus'))).toBe(false);
     });
   });
 });
