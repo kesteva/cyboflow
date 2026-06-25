@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Settings } from './Settings';
 import { DraggableProjectTreeView } from './DraggableProjectTreeView';
 import { ArchiveProgress } from './ArchiveProgress';
-import { Info, Clock, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Cog, Kanban, Activity, Workflow } from 'lucide-react';
+import { Info, Clock, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Kanban, Activity, Workflow } from 'lucide-react';
 import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { IconButton } from './ui/Button';
 import { Modal, ModalHeader, ModalBody } from './ui/Modal';
@@ -328,22 +328,6 @@ export function Sidebar({
         
         {/* Bottom section - always visible */}
         <div className="flex-shrink-0">
-          {/* User footer — avatar + name + settings (Protoflow rail foot) */}
-          <div className="flex items-center gap-2 px-4 py-2 border-t border-border-primary">
-            <span className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full bg-interactive text-[10px] font-bold text-text-on-interactive">
-              K
-            </span>
-            <span className="flex-1 truncate text-[10.5px] text-text-secondary">kesteva</span>
-            <button
-              type="button"
-              onClick={() => { setSettingsInitialTab('general'); setIsSettingsOpen(true); trackEvent('settings_opened'); }}
-              aria-label="Settings"
-              className="text-text-tertiary hover:text-text-primary transition-colors"
-            >
-              <Cog className="h-4 w-4" />
-            </button>
-          </div>
-
           {/* Archive progress indicator above version */}
           <ArchiveProgress />
           
