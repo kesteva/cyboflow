@@ -534,7 +534,11 @@ All outbound telemetry is anonymized and gated in `main/src/services/telemetry/`
   usage and no errors; `dev` / `stable` (release-stamped via `CYBOFLOW_BUILD_ENV`) get both. Keep
   the telemetry `environment` token distinct from the updater/About `variant` token.
 - **Telemetry must NEVER throw into app code** — every entry point is try/caught and is a no-op
-  when the SDK or its credential (`SENTRY_DSN` / `APTABASE_APP_KEY`) is absent.
+  when the SDK or its credential is absent. Creds resolve from the runtime env var
+  (`SENTRY_DSN` / `APTABASE_APP_KEY`, for `pnpm dev`) OR, when absent, from the keys baked into
+  `buildInfo.json` at build time — a DISTRIBUTED packaged app has none of the build shell's env
+  vars at runtime, so without the baked fallback both SDKs silently no-op (the "zero usage from
+  installed apps" class of bug).
 - **Canonical example:** `main/src/services/telemetry/{index,scrub,environment}.ts`.
 
 ## Build & Packaging

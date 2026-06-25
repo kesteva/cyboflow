@@ -63,7 +63,16 @@ const buildInfo = {
   environment:
     process.env.CYBOFLOW_BUILD_ENV === 'stable' || process.env.CYBOFLOW_BUILD_ENV === 'dev'
       ? process.env.CYBOFLOW_BUILD_ENV
-      : 'local'
+      : 'local',
+  // Telemetry client credentials, BAKED at build time. A distributed packaged
+  // app has none of the build shell's env vars at runtime, so without this the
+  // SDKs never get a DSN/key and silently no-op (the cause of "zero usage from
+  // installed apps"). These are client-side keys designed to ship in the binary:
+  // a Sentry DSN is public + write-only, an Aptabase app key is embedded in the
+  // client SDK. null when absent from the build env → that SDK stays a no-op.
+  // buildInfo.json lives in gitignored main/dist/, so these never enter the repo.
+  sentryDsn: process.env.SENTRY_DSN || null,
+  aptabaseAppKey: process.env.APTABASE_APP_KEY || null
 };
 
 // Write build info to a file in the main dist directory
@@ -78,4 +87,9 @@ if (!fs.existsSync(distDir)) {
 // Write the build info
 fs.writeFileSync(buildInfoPath, JSON.stringify(buildInfo, null, 2));
 
-console.log('Build info injected:', buildInfo);
+// Redact the baked credentials in the log (presence only — never the values).
+console.log('Build info injected:', {
+  ...buildInfo,
+  sentryDsn: buildInfo.sentryDsn ? '<set>' : null,
+  aptabaseAppKey: buildInfo.aptabaseAppKey ? '<set>' : null,
+});

@@ -37,8 +37,14 @@ function setPackaged(value: boolean): void {
 let tmpResources: string;
 const realResourcesPath = process.resourcesPath;
 
-/** Write (or clear) the buildInfo.json the telemetry env reader will pick up. */
-function stampBuildInfo(environment: 'local' | 'dev' | 'stable' | null): void {
+/**
+ * Write (or clear) the buildInfo.json the telemetry reader will pick up. `creds`
+ * mirrors the keys baked by inject-build-info.js into a distributed packaged app.
+ */
+function stampBuildInfo(
+  environment: 'local' | 'dev' | 'stable' | null,
+  creds?: { sentryDsn?: string; aptabaseAppKey?: string },
+): void {
   const distDir = path.join(tmpResources, 'app', 'main', 'dist');
   fs.mkdirSync(distDir, { recursive: true });
   const file = path.join(distDir, 'buildInfo.json');
@@ -46,7 +52,7 @@ function stampBuildInfo(environment: 'local' | 'dev' | 'stable' | null): void {
     if (fs.existsSync(file)) fs.rmSync(file);
     return;
   }
-  fs.writeFileSync(file, JSON.stringify({ environment }));
+  fs.writeFileSync(file, JSON.stringify({ environment, ...creds }));
 }
 
 const CFG = { errorReportingEnabled: true, usageMetricsEnabled: true, installId: 'test-install-id' };
@@ -98,6 +104,47 @@ describe('initTelemetry gating (Sentry + Aptabase paths)', () => {
     expect(sentry.init).toHaveBeenCalledTimes(1);
     expect(isSentryActive()).toBe(true);
     expect(sentry.init.mock.calls[0][0].environment).toBe('local');
+  });
+
+  // ---- Baked credentials: distributed packaged app, no env vars at runtime ----
+
+  it('uses the Sentry DSN baked into buildInfo when no env var is set (distributed .dmg)', async () => {
+    setPackaged(true);
+    // No process.env.SENTRY_DSN — exactly a double-clicked packaged app.
+    stampBuildInfo('stable', { sentryDsn: 'https://baked@example.ingest.sentry.io/9' });
+    const { initTelemetry, isSentryActive } = await import('../index');
+    initTelemetry(CFG);
+    expect(sentry.init).toHaveBeenCalledTimes(1);
+    expect(isSentryActive()).toBe(true);
+    expect(sentry.init.mock.calls[0][0].dsn).toBe('https://baked@example.ingest.sentry.io/9');
+  });
+
+  it('uses the Aptabase key baked into buildInfo when no env var is set (distributed .dmg)', async () => {
+    setPackaged(true);
+    stampBuildInfo('stable', { aptabaseAppKey: 'A-US-BAKEDKEY00' });
+    const { initTelemetry } = await import('../index');
+    initTelemetry(CFG);
+    expect(aptabase.initialize).toHaveBeenCalledWith('A-US-BAKEDKEY00');
+    expect(aptabase.trackEvent).toHaveBeenCalledWith('app_started', { environment: 'stable' });
+  });
+
+  it('prefers the runtime env var over the baked buildInfo credential', async () => {
+    setPackaged(true);
+    stampBuildInfo('stable', { aptabaseAppKey: 'A-US-BAKED00000' });
+    process.env.APTABASE_APP_KEY = 'A-US-ENVWINS0000';
+    const { initTelemetry } = await import('../index');
+    initTelemetry(CFG);
+    expect(aptabase.initialize).toHaveBeenCalledWith('A-US-ENVWINS0000');
+  });
+
+  it('stays a silent no-op when neither env var nor baked credential is present', async () => {
+    setPackaged(true);
+    stampBuildInfo('stable'); // no creds baked, no env set
+    const { initTelemetry, isSentryActive } = await import('../index');
+    initTelemetry(CFG);
+    expect(sentry.init).not.toHaveBeenCalled();
+    expect(aptabase.initialize).not.toHaveBeenCalled();
+    expect(isSentryActive()).toBe(false);
   });
 
   it('does NOT initialize Sentry when error reporting is opted out', async () => {

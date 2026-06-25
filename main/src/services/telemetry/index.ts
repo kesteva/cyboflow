@@ -4,7 +4,7 @@ import { app } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import { scrubSentryEvent, scrubBreadcrumb } from './scrub';
-import { environmentFromBuildInfo, type TelemetryEnvironment } from './environment';
+import { environmentFromBuildInfo } from './environment';
 import type { TelemetryEventMap, TelemetryEventName } from '../../../../shared/types/telemetry';
 
 export type { TelemetryEnvironment } from './environment';
@@ -15,19 +15,33 @@ export type { TelemetryEnvironment } from './environment';
 let sentryActive = false;
 let aptabaseActive = false;
 
-/** Resolve the telemetry environment by reading the packaged buildInfo.json. */
-function resolveTelemetryEnvironment(): TelemetryEnvironment {
-  if (!app.isPackaged) return 'local';
-  let buildInfo: { environment?: unknown } | null = null;
+interface BakedBuildInfo {
+  environment?: unknown;
+  sentryDsn?: unknown;
+  aptabaseAppKey?: unknown;
+}
+
+/**
+ * Read the packaged buildInfo.json — the source of the telemetry environment AND
+ * the client credentials baked at build time. Returns null under `pnpm dev`
+ * (unpackaged, no bundle) where creds come from process.env instead.
+ */
+function readBuildInfo(): BakedBuildInfo | null {
+  if (!app.isPackaged) return null;
   try {
     const buildInfoPath = path.join(process.resourcesPath, 'app', 'main', 'dist', 'buildInfo.json');
     if (fs.existsSync(buildInfoPath)) {
-      buildInfo = JSON.parse(fs.readFileSync(buildInfoPath, 'utf8'));
+      return JSON.parse(fs.readFileSync(buildInfoPath, 'utf8')) as BakedBuildInfo;
     }
   } catch {
-    buildInfo = null;
+    return null;
   }
-  return environmentFromBuildInfo(app.isPackaged, buildInfo);
+  return null;
+}
+
+/** Non-empty string or undefined (treats '' / non-strings as absent). */
+function asCred(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 /**
@@ -48,14 +62,24 @@ export function initTelemetry(cfg: {
   usageMetricsEnabled: boolean;
   installId: string;
 }): void {
-  const environment = resolveTelemetryEnvironment();
+  const buildInfo = readBuildInfo();
+  const environment = environmentFromBuildInfo(app.isPackaged, buildInfo);
+
+  // Resolve credentials: a runtime env var WINS (pnpm dev with .envrc.local
+  // loaded, or an explicit override), otherwise fall back to the key BAKED into
+  // buildInfo.json at build time. The baked key is the ONLY source in a
+  // distributed packaged app, whose runtime env has none of the build shell's
+  // vars — without it both SDKs silently no-op (the "zero usage from installed
+  // apps" bug).
+  const sentryDsn = asCred(process.env.SENTRY_DSN) ?? asCred(buildInfo?.sentryDsn);
+  const aptabaseAppKey = asCred(process.env.APTABASE_APP_KEY) ?? asCred(buildInfo?.aptabaseAppKey);
 
   // Gated purely on the config flag + credential presence. Local builds default
-  // the flag off, but an opted-in developer (flag on + SENTRY_DSN set) gets it.
-  if (cfg.errorReportingEnabled && process.env.SENTRY_DSN) {
+  // the flag off, but an opted-in developer (flag on + DSN present) gets it.
+  if (cfg.errorReportingEnabled && sentryDsn) {
     try {
       Sentry.init({
-        dsn: process.env.SENTRY_DSN,
+        dsn: sentryDsn,
         release: app.getVersion(),
         environment,
         // Scrub every outbound event/breadcrumb so user source code, file
@@ -73,10 +97,10 @@ export function initTelemetry(cfg: {
   }
 
   // Same posture for usage metrics: governed by the config flag (default off on
-  // local builds, on for .dmg) plus the APTABASE_APP_KEY credential.
-  if (cfg.usageMetricsEnabled && process.env.APTABASE_APP_KEY) {
+  // local builds, on for .dmg) plus the Aptabase app key.
+  if (cfg.usageMetricsEnabled && aptabaseAppKey) {
     try {
-      aptabaseInitialize(process.env.APTABASE_APP_KEY);
+      aptabaseInitialize(aptabaseAppKey);
       aptabaseActive = true;
       trackUsage('app_started', { environment });
     } catch {

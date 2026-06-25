@@ -412,8 +412,11 @@ cross-package concern.
 - **@sentry/electron 7.13.0 + @aptabase/electron 0.3.1** — Anonymized, opt-out telemetry.
   Sentry = crash/error reporting (main + renderer + native crashes); Aptabase = privacy-first
   usage metrics (no identifiers). Both init in the main process behind opt-out config flags +
-  env-var credentials (`SENTRY_DSN`, `APTABASE_APP_KEY`); absent either → silent no-op. See the
-  **Telemetry** component below.
+  client credentials (`SENTRY_DSN`, `APTABASE_APP_KEY`); absent either → silent no-op. Creds
+  resolve from the runtime env var (pnpm dev) **or**, when absent, the keys BAKED into
+  `buildInfo.json` at build time by `inject-build-info.js` — the only source in a distributed
+  packaged app, whose runtime env has none of the build shell's vars. See the **Telemetry**
+  component below.
 - **Playwright** — E2E tests only.
 
 ## Data Model
