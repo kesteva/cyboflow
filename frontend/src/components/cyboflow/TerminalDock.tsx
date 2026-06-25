@@ -173,7 +173,10 @@ export function TerminalDock({
         {(folderLabel || branchName) && (
           <span style={{ color: FAINT }}>
             {folderLabel ? `· ${folderLabel}` : ''}
-            {branchName ? ` · ${branchName}` : ''}
+            {/* For a quick session the worktree folder name == branch name, which
+                rendered a redundant "· quick-… · quick-…". Only show the branch
+                segment when it actually differs from the folder (flow runs). */}
+            {branchName && branchName !== folderLabel ? ` · ${branchName}` : ''}
           </span>
         )}
         <span style={{ flex: 1 }} />
