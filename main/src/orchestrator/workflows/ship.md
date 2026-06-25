@@ -50,13 +50,17 @@ them between phases.
 1. **context** → delegate to `cyboflow-context`. Pass the `# Selected idea` block
    if one was chosen at launch, otherwise the user's raw prompt. It returns a
    self-contained `## Idea spec` and a `SCOPE: small|large` line.
+   - Persist the spec with the rich `## Idea spec` markdown in **`body`** (the
+     canonical field the idea artifact renders) and a SHORT one-line caption in
+     `summary` — never the whole spec in `summary`.
    - If a `# Selected idea` block IS present: fold the spec into THAT existing idea
-     via `cyboflow_update_task` (use the `task_id` named in the block; put the spec
-     in `summary`). **Never** call `cyboflow_create_task` for an idea that already
-     exists — that creates a duplicate card.
+     via `cyboflow_update_task` (use the `task_id` named in the block; pass the full
+     spec as `body` and the one-line caption as `summary`). **Never** call
+     `cyboflow_create_task` for an idea that already exists — that creates a
+     duplicate card.
    - If NO `# Selected idea` block is present: create the idea via
-     `cyboflow_create_task(task_type='idea')` (one row per distinct idea; a broad
-     prompt may yield more than one).
+     `cyboflow_create_task(task_type='idea', body=<full spec>, summary=<one-line
+     caption>)` (one row per distinct idea; a broad prompt may yield more than one).
    If it returns `## Open questions`, ask them with **AskUserQuestion**, then
    re-delegate to `cyboflow-context` with the answers folded in.
 2. **research** (optional) → when the idea needs external context, delegate to
