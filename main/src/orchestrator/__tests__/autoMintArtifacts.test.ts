@@ -21,24 +21,32 @@
  *    row and exactly ONE 'created' entity_event (no second 'created', no-delta
  *    re-derive appends no 'updated').
  *
- * DB: in-memory better-sqlite3 with migrations 006/011/014/015/016/017/024/028/029
- * applied (mirrors reviewItemRouter.test.ts buildDb + 017 seed-idea + 029
- * artifacts; 024/028 are pulled in because the TaskChangeRouter create chokepoint
- * writes the ideas.attachments column). Entities are seeded through TaskChangeRouter so the entity_events
- * 'created' rows exist (the run-created-idea union read by listRunOwnedIdeaIds),
- * AND seed_idea_id is stamped on the run.
+ * DB: in-memory better-sqlite3 with migrations
+ * 006/011/014/015/016/017/022/024/028/035 applied (mirrors reviewItemRouter.test.ts
+ * buildDb + 017 seed-idea + 022 sprint_batch_tasks + 035 artifacts; 024/028 are
+ * pulled in because the TaskChangeRouter create chokepoint writes the
+ * ideas.attachments column). Entities are seeded through TaskChangeRouter so the
+ * entity_events 'created' rows exist (the run-created-idea union read by
+ * listRunOwnedIdeaIds), AND seed_idea_id (planner/ship) or a sprint_batch_tasks
+ * link (standalone sprint) ties the run to its idea.
+ *
+ * Also covers handleRunStart — the run-start baseline path for sprint/ship that
+ * mints idea-spec + decomposed-stories from the run's resolved idea (via the
+ * sprint batch for a standalone sprint), gated to sprint/ship + non-terminal.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { handleStepCompletion } from '../autoMintArtifacts';
+import { handleStepCompletion, handleRunStart } from '../autoMintArtifacts';
 import { ArtifactRouter, artifactChangeEvents } from '../artifactRouter';
 import { TaskChangeRouter, taskChangeEvents } from '../taskChangeRouter';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
 // ---------------------------------------------------------------------------
-// Test DB builder: projects + 006 + 011 + 014 + 015 + 016 + 017 + 029.
+// Test DB builder: projects + 006 + 011 + 014 + 015 + 016 + 017 + 022 + 024 +
+// 028 + 035 (022 brings sprint_batches/sprint_batch_tasks + workflow_runs.batch_id
+// for the standalone-sprint batch->idea resolution path).
 // ---------------------------------------------------------------------------
 
 function buildDb(): Database.Database {
@@ -64,6 +72,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
   // 024 (archived_at) + 028 (ideas.attachments) are required because the
   // TaskChangeRouter create chokepoint writes the ideas.attachments column.
+  db.exec(readFileSync(join(migDir, '022_sprint_batches.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '035_artifacts.sql'), 'utf-8'));
@@ -131,6 +140,40 @@ function seedCustomRunWithArtifactStep(
     `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
      VALUES (?, 'wf-custom', 1, 'running', 'default')`,
   ).run(runId);
+}
+
+/**
+ * Seed a built-in 'sprint' run with a `batch_id` (migration 022). A standalone
+ * sprint has a NULL seed_idea_id and creates no ideas — it links to its idea only
+ * through the tasks in its sprint batch (linkBatchTask below).
+ */
+function seedSprintRun(db: Database.Database, runId: string, batchId: string): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-s', 1, 'sprint', '{}')`,
+  ).run();
+  db.prepare(
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, batch_id)
+     VALUES (?, 'wf-s', 1, 'running', 'default', ?)`,
+  ).run(runId, batchId);
+}
+
+/**
+ * Seed a built-in 'ship' run with a stamped seed_idea_id (ship seeds its idea like
+ * planner; resolveOriginatingIdeaId resolves it via the owned-ideas path).
+ */
+function seedShipRun(db: Database.Database, runId: string): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-ship', 1, 'ship', '{}')`,
+  ).run();
+  db.prepare(
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
+     VALUES (?, 'wf-ship', 1, 'running', 'default')`,
+  ).run(runId);
+}
+
+/** Link a task into a sprint batch (sprint_batch_tasks, migration 022). */
+function linkBatchTask(db: Database.Database, batchId: string, taskId: string): void {
+  db.prepare('INSERT INTO sprint_batch_tasks (batch_id, task_id) VALUES (?, ?)').run(batchId, taskId);
 }
 
 interface EntityEventRow {
@@ -539,5 +582,245 @@ describe('autoMintArtifacts.handleStepCompletion', () => {
     expect(events.length).toBe(1);
     expect(events[0].kind).toBe('created');
     expect(events.filter((e) => e.kind === 'updated').length).toBe(0);
+  });
+});
+
+// ===========================================================================
+// handleRunStart — the run-start baseline path (sprint / ship).
+// ===========================================================================
+
+describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
+  afterEach(() => {
+    ArtifactRouter._resetForTesting();
+    artifactChangeEvents.removeAllListeners();
+    TaskChangeRouter._resetForTesting();
+    taskChangeEvents.removeAllListeners();
+  });
+
+  /**
+   * Seed an idea + a 2-epic / 3-task decomposition OWNED BY A PLANNER run, and
+   * return the idea + the three task ids. A sprint run under test does NOT own
+   * these (its seed_idea_id is null and it created nothing), so it reaches the
+   * idea only via its sprint batch — exercising resolveRunBatchIdeaId.
+   */
+  async function seedDecomposedIdea(
+    db: Database.Database,
+    ownerRunId: string,
+  ): Promise<{ ideaId: string; taskIds: string[] }> {
+    seedPlannerRun(db, ownerRunId);
+    const router = TaskChangeRouter.getInstance();
+    const { taskId: ideaId } = await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Add a simple sandbox website',
+      runId: ownerRunId,
+    });
+    const { taskId: epicA } = await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'epic',
+      title: 'Epic A',
+      originatingIdeaId: ideaId,
+      runId: ownerRunId,
+    });
+    await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'epic',
+      title: 'Epic B',
+      originatingIdeaId: ideaId,
+      runId: ownerRunId,
+    });
+    const t1 = await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      title: 'Task 1',
+      parentEpicId: epicA,
+      runId: ownerRunId,
+    });
+    const t2 = await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      title: 'Task 2',
+      originatingIdeaId: ideaId,
+      runId: ownerRunId,
+    });
+    const t3 = await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      title: 'Task 3',
+      originatingIdeaId: ideaId,
+      runId: ownerRunId,
+    });
+    return { ideaId, taskIds: [t1.taskId, t2.taskId, t3.taskId] };
+  }
+
+  // -------------------------------------------------------------------------
+  // standalone sprint — idea resolved via the sprint batch
+  // -------------------------------------------------------------------------
+
+  it('mints idea-spec + decomposed-stories for a standalone sprint via its batch idea', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    const { ideaId, taskIds } = await seedDecomposedIdea(db, 'run-plan');
+    seedSprintRun(db, 'run-sprint', 'batch-1');
+    for (const tid of taskIds) linkBatchTask(db, 'batch-1', tid);
+
+    await handleRunStart(adapter, 'run-sprint');
+
+    const spec = readArtifact(db, 'run-sprint', 'idea-spec');
+    expect(spec).toBeDefined();
+    expect(spec!.source_ref).toBe(ideaId);
+    expect(spec!.label).toBe('Add a simple sandbox website');
+    expect(spec!.step_origin).toBe('Sprint · run start');
+    expect(spec!.mode).toBe('template');
+    expect(spec!.payload_json).toBeNull();
+
+    const stories = readArtifact(db, 'run-sprint', 'decomposed-stories');
+    expect(stories).toBeDefined();
+    expect(stories!.source_ref).toBe(ideaId);
+    expect(stories!.label).toBe('2 epics, 3 tasks');
+    expect(stories!.step_origin).toBe('Sprint · run start');
+  });
+
+  it("resolves the sprint idea via the run's task_id when the batch has no tasks", async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    const { ideaId, taskIds } = await seedDecomposedIdea(db, 'run-plan');
+    // A batch with NO linked tasks, but the run carries a single task_id whose
+    // originating idea is the one to resolve (resolveRunBatchIdeaId fallback 2).
+    seedSprintRun(db, 'run-taskid', 'batch-empty');
+    db.prepare('UPDATE workflow_runs SET task_id = ? WHERE id = ?').run(taskIds[0], 'run-taskid');
+
+    await handleRunStart(adapter, 'run-taskid');
+
+    expect(readArtifact(db, 'run-taskid', 'idea-spec')!.source_ref).toBe(ideaId);
+    expect(readArtifact(db, 'run-taskid', 'decomposed-stories')!.source_ref).toBe(ideaId);
+  });
+
+  // -------------------------------------------------------------------------
+  // ship — idea resolved via the owned (seed_idea_id) path
+  // -------------------------------------------------------------------------
+
+  it('mints baselines for a ship run via its seed idea (step_origin = Ship · run start)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedShipRun(db, 'run-ship');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Ship this idea',
+      runId: 'run-ship',
+    });
+    setSeedIdea(db, 'run-ship', ideaId);
+
+    await handleRunStart(adapter, 'run-ship');
+
+    const spec = readArtifact(db, 'run-ship', 'idea-spec');
+    expect(spec).toBeDefined();
+    expect(spec!.source_ref).toBe(ideaId);
+    expect(spec!.label).toBe('Ship this idea');
+    expect(spec!.step_origin).toBe('Ship · run start');
+    expect(readArtifact(db, 'run-ship', 'decomposed-stories')).toBeDefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // workflow gate — planner's run-start is a no-op (it mints via step completion)
+  // -------------------------------------------------------------------------
+
+  it('mints NOTHING at run-start for a planner run (planner uses the step-completion path)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-pl');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Planner idea',
+      runId: 'run-pl',
+    });
+    setSeedIdea(db, 'run-pl', ideaId);
+
+    await expect(handleRunStart(adapter, 'run-pl')).resolves.toBeUndefined();
+    expect(artifactCount(db, 'run-pl')).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // terminal gate — a failed/canceled sprint does not mint
+  // -------------------------------------------------------------------------
+
+  it('does NOT mint a baseline when the sprint run has already FAILED', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    const { taskIds } = await seedDecomposedIdea(db, 'run-plan');
+    seedSprintRun(db, 'run-sprint-failed', 'batch-f');
+    for (const tid of taskIds) linkBatchTask(db, 'batch-f', tid);
+    setRunStatus(db, 'run-sprint-failed', 'failed');
+
+    await expect(handleRunStart(adapter, 'run-sprint-failed')).resolves.toBeUndefined();
+    expect(artifactCount(db, 'run-sprint-failed')).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // fail-soft — sprint that resolves no idea / unknown run
+  // -------------------------------------------------------------------------
+
+  it('is fail-soft when a sprint run resolves no idea (empty batch, no task_id)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedSprintRun(db, 'run-sprint-empty', 'batch-empty');
+
+    await expect(handleRunStart(adapter, 'run-sprint-empty')).resolves.toBeUndefined();
+    expect(artifactCount(db, 'run-sprint-empty')).toBe(0);
+  });
+
+  it('is fail-soft for an unknown run id (no throw, no mint)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    await expect(handleRunStart(adapter, 'no-such-run')).resolves.toBeUndefined();
+    expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts').get() as { n: number }).n).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // idempotency — two run-start calls yield ONE row per atype
+  // -------------------------------------------------------------------------
+
+  it('is idempotent: two run-start calls yield ONE artifact row per atype', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    const { taskIds } = await seedDecomposedIdea(db, 'run-plan');
+    seedSprintRun(db, 'run-sprint-idem', 'batch-i');
+    for (const tid of taskIds) linkBatchTask(db, 'batch-i', tid);
+
+    await handleRunStart(adapter, 'run-sprint-idem');
+    await handleRunStart(adapter, 'run-sprint-idem');
+
+    // One idea-spec + one decomposed-stories = 2 rows total, no duplicates.
+    expect(artifactCount(db, 'run-sprint-idem')).toBe(2);
+    const specId = readArtifactId(db, 'run-sprint-idem', 'idea-spec');
+    const specEvents = readArtifactEvents(db, specId!);
+    expect(specEvents.length).toBe(1);
+    expect(specEvents[0].kind).toBe('created');
   });
 });
