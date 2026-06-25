@@ -64,25 +64,35 @@ const TEMPLATED_ATYPE_WORKFLOWS = new Set<string>(['planner']);
  * Workflows whose RUN START mints the templated baselines (idea-spec +
  * decomposed-stories) from the idea the run originates from / operates on.
  *
- * WHY a run-start path exists alongside handleStepCompletion: sprint and ship
- * execute an idea's decomposition but never report a 'context'/'tasks' step
- * 'done' (they advance through gates / per-task lanes), so the step-completion
- * path never fires their templated atypes — a sprint run would show "No
- * deliverables yet" forever. Minting at run start gives the run its deliverable
- * tabs the moment it is live. This is sound because templated artifacts RE-DERIVE
- * their content on READ from the live entity DB (the row is just a pointer:
- * atype + sourceRef=ideaId) — an early mint is always fresh, and the
- * decomposed-stories tab simply renders its "not decomposed yet" empty state
- * until the decomposition exists.
+ * WHY a run-start path exists alongside handleStepCompletion: the agents NEVER
+ * report a step `'done'`. The flow prompts tell the orchestrator to report each
+ * step as it BEGINS (cyboflow_report_step defaults status='running'); nothing
+ * emits status='done', and there is no implicit "previous step done" synthesis
+ * when the next step goes 'running'. So handleStepCompletion — which fires ONLY
+ * on status='done' — never runs in practice, and a run that relied on it for its
+ * templated atypes would show "No deliverables yet" forever (the original
+ * planner idea-spec bug). Minting at run start instead gives every such run its
+ * deliverable tabs the moment it is live, deterministically. This is sound
+ * because templated artifacts RE-DERIVE their content on READ from the live
+ * entity DB (the row is just a pointer: atype + sourceRef=ideaId) — an early
+ * mint is always fresh, and the decomposed-stories tab simply renders its "not
+ * decomposed yet" empty state until the decomposition exists.
  *
- * Planner is intentionally absent: it mints via its `outputArtifact` steps
- * (handleStepCompletion), so adding it here would be redundant (the idempotent
- * UPSERT would no-op, but the gate keeps the two paths cleanly separated).
+ * Planner is included: its idea-spec / decomposed-stories deliverables were
+ * meant to mint via the `outputArtifact` steps, but since no step ever reports
+ * 'done', that path never fired. The run-start path is the deterministic fix.
+ * For a SEEDED planner run the idea exists at the initial 'running' and mints
+ * immediately; for a raw-prompt planner run the idea is CREATED during 'context'
+ * (not yet present at the initial 'running'), so stepTransitionBridge fires this
+ * hook on every planner 'running' transition — the first one after the idea
+ * exists mints it, and the idempotent (runId, atype) UPSERT makes every later
+ * call a no-op re-derive.
  */
-const BASELINE_RUN_START_WORKFLOWS = new Set<string>(['sprint', 'ship']);
+const BASELINE_RUN_START_WORKFLOWS = new Set<string>(['planner', 'sprint', 'ship']);
 
 /** Run-start provenance label per workflow, stamped onto baseline artifacts. */
 const RUN_START_STEP_ORIGIN: Record<string, string> = {
+  planner: 'Plan · run start',
   sprint: 'Sprint · run start',
   ship: 'Ship · run start',
 };

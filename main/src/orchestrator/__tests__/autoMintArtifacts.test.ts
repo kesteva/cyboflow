@@ -732,10 +732,12 @@ describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
   });
 
   // -------------------------------------------------------------------------
-  // workflow gate — planner's run-start is a no-op (it mints via step completion)
+  // planner — run-start mints the templated baselines too (the agent never
+  // reports a step 'done', so the step-completion path never fires; this is the
+  // deterministic source of the planner idea-spec / decomposed-stories tabs).
   // -------------------------------------------------------------------------
 
-  it('mints NOTHING at run-start for a planner run (planner uses the step-completion path)', async () => {
+  it('mints baselines for a SEEDED planner run (step_origin = Plan · run start)', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     TaskChangeRouter.initialize(adapter);
@@ -750,8 +752,39 @@ describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
     });
     setSeedIdea(db, 'run-pl', ideaId);
 
-    await expect(handleRunStart(adapter, 'run-pl')).resolves.toBeUndefined();
-    expect(artifactCount(db, 'run-pl')).toBe(0);
+    await handleRunStart(adapter, 'run-pl');
+
+    const spec = readArtifact(db, 'run-pl', 'idea-spec');
+    expect(spec).toBeDefined();
+    expect(spec!.source_ref).toBe(ideaId);
+    expect(spec!.label).toBe('Planner idea');
+    expect(spec!.step_origin).toBe('Plan · run start');
+    expect(spec!.mode).toBe('template');
+    expect(spec!.payload_json).toBeNull();
+    expect(readArtifact(db, 'run-pl', 'decomposed-stories')).toBeDefined();
+  });
+
+  it('mints baselines for a planner run whose idea was CREATED during the run (no seed_idea_id)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    // Raw-prompt planner: the idea is created during 'context' (owned via
+    // entity_events.run_id), never stamped as seed_idea_id. resolveOriginatingIdeaId
+    // resolves it through listRunOwnedIdeaIds, so a later 'running' transition mints.
+    seedPlannerRun(db, 'run-pl-created');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Created-in-run idea',
+      runId: 'run-pl-created',
+    });
+
+    await handleRunStart(adapter, 'run-pl-created');
+
+    expect(readArtifact(db, 'run-pl-created', 'idea-spec')!.source_ref).toBe(ideaId);
+    expect(readArtifact(db, 'run-pl-created', 'decomposed-stories')!.source_ref).toBe(ideaId);
   });
 
   // -------------------------------------------------------------------------

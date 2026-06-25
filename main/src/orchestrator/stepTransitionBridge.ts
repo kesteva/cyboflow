@@ -249,15 +249,26 @@ export function buildStepTransitionEvent(
       });
     }
 
-    // Auto-mint run-START baseline artifacts when the run's INITIAL step first
-    // goes 'running' (sprint/ship derive their deliverable tabs from the batch
-    // idea and never report a 'context'/'tasks' step 'done', so the done-hook
-    // above never fires for them). Same fail-soft posture as handleStepCompletion:
-    // handleRunStart is itself fully try/caught + never throws, with a defensive
-    // .catch so a surprise rejection can never suppress the emit/return below.
-    // Idempotent (UPSERT by (runId, atype)) so a re-emitted initial-step 'running'
-    // is a no-op re-derive. See main/src/orchestrator/autoMintArtifacts.ts.
-    if (status === 'running' && stepId === resolveInitialStepId(runRow.workflowName)) {
+    // Auto-mint run-START baseline artifacts on a 'running' transition. The
+    // agents never report a step 'done' (the prompts report each step as it
+    // begins, status='running'), so the done-hook above never fires in practice —
+    // the run-start path is the deterministic source of the templated deliverable
+    // tabs (idea-spec / decomposed-stories). handleRunStart gates on
+    // BASELINE_RUN_START_WORKFLOWS (planner/sprint/ship) and fail-soft no-ops when
+    // the run owns no resolvable idea yet.
+    //
+    // Trigger: the INITIAL step's 'running' for any baseline workflow (sprint/ship
+    // have their idea via the batch/seed at start; a SEEDED planner does too).
+    // PLUS every later planner 'running' — a raw-prompt planner CREATES its idea
+    // during 'context', so it is not resolvable at the initial 'running'; firing on
+    // each subsequent planner step lets the first transition after the idea exists
+    // mint it. Idempotent (UPSERT by (runId, atype)) so the extra calls are no-op
+    // re-derives. Same fail-soft posture as handleStepCompletion (never throws; a
+    // defensive .catch guards a surprise rejection). See autoMintArtifacts.ts.
+    const firesRunStartBaseline =
+      status === 'running' &&
+      (stepId === resolveInitialStepId(runRow.workflowName) || runRow.workflowName === 'planner');
+    if (firesRunStartBaseline) {
       void handleRunStart(db, runId, logger).catch((err) => {
         const m = `[stepTransitionBridge] run-start baseline hook rejected for runId=${runId} (ignored): ${err}`;
         if (logger) {
