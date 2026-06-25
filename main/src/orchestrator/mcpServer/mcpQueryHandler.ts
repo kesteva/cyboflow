@@ -99,6 +99,8 @@ export type McpQueryMessage =
       title: string;
       taskType?: TaskType;
       summary?: string;
+      /** Full markdown body — the canonical rich detail (idea spec / task description + ACs). */
+      body?: string;
       priority?: Priority;
       repo?: string;
       parentEpicId?: string;
@@ -114,6 +116,8 @@ export type McpQueryMessage =
       entityType?: TaskType;
       title?: string;
       summary?: string;
+      /** Full markdown body — the canonical rich detail (idea spec / task description + ACs). */
+      body?: string;
       priority?: Priority;
       repo?: string;
       parentEpicId?: string;
@@ -911,6 +915,7 @@ export class McpQueryHandler {
       entityType: msg.taskType,
       title: msg.title,
       summary: msg.summary,
+      body: msg.body,
       priority: msg.priority,
       repo: msg.repo,
       parentEpicId: msg.parentEpicId ?? null,
@@ -961,6 +966,7 @@ export class McpQueryHandler {
       fields: {
         title: msg.title,
         summary: msg.summary,
+        body: msg.body,
         priority: msg.priority,
         repo: msg.repo,
       },

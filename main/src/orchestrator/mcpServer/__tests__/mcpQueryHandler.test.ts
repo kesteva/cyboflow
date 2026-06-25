@@ -815,6 +815,40 @@ describe('McpQueryHandler', () => {
           .get(data.task_id) as { actor: string };
         expect(ev.actor).toBe('agent:implement');
       });
+
+      it('persists the rich markdown body alongside the short summary (the planner spec path)', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        const specBody = '## Idea spec\n\n- goal one\n- goal two\n\n### Acceptance\n- it works';
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId: 'ct-body',
+            runId: 'run-1',
+            title: 'Spec idea',
+            summary: 'One-line caption',
+            body: specBody,
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { task_id: string };
+
+        // body lands in ideas.body (the canonical markdown field) and summary
+        // stays the short caption — the two no longer collide.
+        const row = taskDb
+          .prepare('SELECT summary, body FROM ideas WHERE id = ?')
+          .get(data.task_id) as { summary: string | null; body: string | null };
+        expect(row.body).toBe(specBody);
+        expect(row.summary).toBe('One-line caption');
+      });
     });
 
     // -----------------------------------------------------------------------
@@ -902,6 +936,53 @@ describe('McpQueryHandler', () => {
           .get(taskId) as { title: string; version: number };
         expect(task.title).toBe('Stable');
         expect(task.version).toBe(1);
+      });
+
+      it('updates the markdown body, bumps version, leaves summary untouched', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        // Seed an idea carrying only a short caption (no body yet — the create gate).
+        const created = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId: 'ct-seed-body',
+            runId: 'run-1',
+            title: 'Folding idea',
+            summary: 'Short caption',
+          },
+          created.socket,
+        );
+        const taskId = (parseLastWrite(created.writes).data as { task_id: string }).task_id;
+
+        const specBody = '## Idea spec\n\nFolded-in rich spec\n\n- detail';
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-update-task',
+            requestId: 'ut-body',
+            runId: 'run-1',
+            taskId,
+            body: specBody,
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { version?: number };
+        expect(data.version).toBe(2);
+
+        const row = taskDb
+          .prepare('SELECT summary, body, version FROM ideas WHERE id = ?')
+          .get(taskId) as { summary: string | null; body: string | null; version: number };
+        expect(row.body).toBe(specBody);
+        expect(row.summary).toBe('Short caption');
+        expect(row.version).toBe(2);
       });
     });
 
