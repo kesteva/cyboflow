@@ -40,7 +40,7 @@
  * raw_events INSERT goes through the narrow DatabaseLike surface only.
  */
 import { stepTransitionEvents } from './trpc/routers/events';
-import { handleStepCompletion } from './autoMintArtifacts';
+import { handleStepCompletion, handleRunStart } from './autoMintArtifacts';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { CyboflowWorkflowName, WorkflowStepTransitionEvent } from '../../../shared/types/workflows';
 import { CYBOFLOW_WORKFLOW_NAMES, resolveWorkflowDefinition } from '../../../shared/types/workflows';
@@ -241,6 +241,25 @@ export function buildStepTransitionEvent(
     if (status === 'done') {
       void handleStepCompletion(db, runId, stepId, logger).catch((err) => {
         const m = `[stepTransitionBridge] auto-mint hook rejected for runId=${runId} (ignored): ${err}`;
+        if (logger) {
+          logger.warn(m, { runId, stepId, status });
+        } else {
+          console.warn(m);
+        }
+      });
+    }
+
+    // Auto-mint run-START baseline artifacts when the run's INITIAL step first
+    // goes 'running' (sprint/ship derive their deliverable tabs from the batch
+    // idea and never report a 'context'/'tasks' step 'done', so the done-hook
+    // above never fires for them). Same fail-soft posture as handleStepCompletion:
+    // handleRunStart is itself fully try/caught + never throws, with a defensive
+    // .catch so a surprise rejection can never suppress the emit/return below.
+    // Idempotent (UPSERT by (runId, atype)) so a re-emitted initial-step 'running'
+    // is a no-op re-derive. See main/src/orchestrator/autoMintArtifacts.ts.
+    if (status === 'running' && stepId === resolveInitialStepId(runRow.workflowName)) {
+      void handleRunStart(db, runId, logger).catch((err) => {
+        const m = `[stepTransitionBridge] run-start baseline hook rejected for runId=${runId} (ignored): ${err}`;
         if (logger) {
           logger.warn(m, { runId, stepId, status });
         } else {

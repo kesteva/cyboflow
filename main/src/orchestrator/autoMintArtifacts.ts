@@ -24,7 +24,7 @@
  * its singleton (already initialized at boot from main/src/index.ts).
  */
 import { ArtifactRouter } from './artifactRouter';
-import { listRunOwnedIdeaIds } from './runEntityOwnership';
+import { listRunOwnedIdeaIds, resolveRunBatchIdeaId } from './runEntityOwnership';
 import type { DatabaseLike, LoggerLike } from './types';
 import { resolveWorkflowDefinition, type WorkflowStep } from '../../../shared/types/workflows';
 import { TERMINAL_RUN_STATUSES } from '../../../shared/types/cyboflow';
@@ -59,6 +59,33 @@ const TERMINAL_SKIP_STATUSES = new Set<string>(
  * non-planner workflow declaring them is fail-soft skipped.
  */
 const TEMPLATED_ATYPE_WORKFLOWS = new Set<string>(['planner']);
+
+/**
+ * Workflows whose RUN START mints the templated baselines (idea-spec +
+ * decomposed-stories) from the idea the run originates from / operates on.
+ *
+ * WHY a run-start path exists alongside handleStepCompletion: sprint and ship
+ * execute an idea's decomposition but never report a 'context'/'tasks' step
+ * 'done' (they advance through gates / per-task lanes), so the step-completion
+ * path never fires their templated atypes — a sprint run would show "No
+ * deliverables yet" forever. Minting at run start gives the run its deliverable
+ * tabs the moment it is live. This is sound because templated artifacts RE-DERIVE
+ * their content on READ from the live entity DB (the row is just a pointer:
+ * atype + sourceRef=ideaId) — an early mint is always fresh, and the
+ * decomposed-stories tab simply renders its "not decomposed yet" empty state
+ * until the decomposition exists.
+ *
+ * Planner is intentionally absent: it mints via its `outputArtifact` steps
+ * (handleStepCompletion), so adding it here would be redundant (the idempotent
+ * UPSERT would no-op, but the gate keeps the two paths cleanly separated).
+ */
+const BASELINE_RUN_START_WORKFLOWS = new Set<string>(['sprint', 'ship']);
+
+/** Run-start provenance label per workflow, stamped onto baseline artifacts. */
+const RUN_START_STEP_ORIGIN: Record<string, string> = {
+  sprint: 'Sprint · run start',
+  ship: 'Ship · run start',
+};
 
 // ---------------------------------------------------------------------------
 // Step-origin labels (human-readable provenance shown on the artifact tab)
@@ -155,13 +182,20 @@ function resolveProjectId(db: DatabaseLike, runId: string): number | null {
 }
 
 /**
- * Resolve the single idea this run originates from for artifact derivation:
- * the FIRST of the run's owned ideas (seed_idea_id UNION run-created ideas, via
- * listRunOwnedIdeaIds). Returns null when the run owns no resolvable idea.
+ * Resolve the single idea this run originates from / operates on for artifact
+ * derivation. Resolution order:
+ *   1. The FIRST of the run's OWNED ideas (seed_idea_id UNION run-created ideas,
+ *      via listRunOwnedIdeaIds) — covers planner and ship (they seed/create the
+ *      idea).
+ *   2. The idea the run OPERATES ON via its sprint batch (resolveRunBatchIdeaId)
+ *      — covers a standalone sprint, whose seed_idea_id is null but whose tasks
+ *      carry an originating_idea_id.
+ * Returns null when neither resolves.
  */
 function resolveOriginatingIdeaId(db: DatabaseLike, runId: string): string | null {
   const ownedIds = listRunOwnedIdeaIds(db, runId);
-  return ownedIds.length > 0 ? ownedIds[0] : null;
+  if (ownedIds.length > 0) return ownedIds[0];
+  return resolveRunBatchIdeaId(db, runId);
 }
 
 // ---------------------------------------------------------------------------
@@ -169,9 +203,48 @@ function resolveOriginatingIdeaId(db: DatabaseLike, runId: string): string | nul
 // ---------------------------------------------------------------------------
 
 /**
- * idea-spec: label = the idea's title (falling back to its ref); sourceRef =
- * ideaId. Content is re-derived on read (mode 'template') so payloadJson is left
- * null. No resolvable idea → fail-soft (logs + returns without minting).
+ * idea-spec mint for a KNOWN idea: label = the idea's title (falling back to its
+ * ref, then `labelFallback`); sourceRef = ideaId. Content is re-derived on read
+ * (mode 'template') so payloadJson is left null. Missing idea row → fail-soft
+ * (logs + returns without minting). Shared by the step-completion path
+ * (mintIdeaSpec) and the run-start baseline path (handleRunStart).
+ */
+async function mintIdeaSpecForIdea(
+  db: DatabaseLike,
+  runId: string,
+  projectId: number,
+  ideaId: string,
+  stepOrigin: string | null,
+  labelFallback: string,
+  logger?: LoggerLike,
+): Promise<void> {
+  const ideaRow = db
+    .prepare('SELECT ref AS ref, title AS title FROM ideas WHERE id = ?')
+    .get(ideaId) as IdeaRow | undefined;
+  if (!ideaRow) {
+    logger?.debug('[autoMintArtifacts] idea-spec skipped — idea row not found', { runId, ideaId });
+    return;
+  }
+
+  const title = typeof ideaRow.title === 'string' && ideaRow.title.length > 0 ? ideaRow.title : null;
+  const ref = typeof ideaRow.ref === 'string' && ideaRow.ref.length > 0 ? ideaRow.ref : null;
+  const label = title ?? ref ?? labelFallback;
+
+  await ArtifactRouter.getInstance().apply(projectId, {
+    op: 'create',
+    runId,
+    atype: 'idea-spec',
+    label,
+    sourceRef: ideaId,
+    stepOrigin,
+    isNew: true,
+    actor: 'orchestrator',
+  });
+}
+
+/**
+ * idea-spec: resolve the run's originating idea, then mint via mintIdeaSpecForIdea.
+ * No resolvable idea → fail-soft (logs + returns without minting).
  */
 async function mintIdeaSpec(
   db: DatabaseLike,
@@ -185,29 +258,15 @@ async function mintIdeaSpec(
     logger?.debug('[autoMintArtifacts] idea-spec skipped — run owns no resolvable idea', { runId });
     return;
   }
-
-  const ideaRow = db
-    .prepare('SELECT ref AS ref, title AS title FROM ideas WHERE id = ?')
-    .get(ideaId) as IdeaRow | undefined;
-  if (!ideaRow) {
-    logger?.debug('[autoMintArtifacts] idea-spec skipped — idea row not found', { runId, ideaId });
-    return;
-  }
-
-  const title = typeof ideaRow.title === 'string' && ideaRow.title.length > 0 ? ideaRow.title : null;
-  const ref = typeof ideaRow.ref === 'string' && ideaRow.ref.length > 0 ? ideaRow.ref : null;
-  const label = title ?? ref ?? step.outputArtifact!.label;
-
-  await ArtifactRouter.getInstance().apply(projectId, {
-    op: 'create',
+  await mintIdeaSpecForIdea(
+    db,
     runId,
-    atype: 'idea-spec',
-    label,
-    sourceRef: ideaId,
-    stepOrigin: STEP_ORIGIN[step.id] ?? null,
-    isNew: true,
-    actor: 'orchestrator',
-  });
+    projectId,
+    ideaId,
+    STEP_ORIGIN[step.id] ?? null,
+    step.outputArtifact!.label,
+    logger,
+  );
 }
 
 /**
@@ -255,9 +314,37 @@ function pluralize(count: number, noun: string): string {
 }
 
 /**
- * decomposed-stories: label = short epic/task count string, e.g. "2 epics, 9
- * tasks". sourceRef = ideaId. Content is re-derived on read (mode 'template') so
- * payloadJson is left null. No resolvable idea → fail-soft.
+ * decomposed-stories mint for a KNOWN idea: label = short epic/task count string,
+ * e.g. "2 epics, 9 tasks". sourceRef = ideaId. Content is re-derived on read
+ * (mode 'template') so payloadJson is left null. Shared by the step-completion
+ * path (mintDecomposedStories) and the run-start baseline path (handleRunStart).
+ */
+async function mintDecomposedStoriesForIdea(
+  db: DatabaseLike,
+  runId: string,
+  projectId: number,
+  ideaId: string,
+  stepOrigin: string | null,
+): Promise<void> {
+  const { epicCount, taskCount } = countDecomposition(db, projectId, ideaId);
+  // Build the label with plain string concatenation (no nested template literals).
+  const label = pluralize(epicCount, 'epic') + ', ' + pluralize(taskCount, 'task');
+
+  await ArtifactRouter.getInstance().apply(projectId, {
+    op: 'create',
+    runId,
+    atype: 'decomposed-stories',
+    label,
+    sourceRef: ideaId,
+    stepOrigin,
+    isNew: true,
+    actor: 'orchestrator',
+  });
+}
+
+/**
+ * decomposed-stories: resolve the run's originating idea, then mint via
+ * mintDecomposedStoriesForIdea. No resolvable idea → fail-soft.
  */
 async function mintDecomposedStories(
   db: DatabaseLike,
@@ -273,21 +360,7 @@ async function mintDecomposedStories(
     });
     return;
   }
-
-  const { epicCount, taskCount } = countDecomposition(db, projectId, ideaId);
-  // Build the label with plain string concatenation (no nested template literals).
-  const label = pluralize(epicCount, 'epic') + ', ' + pluralize(taskCount, 'task');
-
-  await ArtifactRouter.getInstance().apply(projectId, {
-    op: 'create',
-    runId,
-    atype: 'decomposed-stories',
-    label,
-    sourceRef: ideaId,
-    stepOrigin: STEP_ORIGIN[step.id] ?? null,
-    isNew: true,
-    actor: 'orchestrator',
-  });
+  await mintDecomposedStoriesForIdea(db, runId, projectId, ideaId, STEP_ORIGIN[step.id] ?? null);
 }
 
 // ---------------------------------------------------------------------------
@@ -382,6 +455,83 @@ export async function handleStepCompletion(
     }`;
     if (logger) {
       logger.warn(msg, { runId, stepId });
+    } else {
+      console.warn(msg);
+    }
+  }
+}
+
+/**
+ * Auto-mint a run's BASELINE artifacts at run start (sprint / ship). Called from
+ * stepTransitionBridge when the run's INITIAL step first goes 'running'.
+ *
+ * Mints both templated baselines — idea-spec + decomposed-stories — for the idea
+ * the run originates from / operates on (resolveOriginatingIdeaId, which for a
+ * standalone sprint resolves the idea via its sprint batch). These are the
+ * deterministic half of the hybrid: agents enrich the same run with
+ * ui-prototype / screenshots / generic canvases via the cyboflow_report_artifact
+ * MCP tool (the same ArtifactRouter chokepoint, op='create' UPSERT).
+ *
+ * Gates:
+ *   - WORKFLOW: only BASELINE_RUN_START_WORKFLOWS (sprint, ship). A planner run's
+ *     initial-step 'running' is a no-op here (planner mints via its
+ *     outputArtifact steps).
+ *   - TERMINAL: a run already stamped failed/canceled (the synthesized lifecycle
+ *     can emit a late 'running' on teardown) does not mint — mirrors the
+ *     handleStepCompletion terminal gate.
+ *
+ * IDEMPOTENT: op='create' UPSERTs by (runId, atype), so a re-emitted initial-step
+ * 'running' (observed: the initial step can emit 'running' more than once) is a
+ * no-op re-derive, not a duplicate.
+ *
+ * FAIL-SOFT: the whole body is wrapped in try/catch — any failure logs via
+ * `logger` and returns. NEVER throws (the caller is in the step-transition path).
+ *
+ * @param db     Narrow DatabaseLike interface.
+ * @param runId  The workflow_runs.id whose run just started.
+ * @param logger Optional LoggerLike for warn/debug-level fail-soft logging.
+ */
+export async function handleRunStart(
+  db: DatabaseLike,
+  runId: string,
+  logger?: LoggerLike,
+): Promise<void> {
+  try {
+    const meta = resolveRunMeta(db, runId);
+    if (meta === null || meta.workflowName === null) return;
+    if (!BASELINE_RUN_START_WORKFLOWS.has(meta.workflowName)) return; // not a baseline-at-start workflow
+    if (meta.status !== null && TERMINAL_SKIP_STATUSES.has(meta.status)) {
+      logger?.debug('[autoMintArtifacts] run-start baseline skipped — run is failed/canceled', {
+        runId,
+        status: meta.status,
+      });
+      return;
+    }
+
+    const projectId = resolveProjectId(db, runId);
+    if (projectId === null) {
+      logger?.debug('[autoMintArtifacts] run-start baseline skipped — no project_id for run', { runId });
+      return;
+    }
+
+    const ideaId = resolveOriginatingIdeaId(db, runId);
+    if (ideaId === null) {
+      logger?.debug('[autoMintArtifacts] run-start baseline skipped — run owns no resolvable idea', {
+        runId,
+        workflowName: meta.workflowName,
+      });
+      return;
+    }
+
+    const stepOrigin = RUN_START_STEP_ORIGIN[meta.workflowName] ?? null;
+    await mintIdeaSpecForIdea(db, runId, projectId, ideaId, stepOrigin, 'Idea spec', logger);
+    await mintDecomposedStoriesForIdea(db, runId, projectId, ideaId, stepOrigin);
+  } catch (err) {
+    const msg = `[autoMintArtifacts] run-start baseline failed for runId=${runId} (fail-soft): ${
+      err instanceof Error ? err.message : String(err)
+    }`;
+    if (logger) {
+      logger.warn(msg, { runId });
     } else {
       console.warn(msg);
     }
