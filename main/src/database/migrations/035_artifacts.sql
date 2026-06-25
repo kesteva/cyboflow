@@ -1,4 +1,7 @@
--- Migration 029: run artifacts + 'artifact' entity_events audit type.
+-- Migration 035: run artifacts + 'artifact' entity_events audit type.
+-- (Renumbered from 029 on rebase onto main, which owns 029_agent_overrides
+--  through 034_findings_triage. Runs last; depends only on entity_events (015)
+--  and workflow_runs (011), neither of which the intervening migrations alter.)
 --
 -- The tabbed center pane surfaces run-scoped "artifacts" (idea spec, decomposed
 -- stories, screenshots, ui prototype, generic live canvas) as their own tabs.

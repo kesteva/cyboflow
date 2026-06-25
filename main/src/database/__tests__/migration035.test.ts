@@ -1,7 +1,7 @@
 /**
- * Migration 029_artifacts.sql — schema + constraint integration tests.
+ * Migration 035_artifacts.sql — schema + constraint integration tests.
  *
- * Applies 006 -> 011 -> 014 -> 015 -> 016 -> 029 against an in-memory SQLite
+ * Applies 006 -> 011 -> 014 -> 015 -> 016 -> 035 against an in-memory SQLite
  * instance. Proves:
  *   1. The artifacts table exists with the spec'd columns + indexes.
  *   2. CHECK constraints reject bad atype / mode; accept the valid sets.
@@ -47,7 +47,7 @@ const THROUGH_016 = [
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
   seedProject(db);
-  apply(db, [...THROUGH_016, '029_artifacts.sql']);
+  apply(db, [...THROUGH_016, '035_artifacts.sql']);
   return db;
 }
 
@@ -75,7 +75,7 @@ function insertArtifact(
   );
 }
 
-describe('Migration 029: artifacts + entity_events artifact type', () => {
+describe('Migration 035: artifacts + entity_events artifact type', () => {
   it('creates the artifacts table with the spec columns', () => {
     const db = buildDb();
     const cols = (db.prepare('PRAGMA table_info(artifacts)').all() as { name: string }[])
@@ -155,12 +155,12 @@ describe('Migration 029: artifacts + entity_events artifact type', () => {
   it('the recreate-rename preserves pre-existing entity_events rows', () => {
     const db = new Database(':memory:');
     seedProject(db);
-    apply(db, THROUGH_016); // up to but NOT including 029
+    apply(db, THROUGH_016); // up to but NOT including 035 (artifacts)
     db.prepare(
       `INSERT INTO entity_events (entity_type, entity_id, seq, kind, actor) VALUES ('idea', 'ide_keep', 1, 'created', 'user')`,
     ).run();
 
-    apply(db, ['029_artifacts.sql']);
+    apply(db, ['035_artifacts.sql']);
 
     const row = db
       .prepare("SELECT entity_type, entity_id, kind FROM entity_events WHERE entity_id = 'ide_keep'")

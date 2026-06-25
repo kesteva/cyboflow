@@ -35,7 +35,7 @@ function buildDb(): Database.Database {
     '015_entity_model_rebuild.sql',
     '016_review_items.sql',
     '017_run_seed_idea.sql',
-    '029_artifacts.sql',
+    '035_artifacts.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }

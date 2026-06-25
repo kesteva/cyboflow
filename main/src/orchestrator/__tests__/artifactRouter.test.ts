@@ -62,7 +62,7 @@ function buildDb(): Database.Database {
     '014_native_tasks.sql',
     '015_entity_model_rebuild.sql',
     '016_review_items.sql',
-    '029_artifacts.sql',
+    '035_artifacts.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }

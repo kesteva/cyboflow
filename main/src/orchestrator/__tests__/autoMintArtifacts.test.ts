@@ -66,7 +66,7 @@ function buildDb(): Database.Database {
   // TaskChangeRouter create chokepoint writes the ideas.attachments column.
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
-  db.exec(readFileSync(join(migDir, '029_artifacts.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '035_artifacts.sql'), 'utf-8'));
   return db;
 }
 
