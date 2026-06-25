@@ -104,6 +104,9 @@ vi.mock('fs', async (importOriginal) => {
 
 import { McpServerLifecycle } from '../mcpServerLifecycle';
 import { makeSpyLogger } from '../../__test_fixtures__/loggerLikeSpy';
+// These resolve to the hoisted mocks above; used to drive/inspect the spawn.
+import { spawn } from 'child_process';
+import { findNodeExecutable } from '../../../utils/nodeFinder';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -141,6 +144,50 @@ afterEach(async () => {
 // ---------------------------------------------------------------------------
 // Test suite 1: restart state machine
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Test suite 0: fork-bomb guard (ELECTRON_RUN_AS_NODE)
+//
+// In a packaged app with no standalone `node` on PATH, findNodeExecutable()
+// returns process.execPath — the app binary. Spawning it MUST run in Node mode
+// (ELECTRON_RUN_AS_NODE=1), else each spawn boots a new app instance that boots
+// its own MCP lifecycle → an exponential, unkillable loop of app windows.
+// ---------------------------------------------------------------------------
+
+describe('McpServerLifecycle — fork-bomb guard', () => {
+  function envOfSpawn(callIndex: number): Record<string, string> {
+    const opts = vi.mocked(spawn).mock.calls[callIndex][2] as { env: Record<string, string> };
+    return opts.env;
+  }
+
+  it('sets ELECTRON_RUN_AS_NODE=1 when the resolved node IS the app binary (process.execPath)', async () => {
+    vi.useFakeTimers();
+    vi.mocked(findNodeExecutable).mockResolvedValueOnce(process.execPath);
+
+    const { lifecycle } = makeLifecycle();
+    const startPromise = lifecycle.start();
+    await vi.runAllTimersAsync();
+    await startPromise;
+
+    expect(spawnCallCount).toBe(1);
+    expect(vi.mocked(spawn).mock.calls[0][0]).toBe(process.execPath);
+    expect(envOfSpawn(0).ELECTRON_RUN_AS_NODE).toBe('1');
+  });
+
+  it('does NOT set ELECTRON_RUN_AS_NODE when a real standalone node binary is resolved', async () => {
+    vi.useFakeTimers();
+    vi.mocked(findNodeExecutable).mockResolvedValueOnce('/opt/homebrew/bin/node');
+
+    const { lifecycle } = makeLifecycle();
+    const startPromise = lifecycle.start();
+    await vi.runAllTimersAsync();
+    await startPromise;
+
+    expect(spawnCallCount).toBe(1);
+    expect(vi.mocked(spawn).mock.calls[0][0]).toBe('/opt/homebrew/bin/node');
+    expect(envOfSpawn(0).ELECTRON_RUN_AS_NODE).toBeUndefined();
+  });
+});
 
 describe('McpServerLifecycle — restart state machine', () => {
   it('transitions to "failed" after 2 restart attempts (3 total spawn calls)', async () => {
