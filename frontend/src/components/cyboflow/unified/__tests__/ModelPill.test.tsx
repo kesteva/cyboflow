@@ -44,7 +44,7 @@ describe('ModelPill', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it('exposes the four model options in order', () => {
-    expect(MODEL_OPTIONS.map((o) => o.id)).toEqual(['auto', 'sonnet', 'opus', 'haiku']);
+  it('exposes the four model options, most-capable first (Opus is the quick default)', () => {
+    expect(MODEL_OPTIONS.map((o) => o.id)).toEqual(['opus', 'sonnet', 'haiku', 'auto']);
   });
 });

@@ -19,10 +19,10 @@ import { cn } from '../../../utils/cn';
  * discarded by the in-flight turn's already-chosen model.
  */
 export const MODEL_OPTIONS: ReadonlyArray<{ id: string; label: string; description: string }> = [
-  { id: 'auto', label: 'Auto', description: 'Let Claude pick the model' },
+  { id: 'opus', label: 'Opus', description: 'Most capable · 1M context' },
   { id: 'sonnet', label: 'Sonnet', description: 'Balanced · 1M context' },
-  { id: 'opus', label: 'Opus', description: 'Most capable' },
-  { id: 'haiku', label: 'Haiku', description: 'Fastest' },
+  { id: 'haiku', label: 'Haiku', description: 'Fastest · 200K context' },
+  { id: 'auto', label: 'Auto', description: 'Let Claude pick the model' },
 ];
 
 const MODEL_LABELS: Record<string, string> = Object.fromEntries(

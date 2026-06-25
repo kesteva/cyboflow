@@ -116,6 +116,11 @@ vi.mock('../../../utils/api', () => ({
     sessions: {
       createQuick: vi.fn(),
     },
+    // useQuickSession persists the launch model + fast-mode on the SDK panel.
+    claudePanels: {
+      setModel: vi.fn().mockResolvedValue({ success: true }),
+      setFastMode: vi.fn().mockResolvedValue({ success: true }),
+    },
   },
 }));
 

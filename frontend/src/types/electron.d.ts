@@ -345,6 +345,7 @@ interface ElectronAPI {
   claudePanels: {
     getModel: (panelId: string) => Promise<IPCResponse<string>>;
     setModel: (panelId: string, model: string) => Promise<IPCResponse<void>>;
+    setFastMode: (panelId: string, fastMode: boolean) => Promise<IPCResponse<void>>;
   };
 
   // Logs panel operations

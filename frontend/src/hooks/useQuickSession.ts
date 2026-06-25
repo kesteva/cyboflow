@@ -42,11 +42,18 @@ interface UseQuickSessionReturn {
    * stamped onto sessions.substrate; omitted → SDK (legacy behavior). An optional
    * `effort` ('ultracode') launches the interactive REPL with the ultracode
    * setting (the Ultracode wizard card); omitted → no effort setting.
+   *
+   * `model` (the Configure model dropdown, e.g. 'opus') and `fastMode` (the
+   * fast-mode toggle, default off) are persisted on the claude panel — directly
+   * for the frontend-created SDK panel, and via the createQuick request for the
+   * interactive eager spawn — so the per-turn respawn (sessions:input) applies them.
    */
   start: (
     agentPermissionMode?: PermissionMode,
     substrate?: CliSubstrate,
     effort?: 'ultracode',
+    model?: string,
+    fastMode?: boolean,
   ) => Promise<void>;
   isStarting: boolean;
   error: string | null;
@@ -61,6 +68,8 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       agentPermissionMode?: PermissionMode,
       substrate?: CliSubstrate,
       effort?: 'ultracode',
+      model?: string,
+      fastMode?: boolean,
     ): Promise<void> => {
       if (opts.projectId === null || isStarting) return;
 
@@ -68,12 +77,22 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       setIsStarting(true);
 
       try {
+        // model + fastMode ride the request as claudeConfig so the INTERACTIVE
+        // eager spawn (server-side) receives them; the SDK panel is created on the
+        // frontend below and persisted there. Sending both ways is harmless — the
+        // SDK create-quick path ignores claudeConfig (no panel to start yet).
+        const claudeConfig =
+          model !== undefined || fastMode === true
+            ? { ...(model !== undefined ? { model } : {}), fastMode: fastMode === true }
+            : undefined;
+
         const result = await API.sessions.createQuick({
           prompt: '',
           projectId: opts.projectId,
           ...(agentPermissionMode ? { agentPermissionMode } : {}),
           ...(substrate ? { substrate } : {}),
           ...(effort ? { effort } : {}),
+          ...(claudeConfig ? { claudeConfig } : {}),
         });
 
         if (!result.success || !result.data) {
@@ -86,7 +105,13 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
         // sessions spawn the PTY REPL during create-quick and return its panel id),
         // then Terminal.
         if (claudePanelId === undefined) {
-          await panelApi.createPanel({ sessionId, type: 'claude' });
+          const claudePanel = await panelApi.createPanel({ sessionId, type: 'claude' });
+          // Persist the launch model + fast-mode on the SDK panel so the first
+          // (and every) sessions:input turn spawns with them — the request's
+          // claudeConfig only reaches the interactive eager spawn, never this
+          // frontend-created SDK panel.
+          if (model !== undefined) await API.claudePanels.setModel(claudePanel.id, model);
+          await API.claudePanels.setFastMode(claudePanel.id, fastMode === true);
         }
         await panelApi.createPanel({
           sessionId,

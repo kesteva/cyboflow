@@ -32,15 +32,21 @@ import { useQuickSession } from '../useQuickSession';
 // Mocks — hoisted so vi.mock factory closures can reference them
 // ---------------------------------------------------------------------------
 
-const { mockCreateQuick, mockCreatePanel } = vi.hoisted(() => ({
+const { mockCreateQuick, mockCreatePanel, mockSetModel, mockSetFastMode } = vi.hoisted(() => ({
   mockCreateQuick: vi.fn(),
   mockCreatePanel: vi.fn(),
+  mockSetModel: vi.fn(),
+  mockSetFastMode: vi.fn(),
 }));
 
 vi.mock('../../utils/api', () => ({
   API: {
     sessions: {
       createQuick: mockCreateQuick,
+    },
+    claudePanels: {
+      setModel: mockSetModel,
+      setFastMode: mockSetFastMode,
     },
   },
 }));
@@ -75,6 +81,10 @@ import { useCyboflowStore } from '../../stores/cyboflowStore';
 beforeEach(() => {
   mockCreateQuick.mockReset();
   mockCreatePanel.mockReset();
+  mockSetModel.mockReset();
+  mockSetFastMode.mockReset();
+  mockSetModel.mockResolvedValue({ success: true });
+  mockSetFastMode.mockResolvedValue({ success: true });
   mockSubscribe.mockClear();
   mockSubscribe.mockImplementation(() => vi.fn());
 

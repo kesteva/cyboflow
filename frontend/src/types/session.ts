@@ -183,6 +183,8 @@ export interface CreateSessionRequest {
     model?: string;
     permissionMode?: 'approve' | 'ignore';
     ultrathink?: boolean;
+    /** Per-launch opt-in for Anthropic fast mode (premium, Opus-only). Default off. */
+    fastMode?: boolean;
   };
   branchName?: string;
 }
