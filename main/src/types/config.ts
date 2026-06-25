@@ -52,8 +52,8 @@ export interface AppConfig {
   // matching flag is false OR the credential env var (SENTRY_DSN / APTABASE_APP_KEY)
   // is absent. installId is a random uuid v4 minted once on first boot.
   telemetry?: {
-    errorReportingEnabled: boolean;  // Sentry; DEFAULT true (opt-out model)
-    usageMetricsEnabled: boolean;    // Aptabase; DEFAULT true (opt-out model)
+    errorReportingEnabled: boolean;  // Sentry; DEFAULT on for .dmg (opt-out), off for pnpm builds
+    usageMetricsEnabled: boolean;    // Aptabase; DEFAULT on for .dmg (opt-out), off for pnpm builds
     installId: string;               // random uuid v4, generated once on first boot, persisted
   };
   // Additional paths to add to PATH environment variable
@@ -113,8 +113,8 @@ export interface UpdateConfigRequest {
   // true. Privacy: source code, file paths, repo names, and LLM prompts are NEVER
   // sent — payloads are scrubbed before transmission.
   telemetry?: {
-    errorReportingEnabled: boolean;  // Sentry; DEFAULT true (opt-out model)
-    usageMetricsEnabled: boolean;    // Aptabase; DEFAULT true (opt-out model)
+    errorReportingEnabled: boolean;  // Sentry; DEFAULT on for .dmg (opt-out), off for pnpm builds
+    usageMetricsEnabled: boolean;    // Aptabase; DEFAULT on for .dmg (opt-out), off for pnpm builds
     installId: string;               // random uuid v4, generated once on first boot, persisted
   };
   additionalPaths?: string[];

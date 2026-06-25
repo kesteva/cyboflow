@@ -1,4 +1,5 @@
 import { EventEmitter } from 'events';
+import { app } from 'electron';
 import type { AppConfig } from '../types/config';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
@@ -9,6 +10,21 @@ import os from 'os';
 import { v4 as uuidv4 } from 'uuid';
 import { getCyboflowDirectory } from '../utils/cyboflowDirectory';
 import { clearShellPathCache } from '../utils/shellPath';
+
+/**
+ * Default telemetry posture for a FRESH config (no telemetry block on disk yet).
+ * Packaged (.dmg) builds default ON (opt-out model). Unpackaged `pnpm` builds
+ * default OFF — telemetry is still toggleable in Settings, it just isn't enabled
+ * by default for local/dev runs. Guarded so unit contexts without an Electron
+ * `app` fall back to the safe (off) default.
+ */
+function defaultTelemetryEnabled(): boolean {
+  try {
+    return Boolean(app?.isPackaged);
+  } catch {
+    return false;
+  }
+}
 
 export class ConfigManager extends EventEmitter {
   private config: AppConfig;
@@ -34,8 +50,8 @@ export class ConfigManager extends EventEmitter {
         notifyOnComplete: true
       },
       telemetry: {
-        errorReportingEnabled: true,
-        usageMetricsEnabled: true,
+        errorReportingEnabled: defaultTelemetryEnabled(),
+        usageMetricsEnabled: defaultTelemetryEnabled(),
         installId: ''
       },
       sessionCreationPreferences: {
@@ -120,8 +136,8 @@ export class ConfigManager extends EventEmitter {
     // and read back via the telemetry deep-merge above on subsequent boots.
     if (!this.config.telemetry) {
       this.config.telemetry = {
-        errorReportingEnabled: true,
-        usageMetricsEnabled: true,
+        errorReportingEnabled: defaultTelemetryEnabled(),
+        usageMetricsEnabled: defaultTelemetryEnabled(),
         installId: ''
       };
     }

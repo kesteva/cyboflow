@@ -36,11 +36,12 @@ function resolveTelemetryEnvironment(): TelemetryEnvironment {
  * is enabled AND its credential env var is present; otherwise it is skipped
  * silently. Telemetry must never throw into app code.
  *
- * Errors are reported only from PACKAGED (.dmg) builds — both the Cyboflow Dev
- * release .dmg used for active testing (tagged 'dev') and stable releases
- * (tagged 'stable') — never under `pnpm dev`, where errors surface directly in
- * the console. Usage metrics fire ONLY for release builds ('dev' / 'stable') —
- * never under `pnpm dev` or an unstamped local `build:mac` .dmg.
+ * The config flag is the single control: packaged (.dmg) builds default it ON
+ * (opt-out), unpackaged `pnpm` builds default it OFF but leave it toggleable in
+ * Settings (see configManager.defaultTelemetryEnabled). When the flag is on and
+ * the credential env var is present, telemetry initializes regardless of build
+ * type — so a developer can opt a local build in. The resolved `environment`
+ * ('local' / 'dev' / 'stable') is still attached to every event.
  */
 export function initTelemetry(cfg: {
   errorReportingEnabled: boolean;
@@ -48,12 +49,10 @@ export function initTelemetry(cfg: {
   installId: string;
 }): void {
   const environment = resolveTelemetryEnvironment();
-  const isPackagedBuild = app.isPackaged;
-  const isReleaseBuild = environment !== 'local';
 
-  // Errors are .dmg-only: under `pnpm dev` (unpackaged) they are tracked
-  // directly in the console, so Sentry stays off to avoid dev noise.
-  if (isPackagedBuild && cfg.errorReportingEnabled && process.env.SENTRY_DSN) {
+  // Gated purely on the config flag + credential presence. Local builds default
+  // the flag off, but an opted-in developer (flag on + SENTRY_DSN set) gets it.
+  if (cfg.errorReportingEnabled && process.env.SENTRY_DSN) {
     try {
       Sentry.init({
         dsn: process.env.SENTRY_DSN,
@@ -73,9 +72,9 @@ export function initTelemetry(cfg: {
     }
   }
 
-  // Usage metrics are release-only: a non-release build (unpackaged OR an
-  // unstamped local `build:mac` .dmg) resolves to 'local' and is skipped.
-  if (isReleaseBuild && cfg.usageMetricsEnabled && process.env.APTABASE_APP_KEY) {
+  // Same posture for usage metrics: governed by the config flag (default off on
+  // local builds, on for .dmg) plus the APTABASE_APP_KEY credential.
+  if (cfg.usageMetricsEnabled && process.env.APTABASE_APP_KEY) {
     try {
       aptabaseInitialize(process.env.APTABASE_APP_KEY);
       aptabaseActive = true;

@@ -69,7 +69,7 @@ describe('initTelemetry gating (Sentry + Aptabase paths)', () => {
     if (tmpResources && fs.existsSync(tmpResources)) fs.rmSync(tmpResources, { recursive: true, force: true });
   });
 
-  // ---- Sentry path: packaged (.dmg) AND opt-in AND DSN present ----
+  // ---- Sentry path: opt-in (config flag) AND DSN present, any build type ----
 
   it('initializes Sentry for a packaged build with reporting on and a DSN', async () => {
     setPackaged(true);
@@ -88,13 +88,16 @@ describe('initTelemetry gating (Sentry + Aptabase paths)', () => {
     expect(typeof opts.beforeBreadcrumb).toBe('function');
   });
 
-  it('does NOT initialize Sentry under pnpm dev (unpackaged), even with a DSN', async () => {
+  it('initializes Sentry under pnpm dev (unpackaged) when opted in with a DSN — toggleable, env local', async () => {
+    // pnpm builds default the flag OFF (see configManager), but a developer who
+    // opts in (flag on + DSN present) gets telemetry; the build type no longer gates it.
     setPackaged(false);
     process.env.SENTRY_DSN = 'https://public@example.ingest.sentry.io/1';
     const { initTelemetry, isSentryActive } = await import('../index');
     initTelemetry(CFG);
-    expect(sentry.init).not.toHaveBeenCalled();
-    expect(isSentryActive()).toBe(false);
+    expect(sentry.init).toHaveBeenCalledTimes(1);
+    expect(isSentryActive()).toBe(true);
+    expect(sentry.init.mock.calls[0][0].environment).toBe('local');
   });
 
   it('does NOT initialize Sentry when error reporting is opted out', async () => {
@@ -128,7 +131,7 @@ describe('initTelemetry gating (Sentry + Aptabase paths)', () => {
     expect(isSentryActive()).toBe(false);
   });
 
-  // ---- Aptabase path: RELEASE build AND opt-in AND app key present ----
+  // ---- Aptabase path: opt-in (config flag) AND app key present, any build type ----
 
   it('initializes Aptabase and fires app_started for a stamped stable release', async () => {
     setPackaged(true);
@@ -150,22 +153,23 @@ describe('initTelemetry gating (Sentry + Aptabase paths)', () => {
     expect(aptabase.trackEvent).toHaveBeenCalledWith('app_started', { environment: 'dev' });
   });
 
-  it('does NOT initialize Aptabase under pnpm dev (unpackaged → local), even with a key', async () => {
+  it('initializes Aptabase under pnpm dev (unpackaged → local) when opted in with a key — toggleable', async () => {
     setPackaged(false);
     process.env.APTABASE_APP_KEY = 'A-US-0000000000';
     const { initTelemetry } = await import('../index');
     initTelemetry(CFG);
-    expect(aptabase.initialize).not.toHaveBeenCalled();
-    expect(aptabase.trackEvent).not.toHaveBeenCalled();
+    expect(aptabase.initialize).toHaveBeenCalledWith('A-US-0000000000');
+    expect(aptabase.trackEvent).toHaveBeenCalledWith('app_started', { environment: 'local' });
   });
 
-  it('does NOT initialize Aptabase for an unstamped local .dmg (environment local)', async () => {
+  it('initializes Aptabase for an unstamped local .dmg (environment local) when opted in', async () => {
     setPackaged(true);
     stampBuildInfo('local');
     process.env.APTABASE_APP_KEY = 'A-US-0000000000';
     const { initTelemetry } = await import('../index');
     initTelemetry(CFG);
-    expect(aptabase.initialize).not.toHaveBeenCalled();
+    expect(aptabase.initialize).toHaveBeenCalledWith('A-US-0000000000');
+    expect(aptabase.trackEvent).toHaveBeenCalledWith('app_started', { environment: 'local' });
   });
 
   it('does NOT initialize Aptabase when usage metrics are opted out', async () => {
@@ -199,7 +203,7 @@ describe('initTelemetry gating (Sentry + Aptabase paths)', () => {
   });
 
   it('trackUsage is a silent no-op when Aptabase never initialized', async () => {
-    setPackaged(false); // local → aptabase off
+    setPackaged(false); // no APTABASE_APP_KEY set in beforeEach → aptabase never initializes
     const { initTelemetry, trackUsage } = await import('../index');
     initTelemetry(CFG);
     trackUsage('session_created', { kind: 'quick' });
