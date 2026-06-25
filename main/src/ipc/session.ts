@@ -30,6 +30,7 @@ import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
 import { pruneSessionOnlyArtifacts } from '../orchestrator/artifactLifecycle';
 import { isCliSubstrate } from '../../../shared/types/substrate';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
+import { InteractiveSettingsWriter } from '../services/panels/claude/interactiveSettingsWriter';
 
 /**
  * Project an ordered array of raw stored outputs into UnifiedMessage[].
@@ -1910,6 +1911,41 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         session.agentPermissionMode = mode;
         sessionManager.emit('session-updated', session);
       }
+
+      // INTERACTIVE substrate (sessions.substrate, migration 027): the live PTY
+      // `claude` reads its gating from the worktree's .claude/settings.json at
+      // SPAWN only — relayUserTurn/submitToRepl never re-read it — so the SDK
+      // next-turn re-read (resolveSessionAgentPermissionMode) does NOT apply. To
+      // make the change effective on the NEXT spawn (terminal restart), prime the
+      // settings file now: default/acceptEdits keep the wildcard PreToolUse hook;
+      // auto/dontAsk remove it (auto hands gating to native Claude, dontAsk opts
+      // out). Demo mode never spawns a real REPL, so skip it. Fully fail-soft:
+      // never throw across the IPC boundary, and guard the teardown race (a
+      // dismissed session's worktree is gone) by requiring the worktree to exist.
+      try {
+        if (!configManager.isDemoMode()) {
+          const dbSession = databaseService.getSession(sessionId);
+          const worktreePath = dbSession?.worktree_path;
+          if (
+            dbSession?.substrate === 'interactive' &&
+            typeof worktreePath === 'string' &&
+            worktreePath.length > 0 &&
+            existsSync(worktreePath)
+          ) {
+            const writer = new InteractiveSettingsWriter();
+            if (mode === 'auto' || mode === 'dontAsk') {
+              writer.remove(worktreePath);
+            } else {
+              writer.write(worktreePath, { permissionMode: mode });
+            }
+          }
+        }
+      } catch (settingsErr) {
+        // Priming the interactive hook is best-effort: a failure leaves the prior
+        // mode in effect for the next spawn but must not fail the persist.
+        console.warn('[IPC] Failed to prime interactive .claude/settings.json for permission mode:', settingsErr);
+      }
+
       return { success: true };
     } catch (error) {
       console.error('Failed to update agent permission mode:', error);

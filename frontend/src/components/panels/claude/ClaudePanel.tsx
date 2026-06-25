@@ -17,6 +17,7 @@ import { DemoTerminalView } from '../../cyboflow/DemoTerminalView';
 import { QuickSessionComposer } from '../../cyboflow/unified/QuickSessionComposer';
 import { ModeIdentityStrip } from '../../cyboflow/unified/ModeIdentityStrip';
 import { ChatMetaStrip } from '../../cyboflow/unified/ChatMetaStrip';
+import { SessionActionToast } from '../../cyboflow/SessionActionToast';
 
 export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive }) => {
   const hook = useClaudePanel(panel.id, isActive);
@@ -71,6 +72,11 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // Captured at the window level (capture phase) so the keystroke toggles the
   // composer instead of reaching xterm as a BEL (\x07).
   const [composerOpen, setComposerOpen] = useState(false);
+  // Substrate-aware confirmation for a permission-mode change from the composer
+  // pill. Hosted here (not via CyboflowRoot, whose toast is local state reserved
+  // for merge/PR/dismiss) so it co-locates with the composer that triggers it; a
+  // permission-change message never overlaps CyboflowRoot's distinct copy.
+  const [permissionToast, setPermissionToast] = useState<string | null>(null);
   useEffect(() => {
     if (interactiveRunId === null) {
       setComposerOpen(false);
@@ -178,7 +184,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   const branchName = hook.gitCommands?.currentBranch ?? null;
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-background">
+    <div className="relative flex-1 flex flex-col h-full bg-background">
       {/* Mode-identity strip — constant across SDK / PTY quick sessions. */}
       <ModeIdentityStrip
         name={isInteractive ? 'Terminal' : 'Claude'}
@@ -338,8 +344,24 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
             interactive={isInteractive}
             ptyOpen={composerOpen}
             onTogglePtyOpen={() => setComposerOpen((v) => !v)}
+            onPermissionApplied={setPermissionToast}
           />
         )
+      )}
+
+      {/* Permission-change confirmation — substrate-aware copy supplied by the
+          composer (SDK: applies next message; PTY: applies on terminal restart).
+          Positioned above the composer; auto-dismisses. */}
+      {permissionToast !== null && (
+        <div className="pointer-events-none absolute bottom-24 left-1/2 z-20 -translate-x-1/2">
+          <div className="pointer-events-auto">
+            <SessionActionToast
+              message={permissionToast}
+              isVisible={permissionToast !== null}
+              onDismiss={() => setPermissionToast(null)}
+            />
+          </div>
+        </div>
       )}
 
       {/* Show archived message if session is archived */}

@@ -32,6 +32,7 @@
 import { useEffect, useRef, useMemo, useState, useCallback, type ReactElement, type ReactNode } from 'react';
 import { History } from 'lucide-react';
 import { ChatInput } from './ChatInput';
+import { SessionActionToast } from './SessionActionToast';
 import { InteractiveTerminalView } from './InteractiveTerminalView';
 import { ModeIdentityStrip } from './unified/ModeIdentityStrip';
 import { ChatMetaStrip } from './unified/ChatMetaStrip';
@@ -123,6 +124,10 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Confirmation toast for a run permission-mode change (ISSUE #2). Mirrors the
+  // ClaudePanel↔QuickSessionComposer pattern: ChatInput (the composer adapter)
+  // raises onPermissionApplied, and this host (RunChatView) renders the toast.
+  const [permissionToast, setPermissionToast] = useState<string | null>(null);
 
   const settings = useMemo<RichOutputSettings>(() => {
     try {
@@ -488,7 +493,22 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
 
         <PendingApprovalsForRun runId={runId} />
 
-        <ChatInput runId={runId} />
+        {/* Permission-change confirmation — copy supplied by ChatInput's pill
+            (SDK runs apply the change on the next message). Positioned above the
+            composer; auto-dismisses. */}
+        {permissionToast !== null && (
+          <div className="pointer-events-none relative">
+            <div className="pointer-events-auto absolute bottom-2 left-1/2 z-20 -translate-x-1/2">
+              <SessionActionToast
+                message={permissionToast}
+                isVisible={permissionToast !== null}
+                onDismiss={() => setPermissionToast(null)}
+              />
+            </div>
+          </div>
+        )}
+
+        <ChatInput runId={runId} onPermissionApplied={setPermissionToast} />
       </div>
 
       {/* Right prompt-history rail (collapsible) — controlled by promptMarkers.

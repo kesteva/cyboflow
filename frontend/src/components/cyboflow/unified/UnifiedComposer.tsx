@@ -67,8 +67,11 @@ export interface UnifiedComposerProps {
   /** interactive model selector (quick SDK, idle) — host supplies the node;
    *  when present it replaces the read-only model pill. */
   modelSlot?: React.ReactNode;
-  /** interactive permission-mode selector (quick SDK) — host supplies the node;
-   *  rendered next to the model affordance. */
+  /** interactive permission-mode selector — host supplies the node; rendered
+   *  next to the model affordance. Host-driven (render only when present), so it
+   *  is NOT gated on the SDK-only model affordance: it must also show on the PTY
+   *  toolbar (interactive permission changes apply on terminal restart), and a
+   *  flow run that supplies no node is unaffected. */
   permissionSlot?: React.ReactNode;
   /** read-only effort label (e.g. "ultracode"). Shown whenever set, independent
    *  of substrate — cyboflow's only effort value is the interactive-only
@@ -347,7 +350,7 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
             whenever the session carries one (session config; edit deferred). */}
         {visibility.showModelEffort &&
           (modelSlot ?? (modelLabel ? <ReadonlyPill label={modelLabel} /> : null))}
-        {visibility.showModelEffort && permissionSlot}
+        {permissionSlot}
         {effortLabel && <ReadonlyPill label={`effort: ${effortLabel}`} />}
 
         {/* Opus-only fast-mode toggle (speed), then checkpoint / commit-mode —

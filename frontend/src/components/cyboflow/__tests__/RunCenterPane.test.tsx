@@ -85,6 +85,7 @@ function makeRun(overrides: Partial<ActiveRunRow> = {}): ActiveRunRow {
     started_at: null,
     ended_at: null,
     stuck_reason: null,
+    permission_mode_snapshot: 'default',
     workflowName: 'planner',
     ...overrides,
   };

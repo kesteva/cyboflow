@@ -40,7 +40,7 @@ import {
   type CancelRunDeps,
   type CancelRunResult,
 } from '../../cancelRunHandler';
-import type { WorkflowRunRow } from '../../../../../shared/types/cyboflow';
+import type { WorkflowRunRow, RunStatusChangedEvent } from '../../../../../shared/types/cyboflow';
 import {
   nudgeRunHandler,
   type NudgeRunDeps,
@@ -939,6 +939,90 @@ export const runsRouter = router({
       }
       runStatusEvents.emit('changed', { runId: input.runId, status: 'completed' });
       return { ended: true };
+    }),
+
+  /**
+   * Change the agent permission mode of a NON-TERMINAL workflow run at runtime
+   * (ISSUE #2). workflow_runs.permission_mode_snapshot is normally stamped ONCE
+   * at run creation (WorkflowRegistry.createRun via permissionModeResolver) and
+   * treated as immutable; this is the single controlled runtime-UPDATE path.
+   *
+   * NEXT-TURN apply (no executor change): RunExecutor.buildOptionsOverrides reads
+   * `run.permission_mode_snapshot` FRESH off the workflow_runs row on every spawn
+   * and threads it to the spawner as agentPermissionMode, so the new mode governs
+   * the NEXT nudge/resume/turn spawn. A mid-stream change is out of scope. NOTE:
+   * the interactive PTY substrate writes its permission hook to .claude/settings.json
+   * at SPAWN only (interactiveSettingsWriter) and does not live-update — so for a
+   * running interactive run the new mode likewise only applies on the next spawn;
+   * the UI gates this pill to SDK runs accordingly.
+   *
+   * Guards:
+   *   - NOT_FOUND-style noOp when the run is absent;
+   *   - a terminal run (completed/failed/canceled) is rejected as a graceful
+   *     noOp so the UI can no-op rather than error;
+   *   - the UPDATE is guarded `status NOT IN (terminal)` so a concurrent
+   *     cancel/complete that won is never overwritten post-mortem.
+   *
+   * On a successful UPDATE the run's CURRENT status is re-read and re-emitted on
+   * the existing runStatusEvents 'changed' channel — the SAME signal
+   * activeRunsStore.init() subscribes to (onRunStatusChanged), so the store
+   * re-fetches runs.list and the composer pill reflects the new value with no new
+   * subscription. The status is unchanged here; the emit is purely an invalidation
+   * trigger.
+   *
+   * ctx.db-direct (no dep-bag wiring): pure DB + event, mirroring `end`.
+   * Standalone-typecheck invariant holds — no electron/better-sqlite3/services
+   * import is added.
+   *
+   * Returns { updated: true } or { noOp: true, reason } — 'not_found' /
+   * 'already_terminal'.
+   */
+  setPermissionMode: protectedProcedure
+    .input(z.object({
+      runId: z.string().min(1),
+      // Keep the enum literal identical to PERMISSION_MODES so it cannot drift
+      // (mirrors the `start` mutation). zod validates at the boundary — no runtime
+      // isPermissionMode call is needed.
+      permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']),
+    }))
+    .mutation(async ({ ctx, input }): Promise<
+      | { updated: true }
+      | { noOp: true; reason: 'not_found' | 'already_terminal' }
+    > => {
+      if (!ctx.db) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
+      }
+      const db = ctx.db;
+      const run = db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { status?: string } | undefined;
+      if (!run?.status) return { noOp: true, reason: 'not_found' };
+      if (['completed', 'failed', 'canceled'].includes(run.status)) {
+        return { noOp: true, reason: 'already_terminal' };
+      }
+
+      const info = db
+        .prepare(
+          `UPDATE workflow_runs
+              SET permission_mode_snapshot = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
+        )
+        .run(input.permissionMode, input.runId) as { changes: number };
+      if (info.changes === 0) return { noOp: true, reason: 'already_terminal' }; // concurrent terminal transition won
+
+      // Re-read the current status and re-emit on the run-status channel as an
+      // invalidation signal so activeRunsStore re-fetches runs.list (the status
+      // itself is unchanged — this is purely a refresh trigger).
+      const after = db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { status?: RunStatusChangedEvent['status'] } | undefined;
+      if (after?.status) {
+        runStatusEvents.emit(
+          'changed',
+          { runId: input.runId, status: after.status } satisfies RunStatusChangedEvent,
+        );
+      }
+      return { updated: true };
     }),
 
   /**

@@ -641,6 +641,7 @@ const makeActiveRun = (overrides: Record<string, unknown> = {}) => ({
   started_at: null,
   ended_at: null,
   stuck_reason: null,
+  permission_mode_snapshot: 'default' as const,
   workflowName: 'planner',
   ...overrides,
 });

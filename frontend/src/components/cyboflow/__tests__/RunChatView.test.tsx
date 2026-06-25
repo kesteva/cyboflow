@@ -136,6 +136,7 @@ function makeRunRow(id: string, substrate: CliSubstrate | undefined): ActiveRunR
     started_at: null,
     ended_at: null,
     stuck_reason: null,
+    permission_mode_snapshot: 'default',
     substrate,
     workflowName: 'planner',
   };

@@ -159,6 +159,14 @@ export interface WorkflowRunListRow {
   session_id?: string | null;
   /** Sprint lane batch (migration 022) — soft link to sprint_batches.id; stamped on seeded 'sprint' runs, NULL for every other run. */
   batch_id?: string | null;
+  /**
+   * Per-run agent permission mode (resolved + stamped at creation by
+   * permissionModeResolver, mutable at runtime via runs.setPermissionMode — ISSUE
+   * #2). Surfaced on the list row so the run composer's PermissionModePill can
+   * show the current value; the executor re-reads it FRESH per spawn so a change
+   * governs the next turn.
+   */
+  permission_mode_snapshot: PermissionMode;
   created_at: string;
   updated_at: string;
   started_at: string | null;

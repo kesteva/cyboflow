@@ -49,7 +49,9 @@ import { API } from '../../utils/api';
 import type { IPCResponse } from '../../utils/api';
 import { trpc } from '../../trpc/client';
 import { UnifiedComposer } from './unified/UnifiedComposer';
+import { PermissionModePill } from './unified/PermissionModePill';
 import { resolveChatVisibility } from './unified/useChatVisibility';
+import type { PermissionMode } from '../../../../shared/types/workflows';
 
 /**
  * Delay (ms) between relaying the message body and the separate '\r' that submits
@@ -77,6 +79,22 @@ function nudgeReasonMessage(reason: string): string {
   }
 }
 
+/**
+ * Human-readable message for a setPermissionMode no-op reason. The mutation
+ * returns `{ noOp: true, reason: 'not_found' | 'already_terminal' }`; mapping it
+ * here gives PermissionModePill a meaningful error to log instead of `undefined`.
+ */
+function setPermissionModeReasonMessage(reason: 'not_found' | 'already_terminal'): string {
+  switch (reason) {
+    case 'not_found':
+      return 'Run not found';
+    case 'already_terminal':
+      return 'Run has ended and its permission mode can no longer change';
+    default:
+      return `Permission mode change ignored: ${reason}`;
+  }
+}
+
 /** Human-readable message for a reopen no-op reason (falls back to the raw reason). */
 function reopenReasonMessage(reason: string): string {
   switch (reason) {
@@ -95,9 +113,16 @@ function reopenReasonMessage(reason: string): string {
 
 export interface ChatInputProps {
   runId: string | null;
+  /**
+   * Surface a confirmation after a run permission-mode change. The host
+   * (RunChatView) shows a toast; the message is supplied by PermissionModePill's
+   * appliedMessage (SDK runs apply the change on the next message). Only fired on
+   * a confirmed write.
+   */
+  onPermissionApplied?: (message: string) => void;
 }
 
-export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null {
+export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React.ReactElement | null {
   const selectedSessionId = useCyboflowStore((s) => s.selectedSessionId);
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
@@ -355,6 +380,42 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
     ptyOpen,
   });
 
+  // Runtime agent-permission selector for a NON-TERMINAL SDK run (ISSUE #2).
+  // Persists to workflow_runs.permission_mode_snapshot via runs.setPermissionMode;
+  // the executor re-reads it FRESH per spawn so the change governs the next turn.
+  // Gated to substrate === 'sdk' because the interactive PTY substrate writes its
+  // permission hook to .claude/settings.json at SPAWN only (no live update). We do
+  // NOT mirror into the store optimistically — the setPermissionMode emit triggers
+  // activeRunsStore.refresh(), which re-reads the canonical value within a tick.
+  const runIsTerminal =
+    activeRun != null &&
+    ['completed', 'failed', 'canceled'].includes(activeRun.status);
+  const permissionSlot =
+    runId != null && activeRun != null && !isInteractive && !runIsTerminal ? (
+      <PermissionModePill
+        currentMode={activeRun.permission_mode_snapshot ?? 'default'}
+        persist={async (mode: PermissionMode) => {
+          const res = await trpc.cyboflow.runs.setPermissionMode.mutate({
+            runId,
+            permissionMode: mode,
+          });
+          // Map the noOp reason to a user-facing error so PermissionModePill logs
+          // a meaningful message (not `undefined`) instead of silently swallowing
+          // the failure.
+          if ('updated' in res) return { success: true };
+          return { success: false, error: setPermissionModeReasonMessage(res.reason) };
+        }}
+        // No-op: activeRun is store-derived; the setPermissionMode emit triggers a
+        // runs.list refresh so the canonical value flows back through the store.
+        onModeChange={() => {}}
+        // Confirmation toast (hoisted to RunChatView) on a confirmed write only.
+        // SDK runs re-read permission_mode_snapshot per spawn, so the change
+        // governs the next message — not the in-flight turn.
+        onApplied={onPermissionApplied ? (_mode, message) => onPermissionApplied(message) : undefined}
+        appliedMessage="Permission mode updated — applies on your next message"
+      />
+    ) : undefined;
+
   return (
     <UnifiedComposer
       visibility={visibility}
@@ -367,6 +428,7 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
       disabledHint={isDisabled ? disabledHint : undefined}
       onSubmit={() => handleSend()}
       onTogglePtyOpen={isInteractive ? () => setPtyOpen((v) => !v) : undefined}
+      permissionSlot={permissionSlot}
       sendError={sendError}
     />
   );

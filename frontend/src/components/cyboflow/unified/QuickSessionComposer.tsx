@@ -46,6 +46,12 @@ export interface QuickSessionComposerProps {
   interactive: boolean;
   ptyOpen?: boolean;
   onTogglePtyOpen?: () => void;
+  /**
+   * Surface a confirmation after a permission-mode change. The host (ClaudePanel)
+   * shows a toast; the message is substrate/running-aware (SDK applies on the next
+   * message, interactive PTY applies when the terminal restarts).
+   */
+  onPermissionApplied?: (message: string) => void;
 }
 
 export function QuickSessionComposer(props: QuickSessionComposerProps): React.ReactElement {
@@ -63,6 +69,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     interactive,
     ptyOpen = false,
     onTogglePtyOpen,
+    onPermissionApplied,
   } = props;
 
   const transport = interactive ? 'interactive' : 'sdk';
@@ -169,17 +176,35 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       <FastModePill panelId={panelId} fastMode={fastMode} onChange={setFastMode} />
     ) : undefined;
 
-  // Interactive agent-permission selector for an IDLE quick SDK session, next to
-  // the model pill. Persists to sessions.agent_permission_mode (next-turn apply)
-  // and mirrors the change into the session store for an instant label refresh.
-  const permissionSlot =
-    !interactive && !running ? (
-      <PermissionModePill
-        sessionId={activeSession.id}
-        currentMode={activeSession.agentPermissionMode ?? 'default'}
-        onModeChange={(mode) => updateSession({ ...activeSession, agentPermissionMode: mode })}
-      />
-    ) : undefined;
+  // Agent-permission selector, next to the model pill. Persists to
+  // sessions.agent_permission_mode and mirrors the change into the session store
+  // for an instant label refresh. It renders for BOTH substrates and regardless
+  // of running state, but the apply-timing differs and the copy is honest:
+  //  - SDK (idle OR running): resolveSessionAgentPermissionMode re-reads the DB
+  //    row on every spawn, so the change applies on the NEXT message (the
+  //    in-flight turn already chose its gating). Status-independent → safe while
+  //    running.
+  //  - interactive PTY: the .claude/settings.json hook is read by `claude` only
+  //    at spawn, so a live change applies when the terminal RESTARTS, never the
+  //    next message. The IPC handler primes the file for the next spawn.
+  const permissionTitle = interactive
+    ? 'Agent permission — applies when the terminal restarts'
+    : running
+      ? 'Agent permission — applies on your next message (not the in-flight turn)'
+      : 'Agent permission — applies on your next message';
+  const permissionAppliedMessage = interactive
+    ? 'Permission mode updated — applies when the terminal restarts'
+    : 'Permission mode updated — applies on your next message';
+  const permissionSlot = (
+    <PermissionModePill
+      currentMode={activeSession.agentPermissionMode ?? 'default'}
+      persist={(mode) => API.sessions.updateAgentPermissionMode(activeSession.id, mode)}
+      onModeChange={(mode) => updateSession({ ...activeSession, agentPermissionMode: mode })}
+      onApplied={onPermissionApplied ? (_mode, message) => onPermissionApplied(message) : undefined}
+      appliedMessage={permissionAppliedMessage}
+      title={permissionTitle}
+    />
+  );
 
   // Read-only effort pill (set at session start; migration 029). Today the only
   // value is 'ultracode' — an interactive-only opt-in, so it shows on the PTY

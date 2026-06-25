@@ -67,7 +67,8 @@ import type { ResumeRunDeps, ResumeRunResult } from '../../../resumeRunHandler';
 import { RunQueueRegistry } from '../../../RunQueueRegistry';
 import { ApprovalRouter } from '../../../approvalRouter';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
-import { stepTransitionEvents } from '../events';
+import { stepTransitionEvents, runStatusEvents } from '../events';
+import type { RunStatusChangedEvent } from '../../../../../../shared/types/cyboflow';
 import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../../../shared/types/workflows';
 import { buildStepTransitionEvent, resolveInitialStepId } from '../../../stepTransitionBridge';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../../shared/types/workflows';
@@ -736,6 +737,119 @@ describe('cyboflow.runs.cancel (Phase 4a)', () => {
     } finally {
       db.close();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cyboflow.runs.setPermissionMode — runtime agent-permission change (ISSUE #2).
+//
+// ctx.db-direct (no dep-bag), so the test wires the DB through createContext({ db })
+// exactly like cyboflow.runs.get / end. The new mode takes effect on the next
+// spawn because RunExecutor.buildOptionsOverrides re-reads permission_mode_snapshot
+// fresh per execute — that next-turn apply is covered separately at the executor
+// layer; here we verify the UPDATE + the runStatusEvents 'changed' refresh emit and
+// the noOp guards. The base GATE_SCHEMA carries permission_mode_snapshot (NOT NULL
+// DEFAULT 'default'), so no opt-in flag is needed.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.setPermissionMode (ISSUE #2)', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('(a) running run → { updated: true }, snapshot reflects the new value, emits a refresh event', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    // seedRun does not set permission_mode_snapshot → GATE_SCHEMA default 'default'.
+    const events: RunStatusChangedEvent[] = [];
+    const listener = (e: RunStatusChangedEvent): void => {
+      events.push(e);
+    };
+    runStatusEvents.on('changed', listener);
+
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.setPermissionMode({ runId, permissionMode: 'auto' });
+
+      expect(result).toEqual({ updated: true });
+      const row = db
+        .prepare('SELECT permission_mode_snapshot FROM workflow_runs WHERE id = ?')
+        .get(runId) as { permission_mode_snapshot: string };
+      expect(row.permission_mode_snapshot).toBe('auto');
+      // The refresh emit carries the run's UNCHANGED current status (pure
+      // invalidation trigger for activeRunsStore).
+      expect(events).toContainEqual({ runId, status: 'running' });
+    } finally {
+      runStatusEvents.off('changed', listener);
+    }
+  });
+
+  it('(b) terminal run → { noOp: true, reason: already_terminal }, snapshot unchanged, no event', async () => {
+    const { runId } = seedRun(db, { status: 'completed' });
+    const events: RunStatusChangedEvent[] = [];
+    const listener = (e: RunStatusChangedEvent): void => {
+      events.push(e);
+    };
+    runStatusEvents.on('changed', listener);
+
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.setPermissionMode({ runId, permissionMode: 'dontAsk' });
+
+      expect(result).toEqual({ noOp: true, reason: 'already_terminal' });
+      const row = db
+        .prepare('SELECT permission_mode_snapshot FROM workflow_runs WHERE id = ?')
+        .get(runId) as { permission_mode_snapshot: string };
+      expect(row.permission_mode_snapshot).toBe('default');
+      expect(events).toHaveLength(0);
+    } finally {
+      runStatusEvents.off('changed', listener);
+    }
+  });
+
+  it('(c) unknown run → { noOp: true, reason: not_found }', async () => {
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.setPermissionMode({
+      runId: 'no-such-run',
+      permissionMode: 'acceptEdits',
+    });
+    expect(result).toEqual({ noOp: true, reason: 'not_found' });
+  });
+
+  it('(d) invalid permissionMode → zod BAD_REQUEST', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(
+      // @ts-expect-error — deliberately passing an invalid enum value to assert zod rejects it.
+      caller.cyboflow.runs.setPermissionMode({ runId, permissionMode: 'bogus' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST',
+    );
+  });
+
+  it('(e) accepts a paused run (gate is non-terminal, not running-only)', async () => {
+    const { runId } = seedRun(db, { status: 'paused' });
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.setPermissionMode({ runId, permissionMode: 'acceptEdits' });
+    expect(result).toEqual({ updated: true });
+    const row = db
+      .prepare('SELECT permission_mode_snapshot FROM workflow_runs WHERE id = ?')
+      .get(runId) as { permission_mode_snapshot: string };
+    expect(row.permission_mode_snapshot).toBe('acceptEdits');
+  });
+
+  it('(f) throws PRECONDITION_FAILED when ctx.db is missing', async () => {
+    const caller = appRouter.createCaller(createContext());
+    await expect(
+      caller.cyboflow.runs.setPermissionMode({ runId: 'any-run', permissionMode: 'auto' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
+    );
   });
 });
 
