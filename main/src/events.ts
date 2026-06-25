@@ -17,6 +17,7 @@ import type { GitCommit } from './services/gitDiffManager';
 import type { Project } from './database/models';
 import { DEFAULT_PERMISSION_MODE } from '../../shared/types/permissionMode';
 import type { GitStatus } from './types/session';
+import { deriveLiveContextUsage } from './utils/liveContextUsage';
 
 /**
  * Crystal session IDs are 36-char dashed UUIDs (e.g. `91e56989-0674-...`).
@@ -194,6 +195,17 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
       typeCounts[key] = (typeCounts[key] || 0) + 1;
     }
     console.log(`[auto-context-debug] Output types: ${JSON.stringify(typeCounts)}`);
+
+    // Prefer the LIVE single-turn context (newest assistant usage + window) over
+    // the result event's cumulative modelUsage, which otherwise pegs the meter at
+    // 100% on long multi-tool turns (deriveLiveContextUsage owns the rationale +
+    // tests). Falls through to the legacy result/init/regex extraction when no
+    // assistant usage is present (e.g. PTY stdout streams).
+    const liveContext = deriveLiveContextUsage(outputs);
+    if (liveContext) {
+      console.log(`[auto-context-debug] Found live context (assistant usage): ${liveContext}`);
+      return liveContext;
+    }
 
     for (const output of outputs) {
       // Handle JSON outputs
