@@ -12,6 +12,30 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.5] — 2026-06-25
+
+### Fixed
+
+- **Usage metrics now actually send.** Aptabase's SDK disables itself if initialized
+  after the app is ready, and telemetry was being set up too late in boot — so usage
+  events were silently dropped (error reporting via Sentry was unaffected). Telemetry
+  is now initialized before the app `ready` event and usage events flow as intended.
+
+### Changed
+
+- **Telemetry is now toggleable on local (`pnpm`) builds.** The Settings flag (plus the
+  presence of a credential) is the single control: packaged `.dmg` builds still default
+  on (opt-out), while non-packaged builds default off but can be turned on for testing.
+  Previously local builds could never enable telemetry regardless of the setting.
+- Usage-metrics events from a non-packaged build are tagged `local` and surface in the
+  telemetry provider's debug stream rather than the live/release view.
+- **Less console and disk noise.** `INFO`-level logs are no longer persisted to disk
+  unless verbose logging is enabled.
+- The personalized user/settings footer was removed from the left rail, and the demo-mode
+  toggle is now hidden in the stable build.
+- Adding a project now gitignores the legacy `worktrees/` folder so stale worktrees from
+  earlier versions don't show up as untracked changes.
+
 ## [0.1.4] — 2026-06-24
 
 ### Added
