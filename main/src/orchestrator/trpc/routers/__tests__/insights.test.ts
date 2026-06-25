@@ -156,6 +156,7 @@ describe('cyboflow.insights.workflowUsage', () => {
       runsWithUsage: 2,
       avgTotalTokens: 1500,
       totalTokens: 3000,
+      totalCacheTokens: 120000,
       totalCostUsd: 0.42,
       avgCostUsd: 0.21,
     },

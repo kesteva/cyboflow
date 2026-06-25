@@ -578,6 +578,16 @@ export function selectWorkflowUsageStats(
       runsWithUsage === 0
         ? null
         : usedRollups.reduce((sum, r) => sum + r.totalTokens, 0);
+    // Companion cache total (read + creation). totalTokens above excludes cache,
+    // but costUsd below includes it — surfacing this keeps the card's tokens and
+    // cost on the same footing (cache re-reads are usually the dominant volume).
+    const totalCacheTokens =
+      runsWithUsage === 0
+        ? null
+        : usedRollups.reduce(
+            (sum, r) => sum + r.cacheReadTokens + r.cacheCreationTokens,
+            0,
+          );
     const avgTotalTokens =
       runsWithUsage === 0
         ? null
@@ -597,6 +607,7 @@ export function selectWorkflowUsageStats(
       runsWithUsage,
       avgTotalTokens,
       totalTokens,
+      totalCacheTokens,
       totalCostUsd,
       avgCostUsd,
     });

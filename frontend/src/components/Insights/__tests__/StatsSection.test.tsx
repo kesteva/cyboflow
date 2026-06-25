@@ -115,6 +115,7 @@ function usageStats(over: Partial<WorkflowUsageStats> = {}): WorkflowUsageStats 
     runsWithUsage: 5,
     avgTotalTokens: 1000,
     totalTokens: 5000,
+    totalCacheTokens: 250000,
     totalCostUsd: 1,
     avgCostUsd: 0.2,
     ...over,
@@ -216,6 +217,31 @@ describe('StatsSection card grid', () => {
     render(<StatsSection />);
     expect(screen.getByTestId('stats-total-tokens')).toHaveTextContent('—');
     expect(screen.queryByTestId('stats-avg-tokens')).not.toBeInTheDocument();
+  });
+
+  it('surfaces a secondary cache-token figure so tokens reconcile with cost', () => {
+    mockWorkflowStats = [runStats({ workflowId: 'wf-a', workflowName: 'Alpha' })];
+    mockWorkflowUsage = [
+      usageStats({
+        workflowId: 'wf-a',
+        workflowName: 'Alpha',
+        totalTokens: 16_000,
+        totalCacheTokens: 8_300_000,
+      }),
+    ];
+    render(<StatsSection />);
+    // The headline excludes cache; the cache line explains the (otherwise absurd) cost.
+    expect(screen.getByTestId('stats-total-tokens')).toHaveTextContent('16k');
+    expect(screen.getByTestId('stats-cache-tokens')).toHaveTextContent('8.3m cache');
+  });
+
+  it('hides the cache line when a flow has no cache tokens', () => {
+    mockWorkflowStats = [runStats({ workflowId: 'wf-a', workflowName: 'Alpha' })];
+    mockWorkflowUsage = [
+      usageStats({ workflowId: 'wf-a', workflowName: 'Alpha', totalCacheTokens: 0 }),
+    ];
+    render(<StatsSection />);
+    expect(screen.queryByTestId('stats-cache-tokens')).not.toBeInTheDocument();
   });
 });
 

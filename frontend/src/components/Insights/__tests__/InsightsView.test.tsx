@@ -298,7 +298,7 @@ describe('InsightsView', () => {
       buildRunStats({ workflowId: 'wf-sprint', workflowName: 'Sprint', totalRuns: 12, errorRatePct: 8.3 }),
     ];
     mockWorkflowUsage = [
-      { workflowId: 'wf-sprint', workflowName: 'Sprint', runsWithUsage: 10, avgTotalTokens: 184000, totalTokens: 1840000, totalCostUsd: 4.2, avgCostUsd: 0.42 },
+      { workflowId: 'wf-sprint', workflowName: 'Sprint', runsWithUsage: 10, avgTotalTokens: 184000, totalTokens: 1840000, totalCacheTokens: 9000000, totalCostUsd: 4.2, avgCostUsd: 0.42 },
     ];
     render(<InsightsView />);
     const card = screen.getByTestId('stats-card-wf-sprint');

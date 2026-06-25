@@ -135,6 +135,7 @@ function makeUsage(workflowId: string): WorkflowUsageStats {
     runsWithUsage: 1,
     avgTotalTokens: 100,
     totalTokens: 100,
+    totalCacheTokens: 5000,
     totalCostUsd: 0.1,
     avgCostUsd: 0.1,
   };

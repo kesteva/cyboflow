@@ -78,6 +78,11 @@ export interface WorkflowUsageStats {
   /** Sum of totalTokens (input + output, cache excluded) across runsWithUsage;
    *  null when no run has usage. Backs the by-flow token bars. */
   totalTokens: number | null;
+  /** Sum of cache_read + cache_creation tokens across runsWithUsage; null when no
+   *  run has usage. Surfaced as the card's secondary "cache" stat — the headline
+   *  totalTokens excludes cache, but cost INCLUDES it (cache reads are billed at
+   *  ~10% of input), so without this the token figure looks absurd next to the $. */
+  totalCacheTokens: number | null;
   totalCostUsd: number | null;
   avgCostUsd: number | null;
 }

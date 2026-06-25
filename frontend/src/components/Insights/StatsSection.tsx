@@ -78,6 +78,8 @@ interface WorkflowCardModel {
   nullOutcomeRuns: number;
   totalTokens: number | null;
   avgTotalTokens: number | null;
+  /** cache_read + cache_creation — the re-fed context that drives most of the cost. */
+  totalCacheTokens: number | null;
   totalCostUsd: number | null;
 }
 
@@ -113,6 +115,7 @@ function mergeWorkflowCards(
         nullOutcomeRuns: s.nullOutcomeRuns,
         totalTokens: u?.totalTokens ?? null,
         avgTotalTokens: u?.avgTotalTokens ?? null,
+        totalCacheTokens: u?.totalCacheTokens ?? null,
         totalCostUsd: u?.totalCostUsd ?? null,
       };
     })
@@ -197,6 +200,15 @@ function WorkflowCard({
           </span>
         )}
       </div>
+      {card.totalCacheTokens !== null && card.totalCacheTokens > 0 && (
+        <div
+          className="mt-0.5 text-[10px] uppercase tracking-wider text-text-tertiary"
+          data-testid="stats-cache-tokens"
+          title="Cache read + creation tokens — the re-fed context (system prompt, tools, history) that the headline excludes but the cost includes"
+        >
+          + {compactTokens(card.totalCacheTokens)} cache
+        </div>
+      )}
       <div className="mt-1 text-xs text-text-secondary" data-testid="stats-meta">
         error {card.errorRatePct}% · runs {card.totalRuns} · cost {formatCost(card.totalCostUsd)}
       </div>

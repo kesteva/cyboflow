@@ -747,10 +747,10 @@ describe('selectWorkflowUsageStats', () => {
     seedWorkflow(db, { id: 'wf-1', name: 'Sprint' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });
     seedRun(db, { id: 'r2', workflowId: 'wf-1' });
-    // r1: 150 tokens, cost 0.02 ; r2: 250 tokens, no cost.
-    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 100, output: 50 }));
+    // r1: 150 in/out tokens (+1200 cache), cost 0.02 ; r2: 250 in/out (+3500 cache), no cost.
+    seedEvent(db, 'r1', 'assistant', assistantPayload({ input: 100, output: 50, cacheRead: 1000, cacheCreation: 200 }));
     seedEvent(db, 'r1', 'result', resultPayload(0.02, 1));
-    seedEvent(db, 'r2', 'assistant', assistantPayload({ input: 200, output: 50 }));
+    seedEvent(db, 'r2', 'assistant', assistantPayload({ input: 200, output: 50, cacheRead: 3000, cacheCreation: 500 }));
 
     const [stats] = selectWorkflowUsageStats(dbAdapter(db), null);
     expect(stats.workflowName).toBe('Sprint');
@@ -758,7 +758,10 @@ describe('selectWorkflowUsageStats', () => {
     // avg over (150, 250) = 200.
     expect(stats.avgTotalTokens).toBe(200);
     // raw SUM over (150, 250) = 400 — the unaveraged companion to avgTotalTokens.
+    // Cache is EXCLUDED from totalTokens (mirrors the migration-026 contract).
     expect(stats.totalTokens).toBe(400);
+    // ...but surfaced separately: cache read + creation = (1200) + (3500) = 4700.
+    expect(stats.totalCacheTokens).toBe(4700);
     // only r1 carried cost.
     expect(stats.totalCostUsd).toBeCloseTo(0.02, 5);
     expect(stats.avgCostUsd).toBeCloseTo(0.02, 5);
@@ -776,6 +779,7 @@ describe('selectWorkflowUsageStats', () => {
     // totalTokens is null (not 0) when no run carried usage — distinguishes
     // "no data" from "a real zero" for the by-flow bars.
     expect(stats.totalTokens).toBeNull();
+    expect(stats.totalCacheTokens).toBeNull();
     expect(stats.totalCostUsd).toBeNull();
     expect(stats.avgCostUsd).toBeNull();
   });
