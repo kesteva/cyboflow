@@ -180,10 +180,19 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
         }
       }
 
-      // Ensure .cyboflow/worktrees/ is in the project's .gitignore so that
-      // worktrees created under that directory do not appear as untracked changes.
+      // Ensure the worktree directories are in the project's .gitignore so that
+      // worktrees do not appear as untracked changes. Flow runs live under
+      // `.cyboflow/worktrees/`; quick sessions use the legacy top-level
+      // `worktrees/` folder (the project's configured worktree_folder, default
+      // `worktrees`). Both must be ignored — the legacy folder is created
+      // eagerly on project add, so it was showing up untracked.
       try {
         ensureGitignoreEntry(projectData.path, '.cyboflow/worktrees/');
+        const legacyWorktreeFolder = (project?.worktree_folder || 'worktrees').trim();
+        // Only ignore a project-relative folder (skip absolute custom paths).
+        if (legacyWorktreeFolder && !legacyWorktreeFolder.startsWith('/') && !legacyWorktreeFolder.includes(':')) {
+          ensureGitignoreEntry(projectData.path, `${legacyWorktreeFolder.replace(/\/$/, '')}/`);
+        }
       } catch (error) {
         // Should never reach here — ensureGitignoreEntry swallows its own errors.
         // Belt-and-suspenders: log and continue so project creation always succeeds.
