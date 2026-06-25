@@ -241,10 +241,26 @@ export class Logger {
       }
     }
     
-    // Also write to file (unless we're in error handler to prevent recursion)
-    if (!this.isInErrorHandler) {
+    // Also write to file (unless we're in error handler to prevent recursion).
+    // By default only WARN/ERROR are persisted to disk — INFO/VERBOSE are
+    // console-only unless verbose logging is explicitly enabled. This keeps the
+    // persistent ~/.cyboflow/logs file from ballooning (it grew to tens of
+    // thousands of INFO lines per day in stable builds).
+    if (!this.isInErrorHandler && this.shouldPersist(level)) {
       this.writeToFile(fullMessage);
     }
+  }
+
+  /**
+   * Whether a log line at the given level should be written to the on-disk log.
+   * WARN/ERROR always persist for post-hoc diagnostics; INFO/VERBOSE persist
+   * only when the user has opted into verbose logging.
+   */
+  private shouldPersist(level: string): boolean {
+    if (level === 'WARN' || level === 'ERROR') {
+      return true;
+    }
+    return this.configManager.isVerbose();
   }
 
   verbose(message: string) {
