@@ -64,6 +64,9 @@ import { TaskBatchPickerModal } from '../TaskBatchPickerModal';
 import { CreateProjectDialog } from '../../CreateProjectDialog';
 import { AgentPermissionModeSelector, PERMISSION_MODE_OPTIONS } from '../AgentPermissionModeSelector';
 import { SubstrateSelector } from '../SubstrateSelector';
+import { ModelSelector, DEFAULT_QUICK_MODEL } from '../ModelSelector';
+import { MODEL_OPTIONS } from '../unified/ModelPill';
+import { Switch } from '../../ui/Switch';
 import { WorkflowEditorModal } from '../WorkflowEditorModal';
 import { WizardStepHeader } from './WizardStepHeader';
 import type { WizardStep } from './WizardStepHeader';
@@ -193,6 +196,12 @@ export default function SessionStartWizard(): React.JSX.Element {
   // (→ sessions.substrate) for quick launches.
   const { mode: permissionMode, setMode: setPermissionMode } = useAgentPermissionMode();
   const [substrate, setSubstrate] = useState<CliSubstrate>(DEFAULT_SUBSTRATE);
+  // Per-launch Claude model for the QUICK session (Configure ③). Defaults to
+  // Opus; pinned to a concrete snapshot at the spawn seam. Fast mode is the
+  // premium Opus-only research preview — a separate opt-in, default OFF, surfaced
+  // only while Opus is selected (it has no effect on other models).
+  const [model, setModel] = useState<string>(DEFAULT_QUICK_MODEL);
+  const [fastMode, setFastMode] = useState<boolean>(false);
   // Blueprint editor (workflow path only) — 'edit' (selected flow) or 'create'.
   const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
 
@@ -489,7 +498,9 @@ export default function SessionStartWizard(): React.JSX.Element {
     if (selection === null || startInFlightRef.current) return;
 
     if (selection.kind === 'quick') {
-      void startQuickSession(permissionMode, substrate);
+      // Fast mode is Opus-only; never request it for another model even if the
+      // toggle was left on before the model was switched.
+      void startQuickSession(permissionMode, substrate, undefined, model, model === 'opus' && fastMode);
       return;
     }
 
@@ -522,7 +533,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       return;
     }
     void launchRun(selection.workflowId);
-  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, substrate]);
+  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, substrate, model, fastMode]);
 
   const handleIdeaPicked = useCallback(
     (ideaId: string) => {
@@ -711,6 +722,42 @@ export default function SessionStartWizard(): React.JSX.Element {
             {/* Agent permission — shown for BOTH workflow and quick launches. */}
             <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
 
+            {/* Model + fast mode — QUICK session only. Workflow and ultracode
+                launches keep their own model resolution, so the dropdown is
+                scoped to the quick card (the user's "quick flow" request). */}
+            {selection.kind === 'quick' && (
+              <>
+                <ModelSelector
+                  value={model}
+                  onChange={(m) => {
+                    setModel(m);
+                    // Fast mode is Opus-only; drop it when leaving Opus.
+                    if (m !== 'opus') setFastMode(false);
+                  }}
+                  id="wizard-model"
+                />
+                {model === 'opus' && (
+                  <div
+                    data-testid="wizard-fast-mode-row"
+                    className="flex items-center justify-between gap-3 rounded-button border border-border-secondary bg-surface-secondary px-3 py-2"
+                  >
+                    <div className="flex flex-col">
+                      <span className="text-sm font-medium text-text-primary">Fast mode</span>
+                      <span className="text-xs text-text-tertiary">
+                        Faster Opus output · premium · default off
+                      </span>
+                    </div>
+                    <Switch
+                      id="wizard-fast-mode"
+                      checked={fastMode}
+                      onCheckedChange={(v) => setFastMode(v === true)}
+                      aria-label="Fast mode"
+                    />
+                  </div>
+                )}
+              </>
+            )}
+
             {/* CLI substrate — shown for workflow + quick launches (workflow:
                 threaded into runs.start; quick: threaded into useQuickSession →
                 sessions.substrate). Hidden for Ultracode, which always runs on
@@ -775,6 +822,17 @@ export default function SessionStartWizard(): React.JSX.Element {
                     : 'SDK'
                 }
               />
+              {selection.kind === 'quick' && (
+                <>
+                  <SummaryRow
+                    label="Model"
+                    value={MODEL_OPTIONS.find((o) => o.id === model)?.label ?? model}
+                  />
+                  {model === 'opus' && (
+                    <SummaryRow label="Fast mode" value={fastMode ? 'On' : 'Off'} />
+                  )}
+                </>
+              )}
               {selection.kind === 'ultracode' && (
                 <SummaryRow label="Effort" value="ultracode (xhigh + auto workflows)" />
               )}

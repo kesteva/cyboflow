@@ -114,6 +114,11 @@ vi.mock('../../../../utils/api', () => ({
       detectBranch: vi.fn().mockResolvedValue({ success: true, data: 'main' }),
     },
     sessions: { createQuick: vi.fn() },
+    // useQuickSession persists the launch model + fast-mode on the SDK panel.
+    claudePanels: {
+      setModel: vi.fn().mockResolvedValue({ success: true }),
+      setFastMode: vi.fn().mockResolvedValue({ success: true }),
+    },
   },
 }));
 
@@ -384,6 +389,49 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     expect(mockRunStart).not.toHaveBeenCalled();
     expect(mockCreateQuick).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: 1, substrate: 'interactive' }),
+    );
+  });
+
+  it('defaults the model to Opus, surfaces the fast-mode toggle (off), and threads both on launch', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    // Model dropdown defaults to Opus; the Opus-only fast-mode toggle is present
+    // and OFF by default.
+    const modelSelect = screen.getByLabelText('Select Claude model') as HTMLSelectElement;
+    expect(modelSelect.value).toBe('opus');
+    expect(screen.getByTestId('wizard-fast-mode-row')).toBeInTheDocument();
+    const fastToggle = screen.getByLabelText('Fast mode');
+    expect(fastToggle).toHaveAttribute('aria-checked', 'false');
+
+    // Turn fast mode ON, then launch — both ride the request as claudeConfig.
+    await act(async () => {
+      fireEvent.click(fastToggle);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: 1, claudeConfig: { model: 'opus', fastMode: true } }),
+    );
+  });
+
+  it('hides fast mode for a non-Opus model and never requests it', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select Claude model'), { target: { value: 'sonnet' } });
+    });
+    // Fast mode is Opus-only — the toggle disappears for Sonnet.
+    expect(screen.queryByTestId('wizard-fast-mode-row')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: 1, claudeConfig: { model: 'sonnet', fastMode: false } }),
     );
   });
 });
