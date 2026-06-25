@@ -98,9 +98,15 @@ export function listRunCreatedTaskIds(db: DatabaseLike, runId: string): string[]
  * listRunOwnedIdeaIds yields [] for it — but it still executes the tasks of an
  * idea's decomposition, linked via its sprint batch. This resolves that idea:
  *
- *   1. The DOMINANT `originating_idea_id` across the run's sprint-batch tasks
- *      (`sprint_batch_tasks` JOIN `tasks`, picking the idea most tasks share).
- *   2. Failing that, the originating idea of the run's single `task_id`.
+ *   1. The DOMINANT idea across the run's sprint-batch tasks (`sprint_batch_tasks`
+ *      JOIN `tasks`, picking the idea most tasks share).
+ *   2. Failing that, the idea of the run's single `task_id`.
+ *
+ * A task reaches its idea EITHER directly (`tasks.originating_idea_id`, for a task
+ * minted straight off an idea) OR through its parent epic
+ * (`tasks.parent_epic_id` -> `epics.originating_idea_id`, for a task minted under
+ * an epic — these carry a NULL originating_idea_id). Both queries COALESCE the two
+ * so a batch of purely epic-child tasks still resolves.
  *
  * Returns null when neither resolves. Fail-soft: a pre-sprint-batch DB lacking
  * `sprint_batch_tasks` / `batch_id` / `task_id`, or any thrown query, degrades to
@@ -111,16 +117,17 @@ export function listRunCreatedTaskIds(db: DatabaseLike, runId: string): string[]
  * @param runId The workflow_runs.id whose operating idea to resolve.
  */
 export function resolveRunBatchIdeaId(db: DatabaseLike, runId: string): string | null {
-  // 1. Dominant idea across the run's sprint-batch tasks.
+  // 1. Dominant idea across the run's sprint-batch tasks (direct or via epic).
   try {
     const row = db
       .prepare(
-        `SELECT t.originating_idea_id AS ideaId, COUNT(*) AS n
+        `SELECT COALESCE(t.originating_idea_id, e.originating_idea_id) AS ideaId, COUNT(*) AS n
            FROM workflow_runs r
            JOIN sprint_batch_tasks sbt ON sbt.batch_id = r.batch_id
            JOIN tasks t ON t.id = sbt.task_id
-          WHERE r.id = ? AND t.originating_idea_id IS NOT NULL
-          GROUP BY t.originating_idea_id
+           LEFT JOIN epics e ON e.id = t.parent_epic_id
+          WHERE r.id = ? AND COALESCE(t.originating_idea_id, e.originating_idea_id) IS NOT NULL
+          GROUP BY COALESCE(t.originating_idea_id, e.originating_idea_id)
           ORDER BY n DESC
           LIMIT 1`,
       )
@@ -130,14 +137,15 @@ export function resolveRunBatchIdeaId(db: DatabaseLike, runId: string): string |
     // No sprint_batch_tasks table / no batch_id column — fall through.
   }
 
-  // 2. The originating idea of the run's single task_id.
+  // 2. The idea of the run's single task_id (direct or via epic).
   try {
     const row = db
       .prepare(
-        `SELECT t.originating_idea_id AS ideaId
+        `SELECT COALESCE(t.originating_idea_id, e.originating_idea_id) AS ideaId
            FROM workflow_runs r
            JOIN tasks t ON t.id = r.task_id
-          WHERE r.id = ? AND t.originating_idea_id IS NOT NULL`,
+           LEFT JOIN epics e ON e.id = t.parent_epic_id
+          WHERE r.id = ? AND COALESCE(t.originating_idea_id, e.originating_idea_id) IS NOT NULL`,
       )
       .get(runId) as { ideaId: unknown } | undefined;
     if (row && typeof row.ideaId === 'string' && row.ideaId.length > 0) return row.ideaId;
