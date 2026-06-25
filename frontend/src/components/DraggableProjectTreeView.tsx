@@ -74,22 +74,15 @@ function statusDotClass(status: string): string {
 }
 
 /**
- * Projects that have at least one session the rail will actually render — i.e.
- * non-main-repo, non-archived. Mirrors the per-project `projectSessions` filter
- * in the render path so auto-expand never opens a project that would show no
- * rows (or skips one that would).
+ * Every project id. Projects default to EXPANDED so a running agent under a
+ * project is never hidden behind a collapsed row — the left rail must agree with
+ * the review-home "Active agents" list about what's running, and a collapsed
+ * project surfaces no running indicator of its own. (A user's explicit
+ * collapse still persists via the saved-layout path; this only governs the
+ * no-saved-layout default + the post-hydration auto-expand.)
  */
-function projectsWithVisibleSessions(
-  projects: ProjectWithRuns[],
-  sessions: Session[],
-): Set<number> {
-  const out = new Set<number>();
-  for (const p of projects) {
-    if (sessions.some((s) => s.projectId === p.id && !s.isMainRepo && !s.archived)) {
-      out.add(p.id);
-    }
-  }
-  return out;
+function allProjectIds(projects: ProjectWithRuns[]): Set<number> {
+  return new Set(projects.map((p) => p.id));
 }
 
 // ---------------------------------------------------------------------------
@@ -246,14 +239,12 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
         setExpandedProjects(new Set(savedState?.expandedProjects ?? []));
         setExpandedFolders(new Set(savedState?.expandedFolders ?? []));
       } else {
-        // No meaningful saved layout — auto-expand projects that have visible
-        // sessions. The session store may not be hydrated yet at this first pass,
-        // so it can legitimately come up empty; the reactive effect below re-runs
-        // it once sessions arrive, closing that race.
+        // No meaningful saved layout — expand ALL projects so a running agent is
+        // never hidden behind a collapsed project (keeps the rail consistent with
+        // the review-home "Active agents" list). This does not depend on session
+        // hydration, so there's no first-pass race to close.
         restoredSavedExpansionRef.current = false;
-        setExpandedProjects(
-          projectsWithVisibleSessions(projectsWithRunsData, useSessionStore.getState().sessions),
-        );
+        setExpandedProjects(allProjectIds(projectsWithRunsData));
         setExpandedFolders(new Set());
       }
 
@@ -290,18 +281,16 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     }
   };
 
-  // Race fix: the session store can finish hydrating AFTER the initial project
-  // load, so the load-time auto-expand may have found no sessions and opened
-  // nothing. Re-run it once here when sessions are present — but never when the
-  // user has a meaningful saved layout (restoredSavedExpansionRef), and only once
+  // Safety net: if projects populate AFTER the initial load (empty first pass),
+  // expand them all once so the default-open invariant holds. Never overrides a
+  // meaningful saved layout (restoredSavedExpansionRef), runs only once
   // (didReactiveAutoExpandRef) so it can't fight a manual collapse afterward.
   useEffect(() => {
     if (restoredSavedExpansionRef.current) return;
     if (didReactiveAutoExpandRef.current) return;
-    if (allSessions.length === 0 || projectsWithRuns.length === 0) return;
-    const toExpand = projectsWithVisibleSessions(projectsWithRuns, allSessions);
-    if (toExpand.size === 0) return;
+    if (projectsWithRuns.length === 0) return;
     didReactiveAutoExpandRef.current = true;
+    const toExpand = allProjectIds(projectsWithRuns);
     setExpandedProjects((prev) => {
       let changed = false;
       const next = new Set(prev);
@@ -313,7 +302,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
       });
       return changed ? next : prev;
     });
-  }, [allSessions, projectsWithRuns]);
+  }, [projectsWithRuns]);
 
   useEffect(() => {
     // Initial data load
