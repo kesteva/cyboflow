@@ -77,6 +77,17 @@ function IdeaSpecBody({ artifact, projectId }: { artifact: Artifact; projectId: 
   const { loading, error, data } = useArtifactData(artifact);
   const idea = data?.kind === 'idea' ? data.idea : null;
 
+  // Render whichever field actually carries the structured markdown spec. The
+  // planner agent's rich spec historically landed in `summary` (a write-path gap:
+  // the cyboflow_create_task/update_task MCP tools had no `body` field), while
+  // `body` held only the idea-picker one-liner — so rendering `body` verbatim
+  // produced a flat paragraph with literal '#'/'##'. Prefer `body` when it has
+  // line structure; otherwise fall back to `summary`; otherwise whatever is
+  // non-empty. Keep `summary` as the small caption only when it is NOT the doc.
+  const bodyHasStructure = idea?.body?.includes('\n') ?? false;
+  const specMarkdown = bodyHasStructure ? (idea?.body ?? '') : (idea?.summary || idea?.body || '');
+  const summaryIsCaption = !!idea?.summary && idea?.summary !== specMarkdown;
+
   return (
     <Shell testid="artifact-idea-spec">
       <ArtifactHeader
@@ -114,11 +125,11 @@ function IdeaSpecBody({ artifact, projectId }: { artifact: Artifact; projectId: 
             <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 6px' }}>
               {idea.title}
             </h1>
-            {idea.summary && (
+            {summaryIsCaption && (
               <div style={{ fontSize: '11px', color: FAINT, marginBottom: 18 }}>{idea.summary}</div>
             )}
-            {idea.body ? (
-              <MarkdownPreview content={idea.body} />
+            {specMarkdown ? (
+              <MarkdownPreview content={specMarkdown} />
             ) : (
               <div data-testid="artifact-idea-nobody" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
                 This idea has no spec body yet.
