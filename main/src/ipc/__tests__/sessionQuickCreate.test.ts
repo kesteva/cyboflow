@@ -200,6 +200,10 @@ function makeServices(opts?: {
     getDb: () => fakeDb,
     // sessions:input reads the db row for commit-mode + substrate routing.
     getSession: vi.fn(() => ({ id: 'sess-001', commit_mode: undefined, substrate: undefined })),
+    // sessions:input reads per-panel launch config (model + fast mode) to thread
+    // into the respawn; create-quick (interactive) persists it. Empty by default.
+    getPanelSettings: vi.fn(() => ({})),
+    updatePanelSettings: vi.fn(),
   };
 
   // SDK manager — the interactive branch must NEVER touch it.
@@ -593,7 +597,10 @@ describe('sessions:input handler - substrate routing', () => {
       SESSION_ID,
       `/tmp/project/${TEST_BRANCH}`,
       'wake up',
-      undefined,
+      undefined, // permissionMode
+      undefined, // model — no persisted panel settings in this test
+      undefined, // effort — a respawn carries no ultracode card setting
+      false, // fastMode — default off (no persisted opt-in)
     );
     expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
     expect(fakeSessionManager.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'running' });

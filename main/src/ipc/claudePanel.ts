@@ -148,11 +148,28 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
         console.log('[IPC] claude-panels:set-model called for panelId:', panelId, 'model:', model);
         
         databaseService.updatePanelSettings(panelId, { model });
-        
+
         return { success: true };
       } catch (error) {
         console.error('Failed to set Claude panel model:', error);
         return { success: false, error: 'Failed to set Claude panel model' };
+      }
+    });
+
+    // Set the per-panel fast-mode opt-in (quick-session launch toggle). Persisted
+    // in tool_panels.settings and read by sessions:input on every respawn, where
+    // it threads into buildSdkOptions' `settings.fastMode`. Default off — fast mode
+    // is the premium, Opus-only research preview; see claudeCodeManager.
+    this.ipcMain.handle('claude-panels:set-fast-mode', async (_event, panelId: string, fastMode: boolean) => {
+      try {
+        console.log('[IPC] claude-panels:set-fast-mode called for panelId:', panelId, 'fastMode:', fastMode);
+
+        databaseService.updatePanelSettings(panelId, { fastMode: fastMode === true });
+
+        return { success: true };
+      } catch (error) {
+        console.error('Failed to set Claude panel fast mode:', error);
+        return { success: false, error: 'Failed to set Claude panel fast mode' };
       }
     });
 

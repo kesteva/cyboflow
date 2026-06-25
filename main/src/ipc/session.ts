@@ -369,6 +369,16 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // workflow instead (below) — so the setting only reaches the live spawn.
       const requestedEffort = request.effort === 'ultracode' ? 'ultracode' : undefined;
 
+      // Per-launch Claude config for the quick session (Configure model dropdown +
+      // fast-mode toggle). `claudeConfig.model` is the bare alias (pinned to a
+      // concrete snapshot at the spawn seam); `fastMode` opts THIS session into the
+      // premium Opus fast-mode preview (default off). For the interactive substrate
+      // both are passed to the eager spawn AND persisted on the panel below; for
+      // SDK the frontend persists them on the panel it creates. Either way the
+      // sessions:input respawn re-reads them from panel settings.
+      const requestedModel = typeof request.claudeConfig?.model === 'string' ? request.claudeConfig.model : undefined;
+      const requestedFastMode = request.claudeConfig?.fastMode === true;
+
       const job = await taskQueue.createSession({
         prompt: '',
         worktreeTemplate: branchName,
@@ -551,6 +561,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             title: 'Claude'
           });
           claudePanelId = panel.id;
+          // Persist the launch model + fast-mode on the panel so a later
+          // sessions:input respawn re-applies them (the eager spawn below already
+          // receives them directly).
+          if (requestedModel !== undefined || requestedFastMode) {
+            databaseService.updatePanelSettings(panel.id, {
+              ...(requestedModel !== undefined ? { model: requestedModel } : {}),
+              fastMode: requestedFastMode,
+            });
+          }
           // Deterministic at-spawn registration (facade.registerInteractivePanel):
           // seed the runId→panelId translation BEFORE the PTY spawn so a relay or
           // close-out racing the first PTY byte never falls back to the sentinel
@@ -563,8 +582,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               session.worktreePath,
               QUICK_PTY_BRIEFING,
               session.permissionMode,
-              undefined, // model — inherit the default
+              requestedModel, // pinned to a concrete snapshot at the spawn seam
               requestedEffort, // 'ultracode' → `--settings {ultracode:true}` (Ultracode card)
+              requestedFastMode, // default off; opts this session into fast mode
             )
             .catch((err: unknown) => {
               // Fail-soft: a spawn failure leaves the session usable — the next
@@ -886,6 +906,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const claudePanel = postCreateClaudePanels[0];
       console.log(`[IPC] Using Claude panel ${claudePanel.id} for input to session ${sessionId}`);
 
+      // Per-panel launch config persisted at quick-session launch (the Configure
+      // model dropdown + fast-mode toggle) or by the in-composer ModelPill.
+      // sessions:input is the quick-turn path for BOTH substrates and otherwise
+      // passes NO model — leaving resolution to the SDK/CLI default — so read the
+      // persisted choice here and thread it on every respawn.
+      const panelLaunchSettings = databaseService.getPanelSettings(claudePanel.id);
+      const panelModel = typeof panelLaunchSettings?.model === 'string' ? panelLaunchSettings.model : undefined;
+      const panelFastMode = panelLaunchSettings?.fastMode === true;
+
       // INTERACTIVE substrate branch (sessions.substrate, migration 027): the
       // session's claude lives in a persistent PTY REPL, so a composer turn is
       // RELAYED into the live process — never the SDK manager (whose
@@ -921,7 +950,16 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             registerLivePanel(dbSession.run_id, claudePanel.id);
           }
           void interactiveCliManager
-            .startPanel(claudePanel.id, sessionId, session.worktreePath, finalInput, session.permissionMode)
+            .startPanel(
+              claudePanel.id,
+              sessionId,
+              session.worktreePath,
+              finalInput,
+              session.permissionMode,
+              panelModel,
+              undefined, // effort — re-spawn does not carry the ultracode card setting
+              panelFastMode,
+            )
             .catch((err: unknown) => {
               console.error(`[IPC] Interactive REPL re-spawn failed for session ${sessionId}:`, err);
             });
@@ -940,7 +978,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         // Session already fetched above, no need to fetch again
         
         // Start Claude Code via the panel with the input as the initial prompt
-        await claudeCodeManager.startPanel(claudePanel.id, sessionId, session.worktreePath, finalInput, session.permissionMode);
+        await claudeCodeManager.startPanel(claudePanel.id, sessionId, session.worktreePath, finalInput, session.permissionMode, panelModel, panelFastMode);
         
         // Update session status to running
         await sessionManager.updateSession(sessionId, { status: 'running' });
