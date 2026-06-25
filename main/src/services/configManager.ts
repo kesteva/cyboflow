@@ -5,6 +5,7 @@ import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/subs
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import fs from 'fs/promises';
+import { readFileSync } from 'node:fs';
 import path from 'path';
 import os from 'os';
 import { v4 as uuidv4 } from 'uuid';
@@ -23,6 +24,43 @@ function defaultTelemetryEnabled(): boolean {
     return Boolean(app?.isPackaged);
   } catch {
     return false;
+  }
+}
+
+/**
+ * Synchronously read JUST the telemetry block from the persisted config, with
+ * the same build-aware defaults the full deep-merge applies when the block is
+ * absent. This exists because telemetry must be initialized BEFORE Electron's
+ * `ready` event — the Aptabase SDK early-returns and permanently disables itself
+ * if `initialize()` runs after the app is ready (see services/telemetry/index.ts).
+ * That is earlier than the async `ConfigManager.initialize()` (and the rest of
+ * `initializeServices()`, which runs inside `app.whenReady().then(...)`) can
+ * provide config, so the boot seam reads the flags synchronously here instead.
+ * `installId` is returned best-effort ('' when unminted) — telemetry init does
+ * not consume it; the real mint still happens in `initialize()`.
+ */
+export function readTelemetryConfigSync(): {
+  errorReportingEnabled: boolean;
+  usageMetricsEnabled: boolean;
+  installId: string;
+} {
+  const def = defaultTelemetryEnabled();
+  try {
+    const cfgPath = path.join(getCyboflowDirectory(), 'config.json');
+    const raw = JSON.parse(readFileSync(cfgPath, 'utf-8')) as {
+      telemetry?: Partial<{ errorReportingEnabled: boolean; usageMetricsEnabled: boolean; installId: string }>;
+    };
+    const t = raw?.telemetry ?? {};
+    return {
+      errorReportingEnabled:
+        typeof t.errorReportingEnabled === 'boolean' ? t.errorReportingEnabled : def,
+      usageMetricsEnabled:
+        typeof t.usageMetricsEnabled === 'boolean' ? t.usageMetricsEnabled : def,
+      installId: typeof t.installId === 'string' ? t.installId : '',
+    };
+  } catch {
+    // No config on disk yet (first boot) → build-aware default.
+    return { errorReportingEnabled: def, usageMetricsEnabled: def, installId: '' };
   }
 }
 

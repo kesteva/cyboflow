@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, shell, dialog, IpcMainInvokeEvent } from '
 import * as path from 'path';
 import { TaskQueue } from './services/taskQueue';
 import { SessionManager } from './services/sessionManager';
-import { ConfigManager } from './services/configManager';
+import { ConfigManager, readTelemetryConfigSync } from './services/configManager';
 import { WorktreeManager } from './services/worktreeManager';
 import { GitDiffManager } from './services/gitDiffManager';
 import { GitStatusManager } from './services/gitStatusManager';
@@ -490,13 +490,11 @@ async function initializeServices() {
   configManager = new ConfigManager();
   await configManager.initialize();
 
-  // Initialize telemetry (error reporting + usage metrics) as early as
-  // possible, immediately after config is available so boot errors can be
-  // captured. Silent no-op when env credentials or config flags are absent.
-  const __cfg = configManager.getConfig();
-  if (__cfg.telemetry) initTelemetry(__cfg.telemetry);
-  // Register the usage sink so orchestrator code (which can't import services/*)
-  // can emit events via emitUsage() — see orchestrator/telemetrySink.ts.
+  // NOTE: telemetry is initialized BEFORE app 'ready' (see the initTelemetry call
+  // ahead of app.whenReady() below), because the Aptabase SDK disables itself if
+  // initialized post-ready. Here we only register the usage sink so orchestrator
+  // code (which can't import services/*) can emit events via emitUsage() — see
+  // orchestrator/telemetrySink.ts.
   setTelemetrySink(trackUsage);
 
   // Initialize logger early so it can capture all logs
@@ -1217,6 +1215,17 @@ async function initializeServices() {
   // Start git status polling
   gitStatusManager.startPolling();
 }
+
+// Initialize telemetry (error reporting + usage metrics) BEFORE the app 'ready'
+// event. The Aptabase usage-metrics SDK MUST be initialized pre-ready — it
+// early-returns and permanently disables tracking (buffering events that are
+// never drained) if `initialize()` runs after the app is ready, and it awaits
+// `whenReady` internally itself. Sentry has no such ordering constraint but is
+// initialized here too for a single seam. Config is read synchronously because
+// the async ConfigManager.initialize() (inside initializeServices, which runs
+// in the whenReady callback below) is far too late. Silent no-op when the env
+// credentials (SENTRY_DSN / APTABASE_APP_KEY) or config flags are absent.
+initTelemetry(readTelemetryConfigSync());
 
 app.whenReady().then(async () => {
   console.log('[Main] App is ready, initializing services...');
