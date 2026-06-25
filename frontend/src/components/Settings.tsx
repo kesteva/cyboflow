@@ -42,6 +42,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // demoMode is read once at app startup, so the saved value only takes effect
   // after a relaunch — track the loaded value to detect a toggle on save.
   const [initialDemoMode, setInitialDemoMode] = useState(false);
+  // Build channel: 'stable' (stable DMG) | 'dev' (dev DMG) | undefined (dev server).
+  // Demo mode is hidden in the stable DMG (it's a dev/internal affordance).
+  const [buildVariant, setBuildVariant] = useState<'stable' | 'dev' | undefined>(undefined);
   const [additionalPathsText, setAdditionalPathsText] = useState('');
   const [enableCyboflowFooter, setEnableCyboflowFooter] = useState(true);
   const [defaultAgentPermissionMode, setDefaultAgentPermissionMode] = useState<PermissionMode>('default');
@@ -69,6 +72,14 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   useEffect(() => {
     if (isOpen) {
       fetchConfig();
+      // Resolve the build channel so the stable DMG can hide dev-only toggles.
+      API.getVersionInfo()
+        .then((result) => {
+          if (result.success) setBuildVariant(result.data.variant);
+        })
+        .catch(() => {
+          // Non-fatal: if we can't resolve the variant, leave demo mode visible.
+        });
       // Honor a requested tab each time the dialog is (re)opened.
       if (initialTab) {
         setActiveTab(initialTab);
@@ -376,7 +387,8 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               </SettingsSection>
             </CollapsibleCard>
 
-            {/* Demo Mode */}
+            {/* Demo Mode — hidden in the stable DMG (dev/internal affordance) */}
+            {buildVariant !== 'stable' && (
             <CollapsibleCard
               title="Demo Mode"
               subtitle="Tour Cyboflow with a sandbox project and scripted agents"
@@ -402,6 +414,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 </p>
               </SettingsSection>
             </CollapsibleCard>
+            )}
 
             {/* Privacy & Telemetry */}
             <CollapsibleCard
