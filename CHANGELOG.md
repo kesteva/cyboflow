@@ -12,6 +12,19 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.6] — 2026-06-25
+
+### Fixed
+
+- **Critical: the app could spawn endless copies of itself in an unkillable loop.**
+  On a machine with no standalone `node` on its PATH, a packaged build fell back to
+  launching its own app binary to run an internal helper — which booted another full
+  app, and another, in an exponential loop (most visible on Intel installs without
+  Node installed). The helper now runs in Node mode, so it never re-launches the app.
+- The left rail now expands all projects by default, so an agent running under a
+  project is never hidden behind a collapsed row — keeping the rail consistent with
+  the review home's "Active agents" list. An explicit collapse still persists.
+
 ## [0.1.5] — 2026-06-25
 
 ### Fixed
