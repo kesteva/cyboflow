@@ -145,11 +145,47 @@ function IdeaSpecBody({ artifact, projectId }: { artifact: Artifact; projectId: 
 // ---------------------------------------------------------------------------
 // decomposed-stories — one card per epic, tasks in a 2-col grid.
 // ---------------------------------------------------------------------------
-function epicChildren(idea: BacklogTaskItem): BacklogTaskItem[] {
-  return idea.children ?? [];
-}
 function taskChildren(epic: BacklogTaskItem): BacklogTaskItem[] {
   return epic.children ?? [];
+}
+
+function TaskGrid({ tasks }: { tasks: BacklogTaskItem[] }): ReactElement {
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: '1fr 1fr',
+        gap: 1,
+        background: SOFT,
+      }}
+    >
+      {tasks.map((task) => (
+        <div key={task.id} data-testid="artifact-task-cell" style={{ background: 'var(--color-surface-primary)', padding: '9px 11px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 4 }}>
+            <span style={{ fontSize: '9px', fontWeight: 700, color: STORIES, letterSpacing: '.03em' }}>{task.ref}</span>
+            {task.priority && (
+              <span
+                style={{
+                  fontSize: '8px',
+                  fontWeight: 700,
+                  color: FAINT,
+                  border: `1px solid ${SOFT}`,
+                  borderRadius: 2,
+                  padding: '0 4px',
+                }}
+              >
+                {task.priority}
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: '11.5px', fontWeight: 600, color: INK, lineHeight: 1.35 }}>{task.title}</div>
+          {task.summary && (
+            <div style={{ fontSize: '10px', color: MUTED, marginTop: 3, lineHeight: 1.4 }}>{task.summary}</div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 function EpicCard({ epic }: { epic: BacklogTaskItem }): ReactElement {
@@ -179,40 +215,7 @@ function EpicCard({ epic }: { epic: BacklogTaskItem }): ReactElement {
           No tasks under this epic.
         </div>
       ) : (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
-            gap: 1,
-            background: SOFT,
-          }}
-        >
-          {tasks.map((task) => (
-            <div key={task.id} data-testid="artifact-task-cell" style={{ background: 'var(--color-surface-primary)', padding: '9px 11px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 4 }}>
-                <span style={{ fontSize: '9px', fontWeight: 700, color: STORIES, letterSpacing: '.03em' }}>{task.ref}</span>
-                {task.priority && (
-                  <span
-                    style={{
-                      fontSize: '8px',
-                      fontWeight: 700,
-                      color: FAINT,
-                      border: `1px solid ${SOFT}`,
-                      borderRadius: 2,
-                      padding: '0 4px',
-                    }}
-                  >
-                    {task.priority}
-                  </span>
-                )}
-              </div>
-              <div style={{ fontSize: '11.5px', fontWeight: 600, color: INK, lineHeight: 1.35 }}>{task.title}</div>
-              {task.summary && (
-                <div style={{ fontSize: '10px', color: MUTED, marginTop: 3, lineHeight: 1.4 }}>{task.summary}</div>
-              )}
-            </div>
-          ))}
-        </div>
+        <TaskGrid tasks={tasks} />
       )}
     </div>
   );
@@ -222,8 +225,13 @@ function DecomposedStoriesBody({ artifact, projectId }: { artifact: Artifact; pr
   const accent = ARTIFACT_COLORS['decomposed-stories'];
   const { loading, error, data } = useArtifactData(artifact);
   const idea = data?.kind === 'stories' ? data.idea : null;
-  const epics = idea ? epicChildren(idea) : [];
-  const taskCount = epics.reduce((sum, epic) => sum + taskChildren(epic).length, 0);
+  // idea.children is epics FOLLOWED BY tasks decomposed directly under the idea
+  // (small-idea path). Split by type: epics get cards, direct tasks get a grid.
+  const children = idea?.children ?? [];
+  const epics = children.filter((c) => c.type === 'epic');
+  const directTasks = children.filter((c) => c.type === 'task');
+  const taskCount =
+    epics.reduce((sum, epic) => sum + taskChildren(epic).length, 0) + directTasks.length;
 
   return (
     <Shell testid="artifact-decomposed-stories">
@@ -246,12 +254,19 @@ function DecomposedStoriesBody({ artifact, projectId }: { artifact: Artifact; pr
             {epics.length} {epics.length === 1 ? 'epic' : 'epics'} · {taskCount} {taskCount === 1 ? 'task' : 'tasks'}
             {artifact.stepOrigin ? ` · ${artifact.stepOrigin}` : ''}
           </div>
-          {epics.length === 0 ? (
+          {epics.length === 0 && directTasks.length === 0 ? (
             <div data-testid="artifact-stories-noepics" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
-              This idea has not been decomposed into epics yet.
+              This idea has not been decomposed yet.
             </div>
           ) : (
-            epics.map((epic) => <EpicCard key={epic.id} epic={epic} />)
+            <>
+              {epics.map((epic) => <EpicCard key={epic.id} epic={epic} />)}
+              {directTasks.length > 0 && (
+                <div data-testid="artifact-direct-tasks" style={{ marginBottom: 14 }}>
+                  <TaskGrid tasks={directTasks} />
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

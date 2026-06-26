@@ -252,6 +252,34 @@ describe('taskListing — 3-table UNION', () => {
     expect(epics[1].children?.[0].type).toBe('task');
   });
 
+  it('selectIdeaDecomposition surfaces tasks decomposed DIRECTLY under the idea (small idea, no epic)', () => {
+    const db = buildDb();
+    // A small-idea decomposition: tasks created directly under the idea
+    // (originating_idea_id set, parent_epic_id NULL) with NO epic layer. These
+    // must surface as task-type children so the decomposed-stories artifact
+    // renders them (the bug was: read-side only looked for tasks under epics).
+    const ideaId = 'ide_small';
+    db.prepare(
+      `INSERT INTO ideas (id, project_id, ref, title, body, board_id, stage_id, created_at)
+       VALUES (?, 1, 'IDEA-050', 'Small idea', 'body', 'board-1-default', ?, '2026-01-02T00:00:00.000Z')`,
+    ).run(ideaId, stageId(1));
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, parent_epic_id, originating_idea_id, created_at)
+       VALUES ('tsk_d1', 1, 'TASK-101', 'Direct one', 'b', 'board-1-default', ?, NULL, ?, '2026-01-02T00:00:01.000Z')`,
+    ).run(stageId(5), ideaId);
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, parent_epic_id, originating_idea_id, created_at)
+       VALUES ('tsk_d2', 1, 'TASK-102', 'Direct two', 'b', 'board-1-default', ?, NULL, ?, '2026-01-02T00:00:02.000Z')`,
+    ).run(stageId(5), ideaId);
+
+    const idea = selectIdeaDecomposition(dbAdapter(db), ideaId)!;
+    const children = idea.children ?? [];
+    // No epics → children are exactly the direct tasks, ASC by created_at.
+    expect(children.map((c) => c.id)).toEqual(['tsk_d1', 'tsk_d2']);
+    expect(children.every((c) => c.type === 'task')).toBe(true);
+    expect(idea.childCount).toBe(2);
+  });
+
   it('selectIdeaDecomposition handles an idea with no epics and rejects non-idea ids', () => {
     const db = buildDb();
     const { ideaId, epicId, taskId } = seedFixture(db);
