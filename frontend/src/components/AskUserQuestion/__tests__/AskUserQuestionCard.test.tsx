@@ -277,6 +277,93 @@ describe('renders option label, description, and preview toggle', () => {
 });
 
 // ---------------------------------------------------------------------------
+// onOpenArtifact — "open in pane" affordances (#8 / #9)
+// ---------------------------------------------------------------------------
+
+describe('onOpenArtifact open-in-pane affordances', () => {
+  function previewQuestion(): Question {
+    return makeQuestion({
+      id: 'q-1',
+      questions: [
+        {
+          question: 'Pick one?',
+          header: 'Pick',
+          multiSelect: false,
+          options: [
+            { label: 'Option A', preview: '# A\nPreview body.' },
+            { label: 'Option B' },
+          ],
+        },
+      ],
+    });
+  }
+
+  it('per-option affordance becomes "View in pane" and calls onOpenArtifact (#8)', () => {
+    const onOpenArtifact = vi.fn();
+
+    render(
+      <AskUserQuestionCard
+        item={previewQuestion()}
+        onOpenArtifact={onOpenArtifact}
+        openArtifactLabel="IDEA-001 Spec"
+      />,
+    );
+
+    // The inline "Show preview" toggle is replaced by "View in pane".
+    expect(screen.queryByText('Show preview')).not.toBeInTheDocument();
+    const viewBtns = screen.getAllByRole('button', { name: 'View in pane' });
+    expect(viewBtns).toHaveLength(1);
+
+    fireEvent.click(viewBtns[0]);
+    expect(onOpenArtifact).toHaveBeenCalledTimes(1);
+
+    // It does NOT mount the inline preview region.
+    expect(screen.queryByRole('region', { name: /Preview for Option A/i })).not.toBeInTheDocument();
+  });
+
+  it('renders a below-prompt link that calls onOpenArtifact (#9)', () => {
+    const onOpenArtifact = vi.fn();
+
+    render(
+      <AskUserQuestionCard
+        item={previewQuestion()}
+        onOpenArtifact={onOpenArtifact}
+        openArtifactLabel="IDEA-001 Spec"
+      />,
+    );
+
+    const link = screen.getByRole('button', { name: /View IDEA-001 Spec in pane/i });
+    fireEvent.click(link);
+    expect(onOpenArtifact).toHaveBeenCalledTimes(1);
+  });
+
+  it('below-prompt link falls back to "artifact" when no label provided', () => {
+    const onOpenArtifact = vi.fn();
+
+    render(<AskUserQuestionCard item={previewQuestion()} onOpenArtifact={onOpenArtifact} />);
+
+    expect(screen.getByRole('button', { name: /View artifact in pane/i })).toBeInTheDocument();
+  });
+
+  it('without onOpenArtifact: keeps inline "Show preview" toggle and no below-prompt link', () => {
+    render(<AskUserQuestionCard item={previewQuestion()} />);
+
+    // The per-option affordance is the inline toggle, not "View in pane".
+    expect(screen.getByText('Show preview')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'View in pane' })).not.toBeInTheDocument();
+
+    // No below-prompt link is rendered.
+    expect(screen.queryByRole('button', { name: /in pane/i })).not.toBeInTheDocument();
+
+    // The inline toggle still mounts/unmounts the preview region.
+    fireEvent.click(screen.getByText('Show preview'));
+    expect(screen.getByRole('region', { name: /Preview for Option A/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByText('Hide preview'));
+    expect(screen.queryByRole('region', { name: /Preview for Option A/i })).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 5. Other option enables free-text input
 // ---------------------------------------------------------------------------
 

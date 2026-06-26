@@ -75,6 +75,16 @@ interface AskUserQuestionCardProps {
   item: Question;
   /** Called once after a successful submit mutation. Optional. */
   onAnswered?: () => void;
+  /**
+   * Opens the run's primary artifact in the center pane. When provided, the
+   * per-option "Show preview" toggle becomes a "View in pane" button and a
+   * below-prompt link is rendered (both call this). When undefined, the
+   * per-option affordance falls back to the inline MarkdownPreview toggle and
+   * the below-prompt link is omitted (no artifact available for the run).
+   */
+  onOpenArtifact?: () => void;
+  /** Label of the primary artifact, shown in the below-prompt link copy. */
+  openArtifactLabel?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +112,11 @@ interface QuestionFieldsetProps {
   onMultiChange: (label: string, checked: boolean) => void;
   onOtherToggle: (checked: boolean) => void;
   onOtherText: (text: string) => void;
+  /**
+   * When provided, the per-option preview affordance opens the run's primary
+   * artifact in the center pane instead of toggling the inline MarkdownPreview.
+   */
+  onOpenArtifact?: () => void;
 }
 
 function QuestionFieldset({
@@ -114,6 +129,7 @@ function QuestionFieldset({
   onMultiChange,
   onOtherToggle,
   onOtherText,
+  onOpenArtifact,
 }: QuestionFieldsetProps): React.ReactElement {
   // Track which options have their preview panel open
   const [openPreviews, setOpenPreviews] = useState<Set<number>>(new Set());
@@ -184,24 +200,40 @@ function QuestionFieldset({
                   )}
                   {option.preview != null && option.preview !== '' && (
                     <div className="mt-1">
-                      <button
-                        type="button"
-                        className="text-xs text-interactive hover:text-interactive-hover underline"
-                        aria-expanded={openPreviews.has(optionIndex)}
-                        aria-controls={previewId}
-                        onClick={() => { togglePreview(optionIndex); }}
-                      >
-                        {openPreviews.has(optionIndex) ? 'Hide preview' : 'Show preview'}
-                      </button>
-                      {openPreviews.has(optionIndex) && (
-                        <div
-                          id={previewId}
-                          role="region"
-                          aria-label={`Preview for ${option.label}`}
-                          className="mt-2 p-2 bg-bg-tertiary rounded text-sm"
+                      {onOpenArtifact != null ? (
+                        // An artifact is available — the affordance opens it in
+                        // the center pane instead of expanding the inline preview.
+                        <button
+                          type="button"
+                          className="text-xs text-interactive hover:text-interactive-hover underline"
+                          onClick={() => { onOpenArtifact(); }}
                         >
-                          <MarkdownPreview content={option.preview} />
-                        </div>
+                          View in pane
+                        </button>
+                      ) : (
+                        // Graceful fallback: no artifact for the run, so keep the
+                        // inline collapsible MarkdownPreview toggle.
+                        <>
+                          <button
+                            type="button"
+                            className="text-xs text-interactive hover:text-interactive-hover underline"
+                            aria-expanded={openPreviews.has(optionIndex)}
+                            aria-controls={previewId}
+                            onClick={() => { togglePreview(optionIndex); }}
+                          >
+                            {openPreviews.has(optionIndex) ? 'Hide preview' : 'Show preview'}
+                          </button>
+                          {openPreviews.has(optionIndex) && (
+                            <div
+                              id={previewId}
+                              role="region"
+                              aria-label={`Preview for ${option.label}`}
+                              className="mt-2 p-2 bg-bg-tertiary rounded text-sm"
+                            >
+                              <MarkdownPreview content={option.preview} />
+                            </div>
+                          )}
+                        </>
                       )}
                     </div>
                   )}
@@ -248,7 +280,7 @@ function QuestionFieldset({
 // Public component
 // ---------------------------------------------------------------------------
 
-export function AskUserQuestionCard({ item, onAnswered }: AskUserQuestionCardProps): React.ReactElement {
+export function AskUserQuestionCard({ item, onAnswered, onOpenArtifact, openArtifactLabel }: AskUserQuestionCardProps): React.ReactElement {
   const questionCount = item.questions.length;
 
   // Subscribe to the otherText bus slot for THIS question id. ChatInput
@@ -489,9 +521,24 @@ export function AskUserQuestionCard({ item, onAnswered }: AskUserQuestionCardPro
               onMultiChange={(label, checked) => { handleMultiChange(index, label, checked); }}
               onOtherToggle={(checked) => { handleOtherToggle(index, checked); }}
               onOtherText={(text) => { handleOtherText(index, text); }}
+              onOpenArtifact={onOpenArtifact}
             />
           ))}
         </div>
+
+        {/* Below-prompt "open artifact" link (#9) — rendered only when an
+            artifact is available for the run. Sits above the submit bar. */}
+        {onOpenArtifact != null && (
+          <div className="mt-3">
+            <button
+              type="button"
+              className="text-xs text-interactive hover:text-interactive-hover underline"
+              onClick={() => { onOpenArtifact(); }}
+            >
+              View {openArtifactLabel ?? 'artifact'} in pane →
+            </button>
+          </div>
+        )}
 
         {/* Attached image thumbnails */}
         {attachedImages.length > 0 && (

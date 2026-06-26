@@ -40,12 +40,15 @@ import { deriveRunContextUsage } from './unified/runContextUsage';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useQuestionStore } from '../../stores/questionStore';
+import { useCenterPaneStore } from '../../stores/centerPaneStore';
+import { useArtifactsList } from '../../hooks/useArtifactsList';
 import { AskUserQuestionCard } from '../AskUserQuestion/AskUserQuestionCard';
 import { PendingApprovalsForRun } from '../ReviewQueue/PendingApprovalsForRun';
 import { ChatTranscript } from '../chat/ChatTranscript';
 import { PromptNavigation, type PromptMarker } from '../panels/claude/PromptNavigation';
 import { trpc } from '../../trpc/client';
 import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
+import type { Artifact } from '../../../../shared/types/artifacts';
 import type { RichOutputSettings } from '../panels/ai/AbstractAIPanel';
 
 // ---------------------------------------------------------------------------
@@ -65,15 +68,29 @@ const defaultSettings: RichOutputSettings = {
 /** Debounce window for live re-fetch after a streamEvents delta lands. */
 const LIVE_REFETCH_DEBOUNCE_MS = 400;
 
+/**
+ * Pick the run's PRIMARY artifact for the question-card "open in pane" affordances:
+ * prefer an `idea-spec` artifact when present, else the most-recently-created one
+ * (by `createdAt`). Returns null when the run has no artifacts.
+ */
+function selectPrimaryArtifact(artifacts: Artifact[]): Artifact | null {
+  if (artifacts.length === 0) return null;
+  const ideaSpec = artifacts.find((a) => a.atype === 'idea-spec');
+  if (ideaSpec) return ideaSpec;
+  return artifacts.reduce((latest, a) => (a.createdAt > latest.createdAt ? a : latest), artifacts[0]);
+}
+
 // ---------------------------------------------------------------------------
 // Public component
 // ---------------------------------------------------------------------------
 
 export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   const selectedSessionId = useCyboflowStore((s) => s.selectedSessionId);
+  const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const streamEvents = useCyboflowStore((s) => s.streamEvents);
   const questionQueue = useQuestionStore((s) => s.queue);
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
+  const openArtifactTab = useCenterPaneStore((s) => s.openArtifactTab);
 
   // -------------------------------------------------------------------------
   // Substrate gate (IDEA-013 / IDEA-030). Resolve the run row the same way
@@ -106,6 +123,36 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
     () => (isInteractive ? null : deriveRunContextUsage(streamEvents)),
     [isInteractive, streamEvents],
   );
+
+  // -------------------------------------------------------------------------
+  // Run artifacts → question-card "open in pane" affordances (#8 / #9).
+  //
+  // The center-pane key mirrors RunCenterPane/RunRightRail: the run's parent
+  // session when known, else the run id (legacy parentless runs). projectId is
+  // resolved off the active run row (same row the substrate gate resolved).
+  // useArtifactsList returns [] until both runId and projectId are non-null, so
+  // when there is no artifact we pass undefined for both new props and the card
+  // keeps its inline preview toggle (graceful fallback).
+  // -------------------------------------------------------------------------
+
+  const sessionKey = selectedSessionId ?? activeRunId;
+  const projectId = run?.project_id ?? null;
+  const { artifacts } = useArtifactsList(activeRunId, projectId);
+  const primaryArtifact = useMemo(() => selectPrimaryArtifact(artifacts), [artifacts]);
+
+  const onOpenArtifact = useMemo(() => {
+    if (primaryArtifact === null || sessionKey === null) return undefined;
+    const artifact = primaryArtifact;
+    return () => {
+      openArtifactTab(sessionKey, {
+        atype: artifact.atype,
+        label: artifact.label,
+        artifactId: artifact.id,
+        committed: artifact.committed,
+        focus: true,
+      });
+    };
+  }, [primaryArtifact, sessionKey, openArtifactTab]);
 
   // -------------------------------------------------------------------------
   // Messages + load state
@@ -353,10 +400,16 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   const renderToolCallExtra = useCallback((toolCallId: string): ReactNode => {
     const question = questionQueue.find((q) => q.toolUseId === toolCallId);
     if (question != null) {
-      return <AskUserQuestionCard item={question} />;
+      return (
+        <AskUserQuestionCard
+          item={question}
+          onOpenArtifact={onOpenArtifact}
+          openArtifactLabel={primaryArtifact?.label}
+        />
+      );
     }
     return null;
-  }, [questionQueue]);
+  }, [questionQueue, onOpenArtifact, primaryArtifact]);
 
   // -------------------------------------------------------------------------
   // Filter session-init messages unless the setting opts in (mirrors RichOutputView).

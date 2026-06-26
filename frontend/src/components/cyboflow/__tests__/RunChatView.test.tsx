@@ -21,8 +21,9 @@
  *   - A debounced live re-query fires after streamEvents change.
  */
 import '@testing-library/jest-dom';
-import { render, screen, act, waitFor } from '@testing-library/react';
+import { render, screen, act, waitFor, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { ReactNode } from 'react';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
 
 // ---------------------------------------------------------------------------
@@ -44,6 +45,9 @@ vi.mock('../../../utils/cyboflowApi', () => ({
 // ---------------------------------------------------------------------------
 
 const mockListUnifiedMessages = vi.fn<() => Promise<UnifiedMessage[]>>(async () => []);
+// Artifacts feed for the question-card "open in pane" wiring (#8 / #9).
+import type { Artifact } from '../../../../../shared/types/artifacts';
+const mockArtifactsList = vi.fn<() => Promise<Artifact[]>>(async () => []);
 
 vi.mock('../../../trpc/client', () => ({
   trpc: {
@@ -52,6 +56,12 @@ vi.mock('../../../trpc/client', () => ({
         listUnifiedMessages: {
           query: (...args: Parameters<typeof mockListUnifiedMessages>) => mockListUnifiedMessages(...args),
         },
+      },
+      artifacts: {
+        list: {
+          query: (...args: Parameters<typeof mockArtifactsList>) => mockArtifactsList(...args),
+        },
+        onArtifactChanged: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })) },
       },
       events: {
         onStuckDetected: { subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })) },
@@ -73,8 +83,20 @@ vi.mock('../InteractiveTerminalView', () => ({
   ),
 }));
 
+// The ChatTranscript stub invokes `renderToolCallExtra` with a fixed tool id so
+// the inline AskUserQuestionCard injection (and its artifact wiring) is exercised
+// without depending on the real transcript's projection internals.
 vi.mock('../../chat/ChatTranscript', () => ({
-  ChatTranscript: () => <div data-testid="chat-transcript">ChatTranscript</div>,
+  ChatTranscript: ({
+    renderToolCallExtra,
+  }: {
+    renderToolCallExtra?: (toolCallId: string) => ReactNode;
+  }) => (
+    <div data-testid="chat-transcript">
+      ChatTranscript
+      {renderToolCallExtra?.('tool-use-card')}
+    </div>
+  ),
 }));
 
 vi.mock('../../panels/claude/PromptNavigation', () => ({
@@ -100,6 +122,8 @@ vi.mock('../../ReviewQueue/PendingApprovalsForRun', () => ({
 import { RunChatView } from '../RunChatView';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useActiveRunsStore } from '../../../stores/activeRunsStore';
+import { useQuestionStore } from '../../../stores/questionStore';
+import { useCenterPaneStore } from '../../../stores/centerPaneStore';
 import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 
@@ -112,12 +136,69 @@ beforeEach(() => {
     useCyboflowStore.getState().clearActiveRun();
     useCyboflowStore.getState().clearActiveQuickSession();
     useActiveRunsStore.setState({ runsByProject: {} });
+    useQuestionStore.setState({ queue: [], connectionStatus: 'idle', otherText: {} });
+    useCenterPaneStore.setState({ bySession: {} });
   });
   mockListUnifiedMessages.mockClear();
   mockListUnifiedMessages.mockImplementation(async () => []);
+  mockArtifactsList.mockClear();
+  mockArtifactsList.mockImplementation(async () => []);
   // jsdom does not implement scrollIntoView
   HTMLElement.prototype.scrollIntoView = vi.fn();
 });
+
+// ---------------------------------------------------------------------------
+// Artifact fixture
+// ---------------------------------------------------------------------------
+
+function makeArtifact(overrides: Partial<Artifact> = {}): Artifact {
+  return {
+    id: overrides.id ?? 'art-1',
+    runId: overrides.runId ?? 'run-art',
+    sessionId: overrides.sessionId ?? null,
+    atype: overrides.atype ?? 'idea-spec',
+    label: overrides.label ?? 'IDEA-001 Spec',
+    stepOrigin: overrides.stepOrigin ?? null,
+    mode: overrides.mode ?? 'template',
+    committed: overrides.committed ?? false,
+    sessionOnly: overrides.sessionOnly ?? false,
+    isNew: overrides.isNew ?? false,
+    payloadJson: overrides.payloadJson ?? null,
+    sourceRef: overrides.sourceRef ?? null,
+    createdAt: overrides.createdAt ?? '2026-01-01T00:00:00.000Z',
+    committedAt: overrides.committedAt ?? null,
+  };
+}
+
+/** Seed a pending question whose toolUseId matches the ChatTranscript stub's id. */
+function seedQuestion(runId: string): void {
+  act(() => {
+    useQuestionStore.setState({
+      queue: [
+        {
+          id: 'q-1',
+          runId,
+          workflowName: 'planner',
+          toolUseId: 'tool-use-card',
+          status: 'pending',
+          createdAt: '2026-01-01T00:00:00.000Z',
+          answeredAt: null,
+          answerJson: null,
+          questions: [
+            {
+              question: 'Approve?',
+              header: 'Approve',
+              multiSelect: false,
+              options: [{ label: 'Yes', preview: '# Yes\nbody' }, { label: 'No' }],
+            },
+          ],
+        },
+      ],
+      connectionStatus: 'connected',
+      otherText: {},
+    });
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -298,5 +379,72 @@ describe('RunChatView — data flow', () => {
     await waitFor(() => {
       expect(mockListUnifiedMessages).toHaveBeenCalledTimes(2);
     }, { timeout: 2000 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests — AskUserQuestionCard artifact wiring (#8 / #9)
+// ---------------------------------------------------------------------------
+
+describe('RunChatView — question-card artifact wiring', () => {
+  it('passes onOpenArtifact when an artifact exists; "View in pane" opens a center-pane tab', async () => {
+    mockArtifactsList.mockImplementation(async () => [makeArtifact({ id: 'art-1', atype: 'idea-spec', label: 'IDEA-001 Spec' })]);
+    seedRun('run-art', 'sdk');
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-art');
+    });
+    seedQuestion('run-art');
+
+    render(<RunChatView runId="run-art" />);
+
+    // The injected card surfaces the "open in pane" affordances (per-option +
+    // below-prompt link) once the artifact list resolves.
+    const belowLink = await screen.findByRole('button', { name: /View IDEA-001 Spec in pane/i });
+    expect(screen.queryByText('Show preview')).not.toBeInTheDocument();
+
+    // Clicking the below-prompt link opens an idea-spec center-pane tab keyed by
+    // the run id (no parent session → key falls back to activeRunId).
+    fireEvent.click(belowLink);
+    await waitFor(() => {
+      const session = useCenterPaneStore.getState().bySession['run-art'];
+      expect(session?.tabs.some((t) => t.kind === 'artifact' && t.artifactId === 'art-1')).toBe(true);
+    });
+  });
+
+  it('prefers the idea-spec artifact over a more-recent non-idea-spec one', async () => {
+    mockArtifactsList.mockImplementation(async () => [
+      makeArtifact({ id: 'art-spec', atype: 'idea-spec', label: 'Spec', createdAt: '2026-01-01T00:00:00.000Z' }),
+      makeArtifact({ id: 'art-shot', atype: 'screenshots', label: 'Shots', createdAt: '2026-02-01T00:00:00.000Z' }),
+    ]);
+    seedRun('run-art', 'sdk');
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-art');
+    });
+    seedQuestion('run-art');
+
+    render(<RunChatView runId="run-art" />);
+
+    // The link copy carries the idea-spec label even though the screenshot is newer.
+    const link = await screen.findByRole('button', { name: /View Spec in pane/i });
+    fireEvent.click(link);
+    await waitFor(() => {
+      const session = useCenterPaneStore.getState().bySession['run-art'];
+      expect(session?.tabs.some((t) => t.kind === 'artifact' && t.artifactId === 'art-spec')).toBe(true);
+    });
+  });
+
+  it('falls back to inline preview when the run has no artifacts', async () => {
+    mockArtifactsList.mockImplementation(async () => []);
+    seedRun('run-art', 'sdk');
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-art');
+    });
+    seedQuestion('run-art');
+
+    render(<RunChatView runId="run-art" />);
+
+    // No artifact → card keeps the inline "Show preview" toggle, no "in pane" CTAs.
+    expect(await screen.findByText('Show preview')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /in pane/i })).not.toBeInTheDocument();
   });
 });
