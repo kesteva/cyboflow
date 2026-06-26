@@ -25,6 +25,7 @@ import {
 } from '../../../../shared/types/workflows';
 import { DEFAULT_WORKFLOW_NAME } from './wizard/workflowMeta';
 import { useSessionMetrics, formatTokenCount } from '../../hooks/useSessionMetrics';
+import { computeSessionCostUsd, formatCostUsd } from '../../utils/modelPricing';
 import { useLaunchWorkflow } from '../../hooks/useLaunchWorkflow';
 import { IdeaPickerModal } from './IdeaPickerModal';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
@@ -311,6 +312,9 @@ export function QuickSessionCanvas({
     { key: 'cache-write', label: 'Cache write', value: cacheWrite },
     { key: 'cache-read', label: 'Cache read', value: cacheRead },
   ];
+  // Estimated USD cost of the whole-session token usage at the model's list
+  // price (null → '—' when the model is unknown).
+  const costLabel = formatCostUsd(computeSessionCostUsd(metrics.tokenBreakdown, metrics.model));
   const error = launchError ?? listError;
 
   return (
@@ -586,6 +590,31 @@ export function QuickSessionCanvas({
                     </span>
                   </div>
                 ))}
+                {/* Estimated cost — whole-session token usage at the model's
+                    list price; '—' when the model is unknown. */}
+                <div
+                  data-testid="quick-session-cost"
+                  style={{
+                    marginTop: 4,
+                    paddingTop: 6,
+                    borderTop: '1px dashed var(--color-border-primary)',
+                    display: 'flex',
+                    alignItems: 'baseline',
+                    justifyContent: 'space-between',
+                    fontSize: 10.5,
+                  }}
+                >
+                  <span style={{ color: 'var(--color-text-tertiary)' }}>Cost</span>
+                  <span
+                    style={{
+                      color: 'var(--color-text-primary)',
+                      fontWeight: 700,
+                      fontVariantNumeric: 'tabular-nums',
+                    }}
+                  >
+                    {costLabel}
+                  </span>
+                </div>
               </div>
             </div>
           </div>

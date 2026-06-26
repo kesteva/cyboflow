@@ -2216,6 +2216,18 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         messageCount = databaseService.getConversationMessageCount(sessionId);
       }
       
+      // Resolve the session's model from its Claude panel state (model is
+      // managed at panel level, not on the session row). Used by the live
+      // session meter to price token usage. Null when unknown.
+      const statsPanelModel = ((): string | null => {
+        const cs = statsClaudePanels[0]?.state?.customState;
+        if (cs && typeof cs === 'object' && 'model' in cs) {
+          const m = (cs as { model?: unknown }).model;
+          return typeof m === 'string' ? m : null;
+        }
+        return null;
+      })();
+
       // Get session outputs count by type
       const outputCounts = databaseService.getSessionOutputCounts(sessionId);
       
@@ -2227,7 +2239,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           id: session.id,
           name: session.name,
           status: session.status,
-          // Model is now managed at panel level, not session level
+          // Model is managed at panel level; surfaced here for the session meter.
+          model: statsPanelModel,
           createdAt: session.createdAt,
           updatedAt: session.lastActivity || session.createdAt,
           duration: duration,
