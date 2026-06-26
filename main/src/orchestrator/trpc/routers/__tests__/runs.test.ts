@@ -2432,3 +2432,86 @@ describe('cyboflow.runs.listFiles / readFile', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// cyboflow.runs.gitDiff — run-scoped working-directory Diff tab.
+//
+// The diff capture is performed via the injected ctx.gitDiff closure (backed by
+// GitDiffManager in index.ts), so the tests stub it and assert the router:
+//   (a) resolves workflow_runs.worktree_path and forwards it to ctx.gitDiff,
+//       returning the dep's payload verbatim;
+//   (b) returns null when the run has no worktree_path (without calling the dep);
+//   (c) throws NOT_FOUND for an unknown run;
+//   (d) throws PRECONDITION_FAILED when ctx.db is missing;
+//   (e) throws PRECONDITION_FAILED when ctx.gitDiff is not wired.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.gitDiff (run-scoped Diff tab)', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('(a) resolves worktree_path → forwards to ctx.gitDiff and returns its payload', async () => {
+    const { runId } = seedRun(db, { worktreePath: '/tmp/run-worktree' });
+    const payload = {
+      diff: 'diff --git a/x.ts b/x.ts\n@@ -0,0 +1 @@\n+hi\n',
+      stats: { additions: 1, deletions: 0, filesChanged: 1 },
+      changedFiles: ['x.ts'],
+    };
+    const gitDiff = vi.fn().mockResolvedValue(payload);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db), gitDiff }));
+    const result = await caller.cyboflow.runs.gitDiff({ runId });
+
+    expect(gitDiff).toHaveBeenCalledWith('/tmp/run-worktree');
+    expect(result).toEqual(payload);
+  });
+
+  it('(b) no worktree_path → returns null without calling ctx.gitDiff', async () => {
+    const { runId } = seedRun(db);
+    // Clear the worktree path directly (seedRun always sets a default) to model a
+    // not-yet-materialized run.
+    db.prepare('UPDATE workflow_runs SET worktree_path = NULL WHERE id = ?').run(runId);
+    const gitDiff = vi.fn().mockResolvedValue({
+      diff: '',
+      stats: { additions: 0, deletions: 0, filesChanged: 0 },
+      changedFiles: [],
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db), gitDiff }));
+    const result = await caller.cyboflow.runs.gitDiff({ runId });
+
+    expect(result).toBeNull();
+    expect(gitDiff).not.toHaveBeenCalled();
+  });
+
+  it('(c) unknown run → NOT_FOUND', async () => {
+    const gitDiff = vi.fn();
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db), gitDiff }));
+    await expect(caller.cyboflow.runs.gitDiff({ runId: 'no-such-run' })).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND',
+    );
+    expect(gitDiff).not.toHaveBeenCalled();
+  });
+
+  it('(d) missing ctx.db → PRECONDITION_FAILED', async () => {
+    const caller = appRouter.createCaller(createContext({ gitDiff: vi.fn() }));
+    await expect(caller.cyboflow.runs.gitDiff({ runId: 'any-run' })).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
+    );
+  });
+
+  it('(e) gitDiff dep not wired → PRECONDITION_FAILED', async () => {
+    const { runId } = seedRun(db);
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(caller.cyboflow.runs.gitDiff({ runId })).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
+    );
+  });
+});

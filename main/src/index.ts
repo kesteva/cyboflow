@@ -1326,7 +1326,20 @@ app.whenReady().then(async () => {
     attachOrchestratorTrpc({
       window: mainWindow,
       router: appRouter,
-      createContext: () => createContext({ db, setDockBadge: (count) => dockBadgeService.setBadgeCount(count), workflowRegistry, agentOverrideRouter: AgentOverrideRouter.getInstance(), getForcedSubstrate: () => configManager.getForcedSubstrate() }),
+      createContext: () => createContext({
+        db,
+        setDockBadge: (count) => dockBadgeService.setBadgeCount(count),
+        workflowRegistry,
+        agentOverrideRouter: AgentOverrideRouter.getInstance(),
+        getForcedSubstrate: () => configManager.getForcedSubstrate(),
+        // Run-scoped Diff tab: closure over GitDiffManager keeps the standalone
+        // runs router free of a services/* import. Narrow the GitDiffResult down
+        // to the RunGitDiff wire shape (diff + stats + changedFiles).
+        gitDiff: async (worktreePath: string) => {
+          const result = await gitDiffManager.captureWorkingDirectoryDiff(worktreePath);
+          return { diff: result.diff, stats: result.stats, changedFiles: result.changedFiles };
+        },
+      }),
     });
     console.log('[Main] Orchestrator started and tRPC IPC handler attached');
 

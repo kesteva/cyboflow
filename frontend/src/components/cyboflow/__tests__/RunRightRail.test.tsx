@@ -3,12 +3,14 @@
  *
  * After TASK-783, RunRightRail accepts phaseState as a required prop and forwards
  * it to WorkflowProgressTimeline.  Tests pass EMPTY_PHASE_STATE or LOADED_PHASE_STATE
- * fixtures directly — no tRPC mock needed.
+ * fixtures directly — no tRPC mock needed. The rail now also accepts
+ * `collapsed` + `onToggleCollapse` (whole-rail collapse, lifted to CyboflowRoot)
+ * — supplied via the renderRail() helper which defaults collapsed=false.
  *
  * Behaviors verified:
- *   1. Renders two tabs (Workflow Progress / File Explorer) — the standalone Diff
- *      tab was removed (per-file diffs open as center-pane tabs); Workflow Progress
- *      is default selected; shows empty-state when activeRunId is null.
+ *   1. Renders four tabs (Workflow Progress / File Explorer / Diff / Artifacts);
+ *      Workflow Progress is default selected; shows empty-state when activeRunId
+ *      is null.
  *   2. Clicking File Explorer with no active quick session shows its empty state
  *      and hides the Workflow Progress panel.
  *   3. Clicking File Explorer WITH an active quick session mounts SessionFileExplorer
@@ -18,6 +20,9 @@
  *   5. Mounts WorkflowProgressTimeline in the workflow-progress tab when activeRunId is set
  *      (timeline renders phase sections from the phaseState prop).
  *   6. Shows empty state in workflow-progress tab when activeRunId is null.
+ *   7. The Diff tab mounts RunDiffTabPanel (keyed by the active run) during a run.
+ *   8. Whole-rail collapse: collapsed=true renders the thin strip with only an
+ *      expand affordance; the expand/collapse chevrons call onToggleCollapse.
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, act } from '@testing-library/react';
@@ -55,6 +60,14 @@ vi.mock('../SessionFileExplorer', () => ({
         </button>
       )}
     </div>
+  ),
+}));
+
+// Stub RunDiffTabPanel so the Diff-tab test can assert the rail mounts it (keyed
+// by the active run) WITHOUT firing real tRPC (gitDiff.query).
+vi.mock('../RunDiffTabPanel', () => ({
+  RunDiffTabPanel: ({ runId }: { runId: string }) => (
+    <div data-testid="run-diff-tab-panel-mock">{runId}</div>
   ),
 }));
 
@@ -110,20 +123,41 @@ beforeEach(() => {
 });
 
 // ---------------------------------------------------------------------------
+// Render helper — supplies the collapse props (default expanded) so each test
+// only overrides what it cares about.
+// ---------------------------------------------------------------------------
+
+function renderRail(
+  phaseState: UseWorkflowPhaseStateResult,
+  opts?: { collapsed?: boolean; onToggleCollapse?: () => void },
+) {
+  return render(
+    <RunRightRail
+      phaseState={phaseState}
+      collapsed={opts?.collapsed ?? false}
+      onToggleCollapse={opts?.onToggleCollapse ?? (() => {})}
+    />,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 describe('RunRightRail', () => {
-  it('renders two tabs (no Diff); Workflow Progress is selected by default and shows empty state when no activeRunId', () => {
-    render(<RunRightRail phaseState={EMPTY_PHASE_STATE} />);
+  it('renders four tabs (incl. run-scoped Diff); Workflow Progress is selected by default and shows empty state when no activeRunId', () => {
+    renderRail(EMPTY_PHASE_STATE);
 
     const wpTab = screen.getByRole('tab', { name: 'Workflow Progress' });
     const feTab = screen.getByRole('tab', { name: 'File Explorer' });
+    const diffTab = screen.getByRole('tab', { name: 'Diff' });
+    const artifactsTab = screen.getByRole('tab', { name: 'Artifacts' });
 
     expect(wpTab).toBeInTheDocument();
     expect(feTab).toBeInTheDocument();
-    // The standalone Diff tab was removed in the tabbed-center-pane work.
-    expect(screen.queryByRole('tab', { name: 'Diff' })).not.toBeInTheDocument();
+    // The run-scoped Diff tab is back (keyed by runId, not sessionId).
+    expect(diffTab).toBeInTheDocument();
+    expect(artifactsTab).toBeInTheDocument();
 
     expect(wpTab.getAttribute('aria-selected')).toBe('true');
     expect(feTab.getAttribute('aria-selected')).toBe('false');
@@ -143,7 +177,7 @@ describe('RunRightRail', () => {
       useCyboflowStore.setState({ selectedSessionId: null });
     });
 
-    render(<RunRightRail phaseState={EMPTY_PHASE_STATE} />);
+    renderRail(EMPTY_PHASE_STATE);
 
     expect(screen.getByTestId('run-right-rail-workflow-progress-empty')).toBeInTheDocument();
 
@@ -165,7 +199,7 @@ describe('RunRightRail', () => {
       useCyboflowStore.setState({ selectedSessionId: 'session-fe-001' });
     });
 
-    render(<RunRightRail phaseState={EMPTY_PHASE_STATE} />);
+    renderRail(EMPTY_PHASE_STATE);
 
     fireEvent.click(screen.getByRole('tab', { name: 'File Explorer' }));
 
@@ -184,7 +218,7 @@ describe('RunRightRail', () => {
       useCyboflowStore.getState().setActiveRun('run-x', 'session-fe-001');
     });
 
-    render(<RunRightRail phaseState={EMPTY_PHASE_STATE} />);
+    renderRail(EMPTY_PHASE_STATE);
     // Flush SprintLanesPanel's lane snapshot (global stub resolves []).
     await act(async () => {
       await Promise.resolve();
@@ -201,7 +235,7 @@ describe('RunRightRail', () => {
   });
 
   it('shows empty state in workflow-progress tab when activeRunId is null', () => {
-    render(<RunRightRail phaseState={EMPTY_PHASE_STATE} />);
+    renderRail(EMPTY_PHASE_STATE);
 
     expect(screen.getByTestId('run-right-rail-workflow-progress-empty')).toBeInTheDocument();
   });
@@ -211,7 +245,7 @@ describe('RunRightRail', () => {
       useCyboflowStore.getState().setActiveRun('run-test-rail-001');
     });
 
-    render(<RunRightRail phaseState={LOADED_PHASE_STATE} />);
+    renderRail(LOADED_PHASE_STATE);
     // Flush SprintLanesPanel's lane snapshot (global stub resolves []) so the
     // async state update lands inside act.
     await act(async () => {
@@ -220,6 +254,69 @@ describe('RunRightRail', () => {
 
     expect(screen.queryByTestId('run-right-rail-workflow-progress-empty')).not.toBeInTheDocument();
     expect(screen.getByTestId('phase-section-phase-1')).toBeInTheDocument();
+  });
+
+  it('clicking the Diff tab during an active run mounts RunDiffTabPanel keyed by the run', async () => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-diff-rail-001');
+    });
+
+    renderRail(LOADED_PHASE_STATE);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+
+    const panel = screen.getByTestId('run-diff-tab-panel-mock');
+    expect(panel).toBeInTheDocument();
+    expect(panel).toHaveTextContent('run-diff-rail-001');
+  });
+
+  it('clicking the Diff tab with no active run shows the no-run empty state', () => {
+    renderRail(EMPTY_PHASE_STATE);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+
+    expect(screen.getByTestId('run-right-rail-diff-empty-norun')).toBeInTheDocument();
+    expect(screen.queryByTestId('run-diff-tab-panel-mock')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Whole-rail collapse (lifted to CyboflowRoot; persisted there). RunRightRail
+// only renders the collapsed/expanded shells + fires onToggleCollapse.
+// ---------------------------------------------------------------------------
+
+describe('RunRightRail — whole-rail collapse', () => {
+  it('collapsed=true renders the thin strip with only an expand affordance (no tabs)', () => {
+    renderRail(EMPTY_PHASE_STATE, { collapsed: true });
+
+    const strip = screen.getByTestId('run-right-rail-collapsed');
+    expect(strip).toBeInTheDocument();
+    expect(strip).toHaveClass('w-[28px]');
+    expect(strip).toHaveClass('border-l');
+
+    // The expanded shell (and its tabs) is not rendered while collapsed.
+    expect(screen.queryByTestId('run-right-rail')).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Workflow Progress' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('run-right-rail-expand')).toBeInTheDocument();
+  });
+
+  it('the expand chevron calls onToggleCollapse when collapsed', () => {
+    const onToggleCollapse = vi.fn();
+    renderRail(EMPTY_PHASE_STATE, { collapsed: true, onToggleCollapse });
+
+    fireEvent.click(screen.getByTestId('run-right-rail-expand'));
+    expect(onToggleCollapse).toHaveBeenCalledTimes(1);
+  });
+
+  it('the collapse chevron calls onToggleCollapse when expanded', () => {
+    const onToggleCollapse = vi.fn();
+    renderRail(EMPTY_PHASE_STATE, { collapsed: false, onToggleCollapse });
+
+    fireEvent.click(screen.getByTestId('run-right-rail-collapse'));
+    expect(onToggleCollapse).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -269,7 +366,7 @@ function renderTimelineHtml(envelope: StreamEvent): string {
     useCyboflowStore.getState().setActiveRun(RUN_ID);
     useCyboflowStore.getState().appendStreamEvent(envelope);
   });
-  const { container, unmount } = render(<RunRightRail phaseState={LOADED_PHASE_STATE} />);
+  const { container, unmount } = renderRail(LOADED_PHASE_STATE);
   const html = (container.querySelector('[role="tabpanel"]') as HTMLElement).innerHTML;
   unmount();
   return html;

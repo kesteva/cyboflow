@@ -21,7 +21,7 @@ import { selectRunUnifiedMessages } from '../../runUnifiedMessagesListing';
 import { selectRunRawStreamEvents } from '../../runRawEventsListing';
 import { listRunFiles, readRunFile } from '../../runFileExplorer';
 import { withRunFileErrorMapping } from '../runFileErrors';
-import type { RunFileEntry, RunFileContent } from '../../../../../shared/types/runFiles';
+import type { RunFileEntry, RunFileContent, RunGitDiff } from '../../../../../shared/types/runFiles';
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
@@ -1120,6 +1120,49 @@ export const runsRouter = router({
         throw new TRPCError({ code: 'NOT_FOUND', message: `Run ${input.runId} not found` });
       }
       return row;
+    }),
+
+  /**
+   * Capture the working-directory diff of a run's git worktree (run-scoped Diff
+   * tab). Flow runs have workflow_runs.session_id = NULL and are keyed by runId,
+   * so the session-scoped diff path (sessions:get-combined-diff) cannot serve
+   * them — the worktree is resolved here from workflow_runs.worktree_path.
+   *
+   * Returns the raw unified diff + aggregate stats, or `null` when the run has no
+   * worktree_path (e.g. a not-yet-materialized run). An empty `diff` string means
+   * the worktree exists but has no working-directory changes.
+   *
+   * Standalone-typecheck invariant: the diff capture is performed via the
+   * injected `ctx.gitDiff` closure (backed by GitDiffManager in index.ts), NOT a
+   * direct services/* import. Mirrors `get` for the ctx.db precondition guard and
+   * adds a ctx.gitDiff precondition (PRECONDITION_FAILED until wired at boot).
+   */
+  gitDiff: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .query(async ({ ctx, input }): Promise<RunGitDiff | null> => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      if (!ctx.gitDiff) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'gitDiff not wired into tRPC context',
+        });
+      }
+      const row = ctx.db
+        .prepare('SELECT worktree_path FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { worktree_path: string | null } | undefined;
+      if (!row) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: `Run ${input.runId} not found` });
+      }
+      if (!row.worktree_path) {
+        // No worktree yet (e.g. a not-yet-materialized run) — nothing to diff.
+        return null;
+      }
+      return ctx.gitDiff(row.worktree_path);
     }),
 
   /**

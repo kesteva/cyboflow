@@ -1,7 +1,7 @@
 /**
  * RunRightRail — fixed-width right rail in the CyboflowRoot two-column layout.
  *
- * Contains three tabs:
+ * Contains four tabs:
  *   - Workflow Progress (default selected) — live WorkflowProgressTimeline (plus the
  *     per-task SprintLanesPanel for sprint runs) when activeRunId is non-null; neutral
  *     empty state otherwise.
@@ -9,26 +9,35 @@
  *     During an active run it is the LAUNCHER for center-pane file/diff tabs (clicking
  *     a file opens a center tab via centerPaneStore.openFileTab); otherwise it falls
  *     back to its own read-only takeover viewer.
+ *   - Diff — the run-scoped working-directory diff (RunDiffTabPanel) for the active
+ *     run. Flow runs are keyed by runId (workflow_runs.session_id is NULL), so the
+ *     session-scoped combined-diff path can't serve them; this tab fetches
+ *     cyboflow.runs.gitDiff (worktree_path-resolved) instead.
  *   - Artifacts — the "RUN DELIVERABLES" reopen surface (ArtifactsPanel) when
  *     activeRunId is non-null; lists every artifact the run produced so closed
  *     center-pane tabs can be reopened. projectId is resolved from the active run
  *     row in useActiveRunsStore (the row carries project_id) — RunRightRail takes
  *     no extra prop (CyboflowRoot is owned by the orchestrator).
  *
- * The standalone Diff tab was removed: per-file diffs now open as center-pane file
- * tabs (FileTabRenderer).
+ * Collapse: the WHOLE rail is collapsible. `collapsed` + `onToggleCollapse` are
+ * lifted to CyboflowRoot (persisted to localStorage); when collapsed the rail
+ * renders a thin ~28px strip with only a re-expand chevron (affordance mirrors
+ * TerminalDock's header chevron). When expanded a collapse chevron sits in the
+ * tab bar.
  */
 import { useState } from 'react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { WorkflowProgressTimeline } from './WorkflowProgressTimeline';
 import { SprintLanesPanel } from './SprintLanesPanel';
 import { SessionFileExplorer } from './SessionFileExplorer';
+import { RunDiffTabPanel } from './RunDiffTabPanel';
 import { ArtifactsPanel } from './ArtifactsPanel';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 
-type TabId = 'workflow-progress' | 'file-explorer' | 'artifacts';
+type TabId = 'workflow-progress' | 'file-explorer' | 'diff' | 'artifacts';
 
 interface Tab {
   id: TabId;
@@ -46,6 +55,11 @@ const TABS: Tab[] = [
     id: 'file-explorer',
     label: 'File Explorer',
     testid: 'run-right-rail-tab-file-explorer',
+  },
+  {
+    id: 'diff',
+    label: 'Diff',
+    testid: 'run-right-rail-tab-diff',
   },
   {
     id: 'artifacts',
@@ -72,7 +86,15 @@ function selectActiveRunProjectId(
   return null;
 }
 
-export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseStateResult }) {
+interface RunRightRailProps {
+  phaseState: UseWorkflowPhaseStateResult;
+  /** Whether the rail is collapsed to a thin re-expand strip. */
+  collapsed: boolean;
+  /** Toggle the collapsed state (lifted to + persisted by CyboflowRoot). */
+  onToggleCollapse: () => void;
+}
+
+export function RunRightRail({ phaseState, collapsed, onToggleCollapse }: RunRightRailProps) {
   const [activeTab, setActiveTab] = useState<TabId>('workflow-progress');
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const selectedSessionId = useCyboflowStore((s) => s.selectedSessionId);
@@ -86,15 +108,37 @@ export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseState
 
   const currentTab = TABS.find((t) => t.id === activeTab) ?? TABS[0];
 
+  // Collapsed: a thin strip with only a re-expand chevron (affordance mirrors
+  // TerminalDock's header chevron). The center column reclaims the rail's width.
+  if (collapsed) {
+    return (
+      <aside
+        data-testid="run-right-rail-collapsed"
+        className="w-[28px] shrink-0 flex flex-col items-center border-l border-border-primary bg-bg-secondary"
+      >
+        <button
+          type="button"
+          data-testid="run-right-rail-expand"
+          aria-label="Expand right rail"
+          title="Expand right rail"
+          onClick={onToggleCollapse}
+          className="flex h-8 w-full items-center justify-center text-text-tertiary hover:text-text-primary"
+        >
+          <ChevronLeft size={14} />
+        </button>
+      </aside>
+    );
+  }
+
   return (
     <aside
       data-testid="run-right-rail"
       className="w-[296px] shrink-0 flex flex-col border-l border-border-primary bg-bg-primary"
     >
-      {/* Tab bar */}
+      {/* Tab bar — trailing collapse chevron mirrors TerminalDock's affordance. */}
       <div
         role="tablist"
-        className="flex border-b border-border-primary"
+        className="flex items-stretch border-b border-border-primary"
       >
         {TABS.map((tab) => {
           const isActive = tab.id === activeTab;
@@ -116,6 +160,16 @@ export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseState
             </button>
           );
         })}
+        <button
+          type="button"
+          data-testid="run-right-rail-collapse"
+          aria-label="Collapse right rail"
+          title="Collapse right rail"
+          onClick={onToggleCollapse}
+          className="flex w-7 shrink-0 items-center justify-center border-l border-border-primary text-text-tertiary hover:text-text-primary"
+        >
+          <ChevronRight size={14} />
+        </button>
       </div>
 
       {/* Tab content */}
@@ -158,6 +212,21 @@ export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseState
               className="p-4 text-sm text-text-secondary"
             >
               Select a session to view its files.
+            </div>
+          )
+        ) : currentTab.id === 'diff' ? (
+          // Diff tab — run-scoped working-directory diff (keyed by runId, not
+          // sessionId, since flow runs have session_id NULL).
+          activeRunId !== null ? (
+            <div className="h-full overflow-hidden">
+              <RunDiffTabPanel runId={activeRunId} />
+            </div>
+          ) : (
+            <div
+              data-testid="run-right-rail-diff-empty-norun"
+              className="p-4 text-sm text-text-secondary"
+            >
+              No active run
             </div>
           )
         ) : (

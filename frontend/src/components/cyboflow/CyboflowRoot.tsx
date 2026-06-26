@@ -64,10 +64,30 @@ interface CyboflowRootProps {
   projectId: number | null;
 }
 
+/** localStorage key for the right-rail collapsed state. Brand-new key — no migration. */
+const RAIL_COLLAPSED_KEY = 'cyboflow.runRightRail.collapsed';
+
 export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const phaseState = useWorkflowPhaseState(activeRunId);
   const [isPickerOpen, setIsPickerOpen] = useState(false);
+
+  // Whole-rail collapse — lifted here (the parent that sizes the rail) and
+  // persisted to localStorage so it survives reloads. (Brand-new key — no
+  // migrateLocalStorageKey needed.)
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => {
+    if (typeof localStorage === 'undefined') return false;
+    return localStorage.getItem(RAIL_COLLAPSED_KEY) === 'true';
+  });
+  const handleToggleRail = useCallback(() => {
+    setRailCollapsed((prev) => {
+      const next = !prev;
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(RAIL_COLLAPSED_KEY, next ? 'true' : 'false');
+      }
+      return next;
+    });
+  }, []);
   // "Add a workflow" on an interactive (PTY) session: a second workflow can't run
   // in the live-REPL session (descoped), so the affordance first confirms it will
   // launch in a SEPARATE session, then opens the picker with forceNewSession set.
@@ -370,8 +390,13 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           )}
         </div>
 
-        {/* Right rail — always rendered as layout shell (296px fixed) */}
-        <RunRightRail phaseState={phaseState} />
+        {/* Right rail — always rendered as layout shell (296px fixed, or a thin
+            collapsed strip). Collapse state is lifted here + persisted. */}
+        <RunRightRail
+          phaseState={phaseState}
+          collapsed={railCollapsed}
+          onToggleCollapse={handleToggleRail}
+        />
       </div>
 
       {/* WorkflowPicker modal — only rendered when projectId is a number */}

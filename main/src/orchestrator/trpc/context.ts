@@ -12,6 +12,7 @@
 import type { DatabaseLike } from '../types';
 import type { PermissionMode, WorkflowRow, WorkflowDefinition } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
+import type { RunGitDiff } from '../../../../shared/types/runFiles';
 import type { WorkflowDescriptor } from '../workflowRegistry';
 import type { AgentOverrideRow } from '../../database/models';
 
@@ -145,6 +146,18 @@ export interface ContextDeps {
    * interactive-PTY-only pin. Defaults to `() => null` (no pin).
    */
   getForcedSubstrate?: () => CliSubstrate | null;
+
+  /**
+   * Captures the working-directory diff of an absolute worktree path.
+   *
+   * Backs cyboflow.runs.gitDiff (the run-scoped Diff tab). Injected from
+   * `main/src/index.ts` as a closure over GitDiffManager.captureWorkingDirectoryDiff
+   * — kept as a plain function (like `setDockBadge`) so the standalone-typecheck
+   * invariant holds (the router never imports 'main/src/services/gitDiffManager').
+   * Returns the raw unified diff + aggregate stats. When omitted (unit tests that
+   * don't need it), the gitDiff procedure throws PRECONDITION_FAILED.
+   */
+  gitDiff?: (worktreePath: string) => Promise<RunGitDiff>;
 }
 
 /**
@@ -166,6 +179,7 @@ export function createContext(deps: ContextDeps = {}): {
   workflowRegistry?: WorkflowRegistryLike;
   agentOverrideRouter?: AgentOverrideRouterLike;
   getForcedSubstrate: () => CliSubstrate | null;
+  gitDiff?: (worktreePath: string) => Promise<RunGitDiff>;
 } {
   const {
     setDockBadge = (_count: number) => undefined,
@@ -173,6 +187,7 @@ export function createContext(deps: ContextDeps = {}): {
     workflowRegistry,
     agentOverrideRouter,
     getForcedSubstrate = () => null,
+    gitDiff,
   } = deps;
   return {
     userId: 'local' as const,
@@ -181,6 +196,7 @@ export function createContext(deps: ContextDeps = {}): {
     workflowRegistry,
     agentOverrideRouter,
     getForcedSubstrate,
+    gitDiff,
   };
 }
 
