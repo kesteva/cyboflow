@@ -134,9 +134,13 @@ something a human will want to *see*, report it as a run artifact via
 
 - a runnable app / dev server → `atype: 'ui-prototype'`, `payload_json` with the
   localhost URL, e.g. `{"url":"http://localhost:5173"}`.
-- captured screenshots (e.g. from visual-verify) → `atype: 'screenshots'`,
-  `payload_json` `{"fileNames":["home.png","detail.png"]}` (basenames of PNGs the
-  visual-verifier wrote under the run's artifacts dir).
+- captured screenshots — whenever the **visual-verify** step produced image files,
+  you **MUST** surface them: ensure the PNGs live under the run artifacts dir
+  (run `mkdir -p "$CYBOFLOW_RUN_ARTIFACTS_DIR"` then write/copy them there), then
+  report `atype: 'screenshots'` with `payload_json`
+  `{"fileNames":["home.png","detail.png"]}` — the **basenames** of those files.
+  The `cyboflow-visual-verify` subagent returns the basenames it captured in its
+  `## Visual check`. Screenshots are NOT auto-created; only this report surfaces them.
 - any other generated report / live canvas → `atype: 'generic'`.
 
 This is purely additive — never a substitute for a `cyboflow_report_step` call or a

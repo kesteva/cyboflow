@@ -187,7 +187,11 @@ calls in one message); as each returns, you continue that task's chain.
    `cyboflow-implement` with its `## Visual check` notes, or record a finding via
    `cyboflow_report_finding` when the regression is out of scope. Verify-phase
    findings must carry a `severity`; when a regression traces to already-merged
-   work, set `category: 'post-merge-bug'`.
+   work, set `category: 'post-merge-bug'`. When the subagent captured screenshots
+   (it returns their basenames + wrote them under `$CYBOFLOW_RUN_ARTIFACTS_DIR`),
+   you **MUST** surface them: report `cyboflow_report_artifact` with
+   `atype: 'screenshots'` and `payload_json` `{"fileNames":["home.png",...]}` (the
+   basenames). Screenshots are NOT auto-created; only this report surfaces them.
 
 If a subagent comes back stuck (no usable result), re-delegate it **once** with a
 sharper, narrower scope; if it is still stuck, mark the lane `failed` and move on.
