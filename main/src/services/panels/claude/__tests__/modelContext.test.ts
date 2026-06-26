@@ -22,6 +22,8 @@ describe('modelContext', () => {
       expect(modelSupportsContext1M('opus')).toBe(false);
       expect(modelSupportsContext1M('haiku')).toBe(false);
       expect(modelSupportsContext1M('claude-opus-4-8')).toBe(false);
+      // Opus 1M rides the [1m] id suffix, never the Sonnet-only beta.
+      expect(modelSupportsContext1M('claude-opus-4-8[1m]')).toBe(false);
     });
 
     it('rejects auto/empty (resolved model unknown — beta is Sonnet-only)', () => {
@@ -39,13 +41,14 @@ describe('modelContext', () => {
 
   describe('resolveModelAlias', () => {
     it('pins the bare aliases to current concrete snapshots', () => {
-      expect(resolveModelAlias('opus')).toBe('claude-opus-4-8');
+      // Opus carries the [1m] suffix (its 1M window comes from the id, not a beta).
+      expect(resolveModelAlias('opus')).toBe('claude-opus-4-8[1m]');
       expect(resolveModelAlias('sonnet')).toBe('claude-sonnet-4-6');
       expect(resolveModelAlias('haiku')).toBe('claude-haiku-4-5');
     });
 
     it('matches aliases case/space-insensitively', () => {
-      expect(resolveModelAlias('Opus')).toBe('claude-opus-4-8');
+      expect(resolveModelAlias('Opus')).toBe('claude-opus-4-8[1m]');
       expect(resolveModelAlias(' SONNET ')).toBe('claude-sonnet-4-6');
     });
 

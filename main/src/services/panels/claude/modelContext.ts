@@ -20,10 +20,15 @@ export const CONTEXT_1M_BETA: SdkBeta = 'context-1m-2025-08-07';
  * current concrete id at the spawn seam takes the resolution out of the SDK's
  * hands: Opus 4.8 and Sonnet 4.6 are both 1M-context at standard pricing.
  *
+ * Opus carries the `[1m]` model-id suffix — Opus's 1M window is requested by the
+ * suffix on the id itself (the runtime reports a 1,000,000 window for it), NOT by
+ * the Sonnet-only {@link CONTEXT_1M_BETA}. Sonnet's 1M still rides that beta (it
+ * is applied from the bare `claude-sonnet-4-6` id at the SDK seam).
+ *
  * Keep these in sync with the latest GA snapshots when models roll forward.
  */
 const MODEL_ALIAS_TO_ID: Readonly<Record<string, string>> = {
-  opus: 'claude-opus-4-8',
+  opus: 'claude-opus-4-8[1m]',
   sonnet: 'claude-sonnet-4-6',
   haiku: 'claude-haiku-4-5',
 };
