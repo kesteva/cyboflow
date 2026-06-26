@@ -177,7 +177,10 @@
 
   /* Buttons */
   --color-button-primary-bg: var(--terracotta);
-  --color-button-primary-hover: var(--ink);
+  /* Deepen the same hue on hover (matches --color-interactive-hover); inverting
+     a filled primary CTA to --ink painted a near-black slab that swallowed its
+     own label. Mirrors the dark/light themes (blue-700 / lilac-600). */
+  --color-button-primary-hover: var(--terracotta-deep);
   --color-button-primary-text: var(--paper);
   --color-button-secondary-bg: var(--paper-white);
   --color-button-secondary-hover: var(--paper-2);
