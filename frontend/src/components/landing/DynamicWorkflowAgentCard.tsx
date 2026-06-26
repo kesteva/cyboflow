@@ -24,6 +24,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { DynamicWorkflowRunState } from '../../../../shared/types/dynamicWorkflows';
 import { formatElapsed } from '../../utils/homeClassify';
+import { DynamicWorkflowAgents } from '../cyboflow/DynamicWorkflowAgents';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 
@@ -41,6 +42,10 @@ function openWorkflowSession(state: DynamicWorkflowRunState): void {
 }
 
 export function DynamicWorkflowAgentCard({ state }: DynamicWorkflowAgentCardProps): React.JSX.Element {
+  // Expand toggle (the ▸ in the now line) — reveals the full live workflow state
+  // (stage-bucketed agents) inline, without leaving the review queue.
+  const [expanded, setExpanded] = useState<boolean>(false);
+
   // Wall-clock counter — bumps every ~30s so elapsed re-renders without a
   // per-second timer. formatElapsed reads the current epoch-ms each render.
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
@@ -96,14 +101,23 @@ export function DynamicWorkflowAgentCard({ state }: DynamicWorkflowAgentCardProp
         </div>
       )}
 
-      {/* Now line */}
+      {/* Now line — the ▸ toggles the inline expanded workflow state. */}
       <div className="mt-3 flex flex-wrap items-baseline gap-x-2 gap-y-1 text-text-tertiary" style={{ fontSize: '11px' }}>
-        <span className="truncate text-text-secondary">
-          ▸{' '}
+        <button
+          type="button"
+          onClick={() => setExpanded((e) => !e)}
+          aria-expanded={expanded}
+          className="flex items-center gap-1 truncate text-text-secondary hover:text-text-primary"
+          title={expanded ? 'Hide agents' : 'Show agents'}
+          data-testid="dynamic-workflow-card-toggle"
+        >
+          <span aria-hidden="true" style={{ fontSize: 9 }}>
+            {expanded ? '▾' : '▸'}
+          </span>
           <span className="font-bold text-text-primary">
             {runningCount} running · {doneCount} done
           </span>
-        </span>
+        </button>
         <span>{elapsed}</span>
         <button
           type="button"
@@ -113,6 +127,9 @@ export function DynamicWorkflowAgentCard({ state }: DynamicWorkflowAgentCardProp
           Open →
         </button>
       </div>
+
+      {/* Expanded workflow state — stage-bucketed (or flat) live agent list. */}
+      {expanded && <DynamicWorkflowAgents state={state} nowMs={nowMs} />}
     </div>
   );
 }
