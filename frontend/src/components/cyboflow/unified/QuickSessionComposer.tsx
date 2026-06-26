@@ -4,6 +4,7 @@ import { API } from '../../../utils/api';
 import type { IPCResponse } from '../../../utils/api';
 import { CommitModePill } from '../../CommitModeToggle';
 import { ModelPill } from './ModelPill';
+import { FastModePill } from './FastModePill';
 import { PermissionModePill } from './PermissionModePill';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { UnifiedComposer } from './UnifiedComposer';
@@ -77,10 +78,14 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
 
   // Read-only model display (set at session start; mid-session change deferred).
   // The model lives on the panel settings, not the Session row, so we fetch it.
+  // The Opus-only fast-mode opt-in lives there too (persisted at launch); read it
+  // so the composer toggle reflects the launch choice.
   const [modelId, setModelId] = useState<string | null>(null);
+  const [fastMode, setFastMode] = useState(false);
   useEffect(() => {
     if (interactive || !panelId) {
       setModelId(null);
+      setFastMode(false);
       return;
     }
     let cancelled = false;
@@ -92,10 +97,31 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       .catch(() => {
         /* non-fatal: no model pill */
       });
+    API.claudePanels
+      .getFastMode(panelId)
+      .then((res) => {
+        if (!cancelled && res.success && typeof res.data === 'boolean') setFastMode(res.data);
+      })
+      .catch(() => {
+        /* non-fatal: fast toggle stays off */
+      });
     return () => {
       cancelled = true;
     };
   }, [interactive, panelId]);
+
+  // Switching away from Opus drops fast mode (it is Opus-only; the spawn seam
+  // threads the persisted value ungated, so we never leave it true off-Opus).
+  const handleModelChange = useCallback(
+    (model: string) => {
+      setModelId(model);
+      if (model !== 'opus' && fastMode && panelId) {
+        setFastMode(false);
+        void API.claudePanels.setFastMode(panelId, false);
+      }
+    },
+    [fastMode, panelId],
+  );
 
   const visibility = resolveChatVisibility({
     transport,
@@ -143,7 +169,15 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   // in-flight turn already chose its model). PTY/flow runs never get this.
   const modelSlot =
     !interactive && !running && panelId ? (
-      <ModelPill panelId={panelId} currentModel={modelId} onModelChange={setModelId} />
+      <ModelPill panelId={panelId} currentModel={modelId} onModelChange={handleModelChange} />
+    ) : undefined;
+
+  // Opus-only fast-mode toggle, next to the checkpoint pill. Mirrors the model
+  // pill's mounting (idle quick SDK only) and is shown only while Opus is the
+  // selected model — fast mode has no effect on other models.
+  const fastModeSlot =
+    !interactive && !running && panelId && modelId === 'opus' ? (
+      <FastModePill panelId={panelId} fastMode={fastMode} onChange={setFastMode} />
     ) : undefined;
 
   // Interactive agent-permission selector for an IDLE quick SDK session, next to
@@ -218,6 +252,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       permissionSlot={permissionSlot}
       effortLabel={effortLabel}
       checkpointSlot={checkpointSlot}
+      fastSlot={fastModeSlot}
       compactSlot={compactSlot}
     />
   );

@@ -77,6 +77,9 @@ export interface UnifiedComposerProps {
 
   /** checkpoint / commit-mode control (quick) — host supplies the node. */
   checkpointSlot?: React.ReactNode;
+  /** Opus-only fast-mode toggle (quick SDK) — host supplies the node, rendered
+   *  next to the checkpoint pill. */
+  fastSlot?: React.ReactNode;
   /** compact-context control (SDK quick) — host supplies the node. */
   compactSlot?: React.ReactNode;
 }
@@ -106,6 +109,7 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
     permissionSlot,
     effortLabel,
     checkpointSlot,
+    fastSlot,
     compactSlot,
   } = props;
 
@@ -346,8 +350,9 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
         {visibility.showModelEffort && permissionSlot}
         {effortLabel && <ReadonlyPill label={`effort: ${effortLabel}`} />}
 
-        {/* checkpoint / commit-mode (quick) */}
+        {/* checkpoint / commit-mode (quick) + Opus-only fast-mode toggle */}
         {visibility.showCheckpoint && checkpointSlot}
+        {visibility.showCheckpoint && fastSlot}
 
         {/* compact-context (SDK) */}
         {visibility.isSDK && compactSlot}

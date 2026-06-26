@@ -528,6 +528,11 @@ export class API {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.claudePanels.setFastMode(panelId, fastMode);
     },
+
+    async getFastMode(panelId: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.claudePanels.getFastMode(panelId);
+    },
   };
   
 }

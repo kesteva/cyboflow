@@ -173,6 +173,19 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
       }
     });
 
+    // Read the per-panel fast-mode opt-in so the composer toggle can reflect the
+    // launch choice. Mirrors get-model; defaults to false when never set.
+    this.ipcMain.handle('claude-panels:get-fast-mode', async (_event, panelId: string) => {
+      try {
+        const settings = databaseService.getPanelSettings(panelId);
+        const settingsWithDefaults = this.applySettingsDefaults(settings ?? {});
+        return { success: true, data: settingsWithDefaults.fastMode === true };
+      } catch (error) {
+        console.error('Failed to get Claude panel fast mode:', error);
+        return { success: false, error: 'Failed to get Claude panel fast mode' };
+      }
+    });
+
     // Generate compacted context for a Claude panel
     this.ipcMain.handle('claude-panels:generate-compacted-context', async (_event, panelId: string) => {
       try {

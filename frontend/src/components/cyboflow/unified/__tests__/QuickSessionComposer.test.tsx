@@ -6,10 +6,16 @@ import { useRef, useState } from 'react';
 // Mock the panel-model fetch + the interactive send transport.
 const mockSendInput = vi.fn();
 const mockGetModel = vi.fn();
+const mockGetFastMode = vi.fn();
+const mockSetFastMode = vi.fn();
 vi.mock('../../../../utils/api', () => ({
   API: {
     sessions: { sendInput: (id: string, text: string) => mockSendInput(id, text) },
-    claudePanels: { getModel: (id: string) => mockGetModel(id) },
+    claudePanels: {
+      getModel: (id: string) => mockGetModel(id),
+      getFastMode: (id: string) => mockGetFastMode(id),
+      setFastMode: (id: string, v: boolean) => mockSetFastMode(id, v),
+    },
   },
 }));
 
@@ -88,6 +94,8 @@ function Harness(props: {
 beforeEach(() => {
   mockSendInput.mockReset().mockResolvedValue({ success: true });
   mockGetModel.mockReset().mockResolvedValue({ success: true, data: 'sonnet' });
+  mockGetFastMode.mockReset().mockResolvedValue({ success: true, data: false });
+  mockSetFastMode.mockReset().mockResolvedValue({ success: true });
 });
 
 describe('QuickSessionComposer — SDK', () => {
@@ -107,6 +115,22 @@ describe('QuickSessionComposer — SDK', () => {
     fireEvent.change(textarea, { target: { value: 'my answer' } });
     fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
     await waitFor(() => expect(sendIn).toHaveBeenCalledTimes(1));
+  });
+});
+
+describe('QuickSessionComposer — Opus-only fast-mode pill', () => {
+  it('shows the fast-mode toggle for an idle Opus session', async () => {
+    mockGetModel.mockResolvedValue({ success: true, data: 'opus' });
+    render(<Harness session={makeSession({ status: 'ready' })} interactive={false} />);
+    expect(await screen.findByTestId('composer-fast-mode-pill')).toBeInTheDocument();
+  });
+
+  it('hides the fast-mode toggle for a non-Opus model', async () => {
+    mockGetModel.mockResolvedValue({ success: true, data: 'sonnet' });
+    render(<Harness session={makeSession({ status: 'ready' })} interactive={false} />);
+    // The model pill confirms the composer toolbar has rendered…
+    await waitFor(() => expect(mockGetModel).toHaveBeenCalled());
+    expect(screen.queryByTestId('composer-fast-mode-pill')).toBeNull();
   });
 });
 

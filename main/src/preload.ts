@@ -553,6 +553,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getModel: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-model', panelId),
     setModel: (panelId: string, model: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:set-model', panelId, model),
     setFastMode: (panelId: string, fastMode: boolean): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:set-fast-mode', panelId, fastMode),
+    getFastMode: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-fast-mode', panelId),
   },
 
   // Logs panel operations
