@@ -77,7 +77,6 @@ function Harness(props: {
       textareaRef={textareaRef}
       handleSendInput={props.handleSendInput ?? vi.fn()}
       handleContinueConversation={props.handleContinueConversation ?? vi.fn()}
-      onToggleSettings={vi.fn()}
       panelId="panel-1"
       interactive={props.interactive}
       ptyOpen={ptyOpen}

@@ -39,8 +39,6 @@ export interface QuickSessionComposerProps {
   handleStopSession?: () => void;
   handleCompactContext?: () => void;
   hasConversationHistory?: boolean;
-  /** toggle the ClaudeSettingsPanel (⚙). */
-  onToggleSettings: () => void;
   /** panel id — used to read the session's (read-only) model for display. */
   panelId?: string;
   /** interactive (PTY) quick session: composer is ⌃G-revealed. */
@@ -67,7 +65,6 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     handleStopSession,
     handleCompactContext,
     hasConversationHistory,
-    onToggleSettings,
     panelId,
     interactive,
     ptyOpen = false,
@@ -220,7 +217,6 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       modelSlot={modelSlot}
       permissionSlot={permissionSlot}
       effortLabel={effortLabel}
-      onToggleSettings={!interactive ? onToggleSettings : undefined}
       checkpointSlot={checkpointSlot}
       compactSlot={compactSlot}
     />

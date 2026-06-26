@@ -334,7 +334,6 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
             handleStopSession={hook.handleStopSession}
             handleCompactContext={hook.handleCompactContext}
             hasConversationHistory={hook.hasConversationHistory}
-            onToggleSettings={toggleSettings}
             panelId={panel.id}
             interactive={isInteractive}
             ptyOpen={composerOpen}

@@ -75,8 +75,6 @@ export interface UnifiedComposerProps {
    *  'ultracode', so it must not be gated on the SDK-only model affordance. */
   effortLabel?: string | null;
 
-  /** ⚙ display-settings toggle (SDK); omitted → no settings button. */
-  onToggleSettings?: () => void;
   /** checkpoint / commit-mode control (quick) — host supplies the node. */
   checkpointSlot?: React.ReactNode;
   /** compact-context control (SDK quick) — host supplies the node. */
@@ -107,7 +105,6 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
     modelSlot,
     permissionSlot,
     effortLabel,
-    onToggleSettings,
     checkpointSlot,
     compactSlot,
   } = props;
@@ -357,18 +354,6 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
 
         {/* right cluster */}
         <div className="ml-auto flex items-center gap-2">
-          {visibility.showSettings && onToggleSettings && (
-            <button
-              type="button"
-              onClick={onToggleSettings}
-              title="Display settings"
-              aria-label="Display settings"
-              className="inline-flex items-center border border-border-primary bg-surface-primary px-2 py-1.5 text-text-secondary transition-colors hover:border-border-hover"
-            >
-              <SettingsGlyph />
-            </button>
-          )}
-
           {running && onStop ? (
             <button
               type="button"
@@ -421,9 +406,4 @@ function ReadonlyPill({ label }: { label: string }): React.ReactElement {
       <Lock className="h-3 w-3 text-text-tertiary" />
     </span>
   );
-}
-
-function SettingsGlyph(): React.ReactElement {
-  // Inline gear to match the paper aesthetic (lucide Settings is fine too).
-  return <span className="text-sm leading-none">⚙</span>;
 }
