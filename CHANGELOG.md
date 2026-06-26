@@ -12,6 +12,41 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-06-26
+
+### Added
+
+- **Model picker in the composer.** Choose the model per session — it shows each
+  model's version and context window, and offers both 250k and 1M-context Opus
+  variants. Opus 4.8 is the default.
+- **Opus-only fast mode.** A fast-mode toggle on the chat composer and the quick
+  Configure page (faster Opus output, not a smaller model). The chosen model and
+  fast-mode setting persist on the quick-session panel and carry through session
+  creation.
+- **End-of-workflow summary.** When a workflow finishes, a token-usage summary now
+  renders as a card on the graph-paper canvas, with **Complete** and **Request
+  changes** actions.
+- **Whole-session token breakdown.** The session module shows a granular,
+  whole-session accounting of token usage.
+
+### Changed
+
+- Composer pills are reordered to read model → permission → speed → checkpoint, and
+  the redundant display-settings gear has been removed from the chat composer.
+
+### Fixed
+
+- **Telemetry now reports from distributed builds.** Credentials were read only from
+  the build shell's environment, which a double-clicked packaged app never has — so
+  Sentry and Aptabase silently did nothing in every shipped build. The client keys
+  are now baked into the build, so error and usage reporting work as intended.
+- The context meter no longer pegs at 1000/1000 on long quick-session turns, and
+  quick-chat turn tokens are now counted in the session meter.
+- Insights cards now surface cache tokens, so the token counts reconcile with the
+  reported cost.
+- Claude model aliases are pinned to their current snapshots, and fast mode defaults
+  to off.
+
 ## [0.1.6] — 2026-06-25
 
 ### Fixed
