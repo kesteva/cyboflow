@@ -9,10 +9,13 @@
  *   4. The persisted height seeds the initial open height on remount.
  *   5. xterm keep-alive: toggling collapsed/open keeps the body's child mounted
  *      (same element identity) — collapse only flips display:none, never unmounts.
+ *   6. Collapse/expand is a chevron-only toggle strip (no labeled header row);
+ *      clicking it fires onToggle. The old "TERMINAL · folder · branch" header
+ *      and its hint text are gone.
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 import { TerminalDock, DOCK_OPEN_HEIGHT } from '../TerminalDock';
 
@@ -128,6 +131,35 @@ describe('TerminalDock — resize affordance', () => {
   });
 });
 
+describe('TerminalDock — chevron toggle (no labeled header)', () => {
+  it('renders no labeled header row or hint text', () => {
+    render(
+      <TerminalDock open onToggle={() => {}} folderLabel="recipe-holder" branchName="feat/x">
+        <div data-testid="child" />
+      </TerminalDock>,
+    );
+    // The old labeled header testid is gone; the chevron toggle replaces it.
+    expect(screen.queryByTestId('terminal-dock-header')).not.toBeInTheDocument();
+    expect(screen.getByTestId('terminal-dock-toggle')).toBeInTheDocument();
+    // No "TERMINAL" label, no folder/branch, no "click to …" hint is rendered.
+    expect(screen.queryByText('Terminal')).not.toBeInTheDocument();
+    expect(screen.queryByText(/recipe-holder/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/feat\/x/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/click to/i)).not.toBeInTheDocument();
+  });
+
+  it('fires onToggle when the chevron toggle is clicked', () => {
+    const onToggle = vi.fn();
+    render(
+      <TerminalDock open onToggle={onToggle}>
+        <div data-testid="child" />
+      </TerminalDock>,
+    );
+    fireEvent.click(screen.getByTestId('terminal-dock-toggle'));
+    expect(onToggle).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('TerminalDock — xterm keep-alive', () => {
   it('keeps the child mounted (same element identity) across collapse/open toggles', () => {
     const { rerender } = render(
@@ -169,19 +201,19 @@ describe('TerminalDock — xterm keep-alive', () => {
     expect(screen.getByTestId('child')).toBe(before);
   });
 
-  it('keeps aria-expanded on the header reflecting the open state', () => {
+  it('keeps aria-expanded on the toggle reflecting the open state', () => {
     const { rerender } = render(
       <TerminalDock open onToggle={() => {}}>
         <div data-testid="child" />
       </TerminalDock>,
     );
-    expect(screen.getByTestId('terminal-dock-header')).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByTestId('terminal-dock-toggle')).toHaveAttribute('aria-expanded', 'true');
 
     rerender(
       <TerminalDock open={false} onToggle={() => {}}>
         <div data-testid="child" />
       </TerminalDock>,
     );
-    expect(screen.getByTestId('terminal-dock-header')).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByTestId('terminal-dock-toggle')).toHaveAttribute('aria-expanded', 'false');
   });
 });

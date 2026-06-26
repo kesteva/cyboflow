@@ -2,10 +2,11 @@
  * TerminalDock — collapsible, user-resizable bottom dock for the run center pane.
  *
  * Pins its children (the run's chat / terminal / data-stream pane) below the tab
- * content as a dock with a 30px clickable header (TERMINAL · folder · branch ·
- * hint · chevron) and a body whose OPEN height is user-resizable (drag the thin
- * handle just below the header; dragging UP grows the dock). The chosen height is
- * persisted to localStorage so it survives reloads.
+ * content as a dock. There is no labeled header row — collapse/expand is a thin
+ * (8px) chevron-only toggle strip at the top of the dock, with no text. When open
+ * the body height is user-resizable (drag the thin handle just below the toggle;
+ * dragging UP grows the dock). The chosen height is persisted to localStorage so
+ * it survives reloads.
  *
  * HARD INVARIANT (xterm keep-alive): collapse hides the body via `display:none`
  * and NEVER unmounts the children. The live `InteractiveTerminalView` xterm —
@@ -23,9 +24,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 
-/** Default expanded dock height (design handoff). Collapsed = header only (30px). */
+/** Default expanded dock height (design handoff). Collapsed = the toggle strip. */
 export const DOCK_OPEN_HEIGHT = 188;
-const DOCK_HEADER_HEIGHT = 30;
+/** Collapsed footprint = the thin chevron toggle strip only (no labeled header). */
+const DOCK_TOGGLE_HEIGHT = 14;
 /** Resize clamp: never shrink below a usable chat peek. */
 const DOCK_MIN_HEIGHT = 120;
 /** Resize clamp: cap at the smaller of an absolute ceiling or ~70% of viewport. */
@@ -33,7 +35,6 @@ const DOCK_MAX_ABS_HEIGHT = 560;
 /** localStorage key for the persisted open height. Brand-new key — no migration. */
 const DOCK_HEIGHT_KEY = 'cyboflow.terminalDock.height';
 
-const INK = 'var(--color-text-primary)';
 const HAIRLINE = 'var(--color-border-primary)';
 const RAIL = 'var(--color-bg-secondary)';
 const FAINT = 'var(--color-text-tertiary)';
@@ -56,9 +57,12 @@ function clampDockHeight(h: number): number {
 interface TerminalDockProps {
   open: boolean;
   onToggle: () => void;
-  /** Worktree folder label shown in the header (e.g. "recipe-holder"). */
+  /**
+   * @deprecated Accepted for parent compatibility but no longer rendered — the
+   * labeled header row was removed; collapse/expand is now a chevron-only strip.
+   */
   folderLabel?: string;
-  /** Branch shown in the header. */
+  /** @deprecated See {@link folderLabel} — accepted but no longer rendered. */
   branchName?: string;
   children: ReactNode;
 }
@@ -66,8 +70,6 @@ interface TerminalDockProps {
 export function TerminalDock({
   open,
   onToggle,
-  folderLabel,
-  branchName,
   children,
 }: TerminalDockProps): ReactElement {
   // Open height: seed from localStorage (default DOCK_OPEN_HEIGHT), always clamped.
@@ -133,64 +135,42 @@ export function TerminalDock({
         flexShrink: 0,
         display: 'flex',
         flexDirection: 'column',
-        height: open ? height : DOCK_HEADER_HEIGHT,
+        height: open ? height : DOCK_TOGGLE_HEIGHT,
       }}
     >
+      {/* Chevron-only collapse/expand toggle — a thin strip with no labels. The
+          labeled "TERMINAL · folder · branch" header was removed; this is the
+          minimal affordance that preserves collapse/expand. */}
       <button
         type="button"
-        data-testid="terminal-dock-header"
+        data-testid="terminal-dock-toggle"
         aria-expanded={open}
+        aria-label={open ? 'Collapse terminal dock' : 'Expand terminal dock'}
         onClick={onToggle}
+        title={open ? 'Collapse' : 'Expand'}
         style={{
-          height: DOCK_HEADER_HEIGHT,
+          height: DOCK_TOGGLE_HEIGHT,
           flexShrink: 0,
           display: 'flex',
           alignItems: 'center',
-          gap: 10,
-          padding: '0 14px',
+          justifyContent: 'center',
           borderTop: `1px solid ${HAIRLINE}`,
           background: RAIL,
-          fontSize: '10px',
-          letterSpacing: '.06em',
           color: FAINT,
           cursor: 'pointer',
           font: 'inherit',
+          padding: 0,
           width: '100%',
-          textAlign: 'left',
         }}
       >
-        <b
-          style={{
-            color: INK,
-            fontWeight: 700,
-            letterSpacing: '.16em',
-            textTransform: 'uppercase',
-            fontSize: '9.5px',
-          }}
-        >
-          Terminal
-        </b>
-        {(folderLabel || branchName) && (
-          <span style={{ color: FAINT }}>
-            {folderLabel ? `· ${folderLabel}` : ''}
-            {/* For a quick session the worktree folder name == branch name, which
-                rendered a redundant "· quick-… · quick-…". Only show the branch
-                segment when it actually differs from the folder (flow runs). */}
-            {branchName && branchName !== folderLabel ? ` · ${branchName}` : ''}
-          </span>
-        )}
-        <span style={{ flex: 1 }} />
-        <span
-          style={{ fontSize: '9px', letterSpacing: '.12em', textTransform: 'uppercase', color: FAINT }}
-        >
-          {open ? 'click to collapse' : 'click to expand'}
+        <span style={{ fontSize: '10px', lineHeight: 1, color: 'var(--color-text-secondary)' }}>
+          {open ? '▾' : '▸'}
         </span>
-        <span style={{ fontSize: '12px', color: 'var(--color-text-secondary)' }}>{open ? '▾' : '▸'}</span>
       </button>
 
       {/* Drag-to-resize handle (open only). Dragging UP grows the dock. Mounting
-          it only when open keeps the collapsed footprint = header height; it is
-          a sibling of the body so it never interleaves with the xterm subtree. */}
+          it only when open keeps the collapsed footprint = the toggle strip; it
+          is a sibling of the body so it never interleaves with the xterm subtree. */}
       {open && (
         <div
           data-testid="terminal-dock-resize-handle"
