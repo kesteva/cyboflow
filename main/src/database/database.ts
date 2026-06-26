@@ -4,6 +4,7 @@ import { join, dirname } from 'path';
 import type { Project, ProjectRunCommand, Folder, Session, SessionOutput, CreateSessionData, UpdateSessionData, ConversationMessage, PromptMarker, ExecutionDiff, CreateExecutionDiffData, CreatePanelExecutionDiffData } from './models';
 import type { ToolPanel, ToolPanelType, ToolPanelState, ToolPanelMetadata } from '../../../shared/types/panels';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
+import { sumSessionOutputTokenUsage, type SessionTokenTotals } from './sessionTokenUsage';
 
 // Interface for legacy claude_panel_settings during migration
 interface ClaudePanelSetting {
@@ -3473,54 +3474,17 @@ export class DatabaseService {
   }
 
   // Session statistics methods
-  getSessionTokenUsage(sessionId: string): {
-    totalInputTokens: number;
-    totalOutputTokens: number;
-    totalCacheReadTokens: number;
-    totalCacheCreationTokens: number;
-    messageCount: number;
-  } {
+  getSessionTokenUsage(sessionId: string): SessionTokenTotals {
     const rows = this.db.prepare(`
-      SELECT data 
-      FROM session_outputs 
+      SELECT data
+      FROM session_outputs
       WHERE session_id = ? AND type = 'json'
       ORDER BY timestamp ASC
     `).all(sessionId) as { data: string }[];
 
-    let totalInputTokens = 0;
-    let totalOutputTokens = 0;
-    let totalCacheReadTokens = 0;
-    let totalCacheCreationTokens = 0;
-    let messageCount = 0;
-
-    rows.forEach((row: { data: string }) => {
-      try {
-        const data = JSON.parse(row.data);
-        if (data.input_tokens) {
-          totalInputTokens += data.input_tokens;
-          messageCount++;
-        }
-        if (data.output_tokens) {
-          totalOutputTokens += data.output_tokens;
-        }
-        if (data.cache_read_input_tokens) {
-          totalCacheReadTokens += data.cache_read_input_tokens;
-        }
-        if (data.cache_creation_input_tokens) {
-          totalCacheCreationTokens += data.cache_creation_input_tokens;
-        }
-      } catch (e) {
-        // Ignore parse errors
-      }
-    });
-
-    return {
-      totalInputTokens,
-      totalOutputTokens,
-      totalCacheReadTokens,
-      totalCacheCreationTokens,
-      messageCount
-    };
+    // SDK turn usage is NESTED (per-turn total on the `result` message), not the
+    // flat top-level shape this method used to read — see sessionTokenUsage.ts.
+    return sumSessionOutputTokenUsage(rows);
   }
 
   getSessionOutputCounts(sessionId: string): { json: number; stdout: number; stderr: number } {
