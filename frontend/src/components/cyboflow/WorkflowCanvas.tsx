@@ -195,7 +195,7 @@ export function WorkflowCanvas({
   // ── Layout constants (mirror FlowReadOnly from dashboard.jsx) ─────────────
   const COL_W = 138;
   const COL_GAP = 14;
-  const ROW_H = 86;
+  const ROW_H = 120; // ≥ tallest card (~106px: head + 2-line title body + foot) + breathing room so cards and the top-right human badge never overlap the card above
   const TOP = 28; // vertical offset from canvas inner top for first card
 
   // ── Build per-phase column layout ─────────────────────────────────────────
