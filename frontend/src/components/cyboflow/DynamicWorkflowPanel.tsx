@@ -25,13 +25,17 @@
  * on disk, so display names fall back to each agent's prompt excerpt with the
  * longest shared prologue stripped (see computeAgentDisplayNames).
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { formatElapsed } from '../../utils/homeClassify';
-import { formatTokenCount } from '../../hooks/useSessionMetrics';
-import type {
-  DynamicWorkflowAgent,
-  DynamicWorkflowRunState,
-} from '../../../../shared/types/dynamicWorkflows';
+import {
+  DynamicWorkflowAgents,
+  formatDurationMs,
+} from './DynamicWorkflowAgents';
+import type { DynamicWorkflowRunState } from '../../../../shared/types/dynamicWorkflows';
+
+// formatModelName + computeAgentDisplayNames live in DynamicWorkflowAgents (the
+// shared agent-row module); re-exported here for existing importers/tests.
+export { formatModelName, computeAgentDisplayNames } from './DynamicWorkflowAgents';
 
 /** Wall-clock refresh cadence for the elapsed counter (matches ActiveAgentCard). */
 const ELAPSED_TICK_MS = 30_000;
@@ -42,173 +46,12 @@ const ELAPSED_TICK_MS = 30_000;
  */
 const EXPANDED_TICK_MS = 5_000;
 
-/** A running agent with no transcript line for this long is flagged "idle Ns". */
-const AGENT_IDLE_THRESHOLD_MS = 30_000;
-
-/** Max length of a derived agent display name (post prologue-strip). */
-const AGENT_NAME_MAX_CHARS = 60;
-
 /** Status → accent color (paper-theme CSS vars, matching the app's badges). */
 const STATUS_COLOR: Record<DynamicWorkflowRunState['status'], string> = {
   running: 'var(--color-phase-execute)',
   completed: 'var(--color-status-success)',
   failed: 'var(--color-status-error)',
 };
-
-/**
- * Compact duration label for the terminal totals row, matching formatElapsed's
- * shape ("1h 12m" / "6m 36s" / "12s").
- */
-function formatDurationMs(ms: number): string {
-  const totalSeconds = Math.floor(Math.max(0, ms) / 1000);
-  const seconds = totalSeconds % 60;
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  const minutes = totalMinutes % 60;
-  const hours = Math.floor(totalMinutes / 60);
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  if (minutes > 0) return `${minutes}m ${seconds}s`;
-  return `${seconds}s`;
-}
-
-/**
- * Format a raw model id from an agent transcript for display, generically:
- * strip a leading "claude-", drop a trailing 8-digit date segment, capitalize
- * the first remaining segment and join the rest with ".".
- *
- * "claude-fable-5" → "Fable 5" · "claude-opus-4-8" → "Opus 4.8" ·
- * "claude-haiku-4-5-20251001" → "Haiku 4.5".
- */
-export function formatModelName(raw: string): string {
-  const parts = raw
-    .replace(/^claude-/, '')
-    .split('-')
-    .filter((p) => p.length > 0);
-  if (parts.length > 1 && /^\d{8}$/.test(parts[parts.length - 1])) parts.pop();
-  if (parts.length === 0) return raw;
-  const [head, ...rest] = parts;
-  const display = head.charAt(0).toUpperCase() + head.slice(1);
-  return rest.length > 0 ? `${display} ${rest.join('.')}` : display;
-}
-
-/**
- * Derive a display name per agent. Agent labels exist only in the CLI's
- * process memory (never on disk), so the best available signal is each agent's
- * prompt excerpt: compute the longest common prefix across ALL excerpts in the
- * workflow (the shared prologue every subagent prompt opens with) and name
- * each agent by the first ~60 chars of its excerpt AFTER that prefix. A lone
- * excerpt has no shared prologue to strip, so it names itself. When the tail
- * is empty or the excerpt is missing → "agent N" by stable order of appearance
- * in `agents`.
- */
-export function computeAgentDisplayNames(
-  agents: readonly DynamicWorkflowAgent[],
-): Map<string, string> {
-  const excerpts = agents
-    .map((a) => a.promptExcerpt)
-    .filter((e): e is string => typeof e === 'string' && e.length > 0);
-
-  let prefixLen = 0;
-  if (excerpts.length >= 2) {
-    const first = excerpts[0];
-    prefixLen = first.length;
-    for (const excerpt of excerpts.slice(1)) {
-      let i = 0;
-      const max = Math.min(prefixLen, excerpt.length);
-      while (i < max && excerpt[i] === first[i]) i++;
-      prefixLen = i;
-      if (prefixLen === 0) break;
-    }
-  }
-
-  const names = new Map<string, string>();
-  agents.forEach((agent, i) => {
-    const tail = (agent.promptExcerpt ?? '')
-      .slice(prefixLen)
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, AGENT_NAME_MAX_CHARS)
-      .trim();
-    names.set(agent.agentId, tail.length > 0 ? tail : `agent ${i + 1}`);
-  });
-  return names;
-}
-
-/**
- * One subagent row (expanded variant) — status glyph, derived display name and
- * a " · "-joined meta cluster (model / tokens / tools / idle-or-elapsed).
- * Every meta field is optional; an empty cluster renders an em-dash.
- */
-function AgentRow({
-  agent,
-  displayName,
-  nowMs,
-}: {
-  agent: DynamicWorkflowAgent;
-  displayName: string;
-  nowMs: number;
-}) {
-  const isRunning = agent.status === 'running';
-
-  const segments: string[] = [];
-  if (agent.model !== undefined) segments.push(formatModelName(agent.model));
-  if (agent.outputTokens !== undefined) {
-    segments.push(`${formatTokenCount(agent.outputTokens)} tok`);
-  }
-  if (agent.toolUses !== undefined) {
-    segments.push(`${agent.toolUses} ${agent.toolUses === 1 ? 'tool' : 'tools'}`);
-  }
-  if (isRunning) {
-    if (agent.lastActivityAt !== undefined) {
-      const idleMs = nowMs - new Date(agent.lastActivityAt).getTime();
-      if (Number.isFinite(idleMs) && idleMs > AGENT_IDLE_THRESHOLD_MS) {
-        segments.push(`idle ${formatDurationMs(idleMs)}`);
-      }
-    }
-  } else if (agent.startedAt !== undefined && agent.lastActivityAt !== undefined) {
-    const elapsedMs =
-      new Date(agent.lastActivityAt).getTime() - new Date(agent.startedAt).getTime();
-    if (Number.isFinite(elapsedMs)) segments.push(formatDurationMs(elapsedMs));
-  }
-
-  return (
-    <div
-      className="flex items-center gap-2"
-      style={{ padding: '3px 0' }}
-      data-testid={`dynamic-workflow-agent-${agent.agentId}`}
-    >
-      {isRunning ? (
-        <span
-          aria-hidden="true"
-          className="h-1.5 w-1.5 shrink-0 rounded-full animate-pulse motion-reduce:animate-none"
-          style={{ background: 'var(--color-phase-execute)' }}
-        />
-      ) : (
-        <span
-          aria-hidden="true"
-          className="shrink-0"
-          style={{ color: 'var(--color-status-success)', fontSize: 10 }}
-        >
-          ✓
-        </span>
-      )}
-      <span
-        className="min-w-0 flex-1 truncate text-text-primary"
-        style={{ fontSize: 11 }}
-        title={agent.promptExcerpt ?? displayName}
-        data-testid="dynamic-workflow-agent-name"
-      >
-        {displayName}
-      </span>
-      <span
-        className="shrink-0 text-text-tertiary"
-        style={{ fontSize: 10, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' }}
-        data-testid="dynamic-workflow-agent-meta"
-      >
-        {segments.length > 0 ? segments.join(' · ') : '—'}
-      </span>
-    </div>
-  );
-}
 
 /** One totals cell — value over a wide-tracked micro-label (StatCell shape). */
 function TotalCell({ value, label, testId }: { value: string; label: string; testId: string }) {
@@ -279,10 +122,6 @@ export function DynamicWorkflowPanel({
 
   const runningAgents = state.agents.filter((a) => a.status === 'running').length;
   const doneAgents = state.agents.filter((a) => a.status === 'done').length;
-
-  // Derived display names — memoized per agents array (the store replaces the
-  // whole snapshot on change, so reference identity is the right key).
-  const agentNames = useMemo(() => computeAgentDisplayNames(state.agents), [state.agents]);
 
   return (
     <div
@@ -381,25 +220,9 @@ export function DynamicWorkflowPanel({
         )}
       </div>
 
-      {/* Per-agent rows — expanded (takeover) variant only */}
-      {expanded && state.agents.length > 0 && (
-        <div
-          className="mt-2.5 border-t border-border-primary pt-2"
-          data-testid="dynamic-workflow-agents"
-        >
-          <span className="eyebrow text-text-tertiary">agents</span>
-          <div className="mt-1 flex flex-col">
-            {state.agents.map((agent) => (
-              <AgentRow
-                key={agent.agentId}
-                agent={agent}
-                displayName={agentNames.get(agent.agentId) ?? agent.agentId}
-                nowMs={nowMs}
-              />
-            ))}
-          </div>
-        </div>
-      )}
+      {/* Per-agent rows — expanded (takeover) variant only. Stage-bucketed when
+          agents map cleanly to the phase plan, else a flat list. */}
+      {expanded && <DynamicWorkflowAgents state={state} nowMs={nowMs} />}
 
       {/* Terminal block — summary + totals from the wf_<id>.json record */}
       {!isRunning && (

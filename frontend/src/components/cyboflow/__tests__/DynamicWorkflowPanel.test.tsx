@@ -287,6 +287,57 @@ describe('DynamicWorkflowPanel — expanded agent rows', () => {
   });
 });
 
+describe('DynamicWorkflowPanel — stage-bucketed agents', () => {
+  const phases = [{ title: 'Review' }, { title: 'Verify' }, { title: 'Synthesize' }];
+
+  function groupedState(): DynamicWorkflowRunState {
+    return makeState({
+      phases,
+      agents: [
+        { agentId: 'r1', status: 'done', promptExcerpt: 'review the bugs dimension' },
+        { agentId: 'v1', status: 'running', promptExcerpt: 'Adversarially verify the claim' },
+      ],
+    });
+  }
+
+  it('renders a stage header per phase, with the running stage expanded and others collapsed', () => {
+    render(<DynamicWorkflowPanel expanded state={groupedState()} />);
+    expect(screen.getByTestId('dynamic-workflow-stage-0')).toBeInTheDocument();
+    expect(screen.getByTestId('dynamic-workflow-stage-1')).toBeInTheDocument();
+    expect(screen.getByTestId('dynamic-workflow-stage-2')).toBeInTheDocument();
+    // Verify (running) opens by default → its agent is visible.
+    expect(screen.getByTestId('dynamic-workflow-agent-v1')).toBeInTheDocument();
+    // Review (done) starts collapsed → its agent is hidden until clicked.
+    expect(screen.queryByTestId('dynamic-workflow-agent-r1')).not.toBeInTheDocument();
+  });
+
+  it("reveals a stage's agents when its header is clicked", () => {
+    render(<DynamicWorkflowPanel expanded state={groupedState()} />);
+    expect(screen.queryByTestId('dynamic-workflow-agent-r1')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('dynamic-workflow-stage-toggle-0'));
+    expect(screen.getByTestId('dynamic-workflow-agent-r1')).toBeInTheDocument();
+  });
+
+  it('falls back to a flat list (no stage headers) when an agent is unrecognized', () => {
+    render(
+      <DynamicWorkflowPanel
+        expanded
+        state={makeState({
+          phases,
+          agents: [
+            { agentId: 'r1', status: 'done', promptExcerpt: 'review x' },
+            { agentId: 'x1', status: 'running', promptExcerpt: 'totally unrelated work' },
+          ],
+        })}
+      />,
+    );
+    expect(screen.queryByTestId('dynamic-workflow-stage-0')).not.toBeInTheDocument();
+    // Flat list: both rows visible immediately.
+    expect(screen.getByTestId('dynamic-workflow-agent-r1')).toBeInTheDocument();
+    expect(screen.getByTestId('dynamic-workflow-agent-x1')).toBeInTheDocument();
+  });
+});
+
 describe('computeAgentDisplayNames', () => {
   function agent(
     agentId: string,
