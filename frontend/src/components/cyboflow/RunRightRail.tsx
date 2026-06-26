@@ -21,11 +21,15 @@
  *
  * Collapse: the WHOLE rail is collapsible. `collapsed` + `onToggleCollapse` are
  * lifted to CyboflowRoot (persisted to localStorage); when collapsed the rail
- * renders a thin ~28px strip with only a re-expand chevron (affordance mirrors
- * TerminalDock's header chevron). When expanded a collapse chevron sits in the
- * tab bar.
+ * renders a thin ~28px strip with only a re-expand chevron. When expanded the
+ * collapse chevron sits at the TOP-LEFT of the rail (leading the tab bar).
+ *
+ * Width: the expanded rail is user-resizable — drag the handle on its LEFT edge
+ * (drag left to widen). The chosen width is persisted to localStorage so it
+ * survives reloads. The rail stays `shrink-0` in the flex row; the center column
+ * reclaims whatever the rail gives up.
  */
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { WorkflowProgressTimeline } from './WorkflowProgressTimeline';
 import { SprintLanesPanel } from './SprintLanesPanel';
@@ -68,6 +72,29 @@ const TABS: Tab[] = [
   },
 ];
 
+/** Default expanded rail width (the former fixed Tailwind width). */
+const RAIL_DEFAULT_WIDTH = 296;
+/** Resize clamp: never shrink below a usable column. */
+const RAIL_MIN_WIDTH = 240;
+/** Resize clamp: cap at the smaller of an absolute ceiling or ~50% of viewport. */
+const RAIL_MAX_ABS_WIDTH = 640;
+/** localStorage key for the persisted rail width. Brand-new key — no migration. */
+const RAIL_WIDTH_KEY = 'cyboflow.runRightRail.width';
+
+/** Upper resize bound: absolute cap, but never more than ~50% of the viewport. */
+function maxRailWidth(): number {
+  const viewportCap =
+    typeof window !== 'undefined' && window.innerWidth > 0
+      ? Math.round(window.innerWidth * 0.5)
+      : RAIL_MAX_ABS_WIDTH;
+  return Math.min(RAIL_MAX_ABS_WIDTH, viewportCap);
+}
+
+/** Clamp a candidate width into [min, max]. */
+function clampRailWidth(w: number): number {
+  return Math.max(RAIL_MIN_WIDTH, Math.min(maxRailWidth(), w));
+}
+
 /**
  * Resolve the active run's project_id from the active-runs store. The row lives
  * under its project's bucket; we scan every bucket because RunRightRail does not
@@ -101,6 +128,63 @@ export function RunRightRail({ phaseState, collapsed, onToggleCollapse }: RunRig
   const openFileTab = useCenterPaneStore((s) => s.openFileTab);
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
 
+  // User-resizable width: seed from localStorage (default RAIL_DEFAULT_WIDTH),
+  // always clamped. Mirrors TerminalDock's height-resize pattern, horizontal.
+  const [width, setWidth] = useState<number>(() => {
+    const saved =
+      typeof localStorage !== 'undefined' ? localStorage.getItem(RAIL_WIDTH_KEY) : null;
+    const parsed = saved !== null ? parseInt(saved, 10) : NaN;
+    return clampRailWidth(Number.isFinite(parsed) ? parsed : RAIL_DEFAULT_WIDTH);
+  });
+  const [isResizing, setIsResizing] = useState(false);
+  const startXRef = useRef<number>(0);
+  const startWidthRef = useRef<number>(0);
+
+  // Persist the chosen width. (Brand-new key — no migrateLocalStorageKey needed.)
+  useEffect(() => {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(RAIL_WIDTH_KEY, width.toString());
+    }
+  }, [width]);
+
+  const handleResizeDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      setIsResizing(true);
+      startXRef.current = e.clientX;
+      startWidthRef.current = width;
+    },
+    [width],
+  );
+
+  const handleResizeMove = useCallback((e: MouseEvent) => {
+    // The rail sits on the right, so dragging its LEFT edge leftward (smaller
+    // clientX) grows it.
+    const deltaX = startXRef.current - e.clientX;
+    setWidth(clampRailWidth(startWidthRef.current + deltaX));
+  }, []);
+
+  const handleResizeUp = useCallback(() => {
+    setIsResizing(false);
+  }, []);
+
+  // Attach global listeners only while actively dragging.
+  useEffect(() => {
+    if (!isResizing) return;
+    document.addEventListener('mousemove', handleResizeMove);
+    document.addEventListener('mouseup', handleResizeUp);
+    const prevUserSelect = document.body.style.userSelect;
+    const prevCursor = document.body.style.cursor;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'ew-resize';
+    return () => {
+      document.removeEventListener('mousemove', handleResizeMove);
+      document.removeEventListener('mouseup', handleResizeUp);
+      document.body.style.userSelect = prevUserSelect;
+      document.body.style.cursor = prevCursor;
+    };
+  }, [isResizing, handleResizeMove, handleResizeUp]);
+
   const activeRunProjectId = selectActiveRunProjectId(runsByProject, activeRunId);
   // The center-pane key is the run's parent session when known, else the run id
   // (legacy parentless runs) — matches RunCenterPane's keying.
@@ -133,13 +217,38 @@ export function RunRightRail({ phaseState, collapsed, onToggleCollapse }: RunRig
   return (
     <aside
       data-testid="run-right-rail"
-      className="w-[296px] shrink-0 flex flex-col border-l border-border-primary bg-bg-primary"
+      className="relative shrink-0 flex flex-col border-l border-border-primary bg-bg-primary"
+      style={{ width }}
     >
-      {/* Tab bar — trailing collapse chevron mirrors TerminalDock's affordance. */}
+      {/* Left-edge drag handle — resize the rail (drag LEFT to widen). Straddles
+          the left border (centered on it via -translate-x-1/2) and sits above the
+          content so it stays grabbable; it highlights while dragging. */}
+      <div
+        data-testid="run-right-rail-resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize right rail"
+        onMouseDown={handleResizeDown}
+        title="Drag to resize"
+        className="absolute left-0 top-0 z-10 h-full w-1.5 -translate-x-1/2 cursor-ew-resize"
+        style={{ background: isResizing ? 'var(--color-border-primary)' : 'transparent' }}
+      />
+
+      {/* Tab bar — LEADING collapse chevron at the top-left, then the tabs. */}
       <div
         role="tablist"
         className="flex items-stretch border-b border-border-primary"
       >
+        <button
+          type="button"
+          data-testid="run-right-rail-collapse"
+          aria-label="Collapse right rail"
+          title="Collapse right rail"
+          onClick={onToggleCollapse}
+          className="flex w-7 shrink-0 items-center justify-center border-r border-border-primary text-text-tertiary hover:text-text-primary"
+        >
+          <ChevronRight size={14} />
+        </button>
         {TABS.map((tab) => {
           const isActive = tab.id === activeTab;
           return (
@@ -160,16 +269,6 @@ export function RunRightRail({ phaseState, collapsed, onToggleCollapse }: RunRig
             </button>
           );
         })}
-        <button
-          type="button"
-          data-testid="run-right-rail-collapse"
-          aria-label="Collapse right rail"
-          title="Collapse right rail"
-          onClick={onToggleCollapse}
-          className="flex w-7 shrink-0 items-center justify-center border-l border-border-primary text-text-tertiary hover:text-text-primary"
-        >
-          <ChevronRight size={14} />
-        </button>
       </div>
 
       {/* Tab content */}

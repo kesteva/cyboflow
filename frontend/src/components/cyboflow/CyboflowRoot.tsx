@@ -9,7 +9,7 @@
  *                    1. activeRunId set   → WorkflowSummaryPanel card (run ended) or RunCenterPane (tabbed Flow + dock)
  *                    2. mainRepoSession   → PanelTabBar + PanelContainer (session panels fill the area)
  *                    3. neither          → empty-state CTA
- *   right rail     — RunRightRail (always rendered, 296 px fixed)
+ *   right rail     — RunRightRail (always rendered; user-resizable width, or a thin collapsed strip)
  *   Modal overlay  — WorkflowPicker mounted inside Modal
  *   Lifecycle      — SessionLifecycleActionBar (header) drives the merge / create-PR /
  *                    dismiss dialogs + success toast, targeting the session resolved

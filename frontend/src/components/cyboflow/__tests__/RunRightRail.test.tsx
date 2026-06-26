@@ -165,9 +165,12 @@ describe('RunRightRail', () => {
     expect(screen.getByTestId('run-right-rail-workflow-progress-empty')).toBeInTheDocument();
 
     const root = screen.getByTestId('run-right-rail');
-    expect(root).toHaveClass('w-[296px]');
+    // Width is now an inline style (user-resizable), defaulting to 296px.
+    expect((root as HTMLElement).style.width).toBe('296px');
     expect(root).toHaveClass('shrink-0');
     expect(root).toHaveClass('border-l');
+    // A left-edge drag handle is present for resizing.
+    expect(screen.getByTestId('run-right-rail-resize-handle')).toBeInTheDocument();
   });
 
   it('clicking File Explorer tab with no active session shows its empty state and hides the Workflow Progress panel', () => {
@@ -317,6 +320,58 @@ describe('RunRightRail — whole-rail collapse', () => {
 
     fireEvent.click(screen.getByTestId('run-right-rail-collapse'));
     expect(onToggleCollapse).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Width resize — drag the LEFT-edge handle (drag left to widen), persisted to
+// localStorage under the brand-new key 'cyboflow.runRightRail.width'.
+// ---------------------------------------------------------------------------
+
+describe('RunRightRail — width resize', () => {
+  const WIDTH_KEY = 'cyboflow.runRightRail.width';
+
+  beforeEach(() => {
+    localStorage.removeItem(WIDTH_KEY);
+    // Large viewport so the ~50% cap never gates the absolute clamps.
+    Object.defineProperty(window, 'innerWidth', {
+      configurable: true,
+      writable: true,
+      value: 2000,
+    });
+  });
+
+  function railWidth(): number {
+    return parseInt((screen.getByTestId('run-right-rail') as HTMLElement).style.width, 10);
+  }
+
+  /** Drag the left handle by `dx` px (negative = LEFT = widen). */
+  function dragHandle(dx: number, startX = 1000): void {
+    const handle = screen.getByTestId('run-right-rail-resize-handle');
+    fireEvent.mouseDown(handle, { clientX: startX });
+    fireEvent.mouseMove(document, { clientX: startX + dx });
+    fireEvent.mouseUp(document);
+  }
+
+  it('grows the rail on a leftward drag and persists the width', () => {
+    renderRail(EMPTY_PHASE_STATE);
+    expect(railWidth()).toBe(296);
+    dragHandle(-100); // 100px LEFT → +100 width
+    expect(railWidth()).toBe(396);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('396');
+  });
+
+  it('clamps to the minimum on a large rightward drag', () => {
+    renderRail(EMPTY_PHASE_STATE);
+    dragHandle(400); // 400px RIGHT → would shrink below min
+    expect(railWidth()).toBe(240);
+    expect(localStorage.getItem(WIDTH_KEY)).toBe('240');
+  });
+
+  it('seeds the initial width from a persisted (clamped) value', () => {
+    localStorage.setItem(WIDTH_KEY, '420');
+    renderRail(EMPTY_PHASE_STATE);
+    expect(railWidth()).toBe(420);
   });
 });
 
