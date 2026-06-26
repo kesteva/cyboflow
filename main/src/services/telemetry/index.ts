@@ -28,13 +28,26 @@ interface BakedBuildInfo {
  */
 function readBuildInfo(): BakedBuildInfo | null {
   if (!app.isPackaged) return null;
-  try {
-    const buildInfoPath = path.join(process.resourcesPath, 'app', 'main', 'dist', 'buildInfo.json');
-    if (fs.existsSync(buildInfoPath)) {
-      return JSON.parse(fs.readFileSync(buildInfoPath, 'utf8')) as BakedBuildInfo;
+  // buildInfo.json ships at main/dist/buildInfo.json. With asar enabled (the
+  // electron-builder default) it lives INSIDE app.asar — Electron patches fs to
+  // read archive member paths transparently — so the resource path is
+  // `app.asar/...`, NOT a loose `app/` directory (which only exists when asar is
+  // off). Reading the wrong one returns null and SILENTLY disables telemetry: that
+  // was the real "zero usage from installed apps" bug — creds baked fine but the
+  // packaged app could never find them. Try the asar path first, then the loose
+  // fallback.
+  const candidates = [
+    path.join(process.resourcesPath, 'app.asar', 'main', 'dist', 'buildInfo.json'),
+    path.join(process.resourcesPath, 'app', 'main', 'dist', 'buildInfo.json'),
+  ];
+  for (const buildInfoPath of candidates) {
+    try {
+      if (fs.existsSync(buildInfoPath)) {
+        return JSON.parse(fs.readFileSync(buildInfoPath, 'utf8')) as BakedBuildInfo;
+      }
+    } catch {
+      // Corrupt/unreadable candidate — fall through to the next, then null.
     }
-  } catch {
-    return null;
   }
   return null;
 }

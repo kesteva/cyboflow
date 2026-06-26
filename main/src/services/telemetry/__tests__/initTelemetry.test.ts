@@ -44,8 +44,12 @@ const realResourcesPath = process.resourcesPath;
 function stampBuildInfo(
   environment: 'local' | 'dev' | 'stable' | null,
   creds?: { sentryDsn?: string; aptabaseAppKey?: string },
+  // The resource container the file sits under: 'app' mirrors an asar:false build,
+  // 'app.asar' mirrors the default asar build where buildInfo.json lives inside the
+  // archive (Electron resolves the member path the same way node fs resolves a dir).
+  container: 'app' | 'app.asar' = 'app',
 ): void {
-  const distDir = path.join(tmpResources, 'app', 'main', 'dist');
+  const distDir = path.join(tmpResources, container, 'main', 'dist');
   fs.mkdirSync(distDir, { recursive: true });
   const file = path.join(distDir, 'buildInfo.json');
   if (environment === null) {
@@ -125,6 +129,16 @@ describe('initTelemetry gating (Sentry + Aptabase paths)', () => {
     const { initTelemetry } = await import('../index');
     initTelemetry(CFG);
     expect(aptabase.initialize).toHaveBeenCalledWith('A-US-BAKEDKEY00');
+    expect(aptabase.trackEvent).toHaveBeenCalledWith('app_started', { environment: 'stable' });
+  });
+
+  it('reads buildInfo.json from inside app.asar (the default asar build layout)', async () => {
+    setPackaged(true);
+    // No loose app/ dir — only the asar member path, exactly like a shipped .dmg.
+    stampBuildInfo('stable', { aptabaseAppKey: 'A-US-ASARKEY000' }, 'app.asar');
+    const { initTelemetry } = await import('../index');
+    initTelemetry(CFG);
+    expect(aptabase.initialize).toHaveBeenCalledWith('A-US-ASARKEY000');
     expect(aptabase.trackEvent).toHaveBeenCalledWith('app_started', { environment: 'stable' });
   });
 
