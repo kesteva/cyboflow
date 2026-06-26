@@ -261,7 +261,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: 'object',
           properties: {
-            task_id: { type: 'string', description: 'The task id whose lane to update (required; must be in this sprint batch)' },
+            task_id: { type: 'string', description: 'The task whose lane to update — opaque id OR display ref e.g. TASK-001 (required; must be in this sprint batch; the ref is resolved automatically, pass it straight from the sprint task list)' },
             status: {
               type: 'string',
               enum: ['queued', 'running', 'integrated', 'failed', 'blocked'],

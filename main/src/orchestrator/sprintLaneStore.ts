@@ -282,10 +282,32 @@ export class SprintLaneStore {
 
     const now = new Date().toISOString();
 
+    // The lane is keyed by the opaque tasks.id, but agents only see the display
+    // ref (e.g. TASK-008) in the seeded sprint-task block — so accept EITHER and
+    // normalize to the canonical opaque id (parity with cyboflow_add_task_dependency's
+    // resolveTaskByRefOrId). Opaque id wins: the exact task_id match is tried first
+    // (join-free, so a lane whose tasks row is absent still resolves); only on a
+    // miss do we resolve the display ref via the tasks.ref join, scoped to THIS batch.
+    let resolvedTaskId = taskId;
+
     const txn = this.db.transaction(() => {
-      const existing = this.db
+      let existing = this.db
         .prepare('SELECT id FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
         .get(batchId, taskId) as { id: number } | undefined;
+      if (!existing) {
+        const byRef = this.db
+          .prepare(
+            `SELECT sbt.id AS id, sbt.task_id AS taskId
+               FROM sprint_batch_tasks sbt
+               JOIN tasks t ON t.id = sbt.task_id
+              WHERE sbt.batch_id = ? AND t.ref = ?`,
+          )
+          .get(batchId, taskId) as { id: number; taskId: string } | undefined;
+        if (byRef) {
+          existing = { id: byRef.id };
+          resolvedTaskId = byRef.taskId;
+        }
+      }
       if (!existing) {
         throw new SprintLaneError('lane_not_found', `no lane for task ${taskId} in batch ${batchId}`);
       }
@@ -313,16 +335,16 @@ export class SprintLaneStore {
     });
     (txn as () => void)();
 
-    const lane = this.readLane(batchId, taskId);
+    const lane = this.readLane(batchId, resolvedTaskId);
     if (!lane) {
       // Row vanished between commit and read-back — surface as not_found.
-      throw new SprintLaneError('lane_not_found', `lane for task ${taskId} vanished after update`);
+      throw new SprintLaneError('lane_not_found', `lane for task ${resolvedTaskId} vanished after update`);
     }
 
     const event: SprintLaneChangedEvent = {
       runId,
       batchId,
-      taskId,
+      taskId: resolvedTaskId,
       status: lane.status,
       currentStepId: lane.currentStepId,
       attempts: lane.attempts,
