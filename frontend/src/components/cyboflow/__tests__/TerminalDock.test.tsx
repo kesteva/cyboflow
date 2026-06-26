@@ -1,17 +1,18 @@
 /**
- * TerminalDock tests (FU5 — resizable dock).
+ * TerminalDock tests (FU5 — resizable dock; grip bar unifies toggle + resize).
  *
  * Behaviors verified:
- *   1. The resize handle is present only when the dock is open.
- *   2. A simulated drag (handle UP) grows the applied height and persists it to
+ *   1. The chevron grip bar is present in both states; dragging it resizes ONLY
+ *      when the dock is open (collapsed → click expands, drag is inert).
+ *   2. A simulated drag (grip UP) grows the applied height and persists it to
  *      localStorage under the brand-new key 'cyboflow.terminalDock.height'.
  *   3. Height clamps at the min (drag far down) and the max (drag far up).
  *   4. The persisted height seeds the initial open height on remount.
  *   5. xterm keep-alive: toggling collapsed/open keeps the body's child mounted
  *      (same element identity) — collapse only flips display:none, never unmounts.
- *   6. Collapse/expand is a chevron-only toggle strip (no labeled header row);
- *      clicking it fires onToggle. The old "TERMINAL · folder · branch" header
- *      and its hint text are gone.
+ *   6. Collapse/expand is the chevron grip strip (no labeled header row); a plain
+ *      click fires onToggle, but a drag (resize) does NOT toggle. The old
+ *      "TERMINAL · folder · branch" header and its hint text are gone.
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent } from '@testing-library/react';
@@ -23,10 +24,10 @@ const HEIGHT_KEY = 'cyboflow.terminalDock.height';
 const DOCK_MIN = 120;
 const DOCK_MAX_ABS = 560;
 
-/** Drag the resize handle by `dy` px from a starting clientY (default 400). */
-function dragHandle(dy: number, startY = 400): void {
-  const handle = screen.getByTestId('terminal-dock-resize-handle');
-  fireEvent.mouseDown(handle, { clientY: startY });
+/** Drag the grip bar by `dy` px from a starting clientY (default 400). */
+function dragGrip(dy: number, startY = 400): void {
+  const grip = screen.getByTestId('terminal-dock-toggle');
+  fireEvent.mouseDown(grip, { clientY: startY });
   // Negative dy => moving UP => grows the dock.
   fireEvent.mouseMove(document, { clientY: startY + dy });
   fireEvent.mouseUp(document);
@@ -48,20 +49,25 @@ beforeEach(() => {
 });
 
 describe('TerminalDock — resize affordance', () => {
-  it('shows the resize handle only when open', () => {
+  it('keeps the grip in both states and only resizes when open', () => {
     const { rerender } = render(
       <TerminalDock open={false} onToggle={() => {}}>
         <div data-testid="child" />
       </TerminalDock>,
     );
-    expect(screen.queryByTestId('terminal-dock-resize-handle')).not.toBeInTheDocument();
+    // Collapsed: the grip is present, but dragging it is inert (nothing to resize).
+    expect(screen.getByTestId('terminal-dock-toggle')).toBeInTheDocument();
+    dragGrip(-100);
+    expect(localStorage.getItem(HEIGHT_KEY)).toBe(String(DOCK_OPEN_HEIGHT));
 
+    // Open: the SAME grip now resizes on drag.
     rerender(
       <TerminalDock open onToggle={() => {}}>
         <div data-testid="child" />
       </TerminalDock>,
     );
-    expect(screen.getByTestId('terminal-dock-resize-handle')).toBeInTheDocument();
+    dragGrip(-100);
+    expect(dockHeight()).toBe(DOCK_OPEN_HEIGHT + 100);
   });
 
   it('starts at the default open height when nothing is persisted', () => {
@@ -80,7 +86,7 @@ describe('TerminalDock — resize affordance', () => {
       </TerminalDock>,
     );
     // Drag UP by 100px → grows by 100.
-    dragHandle(-100);
+    dragGrip(-100);
     expect(dockHeight()).toBe(DOCK_OPEN_HEIGHT + 100);
     expect(localStorage.getItem(HEIGHT_KEY)).toBe(String(DOCK_OPEN_HEIGHT + 100));
   });
@@ -92,7 +98,7 @@ describe('TerminalDock — resize affordance', () => {
       </TerminalDock>,
     );
     // Drag DOWN by 500px → would go below min, clamps to DOCK_MIN.
-    dragHandle(500);
+    dragGrip(500);
     expect(dockHeight()).toBe(DOCK_MIN);
     expect(localStorage.getItem(HEIGHT_KEY)).toBe(String(DOCK_MIN));
   });
@@ -105,7 +111,7 @@ describe('TerminalDock — resize affordance', () => {
     );
     // Drag UP by 2000px → would exceed max, clamps to the absolute ceiling
     // (viewport is 2000 so ~70% = 1400 > 560 → absolute cap wins).
-    dragHandle(-2000);
+    dragGrip(-2000);
     expect(dockHeight()).toBe(DOCK_MAX_ABS);
     expect(localStorage.getItem(HEIGHT_KEY)).toBe(String(DOCK_MAX_ABS));
   });
@@ -158,6 +164,24 @@ describe('TerminalDock — chevron toggle (no labeled header)', () => {
     fireEvent.click(screen.getByTestId('terminal-dock-toggle'));
     expect(onToggle).toHaveBeenCalledTimes(1);
   });
+
+  it('does NOT toggle when the grip is dragged (resize must not collapse)', () => {
+    const onToggle = vi.fn();
+    render(
+      <TerminalDock open onToggle={onToggle}>
+        <div data-testid="child" />
+      </TerminalDock>,
+    );
+    const grip = screen.getByTestId('terminal-dock-toggle');
+    // Real drag: press → move past threshold → release → the browser then fires
+    // a trailing click on the same element, which must be swallowed.
+    fireEvent.mouseDown(grip, { clientY: 400 });
+    fireEvent.mouseMove(document, { clientY: 340 }); // 60px up → resize
+    fireEvent.mouseUp(document);
+    fireEvent.click(grip);
+    expect(onToggle).not.toHaveBeenCalled();
+    expect(dockHeight()).toBe(DOCK_OPEN_HEIGHT + 60); // the drag DID resize
+  });
 });
 
 describe('TerminalDock — xterm keep-alive', () => {
@@ -197,7 +221,7 @@ describe('TerminalDock — xterm keep-alive', () => {
       </TerminalDock>,
     );
     const before = screen.getByTestId('child');
-    dragHandle(-60);
+    dragGrip(-60);
     expect(screen.getByTestId('child')).toBe(before);
   });
 

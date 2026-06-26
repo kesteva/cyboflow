@@ -2,11 +2,12 @@
  * TerminalDock — collapsible, user-resizable bottom dock for the run center pane.
  *
  * Pins its children (the run's chat / terminal / data-stream pane) below the tab
- * content as a dock. There is no labeled header row — collapse/expand is a thin
- * (8px) chevron-only toggle strip at the top of the dock, with no text. When open
- * the body height is user-resizable (drag the thin handle just below the toggle;
- * dragging UP grows the dock). The chosen height is persisted to localStorage so
- * it survives reloads.
+ * content as a dock. There is no labeled header row — the top of the dock is a
+ * thin chevron-only GRIP BAR that does double duty: click it to collapse/expand,
+ * or drag it vertically to resize the open dock (drag UP grows it). A press is
+ * disambiguated by travel — past DRAG_THRESHOLD px it's a resize (and the
+ * trailing click is swallowed), otherwise it's a toggle. The chosen height is
+ * persisted to localStorage so it survives reloads.
  *
  * HARD INVARIANT (xterm keep-alive): collapse hides the body via `display:none`
  * and NEVER unmounts the children. The live `InteractiveTerminalView` xterm —
@@ -34,6 +35,8 @@ const DOCK_MIN_HEIGHT = 120;
 const DOCK_MAX_ABS_HEIGHT = 560;
 /** localStorage key for the persisted open height. Brand-new key — no migration. */
 const DOCK_HEIGHT_KEY = 'cyboflow.terminalDock.height';
+/** Vertical travel (px) before a press on the grip becomes a resize, not a click. */
+const DRAG_THRESHOLD = 4;
 
 const HAIRLINE = 'var(--color-border-primary)';
 const RAIL = 'var(--color-bg-secondary)';
@@ -80,9 +83,20 @@ export function TerminalDock({
     return clampDockHeight(Number.isFinite(parsed) ? parsed : DOCK_OPEN_HEIGHT);
   });
 
+  // A press on the grip bar is EITHER a click (toggle) or a drag (resize) — we
+  // don't know which at mousedown, so we track movement. Once it crosses
+  // DRAG_THRESHOLD the press becomes a resize and the trailing click is
+  // suppressed (a resize must never also toggle). A press that never crosses the
+  // threshold falls through to onClick → onToggle, which also keeps keyboard
+  // activation working (Enter/Space synthesize a click, never a drag).
   const [isResizing, setIsResizing] = useState(false);
-  const startYRef = useRef<number>(0);
-  const startHeightRef = useRef<number>(0);
+  const interactionRef = useRef<{
+    startY: number;
+    startHeight: number;
+    canResize: boolean;
+    dragged: boolean;
+  } | null>(null);
+  const suppressClickRef = useRef(false);
 
   // Persist the chosen open height. (Brand-new key — no migrateLocalStorageKey needed.)
   useEffect(() => {
@@ -91,42 +105,65 @@ export function TerminalDock({
     }
   }, [height]);
 
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
+  const handleGripMouseMove = useCallback((e: MouseEvent) => {
+    const it = interactionRef.current;
+    if (it === null || !it.canResize) return;
+    // Dragging UP (smaller clientY) grows the dock.
+    const deltaY = it.startY - e.clientY;
+    if (!it.dragged && Math.abs(deltaY) >= DRAG_THRESHOLD) {
+      it.dragged = true;
       setIsResizing(true);
-      startYRef.current = e.clientY;
-      startHeightRef.current = height;
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'ns-resize';
+    }
+    if (it.dragged) {
+      setHeight(clampDockHeight(it.startHeight + deltaY));
+    }
+  }, []);
+
+  const handleGripMouseUp = useCallback(() => {
+    const it = interactionRef.current;
+    document.removeEventListener('mousemove', handleGripMouseMove);
+    document.removeEventListener('mouseup', handleGripMouseUp);
+    document.body.style.userSelect = '';
+    document.body.style.cursor = '';
+    // A completed drag must NOT also toggle — swallow the trailing click.
+    if (it !== null && it.dragged) suppressClickRef.current = true;
+    interactionRef.current = null;
+    setIsResizing(false);
+  }, [handleGripMouseMove]);
+
+  const handleGripMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      if (e.button !== 0) return; // primary button only
+      interactionRef.current = {
+        startY: e.clientY,
+        startHeight: height,
+        canResize: open, // collapsed dock has nothing to resize — click expands it
+        dragged: false,
+      };
+      document.addEventListener('mousemove', handleGripMouseMove);
+      document.addEventListener('mouseup', handleGripMouseUp);
     },
-    [height],
+    [height, open, handleGripMouseMove, handleGripMouseUp],
   );
 
-  const handleMouseMove = useCallback((e: MouseEvent) => {
-    // Dragging the handle UP (smaller clientY) grows the dock.
-    const deltaY = startYRef.current - e.clientY;
-    setHeight(clampDockHeight(startHeightRef.current + deltaY));
-  }, []);
+  const handleGripClick = useCallback(() => {
+    // Swallow the click synthesized at the tail of a drag-resize.
+    if (suppressClickRef.current) {
+      suppressClickRef.current = false;
+      return;
+    }
+    onToggle();
+  }, [onToggle]);
 
-  const handleMouseUp = useCallback(() => {
-    setIsResizing(false);
-  }, []);
-
-  // Attach global listeners only while actively dragging.
+  // Safety: detach global listeners if we unmount mid-drag.
   useEffect(() => {
-    if (!isResizing) return;
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', handleMouseUp);
-    const prevUserSelect = document.body.style.userSelect;
-    const prevCursor = document.body.style.cursor;
-    document.body.style.userSelect = 'none';
-    document.body.style.cursor = 'ns-resize';
     return () => {
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-      document.body.style.userSelect = prevUserSelect;
-      document.body.style.cursor = prevCursor;
+      document.removeEventListener('mousemove', handleGripMouseMove);
+      document.removeEventListener('mouseup', handleGripMouseUp);
     };
-  }, [isResizing, handleMouseMove, handleMouseUp]);
+  }, [handleGripMouseMove, handleGripMouseUp]);
 
   return (
     <div
@@ -138,16 +175,20 @@ export function TerminalDock({
         height: open ? height : DOCK_TOGGLE_HEIGHT,
       }}
     >
-      {/* Chevron-only collapse/expand toggle — a thin strip with no labels. The
-          labeled "TERMINAL · folder · branch" header was removed; this is the
-          minimal affordance that preserves collapse/expand. */}
+      {/* Grip bar — the SINGLE affordance for both collapse/expand AND resize.
+          A click (or keyboard activation) toggles; dragging vertically past a
+          few px resizes the open dock (drag UP grows it). There is no separate
+          resize handle — this strip is the grip. The chevron shows open state;
+          while dragging the bar highlights. It is a sibling of the body so it
+          never interleaves with the xterm subtree. */}
       <button
         type="button"
         data-testid="terminal-dock-toggle"
         aria-expanded={open}
-        aria-label={open ? 'Collapse terminal dock' : 'Expand terminal dock'}
-        onClick={onToggle}
-        title={open ? 'Collapse' : 'Expand'}
+        aria-label={open ? 'Collapse or resize terminal dock' : 'Expand terminal dock'}
+        onMouseDown={handleGripMouseDown}
+        onClick={handleGripClick}
+        title={open ? 'Click to collapse · drag to resize' : 'Expand'}
         style={{
           height: DOCK_TOGGLE_HEIGHT,
           flexShrink: 0,
@@ -155,51 +196,19 @@ export function TerminalDock({
           alignItems: 'center',
           justifyContent: 'center',
           borderTop: `1px solid ${HAIRLINE}`,
-          background: RAIL,
+          background: isResizing ? HAIRLINE : RAIL,
           color: FAINT,
-          cursor: 'pointer',
+          cursor: open ? 'ns-resize' : 'pointer',
           font: 'inherit',
           padding: 0,
           width: '100%',
+          touchAction: 'none',
         }}
       >
         <span style={{ fontSize: '10px', lineHeight: 1, color: 'var(--color-text-secondary)' }}>
           {open ? '▾' : '▸'}
         </span>
       </button>
-
-      {/* Drag-to-resize handle (open only). Dragging UP grows the dock. Mounting
-          it only when open keeps the collapsed footprint = the toggle strip; it
-          is a sibling of the body so it never interleaves with the xterm subtree. */}
-      {open && (
-        <div
-          data-testid="terminal-dock-resize-handle"
-          role="separator"
-          aria-orientation="horizontal"
-          aria-label="Resize terminal dock"
-          onMouseDown={handleMouseDown}
-          title="Drag to resize"
-          style={{
-            height: 8,
-            flexShrink: 0,
-            cursor: 'ns-resize',
-            background: isResizing ? HAIRLINE : RAIL,
-            borderTop: `1px solid ${HAIRLINE}`,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <span
-            style={{
-              width: 28,
-              height: 2,
-              borderRadius: 1,
-              background: isResizing ? 'var(--color-text-secondary)' : FAINT,
-            }}
-          />
-        </div>
-      )}
 
       {/* Body stays mounted; hidden via display:none when collapsed so the live
           xterm (scrollback + PTY subscription) survives. Resizing only mutates
