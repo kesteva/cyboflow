@@ -17,7 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { randomUUID } from 'crypto';
 import { join } from 'path';
 import { RunExecutor } from '../runExecutor';
-import type { ClaudeSpawnerLike, WorkflowRegistryLike, ClaudeSpawnerOptions, WorkflowPromptReaderLike, ProgrammaticRunner, ProgrammaticRunContext } from '../runExecutor';
+import type { ClaudeSpawnerLike, WorkflowRegistryLike, ClaudeSpawnerOptions, WorkflowPromptReaderLike, ProgrammaticRunner, ProgrammaticRunContext, QueuedInputDelivererLike } from '../runExecutor';
 import { buildAssistantTextEvent } from '../programmatic/syntheticEvents';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import { RunLauncher } from '../runLauncher';
@@ -3179,5 +3179,182 @@ describe('RunExecutor — terminal-seam compound findings close-out (migration 0
     expect(events.filter((e) => e.action === 'selection-changed').length).toBe(0);
     const after = readFindingCols(db, findingId);
     expect(after.selected).toBe(1); // untouched
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RunExecutor.queueInput + drain-time delivery
+// ("always allow messaging a running flow" — Design 1, queue + drain)
+// ---------------------------------------------------------------------------
+
+describe('RunExecutor.queueInput — buffer + drain-at-rest delivery', () => {
+  /** A fake deliverer that records every deliver(runId, text) call. */
+  function makeFakeDeliverer(): QueuedInputDelivererLike & { deliver: ReturnType<typeof vi.fn> } {
+    return { deliver: vi.fn<(runId: string, text: string) => void>() };
+  }
+
+  /** Construct a TestableRunExecutor with the queued-input deliverer in the LAST slot. */
+  function makeExecutorWithDeliverer(
+    spawner: ClaudeSpawnerLike,
+    registry: WorkflowRegistryLike,
+    deliverer?: QueuedInputDelivererLike,
+  ): TestableRunExecutor {
+    return new TestableRunExecutor(
+      spawner,
+      registry,
+      makeSpyLogger(),
+      undefined, // promptReader
+      undefined, // lifecycleTransitions
+      undefined, // publisher
+      undefined, // db
+      undefined, // source
+      undefined, // stepEmitter
+      undefined, // taskStageDeriver
+      undefined, // ideaBodyReader
+      undefined, // sprintLaneTaskIds
+      undefined, // programmaticRunner
+      undefined, // findingReader
+      deliverer, // queuedInputDeliverer (slot 15)
+    );
+  }
+
+  function makeRegistry(run: WorkflowRunRow, workflow: WorkflowRow): WorkflowRegistryLike {
+    return {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+  }
+
+  it('ACCEPTANCE: queueInput buffers without delivering until the turn drains', () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const deliverer = makeFakeDeliverer();
+    const executor = makeExecutorWithDeliverer(makeSpawner(), makeRegistry(run, workflow), deliverer);
+
+    // Buffering is a pure state mutation — nothing is delivered yet (no drain).
+    executor.queueInput(run.id, 'hello mid-turn');
+    expect(deliverer.deliver).not.toHaveBeenCalled();
+  });
+
+  it('ignores blank-after-trim queued input (never delivers nothing)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const deliverer = makeFakeDeliverer();
+    const executor = makeExecutorWithDeliverer(makeSpawner(), makeRegistry(run, workflow), deliverer);
+
+    executor.queueInput(run.id, '   \n  ');
+    await executor.execute(run.id); // orchestrated spawn → drains to rest
+
+    // The whitespace-only entry was ignored, so the drain finds an empty buffer.
+    expect(deliverer.deliver).not.toHaveBeenCalled();
+  });
+
+  it('DRAIN: delivers queued input as the next turn when the orchestrated run drains', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const deliverer = makeFakeDeliverer();
+    const executor = makeExecutorWithDeliverer(makeSpawner(), makeRegistry(run, workflow), deliverer);
+
+    executor.queueInput(run.id, 'also fix the typo');
+    await executor.execute(run.id); // spawnCliProcess resolves → drained REST seam
+
+    expect(deliverer.deliver).toHaveBeenCalledTimes(1);
+    expect(deliverer.deliver).toHaveBeenCalledWith(run.id, 'also fix the typo');
+  });
+
+  it('joins multiple buffered lines into a single combined follow-up turn', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const deliverer = makeFakeDeliverer();
+    const executor = makeExecutorWithDeliverer(makeSpawner(), makeRegistry(run, workflow), deliverer);
+
+    executor.queueInput(run.id, 'first message');
+    executor.queueInput(run.id, 'second message');
+    await executor.execute(run.id);
+
+    expect(deliverer.deliver).toHaveBeenCalledTimes(1);
+    expect(deliverer.deliver).toHaveBeenCalledWith(run.id, 'first message\n\nsecond message');
+  });
+
+  it('rests normally (no delivery) when nothing was queued', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const deliverer = makeFakeDeliverer();
+    const executor = makeExecutorWithDeliverer(makeSpawner(), makeRegistry(run, workflow), deliverer);
+
+    await executor.execute(run.id);
+    expect(deliverer.deliver).not.toHaveBeenCalled();
+  });
+
+  it('does NOT replay the buffer on a SECOND drain (delivered exactly once)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const deliverer = makeFakeDeliverer();
+    const executor = makeExecutorWithDeliverer(makeSpawner(), makeRegistry(run, workflow), deliverer);
+
+    executor.queueInput(run.id, 'one-shot message');
+    await executor.execute(run.id); // first drain → delivers + clears the buffer
+    await executor.execute(run.id); // second drain → buffer is empty, no re-deliver
+
+    expect(deliverer.deliver).toHaveBeenCalledTimes(1);
+  });
+
+  it('drops queued input at rest when no deliverer is wired (zero-behavior-change floor)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    // No deliverer injected — the run rests as before; queued input is silently dropped.
+    const executor = makeExecutorWithDeliverer(makeSpawner(), makeRegistry(run, workflow), undefined);
+
+    executor.queueInput(run.id, 'into the void');
+    await expect(executor.execute(run.id)).resolves.toBeUndefined();
+  });
+
+  it('DRAIN (programmatic): delivers queued input when the controller walk drains', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const deliverer = makeFakeDeliverer();
+    const runner: ProgrammaticRunner = {
+      run: vi.fn<(ctx: ProgrammaticRunContext) => Promise<void>>().mockResolvedValue(undefined),
+    };
+    // Programmatic runner sits in slot 13; deliverer in slot 15.
+    const executor = new TestableRunExecutor(
+      makeSpawner(),
+      makeRegistry(run, workflow),
+      makeSpyLogger(),
+      undefined, // promptReader
+      undefined, // lifecycleTransitions
+      undefined, // publisher
+      undefined, // db
+      undefined, // source
+      undefined, // stepEmitter
+      undefined, // taskStageDeriver
+      undefined, // ideaBodyReader
+      undefined, // sprintLaneTaskIds
+      runner, // programmaticRunner (slot 13)
+      undefined, // findingReader
+      deliverer, // queuedInputDeliverer (slot 15)
+    );
+
+    executor.queueInput(run.id, 'queued during the walk');
+    await executor.execute(run.id); // runner resolves → programmatic drained REST seam
+
+    expect(runner.run).toHaveBeenCalledOnce();
+    expect(deliverer.deliver).toHaveBeenCalledWith(run.id, 'queued during the walk');
+  });
+
+  it('does NOT deliver queued input when the run FAILS (failed turn never reaches the drain seam)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const deliverer = makeFakeDeliverer();
+    const spawner = makeSpawner();
+    vi.mocked(spawner.spawnCliProcess).mockRejectedValueOnce(new Error('spawn failed'));
+    const executor = makeExecutorWithDeliverer(spawner, makeRegistry(run, workflow), deliverer);
+
+    executor.queueInput(run.id, 'should not be delivered on failure');
+    await expect(executor.execute(run.id)).rejects.toThrow('spawn failed');
+
+    // The failed arm bypasses drainQueuedInputAtRest; teardownRun clears the buffer
+    // so the queued input is dropped (not stranded for a later replay).
+    expect(deliverer.deliver).not.toHaveBeenCalled();
   });
 });

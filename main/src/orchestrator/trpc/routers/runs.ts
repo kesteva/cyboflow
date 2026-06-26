@@ -21,7 +21,7 @@ import { selectRunUnifiedMessages } from '../../runUnifiedMessagesListing';
 import { selectRunRawStreamEvents } from '../../runRawEventsListing';
 import { listRunFiles, readRunFile } from '../../runFileExplorer';
 import { withRunFileErrorMapping } from '../runFileErrors';
-import type { RunFileEntry, RunFileContent } from '../../../../../shared/types/runFiles';
+import type { RunFileEntry, RunFileContent, RunGitDiff } from '../../../../../shared/types/runFiles';
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
@@ -40,7 +40,7 @@ import {
   type CancelRunDeps,
   type CancelRunResult,
 } from '../../cancelRunHandler';
-import type { WorkflowRunRow } from '../../../../../shared/types/cyboflow';
+import type { WorkflowRunRow, RunStatusChangedEvent } from '../../../../../shared/types/cyboflow';
 import {
   nudgeRunHandler,
   type NudgeRunDeps,
@@ -174,6 +174,40 @@ let nudgeRunDeps: NudgeRunDeps | null = null;
  */
 export function setNudgeRunDeps(deps: NudgeRunDeps): void {
   nudgeRunDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// queueInput dependency bag ("always allow messaging a running flow")
+//
+// Backs the runs.queueInput mutation: a chat message typed while an SDK flow run
+// is EXECUTING is buffered on the (shared) RunExecutor and DELIVERED as the next
+// turn at the drained REST seam. Injected at boot by main/src/index.ts via
+// setQueueInputDeps(), reusing the SAME RunExecutor instance nudge/resume/reopen
+// use (so the executor's queuedInput buffer is the one its drain seam reads).
+// Until wired the mutation throws METHOD_NOT_SUPPORTED — same stub pattern as the
+// other dep-bags.
+// ---------------------------------------------------------------------------
+
+/** Narrow slice of RunExecutor the queueInput mutation drives. */
+export interface QueueInputRunExecutorLike {
+  queueInput(runId: string, text: string): void;
+}
+
+export interface QueueInputDeps {
+  runExecutor: QueueInputRunExecutorLike;
+}
+
+let queueInputDeps: QueueInputDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the queueInput mutation.
+ *
+ * Called once at boot by main/src/index.ts with the SAME RunExecutor instance the
+ * nudge / resume / reopen bags use. Until this is called the mutation throws
+ * METHOD_NOT_SUPPORTED.
+ */
+export function setQueueInputDeps(deps: QueueInputDeps): void {
+  queueInputDeps = deps;
 }
 
 // ---------------------------------------------------------------------------
@@ -942,6 +976,90 @@ export const runsRouter = router({
     }),
 
   /**
+   * Change the agent permission mode of a NON-TERMINAL workflow run at runtime
+   * (ISSUE #2). workflow_runs.permission_mode_snapshot is normally stamped ONCE
+   * at run creation (WorkflowRegistry.createRun via permissionModeResolver) and
+   * treated as immutable; this is the single controlled runtime-UPDATE path.
+   *
+   * NEXT-TURN apply (no executor change): RunExecutor.buildOptionsOverrides reads
+   * `run.permission_mode_snapshot` FRESH off the workflow_runs row on every spawn
+   * and threads it to the spawner as agentPermissionMode, so the new mode governs
+   * the NEXT nudge/resume/turn spawn. A mid-stream change is out of scope. NOTE:
+   * the interactive PTY substrate writes its permission hook to .claude/settings.json
+   * at SPAWN only (interactiveSettingsWriter) and does not live-update — so for a
+   * running interactive run the new mode likewise only applies on the next spawn;
+   * the UI gates this pill to SDK runs accordingly.
+   *
+   * Guards:
+   *   - NOT_FOUND-style noOp when the run is absent;
+   *   - a terminal run (completed/failed/canceled) is rejected as a graceful
+   *     noOp so the UI can no-op rather than error;
+   *   - the UPDATE is guarded `status NOT IN (terminal)` so a concurrent
+   *     cancel/complete that won is never overwritten post-mortem.
+   *
+   * On a successful UPDATE the run's CURRENT status is re-read and re-emitted on
+   * the existing runStatusEvents 'changed' channel — the SAME signal
+   * activeRunsStore.init() subscribes to (onRunStatusChanged), so the store
+   * re-fetches runs.list and the composer pill reflects the new value with no new
+   * subscription. The status is unchanged here; the emit is purely an invalidation
+   * trigger.
+   *
+   * ctx.db-direct (no dep-bag wiring): pure DB + event, mirroring `end`.
+   * Standalone-typecheck invariant holds — no electron/better-sqlite3/services
+   * import is added.
+   *
+   * Returns { updated: true } or { noOp: true, reason } — 'not_found' /
+   * 'already_terminal'.
+   */
+  setPermissionMode: protectedProcedure
+    .input(z.object({
+      runId: z.string().min(1),
+      // Keep the enum literal identical to PERMISSION_MODES so it cannot drift
+      // (mirrors the `start` mutation). zod validates at the boundary — no runtime
+      // isPermissionMode call is needed.
+      permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']),
+    }))
+    .mutation(async ({ ctx, input }): Promise<
+      | { updated: true }
+      | { noOp: true; reason: 'not_found' | 'already_terminal' }
+    > => {
+      if (!ctx.db) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
+      }
+      const db = ctx.db;
+      const run = db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { status?: string } | undefined;
+      if (!run?.status) return { noOp: true, reason: 'not_found' };
+      if (['completed', 'failed', 'canceled'].includes(run.status)) {
+        return { noOp: true, reason: 'already_terminal' };
+      }
+
+      const info = db
+        .prepare(
+          `UPDATE workflow_runs
+              SET permission_mode_snapshot = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
+        )
+        .run(input.permissionMode, input.runId) as { changes: number };
+      if (info.changes === 0) return { noOp: true, reason: 'already_terminal' }; // concurrent terminal transition won
+
+      // Re-read the current status and re-emit on the run-status channel as an
+      // invalidation signal so activeRunsStore re-fetches runs.list (the status
+      // itself is unchanged — this is purely a refresh trigger).
+      const after = db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { status?: RunStatusChangedEvent['status'] } | undefined;
+      if (after?.status) {
+        runStatusEvents.emit(
+          'changed',
+          { runId: input.runId, status: after.status } satisfies RunStatusChangedEvent,
+        );
+      }
+      return { updated: true };
+    }),
+
+  /**
    * SDK-only Pause of a running workflow run (session<->run restructure, Phase 4b).
    *
    * Stops the active SDK turn (via the SubstrateDispatchFacade kill seam injected
@@ -1039,6 +1157,49 @@ export const runsRouter = router({
     }),
 
   /**
+   * Capture the working-directory diff of a run's git worktree (run-scoped Diff
+   * tab). Flow runs have workflow_runs.session_id = NULL and are keyed by runId,
+   * so the session-scoped diff path (sessions:get-combined-diff) cannot serve
+   * them — the worktree is resolved here from workflow_runs.worktree_path.
+   *
+   * Returns the raw unified diff + aggregate stats, or `null` when the run has no
+   * worktree_path (e.g. a not-yet-materialized run). An empty `diff` string means
+   * the worktree exists but has no working-directory changes.
+   *
+   * Standalone-typecheck invariant: the diff capture is performed via the
+   * injected `ctx.gitDiff` closure (backed by GitDiffManager in index.ts), NOT a
+   * direct services/* import. Mirrors `get` for the ctx.db precondition guard and
+   * adds a ctx.gitDiff precondition (PRECONDITION_FAILED until wired at boot).
+   */
+  gitDiff: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .query(async ({ ctx, input }): Promise<RunGitDiff | null> => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      if (!ctx.gitDiff) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'gitDiff not wired into tRPC context',
+        });
+      }
+      const row = ctx.db
+        .prepare('SELECT worktree_path FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { worktree_path: string | null } | undefined;
+      if (!row) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: `Run ${input.runId} not found` });
+      }
+      if (!row.worktree_path) {
+        // No worktree yet (e.g. a not-yet-materialized run) — nothing to diff.
+        return null;
+      }
+      return ctx.gitDiff(row.worktree_path);
+    }),
+
+  /**
    * Cancel a stuck workflow run and immediately enqueue a fresh run for
    * the same workflow, project, prompt, and worktree path.
    *
@@ -1102,6 +1263,62 @@ export const runsRouter = router({
         });
       }
       return nudgeRunHandler(input.runId, input.text, nudgeRunDeps);
+    }),
+
+  /**
+   * Queue a chat message for a RUNNING workflow run ("always allow messaging a
+   * running flow"). The composer is now ENABLED while an SDK run executes; the
+   * SDK substrate runs a one-shot query() per turn, so there is NO mid-turn input
+   * injection — the text is BUFFERED on the (shared) RunExecutor and DELIVERED as
+   * the NEXT turn at the drained REST seam (running -> awaiting_review), via the
+   * SAME nudge re-spawn mechanism. This is the SDK twin of relayInput (which feeds
+   * the live interactive PTY); a running interactive run keeps using relayInput.
+   *
+   * PERMITTED only while the run is mid-flight (running / starting / queued):
+   *   - terminal (completed/failed/canceled) → { noOp: 'terminal' } (a failed run
+   *     uses runs.reopen; a completed run is done);
+   *   - awaiting_review / paused / awaiting_input / stuck → { noOp: 'not_running' }
+   *     (those rested states use runs.nudge / runs.resume / the question gate, not
+   *     this queue path);
+   *   - blank-after-trim text → { noOp: 'empty' } (nothing to deliver).
+   *
+   * ctx.db-direct status guard (no handler module): pure status check + a single
+   * executor-buffer append, mirroring the `end` / `setPermissionMode` shape. The
+   * append is idempotent-safe and side-effect-free until the next drain.
+   *
+   * Standalone-typecheck invariant: the executor is injected via
+   * setQueueInputDeps(); until wired the mutation throws METHOD_NOT_SUPPORTED.
+   */
+  queueInput: protectedProcedure
+    .input(z.object({ runId: z.string().min(1), text: z.string() }))
+    .mutation(async ({ ctx, input }): Promise<
+      | { queued: true }
+      | { noOp: true; reason: 'not_found' | 'terminal' | 'not_running' | 'empty' }
+    > => {
+      if (!queueInputDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'queueInput dependencies not wired yet. Call setQueueInputDeps() at boot.',
+        });
+      }
+      if (!ctx.db) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
+      }
+      if (input.text.trim() === '') return { noOp: true, reason: 'empty' };
+
+      const run = ctx.db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { status?: string } | undefined;
+      if (!run?.status) return { noOp: true, reason: 'not_found' };
+      if (['completed', 'failed', 'canceled'].includes(run.status)) {
+        return { noOp: true, reason: 'terminal' };
+      }
+      if (!['running', 'starting', 'queued'].includes(run.status)) {
+        return { noOp: true, reason: 'not_running' };
+      }
+
+      queueInputDeps.runExecutor.queueInput(input.runId, input.text);
+      return { queued: true };
     }),
 
   /**

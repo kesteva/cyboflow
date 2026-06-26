@@ -297,6 +297,31 @@ export interface StepTransitionEmitterLike {
   emit(runId: string, status: 'pending' | 'running' | 'done'): void;
 }
 
+/**
+ * Narrow collaborator that DELIVERS queued chat input as the NEXT turn of a run
+ * ("always allow messaging a running flow" — Design 1, queue + drain).
+ *
+ * The SDK substrate runs a one-shot query() per turn, so there is NO mid-turn
+ * input injection. While a run is executing, the composer's text is buffered (via
+ * RunExecutor.queueInput); when that turn drains (running -> awaiting_review REST),
+ * execute() reads the buffer and — if non-empty — hands the combined text to this
+ * deliverer instead of resting. The concrete deliverer (wired in main/src/index.ts)
+ * re-drives the run through the SAME nudge re-spawn mechanism (flip awaiting_review
+ * -> running, setPendingNudge, execute) under the per-run RunQueueRegistry
+ * discipline that nudgeRunHandler already uses, so there is no double-spawn race.
+ *
+ * Injected (not the concrete handler) to preserve the standalone-typecheck
+ * invariant: runExecutor.ts never imports the nudge handler / RunQueueRegistry.
+ * The call is FIRE-AND-FORGET — the deliverer enqueues a fresh per-run queue task
+ * that runs AFTER the current execute()'s queue task (and its teardownRun) drains,
+ * so calling it from inside execute() never self-deadlocks. When absent, queued
+ * input is silently dropped at rest (backward-compat with executor constructions
+ * that omit it — e.g. tests and the interactive path that never SDK-drains).
+ */
+export interface QueuedInputDelivererLike {
+  deliver(runId: string, text: string): void;
+}
+
 // ---------------------------------------------------------------------------
 // RunExecutor
 // ---------------------------------------------------------------------------
@@ -422,6 +447,20 @@ export class RunExecutor {
   private pendingResume = new Set<string>();
 
   /**
+   * Per-run buffer of chat input QUEUED while the run executes ("always allow
+   * messaging a running flow" — Design 1, queue + drain). Appended to by
+   * queueInput() (driven by the runs.queueInput tRPC mutation) while the run is
+   * running/starting/queued; the SDK substrate has no mid-turn input, so each
+   * line waits here until the current turn drains. At the drained REST seam
+   * (running -> awaiting_review) execute() pulls the whole buffer, joins it into a
+   * single follow-up message, and hands it to queuedInputDeliverer as the NEXT
+   * turn — delivered EXACTLY ONCE at the turn boundary. Cleared by teardownRun()
+   * (defensive — execute() already drains it at rest) so a later fresh execute()
+   * never replays stale queued input.
+   */
+  private queuedInput = new Map<string, string[]>();
+
+  /**
    * Per-run error messages stashed in execute()'s catch arm before firing the
    * 'failed' phase. Cleared by teardownRun() to prevent leaks.
    */
@@ -501,6 +540,15 @@ export class RunExecutor {
      * verbatim (zero-behavior-change floor). Participates in NO stage derivation.
      */
     private readonly findingReader?: FindingReaderLike,
+    /**
+     * Optional queued-input deliverer ("always allow messaging a running flow").
+     * When injected, the drained REST seam (both the orchestrated and programmatic
+     * paths) drains any buffered chat input for the run and hands it to this
+     * collaborator as the NEXT turn (via the nudge re-spawn mechanism) instead of
+     * resting. When absent, queued input is dropped at rest (zero-behavior-change
+     * floor). See QueuedInputDelivererLike.
+     */
+    private readonly queuedInputDeliverer?: QueuedInputDelivererLike,
   ) {}
 
   /**
@@ -631,6 +679,14 @@ export class RunExecutor {
         await this.onLifecycleTransition(runId, 'drained');
         // Emit step 'done' after the rest transition fires.
         this.emitStep(runId, 'done');
+        // "Always allow messaging a running flow": if the user typed while this
+        // turn was executing, deliver that buffered input as the NEXT turn instead
+        // of leaving it parked. drainQueuedInputAtRest re-drives the run through
+        // the nudge re-spawn mechanism on a FRESH per-run queue task (so it runs
+        // after this execute()'s finally/teardownRun, no self-deadlock). The run
+        // is already resting in awaiting_review from the transition above; the
+        // deliverer flips it back to running.
+        this.drainQueuedInputAtRest(runId);
       } catch (err) {
         // Stash the error message so onLifecycleTransition('failed') can pick it up.
         const message = err instanceof Error ? err.message : String(err);
@@ -765,6 +821,10 @@ export class RunExecutor {
         // auto-completes a run. The controller already emitted the final step
         // 'done', so no run-level emitStep here.
         await this.onLifecycleTransition(runId, 'drained');
+        // "Always allow messaging a running flow": deliver any input buffered
+        // while the walk ran as the NEXT turn (same nudge re-spawn mechanism as
+        // the orchestrated path). See drainQueuedInputAtRest.
+        this.drainQueuedInputAtRest(runId);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         this.pendingFailedMessage.set(runId, message);
@@ -927,6 +987,56 @@ export class RunExecutor {
   }
 
   /**
+   * Buffer a chat message for a RUNNING workflow run ("always allow messaging a
+   * running flow" — Design 1, queue + drain).
+   *
+   * The SDK substrate runs a one-shot query() per turn, so there is no mid-turn
+   * input injection: the text is appended to the per-run buffer and DELIVERED at
+   * the next turn boundary (the drained REST seam reads the buffer and re-drives
+   * the run via queuedInputDeliverer). Blank-after-trim text is ignored so a stray
+   * empty queue never re-drives the run with nothing to say. Permission / status
+   * gating lives at the tRPC boundary (runs.queueInput rejects terminal runs);
+   * this method is the pure executor-state mutator.
+   */
+  queueInput(runId: string, text: string): void {
+    const trimmed = text.trim();
+    if (trimmed === '') return;
+    const buffer = this.queuedInput.get(runId);
+    if (buffer) {
+      buffer.push(trimmed);
+    } else {
+      this.queuedInput.set(runId, [trimmed]);
+    }
+  }
+
+  /**
+   * Drain the per-run queued-input buffer into a single combined follow-up
+   * message and hand it to the queuedInputDeliverer as the NEXT turn ("always
+   * allow messaging a running flow"). Called at the drained REST seam (both the
+   * orchestrated and programmatic paths) BEFORE the run is allowed to rest, so a
+   * message typed mid-turn is delivered exactly once at the turn boundary.
+   *
+   * Returns true when queued input was found and dispatched (the run is being
+   * re-driven — it must NOT also rest); false when there was nothing to deliver or
+   * no deliverer is wired (the run rests as usual). The buffer entry is removed
+   * BEFORE dispatch so teardownRun (which clears it) cannot race the delivery and
+   * so a re-entrant drain never double-delivers. Multiple buffered lines are joined
+   * with a blank line into one resumed turn (the SDK resume sends one prompt).
+   */
+  private drainQueuedInputAtRest(runId: string): boolean {
+    if (!this.queuedInputDeliverer) return false;
+    const buffer = this.queuedInput.get(runId);
+    if (!buffer || buffer.length === 0) return false;
+    // Remove the buffer entry BEFORE dispatch — the deliverer re-drives execute()
+    // on a fresh queue task whose teardownRun clears the (now-empty) entry anyway,
+    // and removing first prevents a re-entrant drain from double-delivering.
+    this.queuedInput.delete(runId);
+    const combined = buffer.join('\n\n');
+    this.queuedInputDeliverer.deliver(runId, combined);
+    return true;
+  }
+
+  /**
    * Mark a run for RESUME (Phase 4b — SDK-only Pause/Resume).
    *
    * Called by resumeRunHandler immediately before it re-drives execute(runId) on a
@@ -981,6 +1091,11 @@ export class RunExecutor {
     this.pendingSystemPromptAppend.delete(runId);
     this.pendingNudge.delete(runId);
     this.pendingResume.delete(runId);
+    // Defensive: the drained REST seam already drains this buffer before resting
+    // (drainQueuedInputAtRest), so it is normally empty here. Clear it anyway so a
+    // teardown on a failed/canceled turn (which never reaches the drain seam) can
+    // never replay stale queued input onto a later fresh execute() of the run.
+    this.queuedInput.delete(runId);
     this.pendingFailedMessage.delete(runId);
     this.pendingFailedFromStatus.delete(runId);
   }

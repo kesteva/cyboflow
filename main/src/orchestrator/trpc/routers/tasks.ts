@@ -37,7 +37,13 @@ import {
   taskProjectChannel,
   TASK_ALL_CHANNEL,
 } from '../../taskChangeRouter';
-import { selectProjectBacklog, selectTaskById, boardsForProject, selectIdeaAttachments } from '../../taskListing';
+import {
+  selectProjectBacklog,
+  selectTaskById,
+  selectIdeaDecomposition,
+  boardsForProject,
+  selectIdeaAttachments,
+} from '../../taskListing';
 import { eventToAsyncIterable } from './events';
 
 // ---------------------------------------------------------------------------
@@ -133,6 +139,29 @@ export const tasksRouter = router({
         });
       }
       return selectTaskById(ctx.db, input.taskId);
+    }),
+
+  /**
+   * Fetch an IDEA together with its full decomposition tree — the idea as the
+   * root, its epics under `children` (WHERE originating_idea_id = ideaId), and
+   * each epic's tasks under that epic's `children` (WHERE parent_epic_id). Returns
+   * null when the id is not an idea.
+   *
+   * Dedicated read for the `decomposed-stories` artifact tab: `get` only nests
+   * children for an epic, so an idea id there yields children===undefined and the
+   * renderer shows its empty state even for a fully-decomposed idea. This query
+   * fills that gap without changing `get`'s shape for its other consumers.
+   */
+  ideaDecomposition: protectedProcedure
+    .input(z.object({ ideaId: z.string().min(1) }))
+    .query(async ({ input, ctx }): Promise<BacklogTaskItem | null> => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: '[tasks.ideaDecomposition] db not wired into tRPC context',
+        });
+      }
+      return selectIdeaDecomposition(ctx.db, input.ideaId);
     }),
 
   /**

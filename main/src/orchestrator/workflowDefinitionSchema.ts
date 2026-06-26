@@ -72,6 +72,14 @@ export const workflowStepSchema = z.object({
   loopback: z.string().optional(),
   desc: z.string().optional(),
   fanOut: fanOutSchema.optional(),
+  // Declares the artifact this step produces on completion (auto-mint + the
+  // "creates ⟨artifact⟩" chip). Kept in the schema so the field survives parse.
+  outputArtifact: z
+    .object({
+      atype: z.enum(['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic']),
+      label: z.string().min(1, 'outputArtifact.label is required'),
+    })
+    .optional(),
 }) satisfies z.ZodType<WorkflowStep>;
 
 /**

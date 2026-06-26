@@ -9,6 +9,7 @@
 import type { CliSubstrate } from './substrate';
 import type { ExecutionModel } from './executionModel';
 import type { WorkflowRunStatus } from './cyboflow';
+import type { ArtifactType } from './artifacts';
 
 /**
  * Workflow-run permission contract consumed by the SDK PreToolUse mapper
@@ -158,6 +159,14 @@ export interface WorkflowRunListRow {
   session_id?: string | null;
   /** Sprint lane batch (migration 022) — soft link to sprint_batches.id; stamped on seeded 'sprint' runs, NULL for every other run. */
   batch_id?: string | null;
+  /**
+   * Per-run agent permission mode (resolved + stamped at creation by
+   * permissionModeResolver, mutable at runtime via runs.setPermissionMode — ISSUE
+   * #2). Surfaced on the list row so the run composer's PermissionModePill can
+   * show the current value; the executor re-reads it FRESH per spawn so a change
+   * governs the next turn.
+   */
+  permission_mode_snapshot: PermissionMode;
   created_at: string;
   updated_at: string;
   started_at: string | null;
@@ -272,6 +281,16 @@ export interface WorkflowStep {
    * per-item lane. Additive — absent ⇒ a normal step (today's behavior).
    */
   fanOut?: FanOutSpec;
+  /**
+   * When set, this step produces a run artifact on completion. The orchestrator
+   * auto-mints an artifact of `atype` (re-derived from the entity DB for
+   * templated types) when the step finishes, and the Flow/Workflow-steps views
+   * render a "creates ⟨artifact⟩" footer chip. See shared/types/artifacts.ts.
+   */
+  outputArtifact?: {
+    atype: ArtifactType;
+    label: string;
+  };
 }
 
 /**
@@ -360,6 +379,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             retries: 0,
             human: true,
             desc: "Parse the user's prompt, scan the codebase, capture the idea in the DB.",
+            outputArtifact: { atype: 'idea-spec', label: 'Idea spec' },
           },
           {
             id: 'research',
@@ -401,6 +421,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem'],
             retries: 0,
             desc: 'Capture each task via cyboflow_create_task with acceptance criteria.',
+            outputArtifact: { atype: 'decomposed-stories', label: 'Decomposed stories' },
           },
           {
             id: 'approve-plan',

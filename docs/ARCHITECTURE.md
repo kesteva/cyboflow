@@ -108,6 +108,21 @@ injected, no `electron` / `better-sqlite3` / `services/*` imports):
   chokepoint triage operation (resolve the item via this router AND mint a real task via
   `TaskChangeRouter`) orchestrated in the `reviewItems` tRPC router so each router stays
   single-table.
+- **`artifactRouter.ts` (`ArtifactRouter.apply`)** — the SINGLE write chokepoint for the run-scoped
+  `artifacts` table (migration 029). Backs the tabbed center pane's artifact tabs (idea spec,
+  decomposed stories, screenshots, ui prototype, generic live canvas). `apply(projectId, change)`
+  handles `create` (UPSERT by `(run_id, atype)` — so orchestrator auto-mint is idempotent), `update`
+  (enrich), and `commit` (flip to committed); `pruneSessionOnly(projectId, runIds)` drops a closing
+  session's uncommitted artifacts. Each write appends a delta to `entity_events` with
+  `entity_type='artifact'` (migration 029 widened the CHECK) and emits an `ArtifactChangedEvent`
+  after commit. Writers that route through it: the `cyboflow.artifacts` tRPC router (commit), the
+  `cyboflow_report_artifact`/`cyboflow_commit_artifact` MCP tools, and the orchestrator auto-mint
+  (`autoMintArtifacts.handleStepCompletion`, hooked fail-soft into `stepTransitionBridge` when a
+  completed step declares `WorkflowStep.outputArtifact`). Templated artifacts (idea-spec,
+  decomposed-stories) re-derive their content from the entity model on read; canvas artifacts
+  (ui-prototype/generic) carry a `payload_json` (e.g. a localhost dev-server URL embedded by
+  `LiveCanvasEmbed`). Session-only artifacts are pruned on session dismiss (`artifactLifecycle`);
+  committed ones persist.
 
 ### Services (`main/src/services/`)
 
@@ -361,10 +376,19 @@ All procedures are consumed by their respective Zustand stores and React compone
 - **`components/panels/`** — Per-panel React components. Panel-type subdirs present today:
   `ai/` (abstract base), `claude/`, `cli/`, `diff/`, `editor/`, `logPanel/`. The Crystal-era
   `codex/` panel has already been removed.
+- **Run center pane (tabbed surface)** — for an active run, `CyboflowRoot` mounts `RunCenterPane`
+  (replacing the former WorkflowCanvas-over-RunBottomPane stack): a `CenterPaneTabStrip` over a
+  content area over a collapsible `TerminalDock`. The pinned **Flow** tab hosts `WorkflowCanvas`
+  (or `SprintSwimlaneCanvas` for sprint runs); **file** tabs render `FileTabRenderer` (a 3-col diff
+  grid over `parseFileHunks`, opened from the right-rail File Explorer); **artifact** tabs render
+  `ArtifactTabRenderer` (+ `LiveCanvasEmbed` for ui-prototype). Per-session tab state lives in the
+  in-memory `centerPaneStore` (keyed by the run's parent session). The dock collapses via
+  `display:none` and NEVER unmounts `RunBottomPane`/`InteractiveTerminalView` (xterm keep-alive).
 - **`stores/`** — Zustand slices, one per domain:
   - Crystal-baseline: `sessionStore`, `panelStore`, `configStore`, `navigationStore`,
     `errorStore`, `sessionHistoryStore`, `sessionPreferencesStore`, `slashCommandStore`.
-  - Cyboflow-era: `cyboflowStore` (workflows & runs), `activeRunsStore`, `mcpHealthStore`
+  - Cyboflow-era: `cyboflowStore` (workflows & runs), `activeRunsStore`, `centerPaneStore`
+    (per-session run-center-pane tabs/dock/right-tab, in-memory), `mcpHealthStore`
     (sidebar dot), `questionStore`, `backlogStore` (the 3-table entity board buckets),
     `reviewQueueStore` + `reviewQueueSlice` + `reviewItemsSlice` (the unified review-queue inbox
     across finding/permission/decision/human_task — the product differentiator).
@@ -487,9 +511,11 @@ hint is the pre-extraction signal. Stages 7 and 8 are `derived` (written only by
 orchestrator from run lifecycle); the rest are `asserted`.
 
 - **`entity_events`** — polymorphic append-only audit log (`entity_type IN
-  ('idea','epic','task','review_item')`, `entity_id`, per-`(entity_type, entity_id)` UNIQUE
-  `seq`, `kind`, `actor`, optional `run_id`, `changes_json`). Replaces the old task-scoped
-  `task_events`. Written ONLY inside the two chokepoints' transactions.
+  ('idea','epic','task','review_item','artifact')`, `entity_id`, per-`(entity_type, entity_id)`
+  UNIQUE `seq`, `kind`, `actor`, optional `run_id`, `changes_json`). Replaces the old task-scoped
+  `task_events`. Written ONLY inside the chokepoints' transactions. (Migration 029 widened the CHECK
+  to add `'artifact'` via a recreate-rename — editing migration 015 in place would never re-run on a
+  migrated DB, and SQLite cannot `ALTER` a CHECK.)
 - **Task satellites** — `task_acceptance_criteria`, `task_dependencies`, `task_files`,
   `task_external_links` stay **task-scoped** (FK→`tasks`).
 - **`task_ref_counters`** — per-`(project_id, type)` display-ref sequence (`IDEA-NNN`,
@@ -512,6 +538,19 @@ orchestrator from run lifecycle); the rest are `asserted`.
     ALL of its blocking `review_items` resolve).
   - **human_task** — manual to-do; `blocking` per item. Triage can resolve / dismiss / promote
     a finding to a real task (minted through `TaskChangeRouter`).
+
+#### Run artifacts (migration 029)
+
+- **`artifacts`** — run-scoped deliverables surfaced as center-pane tabs + a right-rail Artifacts
+  panel. One row per `(run_id, atype)` (`atype IN
+  ('idea-spec','decomposed-stories','screenshots','ui-prototype','generic')`); `mode` (`template`
+  re-derived-on-read vs `canvas` payload-backed), `committed` / `session_only` / `is_new` flags,
+  `step_origin`, `source_ref` (soft link to the derived-from entity), `payload_json`. `run_id`
+  FK→`workflow_runs` ON DELETE CASCADE. All writes go through `ArtifactRouter.apply` (see Entity
+  write chokepoints); deltas append to `entity_events` with `entity_type='artifact'`. Templated
+  artifacts (idea-spec, decomposed-stories) re-derive content from the entity model; auto-minted by
+  the orchestrator when a completed step declares `WorkflowStep.outputArtifact`. Session-only
+  (uncommitted) artifacts are dropped on session dismiss; committed ones persist.
 
 #### Sprint lanes (migrations 022 + 023)
 

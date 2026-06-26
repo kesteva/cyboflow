@@ -49,7 +49,9 @@ import { API } from '../../utils/api';
 import type { IPCResponse } from '../../utils/api';
 import { trpc } from '../../trpc/client';
 import { UnifiedComposer } from './unified/UnifiedComposer';
+import { PermissionModePill } from './unified/PermissionModePill';
 import { resolveChatVisibility } from './unified/useChatVisibility';
+import type { PermissionMode } from '../../../../shared/types/workflows';
 
 /**
  * Delay (ms) between relaying the message body and the separate '\r' that submits
@@ -77,6 +79,42 @@ function nudgeReasonMessage(reason: string): string {
   }
 }
 
+/**
+ * Human-readable message for a setPermissionMode no-op reason. The mutation
+ * returns `{ noOp: true, reason: 'not_found' | 'already_terminal' }`; mapping it
+ * here gives PermissionModePill a meaningful error to log instead of `undefined`.
+ */
+function setPermissionModeReasonMessage(reason: 'not_found' | 'already_terminal'): string {
+  switch (reason) {
+    case 'not_found':
+      return 'Run not found';
+    case 'already_terminal':
+      return 'Run has ended and its permission mode can no longer change';
+    default:
+      return `Permission mode change ignored: ${reason}`;
+  }
+}
+
+/**
+ * Human-readable message for a queueInput no-op reason (falls back to the raw
+ * reason). Used by the "always allow messaging a running flow" path: while an SDK
+ * run executes, Send QUEUES the message for the next turn.
+ */
+function queueInputReasonMessage(reason: string): string {
+  switch (reason) {
+    case 'terminal':
+      return 'This run has ended and cannot receive messages.';
+    case 'not_running':
+      return 'This run is no longer executing — try again once it resumes.';
+    case 'not_found':
+      return 'Run not found.';
+    case 'empty':
+      return 'Nothing to send.';
+    default:
+      return `Message not queued: ${reason}`;
+  }
+}
+
 /** Human-readable message for a reopen no-op reason (falls back to the raw reason). */
 function reopenReasonMessage(reason: string): string {
   switch (reason) {
@@ -95,9 +133,16 @@ function reopenReasonMessage(reason: string): string {
 
 export interface ChatInputProps {
   runId: string | null;
+  /**
+   * Surface a confirmation after a run permission-mode change. The host
+   * (RunChatView) shows a toast; the message is supplied by PermissionModePill's
+   * appliedMessage (SDK runs apply the change on the next message). Only fired on
+   * a confirmed write.
+   */
+  onPermissionApplied?: (message: string) => void;
 }
 
-export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null {
+export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React.ReactElement | null {
   const selectedSessionId = useCyboflowStore((s) => s.selectedSessionId);
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
@@ -217,7 +262,20 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
   // absent substrate to sdk, matching this component's substrate handling).
   const isReopenable =
     mode === 'workflow-idle' && activeRun?.status === 'failed' && !isInteractive;
-  const isDisabled = mode === 'workflow-idle' && !isIdleNudgeable && !isReopenable;
+  // "Always allow messaging a running flow": an SDK run that is mid-flight
+  // (running / starting) lands in workflow-idle (no question, no active monitor),
+  // and used to be DISABLED. It is now ENABLED so the user can always message the
+  // agent — but the SDK runs a one-shot query() per turn (no mid-turn input), so
+  // Send QUEUES the text via runs.queueInput and the backend delivers it as the
+  // NEXT turn (at the drained REST seam). Interactive running runs keep their live
+  // PTY relay path (workflow-interactive, above); paused/stuck/awaiting_input are
+  // excluded by the explicit running/starting check.
+  const isSdkRunning =
+    mode === 'workflow-idle' &&
+    !isInteractive &&
+    (activeRun?.status === 'running' || activeRun?.status === 'starting');
+  const isDisabled =
+    mode === 'workflow-idle' && !isIdleNudgeable && !isReopenable && !isSdkRunning;
 
   // -- send dispatch --------------------------------------------------------
   const handleSend = async (): Promise<void> => {
@@ -322,6 +380,30 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
       } finally {
         setIsSending(false);
       }
+      return;
+    }
+
+    if (mode === 'workflow-idle' && isSdkRunning) {
+      if (runId == null) {
+        console.warn('[ChatInput] workflow-idle queueInput but runId is null at send time');
+        return;
+      }
+      // "Always allow messaging a running flow": the SDK run is mid-turn, so the
+      // message is QUEUED (runs.queueInput) and delivered at the next turn
+      // boundary — NOT relayed live and NOT a nudge (which only re-drives a rested
+      // run). Clear the composer on a confirmed queue; surface the no-op reason
+      // (terminal / not_running / …) otherwise so the text is retained for retry.
+      setIsSending(true);
+      setSendError(null);
+      try {
+        const result = await trpc.cyboflow.runs.queueInput.mutate({ runId, text });
+        if ('queued' in result) setText('');
+        else setSendError(queueInputReasonMessage(result.reason));
+      } catch (err: unknown) {
+        setSendError(err instanceof Error ? err.message : 'Queue failed');
+      } finally {
+        setIsSending(false);
+      }
     }
   };
 
@@ -336,13 +418,15 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
           ? 'Nudge the agent — continues the conversation…'
           : isReopenable
           ? 'Reopen — re-drive this failed run…'
-          : mode === 'workflow-interactive'
-            ? 'Message the running session — relayed safely…'
-            : mode === 'workflow-monitor'
-              ? 'Ask the monitor about this run…'
-              : mode === 'workflow-question'
-                ? 'Type your answer…'
-                : 'Message the running flow…';
+          : isSdkRunning
+            ? 'Queue a message for the agent — sent on its next turn…'
+            : mode === 'workflow-interactive'
+              ? 'Message the running session — relayed safely…'
+              : mode === 'workflow-monitor'
+                ? 'Ask the monitor about this run…'
+                : mode === 'workflow-question'
+                  ? 'Type your answer…'
+                  : 'Message the running flow…';
 
   const disabledHint = isPaused
     ? 'Run paused — Resume to continue the conversation'
@@ -355,6 +439,42 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
     ptyOpen,
   });
 
+  // Runtime agent-permission selector for a NON-TERMINAL SDK run (ISSUE #2).
+  // Persists to workflow_runs.permission_mode_snapshot via runs.setPermissionMode;
+  // the executor re-reads it FRESH per spawn so the change governs the next turn.
+  // Gated to substrate === 'sdk' because the interactive PTY substrate writes its
+  // permission hook to .claude/settings.json at SPAWN only (no live update). We do
+  // NOT mirror into the store optimistically — the setPermissionMode emit triggers
+  // activeRunsStore.refresh(), which re-reads the canonical value within a tick.
+  const runIsTerminal =
+    activeRun != null &&
+    ['completed', 'failed', 'canceled'].includes(activeRun.status);
+  const permissionSlot =
+    runId != null && activeRun != null && !isInteractive && !runIsTerminal ? (
+      <PermissionModePill
+        currentMode={activeRun.permission_mode_snapshot ?? 'default'}
+        persist={async (mode: PermissionMode) => {
+          const res = await trpc.cyboflow.runs.setPermissionMode.mutate({
+            runId,
+            permissionMode: mode,
+          });
+          // Map the noOp reason to a user-facing error so PermissionModePill logs
+          // a meaningful message (not `undefined`) instead of silently swallowing
+          // the failure.
+          if ('updated' in res) return { success: true };
+          return { success: false, error: setPermissionModeReasonMessage(res.reason) };
+        }}
+        // No-op: activeRun is store-derived; the setPermissionMode emit triggers a
+        // runs.list refresh so the canonical value flows back through the store.
+        onModeChange={() => {}}
+        // Confirmation toast (hoisted to RunChatView) on a confirmed write only.
+        // SDK runs re-read permission_mode_snapshot per spawn, so the change
+        // governs the next message — not the in-flight turn.
+        onApplied={onPermissionApplied ? (_mode, message) => onPermissionApplied(message) : undefined}
+        appliedMessage="Permission mode updated — applies on your next message"
+      />
+    ) : undefined;
+
   return (
     <UnifiedComposer
       visibility={visibility}
@@ -365,8 +485,12 @@ export function ChatInput({ runId }: ChatInputProps): React.ReactElement | null 
       placeholder={placeholder}
       disabled={isDisabled}
       disabledHint={isDisabled ? disabledHint : undefined}
+      // "Always allow messaging a running flow": while an SDK run executes the
+      // message is buffered for its next turn, so the action is QUEUE (not Send).
+      primaryLabel={isSdkRunning ? 'Queue' : 'Send'}
       onSubmit={() => handleSend()}
       onTogglePtyOpen={isInteractive ? () => setPtyOpen((v) => !v) : undefined}
+      permissionSlot={permissionSlot}
       sendError={sendError}
     />
   );

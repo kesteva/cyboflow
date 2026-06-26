@@ -16,7 +16,8 @@ import {
   FileText,
   Eye,
   ShieldCheck,
-  Terminal
+  Terminal,
+  FolderOpen
 } from 'lucide-react';
 import { Textarea, Checkbox } from './ui/Input';
 import { Button } from './ui/Button';
@@ -55,6 +56,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // since the SDKs are initialized once at boot.
   const [errorReportingEnabled, setErrorReportingEnabled] = useState(true);
   const [usageMetricsEnabled, setUsageMetricsEnabled] = useState(true);
+  // Where committed-artifact manifests are written on disk. Empty = use the
+  // default ('.cyboflow/artifacts', resolved against each project's root).
+  const [artifactCommitDir, setArtifactCommitDir] = useState('');
   const [notificationSettings, setNotificationSettings] = useState({
     enabled: true,
     playSound: true,
@@ -104,6 +108,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setInteractivePtyOnly(data.interactivePtyOnly ?? false);
       setErrorReportingEnabled(data.telemetry?.errorReportingEnabled ?? true);
       setUsageMetricsEnabled(data.telemetry?.usageMetricsEnabled ?? true);
+      setArtifactCommitDir(data.artifactCommitDir ?? '');
 
       // Load additional paths
       const paths = data.additionalPaths || [];
@@ -141,6 +146,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         enableCyboflowFooter,
         defaultAgentPermissionMode,
         interactivePtyOnly,
+        // Empty field → undefined → the getter floors to the default (config.json
+        // stays free of the key). A set value is trimmed before persisting.
+        artifactCommitDir: artifactCommitDir.trim() ? artifactCommitDir.trim() : undefined,
         additionalPaths: parsedPaths,
         notifications: notificationSettings,
         // Spread the existing telemetry first so the persisted installId is
@@ -383,6 +391,27 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                   substrate and hides the per-run picker. Pause/Resume (SDK-only) become unavailable, and
                   the interactive substrate carries v1 limits. Only affects runs started after you save;
                   demo mode always uses the SDK.
+                </p>
+              </SettingsSection>
+
+              <SettingsSection
+                title="Artifact Commit Location"
+                description="Where committed artifacts are written on disk"
+                icon={<FolderOpen className="w-4 h-4" />}
+              >
+                <input
+                  id="artifactCommitDir"
+                  type="text"
+                  value={artifactCommitDir}
+                  onChange={(e) => setArtifactCommitDir(e.target.value)}
+                  className="w-full px-3 py-2 border border-border-primary rounded-md focus:outline-none focus:ring-2 focus:ring-interactive text-text-primary bg-surface-secondary"
+                  placeholder=".cyboflow/artifacts"
+                />
+                <p className="text-xs text-text-tertiary mt-2">
+                  Directory for the on-disk copy written when you explicitly commit an artifact. A
+                  relative path resolves against each project's root (so it survives the worktree being
+                  torn down); an absolute path is used as-is. Leave empty to use the default
+                  (<code>.cyboflow/artifacts</code>).
                 </p>
               </SettingsSection>
             </CollapsibleCard>

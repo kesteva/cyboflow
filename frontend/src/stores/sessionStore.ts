@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { Session, SessionOutput, GitStatus, ClaudeJsonMessage, CreateSessionRequest } from '../types/session';
 import { API } from '../utils/api';
+import { useCenterPaneStore } from './centerPaneStore';
 
 type CreateSessionInput = Pick<CreateSessionRequest, 'prompt' | 'worktreeTemplate' | 'count'>;
 
@@ -134,7 +135,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     // Clean up terminal output for deleted session to free memory
     const newTerminalOutput = { ...state.terminalOutput };
     delete newTerminalOutput[deletedSession.id];
-    
+
+    // Reclaim the deleted session's center-pane tab state (otherwise
+    // centerPaneStore.bySession grows unbounded — clearSession was never wired in).
+    // Note: parentless runs key center-pane state by run id, not session id, so
+    // those entries are not reclaimed here (see followUp).
+    useCenterPaneStore.getState().clearSession(deletedSession.id);
+
     return {
       sessions: state.sessions.filter(session => session.id !== deletedSession.id),
       activeSessionId: state.activeSessionId === deletedSession.id ? null : state.activeSessionId,

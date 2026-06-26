@@ -48,6 +48,7 @@ import type { DatabaseLike, LoggerLike } from '../types';
 import { resolveWorkflowDefinition, isPermissionMode } from '../../../../shared/types/workflows';
 import type { PermissionMode } from '../../../../shared/types/workflows';
 import { buildStepTransitionEvent } from '../stepTransitionBridge';
+import { handleEntityWrite } from '../autoMintArtifacts';
 import { listRunOwnedIdeaIds, listRunCreatedTaskIds } from '../runEntityOwnership';
 import { ApprovalRouter, RunNotRunningError } from '../approvalRouter';
 import type { ApprovalDecision } from '../../../../shared/types/approval';
@@ -58,6 +59,9 @@ import type { TaskChange, TaskActor, TaskDependencyKind } from '../taskChangeRou
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
 import type { ReviewActor, ReviewItemCreate, ReviewItemTriage } from '../reviewItemRouter';
 import { selectFindingForSeed } from '../reviewItemListing';
+import { ArtifactRouter, ArtifactError } from '../artifactRouter';
+import type { ArtifactActor } from '../artifactRouter';
+import type { ArtifactType } from '../../../../shared/types/artifacts';
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../shared/types/sprintBatch';
 import type { SprintBatchTaskStatus, SprintLaneStepId } from '../../../../shared/types/sprintBatch';
@@ -96,6 +100,8 @@ export type McpQueryMessage =
       title: string;
       taskType?: TaskType;
       summary?: string;
+      /** Full markdown body — the canonical rich detail (idea spec / task description + ACs). */
+      body?: string;
       priority?: Priority;
       repo?: string;
       parentEpicId?: string;
@@ -111,6 +117,8 @@ export type McpQueryMessage =
       entityType?: TaskType;
       title?: string;
       summary?: string;
+      /** Full markdown body — the canonical rich detail (idea spec / task description + ACs). */
+      body?: string;
       priority?: Priority;
       repo?: string;
       parentEpicId?: string;
@@ -207,6 +215,24 @@ export type McpQueryMessage =
       note?: string;
       /** Optional minted task id; recorded when resolutionKind='promoted'. */
       taskId?: string;
+    }
+  | {
+      /** Create (or idempotently re-derive) a run artifact via the ArtifactRouter
+       *  chokepoint. UPSERTS by (run, atype); replies with the artifact id. */
+      type: 'mcp-report-artifact';
+      requestId: string;
+      runId: string;
+      atype: ArtifactType;
+      label: string;
+      payloadJson?: string;
+    }
+  | {
+      /** Commit a run artifact (flip committed). Replies with the artifact id. */
+      type: 'mcp-commit-artifact';
+      requestId: string;
+      runId: string;
+      artifactId: string;
+      payloadJson?: string;
     }
   | {
       type: 'shell-approval-request';
@@ -426,6 +452,12 @@ export class McpQueryHandler {
           // AWAITED (unlike fire-and-forget report-finding) so a failed resolve
           // surfaces to the agent rather than silently leaving the finding pending.
           await this.handleResolveFinding(msg, client);
+          break;
+        case 'mcp-report-artifact':
+          await this.handleReportArtifact(msg, client);
+          break;
+        case 'mcp-commit-artifact':
+          await this.handleCommitArtifact(msg, client);
           break;
         case 'shell-approval-request':
           // Async-deferred — the FIRST handler that does NOT writeResponse
@@ -884,6 +916,7 @@ export class McpQueryHandler {
       entityType: msg.taskType,
       title: msg.title,
       summary: msg.summary,
+      body: msg.body,
       priority: msg.priority,
       repo: msg.repo,
       parentEpicId: msg.parentEpicId ?? null,
@@ -894,6 +927,22 @@ export class McpQueryHandler {
     try {
       const { taskId } = await TaskChangeRouter.getInstance().applyChange(ctx.projectId, change);
       const identity = this.readTaskIdentity(taskId);
+
+      // Content-driven artifact mint: a successful entity create may have just made
+      // a templated deliverable non-empty (idea -> idea-spec; epic/task ->
+      // decomposed-stories). Fire-and-forget + fail-soft (handleEntityWrite never
+      // throws, but a defensive .catch guards a surprise rejection from becoming an
+      // unhandled rejection — mirrors the buildStepTransitionEvent .catch posture).
+      // The entity type comes from the re-read identity, falling back to the
+      // requested taskType (default 'idea' at the chokepoint).
+      const createdType: 'idea' | 'epic' | 'task' = identity?.type ?? msg.taskType ?? 'idea';
+      void handleEntityWrite(this.db, msg.runId, createdType, this.logger).catch((err) => {
+        this.logger?.warn('[Cyboflow MCP Query] entity-write mint rejected (ignored)', {
+          runId: msg.runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,
@@ -934,6 +983,7 @@ export class McpQueryHandler {
       fields: {
         title: msg.title,
         summary: msg.summary,
+        body: msg.body,
         priority: msg.priority,
         repo: msg.repo,
       },
@@ -944,6 +994,20 @@ export class McpQueryHandler {
     try {
       const { taskId } = await TaskChangeRouter.getInstance().applyChange(ctx.projectId, change);
       const identity = this.readTaskIdentity(taskId);
+
+      // Content-driven artifact mint: an update that filled in the idea body /
+      // summary (idea -> idea-spec) or an entity's content (epic/task ->
+      // decomposed-stories) may have just made a templated deliverable non-empty.
+      // Fire-and-forget + fail-soft (mirrors the create path). Entity type from the
+      // re-read identity, falling back to the discriminator the caller supplied.
+      const writtenType: 'idea' | 'epic' | 'task' = identity?.type ?? msg.entityType ?? 'idea';
+      void handleEntityWrite(this.db, msg.runId, writtenType, this.logger).catch((err) => {
+        this.logger?.warn('[Cyboflow MCP Query] entity-write mint rejected (ignored)', {
+          runId: msg.runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,
@@ -1717,6 +1781,82 @@ export class McpQueryHandler {
     } catch (err) {
       this.writeReviewItemError(client, msg.requestId, err);
     }
+  }
+
+  /**
+   * Create (or idempotently re-derive) a run artifact via the ArtifactRouter
+   * chokepoint. Unlike report-finding this AWAITS the write so it can reply with
+   * the artifact id (the agent needs it to enrich/commit later). The project +
+   * actor are resolved from the run; the artifact is minted isNew so its tab
+   * pulses until focused.
+   */
+  private async handleReportArtifact(
+    msg: Extract<McpQueryMessage, { type: 'mcp-report-artifact' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = this.resolveReviewItemRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const actor: ArtifactActor = ctx.actor === 'linear' ? 'agent:unknown' : ctx.actor;
+    try {
+      const { artifactId } = await ArtifactRouter.getInstance().apply(ctx.projectId, {
+        op: 'create',
+        runId: msg.runId,
+        atype: msg.atype,
+        label: msg.label,
+        payloadJson: msg.payloadJson ?? null,
+        isNew: true,
+        actor,
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { artifactId, atype: msg.atype },
+      });
+    } catch (err) {
+      this.writeArtifactError(client, msg.requestId, err);
+    }
+  }
+
+  /**
+   * Commit a run artifact (flip committed) via the ArtifactRouter chokepoint.
+   */
+  private async handleCommitArtifact(
+    msg: Extract<McpQueryMessage, { type: 'mcp-commit-artifact' }>,
+    client: net.Socket,
+  ): Promise<void> {
+    const ctx = this.resolveReviewItemRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+    const actor: ArtifactActor = ctx.actor === 'linear' ? 'agent:unknown' : ctx.actor;
+    try {
+      const { artifactId } = await ArtifactRouter.getInstance().apply(ctx.projectId, {
+        op: 'commit',
+        artifactId: msg.artifactId,
+        actor,
+        ...(msg.payloadJson !== undefined ? { payloadJson: msg.payloadJson } : {}),
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { artifactId, committed: true },
+      });
+    } catch (err) {
+      this.writeArtifactError(client, msg.requestId, err);
+    }
+  }
+
+  /** Surface an ArtifactError code (or a generic message) as an ok:false reply. */
+  private writeArtifactError(client: net.Socket, requestId: string, err: unknown): void {
+    const error =
+      err instanceof ArtifactError ? `${err.code}: ${err.message}` : err instanceof Error ? err.message : String(err);
+    this.writeResponse(client, { type: 'mcp-query-response', requestId, ok: false, error });
   }
 
   /**

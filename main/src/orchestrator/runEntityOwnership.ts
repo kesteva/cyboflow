@@ -91,3 +91,67 @@ export function listRunOwnedIdeaIds(db: DatabaseLike, runId: string): string[] {
 export function listRunCreatedTaskIds(db: DatabaseLike, runId: string): string[] {
   return entityIdsCreatedByRun(db, runId, 'task');
 }
+
+/**
+ * The idea id a run OPERATES ON when it does not own one directly. A standalone
+ * sprint run has a null `seed_idea_id` and creates no ideas, so
+ * listRunOwnedIdeaIds yields [] for it — but it still executes the tasks of an
+ * idea's decomposition, linked via its sprint batch. This resolves that idea:
+ *
+ *   1. The DOMINANT idea across the run's sprint-batch tasks (`sprint_batch_tasks`
+ *      JOIN `tasks`, picking the idea most tasks share).
+ *   2. Failing that, the idea of the run's single `task_id`.
+ *
+ * A task reaches its idea EITHER directly (`tasks.originating_idea_id`, for a task
+ * minted straight off an idea) OR through its parent epic
+ * (`tasks.parent_epic_id` -> `epics.originating_idea_id`, for a task minted under
+ * an epic — these carry a NULL originating_idea_id). Both queries COALESCE the two
+ * so a batch of purely epic-child tasks still resolves.
+ *
+ * Returns null when neither resolves. Fail-soft: a pre-sprint-batch DB lacking
+ * `sprint_batch_tasks` / `batch_id` / `task_id`, or any thrown query, degrades to
+ * null (mirrors listRunOwnedIdeaIds — a missing table/column means "operates on
+ * no resolvable idea", never a throw).
+ *
+ * @param db    Narrow DatabaseLike interface.
+ * @param runId The workflow_runs.id whose operating idea to resolve.
+ */
+export function resolveRunBatchIdeaId(db: DatabaseLike, runId: string): string | null {
+  // 1. Dominant idea across the run's sprint-batch tasks (direct or via epic).
+  try {
+    const row = db
+      .prepare(
+        `SELECT COALESCE(t.originating_idea_id, e.originating_idea_id) AS ideaId, COUNT(*) AS n
+           FROM workflow_runs r
+           JOIN sprint_batch_tasks sbt ON sbt.batch_id = r.batch_id
+           JOIN tasks t ON t.id = sbt.task_id
+           LEFT JOIN epics e ON e.id = t.parent_epic_id
+          WHERE r.id = ? AND COALESCE(t.originating_idea_id, e.originating_idea_id) IS NOT NULL
+          GROUP BY COALESCE(t.originating_idea_id, e.originating_idea_id)
+          ORDER BY n DESC
+          LIMIT 1`,
+      )
+      .get(runId) as { ideaId: unknown } | undefined;
+    if (row && typeof row.ideaId === 'string' && row.ideaId.length > 0) return row.ideaId;
+  } catch {
+    // No sprint_batch_tasks table / no batch_id column — fall through.
+  }
+
+  // 2. The idea of the run's single task_id (direct or via epic).
+  try {
+    const row = db
+      .prepare(
+        `SELECT COALESCE(t.originating_idea_id, e.originating_idea_id) AS ideaId
+           FROM workflow_runs r
+           JOIN tasks t ON t.id = r.task_id
+           LEFT JOIN epics e ON e.id = t.parent_epic_id
+          WHERE r.id = ? AND COALESCE(t.originating_idea_id, e.originating_idea_id) IS NOT NULL`,
+      )
+      .get(runId) as { ideaId: unknown } | undefined;
+    if (row && typeof row.ideaId === 'string' && row.ideaId.length > 0) return row.ideaId;
+  } catch {
+    // No task_id column — fall through.
+  }
+
+  return null;
+}

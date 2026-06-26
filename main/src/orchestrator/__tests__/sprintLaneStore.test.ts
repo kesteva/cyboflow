@@ -267,6 +267,37 @@ describe('SprintLaneStore', () => {
       expect(row.integrated_at).toBeNull();
     });
 
+    it('resolves the lane by display ref (TASK-001) — agents pass refs, not opaque ids', () => {
+      seedTask(db, 'tsk_a', 'TASK-001', 'First task');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+
+      // The agent only sees the display ref in the seeded sprint-task block.
+      const lane = store.updateLane({
+        runId: 'run-1',
+        batchId,
+        taskId: 'TASK-001',
+        status: 'running',
+        currentStepId: 'implement',
+      });
+
+      // It resolved to the opaque id and wrote the lane.
+      expect(lane.taskId).toBe('tsk_a');
+      expect(lane.status).toBe('running');
+      expect(lane.ref).toBe('TASK-001');
+      const row = db
+        .prepare('SELECT status FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+        .get(batchId, 'tsk_a') as { status: string };
+      expect(row.status).toBe('running');
+    });
+
+    it('still resolves by opaque id when the tasks row is absent (no join requirement)', () => {
+      // No seedTask for tsk_a — the opaque-id path must not require a tasks row.
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      const lane = store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running' });
+      expect(lane.taskId).toBe('tsk_a');
+      expect(lane.status).toBe('running');
+    });
+
     it('a step-only update leaves status untouched; null clears the step', () => {
       const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
 

@@ -1,25 +1,47 @@
 /**
  * RunRightRail — fixed-width right rail in the CyboflowRoot two-column layout.
  *
- * Contains three tabs:
+ * Contains four tabs:
  *   - Workflow Progress (default selected) — live WorkflowProgressTimeline (plus the
  *     per-task SprintLanesPanel for sprint runs) when activeRunId is non-null; neutral
  *     empty state otherwise.
- *   - File Explorer — live SessionFileExplorer (selected session's worktree tree +
- *     read-only viewer) when selectedSessionId is non-null; neutral empty state
- *     otherwise.
- *   - Diff — live working diff (CombinedDiffView) for the active quick session; neutral
- *     message when no session is active.
+ *   - File Explorer — live SessionFileExplorer (selected session's worktree tree).
+ *     During an active run it is the LAUNCHER for center-pane file/diff tabs (clicking
+ *     a file opens a center tab via centerPaneStore.openFileTab); otherwise it falls
+ *     back to its own read-only takeover viewer.
+ *   - Diff — the run-scoped working-directory diff (RunDiffTabPanel) for the active
+ *     run. Flow runs are keyed by runId (workflow_runs.session_id is NULL), so the
+ *     session-scoped combined-diff path can't serve them; this tab fetches
+ *     cyboflow.runs.gitDiff (worktree_path-resolved) instead.
+ *   - Artifacts — the "RUN DELIVERABLES" reopen surface (ArtifactsPanel) when
+ *     activeRunId is non-null; lists every artifact the run produced so closed
+ *     center-pane tabs can be reopened. projectId is resolved from the active run
+ *     row in useActiveRunsStore (the row carries project_id) — RunRightRail takes
+ *     no extra prop (CyboflowRoot is owned by the orchestrator).
+ *
+ * Collapse: the WHOLE rail is collapsible. `collapsed` + `onToggleCollapse` are
+ * lifted to CyboflowRoot (persisted to localStorage); when collapsed the rail
+ * renders a thin ~28px strip with only a re-expand chevron. When expanded the
+ * collapse chevron sits at the TOP-LEFT of the rail (leading the tab bar).
+ *
+ * Width: the expanded rail is user-resizable — drag the handle on its LEFT edge
+ * (drag left to widen). The chosen width is persisted to localStorage so it
+ * survives reloads. The rail stays `shrink-0` in the flex row; the center column
+ * reclaims whatever the rail gives up.
  */
-import { useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { WorkflowProgressTimeline } from './WorkflowProgressTimeline';
 import { SprintLanesPanel } from './SprintLanesPanel';
 import { SessionFileExplorer } from './SessionFileExplorer';
-import CombinedDiffView from '../panels/diff/CombinedDiffView';
+import { RunDiffTabPanel } from './RunDiffTabPanel';
+import { ArtifactsPanel } from './ArtifactsPanel';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
+import { useCenterPaneStore } from '../../stores/centerPaneStore';
+import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 
-type TabId = 'workflow-progress' | 'file-explorer' | 'diff';
+type TabId = 'workflow-progress' | 'file-explorer' | 'diff' | 'artifacts';
 
 interface Tab {
   id: TabId;
@@ -43,53 +65,190 @@ const TABS: Tab[] = [
     label: 'Diff',
     testid: 'run-right-rail-tab-diff',
   },
+  {
+    id: 'artifacts',
+    label: 'Artifacts',
+    testid: 'run-right-rail-tab-artifacts',
+  },
 ];
 
-/**
- * RunRightRailDiff — compact wrapper around the working CombinedDiffView, mirroring the
- * minimal state DiffPanel owns (selectedExecutions defaulting to [] == all uncommitted
- * changes, isGitOperationRunning false). Rendered only when the DIFF tab is active and a
- * sessionId is resolved, so it remounts (and reloads git data) whenever the tab is
- * reopened. CombinedDiffView also exposes its own header refresh control.
- */
-function RunRightRailDiff({ sessionId, isActive }: { sessionId: string; isActive: boolean }) {
-  // [] == all uncommitted changes (same default DiffPanel uses).
-  const [selectedExecutions] = useState<number[]>([]);
+/** Default expanded rail width (the former fixed Tailwind width). */
+const RAIL_DEFAULT_WIDTH = 296;
+/** Resize clamp: never shrink below a usable column. */
+const RAIL_MIN_WIDTH = 240;
+/** Resize clamp: cap at the smaller of an absolute ceiling or ~50% of viewport. */
+const RAIL_MAX_ABS_WIDTH = 640;
+/** localStorage key for the persisted rail width. Brand-new key — no migration. */
+const RAIL_WIDTH_KEY = 'cyboflow.runRightRail.width';
 
-  return (
-    <div
-      data-testid="run-right-rail-diff"
-      className="h-full flex flex-col bg-surface-primary"
-    >
-      <div className="flex-1 overflow-hidden">
-        <CombinedDiffView
-          sessionId={sessionId}
-          selectedExecutions={selectedExecutions}
-          isGitOperationRunning={false}
-          isVisible={isActive}
-        />
-      </div>
-    </div>
-  );
+/** Upper resize bound: absolute cap, but never more than ~50% of the viewport. */
+function maxRailWidth(): number {
+  const viewportCap =
+    typeof window !== 'undefined' && window.innerWidth > 0
+      ? Math.round(window.innerWidth * 0.5)
+      : RAIL_MAX_ABS_WIDTH;
+  return Math.min(RAIL_MAX_ABS_WIDTH, viewportCap);
 }
 
-export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseStateResult }) {
+/** Clamp a candidate width into [min, max]. */
+function clampRailWidth(w: number): number {
+  return Math.max(RAIL_MIN_WIDTH, Math.min(maxRailWidth(), w));
+}
+
+/**
+ * Resolve the active run's project_id from the active-runs store. The row lives
+ * under its project's bucket; we scan every bucket because RunRightRail does not
+ * know which project the run belongs to (and takes no prop for it). Returns null
+ * when the run isn't tracked yet (e.g. before the rail's project-expand refresh).
+ */
+function selectActiveRunProjectId(
+  runsByProject: ReturnType<typeof useActiveRunsStore.getState>['runsByProject'],
+  runId: string | null,
+): number | null {
+  if (runId === null) return null;
+  for (const rows of Object.values(runsByProject)) {
+    const row = rows.find((r) => r.id === runId);
+    if (row) return row.project_id;
+  }
+  return null;
+}
+
+interface RunRightRailProps {
+  phaseState: UseWorkflowPhaseStateResult;
+  /** Whether the rail is collapsed to a thin re-expand strip. */
+  collapsed: boolean;
+  /** Toggle the collapsed state (lifted to + persisted by CyboflowRoot). */
+  onToggleCollapse: () => void;
+}
+
+export function RunRightRail({ phaseState, collapsed, onToggleCollapse }: RunRightRailProps) {
   const [activeTab, setActiveTab] = useState<TabId>('workflow-progress');
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const selectedSessionId = useCyboflowStore((s) => s.selectedSessionId);
+  const openFileTab = useCenterPaneStore((s) => s.openFileTab);
+  const runsByProject = useActiveRunsStore((s) => s.runsByProject);
+
+  // User-resizable width: seed from localStorage (default RAIL_DEFAULT_WIDTH),
+  // always clamped. Mirrors TerminalDock's height-resize pattern, horizontal.
+  const [width, setWidth] = useState<number>(() => {
+    const saved =
+      typeof localStorage !== 'undefined' ? localStorage.getItem(RAIL_WIDTH_KEY) : null;
+    const parsed = saved !== null ? parseInt(saved, 10) : NaN;
+    return clampRailWidth(Number.isFinite(parsed) ? parsed : RAIL_DEFAULT_WIDTH);
+  });
+  const [isResizing, setIsResizing] = useState(false);
+  const startXRef = useRef<number>(0);
+  const startWidthRef = useRef<number>(0);
+
+  // Persist the chosen width. (Brand-new key — no migrateLocalStorageKey needed.)
+  useEffect(() => {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(RAIL_WIDTH_KEY, width.toString());
+    }
+  }, [width]);
+
+  const handleResizeDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      setIsResizing(true);
+      startXRef.current = e.clientX;
+      startWidthRef.current = width;
+    },
+    [width],
+  );
+
+  const handleResizeMove = useCallback((e: MouseEvent) => {
+    // The rail sits on the right, so dragging its LEFT edge leftward (smaller
+    // clientX) grows it.
+    const deltaX = startXRef.current - e.clientX;
+    setWidth(clampRailWidth(startWidthRef.current + deltaX));
+  }, []);
+
+  const handleResizeUp = useCallback(() => {
+    setIsResizing(false);
+  }, []);
+
+  // Attach global listeners only while actively dragging.
+  useEffect(() => {
+    if (!isResizing) return;
+    document.addEventListener('mousemove', handleResizeMove);
+    document.addEventListener('mouseup', handleResizeUp);
+    const prevUserSelect = document.body.style.userSelect;
+    const prevCursor = document.body.style.cursor;
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'ew-resize';
+    return () => {
+      document.removeEventListener('mousemove', handleResizeMove);
+      document.removeEventListener('mouseup', handleResizeUp);
+      document.body.style.userSelect = prevUserSelect;
+      document.body.style.cursor = prevCursor;
+    };
+  }, [isResizing, handleResizeMove, handleResizeUp]);
+
+  const activeRunProjectId = selectActiveRunProjectId(runsByProject, activeRunId);
+  // The center-pane key is the run's parent session when known, else the run id
+  // (legacy parentless runs) — matches RunCenterPane's keying.
+  const artifactsSessionKey = selectedSessionId ?? activeRunId ?? '';
 
   const currentTab = TABS.find((t) => t.id === activeTab) ?? TABS[0];
+
+  // Collapsed: a thin strip with only a re-expand chevron (affordance mirrors
+  // TerminalDock's header chevron). The center column reclaims the rail's width.
+  if (collapsed) {
+    return (
+      <aside
+        data-testid="run-right-rail-collapsed"
+        className="w-[28px] shrink-0 flex flex-col items-center border-l border-border-primary bg-bg-secondary"
+      >
+        <button
+          type="button"
+          data-testid="run-right-rail-expand"
+          aria-label="Expand right rail"
+          title="Expand right rail"
+          onClick={onToggleCollapse}
+          className="flex h-8 w-full items-center justify-center text-text-tertiary hover:text-text-primary"
+        >
+          <ChevronLeft size={14} />
+        </button>
+      </aside>
+    );
+  }
 
   return (
     <aside
       data-testid="run-right-rail"
-      className="w-[296px] shrink-0 flex flex-col border-l border-border-primary bg-bg-primary"
+      className="relative shrink-0 flex flex-col border-l border-border-primary bg-bg-primary"
+      style={{ width }}
     >
-      {/* Tab bar */}
+      {/* Left-edge drag handle — resize the rail (drag LEFT to widen). Straddles
+          the left border (centered on it via -translate-x-1/2) and sits above the
+          content so it stays grabbable; it highlights while dragging. */}
+      <div
+        data-testid="run-right-rail-resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize right rail"
+        onMouseDown={handleResizeDown}
+        title="Drag to resize"
+        className="absolute left-0 top-0 z-10 h-full w-1.5 -translate-x-1/2 cursor-ew-resize"
+        style={{ background: isResizing ? 'var(--color-border-primary)' : 'transparent' }}
+      />
+
+      {/* Tab bar — LEADING collapse chevron at the top-left, then the tabs. */}
       <div
         role="tablist"
-        className="flex border-b border-border-primary"
+        className="flex items-stretch border-b border-border-primary"
       >
+        <button
+          type="button"
+          data-testid="run-right-rail-collapse"
+          aria-label="Collapse right rail"
+          title="Collapse right rail"
+          onClick={onToggleCollapse}
+          className="flex w-7 shrink-0 items-center justify-center border-r border-border-primary text-text-tertiary hover:text-text-primary"
+        >
+          <ChevronRight size={14} />
+        </button>
         {TABS.map((tab) => {
           const isActive = tab.id === activeTab;
           return (
@@ -134,7 +293,18 @@ export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseState
           )
         ) : currentTab.id === 'file-explorer' ? (
           selectedSessionId ? (
-            <SessionFileExplorer sessionId={selectedSessionId} />
+            <SessionFileExplorer
+              sessionId={selectedSessionId}
+              // During an active run, clicking a file opens a center-pane file/diff
+              // tab (the centerPane key == selectedSessionId == the run's parent
+              // session). Without an active run there is no tabbed center pane, so
+              // the explorer uses its own takeover viewer.
+              onOpenFile={
+                activeRunId !== null
+                  ? (filePath) => openFileTab(selectedSessionId, { filePath })
+                  : undefined
+              }
+            />
           ) : (
             <div
               data-testid="run-right-rail-file-explorer-empty"
@@ -143,15 +313,35 @@ export function RunRightRail({ phaseState }: { phaseState: UseWorkflowPhaseState
               Select a session to view its files.
             </div>
           )
-        ) : (
-          selectedSessionId ? (
-            <RunRightRailDiff sessionId={selectedSessionId} isActive />
+        ) : currentTab.id === 'diff' ? (
+          // Diff tab — run-scoped working-directory diff (keyed by runId, not
+          // sessionId, since flow runs have session_id NULL).
+          activeRunId !== null ? (
+            <div className="h-full overflow-hidden">
+              <RunDiffTabPanel runId={activeRunId} />
+            </div>
           ) : (
             <div
-              data-testid="run-right-rail-diff-empty"
+              data-testid="run-right-rail-diff-empty-norun"
               className="p-4 text-sm text-text-secondary"
             >
-              Select a session to view its diff.
+              No active run
+            </div>
+          )
+        ) : (
+          // Artifacts tab — needs an active run AND its resolved project id.
+          activeRunId !== null && activeRunProjectId !== null ? (
+            <ArtifactsPanel
+              runId={activeRunId}
+              projectId={activeRunProjectId}
+              sessionKey={artifactsSessionKey}
+            />
+          ) : (
+            <div
+              data-testid="run-right-rail-artifacts-empty"
+              className="p-4 text-sm text-text-secondary"
+            >
+              No active run
             </div>
           )
         )}

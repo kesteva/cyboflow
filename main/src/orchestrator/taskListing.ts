@@ -545,6 +545,124 @@ export function selectTaskById(db: DatabaseLike, taskId: string): BacklogTaskIte
 }
 
 /**
+ * Project an IDEA together with its decomposition tree — the idea as the root,
+ * its epics nested under `children` (WHERE epics.originating_idea_id = ideaId),
+ * and each epic's tasks nested under THAT epic's `children` (WHERE
+ * tasks.parent_epic_id = epic.id). Returns null when the id is not an idea.
+ *
+ * This is the dedicated read behind the `decomposed-stories` artifact tab.
+ * `selectTaskById` only nests children for an EPIC (via parent_epic_id) and has
+ * NO idea→epics branch, so passing an idea id there yields children===undefined
+ * and the renderer falls to its empty state even for a fully-decomposed idea.
+ * This resolver fills that gap WITHOUT changing selectTaskById's semantics for
+ * other tasks.get consumers.
+ *
+ * Shape contract: the returned item is a BacklogTaskItem whose `children` are
+ * the idea's epics (each `epic.children = tasks[]`) FOLLOWED BY any tasks
+ * decomposed directly under the idea with no epic (a small-idea decomposition).
+ * DecomposedStoriesBody splits idea.children by type — epic-type get cards,
+ * task-type render in a direct-task grid. Epics + tasks carry the same on-read
+ * overlays + rollups as selectTaskById.
+ *
+ * @param db     - Narrow DatabaseLike interface.
+ * @param ideaId - The originating idea id whose decomposition to project.
+ */
+export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): BacklogTaskItem | null {
+  // The root MUST be an idea — ideas are the only entities epics link to via
+  // originating_idea_id, and the artifact's sourceRef is always an idea id.
+  const ideaRow = db
+    .prepare(
+      `SELECT ${aliasedUnionColumns('e')}, COALESCE(bs.position, 0) AS stage_position
+         FROM (
+           SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, repo,
+                  NULL AS parent_epic_id, NULL AS originating_idea_id, scope,
+                  board_id, stage_id, archived_at, version, created_at, updated_at
+             FROM ideas WHERE id = ?
+         ) e
+         LEFT JOIN board_stages bs ON bs.id = e.stage_id`,
+    )
+    .get(ideaId) as TaskDbRow | undefined;
+  if (!ideaRow) return null;
+
+  const idea = projectTaskItem(db, ideaRow);
+
+  // Epics decomposed from this idea (ASC by created_at, ref tiebreak).
+  const epicRows = db
+    .prepare(
+      `SELECT e.id, e.project_id, 'epic' AS type, e.ref, e.title, e.summary, e.body, e.priority, e.repo,
+              NULL AS parent_epic_id, e.originating_idea_id, NULL AS scope,
+              e.board_id, e.stage_id, e.archived_at, e.version, e.created_at, e.updated_at,
+              COALESCE(bs.position, 0) AS stage_position
+         FROM epics e
+         LEFT JOIN board_stages bs ON bs.id = e.stage_id
+        WHERE e.originating_idea_id = ?
+        ORDER BY e.created_at ASC, e.ref ASC`,
+    )
+    .all(ideaId) as TaskDbRow[];
+
+  const epics = epicRows.map((epicRow) => {
+    const epic = projectTaskItem(db, epicRow);
+
+    // Tasks under this epic (lineage via parent_epic_id), same ordering as
+    // selectTaskById's epic-children pass.
+    const taskRows = db
+      .prepare(
+        `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.repo,
+                t.parent_epic_id, t.originating_idea_id, NULL AS scope,
+                t.board_id, t.stage_id, t.archived_at, t.version, t.created_at, t.updated_at,
+                COALESCE(bs.position, 0) AS stage_position
+           FROM tasks t
+           LEFT JOIN board_stages bs ON bs.id = t.stage_id
+          WHERE t.parent_epic_id = ?
+          ORDER BY t.created_at ASC, t.ref ASC`,
+      )
+      .all(epicRow.id) as TaskDbRow[];
+
+    const tasks = taskRows.map((taskRow) => {
+      const taskItem = projectTaskItem(db, taskRow);
+      applyDependencyOverlay(taskItem, loadTaskDependencyOverlay(db, taskRow.id));
+      return taskItem;
+    });
+
+    epic.children = tasks;
+    epic.childCount = tasks.length;
+    epic.pendingTasks = tasks.filter((t) => !t.isDone).length;
+    return epic;
+  });
+
+  // Tasks decomposed DIRECTLY under the idea (no epic) — a SMALL idea's planner
+  // decomposition creates tasks with originating_idea_id set and parent_epic_id
+  // NULL (the planner skips the epic layer). Without surfacing these, the
+  // decomposed-stories artifact renders "not decomposed yet" for a small idea.
+  // They are appended to idea.children as task-type items; the renderer splits
+  // idea.children by type (epics get cards, direct tasks get a task grid).
+  const directTaskRows = db
+    .prepare(
+      `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.repo,
+              t.parent_epic_id, t.originating_idea_id, NULL AS scope,
+              t.board_id, t.stage_id, t.archived_at, t.version, t.created_at, t.updated_at,
+              COALESCE(bs.position, 0) AS stage_position
+         FROM tasks t
+         LEFT JOIN board_stages bs ON bs.id = t.stage_id
+        WHERE t.originating_idea_id = ? AND t.parent_epic_id IS NULL
+        ORDER BY t.created_at ASC, t.ref ASC`,
+    )
+    .all(ideaId) as TaskDbRow[];
+
+  const directTasks = directTaskRows.map((taskRow) => {
+    const taskItem = projectTaskItem(db, taskRow);
+    applyDependencyOverlay(taskItem, loadTaskDependencyOverlay(db, taskRow.id));
+    return taskItem;
+  });
+
+  idea.children = [...epics, ...directTasks];
+  idea.childCount = epics.length + directTasks.length;
+  idea.pendingTasks =
+    epics.filter((e) => !e.isDone).length + directTasks.filter((t) => !t.isDone).length;
+  return idea;
+}
+
+/**
  * Return the full backlog as a nested tree:
  *   - Epics carry their child tasks under `children` (ASC by created_at), plus
  *     `childCount` and `pendingTasks` (children not yet done).

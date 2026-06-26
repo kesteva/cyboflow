@@ -67,7 +67,8 @@ import type { ResumeRunDeps, ResumeRunResult } from '../../../resumeRunHandler';
 import { RunQueueRegistry } from '../../../RunQueueRegistry';
 import { ApprovalRouter } from '../../../approvalRouter';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
-import { stepTransitionEvents } from '../events';
+import { stepTransitionEvents, runStatusEvents } from '../events';
+import type { RunStatusChangedEvent } from '../../../../../../shared/types/cyboflow';
 import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../../../shared/types/workflows';
 import { buildStepTransitionEvent, resolveInitialStepId } from '../../../stepTransitionBridge';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../../shared/types/workflows';
@@ -736,6 +737,119 @@ describe('cyboflow.runs.cancel (Phase 4a)', () => {
     } finally {
       db.close();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cyboflow.runs.setPermissionMode — runtime agent-permission change (ISSUE #2).
+//
+// ctx.db-direct (no dep-bag), so the test wires the DB through createContext({ db })
+// exactly like cyboflow.runs.get / end. The new mode takes effect on the next
+// spawn because RunExecutor.buildOptionsOverrides re-reads permission_mode_snapshot
+// fresh per execute — that next-turn apply is covered separately at the executor
+// layer; here we verify the UPDATE + the runStatusEvents 'changed' refresh emit and
+// the noOp guards. The base GATE_SCHEMA carries permission_mode_snapshot (NOT NULL
+// DEFAULT 'default'), so no opt-in flag is needed.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.setPermissionMode (ISSUE #2)', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('(a) running run → { updated: true }, snapshot reflects the new value, emits a refresh event', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    // seedRun does not set permission_mode_snapshot → GATE_SCHEMA default 'default'.
+    const events: RunStatusChangedEvent[] = [];
+    const listener = (e: RunStatusChangedEvent): void => {
+      events.push(e);
+    };
+    runStatusEvents.on('changed', listener);
+
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.setPermissionMode({ runId, permissionMode: 'auto' });
+
+      expect(result).toEqual({ updated: true });
+      const row = db
+        .prepare('SELECT permission_mode_snapshot FROM workflow_runs WHERE id = ?')
+        .get(runId) as { permission_mode_snapshot: string };
+      expect(row.permission_mode_snapshot).toBe('auto');
+      // The refresh emit carries the run's UNCHANGED current status (pure
+      // invalidation trigger for activeRunsStore).
+      expect(events).toContainEqual({ runId, status: 'running' });
+    } finally {
+      runStatusEvents.off('changed', listener);
+    }
+  });
+
+  it('(b) terminal run → { noOp: true, reason: already_terminal }, snapshot unchanged, no event', async () => {
+    const { runId } = seedRun(db, { status: 'completed' });
+    const events: RunStatusChangedEvent[] = [];
+    const listener = (e: RunStatusChangedEvent): void => {
+      events.push(e);
+    };
+    runStatusEvents.on('changed', listener);
+
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      const result = await caller.cyboflow.runs.setPermissionMode({ runId, permissionMode: 'dontAsk' });
+
+      expect(result).toEqual({ noOp: true, reason: 'already_terminal' });
+      const row = db
+        .prepare('SELECT permission_mode_snapshot FROM workflow_runs WHERE id = ?')
+        .get(runId) as { permission_mode_snapshot: string };
+      expect(row.permission_mode_snapshot).toBe('default');
+      expect(events).toHaveLength(0);
+    } finally {
+      runStatusEvents.off('changed', listener);
+    }
+  });
+
+  it('(c) unknown run → { noOp: true, reason: not_found }', async () => {
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.setPermissionMode({
+      runId: 'no-such-run',
+      permissionMode: 'acceptEdits',
+    });
+    expect(result).toEqual({ noOp: true, reason: 'not_found' });
+  });
+
+  it('(d) invalid permissionMode → zod BAD_REQUEST', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(
+      // @ts-expect-error — deliberately passing an invalid enum value to assert zod rejects it.
+      caller.cyboflow.runs.setPermissionMode({ runId, permissionMode: 'bogus' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST',
+    );
+  });
+
+  it('(e) accepts a paused run (gate is non-terminal, not running-only)', async () => {
+    const { runId } = seedRun(db, { status: 'paused' });
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.setPermissionMode({ runId, permissionMode: 'acceptEdits' });
+    expect(result).toEqual({ updated: true });
+    const row = db
+      .prepare('SELECT permission_mode_snapshot FROM workflow_runs WHERE id = ?')
+      .get(runId) as { permission_mode_snapshot: string };
+    expect(row.permission_mode_snapshot).toBe('acceptEdits');
+  });
+
+  it('(f) throws PRECONDITION_FAILED when ctx.db is missing', async () => {
+    const caller = appRouter.createCaller(createContext());
+    await expect(
+      caller.cyboflow.runs.setPermissionMode({ runId: 'any-run', permissionMode: 'auto' }),
+    ).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
+    );
   });
 });
 
@@ -2315,6 +2429,89 @@ describe('cyboflow.runs.listFiles / readFile', () => {
   it('readFile: missing file → NOT_FOUND (not-found mapping)', async () => {
     await expect(caller().cyboflow.runs.readFile({ runId: RUN, path: 'gone.txt' })).rejects.toSatisfy(
       (err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND',
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cyboflow.runs.gitDiff — run-scoped working-directory Diff tab.
+//
+// The diff capture is performed via the injected ctx.gitDiff closure (backed by
+// GitDiffManager in index.ts), so the tests stub it and assert the router:
+//   (a) resolves workflow_runs.worktree_path and forwards it to ctx.gitDiff,
+//       returning the dep's payload verbatim;
+//   (b) returns null when the run has no worktree_path (without calling the dep);
+//   (c) throws NOT_FOUND for an unknown run;
+//   (d) throws PRECONDITION_FAILED when ctx.db is missing;
+//   (e) throws PRECONDITION_FAILED when ctx.gitDiff is not wired.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.runs.gitDiff (run-scoped Diff tab)', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb();
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('(a) resolves worktree_path → forwards to ctx.gitDiff and returns its payload', async () => {
+    const { runId } = seedRun(db, { worktreePath: '/tmp/run-worktree' });
+    const payload = {
+      diff: 'diff --git a/x.ts b/x.ts\n@@ -0,0 +1 @@\n+hi\n',
+      stats: { additions: 1, deletions: 0, filesChanged: 1 },
+      changedFiles: ['x.ts'],
+    };
+    const gitDiff = vi.fn().mockResolvedValue(payload);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db), gitDiff }));
+    const result = await caller.cyboflow.runs.gitDiff({ runId });
+
+    expect(gitDiff).toHaveBeenCalledWith('/tmp/run-worktree');
+    expect(result).toEqual(payload);
+  });
+
+  it('(b) no worktree_path → returns null without calling ctx.gitDiff', async () => {
+    const { runId } = seedRun(db);
+    // Clear the worktree path directly (seedRun always sets a default) to model a
+    // not-yet-materialized run.
+    db.prepare('UPDATE workflow_runs SET worktree_path = NULL WHERE id = ?').run(runId);
+    const gitDiff = vi.fn().mockResolvedValue({
+      diff: '',
+      stats: { additions: 0, deletions: 0, filesChanged: 0 },
+      changedFiles: [],
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db), gitDiff }));
+    const result = await caller.cyboflow.runs.gitDiff({ runId });
+
+    expect(result).toBeNull();
+    expect(gitDiff).not.toHaveBeenCalled();
+  });
+
+  it('(c) unknown run → NOT_FOUND', async () => {
+    const gitDiff = vi.fn();
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db), gitDiff }));
+    await expect(caller.cyboflow.runs.gitDiff({ runId: 'no-such-run' })).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND',
+    );
+    expect(gitDiff).not.toHaveBeenCalled();
+  });
+
+  it('(d) missing ctx.db → PRECONDITION_FAILED', async () => {
+    const caller = appRouter.createCaller(createContext({ gitDiff: vi.fn() }));
+    await expect(caller.cyboflow.runs.gitDiff({ runId: 'any-run' })).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
+    );
+  });
+
+  it('(e) gitDiff dep not wired → PRECONDITION_FAILED', async () => {
+    const { runId } = seedRun(db);
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(caller.cyboflow.runs.gitDiff({ runId })).rejects.toSatisfy(
+      (err: unknown) => err instanceof TRPCError && err.code === 'PRECONDITION_FAILED',
     );
   });
 });

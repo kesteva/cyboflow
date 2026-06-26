@@ -3,14 +3,19 @@ import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useRef, useState } from 'react';
 
-// Mock the panel-model fetch + the interactive send transport.
+// Mock the panel-model fetch + the interactive send transport + the
+// permission-mode persist IPC.
 const mockSendInput = vi.fn();
 const mockGetModel = vi.fn();
 const mockGetFastMode = vi.fn();
 const mockSetFastMode = vi.fn();
+const mockUpdatePermission = vi.fn();
 vi.mock('../../../../utils/api', () => ({
   API: {
-    sessions: { sendInput: (id: string, text: string) => mockSendInput(id, text) },
+    sessions: {
+      sendInput: (id: string, text: string) => mockSendInput(id, text),
+      updateAgentPermissionMode: (id: string, mode: string) => mockUpdatePermission(id, mode),
+    },
     claudePanels: {
       getModel: (id: string) => mockGetModel(id),
       getFastMode: (id: string) => mockGetFastMode(id),
@@ -71,6 +76,7 @@ function Harness(props: {
   interactive: boolean;
   handleSendInput?: ReturnType<typeof vi.fn>;
   handleContinueConversation?: ReturnType<typeof vi.fn>;
+  onPermissionApplied?: (message: string) => void;
 }) {
   const [input, setInput] = useState('');
   const [ptyOpen, setPtyOpen] = useState(false);
@@ -87,6 +93,7 @@ function Harness(props: {
       interactive={props.interactive}
       ptyOpen={ptyOpen}
       onTogglePtyOpen={() => setPtyOpen((v) => !v)}
+      onPermissionApplied={props.onPermissionApplied}
     />
   );
 }
@@ -96,6 +103,7 @@ beforeEach(() => {
   mockGetModel.mockReset().mockResolvedValue({ success: true, data: 'sonnet' });
   mockGetFastMode.mockReset().mockResolvedValue({ success: true, data: false });
   mockSetFastMode.mockReset().mockResolvedValue({ success: true });
+  mockUpdatePermission.mockReset().mockResolvedValue({ success: true });
 });
 
 describe('QuickSessionComposer — SDK', () => {
@@ -184,5 +192,64 @@ describe('QuickSessionComposer — read-only effort pill (migration 029)', () =>
     });
 
     expect(screen.queryByText('effort: ultracode')).toBeNull();
+  });
+});
+
+describe('QuickSessionComposer — agent permission pill (Issue #1)', () => {
+  it('renders the permission pill for a RUNNING SDK session', () => {
+    render(<Harness session={makeSession({ status: 'running' })} interactive={false} />);
+    // Default mode label from PERMISSION_MODE_OPTIONS.
+    expect(screen.getByText('Ask before edits')).toBeInTheDocument();
+  });
+
+  it('renders the permission pill for an interactive session once the PTY composer is revealed', () => {
+    render(
+      <Harness session={makeSession({ status: 'running', substrate: 'interactive' })} interactive />,
+    );
+    // Hidden behind ⌃G; the toolbar (and its pills) appear only after the reveal.
+    expect(screen.queryByText('Ask before edits')).toBeNull();
+    act(() => {
+      fireEvent.click(screen.getByTestId('unified-composer-reveal'));
+    });
+    expect(screen.getByText('Ask before edits')).toBeInTheDocument();
+  });
+
+  it('persists the chosen mode via the IPC and fires host feedback (SDK)', async () => {
+    const onApplied = vi.fn();
+    render(
+      <Harness
+        session={makeSession({ status: 'running' })}
+        interactive={false}
+        onPermissionApplied={onApplied}
+      />,
+    );
+    fireEvent.click(screen.getByText('Ask before edits')); // open the dropdown
+    fireEvent.click(await screen.findByText('Auto'));
+    await waitFor(() => expect(mockUpdatePermission).toHaveBeenCalledWith('s1', 'auto'));
+    await waitFor(() =>
+      expect(onApplied).toHaveBeenCalledWith('Permission mode updated — applies on your next message'),
+    );
+  });
+
+  it('fires restart-scoped host feedback for an interactive session', async () => {
+    const onApplied = vi.fn();
+    render(
+      <Harness
+        session={makeSession({ status: 'running', substrate: 'interactive' })}
+        interactive
+        onPermissionApplied={onApplied}
+      />,
+    );
+    act(() => {
+      fireEvent.click(screen.getByTestId('unified-composer-reveal'));
+    });
+    fireEvent.click(screen.getByText('Ask before edits')); // open the dropdown
+    fireEvent.click(await screen.findByText('Auto'));
+    await waitFor(() => expect(mockUpdatePermission).toHaveBeenCalledWith('s1', 'auto'));
+    await waitFor(() =>
+      expect(onApplied).toHaveBeenCalledWith(
+        'Permission mode updated — applies when the terminal restarts',
+      ),
+    );
   });
 });

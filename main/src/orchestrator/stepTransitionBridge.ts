@@ -40,6 +40,7 @@
  * raw_events INSERT goes through the narrow DatabaseLike surface only.
  */
 import { stepTransitionEvents } from './trpc/routers/events';
+import { handleStepCompletion, handleRunStart, handleVisualArtifactsScan } from './autoMintArtifacts';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { CyboflowWorkflowName, WorkflowStepTransitionEvent } from '../../../shared/types/workflows';
 import { CYBOFLOW_WORKFLOW_NAMES, resolveWorkflowDefinition } from '../../../shared/types/workflows';
@@ -228,6 +229,73 @@ export function buildStepTransitionEvent(
       `INSERT INTO raw_events (run_id, event_type, payload_json)
        VALUES (?, 'step_transition', ?)`,
     ).run(runId, payloadJson);
+
+    // Auto-mint artifacts on step COMPLETION (status='done') only. Mirrors the
+    // raw_events fail-soft posture: handleStepCompletion is itself fully
+    // try/caught + never throws/rejects, but we attach a defensive .catch so a
+    // surprise rejection can never become an unhandled-rejection and can never
+    // suppress the emit/return below. Fire-and-forget (this bridge is synchronous
+    // and its callers consume the return value) — artifact minting is an
+    // observational projection off the entity DB, not part of the authoritative
+    // transition. See main/src/orchestrator/autoMintArtifacts.ts.
+    if (status === 'done') {
+      void handleStepCompletion(db, runId, stepId, logger).catch((err) => {
+        const m = `[stepTransitionBridge] auto-mint hook rejected for runId=${runId} (ignored): ${err}`;
+        if (logger) {
+          logger.warn(m, { runId, stepId, status });
+        } else {
+          console.warn(m);
+        }
+      });
+    }
+
+    // Auto-mint run-START baseline artifacts on the INITIAL step's 'running'
+    // transition. The agents never report a step 'done' (the prompts report each
+    // step as it begins, status='running'), so the done-hook above never fires in
+    // practice — the run-start path is the deterministic source of the templated
+    // deliverable tabs. handleRunStart gates on BASELINE_RUN_START_WORKFLOWS
+    // (planner/sprint/ship), is CONTENT-GATED inside its mint helpers (no empty
+    // idea-spec / decomposed-stories ever appears), and fail-soft no-ops when the
+    // run owns no resolvable idea yet.
+    //
+    // Trigger: ONLY the INITIAL step's 'running'. A SEEDED planner/ship has its
+    // idea at start (idea-spec mints; decomposed-stories is content-gated to skip
+    // until the first epic/task lands). A raw-prompt planner CREATES its idea
+    // during 'context' — that created-idea case is now covered by handleEntityWrite
+    // (fired off each MCP task/idea write in mcpQueryHandler), so we no longer need
+    // to fire handleRunStart on EVERY planner 'running'. Idempotent (UPSERT by
+    // (runId, atype)). Same fail-soft posture as handleStepCompletion (never
+    // throws; a defensive .catch guards a surprise rejection). See autoMintArtifacts.ts.
+    const firesRunStartBaseline =
+      status === 'running' && stepId === resolveInitialStepId(runRow.workflowName);
+    if (firesRunStartBaseline) {
+      void handleRunStart(db, runId, logger).catch((err) => {
+        const m = `[stepTransitionBridge] run-start baseline hook rejected for runId=${runId} (ignored): ${err}`;
+        if (logger) {
+          logger.warn(m, { runId, stepId, status });
+        } else {
+          console.warn(m);
+        }
+      });
+    }
+
+    // Auto-mint the SCREENSHOTS deliverable from on-disk PNGs on EVERY step
+    // 'running' transition. Unlike the run-start baseline (initial step only),
+    // visual-verify is a mid-run step, so we scan on each 'running' to pick up
+    // images the producer laid down after it. handleVisualArtifactsScan self-gates
+    // to sprint/ship runs, no-ops when no images / no resolver, and mints with
+    // isNew=false so it never steals the center pane. Same fire-and-forget +
+    // fail-soft posture as the hooks above. See autoMintArtifacts.ts.
+    if (status === 'running') {
+      void handleVisualArtifactsScan(db, runId, logger).catch((err) => {
+        const m = `[stepTransitionBridge] screenshots scan hook rejected for runId=${runId} (ignored): ${err}`;
+        if (logger) {
+          logger.warn(m, { runId, stepId, status });
+        } else {
+          console.warn(m);
+        }
+      });
+    }
   } catch (err) {
     const msg = `[stepTransitionBridge] raw_events INSERT threw for runId=${runId} (emit/return proceed): ${err}`;
     if (logger) {

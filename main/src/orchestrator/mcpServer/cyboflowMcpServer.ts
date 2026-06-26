@@ -196,7 +196,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             title: { type: 'string', description: 'Task title (required)' },
             task_type: { type: 'string', enum: ['idea', 'epic', 'task'], description: "Optional task type; defaults to 'idea'" },
-            summary: { type: 'string', description: 'Optional longer description' },
+            summary: { type: 'string', description: 'Optional SHORT one-line descriptor shown on the board card (keep it to a sentence). For the rich spec / acceptance criteria, use body.' },
+            body: { type: 'string', description: 'Optional full markdown body — the canonical rich detail (the idea spec, the task description + acceptance criteria, file/dependency hints). This is what the entity artifact renders, so prefer it for anything multi-line; leave summary as the short caption.' },
             priority: { type: 'string', enum: ['P0', 'P1', 'P2'], description: "Optional priority; defaults to 'P2'" },
             repo: { type: 'string', description: 'Optional repo identifier' },
             parent_epic_id: { type: 'string', description: 'Optional parent epic id' },
@@ -215,7 +216,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             task_id: { type: 'string', description: 'The task id to update (required)' },
             title: { type: 'string', description: 'Optional new title' },
-            summary: { type: 'string', description: 'Optional new summary' },
+            summary: { type: 'string', description: 'Optional new SHORT one-line descriptor shown on the board card. For the rich spec / acceptance criteria, use body.' },
+            body: { type: 'string', description: 'Optional new full markdown body — the canonical rich detail rendered in the entity artifact (idea spec, task description + acceptance criteria). Prefer it over summary for anything multi-line.' },
             priority: { type: 'string', enum: ['P0', 'P1', 'P2'], description: 'Optional new priority' },
             repo: { type: 'string', description: 'Optional new repo identifier' },
             parent_epic_id: { type: 'string', description: 'Optional parent epic id (re-parent)' },
@@ -259,7 +261,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: 'object',
           properties: {
-            task_id: { type: 'string', description: 'The task id whose lane to update (required; must be in this sprint batch)' },
+            task_id: { type: 'string', description: 'The task whose lane to update — opaque id OR display ref e.g. TASK-001 (required; must be in this sprint batch; the ref is resolved automatically, pass it straight from the sprint task list)' },
             status: {
               type: 'string',
               enum: ['queued', 'running', 'integrated', 'failed', 'blocked'],
@@ -362,6 +364,40 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             task_id: { type: 'string', description: 'Optional minted task id; recorded when resolution_kind=promoted' },
           },
           required: ['review_item_id', 'resolution_kind'],
+        },
+      },
+      {
+        name: 'cyboflow_report_artifact',
+        description:
+          'Create or update a run deliverable ("artifact") for THIS run — e.g. a live UI-prototype preview, a captured screenshot gallery, a generated report, or a custom canvas. The artifact appears as its own tab in the center pane and in the right-rail Artifacts panel. The run is derived from CYBOFLOW_RUN_ID (no run argument). There is one artifact per atype per run: calling again with the same atype ENRICHES the existing one (and returns the same id). Only the planner deliverables idea-spec + decomposed-stories are auto-created by the orchestrator; screenshots, ui-prototype and generic are reported BY YOU with this tool. For screenshots, first write the PNG bytes into the run artifacts dir ($CYBOFLOW_RUN_ARTIFACTS_DIR) and pass their BASENAMES in payload_json.fileNames. Returns { artifactId }.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            atype: {
+              type: 'string',
+              enum: ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic'],
+              description: 'Artifact type (required). ui-prototype / generic render an embedded live canvas; screenshots renders an on-disk PNG gallery (you write the files + report their basenames); idea-spec / decomposed-stories are the auto-created planner templates.',
+            },
+            label: { type: 'string', description: 'Short tab/card label for the artifact (required)' },
+            payload_json: {
+              type: 'string',
+              description: 'Optional JSON payload, e.g. {"url":"http://localhost:8081"} for a ui-prototype, or {"fileNames":["home.png","detail.png"]} for screenshots (BASENAMES of PNGs you wrote under $CYBOFLOW_RUN_ARTIFACTS_DIR)',
+            },
+          },
+          required: ['atype', 'label'],
+        },
+      },
+      {
+        name: 'cyboflow_commit_artifact',
+        description:
+          'Persist a run artifact into the repo so it survives session close (session-only artifacts are otherwise dropped when the run closes). The run is derived from CYBOFLOW_RUN_ID. Pass the artifact_id returned by cyboflow_report_artifact. Returns { artifactId }.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            artifact_id: { type: 'string', description: 'The artifact id to commit (from cyboflow_report_artifact)' },
+            payload_json: { type: 'string', description: 'Optional final payload JSON to store alongside the commit' },
+          },
+          required: ['artifact_id'],
         },
       },
     ],
@@ -481,13 +517,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         title?: unknown;
         task_type?: unknown;
         summary?: unknown;
+        body?: unknown;
         priority?: unknown;
         repo?: unknown;
         parent_epic_id?: unknown;
         board_id?: unknown;
         initial_stage_id?: unknown;
       };
-      const { title, task_type, summary, priority, repo, parent_epic_id, board_id, initial_stage_id } = args;
+      const { title, task_type, summary, body, priority, repo, parent_epic_id, board_id, initial_stage_id } = args;
       if (typeof title !== 'string' || title.length === 0) {
         return {
           content: [
@@ -514,6 +551,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text: JSON.stringify({ error: 'invalid_arguments', expected: 'summary: string (optional)' }),
+            },
+          ],
+        };
+      }
+      if (body !== undefined && typeof body !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'body: string (optional)' }),
             },
           ],
         };
@@ -571,6 +618,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const queryParams: Record<string, unknown> = { title };
       if (task_type !== undefined) queryParams['taskType'] = task_type;
       if (summary !== undefined) queryParams['summary'] = summary;
+      if (body !== undefined) queryParams['body'] = body;
       if (priority !== undefined) queryParams['priority'] = priority;
       if (repo !== undefined) queryParams['repo'] = repo;
       if (parent_epic_id !== undefined) queryParams['parentEpicId'] = parent_epic_id;
@@ -584,12 +632,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         task_id?: unknown;
         title?: unknown;
         summary?: unknown;
+        body?: unknown;
         priority?: unknown;
         repo?: unknown;
         parent_epic_id?: unknown;
         expected_version?: unknown;
       };
-      const { task_id, title, summary, priority, repo, parent_epic_id, expected_version } = args;
+      const { task_id, title, summary, body, priority, repo, parent_epic_id, expected_version } = args;
       if (typeof task_id !== 'string' || task_id.length === 0) {
         return {
           content: [
@@ -616,6 +665,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             {
               type: 'text',
               text: JSON.stringify({ error: 'invalid_arguments', expected: 'summary: string (optional)' }),
+            },
+          ],
+        };
+      }
+      if (body !== undefined && typeof body !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'body: string (optional)' }),
             },
           ],
         };
@@ -663,6 +722,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const queryParams: Record<string, unknown> = { taskId: task_id };
       if (title !== undefined) queryParams['title'] = title;
       if (summary !== undefined) queryParams['summary'] = summary;
+      if (body !== undefined) queryParams['body'] = body;
       if (priority !== undefined) queryParams['priority'] = priority;
       if (repo !== undefined) queryParams['repo'] = repo;
       if (parent_epic_id !== undefined) queryParams['parentEpicId'] = parent_epic_id;
@@ -1017,6 +1077,60 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (note !== undefined) queryParams['note'] = note;
       if (task_id !== undefined) queryParams['taskId'] = task_id;
       return executeMcpQuery('mcp-resolve-finding', queryParams);
+    }
+
+    case 'cyboflow_report_artifact': {
+      const args = (request.params.arguments ?? {}) as {
+        atype?: unknown;
+        label?: unknown;
+        payload_json?: unknown;
+      };
+      const { atype, label, payload_json } = args;
+      const validAtypes = ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic'];
+      if (typeof atype !== 'string' || !validAtypes.includes(atype)) {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: `atype: ${validAtypes.join(' | ')}` }) },
+          ],
+        };
+      }
+      if (typeof label !== 'string' || label.length === 0) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'label: string' }) }],
+        };
+      }
+      if (payload_json !== undefined && typeof payload_json !== 'string') {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'payload_json: string (optional)' }) },
+          ],
+        };
+      }
+      const queryParams: Record<string, unknown> = { atype, label };
+      if (payload_json !== undefined) queryParams['payloadJson'] = payload_json;
+      return executeMcpQuery('mcp-report-artifact', queryParams);
+    }
+
+    case 'cyboflow_commit_artifact': {
+      const args = (request.params.arguments ?? {}) as { artifact_id?: unknown; payload_json?: unknown };
+      const { artifact_id, payload_json } = args;
+      if (typeof artifact_id !== 'string' || artifact_id.length === 0) {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'artifact_id: string' }) },
+          ],
+        };
+      }
+      if (payload_json !== undefined && typeof payload_json !== 'string') {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'payload_json: string (optional)' }) },
+          ],
+        };
+      }
+      const queryParams: Record<string, unknown> = { artifactId: artifact_id };
+      if (payload_json !== undefined) queryParams['payloadJson'] = payload_json;
+      return executeMcpQuery('mcp-commit-artifact', queryParams);
     }
 
     default:

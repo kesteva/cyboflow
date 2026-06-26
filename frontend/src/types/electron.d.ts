@@ -186,6 +186,14 @@ interface ElectronAPI {
     loadAttachments: (paths: string[]) => Promise<Array<{ path: string; dataUrl: string }>>;
   };
 
+  // Run-scoped artifact images (screenshots gallery) — reads PNG/JPG written under
+  // CYBOFLOW_DIR/artifacts/runs/<runId>/ and returns base64 data: URLs (IPCResponse).
+  artifacts: {
+    loadImages: (
+      req: { runId: string; fileNames: string[] },
+    ) => Promise<IPCResponse<{ images: Array<{ fileName: string; dataUrl: string }> }>>;
+  };
+
   // Project management
   projects: {
     // IPCDataResponse so callers can do response.data.find(...) directly after success check

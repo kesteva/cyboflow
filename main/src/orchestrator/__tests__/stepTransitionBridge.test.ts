@@ -26,6 +26,19 @@ import {
 import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../shared/types/workflows';
 import { stepTransitionEvents } from '../trpc/routers/events';
 import { CYBOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
+import { handleRunStart, handleStepCompletion, handleVisualArtifactsScan } from '../autoMintArtifacts';
+
+// The auto-mint hooks are observational fire-and-forget side-effects off the
+// bridge — mock them so we can assert the run-START baseline trigger condition
+// (FIX: fire handleRunStart ONLY on the INITIAL step's 'running', NOT on every
+// later planner 'running' — the created-idea case now flows through
+// handleEntityWrite off the MCP write path) without touching the real artifact DB.
+vi.mock('../autoMintArtifacts', () => ({
+  handleRunStart: vi.fn(() => Promise.resolve()),
+  handleStepCompletion: vi.fn(() => Promise.resolve()),
+  handleEntityWrite: vi.fn(() => Promise.resolve()),
+  handleVisualArtifactsScan: vi.fn(() => Promise.resolve()),
+}));
 
 /**
  * Shape of a persisted 'step_transition' raw_events row's decoded payload_json.
@@ -594,5 +607,72 @@ describe('buildStepTransitionEvent — step_transition raw_events persistence', 
     expect(countRawEvents(db, runId)).toBe(0);
     expect(logger.warn).toHaveBeenCalledOnce();
     expect((logger.warn as ReturnType<typeof vi.fn>).mock.calls[0][0]).toContain('raw_events INSERT threw');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// run-START baseline trigger (FIX: fire handleRunStart ONLY on the INITIAL step
+// 'running', not on every planner 'running'). The created-idea case is covered
+// by handleEntityWrite off the MCP write path, so the "every planner running"
+// special-case is reverted.
+// ---------------------------------------------------------------------------
+
+describe('run-start baseline trigger', () => {
+  beforeEach(() => {
+    vi.mocked(handleRunStart).mockClear();
+    vi.mocked(handleStepCompletion).mockClear();
+  });
+  afterEach(() => {
+    stepTransitionEvents.removeAllListeners();
+  });
+
+  it("fires handleRunStart on the planner INITIAL step ('context') 'running'", () => {
+    const { db, runId } = seedForBridge('planner');
+    buildStepTransitionEvent(runId, 'context', 'running', dbAdapter(db));
+    expect(handleRunStart).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(handleRunStart).mock.calls[0][1]).toBe(runId);
+  });
+
+  it("does NOT fire handleRunStart on a LATER planner step ('research') 'running'", () => {
+    const { db, runId } = seedForBridge('planner');
+    buildStepTransitionEvent(runId, 'research', 'running', dbAdapter(db));
+    expect(handleRunStart).not.toHaveBeenCalled();
+  });
+
+  it("does NOT fire handleRunStart on a 'done' transition (only 'running' run-start)", () => {
+    const { db, runId } = seedForBridge('planner');
+    buildStepTransitionEvent(runId, 'context', 'done', dbAdapter(db));
+    expect(handleRunStart).not.toHaveBeenCalled();
+    // 'done' fires the step-completion hook instead.
+    expect(handleStepCompletion).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// screenshots scan trigger — fired on EVERY step 'running' (unlike the initial-
+// step-only run-start baseline). handleVisualArtifactsScan self-gates to
+// sprint/ship + no-ops when no images, so the bridge fires it unconditionally on
+// 'running'; here it is mocked, so we assert the trigger condition only.
+// ---------------------------------------------------------------------------
+
+describe('screenshots scan trigger', () => {
+  beforeEach(() => {
+    vi.mocked(handleVisualArtifactsScan).mockClear();
+  });
+  afterEach(() => {
+    stepTransitionEvents.removeAllListeners();
+  });
+
+  it("fires handleVisualArtifactsScan on a sprint step 'running'", () => {
+    const { db, runId } = seedForBridge('sprint');
+    buildStepTransitionEvent(runId, 'execute-tasks', 'running', dbAdapter(db));
+    expect(handleVisualArtifactsScan).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(handleVisualArtifactsScan).mock.calls[0][1]).toBe(runId);
+  });
+
+  it("does NOT fire handleVisualArtifactsScan on a 'done' transition", () => {
+    const { db, runId } = seedForBridge('sprint');
+    buildStepTransitionEvent(runId, 'execute-tasks', 'done', dbAdapter(db));
+    expect(handleVisualArtifactsScan).not.toHaveBeenCalled();
   });
 });

@@ -506,7 +506,44 @@ export class TaskChangeRouter {
 
       // Validate lineage (only the columns this entity type carries).
       const parentEpicId = change.parentEpicId ?? null;
-      const originatingIdeaId = change.originatingIdeaId ?? null;
+      let originatingIdeaId = change.originatingIdeaId ?? null;
+      // DECOMP-LINKAGE FIX: a planner that decomposes a SMALL idea creates tasks
+      // directly under the idea with no epic — but the MCP create path passes no
+      // originatingIdeaId, so the task lands NULL/NULL and the whole decomposition
+      // is invisible (countDecomposition + selectIdeaDecomposition both find no
+      // task matching either lineage column). Stamp the run's seed idea onto a
+      // task created during the run when the caller gave no explicit idea. Only
+      // type='task' (epics already carry the idea via the planner's epic-create
+      // path); only when seed_idea_id is present. Fail-soft: a missing column on
+      // an older DB / missing run row degrades to NULL (the prior behaviour).
+      if (originatingIdeaId === null && type === 'task' && change.runId) {
+        try {
+          const run = this.db
+            .prepare('SELECT seed_idea_id AS seedIdeaId FROM workflow_runs WHERE id = ?')
+            .get(change.runId) as { seedIdeaId?: unknown } | undefined;
+          if (run && typeof run.seedIdeaId === 'string' && run.seedIdeaId.length > 0) {
+            originatingIdeaId = run.seedIdeaId;
+          }
+          // Raw-prompt planner: no seed_idea_id because the idea was CREATED
+          // during the run. Fall back to the most-recent idea this run created
+          // (entity_events). The planner-one-idea model means a run owns a single
+          // idea, so the latest 'created' idea is the decomposition's parent.
+          if (originatingIdeaId === null) {
+            const created = this.db
+              .prepare(
+                `SELECT entity_id AS ideaId FROM entity_events
+                  WHERE entity_type = 'idea' AND kind = 'created' AND run_id = ?
+                  ORDER BY seq DESC LIMIT 1`,
+              )
+              .get(change.runId) as { ideaId?: unknown } | undefined;
+            if (created && typeof created.ideaId === 'string' && created.ideaId.length > 0) {
+              originatingIdeaId = created.ideaId;
+            }
+          }
+        } catch {
+          // pre-017 DB / missing entity_events — leave NULL (no regression).
+        }
+      }
       if (parentEpicId !== null) {
         this.validateParentEpic(projectId, type, taskId, parentEpicId);
       }

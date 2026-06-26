@@ -245,6 +245,9 @@ export default {
       },
       animation: {
         shimmer: 'shimmer 2s linear infinite',
+        // Tabbed center pane — new-artifact pulse on a freshly-minted tab's rust
+        // dot and on RUNNING status dots/pills (design handoff `cfpulse`).
+        cfpulse: 'cfpulse 1.4s infinite',
         'in': 'in 0.2s ease-out',
         'fade-in': 'fade-in 0.2s ease-out',
         'zoom-in-95': 'zoom-in-95 0.2s ease-out',
@@ -255,6 +258,10 @@ export default {
         shimmer: {
           '0%': { transform: 'translateX(-100%)' },
           '100%': { transform: 'translateX(100%)' },
+        },
+        cfpulse: {
+          '0%, 100%': { opacity: 1, transform: 'scale(1)' },
+          '50%': { opacity: 0.4, transform: 'scale(0.8)' },
         },
         'in': {
           '0%': { opacity: 0, transform: 'scale(0.95)' },

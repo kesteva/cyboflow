@@ -44,6 +44,11 @@ vi.mock('../../../trpc/client', () => ({
         reopen: { mutate: vi.fn(async () => ({ delivered: true })) },
         relayInput: { mutate: vi.fn(async () => ({ success: true })) },
         relayResize: { mutate: vi.fn(async () => ({ success: true })) },
+        // "Always allow messaging a running flow" — Send QUEUES while an SDK run
+        // executes; the backend delivers the text at the next turn boundary.
+        queueInput: { mutate: vi.fn(async () => ({ queued: true })) },
+        // ISSUE #2 — runtime agent-permission change for an active SDK run.
+        setPermissionMode: { mutate: vi.fn(async () => ({ updated: true })) },
       },
       // On-demand monitor (monitor-unify) — ChatInput probes isActive for an SDK
       // run and routes Send to monitor.send. Default inactive so the existing
@@ -117,6 +122,8 @@ beforeEach(() => {
   vi.mocked(trpc.cyboflow.questions.answer.mutate).mockClear();
   vi.mocked(trpc.cyboflow.runs.relayInput.mutate).mockClear();
   vi.mocked(trpc.cyboflow.runs.relayInput.mutate).mockResolvedValue({ success: true });
+  vi.mocked(trpc.cyboflow.runs.queueInput.mutate).mockClear();
+  vi.mocked(trpc.cyboflow.runs.queueInput.mutate).mockResolvedValue({ queued: true });
 
   // On-demand monitor: default inactive so the existing SDK tests keep their
   // workflow-idle/paused (disabled) behavior; the monitor-composer describe
@@ -338,6 +345,7 @@ describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
       started_at: null,
       ended_at: null,
       stuck_reason: null,
+      permission_mode_snapshot: 'default',
       workflowName: 'planner',
     };
   }
@@ -393,14 +401,29 @@ describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('try anyway');
   });
 
-  it('keeps the input disabled when the idle run is NOT awaiting_review (running)', () => {
+  it('ENABLES the input (queue, not nudge) for a RUNNING idle SDK run', async () => {
+    // "Always allow messaging a running flow": a running SDK run no longer falls
+    // into a disabled composer — it is enabled and Send QUEUES the message (it is
+    // NOT the nudge path, which only re-drives a rested awaiting_review run).
     act(() => {
       useActiveRunsStore.setState({
         runsByProject: { [PROJECT_ID]: [{ ...makeAwaitingRow(), status: 'running' }] },
       });
     });
     render(<ChatInput runId={RUN_ID} />);
-    expect(screen.getByRole('textbox')).toBeDisabled();
+
+    const textarea = screen.getByRole('textbox');
+    expect(textarea).not.toBeDisabled();
+    fireEvent.change(textarea, { target: { value: 'queue me mid-run' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.queueInput.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        text: 'queue me mid-run',
+      });
+    });
+    // The nudge path must NOT fire for a still-running run.
     expect(vi.mocked(trpc.cyboflow.runs.nudge.mutate)).not.toHaveBeenCalled();
   });
 });
@@ -423,6 +446,7 @@ describe('ChatInput — workflow-idle reopen (failed)', () => {
       started_at: null,
       ended_at: null,
       stuck_reason: null,
+      permission_mode_snapshot: 'default',
       workflowName: 'ship',
     };
   }
@@ -490,6 +514,7 @@ describe('ChatInput — workflow-interactive composer (TASK-817)', () => {
       started_at: null,
       ended_at: null,
       stuck_reason: null,
+      permission_mode_snapshot: 'default',
       workflowName: 'sprint',
       ...overrides,
     };
@@ -549,21 +574,30 @@ describe('ChatInput — workflow-interactive composer (TASK-817)', () => {
     });
   });
 
-  it('a non-interactive (sdk) workflow run still renders the disabled workflow-idle composer', () => {
+  it('a non-interactive (sdk) RUNNING run gets an ENABLED queue composer (NOT the relay path)', async () => {
     act(() => {
       useCyboflowStore.getState().setActiveRun(RUN_ID);
       useActiveRunsStore.setState({
-        // sdk + non-awaiting_review status → disabled workflow-idle composer.
+        // sdk + running → "always allow messaging a running flow": the composer is
+        // ENABLED and Send QUEUES (it is NOT the interactive live-PTY relay path).
         runsByProject: { 5: [makeInteractiveRow({ substrate: 'sdk', status: 'running' })] },
       });
     });
 
     render(<ChatInput runId={RUN_ID} />);
 
-    const textarea = screen.getByRole('textbox');
-    expect(textarea).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
-    // The relay mutation must NOT be reachable for a non-interactive run.
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    expect(textarea).not.toBeDisabled();
+    fireEvent.change(textarea, { target: { value: 'queue this' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.queueInput.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        text: 'queue this',
+      });
+    });
+    // The live-PTY relay mutation must NOT be reachable for an SDK run.
     expect(vi.mocked(trpc.cyboflow.runs.relayInput.mutate)).not.toHaveBeenCalled();
   });
 
@@ -602,6 +636,7 @@ describe('ChatInput — workflow-monitor composer (monitor-unify)', () => {
       started_at: null,
       ended_at: null,
       stuck_reason: null,
+      permission_mode_snapshot: 'default',
       workflowName: 'planner',
       ...overrides,
     };
@@ -680,43 +715,60 @@ describe('ChatInput — workflow-monitor composer (monitor-unify)', () => {
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('still there?');
   });
 
-  it('does NOT enable the monitor composer when isActive resolves inactive (stays disabled idle)', async () => {
+  it('does NOT take the monitor composer when isActive resolves inactive (falls back to the running-queue path)', async () => {
     vi.mocked(trpc.cyboflow.monitor.isActive.query).mockResolvedValue({ active: false });
-    activate();
+    activate(); // status 'running'
     render(<ChatInput runId={RUN_ID} />);
 
-    // Probe still fires for the SDK run, but the composer stays in disabled idle.
+    // Probe still fires for the SDK run.
     await waitFor(() => {
       expect(vi.mocked(trpc.cyboflow.monitor.isActive.query)).toHaveBeenCalledWith({ runId: RUN_ID });
     });
-    expect(screen.getByRole('textbox')).toBeDisabled();
+    // No monitor → "always allow messaging a running flow" takes over: the composer
+    // is ENABLED with the queue placeholder (not the disabled idle composer it used
+    // to render before that feature).
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    expect(textarea).not.toBeDisabled();
+    expect(textarea.placeholder).toBe('Queue a message for the agent — sent on its next turn…');
+    // The monitor send path is NOT reached when the monitor is inactive.
     expect(vi.mocked(trpc.cyboflow.monitor.send.mutate)).not.toHaveBeenCalled();
   });
 
   it('re-probes monitor.isActive when the run status changes (catches a late registration)', async () => {
-    // The monitor registers only once the controller starts walking. A run selected
-    // while still 'starting' must NOT be left with a permanently-disabled composer:
-    // the probe re-fires on the status change and enables it once the monitor is up.
+    // The monitor registers only once the controller starts walking. The probe
+    // re-fires on the status change and switches the composer to the MONITOR path
+    // once the monitor is up. (With "always allow messaging a running flow", a
+    // running/starting SDK run is enabled either way — via the queue path before
+    // the monitor registers, and via the monitor path after — so this test now
+    // asserts the placeholder swap rather than a disabled→enabled flip.)
     vi.mocked(trpc.cyboflow.monitor.isActive.query)
       .mockResolvedValueOnce({ active: false })
       .mockResolvedValue({ active: true });
     activate({ status: 'starting' });
     render(<ChatInput runId={RUN_ID} />);
 
-    // First probe (status 'starting') saw no monitor → composer stays disabled.
+    // First probe (status 'starting') saw no monitor → the composer falls back to
+    // the running-queue path (enabled, queue placeholder).
     await waitFor(() => {
       expect(vi.mocked(trpc.cyboflow.monitor.isActive.query)).toHaveBeenCalledWith({ runId: RUN_ID });
     });
-    expect(screen.getByRole('textbox')).toBeDisabled();
+    await waitFor(() => {
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).placeholder).toBe(
+        'Queue a message for the agent — sent on its next turn…',
+      );
+    });
     const callsAfterMount = vi.mocked(trpc.cyboflow.monitor.isActive.query).mock.calls.length;
 
-    // Run advances to 'running' → the status dep changes → re-probe → active → enabled.
+    // Run advances to 'running' → the status dep changes → re-probe → active → the
+    // composer switches to the monitor path (monitor placeholder).
     activate({ status: 'running' });
     await waitFor(() => {
       expect(vi.mocked(trpc.cyboflow.monitor.isActive.query).mock.calls.length).toBeGreaterThan(callsAfterMount);
     });
     await waitFor(() => {
-      expect(screen.getByRole('textbox')).not.toBeDisabled();
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).placeholder).toBe(
+        'Ask the monitor about this run…',
+      );
     });
   });
 
@@ -739,6 +791,119 @@ describe('ChatInput — workflow-monitor composer (monitor-unify)', () => {
   });
 });
 
+describe('ChatInput — SDK running queue ("always allow messaging a running flow")', () => {
+  const RUN_ID = 'run-sdk-running-001';
+  const PROJECT_ID = 17;
+
+  function makeRunningSdkRow(overrides: Partial<ActiveRunRow> = {}): ActiveRunRow {
+    return {
+      id: RUN_ID,
+      workflow_id: 'wf-run',
+      project_id: PROJECT_ID,
+      status: 'running',
+      substrate: 'sdk',
+      worktree_path: '/Users/me/worktrees/run-x',
+      branch_name: 'planner/run-x',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      started_at: null,
+      ended_at: null,
+      stuck_reason: null,
+      permission_mode_snapshot: 'default',
+      workflowName: 'planner',
+      ...overrides,
+    };
+  }
+
+  const activate = (overrides: Partial<ActiveRunRow> = {}) => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({ runsByProject: { [PROJECT_ID]: [makeRunningSdkRow(overrides)] } });
+    });
+  };
+
+  it('ENABLES the composer with the queue placeholder + a "Queue" button while a running SDK run has no monitor', async () => {
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    expect(textarea).not.toBeDisabled();
+    expect(textarea.placeholder).toBe('Queue a message for the agent — sent on its next turn…');
+    // The primary action communicates queue semantics (not "Send").
+    expect(screen.getByRole('button', { name: 'Queue' })).toBeInTheDocument();
+    // The disabled idle hint must NOT be shown.
+    expect(
+      screen.queryByText('Input enabled when the agent asks a question or the run is awaiting your review'),
+    ).not.toBeInTheDocument();
+  });
+
+  it('Send calls runs.queueInput and clears the textarea on a confirmed queue', async () => {
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'also rename the helper' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.queueInput.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        text: 'also rename the helper',
+      });
+    });
+    await waitFor(() => {
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    });
+    // Neither nudge nor relay is reached for a still-running SDK run.
+    expect(vi.mocked(trpc.cyboflow.runs.nudge.mutate)).not.toHaveBeenCalled();
+    expect(vi.mocked(trpc.cyboflow.runs.relayInput.mutate)).not.toHaveBeenCalled();
+  });
+
+  it('also enables the queue composer for a STARTING SDK run', () => {
+    activate({ status: 'starting' });
+    render(<ChatInput runId={RUN_ID} />);
+    expect(screen.getByRole('textbox')).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Queue' })).toBeInTheDocument();
+  });
+
+  it('surfaces the noOp reason and keeps the text when queueInput is rejected', async () => {
+    vi.mocked(trpc.cyboflow.runs.queueInput.mutate).mockResolvedValue({ noOp: true, reason: 'terminal' });
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'too late?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Queue' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toHaveTextContent('This run has ended and cannot receive messages.');
+    });
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('too late?');
+  });
+
+  it('an ACTIVE monitor still wins (queries the monitor, not the queue path)', async () => {
+    // monitor-unify precedence: when an SDK run has an active monitor, Send routes
+    // to monitor.send — the queue path must NOT fire.
+    vi.mocked(trpc.cyboflow.monitor.isActive.query).mockResolvedValue({ active: true });
+    activate();
+    render(<ChatInput runId={RUN_ID} />);
+
+    await waitFor(() => expect(screen.getByRole('textbox')).not.toBeDisabled());
+    // The monitor placeholder (not the queue placeholder) is shown.
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).placeholder).toBe(
+      'Ask the monitor about this run…',
+    );
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'what is step 2 doing?' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.monitor.send.mutate)).toHaveBeenCalled();
+    });
+    expect(vi.mocked(trpc.cyboflow.runs.queueInput.mutate)).not.toHaveBeenCalled();
+  });
+});
+
 describe('ChatInput — workflow paused (Phase 4b)', () => {
   const RUN_ID = 'run-paused-001';
   const PROJECT_ID = 11;
@@ -757,6 +922,7 @@ describe('ChatInput — workflow paused (Phase 4b)', () => {
       started_at: null,
       ended_at: null,
       stuck_reason: null,
+      permission_mode_snapshot: 'default',
       workflowName: 'planner',
       ...overrides,
     };
@@ -809,6 +975,78 @@ describe('ChatInput — workflow paused (Phase 4b)', () => {
 // NOTE: the folder/branch status-bar moved out of ChatInput into the shared
 // <ChatMetaStrip> (rendered by RunChatView). Its chip rendering is covered by
 // ChatMetaStrip's own test; ChatInput no longer renders chips.
+
+describe('ChatInput — run permission pill (ISSUE #2)', () => {
+  const RUN_ID = 'run-perm-001';
+  const PROJECT_ID = 21;
+
+  function makeSdkRow(overrides: Partial<ActiveRunRow> = {}): ActiveRunRow {
+    return {
+      id: RUN_ID,
+      workflow_id: 'wf-perm',
+      project_id: PROJECT_ID,
+      status: 'awaiting_review',
+      substrate: 'sdk',
+      worktree_path: '/Users/me/worktrees/perm-x',
+      branch_name: 'planner/perm-x',
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-01T00:00:00.000Z',
+      started_at: null,
+      ended_at: null,
+      stuck_reason: null,
+      permission_mode_snapshot: 'default',
+      workflowName: 'planner',
+      ...overrides,
+    };
+  }
+
+  const activate = (overrides: Partial<ActiveRunRow> = {}) => {
+    act(() => {
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({ runsByProject: { [PROJECT_ID]: [makeSdkRow(overrides)] } });
+    });
+  };
+
+  beforeEach(() => {
+    vi.mocked(trpc.cyboflow.runs.setPermissionMode.mutate).mockClear();
+    vi.mocked(trpc.cyboflow.runs.setPermissionMode.mutate).mockResolvedValue({ updated: true });
+  });
+
+  it('renders the permission pill for a non-terminal SDK run, seeded with the current mode', () => {
+    activate({ permission_mode_snapshot: 'auto' });
+    render(<ChatInput runId={RUN_ID} />);
+    // 'auto' → 'Auto' label.
+    expect(screen.getByText('Auto')).toBeInTheDocument();
+  });
+
+  it('selecting a mode calls runs.setPermissionMode with { runId, permissionMode }', async () => {
+    activate({ permission_mode_snapshot: 'default' });
+    render(<ChatInput runId={RUN_ID} />);
+
+    fireEvent.click(screen.getByText('Ask before edits')); // open the dropdown
+    fireEvent.click(await screen.findByText('Auto'));
+
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.setPermissionMode.mutate)).toHaveBeenCalledWith({
+        runId: RUN_ID,
+        permissionMode: 'auto',
+      });
+    });
+  });
+
+  it('does NOT render the pill for a terminal (failed) run', () => {
+    activate({ status: 'failed' });
+    render(<ChatInput runId={RUN_ID} />);
+    expect(screen.queryByText('Ask before edits')).toBeNull();
+  });
+
+  it('does NOT render the pill for an interactive run', () => {
+    activate({ substrate: 'interactive', status: 'running' });
+    render(<ChatInput runId={RUN_ID} />);
+    expect(screen.queryByText('Ask before edits')).toBeNull();
+    expect(vi.mocked(trpc.cyboflow.runs.setPermissionMode.mutate)).not.toHaveBeenCalled();
+  });
+});
 
 describe('ChatInput — mode-gating re-renders', () => {
   it('switches from workflow-idle to workflow-question when a question is added', async () => {

@@ -6,10 +6,10 @@
  *                    action bars (the workflow / quick-session / edit-flow
  *                    launchers were removed; those actions live on other surfaces)
  *   main content   — three-branch left column:
- *                    1. activeRunId set   → WorkflowCanvas (when phaseState has definition) + RunBottomPane
+ *                    1. activeRunId set   → WorkflowSummaryPanel card (run ended) or RunCenterPane (tabbed Flow + dock)
  *                    2. mainRepoSession   → PanelTabBar + PanelContainer (session panels fill the area)
  *                    3. neither          → empty-state CTA
- *   right rail     — RunRightRail (always rendered, 296 px fixed)
+ *   right rail     — RunRightRail (always rendered; user-resizable width, or a thin collapsed strip)
  *   Modal overlay  — WorkflowPicker mounted inside Modal
  *   Lifecycle      — SessionLifecycleActionBar (header) drives the merge / create-PR /
  *                    dismiss dialogs + success toast, targeting the session resolved
@@ -20,12 +20,11 @@
  */
 import { useState, useCallback, useEffect } from 'react';
 import { WorkflowPicker } from './WorkflowPicker';
-import { WorkflowCanvas, GRAPH_PAPER_BACKGROUND } from './WorkflowCanvas';
-import { SprintSwimlaneCanvas } from './SprintSwimlaneCanvas';
+import { GRAPH_PAPER_BACKGROUND } from './WorkflowCanvas';
 import { WorkflowSummaryPanel } from './WorkflowSummaryPanel';
 import { QuickSessionCanvas } from './QuickSessionCanvas';
 import { WorkflowEditorModal } from './WorkflowEditorModal';
-import { RunBottomPane } from './RunBottomPane';
+import { RunCenterPane } from './RunCenterPane';
 import { RunRightRail } from './RunRightRail';
 import { Modal } from '../ui/Modal';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -65,10 +64,30 @@ interface CyboflowRootProps {
   projectId: number | null;
 }
 
+/** localStorage key for the right-rail collapsed state. Brand-new key — no migration. */
+const RAIL_COLLAPSED_KEY = 'cyboflow.runRightRail.collapsed';
+
 export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const phaseState = useWorkflowPhaseState(activeRunId);
   const [isPickerOpen, setIsPickerOpen] = useState(false);
+
+  // Whole-rail collapse — lifted here (the parent that sizes the rail) and
+  // persisted to localStorage so it survives reloads. (Brand-new key — no
+  // migrateLocalStorageKey needed.)
+  const [railCollapsed, setRailCollapsed] = useState<boolean>(() => {
+    if (typeof localStorage === 'undefined') return false;
+    return localStorage.getItem(RAIL_COLLAPSED_KEY) === 'true';
+  });
+  const handleToggleRail = useCallback(() => {
+    setRailCollapsed((prev) => {
+      const next = !prev;
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(RAIL_COLLAPSED_KEY, next ? 'true' : 'false');
+      }
+      return next;
+    });
+  }, []);
   // "Add a workflow" on an interactive (PTY) session: a second workflow can't run
   // in the live-REPL session (descoped), so the affordance first confirms it will
   // launch in a SEPARATE session, then opens the picker with forceNewSession set.
@@ -272,71 +291,40 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         {/* Left column — fluid; hosts empty-state CTA, RunBottomPane, or Canvas+RunBottomPane */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {activeRunId !== null ? (
-            <>
-              {runEndEligible ? (
-                // End of workflow — the run rested with no open gate, or
-                // self-terminated. The all-steps-completed canvas (and the old
-                // "this workflow is finished" banner) are REPLACED by the summary
-                // module: token usage by category + the two close-out CTAs
-                // (Complete workflow / interactive-only Request changes). The
-                // summary owns the complete affordance, so no separate banner. It
-                // sits as a card on the same graph-paper surface as the phase
-                // canvas, rather than filling the pane edge-to-edge.
-                <div
-                  style={{ flexBasis: '46%', flexShrink: 0, background: GRAPH_PAPER_BACKGROUND }}
-                  className="flex items-start justify-center overflow-auto p-6"
-                  data-testid="run-summary-canvas"
-                >
-                  <WorkflowSummaryPanel
-                    runId={activeRunId}
-                    status={activeRun?.status}
-                    substrate={activeRun?.substrate}
-                    workflowLabel={activeRun?.workflowName ?? activeRunId}
-                    onComplete={() => setIsEndOpen(true)}
-                  />
-                </div>
-              ) : (
-                phaseState.definition !== null && (
-                  <div style={{ flexBasis: '46%', overflow: 'hidden', flexShrink: 0 }}>
-                    {activeRun?.batch_id != null ? (
-                      // Parallel sprint run (workflow_runs.batch_id stamped at
-                      // launch) — the center pane shows the per-task swim lanes
-                      // instead of the generic phase canvas. The right rail's
-                      // SprintLanesPanel stays as-is.
-                      <SprintSwimlaneCanvas
-                        runId={activeRunId}
-                        phaseState={phaseState}
-                        sprintStatus={activeRun?.status}
-                      />
-                    ) : (
-                      <WorkflowCanvas
-                        definition={phaseState.definition}
-                        currentStepId={phaseState.currentStepId}
-                        runLabel={activeRunId}
-                        folderPath={activeRun?.worktree_path}
-                        branchName={activeRun?.branch_name}
-                        // Reflect the run's ACTUAL lifecycle status, not phaseState
-                        // load state (which is always "loaded, no error" once ready
-                        // and so pinned the badge to RUNNING even after the run
-                        // rested in awaiting_review). activeRun.status now stays
-                        // fresh via activeRunsStore's onRunStatusChanged subscription.
-                        // A paused run is at rest: isRunning is already false for it,
-                        // and the `paused` prop swaps the running pill for the amber
-                        // PauseCircle badge (Phase 4b).
-                        isRunning={activeRun?.status === 'running' || activeRun?.status === 'starting'}
-                        paused={activeRun?.status === 'paused'}
-                        // Surfaces a static completed/failed outcome pill once the
-                        // run self-terminates, while the operator decides to End it.
-                        status={activeRun?.status}
-                      />
-                    )}
+            // Tabbed center surface (pinned Flow tab hosting the WorkflowCanvas,
+            // or SprintSwimlaneCanvas for sprint runs) over a collapsible terminal
+            // dock, plus file/diff + artifact tabs. RunCenterPane owns the
+            // per-session tab state and the xterm-keep-alive dock collapse.
+            //
+            // At end of workflow (run rested with no open gate, or self-terminated)
+            // the Flow tab renders the summary module — token usage by category +
+            // the two close-out CTAs (Complete / interactive-only Request changes)
+            // — INSTEAD of the phase canvas, passed in as `flowEndSummary`. It is
+            // the Flow-tab content (not a replacement for the whole pane) so the
+            // tab strip and the terminal dock (chat) stay mounted: completion no
+            // longer hides the chat.
+            <RunCenterPane
+              activeRunId={activeRunId}
+              phaseState={phaseState}
+              activeRun={activeRun}
+              flowEndSummary={
+                runEndEligible ? (
+                  <div
+                    style={{ background: GRAPH_PAPER_BACKGROUND }}
+                    className="flex h-full items-start justify-center overflow-auto p-6"
+                    data-testid="run-summary-canvas"
+                  >
+                    <WorkflowSummaryPanel
+                      runId={activeRunId}
+                      status={activeRun?.status}
+                      substrate={activeRun?.substrate}
+                      workflowLabel={activeRun?.workflowName ?? activeRunId}
+                      onComplete={() => setIsEndOpen(true)}
+                    />
                   </div>
-                )
-              )}
-              <div className="flex-1 overflow-hidden">
-                <RunBottomPane />
-              </div>
-            </>
+                ) : undefined
+              }
+            />
           ) : effectiveSession ? (
             <SessionProvider session={effectiveSession} projectName={projectName}>
               {/* Resting view — a worktree-backed session with NO active run
@@ -400,8 +388,13 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           )}
         </div>
 
-        {/* Right rail — always rendered as layout shell (296px fixed) */}
-        <RunRightRail phaseState={phaseState} />
+        {/* Right rail — always rendered as layout shell (296px fixed, or a thin
+            collapsed strip). Collapse state is lifted here + persisted. */}
+        <RunRightRail
+          phaseState={phaseState}
+          collapsed={railCollapsed}
+          onToggleCollapse={handleToggleRail}
+        />
       </div>
 
       {/* WorkflowPicker modal — only rendered when projectId is a number */}

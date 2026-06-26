@@ -31,6 +31,11 @@ export interface AppConfig {
   // Which supervisor a PROGRAMMATIC run runs alongside (Stage 3). 'review-queue' (default) escalates
   // failures to the human review queue; 'sdk' asks an SDK agent to triage (live SDK call — opt-in).
   programmaticSupervisor?: 'review-queue' | 'sdk';
+  // On-disk location for COMMITTED-artifact manifests (FEATURE #3 durability
+  // snapshot). Relative paths resolve against the project ROOT; absolute paths
+  // are used verbatim. Floors to DEFAULT_ARTIFACT_COMMIT_DIR ('.cyboflow/artifacts')
+  // when unset. Intentionally NOT seeded into constructor defaults (byte-identical).
+  artifactCommitDir?: string;
   // Theme preference
   theme?: 'paper' | 'light' | 'dark';
   // Notification settings
@@ -98,6 +103,8 @@ export interface UpdateConfigRequest {
   defaultExecutionModel?: ExecutionModel;
   // Programmatic-run supervisor kind ('review-queue' | 'sdk'). See AppConfig.
   programmaticSupervisor?: 'review-queue' | 'sdk';
+  // On-disk location for COMMITTED-artifact manifests (see AppConfig.artifactCommitDir).
+  artifactCommitDir?: string;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;

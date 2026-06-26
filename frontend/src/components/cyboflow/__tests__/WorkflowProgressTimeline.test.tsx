@@ -17,7 +17,7 @@
  *   9. Phase headers: swatch color, label, step count.
  */
 import '@testing-library/jest-dom';
-import { render, screen, act } from '@testing-library/react';
+import { render, screen, act, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
@@ -38,6 +38,7 @@ vi.mock('../../../utils/cyboflowApi', () => ({
 
 import { WorkflowProgressTimeline } from '../WorkflowProgressTimeline';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
+import { useCenterPaneStore } from '../../../stores/centerPaneStore';
 import type { UseWorkflowPhaseStateResult } from '../../../hooks/useWorkflowPhaseState';
 import type { WorkflowDefinition, WorkflowStepState } from '../../../../../shared/types/workflows';
 
@@ -349,5 +350,53 @@ describe('WorkflowProgressTimeline', () => {
 
     expect(screen.getByText('Sprint review')).toBeInTheDocument();
     expect(screen.getAllByText('2 steps').length).toBe(2);
+  });
+
+  // ── "creates ⟨artifact⟩" footer chip (Agent D) ────────────────────────────
+
+  it('renders a "creates ⟨artifact⟩" chip for a step with outputArtifact and opens its tab on click', () => {
+    useCenterPaneStore.setState({ bySession: {} });
+
+    const phaseState: UseWorkflowPhaseStateResult = {
+      definition: {
+        id: 'planner',
+        phases: [
+          {
+            id: 'plan',
+            label: 'Plan',
+            color: '#3b6dd6',
+            steps: [
+              {
+                id: 'write-spec',
+                name: 'Write idea spec',
+                agent: 'idea-extractor',
+                mcps: [],
+                retries: 0,
+                outputArtifact: { atype: 'idea-spec', label: 'idea spec' },
+              },
+            ],
+          },
+        ],
+      },
+      currentStepId: null,
+      stepStates: [{ stepId: 'write-spec', status: 'pending' }],
+      isLoading: false,
+      error: null,
+    };
+
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={phaseState} />);
+
+    const chip = screen.getByTestId('step-artifact-chip-idea-spec');
+    expect(chip).toHaveTextContent('creates idea spec');
+
+    // No run in activeRunsStore → sessionKey falls back to the runId ("run-A").
+    act(() => {
+      fireEvent.click(chip);
+    });
+
+    const session = useCenterPaneStore.getState().bySession['run-A'];
+    const artifactTab = session?.tabs.find((t) => t.kind === 'artifact' && t.atype === 'idea-spec');
+    expect(artifactTab).toBeDefined();
+    expect(session?.activeTabId).toBe(artifactTab?.id);
   });
 });

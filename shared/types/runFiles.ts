@@ -23,6 +23,30 @@ export interface RunFileEntry {
 /** Why a file's text content was withheld, or null when content is present. */
 export type RunFileUnviewableReason = 'binary' | 'too-large';
 
+/** Aggregate +/- stats for a run's working-directory diff. */
+export interface RunGitDiffStats {
+  additions: number;
+  deletions: number;
+  filesChanged: number;
+}
+
+/**
+ * The working-directory diff of a run's git worktree
+ * (cyboflow.runs.gitDiff). Flow runs have workflow_runs.session_id = NULL and
+ * are keyed by runId (not sessionId), so the diff is resolved from
+ * workflow_runs.worktree_path rather than the session-scoped diff path. `diff`
+ * is the raw unified-diff string the DiffViewer parses; an empty string means
+ * the worktree has no working-directory changes.
+ */
+export interface RunGitDiff {
+  /** Raw unified-diff text (empty string when there are no changes). */
+  diff: string;
+  /** Aggregate +/- stats mirroring GitDiffManager's GitDiffStats. */
+  stats: RunGitDiffStats;
+  /** Paths (worktree-relative) that changed. */
+  changedFiles: string[];
+}
+
 /** The result of reading a single file from a run's worktree. */
 export interface RunFileContent {
   /** Path relative to the worktree root, POSIX-style ('/' separators). */

@@ -17,6 +17,7 @@ import { initTelemetry, trackUsage } from './services/telemetry';
 import { setTelemetrySink } from './orchestrator/telemetrySink';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
+import { registerArtifactImageHandlers } from './ipc/artifactImages';
 import { setupEventListeners } from './events';
 import { AppServices } from './ipc/types';
 import { CliManagerFactory } from './services/cliManagerFactory';
@@ -32,6 +33,9 @@ import { QuestionRouter } from './orchestrator/questionRouter';
 import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
+import { ArtifactRouter } from './orchestrator/artifactRouter';
+import { setRunArtifactsDirResolver } from './orchestrator/autoMintArtifacts';
+import { resolveArtifactCommitDir } from './orchestrator/artifactSnapshot';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
@@ -49,7 +53,8 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps } from './orchestrator/trpc/routers/runs';
+import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
@@ -636,6 +641,35 @@ async function initializeServices() {
   // + crash-safe resume + the monitor.stepResults tRPC query reach it here.
   StepResultStore.initialize(cyboflowDb);
 
+  // Run-artifact write chokepoint (migration 029). The single serialized writer
+  // for `artifacts`; the cyboflow.artifacts tRPC router + the report/commit-artifact
+  // MCP handlers reach it via getInstance(). Its artifactChangeEvents emitter is
+  // consumed directly by cyboflow.artifacts.onArtifactChanged (no bridge needed).
+  //
+  // The third arg resolves WHERE a committed artifact's durability snapshot
+  // (FEATURE #3) is written: the global `artifactCommitDir` setting resolved
+  // against the owning project's ROOT (durable across worktree teardown). Kept as
+  // a closure over configManager + databaseService so the router stays free of
+  // ConfigManager/service imports (standalone-typecheck invariant). Fail-soft:
+  // any lookup error returns null → the snapshot is skipped, never the commit.
+  ArtifactRouter.initialize(cyboflowDb, cyboflowLogger, (projectId: number) => {
+    try {
+      const project = databaseService.getProject(projectId);
+      if (!project?.path) return null;
+      return resolveArtifactCommitDir(project.path, configManager.getArtifactCommitDir());
+    } catch {
+      return null;
+    }
+  });
+
+  // Inject the run-artifacts-dir resolver the screenshots auto-mint scan reads —
+  // CYBOFLOW_DIR/artifacts/runs/<runId>, the SAME subtree artifacts:load-images
+  // serves bytes from and the agent writes into via $CYBOFLOW_RUN_ARTIFACTS_DIR.
+  // Kept as a closure here (the only layer allowed to import the electron-backed
+  // cyboflowDirectory util) so autoMintArtifacts stays free of electron imports
+  // (standalone-typecheck invariant). Mirrors the ArtifactRouter boot wiring above.
+  setRunArtifactsDirResolver((runId: string) => getCyboflowSubdirectory('artifacts', 'runs', runId));
+
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).
   // The CLI managers attach it to each run's EventRouter pipeline via
   // tryGetInstance(); it creates completion review items through
@@ -1029,6 +1063,18 @@ async function initializeServices() {
     },
     programmaticRunner,
     findingReader,
+    // Queued-input deliverer ("always allow messaging a running flow"): at the
+    // drained REST seam the executor hands buffered chat input to this collaborator
+    // as the NEXT turn via the SAME nudge re-spawn path (flip awaiting_review ->
+    // running, setPendingNudge, execute) under the per-run RunQueueRegistry
+    // discipline. The closure captures the MODULE-SCOPED runExecutor + runQueues
+    // (both assigned by the time any drain fires) and the cyboflowDb DatabaseLike —
+    // it is only invoked at drain time, never during construction.
+    {
+      deliver: (runId, text) => {
+        void nudgeRunHandler(runId, text, { db: cyboflowDb, runQueues, runExecutor });
+      },
+    },
   );
 
   // Raw-PTY byte path (TASK-814 / IDEA-030): subscribe the facade's 'pty-output'
@@ -1199,6 +1245,9 @@ async function initializeServices() {
 
   // Initialize IPC handlers first so managers (like ClaudePanelManager) are ready
   registerIpcHandlers(services);
+  // FU4 — screenshots artifact gallery: serve on-disk PNGs from the run's
+  // artifact image root (additive; mirrors the ideaAttachments handler).
+  registerArtifactImageHandlers(ipcMain, services);
   // Then set up event listeners that may rely on initialized managers
   setupEventListeners(services, () => mainWindow);
   
@@ -1299,7 +1348,20 @@ app.whenReady().then(async () => {
     attachOrchestratorTrpc({
       window: mainWindow,
       router: appRouter,
-      createContext: () => createContext({ db, setDockBadge: (count) => dockBadgeService.setBadgeCount(count), workflowRegistry, agentOverrideRouter: AgentOverrideRouter.getInstance(), getForcedSubstrate: () => configManager.getForcedSubstrate() }),
+      createContext: () => createContext({
+        db,
+        setDockBadge: (count) => dockBadgeService.setBadgeCount(count),
+        workflowRegistry,
+        agentOverrideRouter: AgentOverrideRouter.getInstance(),
+        getForcedSubstrate: () => configManager.getForcedSubstrate(),
+        // Run-scoped Diff tab: closure over GitDiffManager keeps the standalone
+        // runs router free of a services/* import. Narrow the GitDiffResult down
+        // to the RunGitDiff wire shape (diff + stats + changedFiles).
+        gitDiff: async (worktreePath: string) => {
+          const result = await gitDiffManager.captureWorkingDirectoryDiff(worktreePath);
+          return { diff: result.diff, stats: result.stats, changedFiles: result.changedFiles };
+        },
+      }),
     });
     console.log('[Main] Orchestrator started and tRPC IPC handler attached');
 
@@ -1568,6 +1630,16 @@ app.whenReady().then(async () => {
       logger: loggerLike,
     });
     console.log('[Main] runs.nudge deps wired');
+
+    // "Always allow messaging a running flow": the composer can send while an SDK
+    // run is EXECUTING; the text is buffered on the SAME module-scoped RunExecutor
+    // and delivered as the next turn at the drained REST seam (the deliverer is
+    // wired into the RunExecutor ctor in initializeServices()). Reuse that instance
+    // so the buffer the mutation writes is the one the drain seam reads.
+    setQueueInputDeps({
+      runExecutor,
+    });
+    console.log('[Main] runs.queueInput deps wired');
 
     // IDEA-030 / TASK-817: wire the live-input relay (the ONLY post-spawn input
     // path into a running interactive REPL). Both methods route through the

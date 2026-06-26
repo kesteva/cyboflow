@@ -4,6 +4,7 @@ import type { AppConfig } from '../types/config';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
+import { DEFAULT_ARTIFACT_COMMIT_DIR } from '../../../shared/types/artifacts';
 import fs from 'fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'path';
@@ -322,6 +323,23 @@ export class ConfigManager extends EventEmitter {
    */
   getProgrammaticSupervisor(): 'review-queue' | 'sdk' {
     return this.config.programmaticSupervisor ?? 'review-queue';
+  }
+
+  /**
+   * On-disk location for COMMITTED-artifact manifests, written when the user
+   * explicitly commits an artifact (FEATURE #3 durability snapshot). A RELATIVE
+   * value resolves against the owning project's ROOT (durable across worktree
+   * teardown); an ABSOLUTE value is used verbatim — resolution happens in
+   * `resolveArtifactCommitDir` at the ArtifactRouter snapshot seam.
+   *
+   * Floors to DEFAULT_ARTIFACT_COMMIT_DIR ('.cyboflow/artifacts') when unset or
+   * blank. Like `defaultSubstrate`, `artifactCommitDir` is intentionally NOT
+   * seeded into the constructor defaults, so existing config.json files stay
+   * byte-identical for users who never override the location.
+   */
+  getArtifactCommitDir(): string {
+    const dir = this.config.artifactCommitDir?.trim();
+    return dir && dir.length > 0 ? dir : DEFAULT_ARTIFACT_COMMIT_DIR;
   }
 
   getSessionCreationPreferences() {

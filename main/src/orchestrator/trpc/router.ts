@@ -18,6 +18,7 @@ import { insightsRouter } from './routers/insights';
 import { questionsRouter } from './routers/questions';
 import { tasksRouter } from './routers/tasks';
 import { reviewItemsRouter } from './routers/reviewItems';
+import { artifactsRouter } from './routers/artifacts';
 import { substratesRouter } from './routers/substrates';
 import { monitorRouter } from './routers/monitor';
 
@@ -25,6 +26,7 @@ export const appRouter = router({
   cyboflow: router({
     agents: agentsRouter,
     approvals: approvalsRouter,
+    artifacts: artifactsRouter,
     dynamicWorkflows: dynamicWorkflowsRouter,
     events: eventsRouter,
     files: filesRouter,

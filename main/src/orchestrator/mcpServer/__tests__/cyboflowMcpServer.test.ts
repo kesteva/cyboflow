@@ -486,3 +486,44 @@ describe('cyboflowMcpServer CallTool cyboflow_resolve_finding validation', () =>
     expect(res['error']).not.toBe('invalid_arguments');
   });
 });
+
+// ---------------------------------------------------------------------------
+// cyboflow_create_task / cyboflow_update_task — the body param (planner spec path)
+// ---------------------------------------------------------------------------
+
+describe('cyboflowMcpServer create/update task body param', () => {
+  it('declares an optional string body on both create_task and update_task', async () => {
+    const tools = await listTools();
+    const create = tools.find((t) => t.name === 'cyboflow_create_task');
+    const update = tools.find((t) => t.name === 'cyboflow_update_task');
+    expect(create!.inputSchema.properties['body'].type).toBe('string');
+    expect(update!.inputSchema.properties['body'].type).toBe('string');
+    // body is OPTIONAL — only title (create) / task_id (update) are required.
+    expect(create!.inputSchema.required).toEqual(['title']);
+    expect(update!.inputSchema.required).toEqual(['task_id']);
+  });
+
+  it('rejects a non-string body with invalid_arguments (create + update)', async () => {
+    expect(await callTool('cyboflow_create_task', { title: 'T', body: 42 })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+    expect(await callTool('cyboflow_update_task', { task_id: 'tsk_a', body: 42 })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+  });
+
+  it('passes validation when body is a string and reaches dispatch (mocked connection error)', async () => {
+    const created = await callTool('cyboflow_create_task', {
+      title: 'Spec idea',
+      summary: 'caption',
+      body: '## Idea spec\n\n- detail',
+    });
+    expect(created['error']).not.toBe('invalid_arguments');
+
+    const updated = await callTool('cyboflow_update_task', {
+      task_id: 'tsk_a',
+      body: '## Idea spec\n\n- folded',
+    });
+    expect(updated['error']).not.toBe('invalid_arguments');
+  });
+});
