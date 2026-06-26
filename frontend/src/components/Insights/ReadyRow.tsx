@@ -10,6 +10,7 @@
 import { cn } from '../../utils/cn';
 import type { TriageFinding } from '../../stores/insightsStore';
 import { composeUntriagedMeta, priorityBadge } from './findingsTagMeta';
+import { FindingProjectTag } from './FindingProjectTag';
 
 interface ReadyRowProps {
   finding: TriageFinding;
@@ -66,9 +67,10 @@ export function ReadyRow({ finding, onToggle }: ReadyRowProps): React.JSX.Elemen
       <span className="truncate text-sm text-text-primary" title={finding.title}>
         {finding.title}
       </span>
-      <span className="ml-auto shrink-0 text-[10px] text-text-tertiary">
-        {composeUntriagedMeta(finding)}
-      </span>
+      <div className="ml-auto flex shrink-0 items-center gap-2">
+        <FindingProjectTag projectId={finding.project_id} />
+        <span className="text-[10px] text-text-tertiary">{composeUntriagedMeta(finding)}</span>
+      </div>
     </div>
   );
 }

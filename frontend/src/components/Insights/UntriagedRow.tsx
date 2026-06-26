@@ -17,6 +17,7 @@
 import { cn } from '../../utils/cn';
 import { Button } from '../ui/Button';
 import { ModifyDrawer } from './ModifyDrawer';
+import { FindingProjectTag } from './FindingProjectTag';
 import type { TriageFinding } from '../../stores/insightsStore';
 import { findingBucket } from '../../../../shared/types/reviews';
 import type { FindingProposedTarget, FindingPriority } from '../../../../shared/types/reviews';
@@ -126,6 +127,7 @@ export function UntriagedRow({
         <span className={cn('shrink-0', BUCKET_TEXT_CLASS[bucket])}>{BUCKET_LABEL[bucket]}</span>
         <span aria-hidden>·</span>
         <span className="truncate">{composeUntriagedMeta(finding)}</span>
+        <FindingProjectTag projectId={finding.project_id} />
       </div>
 
       {modifyOpen && (

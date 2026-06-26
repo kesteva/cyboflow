@@ -249,6 +249,7 @@ vi.mock('../../../stores/navigationStore', () => {
 let mockProjectsCount = 1;
 vi.mock('../../../stores/landingStore', () => ({
   useProjectsCount: () => mockProjectsCount,
+  useLandingProjects: () => [{ id: 1, name: 'cyboflow' }],
 }));
 
 import { FindingsSection } from '../FindingsSection';
