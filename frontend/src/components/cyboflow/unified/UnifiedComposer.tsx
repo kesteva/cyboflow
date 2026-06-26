@@ -350,9 +350,10 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
         {visibility.showModelEffort && permissionSlot}
         {effortLabel && <ReadonlyPill label={`effort: ${effortLabel}`} />}
 
-        {/* checkpoint / commit-mode (quick) + Opus-only fast-mode toggle */}
-        {visibility.showCheckpoint && checkpointSlot}
+        {/* Opus-only fast-mode toggle (speed), then checkpoint / commit-mode —
+            order: model → permission → speed → checkpoint. */}
         {visibility.showCheckpoint && fastSlot}
+        {visibility.showCheckpoint && checkpointSlot}
 
         {/* compact-context (SDK) */}
         {visibility.isSDK && compactSlot}
