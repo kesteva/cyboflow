@@ -176,7 +176,7 @@ describe('RunCenterPane', () => {
     expect(session.tabs.find((t) => t.id === 'art:idea-spec')?.isNew).toBe(false);
   });
 
-  it('opens a MID-RUN artifact as a pulsing INACTIVE tab WITHOUT stealing focus (FIX 2)', () => {
+  it('FLIPS the center pane to a freshly-created MID-RUN artifact', () => {
     mockArtifacts = [];
     const { rerender } = render(
       <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
@@ -184,8 +184,9 @@ describe('RunCenterPane', () => {
     // Initial seed empty → still on Flow.
     expect(useCenterPaneStore.getState().bySession['sess-1'].activeTabId).toBe('flow');
 
-    // A new artifact streams in after mount → it appears + pulses, but the user
-    // stays on Flow (no focus steal; the tab is opened focus:false).
+    // A new artifact streams in after mount → the pane FLIPS to it (it's a fresh
+    // deliverable the run just produced). Content-driven minting means it only
+    // appears once it has content, so flipping is not a "thrown into empty pane".
     act(() => {
       mockArtifacts = [makeArtifact({ id: 'art-fresh', atype: 'screenshots' })];
     });
@@ -194,8 +195,9 @@ describe('RunCenterPane', () => {
     );
     const session = useCenterPaneStore.getState().bySession['sess-1'];
     expect(session.tabs.some((t) => t.id === 'art:screenshots')).toBe(true);
-    expect(session.activeTabId).toBe('flow');
-    expect(session.tabs.find((t) => t.id === 'art:screenshots')?.isNew).toBe(true);
+    expect(session.activeTabId).toBe('art:screenshots');
+    // Now that it's the active tab, it carries no pending "new" pulse.
+    expect(session.tabs.find((t) => t.id === 'art:screenshots')?.isNew).toBe(false);
   });
 
   it('closes an artifact tab whose backing row vanished (no perpetual Loading strand)', () => {

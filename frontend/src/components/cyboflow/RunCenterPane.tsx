@@ -65,9 +65,10 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun }: RunCenterP
   }, [ensureSession, sessionKey]);
 
   // ── Auto-open artifact tabs ────────────────────────────────────────────────
-  // Register a tab for every artifact, but only STEAL FOCUS for ones genuinely
-  // minted AFTER this pane mounted for the current session. The pre-existing set
-  // surfaced on first load must NOT yank the user off the Flow tab.
+  // Register a tab for every artifact, and FLIP the center pane to ones genuinely
+  // minted AFTER this pane mounted for the current session (a fresh deliverable
+  // surfaces itself). The pre-existing set surfaced on first load must NOT yank
+  // the user off the Flow tab.
   //
   // The DB `is_new` flag CANNOT be trusted for this: it is never written back to
   // 0, so on app refresh / fresh run re-select `artifacts.list` re-seeds every
@@ -102,17 +103,19 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun }: RunCenterP
       if (seenArtifactIds.current.has(artifact.id)) continue;
       seenArtifactIds.current.add(artifact.id);
       // On the initial seed, every artifact is "pre-existing" — open it but do
-      // NOT treat it as new (focus is restored below). After the initial seed, an
-      // unseen artifact id is genuinely fresh THIS session: open it as a pulsing
-      // inactive tab (isNew + focus:false) so it announces itself without yanking
-      // the user off the Flow/Chat tab they are on.
+      // NOT steal focus (it is restored below) so first load never yanks the user
+      // off the Flow tab. After the initial seed, an unseen artifact id is
+      // genuinely fresh THIS session: it is content-driven (only minted once it
+      // has content), so we FLIP the center pane to it (focus:true) — the run just
+      // produced a deliverable and the pane surfaces it. The seenArtifactIds guard
+      // means each id flips at most once (no repeated yanking on later syncs).
       store.openArtifactTab(sessionKey, {
         atype: artifact.atype,
         label: artifact.label,
         artifactId: artifact.id,
         committed: artifact.committed,
-        isNew: !isInitialSeed,
-        ...(isInitialSeed ? {} : { focus: false }),
+        isNew: false,
+        ...(isInitialSeed ? {} : { focus: true }),
       });
     }
 
