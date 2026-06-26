@@ -23,6 +23,8 @@
  * stepTransitionBridge.ts / runEntityOwnership.ts. ArtifactRouter is reached via
  * its singleton (already initialized at boot from main/src/index.ts).
  */
+import * as fs from 'fs/promises';
+import * as path from 'node:path';
 import { ArtifactRouter } from './artifactRouter';
 import { listRunOwnedIdeaIds, resolveRunBatchIdeaId } from './runEntityOwnership';
 import type { DatabaseLike, LoggerLike } from './types';
@@ -100,6 +102,46 @@ const BASELINE_RUN_START_WORKFLOWS = new Set<string>(['planner', 'sprint', 'ship
  * its decomposition pre-exists, so both baselines are real at start.
  */
 const CONTENT_DRIVEN_WORKFLOWS = new Set<string>(['planner', 'ship']);
+
+/**
+ * Workflows whose runs are scanned for on-disk screenshot PNGs (the agent-driven
+ * visual-verify deliverable). A scan mints/enriches a single 'screenshots'
+ * artifact from whatever image files the producer laid down under the run's
+ * artifacts dir — the SAFETY NET behind the agent-reported path
+ * (cyboflow_report_artifact), so PNGs surface even when the orchestrator never
+ * calls the tool. Planner has no visual step, so it is excluded.
+ */
+const VISUAL_SCAN_WORKFLOWS = new Set<string>(['sprint', 'ship']);
+
+/** Provenance label per workflow stamped onto a scanned screenshots artifact. */
+const VISUAL_SCAN_STEP_ORIGIN: Record<string, string> = {
+  sprint: 'Sprint · visual-verify',
+  ship: 'Ship · visual-verify',
+};
+
+/** Image extensions the gallery's load-images handler can serve back as data URLs. */
+const SCREENSHOT_EXTS = new Set<string>(['.png', '.jpg', '.jpeg', '.webp', '.gif']);
+
+/**
+ * Injected resolver: runId -> the absolute run artifacts dir
+ * (CYBOFLOW_DIR/artifacts/runs/<runId>), the SAME subtree artifacts:load-images
+ * serves bytes from and the agent writes PNGs into via $CYBOFLOW_RUN_ARTIFACTS_DIR.
+ * Set ONCE at boot from main/src/index.ts (the only layer allowed to import the
+ * electron-backed cyboflowDirectory util). Left null in standalone/unit contexts,
+ * where the scan is a deliberate no-op — preserving the standalone-typecheck
+ * invariant (this module never imports 'electron'). Mirrors the ArtifactRouter
+ * boot-singleton pattern.
+ */
+let runArtifactsDirResolver: ((runId: string) => string) | null = null;
+
+/**
+ * Inject the run-artifacts-dir resolver at boot (see runArtifactsDirResolver).
+ * Pass null to clear it (the scan then no-ops) — used by unit tests to restore
+ * the standalone default between cases.
+ */
+export function setRunArtifactsDirResolver(fn: ((runId: string) => string) | null): void {
+  runArtifactsDirResolver = fn;
+}
 
 /** Run-start provenance label per workflow, stamped onto baseline artifacts. */
 const RUN_START_STEP_ORIGIN: Record<string, string> = {
@@ -694,6 +736,100 @@ export async function handleEntityWrite(
     }`;
     if (logger) {
       logger.warn(msg, { runId, entityType });
+    } else {
+      console.warn(msg);
+    }
+  }
+}
+
+/**
+ * Scan the run's artifacts dir for screenshot images and mint/enrich a single
+ * 'screenshots' artifact from whatever PNGs the visual-verify producer laid down.
+ *
+ * This is the SAFETY NET behind the agent-reported screenshots path: the sprint /
+ * ship visual-verify flow writes PNG bytes under $CYBOFLOW_RUN_ARTIFACTS_DIR
+ * (== CYBOFLOW_DIR/artifacts/runs/<runId>) and is asked to report them via
+ * cyboflow_report_artifact(atype:'screenshots') — but if it captures images yet
+ * forgets to report them, this scan surfaces the tab anyway. Fired off each step
+ * 'running' transition for a sprint/ship run (stepTransitionBridge), so any
+ * images on disk after the visual step appear without waiting on the agent.
+ *
+ * Gates:
+ *   - RESOLVER: no-op when the run-artifacts-dir resolver is not injected
+ *     (standalone/unit contexts) — see runArtifactsDirResolver.
+ *   - WORKFLOW: only VISUAL_SCAN_WORKFLOWS (sprint, ship).
+ *   - TERMINAL: a run already stamped failed/canceled does not mint (mirrors the
+ *     other hooks' terminal gate).
+ *
+ * UNOBTRUSIVE: the mint uses isNew=false so this background scan never steals the
+ * center pane / pulses the tab — only an explicit agent report (isNew=true) or
+ * the user surfaces it. The fileNames are SORTED so a re-scan with the same files
+ * produces byte-identical payload_json → the idempotent (runId, atype) UPSERT
+ * records no delta and emits no event (no UI churn).
+ *
+ * FAIL-SOFT: the whole body is wrapped in try/catch — any failure (missing dir,
+ * unreadable, ArtifactRouter not initialized) logs via `logger` and returns.
+ * NEVER throws (the caller is in the step-transition path). A missing dir (no
+ * images captured yet) is the common case and is a silent no-op.
+ *
+ * @param db     Narrow DatabaseLike interface.
+ * @param runId  The workflow_runs.id to scan.
+ * @param logger Optional LoggerLike for warn/debug-level fail-soft logging.
+ */
+export async function handleVisualArtifactsScan(
+  db: DatabaseLike,
+  runId: string,
+  logger?: LoggerLike,
+): Promise<void> {
+  try {
+    if (runArtifactsDirResolver === null) return; // not wired (standalone/unit) → no-op
+
+    const meta = resolveRunMeta(db, runId);
+    if (meta === null || meta.workflowName === null) return;
+    if (!VISUAL_SCAN_WORKFLOWS.has(meta.workflowName)) return; // not a visual-scan workflow
+    if (meta.status !== null && TERMINAL_SKIP_STATUSES.has(meta.status)) {
+      logger?.debug('[autoMintArtifacts] screenshots scan skipped — run is failed/canceled', {
+        runId,
+        status: meta.status,
+      });
+      return;
+    }
+
+    const projectId = resolveProjectId(db, runId);
+    if (projectId === null) {
+      logger?.debug('[autoMintArtifacts] screenshots scan skipped — no project_id for run', { runId });
+      return;
+    }
+
+    const dir = runArtifactsDirResolver(runId);
+    let entries: string[];
+    try {
+      entries = await fs.readdir(dir);
+    } catch {
+      return; // dir does not exist yet — nothing captured (common case, silent)
+    }
+
+    const fileNames = entries
+      .filter((name) => SCREENSHOT_EXTS.has(path.extname(name).toLowerCase()))
+      .sort((a, b) => a.localeCompare(b));
+    if (fileNames.length === 0) return; // no image files → nothing to surface
+
+    await ArtifactRouter.getInstance().apply(projectId, {
+      op: 'create',
+      runId,
+      atype: 'screenshots',
+      label: pluralize(fileNames.length, 'screenshot'),
+      payloadJson: JSON.stringify({ fileNames }),
+      stepOrigin: VISUAL_SCAN_STEP_ORIGIN[meta.workflowName] ?? null,
+      isNew: false,
+      actor: 'orchestrator',
+    });
+  } catch (err) {
+    const msg = `[autoMintArtifacts] screenshots scan failed for runId=${runId} (fail-soft): ${
+      err instanceof Error ? err.message : String(err)
+    }`;
+    if (logger) {
+      logger.warn(msg, { runId });
     } else {
       console.warn(msg);
     }

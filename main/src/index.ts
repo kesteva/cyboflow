@@ -34,6 +34,7 @@ import { TaskChangeRouter } from './orchestrator/taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents, reviewItemProjectChannel } from './orchestrator/reviewItemRouter';
 import { AgentOverrideRouter } from './orchestrator/agentOverrideRouter';
 import { ArtifactRouter } from './orchestrator/artifactRouter';
+import { setRunArtifactsDirResolver } from './orchestrator/autoMintArtifacts';
 import { resolveArtifactCommitDir } from './orchestrator/artifactSnapshot';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
@@ -660,6 +661,14 @@ async function initializeServices() {
       return null;
     }
   });
+
+  // Inject the run-artifacts-dir resolver the screenshots auto-mint scan reads —
+  // CYBOFLOW_DIR/artifacts/runs/<runId>, the SAME subtree artifacts:load-images
+  // serves bytes from and the agent writes into via $CYBOFLOW_RUN_ARTIFACTS_DIR.
+  // Kept as a closure here (the only layer allowed to import the electron-backed
+  // cyboflowDirectory util) so autoMintArtifacts stays free of electron imports
+  // (standalone-typecheck invariant). Mirrors the ArtifactRouter boot wiring above.
+  setRunArtifactsDirResolver((runId: string) => getCyboflowSubdirectory('artifacts', 'runs', runId));
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).
   // The CLI managers attach it to each run's EventRouter pipeline via

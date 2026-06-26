@@ -40,7 +40,7 @@
  * raw_events INSERT goes through the narrow DatabaseLike surface only.
  */
 import { stepTransitionEvents } from './trpc/routers/events';
-import { handleStepCompletion, handleRunStart } from './autoMintArtifacts';
+import { handleStepCompletion, handleRunStart, handleVisualArtifactsScan } from './autoMintArtifacts';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { CyboflowWorkflowName, WorkflowStepTransitionEvent } from '../../../shared/types/workflows';
 import { CYBOFLOW_WORKFLOW_NAMES, resolveWorkflowDefinition } from '../../../shared/types/workflows';
@@ -271,6 +271,24 @@ export function buildStepTransitionEvent(
     if (firesRunStartBaseline) {
       void handleRunStart(db, runId, logger).catch((err) => {
         const m = `[stepTransitionBridge] run-start baseline hook rejected for runId=${runId} (ignored): ${err}`;
+        if (logger) {
+          logger.warn(m, { runId, stepId, status });
+        } else {
+          console.warn(m);
+        }
+      });
+    }
+
+    // Auto-mint the SCREENSHOTS deliverable from on-disk PNGs on EVERY step
+    // 'running' transition. Unlike the run-start baseline (initial step only),
+    // visual-verify is a mid-run step, so we scan on each 'running' to pick up
+    // images the producer laid down after it. handleVisualArtifactsScan self-gates
+    // to sprint/ship runs, no-ops when no images / no resolver, and mints with
+    // isNew=false so it never steals the center pane. Same fire-and-forget +
+    // fail-soft posture as the hooks above. See autoMintArtifacts.ts.
+    if (status === 'running') {
+      void handleVisualArtifactsScan(db, runId, logger).catch((err) => {
+        const m = `[stepTransitionBridge] screenshots scan hook rejected for runId=${runId} (ignored): ${err}`;
         if (logger) {
           logger.warn(m, { runId, stepId, status });
         } else {

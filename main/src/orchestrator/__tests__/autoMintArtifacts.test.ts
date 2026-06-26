@@ -36,9 +36,16 @@
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { handleStepCompletion, handleRunStart, handleEntityWrite } from '../autoMintArtifacts';
+import { tmpdir } from 'node:os';
+import {
+  handleStepCompletion,
+  handleRunStart,
+  handleEntityWrite,
+  handleVisualArtifactsScan,
+  setRunArtifactsDirResolver,
+} from '../autoMintArtifacts';
 import { ArtifactRouter, artifactChangeEvents } from '../artifactRouter';
 import { TaskChangeRouter, taskChangeEvents } from '../taskChangeRouter';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
@@ -1319,5 +1326,176 @@ describe('decomposed task lineage (FIX D)', () => {
       .prepare('SELECT originating_idea_id AS oid FROM tasks WHERE id = ?')
       .get(taskId) as { oid: string | null };
     expect(row.oid).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// handleVisualArtifactsScan — the screenshots auto-mint safety-net scan
+// ---------------------------------------------------------------------------
+
+describe('autoMintArtifacts.handleVisualArtifactsScan', () => {
+  const tmpDirs: string[] = [];
+
+  /** Make a fresh temp dir, register it for cleanup, and write the given files. */
+  function makeRunDir(files: string[]): string {
+    const dir = mkdtempSync(join(tmpdir(), 'cyboflow-shots-'));
+    tmpDirs.push(dir);
+    for (const name of files) writeFileSync(join(dir, name), 'x');
+    return dir;
+  }
+
+  /** Inject a resolver that maps EVERY runId to the one temp dir under test. */
+  function useDir(dir: string): void {
+    setRunArtifactsDirResolver(() => dir);
+  }
+
+  afterEach(() => {
+    setRunArtifactsDirResolver(null); // restore standalone default (scan no-ops)
+    ArtifactRouter._resetForTesting();
+    artifactChangeEvents.removeAllListeners();
+    TaskChangeRouter._resetForTesting();
+    taskChangeEvents.removeAllListeners();
+    for (const dir of tmpDirs.splice(0)) {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+  });
+
+  it('mints a screenshots artifact from on-disk PNGs for a sprint run (sorted basenames, isNew=0, provenance)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    seedSprintRun(db, 'run-s', 'batch-1');
+    useDir(makeRunDir(['detail.png', 'home.png'])); // unsorted on disk
+
+    await handleVisualArtifactsScan(adapter, 'run-s');
+
+    const art = readArtifact(db, 'run-s', 'screenshots');
+    expect(art).toBeDefined();
+    expect(art!.atype).toBe('screenshots');
+    expect(art!.label).toBe('2 screenshots');
+    expect(art!.step_origin).toBe('Sprint · visual-verify');
+    expect(art!.is_new).toBe(0); // background scan never pulses/steals focus
+    expect(JSON.parse(art!.payload_json!)).toEqual({ fileNames: ['detail.png', 'home.png'] });
+  });
+
+  it('ignores non-image files and sorts the basenames', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    seedSprintRun(db, 'run-s', 'batch-1');
+    useDir(makeRunDir(['z.png', 'notes.txt', 'a.jpg', 'manifest.json']));
+
+    await handleVisualArtifactsScan(adapter, 'run-s');
+
+    const art = readArtifact(db, 'run-s', 'screenshots');
+    expect(art).toBeDefined();
+    expect(JSON.parse(art!.payload_json!)).toEqual({ fileNames: ['a.jpg', 'z.png'] });
+    expect(art!.label).toBe('2 screenshots');
+  });
+
+  it('is a no-op when the run dir has no image files', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    seedSprintRun(db, 'run-s', 'batch-1');
+    useDir(makeRunDir(['README.md']));
+
+    await handleVisualArtifactsScan(adapter, 'run-s');
+
+    expect(artifactCount(db, 'run-s')).toBe(0);
+  });
+
+  it('is a no-op (no throw) when the run dir does not exist', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    seedSprintRun(db, 'run-s', 'batch-1');
+    setRunArtifactsDirResolver(() => join(tmpdir(), 'cyboflow-shots-does-not-exist-zzz'));
+
+    await expect(handleVisualArtifactsScan(adapter, 'run-s')).resolves.toBeUndefined();
+    expect(artifactCount(db, 'run-s')).toBe(0);
+  });
+
+  it('is a no-op when the resolver is not wired (standalone default)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    seedSprintRun(db, 'run-s', 'batch-1');
+    // No useDir() call — resolver stays null (afterEach reset / module default).
+
+    await handleVisualArtifactsScan(adapter, 'run-s');
+
+    expect(artifactCount(db, 'run-s')).toBe(0);
+  });
+
+  it('does NOT mint for a non-visual workflow (planner)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    seedPlannerRun(db, 'run-p');
+    useDir(makeRunDir(['home.png']));
+
+    await handleVisualArtifactsScan(adapter, 'run-p');
+
+    expect(readArtifactId(db, 'run-p', 'screenshots')).toBeUndefined();
+  });
+
+  it('does NOT mint when the run is in a terminal failed/canceled state', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    seedSprintRun(db, 'run-s', 'batch-1');
+    setRunStatus(db, 'run-s', 'failed');
+    useDir(makeRunDir(['home.png']));
+
+    await handleVisualArtifactsScan(adapter, 'run-s');
+
+    expect(readArtifactId(db, 'run-s', 'screenshots')).toBeUndefined();
+  });
+
+  it('mints for a ship run too', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    seedShipRun(db, 'run-ship');
+    useDir(makeRunDir(['shot.png']));
+
+    await handleVisualArtifactsScan(adapter, 'run-ship');
+
+    const art = readArtifact(db, 'run-ship', 'screenshots');
+    expect(art).toBeDefined();
+    expect(art!.label).toBe('1 screenshot'); // singular
+    expect(art!.step_origin).toBe('Ship · visual-verify');
+  });
+
+  it('is idempotent: re-scanning the same files yields ONE row and exactly ONE created event', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    seedSprintRun(db, 'run-s', 'batch-1');
+    useDir(makeRunDir(['home.png']));
+
+    await handleVisualArtifactsScan(adapter, 'run-s');
+    await handleVisualArtifactsScan(adapter, 'run-s');
+
+    expect(artifactCount(db, 'run-s')).toBe(1);
+    const id = readArtifactId(db, 'run-s', 'screenshots')!;
+    const events = readArtifactEvents(db, id).map((e) => e.kind);
+    // A second scan with the SAME sorted fileNames produces byte-identical payload
+    // and is_new is unchanged → no delta → no 'updated' event spam.
+    expect(events).toEqual(['created']);
   });
 });
