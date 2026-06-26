@@ -369,19 +369,19 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_report_artifact',
         description:
-          'Create or update a run deliverable ("artifact") for THIS run — e.g. a live UI-prototype preview, a generated report, or a custom canvas. The artifact appears as its own tab in the center pane and in the right-rail Artifacts panel. The run is derived from CYBOFLOW_RUN_ID (no run argument). There is one artifact per atype per run: calling again with the same atype ENRICHES the existing one (and returns the same id). Templated atypes (idea-spec, decomposed-stories, screenshots) are normally auto-created by the orchestrator on step completion — use this primarily for ui-prototype / generic live canvases, or to enrich an existing artifact. Returns { artifactId }.',
+          'Create or update a run deliverable ("artifact") for THIS run — e.g. a live UI-prototype preview, a captured screenshot gallery, a generated report, or a custom canvas. The artifact appears as its own tab in the center pane and in the right-rail Artifacts panel. The run is derived from CYBOFLOW_RUN_ID (no run argument). There is one artifact per atype per run: calling again with the same atype ENRICHES the existing one (and returns the same id). Only the planner deliverables idea-spec + decomposed-stories are auto-created by the orchestrator; screenshots, ui-prototype and generic are reported BY YOU with this tool. For screenshots, first write the PNG bytes into the run artifacts dir ($CYBOFLOW_RUN_ARTIFACTS_DIR) and pass their BASENAMES in payload_json.fileNames. Returns { artifactId }.',
         inputSchema: {
           type: 'object',
           properties: {
             atype: {
               type: 'string',
               enum: ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic'],
-              description: 'Artifact type (required). ui-prototype / generic render as an embedded live canvas; the others are templated.',
+              description: 'Artifact type (required). ui-prototype / generic render an embedded live canvas; screenshots renders an on-disk PNG gallery (you write the files + report their basenames); idea-spec / decomposed-stories are the auto-created planner templates.',
             },
             label: { type: 'string', description: 'Short tab/card label for the artifact (required)' },
             payload_json: {
               type: 'string',
-              description: 'Optional JSON payload, e.g. {"url":"http://localhost:8081"} for a ui-prototype or {"fileNames":["a.png"]} for screenshots',
+              description: 'Optional JSON payload, e.g. {"url":"http://localhost:8081"} for a ui-prototype, or {"fileNames":["home.png","detail.png"]} for screenshots (BASENAMES of PNGs you wrote under $CYBOFLOW_RUN_ARTIFACTS_DIR)',
             },
           },
           required: ['atype', 'label'],
