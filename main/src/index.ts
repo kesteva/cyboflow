@@ -52,7 +52,8 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps } from './orchestrator/trpc/routers/runs';
+import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
@@ -1053,6 +1054,18 @@ async function initializeServices() {
     },
     programmaticRunner,
     findingReader,
+    // Queued-input deliverer ("always allow messaging a running flow"): at the
+    // drained REST seam the executor hands buffered chat input to this collaborator
+    // as the NEXT turn via the SAME nudge re-spawn path (flip awaiting_review ->
+    // running, setPendingNudge, execute) under the per-run RunQueueRegistry
+    // discipline. The closure captures the MODULE-SCOPED runExecutor + runQueues
+    // (both assigned by the time any drain fires) and the cyboflowDb DatabaseLike —
+    // it is only invoked at drain time, never during construction.
+    {
+      deliver: (runId, text) => {
+        void nudgeRunHandler(runId, text, { db: cyboflowDb, runQueues, runExecutor });
+      },
+    },
   );
 
   // Raw-PTY byte path (TASK-814 / IDEA-030): subscribe the facade's 'pty-output'
@@ -1608,6 +1621,16 @@ app.whenReady().then(async () => {
       logger: loggerLike,
     });
     console.log('[Main] runs.nudge deps wired');
+
+    // "Always allow messaging a running flow": the composer can send while an SDK
+    // run is EXECUTING; the text is buffered on the SAME module-scoped RunExecutor
+    // and delivered as the next turn at the drained REST seam (the deliverer is
+    // wired into the RunExecutor ctor in initializeServices()). Reuse that instance
+    // so the buffer the mutation writes is the one the drain seam reads.
+    setQueueInputDeps({
+      runExecutor,
+    });
+    console.log('[Main] runs.queueInput deps wired');
 
     // IDEA-030 / TASK-817: wire the live-input relay (the ONLY post-spawn input
     // path into a running interactive REPL). Both methods route through the
