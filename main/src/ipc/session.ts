@@ -473,6 +473,24 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // Backfill sessions.run_id.
       db.prepare(`UPDATE sessions SET run_id = ? WHERE id = ?`).run(runId, session.id);
 
+      // INTERACTIVE ONLY: stamp the sentinel run's session_id so the live session
+      // meter counts its tokens. An interactive (PTY) quick session never writes
+      // session_outputs (its Claude panel is deliberately NOT registered with
+      // ClaudePanelManager — see the eager-spawn note below), so its chat tokens
+      // live ONLY in the sentinel run's `assistant` raw_events. The session meter
+      // sums getSessionTokenUsage (session_outputs) + selectSessionRunTokenTotals
+      // (workflow_runs WHERE session_id → raw_events); with session_id NULL the
+      // sentinel is never scanned and PTY quick-chat tokens read 0.
+      //
+      // SDK quick sessions DELIBERATELY leave session_id NULL: they write BOTH
+      // session_outputs AND sentinel raw_events, so counting the run would
+      // DOUBLE-COUNT against getSessionTokenUsage. The two token sources are only
+      // disjoint (per selectSessionRunTokenTotals' contract) while the SDK
+      // sentinel stays unstamped — so gate this stamp on the resolved substrate.
+      if (resolvedSubstrate === 'interactive') {
+        db.prepare(`UPDATE workflow_runs SET session_id = ? WHERE id = ?`).run(session.id, runId);
+      }
+
       // Persist the per-session agent-permission override (migration 021) so the
       // quick Claude panel spawn (resolveSessionAgentPermissionMode → getDbSession)
       // and any restart read it. Only written when explicitly chosen — NULL keeps
