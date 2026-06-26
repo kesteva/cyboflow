@@ -124,9 +124,12 @@
   --color-border-hover: var(--ink);
   --color-border-focus: var(--terracotta);
 
-  /* Interactive (terracotta; CTAs invert to ink on hover per Protoflow) */
+  /* Interactive (terracotta; hover/active deepen the same hue — matching the
+     blue/lilac themes. Hovering to --ink inverted CTAs to a near-black slab and
+     read as the label "blacking out", so primary CTAs now darken to
+     --terracotta-deep on hover instead.) */
   --color-interactive-primary: var(--terracotta);
-  --color-interactive-hover: var(--ink);
+  --color-interactive-hover: var(--terracotta-deep);
   --color-interactive-active: var(--terracotta-deep);
   --color-interactive-text: var(--terracotta);
   --color-focus-ring: var(--terracotta);
