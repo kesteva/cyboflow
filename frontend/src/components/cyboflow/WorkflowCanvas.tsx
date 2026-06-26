@@ -56,6 +56,16 @@ export interface WorkflowCanvasProps {
   status?: string;
 }
 
+/**
+ * 24px dotted-grid backdrop (Protoflow flow canvas) — shared by the workflow
+ * phase canvas and the end-of-workflow summary module so both read as the same
+ * graph-paper surface. Assign to a container's `background`.
+ */
+export const GRAPH_PAPER_BACKGROUND =
+  'linear-gradient(var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
+  'linear-gradient(90deg, var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
+  'var(--color-bg-primary)';
+
 /** Last path segment of a worktree path, for a compact "folder" chip. */
 function basename(p: string): string {
   const trimmed = p.replace(/[/\\]+$/, '');
@@ -337,10 +347,7 @@ export function WorkflowCanvas({
           padding: `${TOP}px 12px 12px`,
           minHeight: canvasInnerHeight,
           // 24px dotted-grid backdrop (Protoflow flow canvas)
-          background:
-            'linear-gradient(var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
-            'linear-gradient(90deg, var(--color-grid-line, rgba(106,94,68,0.06)) 1px, transparent 1px) 0 0 / 24px 24px, ' +
-            'var(--color-bg-primary)',
+          background: GRAPH_PAPER_BACKGROUND,
         }}
         data-testid="workflow-canvas-inner"
       >

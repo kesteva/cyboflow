@@ -20,7 +20,7 @@
  */
 import { useState, useCallback, useEffect } from 'react';
 import { WorkflowPicker } from './WorkflowPicker';
-import { WorkflowCanvas } from './WorkflowCanvas';
+import { WorkflowCanvas, GRAPH_PAPER_BACKGROUND } from './WorkflowCanvas';
 import { SprintSwimlaneCanvas } from './SprintSwimlaneCanvas';
 import { WorkflowSummaryPanel } from './WorkflowSummaryPanel';
 import { QuickSessionCanvas } from './QuickSessionCanvas';
@@ -279,8 +279,14 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                 // "this workflow is finished" banner) are REPLACED by the summary
                 // module: token usage by category + the two close-out CTAs
                 // (Complete workflow / interactive-only Request changes). The
-                // summary owns the complete affordance, so no separate banner.
-                <div style={{ flexBasis: '46%', overflow: 'hidden', flexShrink: 0 }}>
+                // summary owns the complete affordance, so no separate banner. It
+                // sits as a card on the same graph-paper surface as the phase
+                // canvas, rather than filling the pane edge-to-edge.
+                <div
+                  style={{ flexBasis: '46%', flexShrink: 0, background: GRAPH_PAPER_BACKGROUND }}
+                  className="flex items-start justify-center overflow-auto p-6"
+                  data-testid="run-summary-canvas"
+                >
                   <WorkflowSummaryPanel
                     runId={activeRunId}
                     status={activeRun?.status}

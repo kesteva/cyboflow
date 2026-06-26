@@ -128,7 +128,7 @@ export function WorkflowSummaryPanel({
   return (
     <div
       data-testid="run-summary-panel"
-      className="flex h-full flex-col overflow-y-auto bg-surface-primary px-6 py-5"
+      className="flex w-full max-w-2xl flex-col rounded-card border border-border-primary bg-surface-primary px-6 py-5 shadow-md"
     >
       {/* Header */}
       <div className="flex items-start gap-3">
