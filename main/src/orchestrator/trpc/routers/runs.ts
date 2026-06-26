@@ -177,6 +177,40 @@ export function setNudgeRunDeps(deps: NudgeRunDeps): void {
 }
 
 // ---------------------------------------------------------------------------
+// queueInput dependency bag ("always allow messaging a running flow")
+//
+// Backs the runs.queueInput mutation: a chat message typed while an SDK flow run
+// is EXECUTING is buffered on the (shared) RunExecutor and DELIVERED as the next
+// turn at the drained REST seam. Injected at boot by main/src/index.ts via
+// setQueueInputDeps(), reusing the SAME RunExecutor instance nudge/resume/reopen
+// use (so the executor's queuedInput buffer is the one its drain seam reads).
+// Until wired the mutation throws METHOD_NOT_SUPPORTED — same stub pattern as the
+// other dep-bags.
+// ---------------------------------------------------------------------------
+
+/** Narrow slice of RunExecutor the queueInput mutation drives. */
+export interface QueueInputRunExecutorLike {
+  queueInput(runId: string, text: string): void;
+}
+
+export interface QueueInputDeps {
+  runExecutor: QueueInputRunExecutorLike;
+}
+
+let queueInputDeps: QueueInputDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the queueInput mutation.
+ *
+ * Called once at boot by main/src/index.ts with the SAME RunExecutor instance the
+ * nudge / resume / reopen bags use. Until this is called the mutation throws
+ * METHOD_NOT_SUPPORTED.
+ */
+export function setQueueInputDeps(deps: QueueInputDeps): void {
+  queueInputDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
 // reopen dependency bag (session reopen-on-timeout follow-up)
 //
 // Injected at boot by main/src/index.ts via setReopenRunDeps(), reusing the SAME
@@ -1229,6 +1263,62 @@ export const runsRouter = router({
         });
       }
       return nudgeRunHandler(input.runId, input.text, nudgeRunDeps);
+    }),
+
+  /**
+   * Queue a chat message for a RUNNING workflow run ("always allow messaging a
+   * running flow"). The composer is now ENABLED while an SDK run executes; the
+   * SDK substrate runs a one-shot query() per turn, so there is NO mid-turn input
+   * injection — the text is BUFFERED on the (shared) RunExecutor and DELIVERED as
+   * the NEXT turn at the drained REST seam (running -> awaiting_review), via the
+   * SAME nudge re-spawn mechanism. This is the SDK twin of relayInput (which feeds
+   * the live interactive PTY); a running interactive run keeps using relayInput.
+   *
+   * PERMITTED only while the run is mid-flight (running / starting / queued):
+   *   - terminal (completed/failed/canceled) → { noOp: 'terminal' } (a failed run
+   *     uses runs.reopen; a completed run is done);
+   *   - awaiting_review / paused / awaiting_input / stuck → { noOp: 'not_running' }
+   *     (those rested states use runs.nudge / runs.resume / the question gate, not
+   *     this queue path);
+   *   - blank-after-trim text → { noOp: 'empty' } (nothing to deliver).
+   *
+   * ctx.db-direct status guard (no handler module): pure status check + a single
+   * executor-buffer append, mirroring the `end` / `setPermissionMode` shape. The
+   * append is idempotent-safe and side-effect-free until the next drain.
+   *
+   * Standalone-typecheck invariant: the executor is injected via
+   * setQueueInputDeps(); until wired the mutation throws METHOD_NOT_SUPPORTED.
+   */
+  queueInput: protectedProcedure
+    .input(z.object({ runId: z.string().min(1), text: z.string() }))
+    .mutation(async ({ ctx, input }): Promise<
+      | { queued: true }
+      | { noOp: true; reason: 'not_found' | 'terminal' | 'not_running' | 'empty' }
+    > => {
+      if (!queueInputDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'queueInput dependencies not wired yet. Call setQueueInputDeps() at boot.',
+        });
+      }
+      if (!ctx.db) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
+      }
+      if (input.text.trim() === '') return { noOp: true, reason: 'empty' };
+
+      const run = ctx.db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { status?: string } | undefined;
+      if (!run?.status) return { noOp: true, reason: 'not_found' };
+      if (['completed', 'failed', 'canceled'].includes(run.status)) {
+        return { noOp: true, reason: 'terminal' };
+      }
+      if (!['running', 'starting', 'queued'].includes(run.status)) {
+        return { noOp: true, reason: 'not_running' };
+      }
+
+      queueInputDeps.runExecutor.queueInput(input.runId, input.text);
+      return { queued: true };
     }),
 
   /**
