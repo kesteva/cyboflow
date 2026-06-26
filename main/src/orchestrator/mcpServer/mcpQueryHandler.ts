@@ -48,6 +48,7 @@ import type { DatabaseLike, LoggerLike } from '../types';
 import { resolveWorkflowDefinition, isPermissionMode } from '../../../../shared/types/workflows';
 import type { PermissionMode } from '../../../../shared/types/workflows';
 import { buildStepTransitionEvent } from '../stepTransitionBridge';
+import { handleEntityWrite } from '../autoMintArtifacts';
 import { listRunOwnedIdeaIds, listRunCreatedTaskIds } from '../runEntityOwnership';
 import { ApprovalRouter, RunNotRunningError } from '../approvalRouter';
 import type { ApprovalDecision } from '../../../../shared/types/approval';
@@ -926,6 +927,22 @@ export class McpQueryHandler {
     try {
       const { taskId } = await TaskChangeRouter.getInstance().applyChange(ctx.projectId, change);
       const identity = this.readTaskIdentity(taskId);
+
+      // Content-driven artifact mint: a successful entity create may have just made
+      // a templated deliverable non-empty (idea -> idea-spec; epic/task ->
+      // decomposed-stories). Fire-and-forget + fail-soft (handleEntityWrite never
+      // throws, but a defensive .catch guards a surprise rejection from becoming an
+      // unhandled rejection — mirrors the buildStepTransitionEvent .catch posture).
+      // The entity type comes from the re-read identity, falling back to the
+      // requested taskType (default 'idea' at the chokepoint).
+      const createdType: 'idea' | 'epic' | 'task' = identity?.type ?? msg.taskType ?? 'idea';
+      void handleEntityWrite(this.db, msg.runId, createdType, this.logger).catch((err) => {
+        this.logger?.warn('[Cyboflow MCP Query] entity-write mint rejected (ignored)', {
+          runId: msg.runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,
@@ -977,6 +994,20 @@ export class McpQueryHandler {
     try {
       const { taskId } = await TaskChangeRouter.getInstance().applyChange(ctx.projectId, change);
       const identity = this.readTaskIdentity(taskId);
+
+      // Content-driven artifact mint: an update that filled in the idea body /
+      // summary (idea -> idea-spec) or an entity's content (epic/task ->
+      // decomposed-stories) may have just made a templated deliverable non-empty.
+      // Fire-and-forget + fail-soft (mirrors the create path). Entity type from the
+      // re-read identity, falling back to the discriminator the caller supplied.
+      const writtenType: 'idea' | 'epic' | 'task' = identity?.type ?? msg.entityType ?? 'idea';
+      void handleEntityWrite(this.db, msg.runId, writtenType, this.logger).catch((err) => {
+        this.logger?.warn('[Cyboflow MCP Query] entity-write mint rejected (ignored)', {
+          runId: msg.runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId: msg.requestId,

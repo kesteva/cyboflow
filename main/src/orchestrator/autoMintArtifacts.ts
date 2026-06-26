@@ -90,12 +90,29 @@ const TEMPLATED_ATYPE_WORKFLOWS = new Set<string>(['planner']);
  */
 const BASELINE_RUN_START_WORKFLOWS = new Set<string>(['planner', 'sprint', 'ship']);
 
+/**
+ * Workflows whose templated baselines are CONTENT-DRIVEN: the deliverable tabs
+ * mint as the entity model fills in (handleEntityWrite on each idea/epic/task
+ * write) rather than wholesale at run start. A seeded planner/ship mints its
+ * idea-spec at start (the idea exists) but SKIPS decomposed-stories until the
+ * first epic/task lands; a raw-prompt planner mints nothing at start (no idea
+ * yet) and relies entirely on handleEntityWrite. Sprint stays run-start-driven —
+ * its decomposition pre-exists, so both baselines are real at start.
+ */
+const CONTENT_DRIVEN_WORKFLOWS = new Set<string>(['planner', 'ship']);
+
 /** Run-start provenance label per workflow, stamped onto baseline artifacts. */
 const RUN_START_STEP_ORIGIN: Record<string, string> = {
   planner: 'Plan · run start',
   sprint: 'Sprint · run start',
   ship: 'Ship · run start',
 };
+
+/** Entity-write provenance labels for the content-driven mint path. */
+const ENTITY_WRITE_STEP_ORIGIN = {
+  ideaSpec: 'Plan · idea spec',
+  decomposition: 'Plan · decomposition',
+} as const;
 
 // ---------------------------------------------------------------------------
 // Step-origin labels (human-readable provenance shown on the artifact tab)
@@ -118,6 +135,13 @@ interface RunRow {
 interface IdeaRow {
   ref: string | null;
   title: string | null;
+}
+
+interface IdeaContentRow {
+  ref: string | null;
+  title: string | null;
+  body: string | null;
+  summary: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -218,6 +242,10 @@ function resolveOriginatingIdeaId(db: DatabaseLike, runId: string): string | nul
  * (mode 'template') so payloadJson is left null. Missing idea row → fail-soft
  * (logs + returns without minting). Shared by the step-completion path
  * (mintIdeaSpec) and the run-start baseline path (handleRunStart).
+ *
+ * CONTENT GATE: an idea-spec tab is only minted when the idea actually has spec
+ * content — a non-empty `body` OR `summary`. A bare idea (title/ref only, no
+ * body/summary yet) is skipped so the deliverable never appears as an empty doc.
  */
 async function mintIdeaSpecForIdea(
   db: DatabaseLike,
@@ -229,10 +257,21 @@ async function mintIdeaSpecForIdea(
   logger?: LoggerLike,
 ): Promise<void> {
   const ideaRow = db
-    .prepare('SELECT ref AS ref, title AS title FROM ideas WHERE id = ?')
-    .get(ideaId) as IdeaRow | undefined;
+    .prepare('SELECT ref AS ref, title AS title, body AS body, summary AS summary FROM ideas WHERE id = ?')
+    .get(ideaId) as IdeaContentRow | undefined;
   if (!ideaRow) {
     logger?.debug('[autoMintArtifacts] idea-spec skipped — idea row not found', { runId, ideaId });
+    return;
+  }
+
+  // CONTENT GATE — refuse to mint when there is no spec content to render.
+  const hasBody = typeof ideaRow.body === 'string' && ideaRow.body.length > 0;
+  const hasSummary = typeof ideaRow.summary === 'string' && ideaRow.summary.length > 0;
+  if (!hasBody && !hasSummary) {
+    logger?.debug('[autoMintArtifacts] idea-spec skipped — idea has no body/summary yet', {
+      runId,
+      ideaId,
+    });
     return;
   }
 
@@ -328,6 +367,12 @@ function pluralize(count: number, noun: string): string {
  * e.g. "2 epics, 9 tasks". sourceRef = ideaId. Content is re-derived on read
  * (mode 'template') so payloadJson is left null. Shared by the step-completion
  * path (mintDecomposedStories) and the run-start baseline path (handleRunStart).
+ *
+ * CONTENT GATE: only minted when the idea actually has a decomposition —
+ * countDecomposition(epics+tasks) > 0. A not-yet-decomposed idea is skipped so
+ * the deliverable never appears as an empty "0 epics, 0 tasks" tab. The label is
+ * computed from the LIVE count at mint time, so a content-driven re-mint (each
+ * task create, idempotent UPSERT) refreshes the count as the decomposition grows.
  */
 async function mintDecomposedStoriesForIdea(
   db: DatabaseLike,
@@ -335,8 +380,19 @@ async function mintDecomposedStoriesForIdea(
   projectId: number,
   ideaId: string,
   stepOrigin: string | null,
+  logger?: LoggerLike,
 ): Promise<void> {
   const { epicCount, taskCount } = countDecomposition(db, projectId, ideaId);
+
+  // CONTENT GATE — nothing decomposed yet → do not mint an empty stories tab.
+  if (epicCount === 0 && taskCount === 0) {
+    logger?.debug('[autoMintArtifacts] decomposed-stories skipped — no decomposition yet', {
+      runId,
+      ideaId,
+    });
+    return;
+  }
+
   // Build the label with plain string concatenation (no nested template literals).
   const label = pluralize(epicCount, 'epic') + ', ' + pluralize(taskCount, 'task');
 
@@ -370,7 +426,7 @@ async function mintDecomposedStories(
     });
     return;
   }
-  await mintDecomposedStoriesForIdea(db, runId, projectId, ideaId, STEP_ORIGIN[step.id] ?? null);
+  await mintDecomposedStoriesForIdea(db, runId, projectId, ideaId, STEP_ORIGIN[step.id] ?? null, logger);
 }
 
 // ---------------------------------------------------------------------------
@@ -534,14 +590,110 @@ export async function handleRunStart(
     }
 
     const stepOrigin = RUN_START_STEP_ORIGIN[meta.workflowName] ?? null;
+    // Both mints are CONTENT-GATED inside their helpers: a seeded planner/ship
+    // mints idea-spec (the idea has content) and SKIPS decomposed-stories (count
+    // 0); a sprint mints both (its decomposition pre-exists). A raw-prompt planner
+    // mints nothing here (no resolvable idea yet) and relies on handleEntityWrite.
     await mintIdeaSpecForIdea(db, runId, projectId, ideaId, stepOrigin, 'Idea spec', logger);
-    await mintDecomposedStoriesForIdea(db, runId, projectId, ideaId, stepOrigin);
+    await mintDecomposedStoriesForIdea(db, runId, projectId, ideaId, stepOrigin, logger);
   } catch (err) {
     const msg = `[autoMintArtifacts] run-start baseline failed for runId=${runId} (fail-soft): ${
       err instanceof Error ? err.message : String(err)
     }`;
     if (logger) {
       logger.warn(msg, { runId });
+    } else {
+      console.warn(msg);
+    }
+  }
+}
+
+/**
+ * CONTENT-DRIVEN auto-mint hook: fired AFTER a successful entity write (idea /
+ * epic / task) by mcpQueryHandler, this mints the templated deliverable the write
+ * just made non-empty, for a planner/ship run only (CONTENT_DRIVEN_WORKFLOWS).
+ *
+ *   - entityType 'idea'         -> idea-spec        (the spec the planner authored)
+ *   - entityType 'epic'|'task'  -> decomposed-stories (the decomposition tree)
+ *
+ * This replaces the old "mint everything at run start" timing that surfaced an
+ * EMPTY decomposed-stories tab the moment the run went live (no stories yet) and
+ * auto-navigated the user into it. The mint helpers are CONTENT-GATED (idea-spec
+ * needs a non-empty body/summary; decomposed-stories needs count > 0), so a write
+ * that did not actually produce content is a no-op. The decomposed-stories label
+ * is recomputed from the LIVE count at every call, so the tab's count refreshes
+ * as tasks are added (idempotent UPSERT by (runId, atype)).
+ *
+ * Idempotent: ArtifactRouter op='create' UPSERTs by (runId, atype) — a re-fire is
+ * a no-op re-derive, not a duplicate. Fully fail-soft: the whole body is wrapped
+ * in try/catch and NEVER throws/rejects (the caller fires it fire-and-forget off
+ * the MCP task-write path; an artifact hiccup must never fail the agent's write).
+ *
+ * @param db         Narrow DatabaseLike interface.
+ * @param runId      The workflow_runs.id whose entity was just written.
+ * @param entityType The kind of entity written ('idea' | 'epic' | 'task').
+ * @param logger     Optional LoggerLike for warn/debug-level fail-soft logging.
+ */
+export async function handleEntityWrite(
+  db: DatabaseLike,
+  runId: string,
+  entityType: 'idea' | 'epic' | 'task',
+  logger?: LoggerLike,
+): Promise<void> {
+  try {
+    const meta = resolveRunMeta(db, runId);
+    if (meta === null || meta.workflowName === null) return;
+    if (!CONTENT_DRIVEN_WORKFLOWS.has(meta.workflowName)) return; // sprint mints at run start
+    if (meta.status !== null && TERMINAL_SKIP_STATUSES.has(meta.status)) {
+      logger?.debug('[autoMintArtifacts] entity-write mint skipped — run is failed/canceled', {
+        runId,
+        status: meta.status,
+        entityType,
+      });
+      return;
+    }
+
+    const projectId = resolveProjectId(db, runId);
+    if (projectId === null) {
+      logger?.debug('[autoMintArtifacts] entity-write mint skipped — no project_id for run', { runId });
+      return;
+    }
+
+    const ideaId = resolveOriginatingIdeaId(db, runId);
+    if (ideaId === null) {
+      logger?.debug('[autoMintArtifacts] entity-write mint skipped — run owns no resolvable idea', {
+        runId,
+        entityType,
+      });
+      return;
+    }
+
+    if (entityType === 'idea') {
+      await mintIdeaSpecForIdea(
+        db,
+        runId,
+        projectId,
+        ideaId,
+        ENTITY_WRITE_STEP_ORIGIN.ideaSpec,
+        'Idea spec',
+        logger,
+      );
+    } else {
+      await mintDecomposedStoriesForIdea(
+        db,
+        runId,
+        projectId,
+        ideaId,
+        ENTITY_WRITE_STEP_ORIGIN.decomposition,
+        logger,
+      );
+    }
+  } catch (err) {
+    const msg = `[autoMintArtifacts] entity-write mint failed for runId=${runId} entityType=${entityType} (fail-soft): ${
+      err instanceof Error ? err.message : String(err)
+    }`;
+    if (logger) {
+      logger.warn(msg, { runId, entityType });
     } else {
       console.warn(msg);
     }

@@ -38,7 +38,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { handleStepCompletion, handleRunStart } from '../autoMintArtifacts';
+import { handleStepCompletion, handleRunStart, handleEntityWrite } from '../autoMintArtifacts';
 import { ArtifactRouter, artifactChangeEvents } from '../artifactRouter';
 import { TaskChangeRouter, taskChangeEvents } from '../taskChangeRouter';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
@@ -252,6 +252,8 @@ describe('autoMintArtifacts.handleStepCompletion', () => {
       actor: 'user',
       entityType: 'idea',
       title: 'Realtime habit streaks',
+      // CONTENT GATE: idea-spec only mints when the idea has body/summary.
+      summary: 'Track streaks live.',
       runId: 'run-p',
     });
     setSeedIdea(db, 'run-p', ideaId);
@@ -281,6 +283,7 @@ describe('autoMintArtifacts.handleStepCompletion', () => {
       actor: 'user',
       entityType: 'idea',
       title: 'Temp',
+      summary: 'has content so the gate passes',
       runId: 'run-p',
     });
     // Blank out the title so the label falls back to the ref.
@@ -510,6 +513,7 @@ describe('autoMintArtifacts.handleStepCompletion', () => {
       actor: 'user',
       entityType: 'idea',
       title: 'Realtime habit streaks',
+      summary: 'Track streaks live.',
       runId: 'run-done',
     });
     setSeedIdea(db, 'run-done', ideaId);
@@ -564,6 +568,7 @@ describe('autoMintArtifacts.handleStepCompletion', () => {
       actor: 'user',
       entityType: 'idea',
       title: 'Realtime habit streaks',
+      summary: 'Track streaks live.',
       runId: 'run-idem',
     });
     setSeedIdea(db, 'run-idem', ideaId);
@@ -613,6 +618,8 @@ describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
       actor: 'user',
       entityType: 'idea',
       title: 'Add a simple sandbox website',
+      // CONTENT GATE: idea-spec needs body/summary to mint.
+      summary: 'A small sandbox site.',
       runId: ownerRunId,
     });
     const { taskId: epicA } = await router.applyChange(1, {
@@ -706,7 +713,7 @@ describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
   // ship — idea resolved via the owned (seed_idea_id) path
   // -------------------------------------------------------------------------
 
-  it('mints baselines for a ship run via its seed idea (step_origin = Ship · run start)', async () => {
+  it('mints idea-spec (NOT decomposed-stories) for a ship run with no decomposition yet', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     TaskChangeRouter.initialize(adapter);
@@ -717,6 +724,7 @@ describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
       actor: 'user',
       entityType: 'idea',
       title: 'Ship this idea',
+      summary: 'Ship it end-to-end.',
       runId: 'run-ship',
     });
     setSeedIdea(db, 'run-ship', ideaId);
@@ -728,7 +736,40 @@ describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
     expect(spec!.source_ref).toBe(ideaId);
     expect(spec!.label).toBe('Ship this idea');
     expect(spec!.step_origin).toBe('Ship · run start');
-    expect(readArtifact(db, 'run-ship', 'decomposed-stories')).toBeDefined();
+    // CONTENT GATE: no epics/tasks yet → decomposed-stories is SKIPPED at start.
+    expect(readArtifact(db, 'run-ship', 'decomposed-stories')).toBeUndefined();
+  });
+
+  it('mints BOTH baselines for a ship run that already has a decomposition', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedShipRun(db, 'run-ship-decomp');
+    const router = TaskChangeRouter.getInstance();
+    const { taskId: ideaId } = await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Ship with stories',
+      summary: 'Has a decomposition.',
+      runId: 'run-ship-decomp',
+    });
+    await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      title: 'A direct task',
+      originatingIdeaId: ideaId,
+      runId: 'run-ship-decomp',
+    });
+    setSeedIdea(db, 'run-ship-decomp', ideaId);
+
+    await handleRunStart(adapter, 'run-ship-decomp');
+
+    expect(readArtifact(db, 'run-ship-decomp', 'idea-spec')).toBeDefined();
+    const stories = readArtifact(db, 'run-ship-decomp', 'decomposed-stories');
+    expect(stories).toBeDefined();
+    expect(stories!.label).toBe('0 epics, 1 task');
   });
 
   // -------------------------------------------------------------------------
@@ -737,7 +778,7 @@ describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
   // deterministic source of the planner idea-spec / decomposed-stories tabs).
   // -------------------------------------------------------------------------
 
-  it('mints baselines for a SEEDED planner run (step_origin = Plan · run start)', async () => {
+  it('mints idea-spec (NOT decomposed-stories) for a SEEDED planner run with no decomposition', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     TaskChangeRouter.initialize(adapter);
@@ -748,6 +789,7 @@ describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
       actor: 'user',
       entityType: 'idea',
       title: 'Planner idea',
+      summary: 'A planner idea with a spec.',
       runId: 'run-pl',
     });
     setSeedIdea(db, 'run-pl', ideaId);
@@ -761,10 +803,11 @@ describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
     expect(spec!.step_origin).toBe('Plan · run start');
     expect(spec!.mode).toBe('template');
     expect(spec!.payload_json).toBeNull();
-    expect(readArtifact(db, 'run-pl', 'decomposed-stories')).toBeDefined();
+    // CONTENT GATE: no decomposition yet → decomposed-stories is SKIPPED at start.
+    expect(readArtifact(db, 'run-pl', 'decomposed-stories')).toBeUndefined();
   });
 
-  it('mints baselines for a planner run whose idea was CREATED during the run (no seed_idea_id)', async () => {
+  it('mints idea-spec for a planner run whose idea was CREATED during the run (no seed_idea_id)', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     TaskChangeRouter.initialize(adapter);
@@ -772,19 +815,21 @@ describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
 
     // Raw-prompt planner: the idea is created during 'context' (owned via
     // entity_events.run_id), never stamped as seed_idea_id. resolveOriginatingIdeaId
-    // resolves it through listRunOwnedIdeaIds, so a later 'running' transition mints.
+    // resolves it through listRunOwnedIdeaIds, so handleRunStart finds it.
     seedPlannerRun(db, 'run-pl-created');
     const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
       actor: 'agent:cyboflow-context',
       entityType: 'idea',
       title: 'Created-in-run idea',
+      summary: 'Created during context.',
       runId: 'run-pl-created',
     });
 
     await handleRunStart(adapter, 'run-pl-created');
 
     expect(readArtifact(db, 'run-pl-created', 'idea-spec')!.source_ref).toBe(ideaId);
-    expect(readArtifact(db, 'run-pl-created', 'decomposed-stories')!.source_ref).toBe(ideaId);
+    // No decomposition yet → content-gated skip.
+    expect(readArtifact(db, 'run-pl-created', 'decomposed-stories')).toBeUndefined();
   });
 
   // -------------------------------------------------------------------------
@@ -855,5 +900,424 @@ describe('autoMintArtifacts.handleRunStart (sprint/ship baseline)', () => {
     const specEvents = readArtifactEvents(db, specId!);
     expect(specEvents.length).toBe(1);
     expect(specEvents[0].kind).toBe('created');
+  });
+});
+
+// ===========================================================================
+// CONTENT GATE — no empty artifact ever appears.
+// ===========================================================================
+
+describe('autoMintArtifacts content gate (no empty mints)', () => {
+  afterEach(() => {
+    ArtifactRouter._resetForTesting();
+    artifactChangeEvents.removeAllListeners();
+    TaskChangeRouter._resetForTesting();
+    taskChangeEvents.removeAllListeners();
+  });
+
+  it('does NOT mint idea-spec for a bare idea (no body, no summary)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-bare');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Bare idea',
+      runId: 'run-bare',
+    });
+    setSeedIdea(db, 'run-bare', ideaId);
+
+    await handleStepCompletion(adapter, 'run-bare', 'context');
+    expect(readArtifact(db, 'run-bare', 'idea-spec')).toBeUndefined();
+  });
+
+  it('mints idea-spec when the idea has ONLY a body (no summary)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-body');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Idea with body only',
+      body: '# Spec\n\nSome detail.',
+      runId: 'run-body',
+    });
+    setSeedIdea(db, 'run-body', ideaId);
+
+    await handleStepCompletion(adapter, 'run-body', 'context');
+    expect(readArtifact(db, 'run-body', 'idea-spec')).toBeDefined();
+  });
+
+  it('does NOT mint decomposed-stories when the idea has no decomposition (count 0)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-nodecomp');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Undecomposed idea',
+      summary: 'no children yet',
+      runId: 'run-nodecomp',
+    });
+    setSeedIdea(db, 'run-nodecomp', ideaId);
+
+    await handleStepCompletion(adapter, 'run-nodecomp', 'tasks');
+    expect(readArtifact(db, 'run-nodecomp', 'decomposed-stories')).toBeUndefined();
+  });
+});
+
+// ===========================================================================
+// handleEntityWrite — content-driven mint fired off each MCP entity write.
+// ===========================================================================
+
+describe('autoMintArtifacts.handleEntityWrite', () => {
+  afterEach(() => {
+    ArtifactRouter._resetForTesting();
+    artifactChangeEvents.removeAllListeners();
+    TaskChangeRouter._resetForTesting();
+    taskChangeEvents.removeAllListeners();
+  });
+
+  it("mints idea-spec on an 'idea' write for a planner run (step_origin = Plan · idea spec)", async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-ew');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'A content-driven idea',
+      summary: 'with a spec',
+      runId: 'run-ew',
+    });
+
+    await handleEntityWrite(adapter, 'run-ew', 'idea');
+
+    const spec = readArtifact(db, 'run-ew', 'idea-spec');
+    expect(spec).toBeDefined();
+    expect(spec!.source_ref).toBe(ideaId);
+    expect(spec!.step_origin).toBe('Plan · idea spec');
+  });
+
+  it("mints decomposed-stories on a 'task' write (step_origin = Plan · decomposition)", async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-ew2');
+    const router = TaskChangeRouter.getInstance();
+    const { taskId: ideaId } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea',
+      summary: 's',
+      runId: 'run-ew2',
+    });
+    await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      title: 'Direct task',
+      originatingIdeaId: ideaId,
+      runId: 'run-ew2',
+    });
+
+    await handleEntityWrite(adapter, 'run-ew2', 'task');
+
+    const stories = readArtifact(db, 'run-ew2', 'decomposed-stories');
+    expect(stories).toBeDefined();
+    expect(stories!.source_ref).toBe(ideaId);
+    expect(stories!.label).toBe('0 epics, 1 task');
+    expect(stories!.step_origin).toBe('Plan · decomposition');
+  });
+
+  it("mints decomposed-stories on an 'epic' write", async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-ew3');
+    const router = TaskChangeRouter.getInstance();
+    const { taskId: ideaId } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea',
+      summary: 's',
+      runId: 'run-ew3',
+    });
+    await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'epic',
+      title: 'Epic 1',
+      originatingIdeaId: ideaId,
+      runId: 'run-ew3',
+    });
+
+    await handleEntityWrite(adapter, 'run-ew3', 'epic');
+
+    const stories = readArtifact(db, 'run-ew3', 'decomposed-stories');
+    expect(stories).toBeDefined();
+    expect(stories!.label).toBe('1 epic, 0 tasks');
+  });
+
+  it('is content-gated: a task write before any decomposition mints nothing, then mints once a task exists', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-ew-gate');
+    const router = TaskChangeRouter.getInstance();
+    const { taskId: ideaId } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea',
+      summary: 's',
+      runId: 'run-ew-gate',
+    });
+
+    // No tasks yet → fire on 'task' is a content-gated no-op.
+    await handleEntityWrite(adapter, 'run-ew-gate', 'task');
+    expect(readArtifact(db, 'run-ew-gate', 'decomposed-stories')).toBeUndefined();
+
+    // Add a task, then fire again → now it mints.
+    await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      title: 'T',
+      originatingIdeaId: ideaId,
+      runId: 'run-ew-gate',
+    });
+    await handleEntityWrite(adapter, 'run-ew-gate', 'task');
+    expect(readArtifact(db, 'run-ew-gate', 'decomposed-stories')).toBeDefined();
+  });
+
+  it('refreshes the decomposed-stories count label as tasks are added (idempotent UPSERT)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-ew-refresh');
+    const router = TaskChangeRouter.getInstance();
+    const { taskId: ideaId } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea',
+      summary: 's',
+      runId: 'run-ew-refresh',
+    });
+
+    await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      title: 'T1',
+      originatingIdeaId: ideaId,
+      runId: 'run-ew-refresh',
+    });
+    await handleEntityWrite(adapter, 'run-ew-refresh', 'task');
+    expect(readArtifact(db, 'run-ew-refresh', 'decomposed-stories')!.label).toBe('0 epics, 1 task');
+
+    await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      title: 'T2',
+      originatingIdeaId: ideaId,
+      runId: 'run-ew-refresh',
+    });
+    await handleEntityWrite(adapter, 'run-ew-refresh', 'task');
+
+    // Still ONE row (UPSERT), but the label now reflects the live count.
+    expect(artifactCount(db, 'run-ew-refresh')).toBe(1);
+    expect(readArtifact(db, 'run-ew-refresh', 'decomposed-stories')!.label).toBe('0 epics, 2 tasks');
+  });
+
+  it('does NOT mint for a SPRINT run (only planner/ship are content-driven)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    // A sprint run owning an idea with content — handleEntityWrite still skips it
+    // (sprint mints its baselines at run start, not per entity write).
+    const router = TaskChangeRouter.getInstance();
+    seedPlannerRun(db, 'run-owner');
+    const { taskId: ideaId } = await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Idea',
+      summary: 's',
+      runId: 'run-owner',
+    });
+    const { taskId } = await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      title: 'T',
+      originatingIdeaId: ideaId,
+      runId: 'run-owner',
+    });
+    seedSprintRun(db, 'run-sprint-ew', 'batch-ew');
+    linkBatchTask(db, 'batch-ew', taskId);
+
+    await handleEntityWrite(adapter, 'run-sprint-ew', 'task');
+    expect(artifactCount(db, 'run-sprint-ew')).toBe(0);
+  });
+
+  it('is fail-soft for an unknown run id (no throw, no mint)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    await expect(handleEntityWrite(adapter, 'no-such-run', 'idea')).resolves.toBeUndefined();
+    expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts').get() as { n: number }).n).toBe(0);
+  });
+});
+
+// ===========================================================================
+// FIX D regression — a task created by the planner with NO explicit lineage is
+// stamped with the run's seed idea (originating_idea_id), so the small-idea
+// decomposition (tasks directly under the idea, no epics) is VISIBLE/counted.
+// ===========================================================================
+
+describe('decomposed task lineage (FIX D)', () => {
+  afterEach(() => {
+    ArtifactRouter._resetForTesting();
+    artifactChangeEvents.removeAllListeners();
+    TaskChangeRouter._resetForTesting();
+    taskChangeEvents.removeAllListeners();
+  });
+
+  it("stamps originating_idea_id from the run's seed idea on a task created with no lineage", async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-d');
+    const router = TaskChangeRouter.getInstance();
+    const { taskId: ideaId } = await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Add a simple sandbox website',
+      summary: 'small idea',
+      runId: 'run-d',
+    });
+    setSeedIdea(db, 'run-d', ideaId);
+
+    // The planner creates a task with NO parentEpicId and NO originatingIdeaId
+    // (exactly the small-idea decomposition path that was previously invisible).
+    const { taskId } = await router.applyChange(1, {
+      actor: 'agent:cyboflow-decompose',
+      entityType: 'task',
+      title: 'Build the sandbox page',
+      runId: 'run-d',
+    });
+
+    // The create chokepoint stamped the run's seed idea onto the task.
+    const row = db
+      .prepare('SELECT originating_idea_id AS oid, parent_epic_id AS pid FROM tasks WHERE id = ?')
+      .get(taskId) as { oid: string | null; pid: string | null };
+    expect(row.oid).toBe(ideaId);
+    expect(row.pid).toBeNull();
+  });
+
+  it('counts the directly-linked task in decomposed-stories (label reflects it)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-d2');
+    const router = TaskChangeRouter.getInstance();
+    const { taskId: ideaId } = await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Small idea',
+      summary: 's',
+      runId: 'run-d2',
+    });
+    setSeedIdea(db, 'run-d2', ideaId);
+
+    // Two tasks created with no lineage — both stamped with the seed idea.
+    await router.applyChange(1, { actor: 'agent:cyboflow-decompose', entityType: 'task', title: 'T1', runId: 'run-d2' });
+    await router.applyChange(1, { actor: 'agent:cyboflow-decompose', entityType: 'task', title: 'T2', runId: 'run-d2' });
+
+    await handleStepCompletion(adapter, 'run-d2', 'tasks');
+
+    const art = readArtifact(db, 'run-d2', 'decomposed-stories');
+    expect(art).toBeDefined();
+    // 0 epics but 2 tasks directly under the idea (previously this was "0 tasks").
+    expect(art!.label).toBe('0 epics, 2 tasks');
+  });
+
+  it('does NOT stamp the seed idea when the caller passed an explicit originatingIdeaId', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-d3');
+    const router = TaskChangeRouter.getInstance();
+    // Seed idea = the run's seed; a SECOND idea is the explicit target.
+    const { taskId: seedIdeaId } = await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Seed idea',
+      summary: 's',
+      runId: 'run-d3',
+    });
+    const { taskId: otherIdeaId } = await router.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Other idea',
+      summary: 's',
+      runId: 'run-d3',
+    });
+    setSeedIdea(db, 'run-d3', seedIdeaId);
+
+    const { taskId } = await router.applyChange(1, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      title: 'Explicitly-linked task',
+      originatingIdeaId: otherIdeaId,
+      runId: 'run-d3',
+    });
+
+    const row = db
+      .prepare('SELECT originating_idea_id AS oid FROM tasks WHERE id = ?')
+      .get(taskId) as { oid: string | null };
+    // The explicit link wins — the seed-idea stamp only fills a NULL.
+    expect(row.oid).toBe(otherIdeaId);
+  });
+
+  it('leaves originating_idea_id NULL for a task created outside any run (no seed)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    // No runId on the change → the stamp branch is skipped entirely.
+    const { taskId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'task',
+      title: 'Orphan task',
+    });
+    const row = db
+      .prepare('SELECT originating_idea_id AS oid FROM tasks WHERE id = ?')
+      .get(taskId) as { oid: string | null };
+    expect(row.oid).toBeNull();
   });
 });

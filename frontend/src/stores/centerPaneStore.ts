@@ -65,6 +65,13 @@ export interface OpenArtifactTabArgs {
   artifactId?: string;
   committed?: boolean;
   isNew?: boolean;
+  /**
+   * Whether opening/refreshing this tab should ALSO make it active. Defaults to
+   * true (existing focus-on-open behaviour). Pass `false` for a freshly-arrived
+   * MID-RUN artifact so it appears as a pulsing inactive tab without yanking the
+   * user off whatever tab (Flow/Chat) they are on.
+   */
+  focus?: boolean;
 }
 
 interface CenterPaneStore {
@@ -160,11 +167,15 @@ export const useCenterPaneStore = create<CenterPaneStore>((set) => {
     openArtifactTab: (key, args) =>
       mutate(key, (cur) => {
         const id = artifactTabId(args.atype);
+        // focus defaults to true — only an explicit false suppresses the focus
+        // steal (a mid-run artifact arrives as a pulsing inactive tab instead).
+        const focus = args.focus !== false;
         const existing = cur.tabs.find((t) => t.id === id);
         if (existing) {
           return {
             ...cur,
-            activeTabId: id,
+            // No-focus open keeps the user on their current tab.
+            activeTabId: focus ? id : cur.activeTabId,
             tabs: cur.tabs.map((t) =>
               t.id === id
                 ? {
@@ -172,7 +183,9 @@ export const useCenterPaneStore = create<CenterPaneStore>((set) => {
                     label: args.label,
                     artifactId: args.artifactId ?? t.artifactId,
                     committed: args.committed ?? t.committed,
-                    isNew: false,
+                    // A focused open clears the pulse (it becomes active); a
+                    // no-focus refresh keeps/sets it so the inactive tab pulses.
+                    isNew: focus ? false : (args.isNew ?? t.isNew),
                   }
                 : t,
             ),
@@ -187,7 +200,7 @@ export const useCenterPaneStore = create<CenterPaneStore>((set) => {
           committed: args.committed ?? false,
           isNew: args.isNew ?? false,
         };
-        return { ...cur, tabs: [...cur.tabs, tab], activeTabId: id };
+        return { ...cur, tabs: [...cur.tabs, tab], activeTabId: focus ? id : cur.activeTabId };
       }),
 
     toggleTerminal: (key) => mutate(key, (cur) => ({ ...cur, terminalOpen: !cur.terminalOpen })),

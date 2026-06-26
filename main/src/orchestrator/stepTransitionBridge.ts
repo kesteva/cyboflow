@@ -249,25 +249,25 @@ export function buildStepTransitionEvent(
       });
     }
 
-    // Auto-mint run-START baseline artifacts on a 'running' transition. The
-    // agents never report a step 'done' (the prompts report each step as it
-    // begins, status='running'), so the done-hook above never fires in practice —
-    // the run-start path is the deterministic source of the templated deliverable
-    // tabs (idea-spec / decomposed-stories). handleRunStart gates on
-    // BASELINE_RUN_START_WORKFLOWS (planner/sprint/ship) and fail-soft no-ops when
-    // the run owns no resolvable idea yet.
+    // Auto-mint run-START baseline artifacts on the INITIAL step's 'running'
+    // transition. The agents never report a step 'done' (the prompts report each
+    // step as it begins, status='running'), so the done-hook above never fires in
+    // practice — the run-start path is the deterministic source of the templated
+    // deliverable tabs. handleRunStart gates on BASELINE_RUN_START_WORKFLOWS
+    // (planner/sprint/ship), is CONTENT-GATED inside its mint helpers (no empty
+    // idea-spec / decomposed-stories ever appears), and fail-soft no-ops when the
+    // run owns no resolvable idea yet.
     //
-    // Trigger: the INITIAL step's 'running' for any baseline workflow (sprint/ship
-    // have their idea via the batch/seed at start; a SEEDED planner does too).
-    // PLUS every later planner 'running' — a raw-prompt planner CREATES its idea
-    // during 'context', so it is not resolvable at the initial 'running'; firing on
-    // each subsequent planner step lets the first transition after the idea exists
-    // mint it. Idempotent (UPSERT by (runId, atype)) so the extra calls are no-op
-    // re-derives. Same fail-soft posture as handleStepCompletion (never throws; a
-    // defensive .catch guards a surprise rejection). See autoMintArtifacts.ts.
+    // Trigger: ONLY the INITIAL step's 'running'. A SEEDED planner/ship has its
+    // idea at start (idea-spec mints; decomposed-stories is content-gated to skip
+    // until the first epic/task lands). A raw-prompt planner CREATES its idea
+    // during 'context' — that created-idea case is now covered by handleEntityWrite
+    // (fired off each MCP task/idea write in mcpQueryHandler), so we no longer need
+    // to fire handleRunStart on EVERY planner 'running'. Idempotent (UPSERT by
+    // (runId, atype)). Same fail-soft posture as handleStepCompletion (never
+    // throws; a defensive .catch guards a surprise rejection). See autoMintArtifacts.ts.
     const firesRunStartBaseline =
-      status === 'running' &&
-      (stepId === resolveInitialStepId(runRow.workflowName) || runRow.workflowName === 'planner');
+      status === 'running' && stepId === resolveInitialStepId(runRow.workflowName);
     if (firesRunStartBaseline) {
       void handleRunStart(db, runId, logger).catch((err) => {
         const m = `[stepTransitionBridge] run-start baseline hook rejected for runId=${runId} (ignored): ${err}`;

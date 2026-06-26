@@ -11,8 +11,9 @@
  *   4. Toggling the dock collapses its body via display:none but NEVER unmounts
  *      RunBottomPane (the xterm-keep-alive invariant).
  *   5. Auto-open: the INITIAL artifacts seed opens tabs WITHOUT stealing focus
- *      (regardless of the DB is_new flag), but artifacts that appear in a later
- *      sync are treated as fresh and DO focus.
+ *      (regardless of the DB is_new flag), AND a mid-run artifact that appears in
+ *      a later sync opens as a pulsing INACTIVE tab (focus:false) — it announces
+ *      itself but never yanks the user off the Flow/Chat tab (FIX 2).
  *   6. An artifact tab whose backing row vanishes from the live list is closed
  *      (no perpetual "Loading…" strand).
  */
@@ -151,12 +152,12 @@ describe('RunCenterPane', () => {
     expect(screen.getByTestId('mock-run-bottom-pane')).toBeInTheDocument();
 
     // Collapse: body hidden but the child stays mounted (not unmounted).
-    fireEvent.click(screen.getByTestId('terminal-dock-header'));
+    fireEvent.click(screen.getByTestId('terminal-dock-toggle'));
     expect(screen.getByTestId('terminal-dock-body')).toHaveStyle({ display: 'none' });
     expect(screen.getByTestId('mock-run-bottom-pane')).toBeInTheDocument();
 
     // Re-expand.
-    fireEvent.click(screen.getByTestId('terminal-dock-header'));
+    fireEvent.click(screen.getByTestId('terminal-dock-toggle'));
     expect(screen.getByTestId('terminal-dock-body')).toHaveStyle({ display: 'flex' });
   });
 
@@ -175,7 +176,7 @@ describe('RunCenterPane', () => {
     expect(session.tabs.find((t) => t.id === 'art:idea-spec')?.isNew).toBe(false);
   });
 
-  it('focuses an artifact that appears AFTER the initial seed (genuinely fresh this session)', () => {
+  it('opens a MID-RUN artifact as a pulsing INACTIVE tab WITHOUT stealing focus (FIX 2)', () => {
     mockArtifacts = [];
     const { rerender } = render(
       <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
@@ -183,7 +184,8 @@ describe('RunCenterPane', () => {
     // Initial seed empty → still on Flow.
     expect(useCenterPaneStore.getState().bySession['sess-1'].activeTabId).toBe('flow');
 
-    // A new artifact streams in after mount → it focuses + pulses.
+    // A new artifact streams in after mount → it appears + pulses, but the user
+    // stays on Flow (no focus steal; the tab is opened focus:false).
     act(() => {
       mockArtifacts = [makeArtifact({ id: 'art-fresh', atype: 'screenshots' })];
     });
@@ -191,7 +193,8 @@ describe('RunCenterPane', () => {
       <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
     );
     const session = useCenterPaneStore.getState().bySession['sess-1'];
-    expect(session.activeTabId).toBe('art:screenshots');
+    expect(session.tabs.some((t) => t.id === 'art:screenshots')).toBe(true);
+    expect(session.activeTabId).toBe('flow');
     expect(session.tabs.find((t) => t.id === 'art:screenshots')?.isNew).toBe(true);
   });
 

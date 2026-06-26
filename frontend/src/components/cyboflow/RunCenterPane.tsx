@@ -102,14 +102,17 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun }: RunCenterP
       if (seenArtifactIds.current.has(artifact.id)) continue;
       seenArtifactIds.current.add(artifact.id);
       // On the initial seed, every artifact is "pre-existing" — open it but do
-      // NOT treat it as new (focus is restored below). After the initial seed,
-      // an unseen artifact id is genuinely fresh this session and steals focus.
+      // NOT treat it as new (focus is restored below). After the initial seed, an
+      // unseen artifact id is genuinely fresh THIS session: open it as a pulsing
+      // inactive tab (isNew + focus:false) so it announces itself without yanking
+      // the user off the Flow/Chat tab they are on.
       store.openArtifactTab(sessionKey, {
         atype: artifact.atype,
         label: artifact.label,
         artifactId: artifact.id,
         committed: artifact.committed,
         isNew: !isInitialSeed,
+        ...(isInitialSeed ? {} : { focus: false }),
       });
     }
 

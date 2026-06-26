@@ -54,6 +54,41 @@ describe('centerPaneStore', () => {
     expect(s.tabs[1].isNew).toBe(false);
   });
 
+  it('opens a NEW artifact tab WITHOUT stealing focus when focus:false (pulsing inactive tab)', () => {
+    get().ensureSession(KEY);
+    // The user is on the Flow tab; a mid-run artifact arrives focus:false.
+    get().openArtifactTab(KEY, { atype: 'decomposed-stories', label: '2 epics, 3 tasks', isNew: true, focus: false });
+    const s = get().bySession[KEY];
+    expect(s.tabs).toHaveLength(2);
+    // The tab exists and pulses, but the user stays on Flow.
+    expect(s.activeTabId).toBe(FLOW_TAB_ID);
+    expect(s.tabs[1]).toMatchObject({ kind: 'artifact', atype: 'decomposed-stories', isNew: true });
+  });
+
+  it('refreshes an EXISTING artifact tab focus:false without changing the active tab and keeps the pulse', () => {
+    get().ensureSession(KEY);
+    // First open WITH focus so the tab becomes active and its pulse clears.
+    get().openArtifactTab(KEY, { atype: 'idea-spec', label: 'IDEA-1', isNew: true });
+    expect(get().bySession[KEY].activeTabId).toBe('art:idea-spec');
+    // Now move the user back to Flow.
+    get().focusTab(KEY, FLOW_TAB_ID);
+    // A no-focus refresh re-labels the tab and re-pulses it, but leaves the user on Flow.
+    get().openArtifactTab(KEY, { atype: 'idea-spec', label: 'IDEA-1 (updated)', isNew: true, focus: false });
+    const s = get().bySession[KEY];
+    expect(s.activeTabId).toBe(FLOW_TAB_ID);
+    const tab = s.tabs.find((t) => t.atype === 'idea-spec');
+    expect(tab?.label).toBe('IDEA-1 (updated)');
+    expect(tab?.isNew).toBe(true);
+  });
+
+  it('focus defaults to true (existing callers keep focus-on-open behavior)', () => {
+    get().ensureSession(KEY);
+    get().focusTab(KEY, FLOW_TAB_ID);
+    // No focus arg → focuses (default true).
+    get().openArtifactTab(KEY, { atype: 'screenshots', label: 'Shots' });
+    expect(get().bySession[KEY].activeTabId).toBe('art:screenshots');
+  });
+
   it('focusTab clears the focused tab new-dot', () => {
     get().ensureSession(KEY);
     get().openArtifactTab(KEY, { atype: 'screenshots', label: 'Shots', isNew: true });

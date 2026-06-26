@@ -19,7 +19,7 @@
  * inline `MINIMAL_SCHEMA` const declared below (no real migration runner — tests are hermetic). A writes-capturing
  * socket test double is used to assert on the JSON response bodies.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -34,6 +34,19 @@ import { SprintLaneStore, sprintLaneEvents, sprintLaneChannel } from '../../spri
 import { ApprovalRouter } from '../../approvalRouter';
 import type { WorkflowDefinition, WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
 import type { SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
+import { handleEntityWrite } from '../../autoMintArtifacts';
+
+// Mock the content-driven mint hook so we can assert mcpQueryHandler fires it
+// (fire-and-forget) after a SUCCESSFUL task create/update. The real hook is
+// covered by autoMintArtifacts.test.ts; here we only assert the wiring +
+// entity-type derivation. handleRunStart/handleStepCompletion are also stubbed
+// because the report-step path reaches them transitively through the real
+// stepTransitionBridge (no test asserts their artifact output).
+vi.mock('../../autoMintArtifacts', () => ({
+  handleEntityWrite: vi.fn(() => Promise.resolve()),
+  handleRunStart: vi.fn(() => Promise.resolve()),
+  handleStepCompletion: vi.fn(() => Promise.resolve()),
+}));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -848,6 +861,79 @@ describe('McpQueryHandler', () => {
           .get(data.task_id) as { summary: string | null; body: string | null };
         expect(row.body).toBe(specBody);
         expect(row.summary).toBe('One-line caption');
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // content-driven artifact mint (handleEntityWrite) wiring
+    // -----------------------------------------------------------------------
+
+    describe('fires handleEntityWrite after a successful task write', () => {
+      beforeEach(() => {
+        vi.mocked(handleEntityWrite).mockClear();
+      });
+
+      it("fires handleEntityWrite('idea') after a successful idea create (default type)", async () => {
+        seedTaskRun(taskDb, { runId: 'run-1', currentStepId: 'plan', stepsSnapshot: { plan: 'planner' } });
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ew-1', runId: 'run-1', title: 'An idea' },
+          socket,
+        );
+        expect(parseLastWrite(writes).ok).toBe(true);
+
+        expect(handleEntityWrite).toHaveBeenCalledTimes(1);
+        const call = vi.mocked(handleEntityWrite).mock.calls[0];
+        expect(call[1]).toBe('run-1'); // runId
+        expect(call[2]).toBe('idea'); // derived entity type
+      });
+
+      it("fires handleEntityWrite('task') after a successful task create (taskType='task')", async () => {
+        seedTaskRun(taskDb, { runId: 'run-1', currentStepId: 'plan', stepsSnapshot: { plan: 'planner' } });
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ew-2', runId: 'run-1', taskType: 'task', title: 'A task' },
+          socket,
+        );
+        expect(parseLastWrite(writes).ok).toBe(true);
+
+        expect(handleEntityWrite).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(handleEntityWrite).mock.calls[0][2]).toBe('task');
+      });
+
+      it('fires handleEntityWrite after a successful update (entity type from identity)', async () => {
+        seedTaskRun(taskDb, { runId: 'run-1', currentStepId: 'plan', stepsSnapshot: { plan: 'planner' } });
+
+        const created = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ew-seed', runId: 'run-1', title: 'Before' },
+          created.socket,
+        );
+        const taskId = (parseLastWrite(created.writes).data as { task_id: string }).task_id;
+        vi.mocked(handleEntityWrite).mockClear(); // ignore the create's fire
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-update-task', requestId: 'ew-up', runId: 'run-1', taskId, title: 'After' },
+          socket,
+        );
+        expect(parseLastWrite(writes).ok).toBe(true);
+
+        expect(handleEntityWrite).toHaveBeenCalledTimes(1);
+        expect(vi.mocked(handleEntityWrite).mock.calls[0][2]).toBe('idea');
+      });
+
+      it('does NOT fire handleEntityWrite when the create is REJECTED (no real run)', async () => {
+        // 'orchestrator' sentinel → resolveTaskRunContext rejects before any write.
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ew-rej', runId: 'orchestrator', title: 'X' },
+          socket,
+        );
+        expect(parseLastWrite(writes).ok).toBe(false);
+        expect(handleEntityWrite).not.toHaveBeenCalled();
       });
     });
 
