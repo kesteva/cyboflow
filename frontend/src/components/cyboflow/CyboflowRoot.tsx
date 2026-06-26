@@ -291,42 +291,40 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         {/* Left column — fluid; hosts empty-state CTA, RunBottomPane, or Canvas+RunBottomPane */}
         <div className="flex-1 flex flex-col overflow-hidden">
           {activeRunId !== null ? (
-            <>
-              {runEndEligible ? (
-                // End of workflow — the run rested with no open gate, or
-                // self-terminated. The all-steps-completed canvas (and the old
-                // "this workflow is finished" banner) are REPLACED by the summary
-                // module: token usage by category + the two close-out CTAs
-                // (Complete workflow / interactive-only Request changes). The
-                // summary owns the complete affordance, so no separate banner. It
-                // sits as a card on the same graph-paper surface as the phase
-                // canvas, rather than filling the pane edge-to-edge.
-                <div
-                  style={{ flexBasis: '46%', flexShrink: 0, background: GRAPH_PAPER_BACKGROUND }}
-                  className="flex items-start justify-center overflow-auto p-6"
-                  data-testid="run-summary-canvas"
-                >
-                  <WorkflowSummaryPanel
-                    runId={activeRunId}
-                    status={activeRun?.status}
-                    substrate={activeRun?.substrate}
-                    workflowLabel={activeRun?.workflowName ?? activeRunId}
-                    onComplete={() => setIsEndOpen(true)}
-                  />
-                </div>
-              ) : (
-                // Active run — tabbed center surface (pinned Flow tab hosting the
-                // WorkflowCanvas, or SprintSwimlaneCanvas for sprint runs) over a
-                // collapsible terminal dock, plus file/diff + artifact tabs.
-                // RunCenterPane owns the per-session tab state and the
-                // xterm-keep-alive dock collapse.
-                <RunCenterPane
-                  activeRunId={activeRunId}
-                  phaseState={phaseState}
-                  activeRun={activeRun}
-                />
-              )}
-            </>
+            // Tabbed center surface (pinned Flow tab hosting the WorkflowCanvas,
+            // or SprintSwimlaneCanvas for sprint runs) over a collapsible terminal
+            // dock, plus file/diff + artifact tabs. RunCenterPane owns the
+            // per-session tab state and the xterm-keep-alive dock collapse.
+            //
+            // At end of workflow (run rested with no open gate, or self-terminated)
+            // the Flow tab renders the summary module — token usage by category +
+            // the two close-out CTAs (Complete / interactive-only Request changes)
+            // — INSTEAD of the phase canvas, passed in as `flowEndSummary`. It is
+            // the Flow-tab content (not a replacement for the whole pane) so the
+            // tab strip and the terminal dock (chat) stay mounted: completion no
+            // longer hides the chat.
+            <RunCenterPane
+              activeRunId={activeRunId}
+              phaseState={phaseState}
+              activeRun={activeRun}
+              flowEndSummary={
+                runEndEligible ? (
+                  <div
+                    style={{ background: GRAPH_PAPER_BACKGROUND }}
+                    className="flex h-full items-start justify-center overflow-auto p-6"
+                    data-testid="run-summary-canvas"
+                  >
+                    <WorkflowSummaryPanel
+                      runId={activeRunId}
+                      status={activeRun?.status}
+                      substrate={activeRun?.substrate}
+                      workflowLabel={activeRun?.workflowName ?? activeRunId}
+                      onComplete={() => setIsEndOpen(true)}
+                    />
+                  </div>
+                ) : undefined
+              }
+            />
           ) : effectiveSession ? (
             <SessionProvider session={effectiveSession} projectName={projectName}>
               {/* Resting view — a worktree-backed session with NO active run

@@ -134,6 +134,23 @@ describe('RunCenterPane', () => {
     expect(screen.queryByTestId('mock-workflow-canvas')).not.toBeInTheDocument();
   });
 
+  it('renders flowEndSummary in the Flow tab at run-end WITHOUT hiding the chat dock', () => {
+    render(
+      <RunCenterPane
+        activeRunId="run-1"
+        phaseState={makePhaseState(DEFINITION)}
+        activeRun={makeRun()}
+        flowEndSummary={<div data-testid="end-summary">summary</div>}
+      />,
+    );
+    // Flow tab shows the summary instead of the canvas…
+    expect(screen.getByTestId('end-summary')).toBeInTheDocument();
+    expect(screen.queryByTestId('mock-workflow-canvas')).not.toBeInTheDocument();
+    // …and the terminal dock (chat) is STILL mounted — completion never hides it.
+    expect(screen.getByTestId('terminal-dock')).toBeInTheDocument();
+    expect(screen.getByTestId('mock-run-bottom-pane')).toBeInTheDocument();
+  });
+
   it('shows a loading state when the phase definition is null', () => {
     render(
       <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(null)} activeRun={makeRun()} />,

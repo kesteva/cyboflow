@@ -32,6 +32,12 @@ interface RunCenterPaneProps {
   activeRunId: string;
   phaseState: UseWorkflowPhaseStateResult;
   activeRun?: ActiveRunRow;
+  /**
+   * When set (the run has ended — `runEndEligible`), the Flow tab renders this
+   * node (the end-of-workflow summary) INSTEAD of the phase canvas. The tab strip
+   * and the terminal dock (chat) stay mounted, so completion never hides the chat.
+   */
+  flowEndSummary?: ReactElement;
 }
 
 /** Basename of a worktree path for the dock header (e.g. "recipe-holder"). */
@@ -41,7 +47,7 @@ function folderBasename(worktreePath?: string | null): string | undefined {
   return parts[parts.length - 1] || undefined;
 }
 
-export function RunCenterPane({ activeRunId, phaseState, activeRun }: RunCenterPaneProps): ReactElement {
+export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSummary }: RunCenterPaneProps): ReactElement {
   // Per-session key: the run's parent session when known, else the run id
   // (legacy parentless runs still get isolated, stable tab state).
   const sessionKey = activeRun?.session_id ?? activeRunId;
@@ -149,6 +155,10 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun }: RunCenterP
   const activeTab = session.tabs.find((t) => t.id === session.activeTabId) ?? session.tabs[0];
 
   const renderFlow = (): ReactElement => {
+    // Run ended → the Flow tab shows the end-of-workflow summary instead of the
+    // phase canvas. The tab strip + terminal dock (chat) stay mounted below, so
+    // completion never hides the chat.
+    if (flowEndSummary) return flowEndSummary;
     if (phaseState.definition === null) {
       return (
         <div className="flex h-full items-center justify-center text-sm text-text-secondary">
