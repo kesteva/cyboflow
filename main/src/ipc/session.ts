@@ -26,6 +26,7 @@ import { assertTransitionAllowed } from '../services/cyboflow/stateMachine';
 import { isPermissionMode, type PermissionMode } from '../../../shared/types/workflows';
 import { stampSessionRunsOutcome } from '../orchestrator/runRecovery';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
+import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
 import { isCliSubstrate } from '../../../shared/types/substrate';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 
@@ -2108,7 +2109,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
       // Get token usage from session_outputs with type 'json'
       const tokenUsageData = databaseService.getSessionTokenUsage(sessionId);
-      
+
+      // Whole-session totals ALSO include any workflow runs hosted by this
+      // session (run_usage / raw_events) — a pipeline disjoint from the
+      // quick-chat session_outputs that getSessionTokenUsage sums, so the two
+      // never overlap. Zero-cost for a session with no hosted runs.
+      const runTokenTotals = selectSessionRunTokenTotals(databaseService.getDb(), sessionId);
+
       // Get execution diffs for file changes
       const executionDiffs = databaseService.getExecutionDiffs(sessionId);
       
@@ -2182,7 +2189,14 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           totalOutputTokens: tokenUsageData.totalOutputTokens,
           totalCacheReadTokens: tokenUsageData.totalCacheReadTokens,
           totalCacheCreationTokens: tokenUsageData.totalCacheCreationTokens,
-          messageCount: tokenUsageData.messageCount
+          messageCount: tokenUsageData.messageCount,
+          // Workflow-run tokens hosted by this session (additive, disjoint from
+          // the session_outputs totals above). Consumers that want a
+          // whole-session figure SUM the chat + run fields per category.
+          runInputTokens: runTokenTotals.runInputTokens,
+          runOutputTokens: runTokenTotals.runOutputTokens,
+          runCacheReadTokens: runTokenTotals.runCacheReadTokens,
+          runCacheCreationTokens: runTokenTotals.runCacheCreationTokens
         },
         files: {
           totalFilesChanged: filesModified.size,

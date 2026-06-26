@@ -24,7 +24,7 @@ import {
   type WorkflowRow,
 } from '../../../../shared/types/workflows';
 import { DEFAULT_WORKFLOW_NAME } from './wizard/workflowMeta';
-import { useSessionMetrics } from '../../hooks/useSessionMetrics';
+import { useSessionMetrics, formatTokenCount } from '../../hooks/useSessionMetrics';
 import { useLaunchWorkflow } from '../../hooks/useLaunchWorkflow';
 import { IdeaPickerModal } from './IdeaPickerModal';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
@@ -304,6 +304,13 @@ export function QuickSessionCanvas({
   const model = metrics.model ?? '—';
   const { plus, minus } = metrics.diff;
   const diffIsEmpty = plus === 0 && minus === 0;
+  const { input, output, cacheWrite, cacheRead } = metrics.tokenBreakdown;
+  const tokenCategories = [
+    { key: 'input', label: 'Input', value: input },
+    { key: 'output', label: 'Output', value: output },
+    { key: 'cache-write', label: 'Cache write', value: cacheWrite },
+    { key: 'cache-read', label: 'Cache read', value: cacheRead },
+  ];
   const error = launchError ?? listError;
 
   return (
@@ -528,6 +535,57 @@ export function QuickSessionCanvas({
                     </span>
                   }
                 />
+              </div>
+
+              {/* Token usage — granular breakdown across the WHOLE session
+                  (quick chat + any workflow runs hosted by it; the headline
+                  TOKENS stat above stays input+output). */}
+              <div
+                style={{
+                  marginTop: 12,
+                  paddingTop: 10,
+                  borderTop: '1px solid var(--color-border-primary)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 4,
+                }}
+                data-testid="quick-session-token-breakdown"
+              >
+                <span
+                  style={{
+                    fontSize: 8.5,
+                    letterSpacing: '0.14em',
+                    textTransform: 'uppercase',
+                    color: 'var(--color-text-tertiary)',
+                    fontWeight: 700,
+                    marginBottom: 2,
+                  }}
+                >
+                  Token usage
+                </span>
+                {tokenCategories.map((c) => (
+                  <div
+                    key={c.key}
+                    data-testid={`quick-session-token-${c.key}`}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'baseline',
+                      justifyContent: 'space-between',
+                      fontSize: 10.5,
+                    }}
+                  >
+                    <span style={{ color: 'var(--color-text-tertiary)' }}>{c.label}</span>
+                    <span
+                      style={{
+                        color: 'var(--color-text-primary)',
+                        fontWeight: 700,
+                        fontVariantNumeric: 'tabular-nums',
+                      }}
+                    >
+                      {formatTokenCount(c.value)}
+                    </span>
+                  </div>
+                ))}
               </div>
             </div>
           </div>

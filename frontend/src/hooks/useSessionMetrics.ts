@@ -30,7 +30,19 @@ import type { Session } from '../types/session';
 
 interface StatisticsShape {
   session?: { model?: string | null; branch?: string | null };
-  tokens?: { totalInputTokens?: number; totalOutputTokens?: number };
+  tokens?: {
+    // session_outputs (quick-chat) totals
+    totalInputTokens?: number;
+    totalOutputTokens?: number;
+    totalCacheReadTokens?: number;
+    totalCacheCreationTokens?: number;
+    // workflow-run totals hosted by this session (disjoint pipeline; we SUM them
+    // with the chat totals for a whole-session figure)
+    runInputTokens?: number;
+    runOutputTokens?: number;
+    runCacheReadTokens?: number;
+    runCacheCreationTokens?: number;
+  };
   files?: {
     totalFilesChanged?: number;
     totalLinesAdded?: number;
@@ -42,11 +54,23 @@ function isStatisticsShape(value: unknown): value is StatisticsShape {
   return typeof value === 'object' && value !== null;
 }
 
+/** Per-category token totals for the WHOLE session (quick chat + workflow runs). */
+export interface SessionTokenBreakdown {
+  input: number;
+  output: number;
+  /** cache_creation — first-pass writes. */
+  cacheWrite: number;
+  /** cache_read — re-fed context (dominates cost). */
+  cacheRead: number;
+}
+
 export interface SessionMetrics {
   /** Elapsed wall-clock since session creation, e.g. "4m 12s". */
   elapsed: string;
-  /** Cumulative tokens (input + output), e.g. "12.4k". */
+  /** Headline tokens (input + output), e.g. "12.4k" — whole-session. */
   tokens: string;
+  /** Granular per-category totals (raw numbers) for the whole session. */
+  tokenBreakdown: SessionTokenBreakdown;
   /** Distinct files touched in the session worktree. */
   filesSeen: number;
   /** Working diff line counts; both 0 until the agent edits something. */
@@ -153,15 +177,23 @@ export function useSessionMetrics(session: Session | null): SessionMetrics {
     };
   }, [sessionId]);
 
-  const inputTokens = stats?.tokens?.totalInputTokens ?? 0;
-  const outputTokens = stats?.tokens?.totalOutputTokens ?? 0;
+  // Whole-session per-category totals = quick-chat (session_outputs) + workflow
+  // runs hosted by the session (run_usage). The two sources are disjoint, so a
+  // straight sum never double-counts. Run fields are absent on older payloads →
+  // default 0, leaving the chat-only number unchanged.
+  const t = stats?.tokens;
+  const input = (t?.totalInputTokens ?? 0) + (t?.runInputTokens ?? 0);
+  const output = (t?.totalOutputTokens ?? 0) + (t?.runOutputTokens ?? 0);
+  const cacheWrite = (t?.totalCacheCreationTokens ?? 0) + (t?.runCacheCreationTokens ?? 0);
+  const cacheRead = (t?.totalCacheReadTokens ?? 0) + (t?.runCacheReadTokens ?? 0);
   const model = stats?.session?.model ?? null;
   const branch =
     stats?.session?.branch ?? worktreeBasename(session?.worktreePath) ?? session?.baseBranch ?? null;
 
   return {
     elapsed: formatElapsed(elapsedMs),
-    tokens: formatTokenCount(inputTokens + outputTokens),
+    tokens: formatTokenCount(input + output),
+    tokenBreakdown: { input, output, cacheWrite, cacheRead },
     filesSeen: stats?.files?.totalFilesChanged ?? 0,
     diff: {
       plus: stats?.files?.totalLinesAdded ?? 0,

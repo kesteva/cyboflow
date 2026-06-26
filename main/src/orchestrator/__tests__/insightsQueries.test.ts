@@ -54,6 +54,7 @@ import {
   selectUsageTrend,
   selectWorkflowRevisionStats,
   selectDailyModelUsage,
+  selectSessionRunTokenTotals,
 } from '../insightsQueries';
 import { computeSpecHash } from '../specHash';
 
@@ -82,6 +83,7 @@ function createInsightsDb(): Database.Database {
       policy_json TEXT,
       outcome TEXT,
       task_id TEXT,
+      session_id TEXT,
       spec_hash TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       started_at DATETIME,
@@ -162,19 +164,22 @@ interface SeedRunOpts {
   endedAt?: string | null;
   /** Frozen spec_hash (the revision bucket key); null = pre-mig-025 historic run. */
   specHash?: string | null;
+  /** Owning quick session (migration 019); null = standalone flow run. */
+  sessionId?: string | null;
 }
 
 function seedRun(db: Database.Database, opts: SeedRunOpts): void {
   db.prepare(
     `INSERT INTO workflow_runs
-       (id, workflow_id, project_id, status, outcome, spec_hash, created_at, started_at, ended_at)
-     VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)`,
+       (id, workflow_id, project_id, status, outcome, session_id, spec_hash, created_at, started_at, ended_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)`,
   ).run(
     opts.id,
     opts.workflowId,
     opts.projectId ?? 1,
     opts.status ?? 'completed',
     opts.outcome ?? null,
+    opts.sessionId ?? null,
     opts.specHash ?? null,
     opts.createdAt ?? null,
     opts.startedAt ?? null,
@@ -654,6 +659,57 @@ describe('selectRunUsageRollups', () => {
     expect(byId.get('rRaw')?.totalTokens).toBe(50);
     expect(byId.get('rRaw')?.costUsd).toBeCloseTo(0.01, 5);
     expect(byId.get('rRaw')?.assistantMessageCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2a. selectSessionRunTokenTotals (whole-session run-token sum, by session_id)
+// ---------------------------------------------------------------------------
+
+describe('selectSessionRunTokenTotals', () => {
+  let db: Database.Database;
+  beforeEach(() => {
+    db = createInsightsDb();
+    seedWorkflow(db, { id: 'wf1' });
+  });
+
+  it('returns zeros for a session with no hosted runs', () => {
+    expect(selectSessionRunTokenTotals(dbAdapter(db), 'sess-empty')).toEqual({
+      runInputTokens: 0,
+      runOutputTokens: 0,
+      runCacheReadTokens: 0,
+      runCacheCreationTokens: 0,
+    });
+  });
+
+  it('sums per-category tokens across every run hosted by the session', () => {
+    // Two runs on sess-1 (one materialized, one live raw_events) + one on sess-2.
+    seedRun(db, { id: 'r1', workflowId: 'wf1', sessionId: 'sess-1' });
+    seedRunUsage(db, {
+      runId: 'r1',
+      inputTokens: 100,
+      outputTokens: 40,
+      cacheReadTokens: 1000,
+      cacheCreationTokens: 500,
+      totalTokens: 140,
+    });
+    seedRun(db, { id: 'r2', workflowId: 'wf1', sessionId: 'sess-1' });
+    seedEvent(db, 'r2', 'assistant', assistantPayload({ input: 200, output: 60, cacheRead: 2000, cacheCreation: 800 }));
+    seedRun(db, { id: 'r3', workflowId: 'wf1', sessionId: 'sess-2' });
+    seedRunUsage(db, { runId: 'r3', inputTokens: 999, outputTokens: 999, cacheReadTokens: 999, cacheCreationTokens: 999, totalTokens: 1998 });
+
+    expect(selectSessionRunTokenTotals(dbAdapter(db), 'sess-1')).toEqual({
+      runInputTokens: 300,
+      runOutputTokens: 100,
+      runCacheReadTokens: 3000,
+      runCacheCreationTokens: 1300,
+    });
+  });
+
+  it('ignores standalone flow runs (session_id NULL)', () => {
+    seedRun(db, { id: 'r1', workflowId: 'wf1', sessionId: null });
+    seedRunUsage(db, { runId: 'r1', inputTokens: 100, outputTokens: 40, cacheReadTokens: 1000, cacheCreationTokens: 500, totalTokens: 140 });
+    expect(selectSessionRunTokenTotals(dbAdapter(db), 'sess-1').runInputTokens).toBe(0);
   });
 });
 

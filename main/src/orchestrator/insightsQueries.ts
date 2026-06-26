@@ -437,6 +437,47 @@ export function selectRunUsageRollups(
   );
 }
 
+/** Per-category token totals across every workflow run hosted by a session. */
+export interface SessionRunTokenTotals {
+  runInputTokens: number;
+  runOutputTokens: number;
+  runCacheReadTokens: number;
+  runCacheCreationTokens: number;
+}
+
+/**
+ * Sum token usage across every workflow run hosted by a session (joined via
+ * `workflow_runs.session_id`). This is the run-pipeline counterpart to
+ * `DatabaseService.getSessionTokenUsage`, which only sees the quick-chat
+ * `session_outputs`: the two sources are DISJOINT (session_outputs = SDK chat,
+ * run_usage/raw_events = orchestrator agents), so callers SUM them for a
+ * whole-session figure with no double-counting. Uses the two-tier
+ * `selectRunUsageRollups` so a still-running session-hosted run (no materialized
+ * row yet) is counted live from raw_events. Returns zeros for a session with no
+ * hosted runs (the empty-id short-circuit makes that allocation-free).
+ */
+export function selectSessionRunTokenTotals(
+  db: DatabaseLike,
+  sessionId: string,
+): SessionRunTokenTotals {
+  const runRows = db
+    .prepare(`SELECT id FROM workflow_runs WHERE session_id = ?`)
+    .all(sessionId) as Array<{ id: string }>;
+  const rollups = selectRunUsageRollups(
+    db,
+    runRows.map((r) => r.id),
+  );
+  return rollups.reduce<SessionRunTokenTotals>(
+    (acc, r) => ({
+      runInputTokens: acc.runInputTokens + r.inputTokens,
+      runOutputTokens: acc.runOutputTokens + r.outputTokens,
+      runCacheReadTokens: acc.runCacheReadTokens + r.cacheReadTokens,
+      runCacheCreationTokens: acc.runCacheCreationTokens + r.cacheCreationTokens,
+    }),
+    { runInputTokens: 0, runOutputTokens: 0, runCacheReadTokens: 0, runCacheCreationTokens: 0 },
+  );
+}
+
 /**
  * Raw-events-ONLY rollup — the force-scan sibling of `selectRunUsageRollups`
  * that DELIBERATELY ignores the materialized `run_usage` tier and computes every

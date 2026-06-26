@@ -19,9 +19,12 @@ const { mockLaunch, mockListQuery, mockDynamicInit, mockUseDynamicForSession } =
 );
 
 vi.mock('../../../hooks/useSessionMetrics', () => ({
+  formatTokenCount: (n: number) =>
+    n < 1000 ? `${n}` : n < 1_000_000 ? `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k` : `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`,
   useSessionMetrics: () => ({
     elapsed: '4m 12s',
     tokens: '12.4k',
+    tokenBreakdown: { input: 10_000, output: 2_400, cacheWrite: 184_000, cacheRead: 418_000 },
     filesSeen: 18,
     diff: { plus: 0, minus: 0 },
     model: 'sonnet 4.5',
@@ -130,6 +133,16 @@ describe('QuickSessionCanvas', () => {
     expect(screen.getByTestId('quick-session-stat-files')).toHaveTextContent('18');
     expect(screen.getByTestId('quick-session-stat-diff')).toHaveTextContent('+0 −0');
     expect(screen.getByTestId('quick-session-node-sub')).toHaveTextContent('tester-mctest');
+  });
+
+  it('renders the granular token-usage breakdown (input / output / cache write / cache read)', () => {
+    renderCanvas();
+    const breakdown = screen.getByTestId('quick-session-token-breakdown');
+    expect(breakdown).toHaveTextContent('Token usage');
+    expect(screen.getByTestId('quick-session-token-input')).toHaveTextContent('10k');
+    expect(screen.getByTestId('quick-session-token-output')).toHaveTextContent('2.4k');
+    expect(screen.getByTestId('quick-session-token-cache-write')).toHaveTextContent('184k');
+    expect(screen.getByTestId('quick-session-token-cache-read')).toHaveTextContent('418k');
   });
 
   it('substrate copy: pill reads "live", node header reads "Session", no "interactive" copy', () => {

@@ -101,6 +101,45 @@ describe('useSessionMetrics', () => {
     expect(result.current.branch).toBe('quick-20260607-120000');
   });
 
+  it('zeroes the token breakdown when the session is null', () => {
+    const { result } = renderHook(() => useSessionMetrics(null));
+    expect(result.current.tokenBreakdown).toEqual({ input: 0, output: 0, cacheWrite: 0, cacheRead: 0 });
+  });
+
+  it('sums quick-chat + workflow-run tokens per category for the whole session', async () => {
+    mockGetStatistics.mockResolvedValue({
+      success: true,
+      data: {
+        session: {},
+        tokens: {
+          // quick-chat (session_outputs)
+          totalInputTokens: 10_000,
+          totalOutputTokens: 2_400,
+          totalCacheReadTokens: 300_000,
+          totalCacheCreationTokens: 120_000,
+          // workflow runs hosted by the session (run_usage) — disjoint, summed
+          runInputTokens: 2_000,
+          runOutputTokens: 600,
+          runCacheReadTokens: 118_000,
+          runCacheCreationTokens: 64_000,
+        },
+        files: {},
+      },
+    });
+    const { result } = renderHook(() => useSessionMetrics(makeSession()));
+    await waitFor(() => {
+      expect(result.current.tokenBreakdown.input).toBe(12_000);
+    });
+    expect(result.current.tokenBreakdown).toEqual({
+      input: 12_000,
+      output: 3_000,
+      cacheWrite: 184_000,
+      cacheRead: 418_000,
+    });
+    // Headline stays input+output (now run-inclusive): 12_000 + 3_000 = 15k.
+    expect(result.current.tokens).toBe('15k');
+  });
+
   it('ticks a non-empty elapsed string derived from createdAt', () => {
     const { result } = renderHook(() => useSessionMetrics(makeSession()));
     // createdAt is ~4m 12s ago; the exact second may drift, so just assert shape.
