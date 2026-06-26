@@ -65,7 +65,7 @@ import { CreateProjectDialog } from '../../CreateProjectDialog';
 import { AgentPermissionModeSelector, PERMISSION_MODE_OPTIONS } from '../AgentPermissionModeSelector';
 import { SubstrateSelector } from '../SubstrateSelector';
 import { ModelSelector, DEFAULT_QUICK_MODEL } from '../ModelSelector';
-import { MODEL_OPTIONS } from '../unified/ModelPill';
+import { isOpusModel, modelDisplayLabel } from '../unified/ModelPill';
 import { Switch } from '../../ui/Switch';
 import { WorkflowEditorModal } from '../WorkflowEditorModal';
 import { WizardStepHeader } from './WizardStepHeader';
@@ -500,7 +500,7 @@ export default function SessionStartWizard(): React.JSX.Element {
     if (selection.kind === 'quick') {
       // Fast mode is Opus-only; never request it for another model even if the
       // toggle was left on before the model was switched.
-      void startQuickSession(permissionMode, substrate, undefined, model, model === 'opus' && fastMode);
+      void startQuickSession(permissionMode, substrate, undefined, model, isOpusModel(model) && fastMode);
       return;
     }
 
@@ -732,11 +732,11 @@ export default function SessionStartWizard(): React.JSX.Element {
                   onChange={(m) => {
                     setModel(m);
                     // Fast mode is Opus-only; drop it when leaving Opus.
-                    if (m !== 'opus') setFastMode(false);
+                    if (!isOpusModel(m)) setFastMode(false);
                   }}
                   id="wizard-model"
                 />
-                {model === 'opus' && (
+                {isOpusModel(model) && (
                   <div
                     data-testid="wizard-fast-mode-row"
                     className="flex items-center justify-between gap-3 rounded-button border border-border-secondary bg-surface-secondary px-3 py-2"
@@ -824,11 +824,8 @@ export default function SessionStartWizard(): React.JSX.Element {
               />
               {selection.kind === 'quick' && (
                 <>
-                  <SummaryRow
-                    label="Model"
-                    value={MODEL_OPTIONS.find((o) => o.id === model)?.label ?? model}
-                  />
-                  {model === 'opus' && (
+                  <SummaryRow label="Model" value={modelDisplayLabel(model)} />
+                  {isOpusModel(model) && (
                     <SummaryRow label="Fast mode" value={fastMode ? 'On' : 'Off'} />
                   )}
                 </>

@@ -5,7 +5,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { resolveClaudeExecutablePath } from './claudeExecutablePath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
-import { CONTEXT_1M_BETA, modelSupportsContext1M, resolveModelAlias } from './modelContext';
+import { resolveModelAlias, sdkModelAndBetas } from './modelContext';
 import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
 import type Database from 'better-sqlite3';
@@ -919,20 +919,19 @@ export class ClaudeCodeManager extends AbstractCliManager {
       sdkOptions.permissionMode = 'auto';
     }
 
-    // Pin the bare alias ('opus'/'sonnet'/'haiku') to the current concrete
-    // snapshot so the SDK can't resolve it to a previous-generation model (the
-    // opus→4.7 / sonnet→250k drift). 'auto'/undefined/concrete ids pass through.
+    // Pin the bare alias ('opus'/'sonnet'/'haiku', incl. '-250k' variants) to the
+    // current concrete snapshot so the SDK can't resolve it to a previous-gen
+    // model (the opus→4.7 / sonnet→250k drift). The resolved id may carry a `[1m]`
+    // window marker; sdkModelAndBetas translates it per-family — Opus keeps its
+    // `[1m]` id, Sonnet's 1M becomes the bare id + the context-1m beta, and the
+    // 250k variants emit neither. 'auto'/undefined/concrete ids pass through.
     const resolvedModel = resolveModelAlias(options.model);
-    if (resolvedModel && resolvedModel !== 'auto') {
-      sdkOptions.model = resolvedModel;
+    const { model: sdkModel, betas } = sdkModelAndBetas(resolvedModel);
+    if (sdkModel && sdkModel !== 'auto') {
+      sdkOptions.model = sdkModel;
     }
-
-    // Enable the 1M-token context window for Sonnet 4 ids (the only family the SDK
-    // beta supports) — gate on the RESOLVED id so the pinned `claude-sonnet-4-6`
-    // still matches. Without this a Sonnet run reports a 200k window, so the chat
-    // context meter caps at 200k even though the model is 1M-capable.
-    if (modelSupportsContext1M(resolvedModel)) {
-      sdkOptions.betas = [CONTEXT_1M_BETA];
+    if (betas.length > 0) {
+      sdkOptions.betas = betas;
     }
 
     // Fast mode (premium, Opus-only research preview) is a per-launch opt-in.

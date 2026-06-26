@@ -9,7 +9,7 @@ import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
-import { resolveModelAlias } from './modelContext';
+import { resolveModelAlias, interactiveModelArg } from './modelContext';
 import { ApprovalRouter } from '../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../orchestrator/questionRouter';
 import { DynamicWorkflowTracker } from '../../../orchestrator/dynamicWorkflows';
@@ -446,10 +446,11 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     const args: string[] = [];
 
     // model: pass `--model X` ONLY for a concrete model; 'auto'/'default' omit.
-    // Pin the bare alias ('opus'/'sonnet'/'haiku') to the current concrete
-    // snapshot (mirrors the SDK seam) so the CLI doesn't resolve it to a
-    // previous-generation model.
-    const resolvedModel = resolveModelAlias(options.model);
+    // Pin the bare alias ('opus'/'sonnet'/'haiku', incl. '-250k' variants) to the
+    // current concrete snapshot (mirrors the SDK seam) so the CLI doesn't resolve
+    // it to a previous-generation model. interactiveModelArg keeps Opus's `[1m]`
+    // id but strips a `[1m]` Sonnet marker (the CLI has no 1M-beta path).
+    const resolvedModel = interactiveModelArg(resolveModelAlias(options.model));
     if (resolvedModel && resolvedModel !== 'auto' && resolvedModel !== 'default') {
       args.push('--model', resolvedModel);
     }

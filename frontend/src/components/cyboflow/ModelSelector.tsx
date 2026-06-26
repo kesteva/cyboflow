@@ -49,12 +49,14 @@ export function ModelSelector({
       >
         {MODEL_OPTIONS.map((o) => (
           <option key={o.id} value={o.id}>
-            {o.label} — {o.description}
+            {o.context ? `${o.label} · ${o.context}` : o.label} — {o.description}
           </option>
         ))}
       </select>
       {active !== undefined && (
-        <p className="text-xs text-text-tertiary">{active.description}</p>
+        <p className="text-xs text-text-tertiary">
+          {active.context ? `${active.description} · ${active.context} context` : active.description}
+        </p>
       )}
     </div>
   );

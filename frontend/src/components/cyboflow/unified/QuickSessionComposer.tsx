@@ -3,7 +3,7 @@ import type { Session } from '../../../types/session';
 import { API } from '../../../utils/api';
 import type { IPCResponse } from '../../../utils/api';
 import { CommitModePill } from '../../CommitModeToggle';
-import { ModelPill } from './ModelPill';
+import { ModelPill, isOpusModel, modelDisplayLabel } from './ModelPill';
 import { FastModePill } from './FastModePill';
 import { PermissionModePill } from './PermissionModePill';
 import { useSessionStore } from '../../../stores/sessionStore';
@@ -47,13 +47,6 @@ export interface QuickSessionComposerProps {
   ptyOpen?: boolean;
   onTogglePtyOpen?: () => void;
 }
-
-const MODEL_LABELS: Record<string, string> = {
-  auto: 'Auto',
-  sonnet: 'Sonnet',
-  opus: 'Opus',
-  haiku: 'Haiku',
-};
 
 export function QuickSessionComposer(props: QuickSessionComposerProps): React.ReactElement {
   const {
@@ -115,7 +108,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   const handleModelChange = useCallback(
     (model: string) => {
       setModelId(model);
-      if (model !== 'opus' && fastMode && panelId) {
+      if (!isOpusModel(model) && fastMode && panelId) {
         setFastMode(false);
         void API.claudePanels.setFastMode(panelId, false);
       }
@@ -157,11 +150,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       ? 'Enter your response…  (⌘↵ to send)'
       : 'Write a command…  (⌘↵ to send)';
 
-  const modelLabel = interactive
-    ? null
-    : modelId
-      ? MODEL_LABELS[modelId] ?? modelId
-      : null;
+  const modelLabel = interactive ? null : modelId ? modelDisplayLabel(modelId) : null;
 
   // Interactive model selector for an IDLE quick SDK session — replaces the
   // read-only "Sonnet 🔒" pill. While running, fall through to the read-only
@@ -176,7 +165,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   // pill's mounting (idle quick SDK only) and is shown only while Opus is the
   // selected model — fast mode has no effect on other models.
   const fastModeSlot =
-    !interactive && !running && panelId && modelId === 'opus' ? (
+    !interactive && !running && panelId && isOpusModel(modelId) ? (
       <FastModePill panelId={panelId} fastMode={fastMode} onChange={setFastMode} />
     ) : undefined;
 

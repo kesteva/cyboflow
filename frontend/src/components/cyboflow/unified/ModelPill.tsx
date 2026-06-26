@@ -18,16 +18,42 @@ import { cn } from '../../../utils/cn';
  * running turn shows the read-only pill instead, since a model change would be
  * discarded by the in-flight turn's already-chosen model.
  */
-export const MODEL_OPTIONS: ReadonlyArray<{ id: string; label: string; description: string }> = [
-  { id: 'opus', label: 'Opus', description: 'Most capable · 1M context' },
-  { id: 'sonnet', label: 'Sonnet', description: 'Balanced · 1M context' },
-  { id: 'haiku', label: 'Haiku', description: 'Fastest · 200K context' },
-  { id: 'auto', label: 'Auto', description: 'Let Claude pick the model' },
+export interface ModelOption {
+  /** Persisted id / alias (resolved to a concrete snapshot at the spawn seam). */
+  id: string;
+  /** Version label, e.g. "Opus 4.8". */
+  label: string;
+  /** Context-window label, e.g. "1M" / "250K" / "200K"; null for auto. */
+  context: string | null;
+  /** Short capability tagline. */
+  description: string;
+}
+
+// Each model that has both windows is listed once per context length; the spawn
+// seam (modelContext.ts) maps `opus`→4.8[1m], `opus-250k`→4.8, etc.
+export const MODEL_OPTIONS: ReadonlyArray<ModelOption> = [
+  { id: 'opus', label: 'Opus 4.8', context: '1M', description: 'Most capable' },
+  { id: 'opus-250k', label: 'Opus 4.8', context: '250K', description: 'Most capable' },
+  { id: 'sonnet', label: 'Sonnet 4.6', context: '1M', description: 'Balanced' },
+  { id: 'sonnet-250k', label: 'Sonnet 4.6', context: '250K', description: 'Balanced' },
+  { id: 'haiku', label: 'Haiku 4.5', context: '200K', description: 'Fastest' },
+  { id: 'auto', label: 'Auto', context: null, description: 'Let Claude pick the model' },
 ];
 
-const MODEL_LABELS: Record<string, string> = Object.fromEntries(
-  MODEL_OPTIONS.map((o) => [o.id, o.label]),
-);
+const OPTION_BY_ID = new Map(MODEL_OPTIONS.map((o) => [o.id, o] as const));
+
+/** Compact "version · context" display for a model id (falls back to the raw id). */
+export function modelDisplayLabel(id: string | null | undefined): string {
+  const active = id ?? 'auto';
+  const o = OPTION_BY_ID.get(active);
+  if (!o) return active;
+  return o.context ? `${o.label} · ${o.context}` : o.label;
+}
+
+/** Whether a picker model id is an Opus variant — fast mode is Opus-only. */
+export function isOpusModel(id: string | null | undefined): boolean {
+  return typeof id === 'string' && id.toLowerCase().includes('opus');
+}
 
 interface ModelPillProps {
   panelId: string;
@@ -40,7 +66,7 @@ interface ModelPillProps {
 export function ModelPill({ panelId, currentModel, onModelChange }: ModelPillProps): React.ReactElement {
   const [open, setOpen] = useState(false);
   const active = currentModel ?? 'auto';
-  const label = MODEL_LABELS[active] ?? active;
+  const label = modelDisplayLabel(active);
 
   const handleSelect = async (model: string): Promise<void> => {
     setOpen(false);
@@ -56,8 +82,8 @@ export function ModelPill({ panelId, currentModel, onModelChange }: ModelPillPro
 
   const items: DropdownItem[] = MODEL_OPTIONS.map((o) => ({
     id: o.id,
-    label: o.label,
-    description: o.description,
+    label: o.context ? `${o.label} · ${o.context}` : o.label,
+    description: o.context ? `${o.description} · ${o.context} context` : o.description,
     icon: Cpu,
     iconColor: 'text-text-secondary',
     onClick: () => void handleSelect(o.id),

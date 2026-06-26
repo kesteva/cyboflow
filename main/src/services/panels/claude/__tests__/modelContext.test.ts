@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { CONTEXT_1M_BETA, modelSupportsContext1M, resolveModelAlias } from '../modelContext';
+import {
+  CONTEXT_1M_BETA,
+  hasContext1MSuffix,
+  interactiveModelArg,
+  modelSupportsContext1M,
+  resolveModelAlias,
+  sdkModelAndBetas,
+} from '../modelContext';
 
 describe('modelContext', () => {
   it('CONTEXT_1M_BETA is the Sonnet 1M beta flag', () => {
@@ -41,15 +48,17 @@ describe('modelContext', () => {
 
   describe('resolveModelAlias', () => {
     it('pins the bare aliases to current concrete snapshots', () => {
-      // Opus carries the [1m] suffix (its 1M window comes from the id, not a beta).
+      // The 1M default variants carry the [1m] window marker; -250k variants don't.
       expect(resolveModelAlias('opus')).toBe('claude-opus-4-8[1m]');
-      expect(resolveModelAlias('sonnet')).toBe('claude-sonnet-4-6');
+      expect(resolveModelAlias('opus-250k')).toBe('claude-opus-4-8');
+      expect(resolveModelAlias('sonnet')).toBe('claude-sonnet-4-6[1m]');
+      expect(resolveModelAlias('sonnet-250k')).toBe('claude-sonnet-4-6');
       expect(resolveModelAlias('haiku')).toBe('claude-haiku-4-5');
     });
 
     it('matches aliases case/space-insensitively', () => {
       expect(resolveModelAlias('Opus')).toBe('claude-opus-4-8[1m]');
-      expect(resolveModelAlias(' SONNET ')).toBe('claude-sonnet-4-6');
+      expect(resolveModelAlias(' SONNET ')).toBe('claude-sonnet-4-6[1m]');
     });
 
     it('passes through "auto" (the SDK owns model choice)', () => {
@@ -70,10 +79,68 @@ describe('modelContext', () => {
     });
 
     it('the pinned Sonnet id still qualifies for the 1M beta', () => {
-      // The pinning + 1M gate must compose: opus→4.8 keeps no beta, sonnet→4.6
-      // still matches the /sonnet-4/ gate so the 1M window is requested.
+      // The pinning + 1M gate must compose: opus→4.8[1m] keeps no beta (its 1M is
+      // the id suffix), sonnet→4.6[1m] still matches the /sonnet-4/ gate.
       expect(modelSupportsContext1M(resolveModelAlias('sonnet'))).toBe(true);
       expect(modelSupportsContext1M(resolveModelAlias('opus'))).toBe(false);
+    });
+  });
+
+  describe('hasContext1MSuffix', () => {
+    it('detects the [1m] window marker (case-insensitive)', () => {
+      expect(hasContext1MSuffix('claude-opus-4-8[1m]')).toBe(true);
+      expect(hasContext1MSuffix('claude-sonnet-4-6[1M]')).toBe(true);
+      expect(hasContext1MSuffix('claude-opus-4-8')).toBe(false);
+      expect(hasContext1MSuffix(undefined)).toBe(false);
+    });
+  });
+
+  describe('sdkModelAndBetas — per-family 1M translation', () => {
+    it('Opus 1M keeps the [1m] id and emits no beta', () => {
+      expect(sdkModelAndBetas(resolveModelAlias('opus'))).toEqual({
+        model: 'claude-opus-4-8[1m]',
+        betas: [],
+      });
+    });
+
+    it('Sonnet 1M strips the marker and rides the context-1m beta', () => {
+      expect(sdkModelAndBetas(resolveModelAlias('sonnet'))).toEqual({
+        model: 'claude-sonnet-4-6',
+        betas: [CONTEXT_1M_BETA],
+      });
+    });
+
+    it('the -250k variants emit the bare id and no beta', () => {
+      expect(sdkModelAndBetas(resolveModelAlias('opus-250k'))).toEqual({
+        model: 'claude-opus-4-8',
+        betas: [],
+      });
+      // Critically, a 250k Sonnet choice must NOT get the 1M beta.
+      expect(sdkModelAndBetas(resolveModelAlias('sonnet-250k'))).toEqual({
+        model: 'claude-sonnet-4-6',
+        betas: [],
+      });
+    });
+
+    it('passes auto/undefined through with no beta', () => {
+      expect(sdkModelAndBetas('auto')).toEqual({ model: 'auto', betas: [] });
+      expect(sdkModelAndBetas(undefined)).toEqual({ model: undefined, betas: [] });
+    });
+  });
+
+  describe('interactiveModelArg — CLI --model', () => {
+    it('keeps Opus\'s [1m] id (the CLI accepts it)', () => {
+      expect(interactiveModelArg(resolveModelAlias('opus'))).toBe('claude-opus-4-8[1m]');
+    });
+
+    it('strips a [1m] Sonnet marker (no CLI 1M-beta path)', () => {
+      expect(interactiveModelArg(resolveModelAlias('sonnet'))).toBe('claude-sonnet-4-6');
+      expect(interactiveModelArg(resolveModelAlias('sonnet-250k'))).toBe('claude-sonnet-4-6');
+    });
+
+    it('passes auto/undefined through unchanged', () => {
+      expect(interactiveModelArg('auto')).toBe('auto');
+      expect(interactiveModelArg(undefined)).toBeUndefined();
     });
   });
 });
