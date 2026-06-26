@@ -22,9 +22,11 @@
  *
  * Design hexes are inline (warm-paper palette); the M7 polish pass tokenizes them.
  */
+import { useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 import { MarkdownPreview } from '../MarkdownPreview';
 import { ArtifactHeader } from './ArtifactHeader';
+import { TaskDetailModal } from './TaskDetailModal';
 import { LiveCanvasEmbed, isLocalhostUrl } from './LiveCanvasEmbed';
 import { useArtifactData } from '../../hooks/useArtifactData';
 import { useArtifactImages } from '../../hooks/useArtifactImages';
@@ -143,24 +145,54 @@ function IdeaSpecBody({ artifact, projectId }: { artifact: Artifact; projectId: 
 }
 
 // ---------------------------------------------------------------------------
-// decomposed-stories — one card per epic, tasks in a 2-col grid.
+// decomposed-stories — one card per epic; tasks stacked vertically (one card
+// per row), each card a clickable button that opens the TaskDetailModal.
 // ---------------------------------------------------------------------------
 function taskChildren(epic: BacklogTaskItem): BacklogTaskItem[] {
   return epic.children ?? [];
 }
 
-function TaskGrid({ tasks }: { tasks: BacklogTaskItem[] }): ReactElement {
+/** Vertical task stack — one clickable card per row (was a 2-col grid). */
+function TaskGrid({
+  tasks,
+  onSelect,
+}: {
+  tasks: BacklogTaskItem[];
+  onSelect: (task: BacklogTaskItem) => void;
+}): ReactElement {
   return (
     <div
       style={{
-        display: 'grid',
-        gridTemplateColumns: '1fr 1fr',
+        display: 'flex',
+        flexDirection: 'column',
         gap: 1,
         background: SOFT,
       }}
     >
       {tasks.map((task) => (
-        <div key={task.id} data-testid="artifact-task-cell" style={{ background: 'var(--color-surface-primary)', padding: '9px 11px' }}>
+        <button
+          key={task.id}
+          type="button"
+          data-testid="artifact-task-cell"
+          onClick={() => onSelect(task)}
+          aria-label={`View details for ${task.ref}: ${task.title}`}
+          style={{
+            display: 'block',
+            width: '100%',
+            textAlign: 'left',
+            font: 'inherit',
+            cursor: 'pointer',
+            background: 'var(--color-surface-primary)',
+            border: 'none',
+            padding: '9px 11px',
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = HOVER_WASH;
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = 'var(--color-surface-primary)';
+          }}
+        >
           <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 4 }}>
             <span style={{ fontSize: '9px', fontWeight: 700, color: STORIES, letterSpacing: '.03em' }}>{task.ref}</span>
             {task.priority && (
@@ -182,13 +214,19 @@ function TaskGrid({ tasks }: { tasks: BacklogTaskItem[] }): ReactElement {
           {task.summary && (
             <div style={{ fontSize: '10px', color: MUTED, marginTop: 3, lineHeight: 1.4 }}>{task.summary}</div>
           )}
-        </div>
+        </button>
       ))}
     </div>
   );
 }
 
-function EpicCard({ epic }: { epic: BacklogTaskItem }): ReactElement {
+function EpicCard({
+  epic,
+  onSelect,
+}: {
+  epic: BacklogTaskItem;
+  onSelect: (task: BacklogTaskItem) => void;
+}): ReactElement {
   const tasks = taskChildren(epic);
   return (
     <div data-testid="artifact-epic-card" style={{ border: `1px solid ${HAIRLINE}`, background: 'var(--color-surface-primary)', marginBottom: 14 }}>
@@ -209,13 +247,13 @@ function EpicCard({ epic }: { epic: BacklogTaskItem }): ReactElement {
         <span style={{ flex: 1 }} />
         <span style={{ fontSize: '9px', color: FAINT }}>{tasks.length} tasks</span>
       </div>
-      {/* Tasks 2-col grid */}
+      {/* Tasks — vertical stack */}
       {tasks.length === 0 ? (
         <div style={{ padding: '10px 12px', fontSize: '11px', color: FAINT, fontStyle: 'italic' }}>
           No tasks under this epic.
         </div>
       ) : (
-        <TaskGrid tasks={tasks} />
+        <TaskGrid tasks={tasks} onSelect={onSelect} />
       )}
     </div>
   );
@@ -225,8 +263,10 @@ function DecomposedStoriesBody({ artifact, projectId }: { artifact: Artifact; pr
   const accent = ARTIFACT_COLORS['decomposed-stories'];
   const { loading, error, data } = useArtifactData(artifact);
   const idea = data?.kind === 'stories' ? data.idea : null;
+  // The task selected for the detail modal; null = modal closed.
+  const [selectedTask, setSelectedTask] = useState<BacklogTaskItem | null>(null);
   // idea.children is epics FOLLOWED BY tasks decomposed directly under the idea
-  // (small-idea path). Split by type: epics get cards, direct tasks get a grid.
+  // (small-idea path). Split by type: epics get cards, direct tasks get a stack.
   const children = idea?.children ?? [];
   const epics = children.filter((c) => c.type === 'epic');
   const directTasks = children.filter((c) => c.type === 'task');
@@ -260,16 +300,17 @@ function DecomposedStoriesBody({ artifact, projectId }: { artifact: Artifact; pr
             </div>
           ) : (
             <>
-              {epics.map((epic) => <EpicCard key={epic.id} epic={epic} />)}
+              {epics.map((epic) => <EpicCard key={epic.id} epic={epic} onSelect={setSelectedTask} />)}
               {directTasks.length > 0 && (
                 <div data-testid="artifact-direct-tasks" style={{ marginBottom: 14 }}>
-                  <TaskGrid tasks={directTasks} />
+                  <TaskGrid tasks={directTasks} onSelect={setSelectedTask} />
                 </div>
               )}
             </>
           )}
         </div>
       )}
+      <TaskDetailModal task={selectedTask} onClose={() => setSelectedTask(null)} />
     </Shell>
   );
 }

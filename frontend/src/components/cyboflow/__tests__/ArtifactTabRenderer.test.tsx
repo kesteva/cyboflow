@@ -141,19 +141,30 @@ describe('ArtifactTabRenderer', () => {
 
   // --- decomposed-stories --------------------------------------------------
 
-  it('renders the decomposed-stories epic/task grid with the indigo eyebrow', () => {
-    const idea = makeIdea({
+  function makeStoriesIdea(): BacklogTaskItem {
+    return makeIdea({
       children: [
         {
           ...makeIdea({ id: 'EPIC-1', type: 'epic', ref: 'EPIC-001', title: 'Center tabs' }),
           children: [
-            makeIdea({ id: 'TASK-1', type: 'task', ref: 'TASK-041', title: 'Build tab strip', priority: 'P0' }),
-            makeIdea({ id: 'TASK-2', type: 'task', ref: 'TASK-042', title: 'Wire artifact tabs' }),
+            makeIdea({
+              id: 'TASK-1',
+              type: 'task',
+              ref: 'TASK-041',
+              title: 'Build tab strip',
+              priority: 'P0',
+              summary: 'Tab strip across the top.',
+              body: '## Acceptance\n\nRender a horizontal tab strip with keyboard nav.',
+            }),
+            makeIdea({ id: 'TASK-2', type: 'task', ref: 'TASK-042', title: 'Wire artifact tabs', body: null }),
           ],
         },
       ],
     });
-    setHook({ loading: false, error: null, data: { kind: 'stories', idea } });
+  }
+
+  it('renders the decomposed-stories epic/task grid with the indigo eyebrow', () => {
+    setHook({ loading: false, error: null, data: { kind: 'stories', idea: makeStoriesIdea() } });
     render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'decomposed-stories' })} {...PROPS} />);
 
     expect(screen.getByTestId('artifact-decomposed-stories')).toBeInTheDocument();
@@ -165,6 +176,61 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.getAllByTestId('artifact-task-cell')).toHaveLength(2);
     expect(screen.getByText('TASK-041')).toBeInTheDocument();
     expect(screen.getByText('Build tab strip')).toBeInTheDocument();
+  });
+
+  it('stacks tasks vertically (a single column, NOT a 2-col grid)', () => {
+    setHook({ loading: false, error: null, data: { kind: 'stories', idea: makeStoriesIdea() } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'decomposed-stories' })} {...PROPS} />);
+
+    const cells = screen.getAllByTestId('artifact-task-cell');
+    expect(cells).toHaveLength(2);
+    // The shared container is the cells' common parent.
+    const container = cells[0].parentElement as HTMLElement;
+    expect(container).toBe(cells[1].parentElement);
+    // Vertical stack: a flex column, NOT a 2-col CSS grid.
+    expect(container).toHaveStyle({ display: 'flex', flexDirection: 'column' });
+    expect(container).not.toHaveStyle({ gridTemplateColumns: '1fr 1fr' });
+    // Each card is an accessible button.
+    for (const cell of cells) {
+      expect(cell.tagName).toBe('BUTTON');
+      expect(cell).toHaveAttribute('aria-label');
+    }
+  });
+
+  it('opens the task detail with the full markdown body on card click, then closes', () => {
+    setHook({ loading: false, error: null, data: { kind: 'stories', idea: makeStoriesIdea() } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'decomposed-stories' })} {...PROPS} />);
+
+    // Modal is closed initially.
+    expect(screen.queryByTestId('task-detail-modal')).not.toBeInTheDocument();
+
+    // Click the first task card.
+    const cells = screen.getAllByTestId('artifact-task-cell');
+    fireEvent.click(cells[0]);
+
+    // Detail shows ref, title, priority, summary, and the body markdown.
+    const modal = screen.getByTestId('task-detail-modal');
+    expect(modal).toBeInTheDocument();
+    expect(screen.getByTestId('task-detail-title')).toHaveTextContent('Build tab strip');
+    expect(screen.getByTestId('task-detail-priority')).toHaveTextContent('P0');
+    expect(screen.getByTestId('task-detail-summary')).toHaveTextContent('Tab strip across the top.');
+    // Body is rendered via MarkdownPreview (stubbed to echo its content).
+    expect(screen.getByTestId('md-preview')).toHaveTextContent('Render a horizontal tab strip with keyboard nav.');
+
+    // Close via the Modal close button.
+    fireEvent.click(screen.getByLabelText('Close modal'));
+    expect(screen.queryByTestId('task-detail-modal')).not.toBeInTheDocument();
+  });
+
+  it('shows the No-additional-detail state when a task body is null/empty', () => {
+    setHook({ loading: false, error: null, data: { kind: 'stories', idea: makeStoriesIdea() } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'decomposed-stories' })} {...PROPS} />);
+
+    // The second task (TASK-042) has body: null.
+    fireEvent.click(screen.getAllByTestId('artifact-task-cell')[1]);
+    expect(screen.getByTestId('task-detail-title')).toHaveTextContent('Wire artifact tabs');
+    expect(screen.getByTestId('task-detail-nobody')).toHaveTextContent('No additional detail.');
+    expect(screen.queryByTestId('md-preview')).not.toBeInTheDocument();
   });
 
   it('shows the decomposed-stories no-epics empty state', () => {
