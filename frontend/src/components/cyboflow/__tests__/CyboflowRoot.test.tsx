@@ -82,6 +82,8 @@ vi.mock('../../../trpc/client', () => ({
         },
         // Phase 4a — git-neutral run Cancel.
         cancel: { mutate: vi.fn().mockResolvedValue({ success: true }) },
+        // Interactive "request changes" relay (end-of-workflow summary CTA).
+        relayInput: { mutate: vi.fn().mockResolvedValue({ success: true }) },
       },
       workflows: {
         list: {
@@ -118,6 +120,23 @@ vi.mock('../../../trpc/client', () => ({
         isActive: { query: vi.fn().mockResolvedValue({ active: false }) },
         send: { mutate: vi.fn().mockResolvedValue({ delivered: false }) },
         stepResults: { query: vi.fn().mockResolvedValue([]) },
+      },
+      // Per-run token rollup backing the end-of-workflow summary panel (shown
+      // once a run is end-eligible — the default awaiting_review fixture is).
+      insights: {
+        runUsage: {
+          query: vi.fn().mockResolvedValue({
+            runId: 'run-planner-1',
+            inputTokens: 13000,
+            outputTokens: 3000,
+            cacheReadTokens: 50000,
+            cacheCreationTokens: 20000,
+            totalTokens: 16000,
+            costUsd: 0.5,
+            numTurns: 5,
+            assistantMessageCount: 5,
+          }),
+        },
       },
     },
   },
@@ -654,15 +673,18 @@ describe('CyboflowRoot — run-scoped Cancel (Phase 4a)', () => {
     expect(screen.queryByTestId('session-action-create-pr')).not.toBeInTheDocument();
   });
 
-  it('shows the End-workflow gate (not Cancel) when a run self-terminates (completed)', () => {
+  it('shows the End-workflow gate (not Cancel) when a run self-terminates (completed)', async () => {
     activateRun({ status: 'completed' });
     render(<CyboflowRoot projectId={1} />);
 
     expect(screen.getByTestId('run-action-bar')).toBeInTheDocument();
     expect(screen.getByTestId('run-action-end')).toBeInTheDocument();
     expect(screen.queryByTestId('run-action-cancel')).not.toBeInTheDocument();
-    // The in-canvas completion banner mirrors the top-bar End affordance.
-    expect(screen.getByTestId('run-end-banner')).toBeInTheDocument();
+    // The end-of-workflow summary module replaces the old completion banner and
+    // carries the primary "Complete workflow" CTA in the main flow window.
+    expect(await screen.findByTestId('run-summary-panel')).toBeInTheDocument();
+    expect(screen.getByTestId('run-summary-complete')).toBeInTheDocument();
+    expect(screen.queryByTestId('run-end-banner')).not.toBeInTheDocument();
   });
 
   it('clicking End workflow opens RunEndDialog; confirming drops the run overlay', async () => {
@@ -674,14 +696,13 @@ describe('CyboflowRoot — run-scoped Cancel (Phase 4a)', () => {
     fireEvent.click(endTrigger);
     expect(screen.getByText('End this workflow?')).toBeInTheDocument();
 
-    // Three buttons read 'End workflow' (the action-bar trigger, the in-canvas
-    // banner button, and the ConfirmDialog confirm). The first two carry
-    // testids, so click the remaining one — the dialog confirm.
+    // Two buttons read 'End workflow' now (the action-bar trigger and the
+    // ConfirmDialog confirm — the summary's primary CTA reads 'Complete
+    // workflow', a different label). The trigger carries a testid, so click the
+    // remaining one — the dialog confirm.
     const confirmBtn = screen
       .getAllByRole('button', { name: 'End workflow' })
-      .find(
-        (b) => b !== endTrigger && b.getAttribute('data-testid') !== 'run-end-banner-button',
-      );
+      .find((b) => b !== endTrigger);
     await act(async () => {
       fireEvent.click(confirmBtn!);
     });
