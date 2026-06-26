@@ -5,6 +5,7 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { resolveClaudeExecutablePath } from './claudeExecutablePath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
+import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
 import { resolveModelAlias, sdkModelAndBetas } from './modelContext';
 import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
 import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
@@ -1030,10 +1031,20 @@ export class ClaudeCodeManager extends AbstractCliManager {
     return mcpServers as Record<string, McpServerConfig>;
   }
 
-  private composeRunEnv(_options: ClaudeSpawnOptions): Record<string, string | undefined> {
+  private composeRunEnv(options: ClaudeSpawnOptions): Record<string, string | undefined> {
     const verbose = this.configManager?.getConfig()?.verbose;
+    // The per-run artifacts dir the agent writes screenshot PNGs into — the SAME
+    // CYBOFLOW_DIR/artifacts/runs/<runId>/ subtree the gallery serves bytes from
+    // (artifacts:load-images) and the auto-mint safety-net scan reads. Keyed by
+    // the SAME run id used for CYBOFLOW_RUN_ID (runId for workflow runs, falling
+    // back to sessionId for legacy quick sessions) so all three agree. The agent
+    // reports the PNG BASENAMES via cyboflow_report_artifact(atype:'screenshots').
+    const artifactRunKey =
+      options.runId && options.runId.length > 0 ? options.runId : options.sessionId;
+    const runArtifactsDir = getCyboflowSubdirectory('artifacts', 'runs', artifactRunKey);
     return {
       ...process.env,
+      CYBOFLOW_RUN_ARTIFACTS_DIR: runArtifactsDir,
       ...(verbose ? { MCP_DEBUG: '1' } : {})
     };
   }
