@@ -2,12 +2,6 @@
 
 All notable changes to **Cyboflow** are documented in this file.
 
-Cyboflow is a fork of [Crystal](https://github.com/stravu/crystal) at tag `0.3.5` and has
-diverged substantially in scope and architecture. The original upstream Crystal changelog is
-preserved at [`docs/archive/CHANGELOG-crystal.md`](docs/archive/CHANGELOG-crystal.md) — note
-that Cyboflow does **not** track the renamed successor product (Nimbalyst); see
-[`docs/PROVENANCE.md`](docs/PROVENANCE.md).
-
 The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
@@ -165,3 +159,11 @@ First signed, notarized, and auto-updating macOS builds.
   fixing a `NODE_MODULE_VERSION` crash on launch.
 - Flow-run context meter no longer pegs at 100%; a torn-down awaiting-input run now
   rests in `awaiting_review` instead of wedging.
+
+---
+
+Cyboflow is a fork of [Crystal](https://github.com/stravu/crystal) at tag `0.3.5` and has
+diverged substantially in scope and architecture. The original upstream Crystal changelog is
+preserved at [`docs/archive/CHANGELOG-crystal.md`](docs/archive/CHANGELOG-crystal.md) — note
+that Cyboflow does **not** track the renamed successor product (Nimbalyst); see
+[`docs/PROVENANCE.md`](docs/PROVENANCE.md).
