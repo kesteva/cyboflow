@@ -41,6 +41,7 @@ import { trpc } from '../trpc/client';
 import { API } from '../utils/api';
 import type { Project } from '../types/project';
 import type { AgentEntry } from '../../../shared/types/agents';
+import type { McpEntry, PluginEntry } from '../../../shared/types/integrations';
 import type {
   WorkflowRow,
   WorkflowRunListRow,
@@ -146,6 +147,10 @@ export interface WorkflowsState {
   workflows: WorkflowGalleryEntry[];
   /** Agent cards across the resolved project set (deduped by agentKey). */
   agents: AgentGalleryEntry[];
+  /** MCP servers configured in the CLI (machine-global, read-only). */
+  mcps: McpEntry[];
+  /** Installed Claude Code plugins (machine-global, read-only). */
+  plugins: PluginEntry[];
 
   /**
    * Bootstrap the gallery: first fetch (loading=true) for the current
@@ -261,24 +266,38 @@ export const useWorkflowsStore = create<WorkflowsState>((set, get) => {
 
     const { ids: projectIds, names } = await resolveProjects(filter, recordError);
 
-    const perProject = await Promise.all(
-      projectIds.map(async (projectId) => {
-        const safe = async <T>(label: string, p: Promise<T>): Promise<T | undefined> => {
-          try {
-            return await p;
-          } catch (err: unknown) {
-            recordError(err instanceof Error ? err.message : `${label} failed for ${projectId}`);
-            return undefined;
-          }
-        };
-        const [rows, agentEntries, runs] = await Promise.all([
-          safe('workflows.list', trpc.cyboflow.workflows.list.query({ projectId })),
-          safe('agents.list', trpc.cyboflow.agents.list.query({ projectId })),
-          safe('runs.list', trpc.cyboflow.runs.list.query({ projectId })),
-        ]);
-        return { projectId, rows, agentEntries, runs };
-      }),
-    );
+    // MCPs + plugins are machine-global (no projectId), so fetch them ONCE in
+    // parallel with the per-project fan-out — never inside projectIds.map.
+    const safeGlobal = async <T>(label: string, p: Promise<T>): Promise<T | undefined> => {
+      try {
+        return await p;
+      } catch (err: unknown) {
+        recordError(err instanceof Error ? err.message : `${label} failed`);
+        return undefined;
+      }
+    };
+    const [perProject, mcps, plugins] = await Promise.all([
+      Promise.all(
+        projectIds.map(async (projectId) => {
+          const safe = async <T>(label: string, p: Promise<T>): Promise<T | undefined> => {
+            try {
+              return await p;
+            } catch (err: unknown) {
+              recordError(err instanceof Error ? err.message : `${label} failed for ${projectId}`);
+              return undefined;
+            }
+          };
+          const [rows, agentEntries, runs] = await Promise.all([
+            safe('workflows.list', trpc.cyboflow.workflows.list.query({ projectId })),
+            safe('agents.list', trpc.cyboflow.agents.list.query({ projectId })),
+            safe('runs.list', trpc.cyboflow.runs.list.query({ projectId })),
+          ]);
+          return { projectId, rows, agentEntries, runs };
+        }),
+      ),
+      safeGlobal('mcps.list', trpc.cyboflow.mcps.list.query()),
+      safeGlobal('plugins.list', trpc.cyboflow.plugins.list.query()),
+    ]);
 
     // A newer fetch superseded us — drop everything we computed.
     if (generation !== fetchGeneration) return;
@@ -341,6 +360,10 @@ export const useWorkflowsStore = create<WorkflowsState>((set, get) => {
     set({
       workflows: anyData ? workflows : prev.workflows,
       agents: anyData ? Array.from(agentsByKey.values()) : prev.agents,
+      // Global catalogues commit independently of anyData (which gates only the
+      // per-project slices); an undefined global result keeps the prior slice.
+      mcps: mcps ?? prev.mcps,
+      plugins: plugins ?? prev.plugins,
       error: firstError,
     });
 
@@ -356,6 +379,8 @@ export const useWorkflowsStore = create<WorkflowsState>((set, get) => {
     projectFilter: null,
     workflows: [],
     agents: [],
+    mcps: [],
+    plugins: [],
 
     init: async () => {
       if (initialized) return;

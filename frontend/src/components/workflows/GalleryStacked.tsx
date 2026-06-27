@@ -24,6 +24,7 @@ import { AgentCard } from './AgentCard';
 import { NewWorkflowCard } from './NewWorkflowCard';
 import { NewAgentCard } from './NewAgentCard';
 import type { WorkflowGalleryEntry, AgentGalleryEntry } from '../../stores/workflowsStore';
+import type { McpEntry, PluginEntry } from '../../../../shared/types/integrations';
 
 export interface GalleryStackedProps {
   /** Workflow cards across the resolved project set. */
@@ -40,6 +41,10 @@ export interface GalleryStackedProps {
    * agents.list data). Renders the Agents empty-state instead of a grid.
    */
   agentsUnavailable: boolean;
+  /** CLI-configured MCP servers (machine-global, read-only). */
+  mcps: McpEntry[];
+  /** Installed Claude Code plugins (machine-global, read-only). */
+  plugins: PluginEntry[];
 
   // Thin action props — wired in P4 / the editor integration.
   onRunWorkflow?: (entry: WorkflowGalleryEntry) => void;
@@ -57,6 +62,8 @@ export function GalleryStacked({
   agents,
   showProjectChip,
   agentsUnavailable,
+  mcps,
+  plugins,
   onRunWorkflow,
   onEditWorkflow,
   onDuplicateWorkflow,
@@ -114,6 +121,100 @@ export function GalleryStacked({
             </div>
             <NewAgentCard onClick={onNewAgent} />
           </>
+        )}
+      </GallerySection>
+
+      <GallerySection
+        title="MCPs"
+        count={mcps.length}
+        subtitle="Model Context Protocol servers from your CLI config"
+        gridClassName="grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+        data-testid="gallery-section-mcps"
+      >
+        {mcps.length > 0 ? (
+          mcps.map((entry) => (
+            <div
+              key={`${entry.scope}:${entry.name}`}
+              data-testid={`mcp-card-${entry.name}`}
+              className="flex flex-col gap-2.5 border border-border-primary bg-surface-primary p-4 transition-[border-color,box-shadow] duration-150 hover:border-text-primary"
+              onMouseEnter={(e) => {
+                e.currentTarget.style.boxShadow = '0 2px 0 var(--color-text-primary)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.boxShadow = 'none';
+              }}
+            >
+              <div className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate text-[13px] font-bold tracking-[-0.005em] text-text-primary">
+                  {entry.name}
+                </span>
+                <span className="shrink-0 rounded-badge border border-border-primary bg-bg-secondary px-1.5 py-px text-[8.5px] font-bold uppercase tracking-[0.08em] text-text-tertiary">
+                  {entry.transport}
+                </span>
+              </div>
+              <p className="flex-1 truncate text-[11px] leading-relaxed text-text-secondary">
+                {entry.url ?? entry.command ?? '—'}
+              </p>
+              <div className="flex items-center gap-2 border-t border-dashed border-border-primary pt-2.5 text-[9.5px] tracking-[0.04em] text-text-tertiary">
+                <span className="truncate">{entry.scope === 'global' ? 'global' : entry.scope}</span>
+              </div>
+            </div>
+          ))
+        ) : (
+          <div
+            data-testid="gallery-mcps-empty"
+            className="col-span-full border border-dashed border-border-primary bg-bg-secondary p-6 text-center text-[11px] leading-relaxed text-text-tertiary"
+          >
+            No MCP servers are configured in your CLI yet.
+          </div>
+        )}
+      </GallerySection>
+
+      <GallerySection
+        title="Plugins"
+        count={plugins.length}
+        subtitle="Installed Claude Code plugins"
+        gridClassName="grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+        data-testid="gallery-section-plugins"
+      >
+        {plugins.length > 0 ? (
+          plugins.map((entry) => (
+            <div
+              key={`${entry.id}:${entry.scope}:${entry.projectPath ?? ''}`}
+              data-testid={`plugin-card-${entry.name}`}
+              className="flex flex-col gap-2.5 border border-border-primary bg-surface-primary p-4 transition-[border-color,box-shadow] duration-150 hover:border-text-primary"
+              onMouseEnter={(e) => {
+                e.currentTarget.style.boxShadow = '0 2px 0 var(--color-text-primary)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.boxShadow = 'none';
+              }}
+            >
+              <div className="flex items-center gap-2">
+                <span className="min-w-0 flex-1 truncate text-[13px] font-bold tracking-[-0.005em] text-text-primary">
+                  {entry.name}
+                </span>
+                <span className="shrink-0 rounded-badge border border-border-primary bg-bg-secondary px-1.5 py-px text-[8.5px] font-bold uppercase tracking-[0.08em] text-text-tertiary">
+                  {entry.scope}
+                </span>
+              </div>
+              <p className="flex-1 truncate text-[11px] leading-relaxed text-text-secondary">
+                {entry.marketplace}
+              </p>
+              <div className="flex items-center gap-2 border-t border-dashed border-border-primary pt-2.5 text-[9.5px] tracking-[0.04em] text-text-tertiary">
+                <span>
+                  <b className="font-bold tabular-nums text-text-primary">{entry.version}</b>
+                </span>
+              </div>
+            </div>
+          ))
+        ) : (
+          <div
+            data-testid="gallery-plugins-empty"
+            className="col-span-full border border-dashed border-border-primary bg-bg-secondary p-6 text-center text-[11px] leading-relaxed text-text-tertiary"
+          >
+            No plugins are installed yet.
+          </div>
         )}
       </GallerySection>
     </div>

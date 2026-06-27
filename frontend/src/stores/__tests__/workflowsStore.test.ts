@@ -28,6 +28,8 @@ import type {
 let mockWorkflowsListQuery: ReturnType<typeof vi.fn>;
 let mockAgentsListQuery: ReturnType<typeof vi.fn>;
 let mockRunsListQuery: ReturnType<typeof vi.fn>;
+let mockMcpsListQuery: ReturnType<typeof vi.fn>;
+let mockPluginsListQuery: ReturnType<typeof vi.fn>;
 let mockProjectsGetAll: ReturnType<typeof vi.fn>;
 
 vi.mock('../../trpc/client', () => ({
@@ -42,6 +44,12 @@ vi.mock('../../trpc/client', () => ({
       },
       runs: {
         list: { get query() { return mockRunsListQuery; } },
+      },
+      mcps: {
+        list: { get query() { return mockMcpsListQuery; } },
+      },
+      plugins: {
+        list: { get query() { return mockPluginsListQuery; } },
       },
       events: {
         onRunStatusChanged: { subscribe: () => ({ unsubscribe: vi.fn() }) },
@@ -121,6 +129,8 @@ async function loadStore(): Promise<WorkflowsModule> {
 beforeEach(() => {
   mockAgentsListQuery = vi.fn().mockResolvedValue([]);
   mockRunsListQuery = vi.fn().mockResolvedValue([]);
+  mockMcpsListQuery = vi.fn().mockResolvedValue([]);
+  mockPluginsListQuery = vi.fn().mockResolvedValue([]);
   mockProjectsGetAll = vi.fn().mockResolvedValue({
     success: true,
     data: [
@@ -208,5 +218,65 @@ describe('workflowsStore — global-workflow dedup', () => {
     const p2 = workflows.find((w) => w.row.id === 'wf-2-custom-aaaa');
     expect(p1?.projectName).toBe('Acme');
     expect(p2?.projectName).toBe('Beta');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Machine-global MCP + plugin catalogues (fetched ONCE, not per project)
+// ---------------------------------------------------------------------------
+
+describe('workflowsStore — global MCP + plugin catalogues', () => {
+  const mcpFixture = {
+    name: 'peekaboo',
+    transport: 'stdio' as const,
+    url: null,
+    command: 'npx',
+    args: [] as string[],
+    scope: 'global',
+  };
+  const pluginFixture = {
+    id: 'frontend-design@claude-plugins-official',
+    name: 'frontend-design',
+    marketplace: 'claude-plugins-official',
+    scope: 'user',
+    version: 'unknown',
+    lastUpdated: null,
+    projectPath: null,
+  };
+
+  it('commits the machine-global mcps + plugins lists fetched ONCE', async () => {
+    mockWorkflowsListQuery = vi.fn().mockResolvedValue([]);
+    mockMcpsListQuery = vi.fn().mockResolvedValue([mcpFixture]);
+    mockPluginsListQuery = vi.fn().mockResolvedValue([pluginFixture]);
+
+    const { useWorkflowsStore } = await loadStore();
+    await useWorkflowsStore.getState().init();
+
+    const { mcps, plugins } = useWorkflowsStore.getState();
+    expect(mcps).toHaveLength(1);
+    expect(mcps[0].name).toBe('peekaboo');
+    expect(plugins).toHaveLength(1);
+    expect(plugins[0].id).toBe('frontend-design@claude-plugins-official');
+    // Machine-global: queried exactly once for the whole fan-out (2 projects).
+    expect(mockMcpsListQuery).toHaveBeenCalledTimes(1);
+    expect(mockPluginsListQuery).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the global catalogues even when every per-project query fails', async () => {
+    mockWorkflowsListQuery = vi.fn().mockRejectedValue(new Error('boom'));
+    mockAgentsListQuery = vi.fn().mockRejectedValue(new Error('boom'));
+    mockRunsListQuery = vi.fn().mockRejectedValue(new Error('boom'));
+    mockMcpsListQuery = vi.fn().mockResolvedValue([mcpFixture]);
+    mockPluginsListQuery = vi.fn().mockResolvedValue([pluginFixture]);
+
+    const { useWorkflowsStore } = await loadStore();
+    await useWorkflowsStore.getState().init();
+
+    const state = useWorkflowsStore.getState();
+    // Per-project slices stay stale-empty (anyData false), but the global
+    // catalogues commit independently of anyData.
+    expect(state.workflows).toEqual([]);
+    expect(state.mcps).toHaveLength(1);
+    expect(state.plugins).toHaveLength(1);
   });
 });
