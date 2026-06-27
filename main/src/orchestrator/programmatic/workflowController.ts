@@ -25,7 +25,12 @@
  */
 import type { WorkflowDefinition, WorkflowStep } from '../../../../shared/types/workflows';
 import { HUMAN_GATE_AGENT } from '../../../../shared/types/agentIdentity';
-import { SPRINT_BATCH_CAP } from '../../../../shared/types/sprintBatch';
+import {
+  SPRINT_BATCH_CAP,
+  AWAITING_VERIFY_STEP,
+  SPRINT_IMPLEMENT_STEP,
+  SPRINT_VISUAL_VERIFY_STEP,
+} from '../../../../shared/types/sprintBatch';
 import type {
   ControllerHost,
   ControllerResult,
@@ -57,6 +62,14 @@ export const MAX_STEP_LOOPBACKS = 5;
  * systemic failure falls through to the normal failure path.
  */
 export const MAX_SYSTEMIC_PAUSES = 10;
+
+/**
+ * Safety bound on visual merge-gate loopbacks per lane (re-implement → re-verify).
+ * The merge-gate's own 3× cap (MERGE_GATE_ATTEMPT_CAP) marks the lane FAILED first,
+ * so this is purely a backstop against a semantics drift that never returns 'failed'
+ * — a flapping verdict can never spin a lane forever.
+ */
+export const MAX_VISUAL_LOOPBACKS = 5;
 
 /**
  * A step is a PURE human gate (no agent work) when its agent is the dedicated
@@ -596,6 +609,14 @@ export class WorkflowController {
      *  - all inner steps ok → mark the lane 'integrated'.
      * Returns 'aborted' when the signal fired mid-walk so the wave can short out.
      */
+    // The inner index the visual merge-gate loops a lane back to on a FAIL (the
+    // re-implement target); -1 when this chain has no `implement` step (a custom
+    // fan-out) — then a loopback cannot be honored and the lane is failed instead.
+    const implementIndex = inner.findIndex((s) => s.id === SPRINT_IMPLEMENT_STEP);
+    // The park step is NOT an inner-chain id, so the lane-store vocabulary must be
+    // widened to accept it when the controller parks at the merge-gate.
+    const parkAllowedStepIds: readonly string[] = [...allowedStepIds, AWAITING_VERIFY_STEP];
+
     const driveItem = async (itemId: string): Promise<'done' | 'failed' | 'aborted' | 'systemic'> => {
       driver.driveLane({
         runId,
@@ -604,6 +625,12 @@ export class WorkflowController {
         currentStepId: inner[0].id,
         allowedStepIds,
       });
+
+      // The lane's current implement attempt (1-based). Bumped by a visual
+      // merge-gate loopback so the re-dispatched implement (and the steps after it)
+      // run under the bumped attempt — parity with the orchestrated re-delegate.
+      let laneAttempt = 1;
+      let visualLoopbacks = 0;
 
       for (let k = 0; k < inner.length; k++) {
         if (signal?.aborted) return 'aborted';
@@ -632,7 +659,7 @@ export class WorkflowController {
         };
         const ctx: ControllerStepContext = {
           ...baseCtx,
-          attempt: 1,
+          attempt: laneAttempt,
           item: { id: itemId, over: fanOut.over },
           // Additive per-lane spawn identity so concurrent lanes each spawn
           // under a distinct key instead of serializing on the shared run
@@ -658,6 +685,48 @@ export class WorkflowController {
           driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
           this.host.log?.('warn', `fan-out item '${itemId}': step '${innerStep.id}' failed; lane failed`);
           return 'failed';
+        }
+
+        // Visual MERGE-GATE actuation (programmatic): the visual-verify step only
+        // FIRES a fire-and-continue verification request — the verdict lands later.
+        // Park the lane at `awaiting-verify` and AWAIT it, then advance / loop back
+        // to implement / fail the lane. This closes the actuation gap so a
+        // programmatic run never leaves a FAILed lane parked. Skipped entirely when
+        // no gate is wired or verification is inactive for the run (byte-identical
+        // to today — the lane integrates straight after visual-verify).
+        if (innerStep.id === SPRINT_VISUAL_VERIFY_STEP && this.host.visualGate?.isActive(runId)) {
+          driver.driveLane({
+            runId,
+            itemId,
+            currentStepId: AWAITING_VERIFY_STEP,
+            allowedStepIds: parkAllowedStepIds,
+          });
+          const outcome = await this.host.visualGate.awaitVerdict({
+            runId,
+            itemId,
+            ...(signal ? { signal } : {}),
+          });
+          if (outcome.kind === 'aborted') return 'aborted';
+          if (outcome.kind === 'failed') {
+            driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+            this.host.log?.('warn', `fan-out item '${itemId}': visual merge-gate FAILED; lane failed`);
+            return 'failed';
+          }
+          if (outcome.kind === 'loopback') {
+            visualLoopbacks += 1;
+            if (implementIndex < 0 || visualLoopbacks > MAX_VISUAL_LOOPBACKS) {
+              // No implement step to loop back to, or the backstop bound was hit
+              // (the merge-gate's 3× cap should mark the lane failed before this).
+              driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
+              this.host.log?.('warn', `fan-out item '${itemId}': visual merge-gate loopback exhausted; lane failed`);
+              return 'failed';
+            }
+            laneAttempt = outcome.attempt;
+            this.host.log?.('info', `fan-out item '${itemId}': visual merge-gate FAIL → re-implement (attempt ${laneAttempt})`);
+            k = implementIndex - 1; // the loop's k++ lands on implementIndex next.
+            continue;
+          }
+          // 'advance' → fall through; the loop ends and the lane integrates below.
         }
       }
 
