@@ -22,6 +22,7 @@ import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { AgentEntry } from '../../../../../../shared/types/agents';
+import type { McpEntry } from '../../../../../../shared/types/integrations';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -90,9 +91,18 @@ vi.mock('../../../../trpc/client', () => ({
         duplicate: { mutate: vi.fn() },
         createCustom: { mutate: vi.fn() },
       },
+      mcps: {
+        list: { query: vi.fn() },
+      },
     },
   },
 }));
+
+/** Two CLI-configured MCP servers the editor's "MCP access" grid offers. */
+const MCP_CATALOGUE: McpEntry[] = [
+  { name: 'peekaboo', transport: 'stdio', url: null, command: 'peekaboo', args: [], scope: 'global' },
+  { name: 'playwright', transport: 'http', url: 'http://localhost', command: null, args: [], scope: 'global' },
+];
 
 import { AgentEditorModal } from '../AgentEditorModal';
 import { trpc } from '../../../../trpc/client';
@@ -103,6 +113,7 @@ const mockUpsert = vi.mocked(trpc.cyboflow.agents.upsertOverride.mutate);
 const mockReset = vi.mocked(trpc.cyboflow.agents.resetOverride.mutate);
 const mockDuplicate = vi.mocked(trpc.cyboflow.agents.duplicate.mutate);
 const mockCreate = vi.mocked(trpc.cyboflow.agents.createCustom.mutate);
+const mockMcpsList = vi.mocked(trpc.cyboflow.mcps.list.query);
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -111,6 +122,7 @@ beforeEach(() => {
   mockReset.mockResolvedValue(structuredClone(BUILTIN_ENTRY));
   mockDuplicate.mockResolvedValue({ ...structuredClone(BUILTIN_ENTRY), agentKey: 'implement-copy', name: 'implement-copy', isCustom: true });
   mockCreate.mockResolvedValue({ ...structuredClone(BUILTIN_ENTRY), agentKey: 'my-helper', name: 'My Helper', isCustom: true });
+  mockMcpsList.mockResolvedValue(structuredClone(MCP_CATALOGUE));
 });
 
 afterEach(() => {
@@ -292,6 +304,47 @@ describe('AgentEditorModal — tools grid', () => {
     await waitFor(() =>
       expect(screen.getByTestId('agent-tools-count')).toHaveTextContent('5 of 8 enabled'),
     );
+  });
+});
+
+describe('AgentEditorModal — MCP access', () => {
+  it('offers the CLI MCP catalogue (deduped) and persists a selected server via upsertOverride', async () => {
+    const { onSaved } = await renderModal();
+
+    // The grid appears once mcps.list resolves; both catalogue servers render
+    // unchecked for a built-in with no grants.
+    const peekaboo = await screen.findByTestId('agent-mcp-switch-peekaboo');
+    expect(peekaboo).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByTestId('agent-mcp-switch-playwright')).toHaveAttribute('aria-checked', 'false');
+
+    await act(async () => {
+      fireEvent.click(peekaboo);
+    });
+    await waitFor(() => expect(peekaboo).toHaveAttribute('aria-checked', 'true'));
+    expect(screen.getByTestId('agent-mcps-count')).toHaveTextContent('1 enabled');
+
+    const saveBtn = screen.getByTestId('agent-editor-save-button');
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+
+    expect(mockUpsert).toHaveBeenCalledTimes(1);
+    expect(mockUpsert.mock.calls[0][0].enabledMcps).toEqual(['peekaboo']);
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(BUILTIN_KEY));
+  });
+
+  it('round-trips an existing grant on reopen (shows the granted server checked)', async () => {
+    const granted: AgentEntry = { ...structuredClone(BUILTIN_ENTRY), enabledMcps: ['peekaboo'] };
+    await renderModal({ entry: granted });
+
+    const peekaboo = await screen.findByTestId('agent-mcp-switch-peekaboo');
+    expect(peekaboo).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByTestId('agent-mcp-switch-playwright')).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByTestId('agent-mcps-count')).toHaveTextContent('1 enabled');
+
+    // Seeded, not dirty → Save stays disabled until something changes.
+    expect(screen.getByTestId('agent-editor-save-button')).toBeDisabled();
   });
 });
 
