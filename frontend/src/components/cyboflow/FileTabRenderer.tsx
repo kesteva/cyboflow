@@ -17,7 +17,7 @@
  *
  * Design hexes are inline (warm-paper palette); the M7 polish pass tokenizes them.
  */
-import { useState } from 'react';
+import { Fragment, useState } from 'react';
 import type { ReactElement } from 'react';
 import { useFileDiffData } from '../../hooks/useFileDiffData';
 import { useFileContentData } from '../../hooks/useFileContentData';
@@ -170,56 +170,78 @@ function toSplitRows(hunk: DiffHunk): SplitRow[] {
   return rows;
 }
 
-function SplitCellView({ cell }: { cell: SplitCell | null }): ReactElement {
-  if (cell === null) {
-    return <div style={{ display: 'grid', gridTemplateColumns: '30px 1fr', background: 'transparent' }} />;
-  }
-  return (
-    <div
-      style={{
-        display: 'grid',
-        gridTemplateColumns: '30px 1fr',
-        background: cell.kind === 'add' ? ADD_BG : cell.kind === 'del' ? DEL_BG : 'transparent',
-      }}
-    >
-      <span style={{ padding: '0 6px', textAlign: 'right', color: FAINT, fontSize: '9.5px' }}>
-        {cell.no ?? ''}
-      </span>
-      <span style={{ padding: '0 8px', whiteSpace: 'pre', color: cell.kind === 'context' ? MUTED : INK }}>
-        {cell.text}
-      </span>
-    </div>
-  );
-}
+const SPLIT_NO_STYLE = { padding: '0 6px', textAlign: 'right' as const, color: FAINT, fontSize: '9.5px' };
+const SPLIT_TEXT_STYLE = { padding: '0 12px', whiteSpace: 'pre' as const };
 
-function SplitHunkRows({ hunk }: { hunk: DiffHunk }): ReactElement {
-  const rows = toSplitRows(hunk);
+/**
+ * SplitView — side-by-side diff as ONE horizontally-scrollable grid:
+ * [old# │ old code │ new# │ new code]. The text columns are `max-content` so
+ * each sizes to its widest line and long lines never bleed across the divider —
+ * the whole grid scrolls horizontally as a unit instead. Hunk headers span all
+ * four columns. Left cells carry old line numbers (context/deletions), right
+ * cells the new (context/additions); a null cell is just blank, keeping rows
+ * aligned to a single line height.
+ */
+function SplitView({ hunks }: { hunks: DiffHunk[] }): ReactElement {
   return (
-    <>
+    <div data-testid="file-tab-split" style={{ overflowX: 'auto', borderBottom: `1px solid ${SOFT}` }}>
       <div
         style={{
-          fontSize: '10px',
-          padding: '3px 16px',
-          color: FAINT,
-          background: RAIL,
-          borderBottom: `1px dashed ${HAIRLINE}`,
-          whiteSpace: 'pre',
+          display: 'grid',
+          gridTemplateColumns: 'min-content max-content min-content max-content',
+          fontSize: '11px',
+          lineHeight: 1.55,
+          minWidth: '100%',
         }}
       >
-        {hunk.header}
+        {hunks.map((hunk, hi) => (
+          <Fragment key={hi}>
+            <div
+              style={{
+                gridColumn: '1 / -1',
+                fontSize: '10px',
+                padding: '3px 16px',
+                color: FAINT,
+                background: RAIL,
+                borderBottom: `1px dashed ${HAIRLINE}`,
+                whiteSpace: 'pre',
+              }}
+            >
+              {hunk.header}
+            </div>
+            {toSplitRows(hunk).map((row, ri) => {
+              const leftBg = row.left?.kind === 'del' ? DEL_BG : 'transparent';
+              const rightBg = row.right?.kind === 'add' ? ADD_BG : 'transparent';
+              return (
+                <Fragment key={ri}>
+                  <span style={{ ...SPLIT_NO_STYLE, background: leftBg }}>{row.left?.no ?? ''}</span>
+                  <span
+                    style={{
+                      ...SPLIT_TEXT_STYLE,
+                      background: leftBg,
+                      color: row.left?.kind === 'del' ? INK : MUTED,
+                      borderRight: `1px solid ${SOFT}`,
+                    }}
+                  >
+                    {row.left?.text ?? ''}
+                  </span>
+                  <span style={{ ...SPLIT_NO_STYLE, background: rightBg }}>{row.right?.no ?? ''}</span>
+                  <span
+                    style={{
+                      ...SPLIT_TEXT_STYLE,
+                      background: rightBg,
+                      color: row.right?.kind === 'add' ? INK : MUTED,
+                    }}
+                  >
+                    {row.right?.text ?? ''}
+                  </span>
+                </Fragment>
+              );
+            })}
+          </Fragment>
+        ))}
       </div>
-      {rows.map((row, i) => (
-        <div
-          key={i}
-          style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', fontSize: '11px', lineHeight: 1.55 }}
-        >
-          <div style={{ borderRight: `1px solid ${SOFT}` }}>
-            <SplitCellView cell={row.left} />
-          </div>
-          <SplitCellView cell={row.right} />
-        </div>
-      ))}
-    </>
+    </div>
   );
 }
 
@@ -232,13 +254,7 @@ function DiffBody({ fileDiff, mode }: { fileDiff: ParsedFileDiff; mode: 'diff' |
     );
   }
   if (mode === 'split') {
-    return (
-      <div data-testid="file-tab-split" style={{ borderBottom: `1px solid ${SOFT}` }}>
-        {fileDiff.hunks.map((hunk, i) => (
-          <SplitHunkRows key={i} hunk={hunk} />
-        ))}
-      </div>
-    );
+    return <SplitView hunks={fileDiff.hunks} />;
   }
   return (
     <div data-testid="file-tab-hunks" style={{ borderBottom: `1px solid ${SOFT}` }}>
