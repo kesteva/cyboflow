@@ -17,10 +17,12 @@
  * the run's model. The model surfaces only as a read-only Stats key/value in
  * AgentUsageInspector.
  */
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Switch } from '../../ui/Switch';
+import { trpc } from '../../../trpc/client';
 import { CLI_TOOLS, roleColorVar, estimateTokens } from './agentEditorTokens';
 import type { AgentDraft, AgentEditorAction } from './useAgentEditorState';
+import type { McpEntry } from '../../../../../shared/types/integrations';
 
 export interface AgentEditorFormProps {
   draft: AgentDraft;
@@ -51,6 +53,39 @@ export function AgentEditorForm({
   const displayName = nameEditable ? draft.name : draft.name.replace(/^cyboflow-/, '');
   const enabled = useMemo(() => new Set(draft.enabledTools), [draft.enabledTools]);
   const promptTokens = estimateTokens(draft.systemPrompt);
+
+  // Read-only catalogue of MCP servers configured in the CLI (machine-global).
+  // Fetched once on mount; failures degrade to an empty list (no MCP options).
+  const [mcps, setMcps] = useState<McpEntry[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await trpc.cyboflow.mcps.list.query();
+        if (!cancelled) setMcps(list);
+      } catch {
+        if (!cancelled) setMcps([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Selectable server names: the catalogue deduped by name (a server can appear
+  // at multiple scopes), minus the single-writer `cyboflow` server (never
+  // grantable), unioned with any already-granted server so a stale grant stays
+  // visible and un-checkable. Sorted for a stable grid order.
+  const mcpEnabled = useMemo(() => new Set(draft.enabledMcps), [draft.enabledMcps]);
+  const mcpOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const entry of mcps) {
+      if (entry.name === 'cyboflow' || entry.name.startsWith('cyboflow_')) continue;
+      names.add(entry.name);
+    }
+    for (const server of draft.enabledMcps) names.add(server);
+    return Array.from(names).sort();
+  }, [mcps, draft.enabledMcps]);
 
   return (
     <div className="flex-1 overflow-auto px-7 py-6 min-w-0" data-testid="agent-editor-form">
@@ -165,6 +200,50 @@ export function AgentEditorForm({
             );
           })}
         </div>
+      </div>
+
+      {/* ── MCP access (servers this agent may call) ─────────────────────── */}
+      <div className="mt-6">
+        <div className="text-[9px] font-bold uppercase tracking-[0.18em] text-text-tertiary mb-3 flex items-center gap-2">
+          <span>MCP access</span>
+          <span className="font-semibold normal-case tracking-normal text-text-secondary" data-testid="agent-mcps-count">
+            {draft.enabledMcps.length} enabled
+          </span>
+          <span className="flex-1 h-px bg-border-subtle" />
+        </div>
+        {mcpOptions.length === 0 ? (
+          <p className="text-xs text-text-tertiary" data-testid="agent-mcps-empty">
+            No MCP servers are configured in your CLI. Granted servers expand to
+            <span className="font-mono"> mcp__&lt;server&gt;__*</span> on the tools line.
+          </p>
+        ) : (
+          <div className="grid grid-cols-2 gap-2" data-testid="agent-mcps-grid">
+            {mcpOptions.map((server) => {
+              const on = mcpEnabled.has(server);
+              const switchId = `agent-mcp-${server}`;
+              return (
+                <label
+                  key={server}
+                  htmlFor={switchId}
+                  className={
+                    'flex items-center justify-between gap-3 border border-border-subtle bg-surface-primary px-3 py-2.5 cursor-pointer hover:border-border-emphasized' +
+                    (on ? '' : ' opacity-70')
+                  }
+                  data-testid={`agent-mcp-row-${server}`}
+                >
+                  <span className="text-sm font-semibold text-text-primary truncate">{server}</span>
+                  <Switch
+                    id={switchId}
+                    checked={on}
+                    onCheckedChange={() => dispatch({ type: 'TOGGLE_MCP', server })}
+                    aria-label={`Toggle MCP ${server}`}
+                    data-testid={`agent-mcp-switch-${server}`}
+                  />
+                </label>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

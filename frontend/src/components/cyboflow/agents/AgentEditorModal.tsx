@@ -162,6 +162,7 @@ export function AgentEditorModal({
           description: state.draft.description,
           systemPrompt: state.draft.systemPrompt,
           tools: state.draft.enabledTools,
+          enabledMcps: state.draft.enabledMcps,
           role: state.draft.role,
         });
         trackEvent('agent_saved', { custom: true });
@@ -176,6 +177,7 @@ export function AgentEditorModal({
         description: state.draft.description,
         systemPrompt: state.draft.systemPrompt,
         tools: state.draft.enabledTools,
+        enabledMcps: state.draft.enabledMcps,
         role: state.draft.role,
       });
       trackEvent('agent_saved', { custom: isCustom });

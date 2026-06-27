@@ -27,6 +27,8 @@ export interface AgentDraft {
   role: string;
   systemPrompt: string;
   enabledTools: CliTool[];
+  /** MCP server names granted to this agent (rendered as `mcp__<server>__*`). */
+  enabledMcps: string[];
 }
 
 export interface AgentEditorState {
@@ -41,7 +43,8 @@ export type AgentEditorAction =
   | { type: 'SET_NAME'; name: string }
   | { type: 'SET_DESCRIPTION'; description: string }
   | { type: 'SET_SYSTEM_PROMPT'; systemPrompt: string }
-  | { type: 'TOGGLE_TOOL'; tool: CliTool };
+  | { type: 'TOGGLE_TOOL'; tool: CliTool }
+  | { type: 'TOGGLE_MCP'; server: string };
 
 /** Build a draft from an effective AgentEntry, preserving CLI_TOOLS order. */
 export function draftFromEntry(entry: AgentEntry): AgentDraft {
@@ -54,6 +57,9 @@ export function draftFromEntry(entry: AgentEntry): AgentDraft {
     role: entry.role,
     systemPrompt: entry.systemPrompt,
     enabledTools: CLI_TOOLS.filter((t) => enabled.has(t)),
+    // Sort so the structural dirty check is order-independent (the catalogue
+    // has no fixed order like CLI_TOOLS); TOGGLE_MCP keeps the array sorted.
+    enabledMcps: [...entry.enabledMcps].sort(),
   };
 }
 
@@ -86,6 +92,16 @@ export function agentEditorReducer(
       return { ...state, draft: { ...state.draft, enabledTools } };
     }
 
+    case 'TOGGLE_MCP': {
+      const has = state.draft.enabledMcps.includes(action.server);
+      // Keep the array sorted so the dirty check stays set-based: toggling a
+      // server on then off returns to a baseline-identical array.
+      const enabledMcps = has
+        ? state.draft.enabledMcps.filter((s) => s !== action.server)
+        : [...state.draft.enabledMcps, action.server].sort();
+      return { ...state, draft: { ...state.draft, enabledMcps } };
+    }
+
     default:
       return state;
   }
@@ -95,7 +111,7 @@ export function agentEditorReducer(
 export function initAgentEditorState(entry: AgentEntry | null): AgentEditorState {
   const draft: AgentDraft = entry
     ? draftFromEntry(entry)
-    : { name: '', description: '', role: '', systemPrompt: '', enabledTools: [] };
+    : { name: '', description: '', role: '', systemPrompt: '', enabledTools: [], enabledMcps: [] };
   return { draft, baseline: structuredClone(draft) };
 }
 
