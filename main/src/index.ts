@@ -64,6 +64,7 @@ import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
+import { VerificationScheduler } from './orchestrator/verify/verificationScheduler';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import {
   setReviewItemsRunProbe,
@@ -767,6 +768,38 @@ async function initializeServices() {
   // cyboflowDirectory util) so autoMintArtifacts stays free of electron imports
   // (standalone-typecheck invariant). Mirrors the ArtifactRouter boot wiring above.
   setRunArtifactsDirResolver((runId: string) => getCyboflowSubdirectory('artifacts', 'runs', runId));
+
+  // VerificationScheduler — the main-process singleton that owns the DB-backed
+  // verification_requests queue, the ResourceLeasePool (over the shared `mutex`),
+  // and the waterfall drain loop (migration 036 / layered visual verification).
+  // Lane agents fire-and-continue via the mcp-request-verification handler (P6),
+  // which reaches this singleton through getInstance() to enqueue + nudge. For
+  // this slice the backend registry is EMPTY ({} — capturePage/peekaboo/etc. land
+  // in later layers), the judge is a no-op placeholder, and the verdict-delivery
+  // side-effects (ArtifactRouter / ReviewItemRouter / SprintLaneStore) are deferred
+  // (P8 injects the real onVerdict). The artifactsDir resolver matches the
+  // screenshots auto-mint subtree (CYBOFLOW_DIR/artifacts/runs/<runId>). The
+  // resolved visualVerify config supplies the port / sim pools the lease pool
+  // serializes over. Standalone-typecheck invariant: the scheduler imports no
+  // electron/service code; everything electron-backed is injected here.
+  VerificationScheduler.initialize({
+    db: cyboflowDb,
+    backends: {},
+    judge: {
+      judge: async () => ({
+        status: 'low_confidence',
+        confidence: 0,
+        issues: [],
+        feedback: 'visual-verification judge not yet wired (MVP placeholder)',
+        judgedFileNames: [],
+        baselineUsed: false,
+        model: 'none',
+      }),
+    },
+    artifactsDirResolver: (runId: string) => getCyboflowSubdirectory('artifacts', 'runs', runId),
+    logger: cyboflowLogger,
+    config: configManager.getVisualVerifyConfig(),
+  });
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).
   // The CLI managers attach it to each run's EventRouter pipeline via
