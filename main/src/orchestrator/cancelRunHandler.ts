@@ -102,6 +102,18 @@ export interface CancelRunDeps {
    */
   deletePendingDraftsForRun?: (runId: string) => void | Promise<unknown>;
   /**
+   * Cancel the run's outstanding visual-verification requests: abort any in-flight
+   * capture/judge + mark every non-terminal verification_requests row 'timeout'.
+   * Backed by VerificationScheduler.cancelForRun. Called AFTER the live agent is
+   * stopped so a canceled run leaves no detached capture burning a lease / a vision
+   * call and no 'queued' row for the drain to later pick up. Optional + fail-soft:
+   * a missing dep (verification disabled / not initialized) or a throw never blocks
+   * the cancel — the run row is canonical, the verification queue is downstream.
+   * Standalone-typecheck invariant: injected as a function-ref so this handler
+   * imports no services/* (and no electron) code.
+   */
+  cancelVerificationsForRun?: (runId: string) => void;
+  /**
    * Optional structured logger. When provided, a rejection from `stopLiveRun` is
    * logged as a `[cancelRun]` entry before the handler proceeds to the DB write
    * (the run is conceptually canceled regardless of kill success). When omitted,
@@ -171,6 +183,7 @@ export async function cancelRunHandler(
     emitRunStatusChanged,
     markBatchTerminal,
     deletePendingDraftsForRun,
+    cancelVerificationsForRun,
     logger,
   } = deps;
 
@@ -220,6 +233,19 @@ export async function cancelRunHandler(
     await clearPendingHumanGatesForRun?.(runId);
   } catch (err: unknown) {
     logger?.error('[cancelRun] clearPendingHumanGatesForRun failed — proceeding', {
+      runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Cancel the run's outstanding visual-verification requests AFTER the kill:
+  // abort any in-flight capture/judge + mark non-terminal verification rows
+  // 'timeout'. Fail-soft: a missing dep (verification disabled) or a throw never
+  // blocks the cancel — the verification queue is downstream of the run row.
+  try {
+    cancelVerificationsForRun?.(runId);
+  } catch (err: unknown) {
+    logger?.error('[cancelRun] cancelVerificationsForRun failed — proceeding', {
       runId,
       error: err instanceof Error ? err.message : String(err),
     });

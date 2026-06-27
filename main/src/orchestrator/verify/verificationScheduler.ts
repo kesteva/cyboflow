@@ -167,6 +167,13 @@ export type OnVerdict = (args: {
   input?: VerificationRequestInput;
 }) => void | Promise<void>;
 
+/**
+ * The default per-request deadline (5 minutes). When a capture+judge attempt runs
+ * longer than this the scheduler `signal.abort()`s the in-flight work and marks the
+ * row 'timeout' (releasing the lease). Tunable via VerificationSchedulerDeps.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+
 /** The dependency bag VerificationScheduler.initialize takes. */
 export interface VerificationSchedulerDeps {
   db: DatabaseLike;
@@ -183,6 +190,12 @@ export interface VerificationSchedulerDeps {
   onVerdict?: OnVerdict;
   /** Shared lease pool override (tests). Defaults to a pool over the global mutex. */
   leasePool?: ResourceLeasePool;
+  /**
+   * Per-request capture+judge deadline in ms. On expiry the in-flight attempt is
+   * `signal.abort()`ed and the row is marked 'timeout' (lease released). Defaults
+   * to DEFAULT_REQUEST_TIMEOUT_MS (5 min). Tests pass a small value to exercise it.
+   */
+  requestTimeoutMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -217,11 +230,21 @@ export class VerificationScheduler {
   private readonly config: ResolvedVisualVerifyConfig;
   private readonly onVerdict?: OnVerdict;
   private readonly leasePool: ResourceLeasePool;
+  private readonly requestTimeoutMs: number;
 
   /** True while a drain pass is in flight — coalesces concurrent nudges into one loop. */
   private draining = false;
   /** True when a nudge arrived during a drain — triggers exactly one more pass. */
   private rescanRequested = false;
+
+  /**
+   * The AbortController of every CURRENTLY in-flight (running) request, keyed by
+   * requestId. Populated when runChosen starts the detached capture+judge work and
+   * deleted in its finally. This is the handle cancelForRun(runId) / the per-request
+   * timeout reach for to `.abort()` the live capture/judge of a row that is already
+   * leased + running (a pure DB UPDATE alone would NOT stop the in-flight promise).
+   */
+  private readonly inFlight = new Map<string, AbortController>();
 
   constructor(deps: VerificationSchedulerDeps) {
     this.db = deps.db;
@@ -232,6 +255,7 @@ export class VerificationScheduler {
     this.config = deps.config ?? VISUAL_VERIFY_DEFAULTS;
     this.onVerdict = deps.onVerdict;
     this.leasePool = deps.leasePool ?? new ResourceLeasePool();
+    this.requestTimeoutMs = deps.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
   // --------------------------------------------------------------------------
@@ -260,6 +284,40 @@ export class VerificationScheduler {
   /** Reset singleton — intended for tests only. */
   static _resetForTesting(): void {
     VerificationScheduler.instance = null;
+  }
+
+  // --------------------------------------------------------------------------
+  // runRecovery — crash recovery for orphaned leased/running rows
+  // --------------------------------------------------------------------------
+
+  /**
+   * Re-drain rows stranded mid-flight by a PRIOR process. After a crash/restart a
+   * row may be persisted 'leased' or 'running' even though the capture/judge that
+   * owned it is gone (its in-memory AbortController, lease, and detached promise all
+   * died with the process). These CANNOT resume — the scheduler is brand new and
+   * holds no in-flight handle for them — so they are marked 'timeout' (lease already
+   * dropped with the dead process; the freshly-constructed `mutex` holds nothing).
+   *
+   * Mirrors recoverActiveStateOrphans (runRecovery.ts): "no in-process worker → the
+   * row is an orphan; force it terminal so nothing waits on it forever". Called ONCE
+   * at scheduler init from index.ts boot recovery, BEFORE any nudge, so a stale row
+   * can never be confused with a live in-flight one (inFlight is empty at boot).
+   * Returns the number of rows re-drained. Idempotent: a second call finds none.
+   */
+  runRecovery(): number {
+    const res = this.db
+      .prepare(
+        `UPDATE verification_requests
+            SET status = 'timeout', ended_at = ?, error_message = 'orphaned by process restart'
+          WHERE status IN ('leased', 'running')`,
+      )
+      .run(new Date().toISOString());
+    if (res.changes > 0) {
+      this.logger?.info('[VerificationScheduler] re-drained orphaned requests on boot', {
+        timedOut: res.changes,
+      });
+    }
+    return res.changes;
   }
 
   // --------------------------------------------------------------------------
@@ -528,6 +586,28 @@ export class VerificationScheduler {
     lease: LeaseHandle,
   ): Promise<void> {
     const controller = new AbortController();
+    // Register the controller so cancelForRun(runId) + the per-request timeout can
+    // reach in and `.abort()` THIS live capture/judge. Deleted in the finally.
+    this.inFlight.set(row.id, controller);
+
+    // Per-request deadline: on expiry abort the in-flight signal. The catch below
+    // (or the abort-aware capture/judge) then unwinds; `timedOut` distinguishes a
+    // deadline abort (→ 'timeout') from a genuine capture/judge throw (→ 'failed').
+    let timedOut = false;
+    const deadline = setTimeout(() => {
+      timedOut = true;
+      this.logger?.warn('[VerificationScheduler] request timed out — aborting', {
+        requestId: row.id,
+        backend: backend.id,
+        timeoutMs: this.requestTimeoutMs,
+      });
+      controller.abort();
+    }, this.requestTimeoutMs);
+    // Do not let the timer keep the event loop / process alive on its own.
+    if (typeof deadline === 'object' && deadline !== null && 'unref' in deadline) {
+      (deadline as { unref: () => void }).unref();
+    }
+
     let fileNames: string[] = [];
 
     try {
@@ -540,6 +620,16 @@ export class VerificationScheduler {
       };
 
       const capture = await backend.capture(ctx, controller.signal);
+      // A timeout/cancel that fired DURING capture: stop here, mark 'timeout',
+      // regardless of what the (now-aborted) capture nominally returned.
+      if (controller.signal.aborted) {
+        this.markTerminal(row.id, 'timeout', {
+          backend: backend.id,
+          error: timedOut ? 'request timed out' : 'aborted',
+        });
+        await this.deliver(row, 'timeout', undefined, [], input);
+        return;
+      }
       if (!capture.ok || capture.fileNames.length === 0) {
         this.markTerminal(row.id, 'failed', {
           backend: backend.id,
@@ -561,20 +651,41 @@ export class VerificationScheduler {
         controller.signal,
       );
 
+      // A timeout/cancel that fired DURING judging: mark 'timeout', drop the verdict.
+      if (controller.signal.aborted) {
+        this.markTerminal(row.id, 'timeout', {
+          backend: backend.id,
+          error: timedOut ? 'request timed out' : 'aborted',
+        });
+        await this.deliver(row, 'timeout', undefined, fileNames, input);
+        return;
+      }
+
       const status = this.statusFromVerdict(verdict);
       this.markTerminal(row.id, status, { backend: backend.id, verdict });
       await this.deliver(row, status, verdict, fileNames, input);
     } catch (err) {
+      // An abort-aware backend/judge that THROWS on abort (vs. returning) lands
+      // here. If the signal was aborted (deadline or cancel) it is a 'timeout', not
+      // a 'failed' — a genuine capture/judge error keeps 'failed'.
+      const aborted = controller.signal.aborted;
       controller.abort();
       const message = err instanceof Error ? err.message : String(err);
-      this.markTerminal(row.id, 'failed', { backend: backend.id, error: message });
+      const status: RequestStatus = aborted ? 'timeout' : 'failed';
+      this.markTerminal(row.id, status, {
+        backend: backend.id,
+        error: aborted ? (timedOut ? 'request timed out' : 'aborted') : message,
+      });
       this.logger?.error('[VerificationScheduler] capture/judge error', {
         requestId: row.id,
         backend: backend.id,
+        aborted,
         error: message,
       });
-      await this.deliver(row, 'failed', undefined, fileNames, input);
+      await this.deliver(row, status, undefined, fileNames, input);
     } finally {
+      clearTimeout(deadline);
+      this.inFlight.delete(row.id);
       lease.release();
     }
   }
@@ -596,11 +707,41 @@ export class VerificationScheduler {
 
   /**
    * Mark every non-terminal (queued/leased/running) request for a run as
-   * 'timeout' (canceled). Called on run cancel / teardown so a paused or aborted
-   * run leaves no orphaned requests for the drain to pick up. Already-terminal
-   * rows are untouched. Returns the number of rows canceled.
+   * 'timeout' (canceled) AND abort any of its in-flight captures/judges. Called on
+   * run cancel / teardown (cancelRunHandler) so a paused or aborted run leaves no
+   * orphaned requests for the drain to pick up AND no detached capture/judge promise
+   * still burning a lease / a vision call.
+   *
+   * Order matters: ABORT the live controllers FIRST, then UPDATE. The abort makes
+   * each in-flight runChosen see `signal.aborted` and unwind to its own 'timeout'
+   * write (or, for an abort-unaware backend, finish and release its lease); this
+   * UPDATE is the authoritative sweep that also catches QUEUED rows (never started,
+   * so not in inFlight) and any row whose detached promise has not yet reached its
+   * terminal write. Already-terminal rows are untouched. Returns rows swept here.
    */
   cancelForRun(runId: string): number {
+    // (1) Abort the live in-flight work for this run. Find which tracked controllers
+    // belong to runId via the non-terminal rows, then abort each present handle.
+    const liveRows = this.db
+      .prepare(
+        `SELECT id FROM verification_requests
+          WHERE run_id = ? AND status IN ('leased', 'running')`,
+      )
+      .all(runId) as Array<{ id: string }>;
+    let aborted = 0;
+    for (const { id } of liveRows) {
+      const controller = this.inFlight.get(id);
+      if (controller && !controller.signal.aborted) {
+        controller.abort();
+        aborted += 1;
+      }
+    }
+
+    // (2) Authoritative sweep: mark every non-terminal request 'timeout'. This is
+    // ALSO what handles queued rows (never in inFlight) and any leased/running row
+    // whose detached unwind has not yet written its own terminal status. A row whose
+    // runChosen wins the race and writes 'timeout' first is simply re-stamped here
+    // with the same status (the WHERE drops it once terminal on the next observation).
     const res = this.db
       .prepare(
         `UPDATE verification_requests
@@ -608,10 +749,11 @@ export class VerificationScheduler {
           WHERE run_id = ? AND status IN ('queued', 'leased', 'running')`,
       )
       .run(new Date().toISOString(), runId);
-    if (res.changes > 0) {
+    if (res.changes > 0 || aborted > 0) {
       this.logger?.info('[VerificationScheduler] canceled requests for run', {
         runId,
         canceled: res.changes,
+        aborted,
       });
     }
     return res.changes;

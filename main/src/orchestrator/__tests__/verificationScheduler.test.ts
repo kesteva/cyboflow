@@ -95,7 +95,7 @@ function fakeBackend(opts: {
   id: VisualBackendId;
   rung: number;
   lease: string | null;
-  capture?: (ctx: CaptureContext) => Promise<CaptureResult>;
+  capture?: (ctx: CaptureContext, signal: AbortSignal) => Promise<CaptureResult>;
 }): VisualBackend {
   return {
     id: opts.id,
@@ -385,6 +385,185 @@ describe('VerificationScheduler', () => {
     ).run();
     expect(sched.cancelForRun('run-1')).toBe(0); // nothing non-terminal left
     expect(status(db, 'vr_done')).toBe('passed');
+  });
+
+  it('times out a slow capture: aborts the signal, marks timeout, releases the lease', async () => {
+    const mutex = new Mutex();
+    const pool = new ResourceLeasePool(mutex);
+    let sawAbort = false;
+    // A backend that hangs until aborted, then resolves (abort-aware via signal).
+    const slow = fakeBackend({
+      id: 'peekaboo',
+      rung: 2,
+      lease: VERIFY_SCREEN_LEASE,
+      capture: (_ctx, signal) =>
+        new Promise<CaptureResult>((resolve) => {
+          signal.addEventListener('abort', () => {
+            sawAbort = true;
+            resolve({ ok: true, fileNames: ['late.png'] });
+          });
+        }),
+    });
+    const judge = fakeJudge();
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { peekaboo: slow },
+      judge,
+      artifactsDirResolver: (runId) => `/tmp/${runId}`,
+      leasePool: pool,
+      requestTimeoutMs: 20, // tiny deadline
+    });
+    const id = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'native-desktop',
+      input: { intent: 'x' },
+      chain: ['peekaboo'],
+    });
+
+    await flushDrain();
+    // Wait past the 20ms deadline so the timer fires + the abort unwinds.
+    await new Promise((r) => setTimeout(r, 60));
+    await flushDrain();
+
+    expect(sawAbort).toBe(true);
+    expect(status(db, id)).toBe('timeout');
+    // The judge must never have run (capture was aborted before producing usable PNGs).
+    expect(judge.judge).not.toHaveBeenCalled();
+    const row = db
+      .prepare('SELECT error_message, ended_at FROM verification_requests WHERE id = ?')
+      .get(id) as { error_message: string; ended_at: string };
+    expect(row.error_message).toBe('request timed out');
+    expect(row.ended_at).not.toBeNull();
+    // The screen lease was released in finally → reacquirable.
+    expect(mutex.isLocked(VERIFY_SCREEN_LEASE)).toBe(false);
+  });
+
+  it('cancelForRun aborts an in-flight capture and marks it timeout (lease released)', async () => {
+    const mutex = new Mutex();
+    const pool = new ResourceLeasePool(mutex);
+    let sawAbort = false;
+    // A backend that hangs forever unless aborted (no timeout in this test — cancel drives it).
+    const hanging = fakeBackend({
+      id: 'peekaboo',
+      rung: 2,
+      lease: VERIFY_SCREEN_LEASE,
+      capture: (_ctx, signal) =>
+        new Promise<CaptureResult>((resolve) => {
+          signal.addEventListener('abort', () => {
+            sawAbort = true;
+            resolve({ ok: false, fileNames: [], error: 'aborted' });
+          });
+        }),
+    });
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { peekaboo: hanging },
+      judge: fakeJudge(),
+      artifactsDirResolver: (runId) => `/tmp/${runId}`,
+      leasePool: pool,
+      requestTimeoutMs: 60_000, // long — cancel, not the deadline, ends it
+    });
+    const id = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'native-desktop',
+      input: { intent: 'x' },
+      chain: ['peekaboo'],
+    });
+
+    // Let the drain lease + start the capture (now 'running', in-flight registered).
+    await flushDrain();
+    expect(status(db, id)).toBe('running');
+    expect(mutex.isLocked(VERIFY_SCREEN_LEASE)).toBe(true); // lease held by the in-flight capture
+
+    const canceled = sched.cancelForRun('run-1');
+    expect(canceled).toBe(1); // the running row was swept
+    // Let the aborted capture unwind + release the lease.
+    await flushDrain();
+
+    expect(sawAbort).toBe(true);
+    expect(status(db, id)).toBe('timeout');
+    expect(mutex.isLocked(VERIFY_SCREEN_LEASE)).toBe(false);
+  });
+
+  it('cancelForRun cancels a mix of queued + running non-terminal rows, leaving terminal ones', async () => {
+    // Insert rows directly so we control statuses precisely (no drain).
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge(),
+      artifactsDirResolver: (runId) => `/tmp/${runId}`,
+      leasePool: new ResourceLeasePool(new Mutex()),
+    });
+    db.prepare(
+      `INSERT INTO verification_requests (id, run_id, project_id, status, verify_type, deliverable_json)
+       VALUES ('q1', 'run-1', 1, 'queued', 'static-render-snapshot', '{"intent":"a"}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO verification_requests (id, run_id, project_id, status, verify_type, deliverable_json)
+       VALUES ('r1', 'run-1', 1, 'running', 'static-render-snapshot', '{"intent":"b"}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO verification_requests (id, run_id, project_id, status, verify_type, deliverable_json)
+       VALUES ('p1', 'run-1', 1, 'passed', 'static-render-snapshot', '{"intent":"c"}')`,
+    ).run();
+    // A different run must be untouched.
+    seedRun(db, 'run-2');
+    db.prepare(
+      `INSERT INTO verification_requests (id, run_id, project_id, status, verify_type, deliverable_json)
+       VALUES ('q2', 'run-2', 1, 'queued', 'static-render-snapshot', '{"intent":"d"}')`,
+    ).run();
+
+    const canceled = sched.cancelForRun('run-1');
+    expect(canceled).toBe(2); // queued + running swept
+    expect(status(db, 'q1')).toBe('timeout');
+    expect(status(db, 'r1')).toBe('timeout');
+    expect(status(db, 'p1')).toBe('passed'); // terminal untouched
+    expect(status(db, 'q2')).toBe('queued'); // other run untouched
+  });
+
+  it('runRecovery re-drains orphaned leased/running rows to timeout on init', async () => {
+    // Simulate rows stranded by a PRIOR process: leased + running, plus terminal
+    // and queued rows that must be left as-is.
+    db.prepare(
+      `INSERT INTO verification_requests (id, run_id, project_id, status, verify_type, deliverable_json, leased_at)
+       VALUES ('leased1', 'run-1', 1, 'leased', 'native-desktop', '{"intent":"a"}', ?)`,
+    ).run(new Date().toISOString());
+    db.prepare(
+      `INSERT INTO verification_requests (id, run_id, project_id, status, verify_type, deliverable_json)
+       VALUES ('running1', 'run-1', 1, 'running', 'static-render-snapshot', '{"intent":"b"}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO verification_requests (id, run_id, project_id, status, verify_type, deliverable_json)
+       VALUES ('queued1', 'run-1', 1, 'queued', 'static-render-snapshot', '{"intent":"c"}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO verification_requests (id, run_id, project_id, status, verify_type, deliverable_json)
+       VALUES ('passed1', 'run-1', 1, 'passed', 'static-render-snapshot', '{"intent":"d"}')`,
+    ).run();
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge(),
+      artifactsDirResolver: (runId) => `/tmp/${runId}`,
+      leasePool: new ResourceLeasePool(new Mutex()),
+    });
+
+    const drained = sched.runRecovery();
+    expect(drained).toBe(2); // leased + running
+    expect(status(db, 'leased1')).toBe('timeout');
+    expect(status(db, 'running1')).toBe('timeout');
+    expect(status(db, 'queued1')).toBe('queued'); // a fresh queued row is still drainable
+    expect(status(db, 'passed1')).toBe('passed'); // terminal untouched
+    const row = db
+      .prepare('SELECT error_message, ended_at FROM verification_requests WHERE id = ?')
+      .get('leased1') as { error_message: string; ended_at: string };
+    expect(row.error_message).toBe('orphaned by process restart');
+    expect(row.ended_at).not.toBeNull();
+    // Idempotent: a second pass finds nothing.
+    expect(sched.runRecovery()).toBe(0);
   });
 
   it('fires the onVerdict hook with the terminal outcome', async () => {
