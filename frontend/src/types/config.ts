@@ -1,5 +1,6 @@
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import type { VisualVerifyConfig } from '../../../shared/types/visualVerification';
 
 export interface AppConfig {
   gitRepoPath: string;
@@ -20,6 +21,9 @@ export interface AppConfig {
   // snapshot). Relative paths resolve against the project ROOT; absolute paths
   // are used verbatim. Floors to '.cyboflow/artifacts' when unset.
   artifactCommitDir?: string;
+  // Layered visual verification settings (see shared/types/visualVerification.ts).
+  // Master switch defaults OFF; the ConfigManager getter applies floors.
+  visualVerify?: VisualVerifyConfig;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;

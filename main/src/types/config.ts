@@ -1,6 +1,7 @@
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
+import type { VisualVerifyConfig } from '../../../shared/types/visualVerification';
 
 export interface AppConfig {
   verbose?: boolean;
@@ -36,6 +37,11 @@ export interface AppConfig {
   // are used verbatim. Floors to DEFAULT_ARTIFACT_COMMIT_DIR ('.cyboflow/artifacts')
   // when unset. Intentionally NOT seeded into constructor defaults (byte-identical).
   artifactCommitDir?: string;
+  // Layered visual verification settings (see shared/types/visualVerification.ts
+  // and docs/visual-verification-design.md). Master switch defaults OFF. Like the
+  // other globals, intentionally NOT seeded into constructor defaults so existing
+  // config.json files stay byte-identical; the ConfigManager getter applies floors.
+  visualVerify?: VisualVerifyConfig;
   // Theme preference
   theme?: 'paper' | 'light' | 'dark';
   // Notification settings
@@ -105,6 +111,8 @@ export interface UpdateConfigRequest {
   programmaticSupervisor?: 'review-queue' | 'sdk';
   // On-disk location for COMMITTED-artifact manifests (see AppConfig.artifactCommitDir).
   artifactCommitDir?: string;
+  // Layered visual verification settings (see AppConfig.visualVerify).
+  visualVerify?: VisualVerifyConfig;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;

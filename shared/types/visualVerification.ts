@@ -265,3 +265,63 @@ export function isVerificationType(v: unknown): v is VerificationType {
     v === 'mobile-flow'
   );
 }
+
+/**
+ * The persisted `AppConfig.visualVerify` block (P2). Every member is OPTIONAL so
+ * an absent block (the default) keeps config.json byte-identical — the
+ * ConfigManager getter applies the floors below. Both the main process (resolver,
+ * scheduler, judge) and the renderer (Settings) import this shape so it stays a
+ * single contract. `defaultType` participates in the verification-type override
+ * ladder (below the agent-declared type, above the inferred default).
+ */
+export interface VisualVerifyConfig {
+  /** Global master switch. Default OFF — no request is ever enqueued when false. */
+  enabled?: boolean;
+  /** Project/AppConfig-default verification type (override-ladder rung). */
+  defaultType?: VerificationType;
+  /** Below this confidence the VlmJudge verdict is forced to 'low_confidence'. Default 0.7. */
+  vlmConfidenceThreshold?: number;
+  /** Per-run cap on VlmJudge (vision) calls — bounds 2026 Agent-SDK billing. Default 4. */
+  maxPerRunJudgeCalls?: number;
+  /** Dev-server port pool the ResourceLeasePool serializes web captures over (verify:port:<p>). */
+  devServerPorts?: number[];
+  /** Simulator device ids for the maestro/mobile pool. Default [] (mobile inert until provisioned). */
+  simulatorDevices?: string[];
+}
+
+/**
+ * The fully-resolved visualVerify block, every field present — the return shape
+ * of ConfigManager.getVisualVerifyConfig(). Mirrors VisualVerifyConfig with all
+ * optionals made required after the ConfigManager applies VISUAL_VERIFY_DEFAULTS.
+ */
+export interface ResolvedVisualVerifyConfig {
+  enabled: boolean;
+  defaultType: VerificationType;
+  vlmConfidenceThreshold: number;
+  maxPerRunJudgeCalls: number;
+  devServerPorts: number[];
+  simulatorDevices: string[];
+}
+
+/**
+ * The default dev-server port pool — 5 ports (= SPRINT_BATCH_CAP, one per
+ * concurrent sprint lane) so port-bound web captures never out-contend the lane
+ * fan-out. Common Vite / CRA / Next / generic dev ports; users override via
+ * AppConfig.visualVerify.devServerPorts.
+ */
+export const DEFAULT_VERIFY_DEV_PORTS: readonly number[] = [5173, 3000, 4173, 8080, 4321] as const;
+
+/**
+ * The floors ConfigManager.getVisualVerifyConfig() applies when a member of the
+ * persisted block is absent. `enabled` floors to false (master switch OFF by
+ * default); the rest mirror the design doc (#7). Kept here so the contract +
+ * defaults live in one reviewed place.
+ */
+export const VISUAL_VERIFY_DEFAULTS: ResolvedVisualVerifyConfig = {
+  enabled: false,
+  defaultType: 'static-render-snapshot',
+  vlmConfidenceThreshold: 0.7,
+  maxPerRunJudgeCalls: 4,
+  devServerPorts: [...DEFAULT_VERIFY_DEV_PORTS],
+  simulatorDevices: [],
+};
