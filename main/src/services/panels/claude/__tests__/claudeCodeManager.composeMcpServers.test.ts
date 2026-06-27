@@ -244,3 +244,113 @@ describe('ClaudeCodeManager.composeMcpServers — eager node path resolution', (
     expect(cyboflow.env.CYBOFLOW_RUN_ID).toBe('sess-uuid');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Per-session MCP deny-list (migration 036 / Slice 4 — read-at-spawn).
+// composeMcpServers deletes each name in sessions.disabled_mcp_servers_json from
+// the composed record, NEVER the 'cyboflow' entry; an empty/missing/malformed
+// list is byte-identical to the prior behavior.
+// ---------------------------------------------------------------------------
+
+describe('ClaudeCodeManager.composeMcpServers — per-session MCP deny-list', () => {
+  let db: Database.Database;
+  let loggerSpy: ReturnType<typeof createLoggerSpy>;
+
+  beforeEach(() => {
+    db = createTestDb();
+    loggerSpy = createLoggerSpy();
+    findNodeExecutableMock.mockReset();
+    findNodeExecutableMock.mockResolvedValue('/mock/path/node');
+    const adapter = dbAdapter(db);
+    ApprovalRouter.initialize(adapter);
+  });
+
+  afterEach(() => {
+    ApprovalRouter._resetForTesting();
+    db.close();
+    vi.clearAllMocks();
+  });
+
+  // Build a manager whose getDbSession returns the given row, so the deny-list
+  // column can be controlled per test.
+  function makeManagerWithSession(dbRow: Record<string, unknown>): TestableClaudeCodeManager {
+    const sessionManager = {
+      getDbSession: vi.fn(() => dbRow),
+      getPanelClaudeSessionId: vi.fn(() => undefined),
+      getProjectById: vi.fn(() => undefined),
+      updateSession: vi.fn(),
+    } as unknown as SessionManager;
+    return new TestableClaudeCodeManager(
+      sessionManager,
+      loggerSpy as unknown as Logger,
+      {
+        getSystemPromptAppend: vi.fn(() => undefined),
+        getConfig: vi.fn(() => ({ verbose: false })),
+      } as unknown as import('../../../configManager').ConfigManager,
+      db,
+    );
+  }
+
+  // Inject base project MCP servers (getBaseProjectMcpServers normally reads the
+  // FS; stub it so the deny-list filter has something to remove without FS).
+  function stubBaseServers(mgr: TestableClaudeCodeManager, servers: Record<string, unknown>): void {
+    vi.spyOn(
+      mgr as unknown as {
+        getBaseProjectMcpServers(sessionId: string): { mcpServers: Record<string, unknown> };
+      },
+      'getBaseProjectMcpServers',
+    ).mockReturnValue({ mcpServers: { ...servers } });
+  }
+
+  it('removes a disabled MCP server from the composed record (leaves others)', async () => {
+    const mgr = makeManagerWithSession({ id: 's1', disabled_mcp_servers_json: JSON.stringify(['peekaboo']) });
+    stubBaseServers(mgr, { peekaboo: { command: 'peekaboo' }, ripgrep: { command: 'rg' } });
+
+    const result = await mgr.publicComposeMcpServers('s1');
+
+    expect(result).not.toHaveProperty('peekaboo');
+    expect(result).toHaveProperty('ripgrep');
+    expect(loggerSpy.info).toHaveBeenCalledWith(expect.stringContaining('Removed disabled MCP server'));
+  });
+
+  it("never removes the 'cyboflow' server even when it is in the deny-list", async () => {
+    // orchSocket is deliberately NOT set, so no injection happens — the filter
+    // itself must skip 'cyboflow'.
+    const mgr = makeManagerWithSession({ id: 's1', disabled_mcp_servers_json: JSON.stringify(['cyboflow', 'peekaboo']) });
+    stubBaseServers(mgr, { cyboflow: { command: 'pre-existing' }, peekaboo: { command: 'p' }, ripgrep: { command: 'rg' } });
+
+    const result = await mgr.publicComposeMcpServers('s1');
+
+    expect(result).toHaveProperty('cyboflow'); // skipped by the guard, never deleted
+    expect(result).toHaveProperty('ripgrep');
+    expect(result).not.toHaveProperty('peekaboo'); // a non-cyboflow deny still applies
+  });
+
+  it('empty [] deny-list leaves the composed record byte-identical', async () => {
+    const mgr = makeManagerWithSession({ id: 's1', disabled_mcp_servers_json: '[]' });
+    stubBaseServers(mgr, { peekaboo: { command: 'p' }, ripgrep: { command: 'rg' } });
+
+    const result = await mgr.publicComposeMcpServers('s1');
+
+    expect(result).toEqual({ peekaboo: { command: 'p' }, ripgrep: { command: 'rg' } });
+    expect(loggerSpy.info).not.toHaveBeenCalledWith(expect.stringContaining('Removed disabled MCP server'));
+  });
+
+  it('missing column → no removal (byte-identical legacy path)', async () => {
+    const mgr = makeManagerWithSession({ id: 's1' }); // no disabled_mcp_servers_json
+    stubBaseServers(mgr, { peekaboo: { command: 'p' } });
+
+    const result = await mgr.publicComposeMcpServers('s1');
+
+    expect(result).toEqual({ peekaboo: { command: 'p' } });
+  });
+
+  it('malformed JSON in the deny-list column → no removal', async () => {
+    const mgr = makeManagerWithSession({ id: 's1', disabled_mcp_servers_json: 'not-json' });
+    stubBaseServers(mgr, { peekaboo: { command: 'p' } });
+
+    const result = await mgr.publicComposeMcpServers('s1');
+
+    expect(result).toEqual({ peekaboo: { command: 'p' } });
+  });
+});

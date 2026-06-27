@@ -1,0 +1,33 @@
+-- Migration 036: per-session MCP-disable / plugin-enable toggles.
+--
+-- Two JSON-string-array columns on the legacy `sessions` table, both read at SDK
+-- spawn time (claudeCodeManager.resolveSessionDisabledMcps /
+-- resolveSessionEnabledPlugins) so a change applies on the NEXT turn with no
+-- respawn — mirroring the agent_permission_mode read-at-spawn precedent.
+--
+--   disabled_mcp_servers_json — JSON string[] of MCP server NAMES DISABLED for
+--     this session (a DENY list). '[]' (the DEFAULT) means nothing disabled, so
+--     every discovered server still loads — byte-identical to prior behavior.
+--     composeMcpServers deletes each listed name from the spawn record, NEVER the
+--     single-writer 'cyboflow' entry.
+--   enabled_plugins_json — JSON string[] of plugin ids force-ENABLED for this
+--     session (an ALLOW list). '[]' (the DEFAULT) means inherit the user's file
+--     settings — no enabledPlugins key is emitted into the inline SDK settings
+--     overlay, so file-loaded plugins are untouched.
+--
+-- Validation (string[] shape) is enforced IN CODE at the write chokepoint
+-- (Slice 5's IPC handlers), mirroring the enum/shape-in-code pattern of the
+-- other session toggle columns (021/027/031).
+--
+-- NOTE: No explicit BEGIN/COMMIT here — runFileBasedMigrations() in database.ts
+-- wraps every file in a this.transaction(...) call, so an inner BEGIN would nest.
+--
+-- Idempotency: SQLite has no ADD COLUMN IF NOT EXISTS; a re-run after a ledger
+-- reset throws "duplicate column name", which runFileBasedMigrations() catches as
+-- idempotent-ok (filename-keyed ledger).
+--
+-- `sessions` is a legacy schema.sql table excluded from entitySchemaParity, so
+-- this migration needs no parity-test edit.
+
+ALTER TABLE sessions ADD COLUMN disabled_mcp_servers_json TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE sessions ADD COLUMN enabled_plugins_json TEXT NOT NULL DEFAULT '[]';

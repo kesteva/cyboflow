@@ -90,6 +90,20 @@ export interface Session {
    * Written by sessions:create-quick (migration 029); NULL → no effort.
    */
   effort?: 'ultracode';
+  /**
+   * Per-session MCP DENY list (migration 036) — JSON string[] of MCP server
+   * NAMES disabled for this session. '[]'/NULL → nothing disabled (all servers
+   * load). Read at SDK spawn by resolveSessionDisabledMcps; the 'cyboflow' entry
+   * is never removable. Next-turn apply.
+   */
+  disabled_mcp_servers_json?: string;
+  /**
+   * Per-session plugin ALLOW list (migration 036) — JSON string[] of plugin ids
+   * force-enabled for this session. '[]'/NULL → inherit file settings (no
+   * enabledPlugins key emitted). Read at SDK spawn by resolveSessionEnabledPlugins.
+   * Next-turn apply.
+   */
+  enabled_plugins_json?: string;
 }
 
 export interface SessionOutput {
@@ -146,6 +160,8 @@ export interface UpdateSessionData {
   commit_mode?: 'structured' | 'checkpoint' | 'disabled';
   commit_mode_settings?: string; // JSON string of CommitModeSettings
   agent_permission_mode?: PermissionMode;
+  disabled_mcp_servers_json?: string; // JSON string[] of disabled MCP server names (migration 036)
+  enabled_plugins_json?: string; // JSON string[] of force-enabled plugin ids (migration 036)
   skip_continue_next?: boolean;
 }
 
