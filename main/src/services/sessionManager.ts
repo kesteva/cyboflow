@@ -45,6 +45,23 @@ import { addSessionLog, cleanupSessionLogs } from '../ipc/logs';
 import { withLock } from '../utils/mutex';
 import { panelManager } from './panelManager';
 
+/**
+ * Parse a JSON-string-array session column (migration 036's
+ * disabled_mcp_servers_json / enabled_plugins_json) into a `string[]`. Returns
+ * undefined when the column is NULL/empty/malformed or not a string array, so a
+ * default row maps to the no-op default (undefined → the pills seed `[]`).
+ */
+function parseStringArrayColumn(raw: string | undefined | null): string[] | undefined {
+  if (!raw) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return undefined;
+    return parsed.filter((x): x is string => typeof x === 'string');
+  } catch {
+    return undefined;
+  }
+}
+
 export class SessionManager extends EventEmitter {
   private activeSessions: Map<string, Session> = new Map();
   private runningScriptProcess: ChildProcess | null = null;
@@ -218,7 +235,14 @@ export class SessionManager extends EventEmitter {
       runId: dbSession.run_id ?? null,
       substrate: dbSession.substrate,
       effort: dbSession.effort,
-      agentPermissionMode: dbSession.agent_permission_mode
+      agentPermissionMode: dbSession.agent_permission_mode,
+      // Per-session MCP/plugin toggles (migration 036). Parse the JSON columns
+      // into the runtime arrays the composer pills seed from; malformed/missing
+      // JSON degrades to undefined (the byte-identical default — nothing disabled,
+      // file plugins inherited). The columns themselves are read directly off the
+      // DB row at SDK spawn (claudeCodeManager), not via this runtime object.
+      disabledMcpServers: parseStringArrayColumn(dbSession.disabled_mcp_servers_json),
+      enabledPlugins: parseStringArrayColumn(dbSession.enabled_plugins_json)
     };
   }
 

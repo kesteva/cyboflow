@@ -147,6 +147,8 @@ interface ElectronAPI {
     toggleFavorite: (sessionId: string) => Promise<IPCResponse<void>>;
     toggleAutoCommit: (sessionId: string) => Promise<IPCResponse<void>>;
     updateAgentPermissionMode: (sessionId: string, mode: PermissionMode) => Promise<IPCResponse<void>>;
+    updateSessionMcps: (sessionId: string, disabledMcpServers: string[]) => Promise<IPCResponse<void>>;
+    updateSessionPlugins: (sessionId: string, enabledPlugins: string[]) => Promise<IPCResponse<void>>;
 
     // Main repo session
     getOrCreateMainRepoSession: (projectId: number) => Promise<IPCResponse<Session>>;

@@ -8,13 +8,32 @@ const mockSendInput = vi.fn();
 const mockGetModel = vi.fn();
 const mockGetFastMode = vi.fn();
 const mockSetFastMode = vi.fn();
+const mockUpdateSessionMcps = vi.fn();
+const mockUpdateSessionPlugins = vi.fn();
 vi.mock('../../../../utils/api', () => ({
   API: {
-    sessions: { sendInput: (id: string, text: string) => mockSendInput(id, text) },
+    sessions: {
+      sendInput: (id: string, text: string) => mockSendInput(id, text),
+      updateSessionMcps: (...args: unknown[]) => mockUpdateSessionMcps(...args),
+      updateSessionPlugins: (...args: unknown[]) => mockUpdateSessionPlugins(...args),
+    },
     claudePanels: {
       getModel: (id: string) => mockGetModel(id),
       getFastMode: (id: string) => mockGetFastMode(id),
       setFastMode: (id: string, v: boolean) => mockSetFastMode(id, v),
+    },
+  },
+}));
+
+// The MCP/plugin toggle pills (idle-SDK slots) query the read-only catalogue on
+// mount; stub the tRPC client so the composer renders without a real IPC bridge.
+const mockMcpsList = vi.fn();
+const mockPluginsList = vi.fn();
+vi.mock('../../../../trpc/client', () => ({
+  trpc: {
+    cyboflow: {
+      mcps: { list: { query: (...args: unknown[]) => mockMcpsList(...args) } },
+      plugins: { list: { query: (...args: unknown[]) => mockPluginsList(...args) } },
     },
   },
 }));
@@ -96,6 +115,10 @@ beforeEach(() => {
   mockGetModel.mockReset().mockResolvedValue({ success: true, data: 'sonnet' });
   mockGetFastMode.mockReset().mockResolvedValue({ success: true, data: false });
   mockSetFastMode.mockReset().mockResolvedValue({ success: true });
+  mockUpdateSessionMcps.mockReset().mockResolvedValue({ success: true });
+  mockUpdateSessionPlugins.mockReset().mockResolvedValue({ success: true });
+  mockMcpsList.mockReset().mockResolvedValue([]);
+  mockPluginsList.mockReset().mockResolvedValue([]);
 });
 
 describe('QuickSessionComposer — SDK', () => {
@@ -131,6 +154,36 @@ describe('QuickSessionComposer — Opus-only fast-mode pill', () => {
     // The model pill confirms the composer toolbar has rendered…
     await waitFor(() => expect(mockGetModel).toHaveBeenCalled());
     expect(screen.queryByTestId('composer-fast-mode-pill')).toBeNull();
+  });
+});
+
+describe('QuickSessionComposer — MCP / plugin toggle pills', () => {
+  it('renders both toggle pills for an idle SDK session', async () => {
+    render(<Harness session={makeSession({ status: 'ready' })} interactive={false} />);
+    expect(await screen.findByText('MCP')).toBeInTheDocument();
+    expect(screen.getByText('Plugins')).toBeInTheDocument();
+  });
+
+  it('reflects the session row deny-set / allow-set in the pill labels', async () => {
+    render(
+      <Harness
+        session={makeSession({
+          status: 'ready',
+          disabledMcpServers: ['peekaboo'],
+          enabledPlugins: ['demo@local'],
+        })}
+        interactive={false}
+      />,
+    );
+    expect(await screen.findByText('MCP · 1 off')).toBeInTheDocument();
+    expect(screen.getByText('Plugins · 1')).toBeInTheDocument();
+  });
+
+  it('hides the toggle pills while the SDK session is running', async () => {
+    render(<Harness session={makeSession({ status: 'running' })} interactive={false} />);
+    expect(screen.queryByText('MCP')).toBeNull();
+    expect(screen.queryByText('Plugins')).toBeNull();
+    await waitFor(() => expect(mockGetModel).toHaveBeenCalled()); // flush the model fetch
   });
 });
 
