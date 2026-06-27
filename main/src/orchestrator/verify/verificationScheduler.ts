@@ -158,6 +158,13 @@ export type OnVerdict = (args: {
   status: RequestStatus;
   verdict?: VerdictV1;
   fileNames: string[];
+  /**
+   * The original request input (parsed from deliverable_json) — carries
+   * `taskRef` for the merge-gate driver's verdict→lane attribution (P8b). Present
+   * for every delivered outcome whose row parsed; an unparseable-deliverable skip
+   * passes undefined (there is no lane to attribute and nothing to enrich).
+   */
+  input?: VerificationRequestInput;
 }) => void | Promise<void>;
 
 /** The dependency bag VerificationScheduler.initialize takes. */
@@ -424,7 +431,7 @@ export class VerificationScheduler {
       this.markTerminal(row.id, 'skipped', {
         error: chain.length === 0 ? 'empty chain' : 'no listed backend available',
       });
-      await this.deliver(row, 'skipped', undefined, []);
+      await this.deliver(row, 'skipped', undefined, [], input);
       return { work: null };
     }
 
@@ -538,7 +545,7 @@ export class VerificationScheduler {
           backend: backend.id,
           error: capture.error ?? 'capture produced no images',
         });
-        await this.deliver(row, 'failed', undefined, []);
+        await this.deliver(row, 'failed', undefined, [], input);
         return;
       }
 
@@ -556,7 +563,7 @@ export class VerificationScheduler {
 
       const status = this.statusFromVerdict(verdict);
       this.markTerminal(row.id, status, { backend: backend.id, verdict });
-      await this.deliver(row, status, verdict, fileNames);
+      await this.deliver(row, status, verdict, fileNames, input);
     } catch (err) {
       controller.abort();
       const message = err instanceof Error ? err.message : String(err);
@@ -566,7 +573,7 @@ export class VerificationScheduler {
         backend: backend.id,
         error: message,
       });
-      await this.deliver(row, 'failed', undefined, fileNames);
+      await this.deliver(row, 'failed', undefined, fileNames, input);
     } finally {
       lease.release();
     }
@@ -685,6 +692,7 @@ export class VerificationScheduler {
     status: RequestStatus,
     verdict: VerdictV1 | undefined,
     fileNames: string[],
+    input?: VerificationRequestInput,
   ): Promise<void> {
     if (!this.onVerdict) return;
     try {
@@ -696,6 +704,7 @@ export class VerificationScheduler {
         status,
         verdict,
         fileNames,
+        input,
       });
     } catch (err) {
       this.logger?.error('[VerificationScheduler] onVerdict hook threw', {

@@ -56,8 +56,15 @@ describe('built-in workflow bundles', () => {
  * returns immediately; never mutates workflow state), so it does NOT break the
  * single-writer invariant — "subagents request, never mutate". Every OTHER
  * `cyboflow_*` reference in a subagent is still forbidden below.
+ *
+ * A subagent references it in TWO forms: the fully-qualified frontmatter grant
+ * (`mcp__cyboflow__cyboflow_request_verification`) AND the bare call name in prose
+ * (`cyboflow_request_verification(...)`, the visual merge-gate usage example — P8b).
+ * Both are sanctioned; the strip removes the fully-qualified form FIRST (the bare
+ * name is its substring), then any remaining bare occurrences.
  */
 const SANCTIONED_SUBAGENT_TOOL = 'mcp__cyboflow__cyboflow_request_verification';
+const SANCTIONED_SUBAGENT_TOOL_BARE = 'cyboflow_request_verification';
 
 /**
  * Every phase subagent carries name + description + tools frontmatter, returns a
@@ -75,9 +82,14 @@ function assertAgentShape(agents: { name: string; content: string }[]): void {
       /^---[\s\S]*name:[\s\S]*description:[\s\S]*tools:/,
     );
     expect(agent.content, `${agent.name} returns a Result block`).toContain('## Result');
-    // Strip the one sanctioned request-only grant, then assert NO other cyboflow_*
-    // tool is referenced (the single-writer invariant for mutating tools).
-    const withoutSanctioned = agent.content.split(SANCTIONED_SUBAGENT_TOOL).join('');
+    // Strip the one sanctioned request-only grant (fully-qualified frontmatter
+    // form FIRST, then any remaining bare prose call), then assert NO other
+    // cyboflow_* tool is referenced (the single-writer invariant for mutating tools).
+    const withoutSanctioned = agent.content
+      .split(SANCTIONED_SUBAGENT_TOOL)
+      .join('')
+      .split(SANCTIONED_SUBAGENT_TOOL_BARE)
+      .join('');
     expect(withoutSanctioned, `${agent.name} must not call any state-mutating cyboflow_* tool`).not.toMatch(
       /cyboflow_/,
     );

@@ -121,6 +121,17 @@ export interface SprintBatchTaskRow {
  * report through `cyboflow_update_sprint_task` (`current_step` enum). These
  * are LANE steps inside the single 'execute-tasks' workflow step — NOT
  * workflow step ids — and mirror the historical per-task sprint pipeline.
+ *
+ * `awaiting-verify` (locked decision #2 — the visual merge-gate) is the PARK
+ * step a lane sits on AFTER it has fired a `cyboflow_request_verification` and
+ * BEFORE the asynchronous verdict lands. It is ordered AFTER `visual-verify`
+ * (the dispatch step) so the monotonic-forward guard in
+ * deriveLaneFromTaskDispatch never regresses a parked lane, and the merge-gate
+ * driver (verify/mergeGateLaneAdvance.ts) reads the verdict and drives the lane
+ * off it: PASS → `integrated`; FAIL (under the 3× cap) → back to `implement`
+ * with a bumped attempt; FAIL (cap reached) → `failed`. The vocabulary stays a
+ * SUPERSET of the historical pipeline, so a verify-disabled run that never
+ * parks here is byte-identical to the pre-merge-gate behavior.
  */
 export const SPRINT_LANE_STEP_IDS = [
   'implement',
@@ -128,8 +139,17 @@ export const SPRINT_LANE_STEP_IDS = [
   'code-review',
   'task-verify',
   'visual-verify',
+  'awaiting-verify',
 ] as const;
 export type SprintLaneStepId = (typeof SPRINT_LANE_STEP_IDS)[number];
+
+/**
+ * The lane park step for the visual merge-gate (locked decision #2). A lane that
+ * fired a verification request sits here until the verdict drives it off via the
+ * merge-gate driver. Exported as a named const (not a bare string literal) so the
+ * driver, the prompts, and the tests share ONE source of truth.
+ */
+export const AWAITING_VERIFY_STEP: SprintLaneStepId = 'awaiting-verify';
 
 /**
  * Read-model for a single task lane (SprintLaneStore.listLanes /

@@ -103,11 +103,26 @@ message); as each returns, you continue that task's chain.
    second) in the same `cyboflow_update_sprint_task` call that moves the lane's
    `current_step` back to `implement`.
 5. **visual-verify** (optional) → when visual verification is enabled, delegate to
-   `cyboflow-visual-verify`; otherwise skip. On `VERDICT: FAIL`, loop back to
-   `cyboflow-implement` with its `## Visual check` notes, or record a finding via
-   `cyboflow_report_finding` when the regression is out of scope. Verify-phase findings
-   must carry a `severity`; when a regression traces to already-merged work, set
-   `category: 'post-merge-bug'`.
+   `cyboflow-visual-verify`; otherwise skip. The subagent FIRES a verification
+   request (`cyboflow_request_verification`, passing this lane's `task_ref`) and
+   returns immediately — it does NOT wait for the verdict. Move the lane to the
+   `awaiting-verify` step via `cyboflow_update_sprint_task` (`current_step:
+   'awaiting-verify'`): this is the **visual merge-gate**. The main-process verifier
+   captures + judges the deliverable asynchronously and drives the lane off the park
+   step for you — **PASS** advances the lane toward `integrated`; **FAIL** loops the
+   lane back to `implement` with a bumped `attempt` and a BLOCKING finding carrying
+   the judge's `feedback` (up to 3× before the lane is marked `failed`); **low
+   confidence** raises a non-blocking "needs human visual review" finding and lets
+   the lane proceed. When you observe a lane the gate looped back to `implement` (its
+   `current_step` returned to `implement` with a higher `attempt` and a blocking
+   visual finding), RE-DELEGATE `cyboflow-implement` with that finding's feedback,
+   then re-fire `cyboflow_request_verification` — the same 3× loop as task-verify.
+   Do NOT advance a lane to `integrated`/commit until its visual merge-gate has
+   PASSED (or the run has visual verification disabled). A `VERDICT: SKIPPED` from
+   the subagent (not configured / missing precondition) is NOT a gate — proceed.
+   When a regression traces to already-merged work, the finding carries
+   `category: 'post-merge-bug'`. Batch integration of the shared worktree is held
+   until **all** lanes reach `integrated`.
 
 If a subagent comes back stuck (no usable result), re-delegate it **once** with a
 sharper, narrower scope; if it is still stuck, mark the lane `failed` and move on.

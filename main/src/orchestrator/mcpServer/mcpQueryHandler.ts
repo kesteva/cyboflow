@@ -264,6 +264,14 @@ export type McpQueryMessage =
       /** Responsive viewport list (camelCase wire); passed through UNVALIDATED — narrowed by the handler. */
       viewports?: unknown;
       baselineKey?: string;
+      /**
+       * The lane's display ref (e.g. "TASK-008") or opaque task id — verdict→lane
+       * attribution for the visual merge-gate (locked decision #2). Carried into
+       * deliverable_json so the async verdict can be driven onto the right lane in a
+       * multi-lane sprint batch. Optional (single-lane batches attribute by being
+       * the only lane; non-sprint runs have no gate).
+       */
+      taskRef?: string;
     }
   | {
       type: 'shell-approval-request';
@@ -1994,6 +2002,9 @@ export class McpQueryHandler {
     if (typeof msg.url === 'string') input.url = msg.url;
     if (typeof msg.htmlPath === 'string') input.htmlPath = msg.htmlPath;
     if (typeof msg.baselineKey === 'string') input.baselineKey = msg.baselineKey;
+    // taskRef threads the lane attribution into deliverable_json so the async
+    // merge-gate verdict can be driven onto the right lane (multi-lane batches).
+    if (typeof msg.taskRef === 'string' && msg.taskRef.length > 0) input.taskRef = msg.taskRef;
     const viewports = this.parseViewports(msg.viewports);
     if (viewports !== undefined) input.viewports = viewports;
 

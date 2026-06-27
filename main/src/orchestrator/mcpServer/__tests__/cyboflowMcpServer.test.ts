@@ -328,13 +328,15 @@ describe('cyboflowMcpServer ListTools cyboflow_update_sprint_task', () => {
       'failed',
       'blocked',
     ]);
-    // The fixed per-task lane step vocabulary (SPRINT_LANE_STEP_IDS).
+    // The per-task lane step vocabulary (SPRINT_LANE_STEP_IDS) — includes the
+    // visual merge-gate park step 'awaiting-verify' (P8b).
     expect(schema.properties['current_step'].enum).toEqual([
       'implement',
       'write-tests',
       'code-review',
       'task-verify',
       'visual-verify',
+      'awaiting-verify',
     ]);
     // The 1-based implement→verify retry counter (migration 025).
     expect(schema.properties['attempt'].type).toBe('number');
