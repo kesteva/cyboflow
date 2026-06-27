@@ -51,12 +51,23 @@ describe('built-in workflow bundles', () => {
 });
 
 /**
+ * The ONE sanctioned subagent-callable cyboflow MCP tool (visual-verification P6).
+ * It is request-only / fire-and-continue (enqueues a verification request and
+ * returns immediately; never mutates workflow state), so it does NOT break the
+ * single-writer invariant — "subagents request, never mutate". Every OTHER
+ * `cyboflow_*` reference in a subagent is still forbidden below.
+ */
+const SANCTIONED_SUBAGENT_TOOL = 'mcp__cyboflow__cyboflow_request_verification';
+
+/**
  * Every phase subagent carries name + description + tools frontmatter, returns a
- * `## Result` block, and NEVER touches a `cyboflow_*` MCP tool — the orchestrator
- * is the single writer of workflow state (subagents only do isolated side-work and
- * return a compact result). The `cyboflow_` (underscore) match is precise: agent
- * prose freely says "cyboflow Planner" / "cyboflow state" / `cyboflow-context`,
- * none of which contain the tool-name underscore.
+ * `## Result` block, and NEVER touches a STATE-MUTATING `cyboflow_*` MCP tool —
+ * the orchestrator is the single writer of workflow state (subagents only do
+ * isolated side-work and return a compact result). The lone exception is the
+ * request-only SANCTIONED_SUBAGENT_TOOL, which we strip before the guard so the
+ * underscore match stays precise: agent prose freely says "cyboflow Planner" /
+ * "cyboflow state" / `cyboflow-context`, none of which contain the tool-name
+ * underscore.
  */
 function assertAgentShape(agents: { name: string; content: string }[]): void {
   for (const agent of agents) {
@@ -64,6 +75,11 @@ function assertAgentShape(agents: { name: string; content: string }[]): void {
       /^---[\s\S]*name:[\s\S]*description:[\s\S]*tools:/,
     );
     expect(agent.content, `${agent.name} returns a Result block`).toContain('## Result');
-    expect(agent.content, `${agent.name} must not call any cyboflow_* tool`).not.toMatch(/cyboflow_/);
+    // Strip the one sanctioned request-only grant, then assert NO other cyboflow_*
+    // tool is referenced (the single-writer invariant for mutating tools).
+    const withoutSanctioned = agent.content.split(SANCTIONED_SUBAGENT_TOOL).join('');
+    expect(withoutSanctioned, `${agent.name} must not call any state-mutating cyboflow_* tool`).not.toMatch(
+      /cyboflow_/,
+    );
   }
 }

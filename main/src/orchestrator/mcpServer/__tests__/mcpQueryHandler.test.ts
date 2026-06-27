@@ -32,6 +32,8 @@ import { TaskChangeRouter, taskChangeEvents } from '../../taskChangeRouter';
 import { ReviewItemRouter, reviewItemChangeEvents } from '../../reviewItemRouter';
 import { SprintLaneStore, sprintLaneEvents, sprintLaneChannel } from '../../sprintLaneStore';
 import { ApprovalRouter } from '../../approvalRouter';
+import { VerificationScheduler } from '../../verify/verificationScheduler';
+import type { VerdictV1 } from '../../../../../shared/types/visualVerification';
 import type { WorkflowDefinition, WorkflowStepTransitionEvent } from '../../../../../shared/types/workflows';
 import type { SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
 import { handleEntityWrite } from '../../autoMintArtifacts';
@@ -3186,5 +3188,227 @@ describe('compound-run findings (mcp-get-selected-findings / mcp-resolve-finding
       expect(response.ok).toBe(false);
       expect(response.error).toBe('not_found');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mcp-request-verification (cyboflow_request_verification — P6)
+//
+// FIRE-AND-CONTINUE: enabled run → enqueue a verification_requests row + reply
+// { requestId }; disabled run → reply { skipped:true } (never an error). The
+// VerificationScheduler singleton is initialized with INJECTED fake backends /
+// judge so the test stays electron-free (the scheduler's standalone invariant).
+// ---------------------------------------------------------------------------
+
+describe('McpQueryHandler — mcp-request-verification', () => {
+  let vdb: Database.Database;
+  let vHandler: McpQueryHandler;
+
+  /** Seed a run with the migration-036 verify stamp applied inline. */
+  function seedVerifyRun(
+    db: Database.Database,
+    id: string,
+    opts: { enabled: boolean; type?: string | null; chain?: string[] | null; status?: string },
+  ): void {
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status, policy_json,
+                                  verify_enabled, verify_type, verify_chain)
+       VALUES (?, 'wf-1', 1, '/tmp/test', ?, '{}', ?, ?, ?)`,
+    ).run(
+      id,
+      opts.status ?? 'running',
+      opts.enabled ? 1 : 0,
+      opts.type ?? null,
+      opts.chain ? JSON.stringify(opts.chain) : null,
+    );
+  }
+
+  beforeEach(() => {
+    // includeWorkflowRunTaskColumns gives current_step_id + steps_snapshot_json,
+    // which resolveReviewItemRunContext SELECTs to derive the actor.
+    vdb = createTestDb({ disableForeignKeys: true, includeWorkflowRunTaskColumns: true });
+    // Layer migration 036's verify stamp columns + verification_requests table
+    // onto the GATE_SCHEMA test DB (the fixture stops before 036).
+    vdb.exec('ALTER TABLE workflow_runs ADD COLUMN verify_enabled INTEGER NOT NULL DEFAULT 0');
+    vdb.exec('ALTER TABLE workflow_runs ADD COLUMN verify_type TEXT');
+    vdb.exec('ALTER TABLE workflow_runs ADD COLUMN verify_chain TEXT');
+    vdb.exec(`
+      CREATE TABLE verification_requests (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        project_id INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        verify_type TEXT NOT NULL,
+        deliverable_json TEXT NOT NULL,
+        chain_json TEXT,
+        current_backend TEXT,
+        attempt INTEGER NOT NULL DEFAULT 0,
+        verdict_json TEXT,
+        error_message TEXT,
+        enqueued_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        leased_at DATETIME,
+        ended_at DATETIME
+      );
+    `);
+
+    VerificationScheduler._resetForTesting();
+    VerificationScheduler.initialize({
+      db: dbAdapter(vdb),
+      backends: {},
+      judge: { judge: vi.fn(async (): Promise<VerdictV1> => ({
+        status: 'pass',
+        confidence: 0.95,
+        issues: [],
+        feedback: 'ok',
+        judgedFileNames: [],
+        baselineUsed: false,
+        model: 'fake',
+      })) },
+      artifactsDirResolver: () => '/tmp/artifacts',
+    });
+
+    vHandler = new McpQueryHandler(dbAdapter(vdb));
+  });
+
+  afterEach(() => {
+    VerificationScheduler._resetForTesting();
+  });
+
+  it('enabled run → enqueues a verification_requests row and replies { requestId }', async () => {
+    seedVerifyRun(vdb, 'run-v1', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-1',
+        runId: 'run-v1',
+        intent: 'the toggle renders, default off',
+        url: 'http://localhost:5173',
+      },
+      socket,
+    );
+
+    // Wire-protocol framing
+    expect(writes[writes.length - 1].endsWith('\n')).toBe(true);
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const data = response.data as { requestId?: string; type?: string; skipped?: boolean };
+    expect(typeof data.requestId).toBe('string');
+    expect(data.requestId).toMatch(/^vr_/);
+    expect(data.type).toBe('static-render-snapshot');
+    expect(data.skipped).toBeUndefined();
+
+    // Exactly one queued row, carrying the resolved type + chain + deliverable.
+    const row = vdb
+      .prepare(
+        'SELECT id, run_id, project_id, status, verify_type, deliverable_json, chain_json FROM verification_requests WHERE id = ?',
+      )
+      .get(data.requestId) as
+      | {
+          id: string;
+          run_id: string;
+          project_id: number;
+          status: string;
+          verify_type: string;
+          deliverable_json: string;
+          chain_json: string;
+        }
+      | undefined;
+    expect(row).toBeDefined();
+    expect(row?.run_id).toBe('run-v1');
+    expect(row?.status).toBe('queued');
+    expect(row?.verify_type).toBe('static-render-snapshot');
+    expect(JSON.parse(row!.chain_json)).toEqual(['capturePage']);
+    expect(JSON.parse(row!.deliverable_json)).toEqual({
+      intent: 'the toggle renders, default off',
+      url: 'http://localhost:5173',
+    });
+  });
+
+  it('typeOverride NARROWS the chain to the override-type ∩ the run stamped chain', async () => {
+    // Run resolved interactive-web (chain playwright,peekaboo) but an override to
+    // static-render must intersect down to only the stamped backends that overlap.
+    seedVerifyRun(vdb, 'run-v2', {
+      enabled: true,
+      type: 'interactive-web-behavior',
+      chain: ['playwright', 'peekaboo'],
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-2',
+        runId: 'run-v2',
+        intent: 'static check',
+        typeOverride: 'static-render-snapshot',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const data = response.data as { requestId: string; type: string };
+    expect(data.type).toBe('static-render-snapshot');
+    const row = vdb
+      .prepare('SELECT chain_json FROM verification_requests WHERE id = ?')
+      .get(data.requestId) as { chain_json: string };
+    // static-render chain is [capturePage,playwright,peekaboo]; ∩ stamped
+    // [playwright,peekaboo] = [playwright,peekaboo] (capturePage dropped — not host-available).
+    expect(JSON.parse(row.chain_json)).toEqual(['playwright', 'peekaboo']);
+  });
+
+  it('disabled run → replies { skipped:true } and enqueues nothing (never an error)', async () => {
+    seedVerifyRun(vdb, 'run-v3', { enabled: false });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-3',
+        runId: 'run-v3',
+        intent: 'should be skipped',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    expect(response.data).toEqual({ skipped: true });
+
+    const count = vdb.prepare('SELECT COUNT(*) AS n FROM verification_requests').get() as { n: number };
+    expect(count.n).toBe(0);
+  });
+
+  it('terminal run → ok:false run_not_active (no enqueue)', async () => {
+    seedVerifyRun(vdb, 'run-v4', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+      status: 'completed',
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-4',
+        runId: 'run-v4',
+        intent: 'too late',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe('run_not_active');
+    const count = vdb.prepare('SELECT COUNT(*) AS n FROM verification_requests').get() as { n: number };
+    expect(count.n).toBe(0);
   });
 });

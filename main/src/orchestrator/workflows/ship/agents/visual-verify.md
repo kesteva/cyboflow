@@ -1,7 +1,7 @@
 ---
 name: cyboflow-visual-verify
 description: Sprint visual-verify subagent (optional). When visual verification is enabled, runs the configured snapshot diff over the affected UI and returns a verdict. Never writes cyboflow state.
-tools: Read, Grep, Glob, Bash
+tools: Read, Grep, Glob, Bash, mcp__cyboflow__cyboflow_request_verification
 ---
 
 You are the cyboflow Sprint **visual-verify** subagent, invoked only when visual

@@ -62,6 +62,16 @@ import { selectFindingForSeed } from '../reviewItemListing';
 import { ArtifactRouter, ArtifactError } from '../artifactRouter';
 import type { ArtifactActor } from '../artifactRouter';
 import type { ArtifactType } from '../../../../shared/types/artifacts';
+import { VerificationScheduler } from '../verify/verificationScheduler';
+import {
+  FALLBACK_CHAINS,
+  isVerificationType,
+} from '../../../../shared/types/visualVerification';
+import type {
+  VerificationType,
+  VerificationRequestInput,
+  VisualBackendId,
+} from '../../../../shared/types/visualVerification';
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../shared/types/sprintBatch';
 import type { SprintBatchTaskStatus, SprintLaneStepId } from '../../../../shared/types/sprintBatch';
@@ -233,6 +243,27 @@ export type McpQueryMessage =
       runId: string;
       artifactId: string;
       payloadJson?: string;
+    }
+  | {
+      /**
+       * FIRE-AND-CONTINUE visual-verification request. Resolves the run's stamped
+       * verify posture (migration 036), enqueues a verification_requests row, and
+       * replies { requestId } synchronously — the lane NEVER blocks on the verdict.
+       * A disabled run replies { skipped:true } (never an error). typeOverride only
+       * NARROWS within the run's resolved chain; it cannot enable a disabled run.
+       */
+      type: 'mcp-request-verification';
+      requestId: string;
+      runId: string;
+      /** Natural-language acceptance the VlmJudge checks (required). */
+      intent: string;
+      /** Agent-declared verification type. Narrows only — invalid/out-of-chain is dropped. */
+      typeOverride?: VerificationType;
+      url?: string;
+      htmlPath?: string;
+      /** Responsive viewport list (camelCase wire); passed through UNVALIDATED — narrowed by the handler. */
+      viewports?: unknown;
+      baselineKey?: string;
     }
   | {
       type: 'shell-approval-request';
@@ -458,6 +489,12 @@ export class McpQueryHandler {
           break;
         case 'mcp-commit-artifact':
           await this.handleCommitArtifact(msg, client);
+          break;
+        case 'mcp-request-verification':
+          // FIRE-AND-CONTINUE: resolves posture + enqueues synchronously, replies
+          // { requestId } (or { skipped:true } for a disabled run), then nudges the
+          // scheduler — the lane never blocks on the verdict.
+          this.handleRequestVerification(msg, client);
           break;
         case 'shell-approval-request':
           // Async-deferred — the FIRST handler that does NOT writeResponse
@@ -1849,6 +1886,160 @@ export class McpQueryHandler {
       });
     } catch (err) {
       this.writeArtifactError(client, msg.requestId, err);
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Visual verification request (cyboflow_request_verification)
+  //
+  // FIRE-AND-CONTINUE producer seam (docs/visual-verification-design.md §"The
+  // collision story" #1): resolve the run's IMMUTABLY-stamped verify posture
+  // (migration 036 verify_enabled / verify_type / verify_chain), enqueue ONE
+  // verification_requests row via the VerificationScheduler chokepoint, and reply
+  // { requestId } SYNCHRONOUSLY — the lane is never held on the verdict. The
+  // scheduler drains on its OWN setImmediate loop (NOT RunQueueRegistry), captures
+  // + judges, and delivers the verdict asynchronously.
+  //
+  // Two invariants enforced here:
+  //  - A run with verify_enabled=0 replies { skipped:true } — NEVER an error (a
+  //    disabled run must not wedge a lane; mirrors the resolver's disabled posture).
+  //  - typeOverride only NARROWS: the effective chain is intersected with the run's
+  //    stamped verify_chain, so an override can neither enable a disabled run nor
+  //    introduce a backend the host lacks (the stamped chain is the host-available
+  //    set the resolver already filtered).
+  // --------------------------------------------------------------------------
+
+  /**
+   * Narrow the camelCase viewports wire value to VerificationRequestInput.viewports,
+   * keeping only well-formed entries ({ width:number, height:number, label?:string })
+   * and dropping malformed ones. Returns undefined when the input is not an array OR
+   * no entry survives — an agent typo never fails a fire-and-continue request.
+   */
+  private parseViewports(v: unknown): VerificationRequestInput['viewports'] | undefined {
+    if (!Array.isArray(v)) return undefined;
+    const out: NonNullable<VerificationRequestInput['viewports']> = [];
+    for (const entry of v) {
+      if (!isRecord(entry) || typeof entry.width !== 'number' || typeof entry.height !== 'number') continue;
+      out.push(
+        typeof entry.label === 'string'
+          ? { width: entry.width, height: entry.height, label: entry.label }
+          : { width: entry.width, height: entry.height },
+      );
+    }
+    return out.length > 0 ? out : undefined;
+  }
+
+  /**
+   * Enqueue a visual-verification request for the run and reply { requestId }, or
+   * { skipped:true } when the run has verify disabled. Synchronous (no await on the
+   * verdict). Guards mirror the other run-bound writes (sentinel / missing /
+   * terminal run reject via resolveReviewItemRunContext). Fully fail-soft: any
+   * unexpected error is surfaced as an ok:false reply rather than throwing.
+   */
+  private handleRequestVerification(
+    msg: Extract<McpQueryMessage, { type: 'mcp-request-verification' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = this.resolveReviewItemRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, { type: 'mcp-query-response', requestId: msg.requestId, ok: false, error: ctx.error });
+      return;
+    }
+
+    // Read the run's IMMUTABLE verify stamp (migration 036). Read defensively — a
+    // pre-036 DB lacking the columns degrades to a disabled posture (skipped).
+    let enabled = false;
+    let stampedType: VerificationType | null = null;
+    let stampedChain: VisualBackendId[] = [];
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT verify_enabled AS verifyEnabled, verify_type AS verifyType, verify_chain AS verifyChain
+             FROM workflow_runs WHERE id = ?`,
+        )
+        .get(msg.runId) as { verifyEnabled?: unknown; verifyType?: unknown; verifyChain?: unknown } | undefined;
+      enabled = row?.verifyEnabled === 1 || row?.verifyEnabled === true;
+      stampedType = isVerificationType(row?.verifyType) ? row.verifyType : null;
+      stampedChain = this.parseStampedChain(row?.verifyChain);
+    } catch {
+      // Pre-migration-036 DB (no verify columns) — keep the disabled default.
+      enabled = false;
+    }
+
+    // Disabled run → no-op SKIP (never an error). A typeOverride cannot enable it.
+    if (!enabled || stampedType === null) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { skipped: true },
+      });
+      return;
+    }
+
+    // Effective type: a valid typeOverride NARROWS to its own type; otherwise the
+    // run's stamped type. (Validity is already guaranteed by the wire union, but we
+    // re-guard since the field flows in untrusted across the socket.)
+    const effectiveType: VerificationType = isVerificationType(msg.typeOverride) ? msg.typeOverride : stampedType;
+
+    // Effective chain = FALLBACK_CHAINS[effectiveType] ∩ the run's stamped chain
+    // (the host-available set the resolver already filtered). The intersection is
+    // why typeOverride can only NARROW — it can never reach a backend the host lacks.
+    // Order follows FALLBACK_CHAINS (easy→hard). An empty intersection still enqueues
+    // (the scheduler treats an empty chain as a SKIP, never a fabricated fail).
+    const chain = FALLBACK_CHAINS[effectiveType].filter((backend) => stampedChain.includes(backend));
+
+    // Build the deliverable input, dropping any malformed optional members.
+    const input: VerificationRequestInput = { intent: msg.intent };
+    if (typeof msg.url === 'string') input.url = msg.url;
+    if (typeof msg.htmlPath === 'string') input.htmlPath = msg.htmlPath;
+    if (typeof msg.baselineKey === 'string') input.baselineKey = msg.baselineKey;
+    const viewports = this.parseViewports(msg.viewports);
+    if (viewports !== undefined) input.viewports = viewports;
+
+    try {
+      const requestId = VerificationScheduler.getInstance().enqueue({
+        runId: msg.runId,
+        projectId: ctx.projectId,
+        type: effectiveType,
+        input,
+        chain,
+      });
+      // Reply SYNCHRONOUSLY (the lane continues), then kick the drain loop. enqueue
+      // already nudges; the extra nudge is harmless (coalesced) and makes the
+      // fire-and-continue contract explicit.
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { requestId, type: effectiveType },
+      });
+      VerificationScheduler.getInstance().nudge();
+    } catch (err) {
+      this.logger?.error('[Cyboflow MCP Query] request-verification enqueue failed', {
+        runId: msg.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'verification_enqueue_failed',
+      });
+    }
+  }
+
+  /** Parse the run's stamped verify_chain JSON into a VisualBackendId[]; [] on null/malformed. */
+  private parseStampedChain(v: unknown): VisualBackendId[] {
+    if (typeof v !== 'string' || v.length === 0) return [];
+    try {
+      const parsed: unknown = JSON.parse(v);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((x): x is VisualBackendId => typeof x === 'string');
+      }
+      return [];
+    } catch {
+      return [];
     }
   }
 
