@@ -428,6 +428,50 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['artifact_id'],
         },
       },
+      {
+        name: 'cyboflow_request_verification',
+        description:
+          'Request a visual verification of a rendered deliverable for THIS run (derived from CYBOFLOW_RUN_ID — no run argument). FIRE-AND-CONTINUE: this returns { requestId } IMMEDIATELY and the lane NEVER blocks on the verdict — the main-process scheduler captures + judges the deliverable on its own loop and delivers the verdict asynchronously (to the screenshots artifact + the review queue). describe the natural-language acceptance to check in `intent` and point at the deliverable via `url` or `html_path`. If visual verification is DISABLED for this run, this is a no-op that returns { skipped: true } (never an error). `type_override` can only NARROW within the run\'s resolved capability — it cannot enable a disabled run or add a backend the host lacks.',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            intent: {
+              type: 'string',
+              description:
+                'Natural-language acceptance the verifier judges the rendered result against (required), e.g. "the settings panel shows the new visual-verify toggle, default off".',
+            },
+            type_override: {
+              type: 'string',
+              enum: [
+                'static-render-snapshot',
+                'interactive-web-behavior',
+                'responsive-multi-viewport',
+                'native-desktop',
+                'mobile-flow',
+              ],
+              description:
+                "Optional agent-declared verification type. NARROWS only — an override outside the run's resolved chain is dropped; it can never enable a disabled run.",
+            },
+            url: { type: 'string', description: 'Optional URL of the running deliverable to capture (e.g. http://localhost:5173).' },
+            html_path: { type: 'string', description: 'Optional path to a static HTML file to render + capture.' },
+            viewports: {
+              type: 'array',
+              description: 'Optional viewport list for responsive-multi-viewport captures.',
+              items: {
+                type: 'object',
+                properties: {
+                  width: { type: 'number', description: 'Viewport width in px (required within a viewport)' },
+                  height: { type: 'number', description: 'Viewport height in px (required within a viewport)' },
+                  label: { type: 'string', description: 'Optional viewport label (e.g. "mobile", "desktop")' },
+                },
+                required: ['width', 'height'],
+              },
+            },
+            baseline_key: { type: 'string', description: 'Optional golden-baseline key to compare against (absent = intent-only judging).' },
+          },
+          required: ['intent'],
+        },
+      },
     ],
   };
 });
@@ -1221,6 +1265,62 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const queryParams: Record<string, unknown> = { artifactId: artifact_id };
       if (payload_json !== undefined) queryParams['payloadJson'] = payload_json;
       return executeMcpQuery('mcp-commit-artifact', queryParams);
+    }
+
+    case 'cyboflow_request_verification': {
+      const args = (request.params.arguments ?? {}) as {
+        intent?: unknown;
+        type_override?: unknown;
+        url?: unknown;
+        html_path?: unknown;
+        viewports?: unknown;
+        baseline_key?: unknown;
+      };
+      const { intent, type_override, url, html_path, viewports, baseline_key } = args;
+      if (typeof intent !== 'string' || intent.length === 0) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'intent: string' }) }],
+        };
+      }
+      const validTypes = [
+        'static-render-snapshot',
+        'interactive-web-behavior',
+        'responsive-multi-viewport',
+        'native-desktop',
+        'mobile-flow',
+      ];
+      if (type_override !== undefined && (typeof type_override !== 'string' || !validTypes.includes(type_override))) {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: `type_override: ${validTypes.join(' | ')} (optional)` }) },
+          ],
+        };
+      }
+      if (url !== undefined && typeof url !== 'string') {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'url: string (optional)' }) }],
+        };
+      }
+      if (html_path !== undefined && typeof html_path !== 'string') {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'html_path: string (optional)' }) }],
+        };
+      }
+      if (baseline_key !== undefined && typeof baseline_key !== 'string') {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'baseline_key: string (optional)' }) }],
+        };
+      }
+      const queryParams: Record<string, unknown> = { intent };
+      if (type_override !== undefined) queryParams['typeOverride'] = type_override;
+      if (url !== undefined) queryParams['url'] = url;
+      if (html_path !== undefined) queryParams['htmlPath'] = html_path;
+      // viewports / baselineKey are passed through UNVALIDATED — the handler
+      // narrows the deliverable shape and DROPS malformed members so an agent typo
+      // can never fail a fire-and-continue request.
+      if (viewports !== undefined) queryParams['viewports'] = viewports;
+      if (baseline_key !== undefined) queryParams['baselineKey'] = baseline_key;
+      return executeMcpQuery('mcp-request-verification', queryParams);
     }
 
     default:
