@@ -209,7 +209,8 @@ For each dispatched task, set its lane to `running` via
 `cyboflow_update_sprint_task`, then drive its per-task chain by delegating
 subagents — updating the lane's `current_step` as each stage begins. Use the
 EXACT lane step ids `implement`, `write-tests`, `code-review`, `task-verify`,
-`visual-verify` and the EXACT subagent_type names below so the lane auto-advances.
+`visual-verify`, `awaiting-verify` and the EXACT subagent_type names below so the
+lane auto-advances.
 Independent tasks' subagent calls go out **in parallel** (multiple Agent tool
 calls in one message); as each returns, you continue that task's chain.
 
@@ -245,15 +246,28 @@ calls in one message); as each returns, you continue that task's chain.
    on the second) in the same `cyboflow_update_sprint_task` call that moves the
    lane's `current_step` back to `implement`.
 5. **visual-verify** (optional) → when visual verification is enabled, delegate to
-   `cyboflow-visual-verify`; otherwise skip. On `VERDICT: FAIL`, loop back to
-   `cyboflow-implement` with its `## Visual check` notes, or record a finding via
-   `cyboflow_report_finding` when the regression is out of scope. Verify-phase
-   findings must carry a `severity`; when a regression traces to already-merged
-   work, set `category: 'post-merge-bug'`. When the subagent captured screenshots
-   (it returns their basenames + wrote them under `$CYBOFLOW_RUN_ARTIFACTS_DIR`),
-   you **MUST** surface them: report `cyboflow_report_artifact` with
-   `atype: 'screenshots'` and `payload_json` `{"fileNames":["home.png",...]}` (the
-   basenames). Screenshots are NOT auto-created; only this report surfaces them.
+   `cyboflow-visual-verify`; otherwise skip. The subagent FIRES a verification
+   request (`cyboflow_request_verification`, passing this lane's `task_ref`) and
+   returns immediately — it does NOT capture, judge, or wait for a verdict, and it
+   does NOT write cyboflow state. Move the lane to the `awaiting-verify` step via
+   `cyboflow_update_sprint_task` (`current_step: 'awaiting-verify'`): this is the
+   **visual merge-gate**. The main-process verifier captures + judges the deliverable
+   asynchronously, writes the screenshots + verdict centrally, and drives the lane
+   off the park step for you — **PASS** advances the lane toward `integrated`;
+   **FAIL** loops the lane back to `implement` with a bumped `attempt` and a BLOCKING
+   finding carrying the judge's `feedback` (up to 3× before the lane is marked
+   `failed`); **low confidence** raises a non-blocking "needs human visual review"
+   finding and lets the lane proceed. When you observe a lane the gate looped back to
+   `implement` (its `current_step` returned to `implement` with a higher `attempt`
+   and a blocking visual finding), RE-DELEGATE `cyboflow-implement` with that
+   finding's feedback, then re-fire `cyboflow_request_verification` — the same 3×
+   loop as task-verify. Do NOT advance a lane to `integrated`/commit until its visual
+   merge-gate has PASSED (or the run has visual verification disabled). A
+   `VERDICT: SKIPPED` from the subagent (not configured / no UI deliverable) is NOT a
+   gate — proceed. When a regression traces to already-merged work, the finding
+   carries `category: 'post-merge-bug'`. The verifier produces and surfaces the
+   screenshots artifact itself — you do NOT capture screenshots or report a
+   `screenshots` artifact for this step.
 
 If a subagent comes back stuck (no usable result), re-delegate it **once** with a
 sharper, narrower scope; if it is still stuck, mark the lane `failed` and move on.
