@@ -168,13 +168,13 @@ describe('RunCenterPane', () => {
     expect(body).toHaveStyle({ display: 'flex' });
     expect(screen.getByTestId('mock-run-bottom-pane')).toBeInTheDocument();
 
-    // Collapse: body hidden but the child stays mounted (not unmounted).
-    fireEvent.click(screen.getByTestId('terminal-dock-toggle'));
+    // Collapse via the ▾ chevron: body hidden but the child stays mounted.
+    fireEvent.click(screen.getByTestId('terminal-dock-collapse'));
     expect(screen.getByTestId('terminal-dock-body')).toHaveStyle({ display: 'none' });
     expect(screen.getByTestId('mock-run-bottom-pane')).toBeInTheDocument();
 
-    // Re-expand.
-    fireEvent.click(screen.getByTestId('terminal-dock-toggle'));
+    // Re-expand via the ▴ chevron.
+    fireEvent.click(screen.getByTestId('terminal-dock-expand'));
     expect(screen.getByTestId('terminal-dock-body')).toHaveStyle({ display: 'flex' });
   });
 

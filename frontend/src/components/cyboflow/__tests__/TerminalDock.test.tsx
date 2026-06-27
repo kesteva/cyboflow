@@ -1,17 +1,18 @@
 /**
- * TerminalDock tests (FU5 — resizable dock; grip bar unifies toggle + resize).
+ * TerminalDock tests (three-level dock: collapsed → standard → full).
  *
  * Behaviors verified:
- *   1. The chevron grip bar is present in both states; dragging it resizes ONLY
- *      when the dock is open (collapsed → click expands, drag is inert).
+ *   1. The chevron grip bar is present in every level; dragging it resizes ONLY
+ *      in the standard level (collapsed/full drags are inert).
  *   2. A simulated drag (grip UP) grows the applied height and persists it to
  *      localStorage under the brand-new key 'cyboflow.terminalDock.height'.
  *   3. Height clamps at the min (drag far down) and the max (drag far up).
- *   4. The persisted height seeds the initial open height on remount.
+ *   4. The persisted height seeds the initial standard height on remount.
  *   5. xterm keep-alive: toggling collapsed/open keeps the body's child mounted
  *      (same element identity) — collapse only flips display:none, never unmounts.
- *   6. Collapse/expand is the chevron grip strip (no labeled header row); a plain
- *      click fires onToggle, but a drag (resize) does NOT toggle. The old
+ *   6. Three levels: collapsed shows a single ▴ (→ onToggle); standard shows ▴
+ *      (→ full, covering the pane) and ▾ (→ onToggle collapse); full shows a
+ *      single ▾ (→ standard). A drag (resize) never changes level. The old
  *      "TERMINAL · folder · branch" header and its hint text are gone.
  */
 import '@testing-library/jest-dom';
@@ -23,6 +24,7 @@ import { TerminalDock, DOCK_OPEN_HEIGHT } from '../TerminalDock';
 const HEIGHT_KEY = 'cyboflow.terminalDock.height';
 const DOCK_MIN = 120;
 const DOCK_MAX_ABS = 560;
+const VIEWPORT = 2000; // window.innerHeight set in beforeEach
 
 /** Drag the grip bar by `dy` px from a starting clientY (default 400). */
 function dragGrip(dy: number, startY = 400): void {
@@ -154,18 +156,29 @@ describe('TerminalDock — chevron toggle (no labeled header)', () => {
     expect(screen.queryByText(/click to/i)).not.toBeInTheDocument();
   });
 
-  it('fires onToggle when the chevron toggle is clicked', () => {
+  it('fires onToggle from the ▾ collapse chevron in the standard level', () => {
     const onToggle = vi.fn();
     render(
       <TerminalDock open onToggle={onToggle}>
         <div data-testid="child" />
       </TerminalDock>,
     );
-    fireEvent.click(screen.getByTestId('terminal-dock-toggle'));
+    fireEvent.click(screen.getByTestId('terminal-dock-collapse'));
     expect(onToggle).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT toggle when the grip is dragged (resize must not collapse)', () => {
+  it('fires onToggle from the ▴ expand chevron when collapsed', () => {
+    const onToggle = vi.fn();
+    render(
+      <TerminalDock open={false} onToggle={onToggle}>
+        <div data-testid="child" />
+      </TerminalDock>,
+    );
+    fireEvent.click(screen.getByTestId('terminal-dock-expand'));
+    expect(onToggle).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT change level when the grip is dragged (resize must not toggle)', () => {
     const onToggle = vi.fn();
     render(
       <TerminalDock open onToggle={onToggle}>
@@ -173,14 +186,88 @@ describe('TerminalDock — chevron toggle (no labeled header)', () => {
       </TerminalDock>,
     );
     const grip = screen.getByTestId('terminal-dock-toggle');
-    // Real drag: press → move past threshold → release → the browser then fires
-    // a trailing click on the same element, which must be swallowed.
+    // A drag on the grip background resizes; the chevrons (not the grip) own
+    // level changes, so onToggle must stay untouched.
     fireEvent.mouseDown(grip, { clientY: 400 });
     fireEvent.mouseMove(document, { clientY: 340 }); // 60px up → resize
     fireEvent.mouseUp(document);
-    fireEvent.click(grip);
     expect(onToggle).not.toHaveBeenCalled();
     expect(dockHeight()).toBe(DOCK_OPEN_HEIGHT + 60); // the drag DID resize
+  });
+});
+
+describe('TerminalDock — three levels (collapsed / standard / full)', () => {
+  it('collapsed shows only the ▴ expand chevron (no level chevrons)', () => {
+    render(
+      <TerminalDock open={false} onToggle={() => {}}>
+        <div data-testid="child" />
+      </TerminalDock>,
+    );
+    expect(screen.getByTestId('terminal-dock-expand')).toBeInTheDocument();
+    expect(screen.queryByTestId('terminal-dock-collapse')).not.toBeInTheDocument();
+    // Body hidden while collapsed.
+    expect(screen.getByTestId('terminal-dock-body')).toHaveStyle({ display: 'none' });
+  });
+
+  it('standard shows BOTH chevrons; ▴ grows to full (covers the pane) and ▾ collapses', () => {
+    const onToggle = vi.fn();
+    render(
+      <TerminalDock open onToggle={onToggle}>
+        <div data-testid="child" />
+      </TerminalDock>,
+    );
+    expect(screen.getByTestId('terminal-dock-expand')).toBeInTheDocument();
+    expect(screen.getByTestId('terminal-dock-collapse')).toBeInTheDocument();
+    expect(dockHeight()).toBe(DOCK_OPEN_HEIGHT);
+
+    // ▴ → full: the dock grows to the viewport height (covering the central pane).
+    fireEvent.click(screen.getByTestId('terminal-dock-expand'));
+    expect(dockHeight()).toBe(VIEWPORT);
+    // onToggle is the parent's collapse — growing to full must NOT call it.
+    expect(onToggle).not.toHaveBeenCalled();
+  });
+
+  it('full shows only the ▾ chevron, which drops back to the standard height', () => {
+    render(
+      <TerminalDock open onToggle={() => {}}>
+        <div data-testid="child" />
+      </TerminalDock>,
+    );
+    // standard → full
+    fireEvent.click(screen.getByTestId('terminal-dock-expand'));
+    expect(dockHeight()).toBe(VIEWPORT);
+    // In full, the expand chevron is gone; only the collapse (▾) chevron remains.
+    expect(screen.queryByTestId('terminal-dock-expand')).not.toBeInTheDocument();
+    // ▾ → standard
+    fireEvent.click(screen.getByTestId('terminal-dock-collapse'));
+    expect(dockHeight()).toBe(DOCK_OPEN_HEIGHT);
+    expect(screen.getByTestId('terminal-dock-expand')).toBeInTheDocument();
+  });
+
+  it('collapsing from full resets the maximize so re-opening lands on standard', () => {
+    const { rerender } = render(
+      <TerminalDock open onToggle={() => {}}>
+        <div data-testid="child" />
+      </TerminalDock>,
+    );
+    fireEvent.click(screen.getByTestId('terminal-dock-expand')); // → full
+    expect(dockHeight()).toBe(VIEWPORT);
+
+    // Parent collapses the dock…
+    rerender(
+      <TerminalDock open={false} onToggle={() => {}}>
+        <div data-testid="child" />
+      </TerminalDock>,
+    );
+    // …then re-opens it: it must be the standard height, not full.
+    rerender(
+      <TerminalDock open onToggle={() => {}}>
+        <div data-testid="child" />
+      </TerminalDock>,
+    );
+    expect(dockHeight()).toBe(DOCK_OPEN_HEIGHT);
+    expect(screen.getByTestId('terminal-dock-expand')).toBeInTheDocument();
+    expect(screen.getByTestId('terminal-dock-collapse')).toBeInTheDocument();
   });
 });
 
