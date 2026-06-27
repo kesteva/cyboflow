@@ -6,6 +6,50 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.9] — 2026-06-27
+
+### Added
+
+- **Three-level bottom chat dock.** The center-pane chat dock now has three
+  heights — a collapsed strip, a standard height, and full (which covers the
+  central pane) — with clear up/down chevrons. The standard level keeps
+  drag-to-resize.
+- **Estimated session cost.** The running-session ticker and the whole-session
+  token breakdown now show an estimated USD cost, computed from per-category
+  token totals (input / output / cache-write / cache-read) at each model's list
+  price. An unset model is priced at the quick-session default (Opus); an
+  unrecognized model shows `—` rather than a mispriced figure.
+- **Per-day tooltip on the Insights token chart.** Hovering any day on the
+  token-use chart highlights that column and surfaces its full per-model
+  breakdown (swatch · name · tokens) plus the day total. Every day is an easy
+  hover target, including thin or empty slots.
+- **Stage-bucketed dynamic-workflow progress.** A running dynamic workflow's
+  agents are grouped by stage — an accordion when every agent maps cleanly to a
+  declared phase, an honest flat list otherwise — in the run pane, and the
+  review-queue card's ▸ glyph now expands that same live state inline.
+- **Finding origin project.** Compounding backlog findings (both untriaged and
+  ready-to-compound) now show a subtle tag with their origin project's name,
+  since the backlog is cross-project until a selection locks it to one.
+
+### Fixed
+
+- Generated `cyboflow-*.md` agent and command files are kept out of the run diff
+  — they're added to the worktree's local git exclude at install time — so they
+  no longer appear as a dozen-plus untracked "changed files" or risk being
+  committed. The user's own (non-`cyboflow-`) `.claude/agents` files are
+  untouched.
+- The session-meter **Cost** row no longer always shows `—`: it reads the model
+  from the panel settings and prices an unset / `auto` model at the
+  quick-session default, so a cost is always estimated.
+- Interactive (PTY) quick-session chat tokens are now counted in the session
+  meter, which previously showed zero usage for them.
+- A completed dynamic workflow no longer reports a lingering "running" agent in
+  its tally, stage glyphs, or rows.
+- Primary CTA hover on the paper theme darkens to deep terracotta instead of
+  inverting to a near-black slab that swallowed the button's own label.
+- Workflow step cards no longer overlap the card below them; the row height now
+  matches each card's true rendered height.
+
 ## [0.1.8] — 2026-06-27
 
 ### Added
