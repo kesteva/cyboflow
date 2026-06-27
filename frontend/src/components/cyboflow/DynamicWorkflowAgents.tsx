@@ -21,6 +21,7 @@
 import { useMemo, useState } from 'react';
 import { formatTokenCount } from '../../hooks/useSessionMetrics';
 import {
+  agentsForDisplay,
   groupAgentsByPhase,
   type PhaseBucket,
   type PhaseBucketStatus,
@@ -308,13 +309,15 @@ export function DynamicWorkflowAgents({
   state,
   nowMs,
 }: DynamicWorkflowAgentsProps): React.JSX.Element | null {
-  const displayNames = useMemo(() => computeAgentDisplayNames(state.agents), [state.agents]);
-  const grouping = useMemo(
-    () => groupAgentsByPhase(state.agents, state.phases),
-    [state.agents, state.phases],
+  // A terminal workflow shows no running agents (coerce a stuck snapshot).
+  const agents = useMemo(
+    () => agentsForDisplay(state.agents, state.status),
+    [state.agents, state.status],
   );
+  const displayNames = useMemo(() => computeAgentDisplayNames(agents), [agents]);
+  const grouping = useMemo(() => groupAgentsByPhase(agents, state.phases), [agents, state.phases]);
 
-  if (state.agents.length === 0) return null;
+  if (agents.length === 0) return null;
 
   return (
     <div className="mt-2.5 border-t border-border-primary pt-2" data-testid="dynamic-workflow-agents">
@@ -332,7 +335,7 @@ export function DynamicWorkflowAgents({
         </div>
       ) : (
         <div className="mt-1 flex flex-col">
-          {state.agents.map((agent) => (
+          {agents.map((agent) => (
             <AgentRow
               key={agent.agentId}
               agent={agent}

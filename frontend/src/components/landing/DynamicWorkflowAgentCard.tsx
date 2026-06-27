@@ -25,6 +25,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { DynamicWorkflowRunState } from '../../../../shared/types/dynamicWorkflows';
 import { formatElapsed } from '../../utils/homeClassify';
 import { DynamicWorkflowAgents } from '../cyboflow/DynamicWorkflowAgents';
+import { agentsForDisplay } from '../../utils/dynamicWorkflowGrouping';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 
@@ -54,14 +55,16 @@ export function DynamicWorkflowAgentCard({ state }: DynamicWorkflowAgentCardProp
     return () => clearInterval(id);
   }, []);
 
-  // Live agent tally from journal.jsonl-derived lifecycles.
+  // Live agent tally from journal.jsonl-derived lifecycles. A terminal workflow
+  // shows no running agents (coerce a stuck snapshot).
   const { runningCount, doneCount } = useMemo(() => {
+    const agents = agentsForDisplay(state.agents, state.status);
     let running = 0;
-    for (const agent of state.agents) {
+    for (const agent of agents) {
       if (agent.status === 'running') running += 1;
     }
-    return { runningCount: running, doneCount: state.agents.length - running };
-  }, [state.agents]);
+    return { runningCount: running, doneCount: agents.length - running };
+  }, [state.agents, state.status]);
 
   // Compact phase plan — static titles from the script meta, joined.
   const phasePlan = useMemo(() => {

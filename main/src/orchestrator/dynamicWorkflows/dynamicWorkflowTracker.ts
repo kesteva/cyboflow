@@ -549,6 +549,14 @@ export class DynamicWorkflowTracker {
   private finalize(state: DynamicWorkflowRunState, record: DynamicWorkflowCompletionRecord): void {
     if (state.status !== 'running') return; // record/notification race — first finalize wins
     state.status = record.status;
+    // A terminal workflow has no running agents: an agent whose 'result' line
+    // never landed in the journal (last-agent/completion race, or a 'started'
+    // with no matching 'result') would otherwise stay 'running' forever, so the
+    // completed card reads "1 running · 3 done". Coerce any lingering running
+    // agent to done (mirrors the demo finalize path).
+    state.agents = state.agents.map((a) =>
+      a.status === 'running' ? { ...a, status: 'done' as const } : a,
+    );
     if (record.summary !== undefined) state.summary = record.summary;
     if (record.totals !== undefined) state.totals = record.totals;
     state.completedAt = new Date().toISOString();

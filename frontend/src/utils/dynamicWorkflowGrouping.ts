@@ -18,7 +18,24 @@
 import type {
   DynamicWorkflowAgent,
   DynamicWorkflowPhase,
+  DynamicWorkflowRunState,
 } from '../../../shared/types/dynamicWorkflows';
+
+/**
+ * Agents as they should DISPLAY: a terminal (completed/failed) workflow has no
+ * running agents, so coerce any lingering 'running' to 'done'. This mirrors the
+ * tracker's finalize() coercion and defends the UI against a stuck snapshot
+ * (an agent whose 'result' journal line never landed, the stall path, or a
+ * completed card rendered before the backend fix) — without it a finished card
+ * reads "1 running · 3 done". A running workflow passes through untouched.
+ */
+export function agentsForDisplay(
+  agents: readonly DynamicWorkflowAgent[],
+  status: DynamicWorkflowRunState['status'],
+): DynamicWorkflowAgent[] {
+  if (status === 'running') return agents.slice();
+  return agents.map((a) => (a.status === 'running' ? { ...a, status: 'done' as const } : a));
+}
 
 /** Derived live status of a phase bucket. */
 export type PhaseBucketStatus = 'done' | 'running' | 'pending';

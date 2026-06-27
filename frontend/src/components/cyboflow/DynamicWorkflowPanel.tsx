@@ -31,6 +31,7 @@ import {
   DynamicWorkflowAgents,
   formatDurationMs,
 } from './DynamicWorkflowAgents';
+import { agentsForDisplay } from '../../utils/dynamicWorkflowGrouping';
 import type { DynamicWorkflowRunState } from '../../../../shared/types/dynamicWorkflows';
 
 // formatModelName + computeAgentDisplayNames live in DynamicWorkflowAgents (the
@@ -120,8 +121,11 @@ export function DynamicWorkflowPanel({
     return () => clearInterval(id);
   }, [isRunning, expanded]);
 
-  const runningAgents = state.agents.filter((a) => a.status === 'running').length;
-  const doneAgents = state.agents.filter((a) => a.status === 'done').length;
+  // A terminal workflow shows no running agents (coerce a stuck snapshot so a
+  // completed card never reads "1 running · 3 done").
+  const tallyAgents = agentsForDisplay(state.agents, state.status);
+  const runningAgents = tallyAgents.filter((a) => a.status === 'running').length;
+  const doneAgents = tallyAgents.filter((a) => a.status === 'done').length;
 
   return (
     <div

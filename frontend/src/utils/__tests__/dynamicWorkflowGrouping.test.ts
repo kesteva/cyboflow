@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { groupAgentsByPhase } from '../dynamicWorkflowGrouping';
+import { agentsForDisplay, groupAgentsByPhase } from '../dynamicWorkflowGrouping';
 import type {
   DynamicWorkflowAgent,
   DynamicWorkflowPhase,
@@ -87,6 +87,28 @@ describe('groupAgentsByPhase', () => {
     ).toBe('flat');
   });
 
+});
+
+describe('agentsForDisplay', () => {
+  it('leaves a running workflow untouched', () => {
+    const agents = [
+      agent({ agentId: 'a', status: 'running' }),
+      agent({ agentId: 'b', status: 'done' }),
+    ];
+    expect(agentsForDisplay(agents, 'running').map((a) => a.status)).toEqual(['running', 'done']);
+  });
+
+  it('coerces lingering running agents to done on a terminal workflow', () => {
+    const agents = [
+      agent({ agentId: 'a', status: 'running' }),
+      agent({ agentId: 'b', status: 'done' }),
+    ];
+    expect(agentsForDisplay(agents, 'completed').map((a) => a.status)).toEqual(['done', 'done']);
+    expect(agentsForDisplay(agents, 'failed').map((a) => a.status)).toEqual(['done', 'done']);
+  });
+});
+
+describe('groupAgentsByPhase — word boundary', () => {
   it('does not over-match on substrings (word-boundary)', () => {
     // "preview" must NOT match the "Review" phase.
     const result = groupAgentsByPhase(
