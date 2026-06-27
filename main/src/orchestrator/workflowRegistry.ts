@@ -19,8 +19,10 @@ import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName,
 import { isCyboflowWorkflowName, resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
+import type { ResolvedVisualVerifyConfig } from '../../../shared/types/visualVerification';
 import { resolveSubstrate } from './substrateResolver';
 import { resolveExecutionModel } from './executionModelResolver';
+import { resolveVisualVerification } from './visualVerificationResolver';
 import { resolvePermissionMode } from './permissionModeResolver';
 import { computeSpecHash } from './specHash';
 
@@ -59,6 +61,15 @@ export interface WorkflowConfigProvider {
    * existing fixtures that construct a registry without config are unaffected.
    */
   getDefaultExecutionModel?(): ExecutionModel | null;
+  /**
+   * Fully-resolved global visual-verification block (P2 ConfigManager getter),
+   * consulted by resolveVisualVerification for the global enablement + default
+   * type rungs. Optional + absent => createRun floors the run to the DISABLED
+   * posture (verify_enabled=0 / verify_type=NULL / verify_chain=NULL), the
+   * zero-behavior-change default, so existing fixtures without config stamp a
+   * disabled run exactly as before migration 036.
+   */
+  getVisualVerifyConfig?(): ResolvedVisualVerifyConfig;
 }
 
 // The built-in workflow descriptors now live in-repo. See
@@ -715,6 +726,30 @@ export class WorkflowRegistry {
       env: process.env,
     });
 
+    // Resolve the layered visual-verification posture (migration 036) — the
+    // third immutable run-stamp sibling to substrate / execution_model. Decides
+    // whether this run participates in visual verification, which TYPE of check,
+    // and the live easy→hard backend chain. The global enablement + default-type
+    // rungs come from the injected config's getVisualVerifyConfig(); the per-run
+    // and project-config rungs are not yet wired (reserved for the launch UI /
+    // .cyboflow/verify.json) and resolution otherwise uses the global + floor.
+    // The host-available backends default to MVP_AVAILABLE_BACKENDS (only
+    // 'capturePage') inside the resolver. When no config is injected (test
+    // fixtures) the global rung is unset and the run floors to the DISABLED
+    // posture. Like substrate, this is stamped ONCE at INSERT and is immutable
+    // for the run lifetime — there is no UPDATE path (a long run can't change
+    // posture mid-flight). With the master switch OFF (the default) every run
+    // stamps verify_enabled=0 / verify_type=NULL / verify_chain=NULL
+    // (zero-behavior-change).
+    const visualVerifyConfig = this.config?.getVisualVerifyConfig?.();
+    const verify = resolveVisualVerification({
+      globalDefaultEnabled: visualVerifyConfig?.enabled ?? null,
+      globalDefaultType: visualVerifyConfig?.defaultType ?? null,
+    });
+    const verifyEnabled = verify.enabled ? 1 : 0;
+    const verifyType = verify.type;
+    const verifyChain = verify.enabled ? JSON.stringify(verify.chain) : null;
+
     // Freeze the workflow's CURRENT spec onto the run as a content address
     // (migration 026). Like substrate, spec_hash is stamped ONCE at INSERT and
     // is immutable for the run lifetime — there is no UPDATE path. It lets
@@ -723,12 +758,12 @@ export class WorkflowRegistry {
     const specHash = computeSpecHash(workflow.spec_json);
 
     const insert = this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, execution_model, session_id, spec_hash)
-      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, execution_model, verify_enabled, verify_type, verify_chain, session_id, spec_hash)
+      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const createTx = this.db.transaction(() => {
-      insert.run(runId, workflowId, runProjectId, permissionMode, substrate, executionModel, sessionId ?? null, specHash);
+      insert.run(runId, workflowId, runProjectId, permissionMode, substrate, executionModel, verifyEnabled, verifyType, verifyChain, sessionId ?? null, specHash);
       // Ensure the frozen hash is always resolvable to its spec: snapshot a
       // revision for the spec we just stamped. INSERT OR IGNORE keyed on
       // UNIQUE(workflow_id, spec_hash) makes this idempotent, so a workflow that
@@ -749,7 +784,7 @@ export class WorkflowRegistry {
    */
   getRunById(runId: string): WorkflowRunRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, outcome, base_branch, base_sha, steps_snapshot_json, substrate, execution_model, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
+      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, outcome, base_branch, base_sha, steps_snapshot_json, substrate, execution_model, verify_enabled, verify_type, verify_chain, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
     );
     const row = stmt.get(runId) as WorkflowRunRow | undefined;
     return row ?? null;
