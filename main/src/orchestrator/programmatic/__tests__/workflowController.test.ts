@@ -6,7 +6,7 @@
  * terminal outcomes) without any SDK / DB / Electron dependency.
  */
 import { describe, it, expect } from 'vitest';
-import { WorkflowController, MAX_STEP_LOOPBACKS } from '../workflowController';
+import { WorkflowController, MAX_STEP_LOOPBACKS, MAX_VISUAL_LOOPBACKS } from '../workflowController';
 import type {
   ControllerHost,
   FanOutDriver,
@@ -15,6 +15,8 @@ import type {
   StepRunner,
   SupervisorEvent,
   TriageDecision,
+  VisualGateOutcome,
+  VisualVerifyGate,
 } from '../types';
 import type { SprintBatchTaskStatus } from '../../../../../shared/types/sprintBatch';
 import { SPRINT_BATCH_CAP } from '../../../../../shared/types/sprintBatch';
@@ -808,6 +810,144 @@ describe('WorkflowController', () => {
 
       expect(result.outcome).toBe('completed');
       expect(runner.calls.filter((c) => c.id === 'execute').length).toBe(1);
+    });
+
+    // ── Visual MERGE-GATE actuation (programmatic): after the visual-verify inner
+    //    step the controller parks the lane + awaits the async verdict, then
+    //    advances / loops back to implement / fails the lane. ───────────────────
+    describe('visual merge-gate actuation', () => {
+      /** A scripted fake VisualVerifyGate: shifts an outcome per awaitVerdict call. */
+      function makeVisualGate(
+        outcomes: VisualGateOutcome[],
+        active = true,
+      ): VisualVerifyGate & { calls: Array<{ runId: string; itemId: string }> } {
+        const queue = [...outcomes];
+        const calls: Array<{ runId: string; itemId: string }> = [];
+        return {
+          calls,
+          isActive: () => active,
+          async awaitVerdict({ runId, itemId }) {
+            calls.push({ runId, itemId });
+            return queue.shift() ?? { kind: 'advance' };
+          },
+        };
+      }
+
+      it('parks at awaiting-verify then advances the lane to integrated on a PASS', async () => {
+        const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        const gate = makeVisualGate([{ kind: 'advance' }]);
+        host.visualGate = gate;
+        const runner = makeRunner();
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(gate.calls).toEqual([{ runId: 'r', itemId: 't1' }]);
+        // The lane parked at awaiting-verify (a non-inner id, so the park write
+        // widened allowedStepIds to include it) before integrating.
+        const steps = driver.lanes.filter((l) => l.itemId === 't1').map((l) => l.currentStepId);
+        expect(steps).toContain('awaiting-verify');
+        const parkWrite = driver.lanes.find((l) => l.currentStepId === 'awaiting-verify');
+        expect(parkWrite?.allowedStepIds).toContain('awaiting-verify');
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+        // implement + visual-verify each ran exactly once.
+        expect(runner.calls.filter((c) => c.id === 'implement').length).toBe(1);
+        expect(runner.calls.filter((c) => c.id === 'visual-verify').length).toBe(1);
+      });
+
+      it('loops back to implement with the bumped attempt on a FAIL, then integrates on PASS', async () => {
+        const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        // First verdict loops back (attempt 2), second advances.
+        const gate = makeVisualGate([{ kind: 'loopback', attempt: 2 }, { kind: 'advance' }]);
+        host.visualGate = gate;
+        const runner = makeRunner();
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        // The gate was consulted twice (loopback → re-verify).
+        expect(gate.calls.length).toBe(2);
+        // implement ran TWICE: attempt 1, then re-dispatched at attempt 2.
+        const implementCalls = runner.calls.filter((c) => c.id === 'implement');
+        expect(implementCalls.map((c) => c.attempt)).toEqual([1, 2]);
+        // visual-verify also re-ran (attempt 2 on the re-verify pass).
+        expect(runner.calls.filter((c) => c.id === 'visual-verify').map((c) => c.attempt)).toEqual([1, 2]);
+        // Lane ends integrated.
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('fails the lane when the merge-gate returns failed (cap reached)', async () => {
+        const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        const gate = makeVisualGate([{ kind: 'failed' }]);
+        host.visualGate = gate;
+        const runner = makeRunner();
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        // A required-inner failure fails the LANE but the fan-out outer step still
+        // settles done (sibling lanes would continue); the lane never integrates.
+        expect(result.outcome).toBe('completed');
+        const laneStatuses = driver.lanes.filter((l) => l.itemId === 't1').map((l) => l.status);
+        expect(laneStatuses).toContain('failed');
+        expect(laneStatuses).not.toContain('integrated');
+      });
+
+      it('does NOT park when the gate is inactive for the run (byte-identical to today)', async () => {
+        const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        const gate = makeVisualGate([], /* active */ false);
+        host.visualGate = gate;
+        const runner = makeRunner();
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        // Inactive → never awaited, never parked; the lane integrates straight away.
+        expect(gate.calls.length).toBe(0);
+        expect(driver.lanes.some((l) => l.currentStepId === 'awaiting-verify')).toBe(false);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
+      it('aborts the lane when the gate resolves aborted (run canceled while awaiting)', async () => {
+        const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        const gate = makeVisualGate([{ kind: 'aborted' }]);
+        host.visualGate = gate;
+        const runner = makeRunner();
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        // An aborted lane shorts the wave → the whole run settles canceled.
+        expect(result.outcome).toBe('canceled');
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).not.toBe('integrated');
+      });
+
+      it('fails the lane after the MAX_VISUAL_LOOPBACKS backstop (never spins forever)', async () => {
+        const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        // Always loop back — the controller backstop must eventually fail the lane.
+        const gate = makeVisualGate(
+          Array.from({ length: MAX_VISUAL_LOOPBACKS + 5 }, () => ({ kind: 'loopback', attempt: 2 }) as VisualGateOutcome),
+        );
+        host.visualGate = gate;
+        const runner = makeRunner();
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        // Bounded: at most MAX_VISUAL_LOOPBACKS + 1 gate consultations, then failed.
+        expect(gate.calls.length).toBeLessThanOrEqual(MAX_VISUAL_LOOPBACKS + 1);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').map((l) => l.status)).toContain('failed');
+      });
     });
 
     // ── A fanOut OUTER step that ALSO carries a trailing human checkpoint
