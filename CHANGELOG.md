@@ -6,6 +6,56 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-06-27
+
+### Added
+
+- **Tabbed run center pane.** The run view's center pane is now tabbed — a **Flow**
+  tab plus file and diff tabs opened from the File Explorer — sitting over a
+  collapsible, resizable terminal dock. The right rail is likewise collapsible and
+  width-adjustable.
+- **Run artifacts.** Flows now produce typed artifacts — idea specs, decomposed-story
+  grids, UI prototypes, and screenshots — that open as center-pane tabs and are listed
+  in a new **Artifacts** panel so closed tabs can be reopened. A UI-prototype artifact
+  renders live in a sandboxed iframe; reported screenshots show in a gallery. Artifacts
+  are snapshotted to disk when committed (with a configurable commit location), and new
+  `cyboflow_*` MCP tools let agents report them.
+- **Diff / Split / Preview in file tabs.** Opening a file shows its diff with a header
+  control to switch between a unified **Diff**, a side-by-side **Split**, and a
+  **Preview** of the file (Markdown is rendered). An unchanged file shows its contents
+  rather than a dead-end message.
+- **Message a running flow.** You can now send a message to a running SDK flow — input
+  is queued and drained into the agent.
+- **Runtime permission mode.** Change an agent's permission mode while a run (or an
+  open quick session) is live.
+
+### Changed
+
+- **The rail Diff tab is a changed-files list.** It lists each changed file with its
+  +/- counts; clicking one opens it in the center pane (where Diff / Split / Preview
+  live) instead of expanding an inline toggle.
+- **The run diff shows committed work, not just untracked files.** The run-scoped diff
+  is now computed against the run's launch point, so a flow that *commits* its work — a
+  sprint/ship run merging parallel task lanes back to the branch — shows those changes.
+  Previously only uncommitted/untracked files appeared.
+- Decomposed-story tasks stack vertically and open a clickable task-detail modal, and a
+  small idea that decomposes directly into tasks now surfaces those tasks.
+- Planner/ship idea specs flow into the entity body, and the `cyboflow_create_task` /
+  `cyboflow_update_task` MCP tools accept a `body`.
+
+### Fixed
+
+- **Sandbox-escape guard.** The live-canvas iframe rejects shell-origin / non-loopback
+  URLs so an artifact preview can't navigate out of the sandbox.
+- The split diff view no longer bleeds long lines across the divider, and the diff
+  parser no longer emits phantom blank-context rows between hunks.
+- A run/quick session with no active run shows its session diff again instead of a
+  dead-end "No active run".
+- The chat stays visible when a workflow completes, and the terminal dock no longer
+  shows a duplicated label for quick sessions.
+- Planner, sprint, and ship runs mint their baseline artifacts at run start, so a run
+  whose agents never report a `done` step still produces its deliverables.
+
 ## [0.1.7] — 2026-06-26
 
 ### Added
