@@ -353,6 +353,129 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.getByText('detail.png')).toBeInTheDocument();
   });
 
+  // --- screenshots verdict banner (P9) -------------------------------------
+
+  it('renders the PASS verdict banner (green check + confidence, no feedback/issues)', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: {
+        kind: 'screenshots',
+        payload: {
+          fileNames: ['home.png'],
+          verdict: {
+            status: 'pass',
+            confidence: 0.92,
+            issues: [],
+            feedback: 'Matches the intent.',
+            judgedFileNames: ['home.png'],
+            baselineUsed: false,
+            model: 'claude-opus-4-8',
+          },
+        },
+      },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+
+    const banner = screen.getByTestId('artifact-verdict-banner');
+    expect(banner).toHaveAttribute('data-verdict-status', 'pass');
+    expect(banner).toHaveTextContent('Visual check passed');
+    expect(screen.getByTestId('artifact-verdict-confidence')).toHaveTextContent('92% confidence');
+    expect(screen.getByTestId('artifact-verdict-icon')).toHaveTextContent('✓');
+    // PASS suppresses feedback + issue list.
+    expect(screen.queryByTestId('artifact-verdict-feedback')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('artifact-verdict-issues')).not.toBeInTheDocument();
+  });
+
+  it('renders the FAIL verdict banner with feedback + a per-issue list', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: {
+        kind: 'screenshots',
+        payload: {
+          fileNames: ['home.png', 'detail.png'],
+          verdict: {
+            status: 'fail',
+            confidence: 0.81,
+            issues: [
+              { severity: 'high', description: 'Header overlaps the hero', fileName: 'home.png' },
+              { severity: 'low', description: 'Footer spacing is tight' },
+            ],
+            feedback: 'Two layout regressions found.',
+            judgedFileNames: ['home.png', 'detail.png'],
+            baselineUsed: false,
+            model: 'claude-opus-4-8',
+          },
+        },
+      },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+
+    const banner = screen.getByTestId('artifact-verdict-banner');
+    expect(banner).toHaveAttribute('data-verdict-status', 'fail');
+    expect(banner).toHaveTextContent('Visual check failed');
+    expect(screen.getByTestId('artifact-verdict-feedback')).toHaveTextContent('Two layout regressions found.');
+    const issues = screen.getAllByTestId('artifact-verdict-issue');
+    expect(issues).toHaveLength(2);
+    expect(issues[0]).toHaveTextContent('Header overlaps the hero');
+    expect(issues[0]).toHaveTextContent('home.png');
+
+    // The per-image issue annotates the matching thumbnail (home.png) only.
+    const badge = screen.getByTestId('artifact-shot-issue-badge');
+    expect(badge).toHaveTextContent('1 issue');
+    // Only one card carries a badge (detail.png has no per-file issue).
+    expect(screen.getAllByTestId('artifact-shot-issue-badge')).toHaveLength(1);
+  });
+
+  it('renders the low_confidence banner as "needs human visual review" (amber, with feedback)', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: {
+        kind: 'screenshots',
+        payload: {
+          fileNames: ['home.png'],
+          verdict: {
+            status: 'low_confidence',
+            confidence: 0.42,
+            issues: [],
+            feedback: 'Could not determine if the modal rendered.',
+            judgedFileNames: ['home.png'],
+            baselineUsed: false,
+            model: 'claude-opus-4-8',
+          },
+        },
+      },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+
+    const banner = screen.getByTestId('artifact-verdict-banner');
+    expect(banner).toHaveAttribute('data-verdict-status', 'low_confidence');
+    expect(banner).toHaveTextContent('Needs human visual review');
+    expect(screen.getByTestId('artifact-verdict-confidence')).toHaveTextContent('42% confidence');
+    expect(screen.getByTestId('artifact-verdict-feedback')).toHaveTextContent('Could not determine if the modal rendered.');
+  });
+
+  it('renders no verdict banner when the payload carries no verdict', () => {
+    setHook({ loading: false, error: null, data: { kind: 'screenshots', payload: { fileNames: ['home.png'] } } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+    expect(screen.queryByTestId('artifact-verdict-banner')).not.toBeInTheDocument();
+    expect(screen.getByTestId('artifact-shots-grid')).toBeInTheDocument();
+  });
+
+  it('ignores a malformed verdict (no banner, no throw)', () => {
+    const malformed = {
+      kind: 'screenshots',
+      payload: { fileNames: ['home.png'], verdict: 'pass' },
+    } as unknown as ArtifactData['data'];
+    setHook({ loading: false, error: null, data: malformed });
+    expect(() =>
+      render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />),
+    ).not.toThrow();
+    expect(screen.queryByTestId('artifact-verdict-banner')).not.toBeInTheDocument();
+  });
+
   // --- ui-prototype / generic (live canvas) --------------------------------
 
   it('embeds the ui-prototype live canvas (iframe) for a localhost url', () => {

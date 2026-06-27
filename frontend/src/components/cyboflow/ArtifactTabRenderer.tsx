@@ -35,6 +35,7 @@ import { useArtifactImages } from '../../hooks/useArtifactImages';
 import { ARTIFACT_COLORS, extractArchDesignSection } from '../../../../shared/types/artifacts';
 import type { Artifact } from '../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
+import type { VerdictV1 } from '../../../../shared/types/visualVerification';
 
 const PAGE = 'var(--color-bg-primary)';
 const HAIRLINE = 'var(--color-border-primary)';
@@ -45,6 +46,13 @@ const INK = 'var(--color-text-primary)';
 const RUST = 'var(--color-interactive-primary)';
 const HOVER_WASH = '#faf7ef';
 const STORIES = 'var(--color-phase-refine)';
+
+// Verdict-banner accents (warm-paper palette; M7 polish tokenizes them). Mirrors
+// the screenshots-tab green for PASS, the artifact-error rust for FAIL, and an
+// amber for the never-auto-loop low_confidence "needs human review" state.
+const VERDICT_PASS = '#2d8a5b';
+const VERDICT_FAIL = '#c0392b';
+const VERDICT_LOW = '#b8860b';
 
 interface ArtifactTabRendererProps {
   artifact: Artifact;
@@ -381,6 +389,165 @@ function DecomposedStoriesBody({ artifact, projectId }: { artifact: Artifact; pr
 }
 
 // ---------------------------------------------------------------------------
+// screenshots — verdict banner (P9) — a compact visual-verification result strip
+// above the gallery, driven by the optional payload.verdict (VerdictV1) the
+// scheduler's verdict-delivery chokepoint enriches onto the SAME 'screenshots'
+// artifact (P8a). Three states:
+//   - pass            → green check + confidence%.
+//   - fail            → red, the judge feedback + a per-issue list.
+//   - low_confidence  → amber "needs human visual review" + feedback.
+// Per-image issues (issue.fileName) ALSO annotate the matching thumbnail below.
+// ---------------------------------------------------------------------------
+
+/**
+ * Runtime guard for the optional payload.verdict. `payload` is typed
+ * ScreenshotsArtifactPayload (verdict?: VerdictV1), but the bytes arrive as JSON
+ * laundered through parsePayload (Record<string, unknown>), so a malformed verdict
+ * (e.g. a bare string, a missing status) must not reach the banner. Validate the
+ * load-bearing shape (status + numeric confidence + an issues array) and tolerate
+ * the rest; an invalid verdict is treated as absent (no banner).
+ */
+function isVerdictV1(v: unknown): v is VerdictV1 {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  return (
+    (o.status === 'pass' || o.status === 'fail' || o.status === 'low_confidence') &&
+    typeof o.confidence === 'number' &&
+    Array.isArray(o.issues)
+  );
+}
+
+/** Visual styling per verdict status (accent + label + summary line). */
+function verdictPresentation(status: VerdictV1['status']): {
+  accent: string;
+  icon: string;
+  label: string;
+} {
+  switch (status) {
+    case 'pass':
+      return { accent: VERDICT_PASS, icon: '✓', label: 'Visual check passed' };
+    case 'fail':
+      return { accent: VERDICT_FAIL, icon: '✕', label: 'Visual check failed' };
+    case 'low_confidence':
+      return { accent: VERDICT_LOW, icon: '?', label: 'Needs human visual review' };
+    default: {
+      // Closed union; never executes. Treat anything unexpected as low-confidence.
+      void (status satisfies never);
+      return { accent: VERDICT_LOW, icon: '?', label: 'Needs human visual review' };
+    }
+  }
+}
+
+/** Per-issue severity dot color. */
+function severityColor(severity: VerdictV1['issues'][number]['severity']): string {
+  switch (severity) {
+    case 'high':
+      return VERDICT_FAIL;
+    case 'medium':
+      return VERDICT_LOW;
+    case 'low':
+      return MUTED;
+    default:
+      void (severity satisfies never);
+      return MUTED;
+  }
+}
+
+/**
+ * Compact verdict banner rendered above the gallery. Square-cornered card on a
+ * faint status-tinted wash (consistent with the artifact-tab idiom), accent stripe
+ * on the leading edge. PASS shows only the confidence; FAIL / low_confidence add
+ * the feedback line and a per-issue list when present.
+ */
+function VerdictBanner({ verdict }: { verdict: VerdictV1 }): ReactElement {
+  const { accent, icon, label } = verdictPresentation(verdict.status);
+  const confidencePct = Math.round((verdict.confidence ?? 0) * 100);
+  const showDetail = verdict.status !== 'pass';
+  const issues = Array.isArray(verdict.issues) ? verdict.issues : [];
+
+  return (
+    <div
+      data-testid="artifact-verdict-banner"
+      data-verdict-status={verdict.status}
+      style={{
+        margin: '16px 20px 0',
+        border: `1px solid ${accent}`,
+        borderLeft: `4px solid ${accent}`,
+        background: 'var(--color-surface-primary)',
+        padding: '10px 12px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span
+          data-testid="artifact-verdict-icon"
+          style={{
+            width: 16,
+            height: 16,
+            borderRadius: '50%',
+            background: accent,
+            color: 'var(--color-surface-primary)',
+            fontSize: '10px',
+            fontWeight: 700,
+            lineHeight: '16px',
+            textAlign: 'center',
+            flexShrink: 0,
+          }}
+        >
+          {icon}
+        </span>
+        <span style={{ fontSize: '12px', fontWeight: 700, color: accent }}>{label}</span>
+        <span style={{ flex: 1 }} />
+        <span data-testid="artifact-verdict-confidence" style={{ fontSize: '10px', color: FAINT }}>
+          {confidencePct}% confidence
+        </span>
+      </div>
+      {showDetail && verdict.feedback && (
+        <div data-testid="artifact-verdict-feedback" style={{ fontSize: '11px', color: MUTED, lineHeight: 1.45 }}>
+          {verdict.feedback}
+        </div>
+      )}
+      {showDetail && issues.length > 0 && (
+        <ul
+          data-testid="artifact-verdict-issues"
+          style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 4 }}
+        >
+          {issues.map((issue, i) => (
+            <li
+              key={`${issue.severity}-${i}`}
+              data-testid="artifact-verdict-issue"
+              style={{ display: 'flex', alignItems: 'flex-start', gap: 6, fontSize: '10.5px', color: INK, lineHeight: 1.4 }}
+            >
+              <span
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  background: severityColor(issue.severity),
+                  flexShrink: 0,
+                  marginTop: 4,
+                }}
+              />
+              <span style={{ flex: 1 }}>
+                <span style={{ fontWeight: 700, color: severityColor(issue.severity), textTransform: 'uppercase', fontSize: '8.5px', letterSpacing: '.04em', marginRight: 6 }}>
+                  {issue.severity}
+                </span>
+                {issue.description}
+                {issue.fileName && (
+                  <span style={{ color: FAINT, marginLeft: 6 }}>· {issue.fileName}</span>
+                )}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // screenshots — 2-col gallery rendering on-disk PNGs (FU4 display half).
 //
 // PRODUCER CONVENTION (capture half is environmental / out of scope): a
@@ -389,6 +556,7 @@ function DecomposedStoriesBody({ artifact, projectId }: { artifact: Artifact; pr
 // MCP tool whose payload.fileNames are the BASENAMES. The bytes are served back
 // as data URLs by useArtifactImages → artifacts:load-images (path-validated,
 // fail-soft per file). The actual capture (Peekaboo TCC) is NOT built here.
+// The optional payload.verdict (P8a) renders the VerdictBanner above the grid.
 // ---------------------------------------------------------------------------
 function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
   const accent = ARTIFACT_COLORS.screenshots;
@@ -401,6 +569,23 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
     data?.kind === 'screenshots' && Array.isArray(data.payload.fileNames)
       ? data.payload.fileNames.filter((n): n is string => typeof n === 'string')
       : [];
+
+  // The optional verdict (P8a) enriched onto the SAME artifact payload by the
+  // verdict-delivery chokepoint. Absent until a judged outcome exists (a
+  // skipped/timeout request enriches none) — narrowed via isVerdictV1.
+  const verdict = data?.kind === 'screenshots' && isVerdictV1(data.payload.verdict) ? data.payload.verdict : null;
+
+  // Per-image issues, keyed by the issue's optional fileName, to annotate the
+  // matching thumbnail (a file with no issue is left unannotated).
+  const issuesByFile = new Map<string, VerdictV1['issues']>();
+  if (verdict) {
+    for (const issue of verdict.issues) {
+      if (!issue.fileName) continue;
+      const existing = issuesByFile.get(issue.fileName);
+      if (existing) existing.push(issue);
+      else issuesByFile.set(issue.fileName, [issue]);
+    }
+  }
 
   // Resolve the on-disk bytes (basename -> data URL) for the reported files.
   // A file that fails the main-side containment guard / is missing simply has no
@@ -416,6 +601,9 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
         eyebrow="Artifact · screenshots"
         meta={artifact.stepOrigin ?? 'visual-verifier'}
       />
+      {/* Verdict strip above the gallery — present whenever the payload carries a
+          judged verdict, independent of whether bytes resolved. */}
+      {!loading && !error && verdict && <VerdictBanner verdict={verdict} />}
       {loading ? (
         <StateRow testid="artifact-shots-loading" color={MUTED} text="Loading screenshots…" />
       ) : error ? (
@@ -448,8 +636,46 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
         >
           {fileNames.map((name) => {
             const dataUrl = images[name];
+            const shotIssues = issuesByFile.get(name) ?? [];
+            const worstSeverity = shotIssues.reduce<VerdictV1['issues'][number]['severity'] | null>(
+              (worst, issue) => {
+                if (issue.severity === 'high') return 'high';
+                if (issue.severity === 'medium' && worst !== 'high') return 'medium';
+                if (issue.severity === 'low' && worst === null) return 'low';
+                return worst;
+              },
+              null,
+            );
             return (
-              <div key={name} data-testid="artifact-shot-card" style={{ border: `1px solid ${HAIRLINE}`, background: 'var(--color-surface-primary)' }}>
+              <div
+                key={name}
+                data-testid="artifact-shot-card"
+                style={{
+                  border: `1px solid ${worstSeverity ? severityColor(worstSeverity) : HAIRLINE}`,
+                  background: 'var(--color-surface-primary)',
+                  position: 'relative',
+                }}
+              >
+                {shotIssues.length > 0 && (
+                  <span
+                    data-testid="artifact-shot-issue-badge"
+                    title={shotIssues.map((iss) => iss.description).join('\n')}
+                    style={{
+                      position: 'absolute',
+                      top: 6,
+                      right: 6,
+                      zIndex: 1,
+                      fontSize: '9px',
+                      fontWeight: 700,
+                      color: 'var(--color-surface-primary)',
+                      background: worstSeverity ? severityColor(worstSeverity) : VERDICT_FAIL,
+                      borderRadius: 2,
+                      padding: '1px 5px',
+                    }}
+                  >
+                    {shotIssues.length} {shotIssues.length === 1 ? 'issue' : 'issues'}
+                  </span>
+                )}
                 {/* 16:10 image area — the resolved on-disk PNG, or a hatched
                     fallback when the file did not resolve (missing / blocked). */}
                 {dataUrl ? (
