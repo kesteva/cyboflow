@@ -28,7 +28,7 @@ import { resolveWorkflowDefinition } from '../../../../shared/types/workflows';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { ClaudeSpawnerLike, ProgrammaticRunner, ProgrammaticRunContext } from '../runExecutor';
 import type { LoggerLike } from '../types';
-import type { FanOutDriver, StepReport } from './types';
+import type { FanOutDriver, StepReport, VisualVerifyGate } from './types';
 import { WorkflowController } from './workflowController';
 import { createRunDirectives } from './runDirectives';
 import { SpawnStepRunner } from './spawnStepRunner';
@@ -95,6 +95,14 @@ export interface DefaultProgrammaticRunnerDeps {
    * returns undefined (e.g. no batch) likewise yields no host-driven fan-out.
    */
   fanOutDriverFactory?: (ctx: { runId: string; batchId: string | null }) => FanOutDriver | undefined;
+  /**
+   * Visual merge-gate resolver (programmatic actuation). A single stateless
+   * instance (it resolves run/lane state per call) threaded onto the host so the
+   * controller can park + await the async visual verdict after a lane's
+   * visual-verify step. Only consulted inside a sprint fan-out when verification is
+   * active for the run; absent ⇒ the controller never parks (byte-identical to today).
+   */
+  visualGate?: VisualVerifyGate;
   /**
    * Sprint task-scope provider (grounding fix, 2026-06-22). Called once per
    * sprint-style run (a non-empty `batch_id`) to resolve the `# Sprint tasks`
@@ -195,6 +203,10 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       injectEvent: ctx.injectEvent,
       ...(this.deps.stepResultRecorder ? { recordStepResult: this.deps.stepResultRecorder } : {}),
       ...(fanOutDriver ? { fanOutDriver } : {}),
+      // The visual merge-gate is wired only alongside a fan-out driver (a sprint
+      // run) — without lanes there is nothing to park. It is otherwise inert (the
+      // controller consults it only on a visual-verify inner step when active).
+      ...(fanOutDriver && this.deps.visualGate ? { visualGate: this.deps.visualGate } : {}),
       logger: this.deps.logger,
     });
 

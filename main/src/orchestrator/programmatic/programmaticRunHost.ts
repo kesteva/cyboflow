@@ -37,6 +37,7 @@ import type {
   StepReport,
   SystemicPauseVerdict,
   TriageDecision,
+  VisualVerifyGate,
 } from './types';
 import type { HumanGateResolver } from './humanGate';
 import type { BlockingItemsResolver } from './blockingItemsGate';
@@ -106,6 +107,13 @@ export interface ProgrammaticRunHostArgs {
    * never fans out (a `fanOut` step runs as a normal single agent step).
    */
   fanOutDriver?: FanOutDriver;
+  /**
+   * Optional visual merge-gate (programmatic actuation). Exposed verbatim on the
+   * host's `visualGate` getter so the controller can park + await the async verdict
+   * after a lane's visual-verify step. Present ONLY for a sprint-style run; absent ⇒
+   * `host.visualGate` is undefined ⇒ the controller never parks (byte-identical).
+   */
+  visualGate?: VisualVerifyGate;
   logger?: LoggerLike;
 }
 
@@ -278,6 +286,15 @@ export class ProgrammaticRunHost implements ControllerHost {
    */
   get fanOut(): FanOutDriver | undefined {
     return this.args.fanOutDriver;
+  }
+
+  /**
+   * Visual merge-gate (programmatic actuation). Wired only for sprint-style runs;
+   * `ControllerHost.visualGate` is optional so an absent gate (undefined) means the
+   * controller never parks a lane at awaiting-verify (today's behavior).
+   */
+  get visualGate(): VisualVerifyGate | undefined {
+    return this.args.visualGate;
   }
 
   log(level: 'info' | 'warn', message: string): void {
