@@ -9,10 +9,11 @@
  *     During an active run it is the LAUNCHER for center-pane file/diff tabs (clicking
  *     a file opens a center tab via centerPaneStore.openFileTab); otherwise it falls
  *     back to its own read-only takeover viewer.
- *   - Diff — the run-scoped working-directory diff (RunDiffTabPanel) for the active
- *     run. Flow runs are keyed by runId (workflow_runs.session_id is NULL), so the
- *     session-scoped combined-diff path can't serve them; this tab fetches
- *     cyboflow.runs.gitDiff (worktree_path-resolved) instead.
+ *   - Diff — the working-directory diff. For an active run it is run-scoped
+ *     (RunDiffTabPanel; flow runs are keyed by runId since workflow_runs.session_id
+ *     is NULL, so it fetches cyboflow.runs.gitDiff, worktree_path-resolved). With no
+ *     active run but a selected session it falls back to the session-scoped combined
+ *     diff (RunRightRailDiff → CombinedDiffView) — the at-rest experience.
  *   - Artifacts — the "RUN DELIVERABLES" reopen surface (ArtifactsPanel) when
  *     activeRunId is non-null; lists every artifact the run produced so closed
  *     center-pane tabs can be reopened. projectId is resolved from the active run
@@ -35,6 +36,7 @@ import { WorkflowProgressTimeline } from './WorkflowProgressTimeline';
 import { SprintLanesPanel } from './SprintLanesPanel';
 import { SessionFileExplorer } from './SessionFileExplorer';
 import { RunDiffTabPanel } from './RunDiffTabPanel';
+import CombinedDiffView from '../panels/diff/CombinedDiffView';
 import { ArtifactsPanel } from './ArtifactsPanel';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
@@ -111,6 +113,38 @@ function selectActiveRunProjectId(
     if (row) return row.project_id;
   }
   return null;
+}
+
+/**
+ * RunRightRailDiff — session-scoped Diff body: a compact wrapper around the
+ * working CombinedDiffView, mirroring the minimal state DiffPanel owns
+ * (selectedExecutions defaulting to [] == all uncommitted changes,
+ * isGitOperationRunning false). This is the at-rest fallback the DIFF tab shows
+ * when a session is selected but no workflow run is active — flow runs key off
+ * runId (session_id NULL) and use RunDiffTabPanel instead, but a quick session
+ * (and any session at rest) has a real `sessions` row whose worktree diff is
+ * session-scoped. Keyed by sessionId so it remounts (reloads git data) whenever
+ * the resolved session changes; CombinedDiffView also exposes a header refresh.
+ */
+function RunRightRailDiff({ sessionId }: { sessionId: string }) {
+  // [] == all uncommitted changes (same default DiffPanel uses).
+  const [selectedExecutions] = useState<number[]>([]);
+
+  return (
+    <div
+      data-testid="run-right-rail-session-diff"
+      className="h-full flex flex-col bg-surface-primary"
+    >
+      <div className="flex-1 overflow-hidden">
+        <CombinedDiffView
+          sessionId={sessionId}
+          selectedExecutions={selectedExecutions}
+          isGitOperationRunning={false}
+          isVisible
+        />
+      </div>
+    </div>
+  );
 }
 
 interface RunRightRailProps {
@@ -314,18 +348,25 @@ export function RunRightRail({ phaseState, collapsed, onToggleCollapse }: RunRig
             </div>
           )
         ) : currentTab.id === 'diff' ? (
-          // Diff tab — run-scoped working-directory diff (keyed by runId, not
-          // sessionId, since flow runs have session_id NULL).
+          // Diff tab — two scopes:
+          //  • Active run → run-scoped working-directory diff (keyed by runId,
+          //    since flow runs have session_id NULL).
+          //  • No run but a session is selected → session-scoped combined diff
+          //    (the at-rest experience for quick / session-hosted sessions). The
+          //    earlier change wired only the run path and regressed this case to
+          //    a dead-end "No active run".
           activeRunId !== null ? (
             <div className="h-full overflow-hidden">
               <RunDiffTabPanel runId={activeRunId} />
             </div>
+          ) : selectedSessionId !== null ? (
+            <RunRightRailDiff sessionId={selectedSessionId} />
           ) : (
             <div
               data-testid="run-right-rail-diff-empty-norun"
               className="p-4 text-sm text-text-secondary"
             >
-              No active run
+              Select a session to view its diff.
             </div>
           )
         ) : (

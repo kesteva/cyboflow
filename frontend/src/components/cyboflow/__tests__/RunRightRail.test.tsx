@@ -71,6 +71,15 @@ vi.mock('../RunDiffTabPanel', () => ({
   ),
 }));
 
+// Stub CombinedDiffView (the session-scoped diff body) so the at-rest Diff-tab
+// fallback test can assert the rail mounts it keyed by the selected session
+// WITHOUT firing the real session-diff IPC.
+vi.mock('../../panels/diff/CombinedDiffView', () => ({
+  default: ({ sessionId }: { sessionId: string }) => (
+    <div data-testid="combined-diff-view-mock">{sessionId}</div>
+  ),
+}));
+
 // Import after mocks
 import { RunRightRail } from '../RunRightRail';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
@@ -276,13 +285,31 @@ describe('RunRightRail', () => {
     expect(panel).toHaveTextContent('run-diff-rail-001');
   });
 
-  it('clicking the Diff tab with no active run shows the no-run empty state', () => {
+  it('clicking the Diff tab with no active run but a selected session falls back to the session-scoped diff', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-diff-rest-001' });
+    });
+
+    renderRail(EMPTY_PHASE_STATE);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
+
+    const panel = screen.getByTestId('combined-diff-view-mock');
+    expect(panel).toBeInTheDocument();
+    expect(panel).toHaveTextContent('sess-diff-rest-001');
+    // Not the run-scoped panel, and not the dead-end empty state.
+    expect(screen.queryByTestId('run-diff-tab-panel-mock')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-right-rail-diff-empty-norun')).not.toBeInTheDocument();
+  });
+
+  it('clicking the Diff tab with no active run and no selected session shows the empty state', () => {
     renderRail(EMPTY_PHASE_STATE);
 
     fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
 
     expect(screen.getByTestId('run-right-rail-diff-empty-norun')).toBeInTheDocument();
     expect(screen.queryByTestId('run-diff-tab-panel-mock')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('combined-diff-view-mock')).not.toBeInTheDocument();
   });
 });
 
