@@ -152,6 +152,20 @@ export type SprintLaneStepId = (typeof SPRINT_LANE_STEP_IDS)[number];
 export const AWAITING_VERIFY_STEP: SprintLaneStepId = 'awaiting-verify';
 
 /**
+ * The lane step the visual merge-gate loops BACK to on a FAIL (under the 3× cap) —
+ * the re-implement target. Named const (not a bare literal) so the merge-gate
+ * driver, the programmatic controller's loopback, and the tests share one source.
+ */
+export const SPRINT_IMPLEMENT_STEP: SprintLaneStepId = 'implement';
+
+/**
+ * The lane step that FIRES the fire-and-continue verification request. After it
+ * runs, the lane parks at AWAITING_VERIFY_STEP until the async verdict lands. The
+ * programmatic controller keys its merge-gate park/await on this inner-step id.
+ */
+export const SPRINT_VISUAL_VERIFY_STEP: SprintLaneStepId = 'visual-verify';
+
+/**
  * Read-model for a single task lane (SprintLaneStore.listLanes /
  * cyboflow.runs.listLanes). `ref`/`title` are resolved fail-soft from the
  * `tasks` table (NULL when the task row is missing).
