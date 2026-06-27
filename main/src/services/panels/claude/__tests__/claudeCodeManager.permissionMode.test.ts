@@ -607,3 +607,86 @@ describe('ClaudeCodeManager.maybeFoldAutoDenyVisibility — native-auto deny vis
     expect(count).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Per-session plugin enablement (migration 036 / Slice 4 — read-at-spawn).
+// buildSdkOptions reads sessions.enabled_plugins_json and merges a {id:true} map
+// into the SAME inline `settings` overlay that holds the fastMode pins. An empty
+// or missing allow-list emits NO enabledPlugins key; settingSources is untouched.
+// ---------------------------------------------------------------------------
+
+describe('ClaudeCodeManager.buildSdkOptions — per-session enabledPlugins overlay', () => {
+  let db: Database.Database;
+  let logger: LoggerSpy;
+
+  beforeEach(() => {
+    db = createTestDb();
+    logger = makeProdLoggerSpy();
+    const adapter = dbAdapter(db);
+    ApprovalRouter.initialize(adapter);
+  });
+
+  afterEach(() => {
+    ApprovalRouter._resetForTesting();
+    db.close();
+    vi.clearAllMocks();
+  });
+
+  // Manager whose getDbSession returns the given enabled_plugins_json (or none).
+  function makeManager(enabledPluginsJson?: string): TestableClaudeCodeManager {
+    const sessionManager = {
+      getDbSession: vi.fn(() =>
+        enabledPluginsJson === undefined
+          ? { id: 'stub-session' }
+          : { id: 'stub-session', enabled_plugins_json: enabledPluginsJson },
+      ),
+      getPanelClaudeSessionId: vi.fn(() => undefined),
+      getProjectById: vi.fn(() => undefined),
+      updateSession: vi.fn(),
+    } as unknown as SessionManager;
+    return new TestableClaudeCodeManager(sessionManager, logger as unknown as Logger, makeConfigManager(), db);
+  }
+
+  // dontAsk → no PreToolUse hook / no FS, so buildSdkOptions stays hermetic.
+  const baseOpts = { panelId: 'p', sessionId: 's', worktreePath: '/tmp/w', prompt: 'go', agentPermissionMode: 'dontAsk' as const };
+
+  it('enabled_plugins_json → settings.enabledPlugins {id:true}, settingSources untouched', async () => {
+    const mgr = makeManager(JSON.stringify(['acme@market', 'foo@bar']));
+    const opts = await mgr.publicBuildSdkOptions(baseOpts);
+
+    const settings = opts.settings as Record<string, unknown>;
+    expect(settings.enabledPlugins).toEqual({ 'acme@market': true, 'foo@bar': true });
+    // The fast-mode pins on the same overlay are preserved.
+    expect(settings.fastMode).toBe(false);
+    expect(settings.fastModePerSessionOptIn).toBe(true);
+    // settingSources is NOT touched by the plugin overlay.
+    expect(opts.settingSources).toEqual(['user', 'project']);
+  });
+
+  it('empty [] allow-list → no enabledPlugins key emitted', async () => {
+    const mgr = makeManager('[]');
+    const opts = await mgr.publicBuildSdkOptions(baseOpts);
+
+    const settings = opts.settings as Record<string, unknown>;
+    expect(settings).not.toHaveProperty('enabledPlugins');
+    expect(settings.fastModePerSessionOptIn).toBe(true);
+    expect(opts.settingSources).toEqual(['user', 'project']);
+  });
+
+  it('missing column → no enabledPlugins key (byte-identical legacy overlay)', async () => {
+    const mgr = makeManager(undefined);
+    const opts = await mgr.publicBuildSdkOptions(baseOpts);
+
+    const settings = opts.settings as Record<string, unknown>;
+    expect(settings).not.toHaveProperty('enabledPlugins');
+    expect(opts.settingSources).toEqual(['user', 'project']);
+  });
+
+  it('malformed JSON → no enabledPlugins key', async () => {
+    const mgr = makeManager('not-json');
+    const opts = await mgr.publicBuildSdkOptions(baseOpts);
+
+    const settings = opts.settings as Record<string, unknown>;
+    expect(settings).not.toHaveProperty('enabledPlugins');
+  });
+});

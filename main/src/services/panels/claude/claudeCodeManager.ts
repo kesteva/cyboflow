@@ -942,10 +942,17 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // `settings` overlay: `fastModePerSessionOptIn: true` makes each session
     // start with fast mode OFF regardless of the inherited file, and `fastMode`
     // re-enables it for exactly the session whose launch toggle requested it.
+    // Per-session plugin enablement (allow-list from sessions.enabled_plugins_json,
+    // read at spawn). Merged into the SAME inline (flag-tier) settings overlay so
+    // it layers ON TOP of the file-loaded user/project plugins — settingSources
+    // (line above) is untouched. `undefined` when the allow-list is empty, so the
+    // default path emits no enabledPlugins key and inherited plugins are untouched.
+    const enabledPlugins = this.resolveSessionEnabledPlugins(options.sessionId);
     sdkOptions.settings = {
       ...(typeof sdkOptions.settings === 'object' ? sdkOptions.settings : {}),
       fastMode: options.fastMode === true,
       fastModePerSessionOptIn: true,
+      ...(enabledPlugins ? { enabledPlugins } : {}),
     };
 
     // Piece C — idle-chat nudge. An explicit resumeSessionId (threaded by
@@ -988,6 +995,19 @@ export class ClaudeCodeManager extends AbstractCliManager {
    */
   private async composeMcpServers(options: ClaudeSpawnOptions): Promise<Record<string, McpServerConfig>> {
     const { mcpServers } = this.getBaseProjectMcpServers(options.sessionId);
+
+    // Per-session MCP removal (deny-list from sessions.disabled_mcp_servers_json,
+    // read at spawn). Delete each disabled server from the composed record — but
+    // NEVER the 'cyboflow' entry, which carries the orchestrator socket the
+    // permission bridge depends on (it is injected just below regardless). An
+    // empty/missing deny-set leaves `mcpServers` byte-identical to before.
+    for (const name of this.resolveSessionDisabledMcps(options.sessionId)) {
+      if (name === 'cyboflow') continue;
+      if (name in mcpServers) {
+        delete mcpServers[name];
+        this.logger?.info(`[MCP] Removed disabled MCP server for session ${options.sessionId}: ${name}`);
+      }
+    }
 
     if (this.orchSocketPath) {
       try {
@@ -1534,6 +1554,49 @@ export class ClaudeCodeManager extends AbstractCliManager {
     const stored = this.sessionManager.getDbSession(sessionId)?.agent_permission_mode;
     if (isPermissionMode(stored)) return stored;
     return this.configManager?.getDefaultAgentPermissionMode();
+  }
+
+  /**
+   * Per-session MCP DENY list — read at spawn from sessions.disabled_mcp_servers_json
+   * (migration 036). Returns the parsed server-name array, or [] when the column
+   * is missing/empty/malformed (so the default path filters nothing and stays
+   * byte-identical). The 'cyboflow' entry is never honored — composeMcpServers
+   * skips it explicitly. Reading the DB row (not a threaded arg) keeps it
+   * restart-safe, mirroring resolveSessionAgentPermissionMode.
+   */
+  private resolveSessionDisabledMcps(sessionId: string): string[] {
+    const raw = this.sessionManager.getDbSession(sessionId)?.disabled_mcp_servers_json;
+    if (!raw) return [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((x): x is string => typeof x === 'string');
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Per-session plugin ALLOW list — read at spawn from sessions.enabled_plugins_json
+   * (migration 036). Returns a `{ id: true }` map for buildSdkOptions to merge into
+   * the inline `settings.enabledPlugins`, or `undefined` when the column is
+   * missing/empty/malformed — so no enabledPlugins key is emitted and file-loaded
+   * plugins are untouched (byte-identical default).
+   */
+  private resolveSessionEnabledPlugins(sessionId: string): Record<string, boolean> | undefined {
+    const raw = this.sessionManager.getDbSession(sessionId)?.enabled_plugins_json;
+    if (!raw) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return undefined;
+      const ids = parsed.filter((x): x is string => typeof x === 'string');
+      if (ids.length === 0) return undefined;
+      const map: Record<string, boolean> = {};
+      for (const id of ids) map[id] = true;
+      return map;
+    } catch {
+      return undefined;
+    }
   }
 
   // ---------------------------------------------------------------------------
