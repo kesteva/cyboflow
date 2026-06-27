@@ -39,6 +39,7 @@ import { resolveArtifactCommitDir } from './orchestrator/artifactSnapshot';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
+import { SchedulerVisualVerifyGate } from './orchestrator/programmatic/visualVerifyGate';
 import {
   DefaultMonitorSession,
   DefaultHistoryReader,
@@ -58,7 +59,7 @@ import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
-import { VerificationScheduler } from './orchestrator/verify/verificationScheduler';
+import { VerificationScheduler, verificationEvents, verificationChannel } from './orchestrator/verify/verificationScheduler';
 import { createVerdictDelivery } from './orchestrator/verify/verdictDelivery';
 import { CapturePageBackend } from './services/visualVerify/capturePageBackend';
 import { VlmJudgeImpl } from './services/visualVerify/vlmJudge';
@@ -951,6 +952,18 @@ async function initializeServices() {
       reviewItemProjectChannel,
       cyboflowLogger,
     ),
+    // Visual merge-gate (programmatic actuation): closes the prose-only boundary so
+    // a PROGRAMMATIC sprint parks each lane after visual-verify, awaits the async
+    // verdict the VerificationScheduler delivers, and re-dispatches implement on a
+    // FAIL (or fails the lane at the cap) — instead of integrating prematurely or
+    // leaving a FAILed lane parked. Subscribes to the scheduler's verificationEvents
+    // + reads the merge-gate's lane write. Inert for verify-disabled / non-sprint runs.
+    visualGate: new SchedulerVisualVerifyGate({
+      db: cyboflowDb,
+      events: verificationEvents,
+      channelFor: verificationChannel,
+      logger: cyboflowLogger,
+    }),
     // ON-DEMAND monitor (the monitor-unify refactor): the single triage + chat
     // human-seam plane that folds the old Stage 3 supervisor + supervisor-chat
     // planes into one token-frugal `MonitorSession` rendering in the run's existing
