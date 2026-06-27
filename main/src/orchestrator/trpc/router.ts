@@ -21,6 +21,8 @@ import { reviewItemsRouter } from './routers/reviewItems';
 import { artifactsRouter } from './routers/artifacts';
 import { substratesRouter } from './routers/substrates';
 import { monitorRouter } from './routers/monitor';
+import { mcpsRouter } from './routers/mcps';
+import { pluginsRouter } from './routers/plugins';
 
 export const appRouter = router({
   cyboflow: router({
@@ -32,7 +34,9 @@ export const appRouter = router({
     files: filesRouter,
     health: healthRouter,
     insights: insightsRouter,
+    mcps: mcpsRouter,
     monitor: monitorRouter,
+    plugins: pluginsRouter,
     questions: questionsRouter,
     reviewItems: reviewItemsRouter,
     runs: runsRouter,

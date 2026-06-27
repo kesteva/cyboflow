@@ -110,6 +110,8 @@ export function WorkflowsView(): React.JSX.Element {
   const projectFilter = useWorkflowsStore((s) => s.projectFilter);
   const workflows = useWorkflowsStore((s) => s.workflows);
   const agents = useWorkflowsStore((s) => s.agents);
+  const mcps = useWorkflowsStore((s) => s.mcps);
+  const plugins = useWorkflowsStore((s) => s.plugins);
 
   // One-shot store init on mount (idempotent — first call fetches + subscribes).
   useEffect(() => {
@@ -405,6 +407,8 @@ export function WorkflowsView(): React.JSX.Element {
           <GalleryStacked
             workflows={workflows}
             agents={agents}
+            mcps={mcps}
+            plugins={plugins}
             showProjectChip={projectFilter === null}
             agentsUnavailable={agents.length === 0}
             onRunWorkflow={onRunWorkflow}

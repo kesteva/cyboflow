@@ -26,6 +26,7 @@ import type {
   WorkflowGalleryEntry,
   AgentGalleryEntry,
 } from '../../../stores/workflowsStore';
+import type { McpEntry, PluginEntry } from '../../../../../shared/types/integrations';
 import { wfMeta } from '../wfMeta';
 
 // ---------------------------------------------------------------------------
@@ -38,6 +39,8 @@ let mockError: string | null = null;
 let mockProjectFilter: number | null = null;
 let mockWorkflows: WorkflowGalleryEntry[] = [];
 let mockAgents: AgentGalleryEntry[] = [];
+let mockMcps: McpEntry[] = [];
+let mockPlugins: PluginEntry[] = [];
 
 const mockInit = vi.fn(async () => {});
 const mockRefresh = vi.fn(async () => {});
@@ -51,6 +54,8 @@ function snapshot() {
     projectFilter: mockProjectFilter,
     workflows: mockWorkflows,
     agents: mockAgents,
+    mcps: mockMcps,
+    plugins: mockPlugins,
     init: mockInit,
     refresh: mockRefresh,
     setProjectFilter: mockSetProjectFilter,
@@ -192,6 +197,31 @@ function buildAgentEntry(over: Partial<AgentGalleryEntry> = {}): AgentGalleryEnt
   };
 }
 
+function buildMcpEntry(over: Partial<McpEntry> = {}): McpEntry {
+  return {
+    name: 'peekaboo',
+    transport: 'stdio',
+    url: null,
+    command: 'npx',
+    args: [],
+    scope: 'global',
+    ...over,
+  };
+}
+
+function buildPluginEntry(over: Partial<PluginEntry> = {}): PluginEntry {
+  return {
+    id: 'frontend-design@claude-plugins-official',
+    name: 'frontend-design',
+    marketplace: 'claude-plugins-official',
+    scope: 'user',
+    version: 'unknown',
+    lastUpdated: null,
+    projectPath: null,
+    ...over,
+  };
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mockInitialized = true;
@@ -200,6 +230,8 @@ beforeEach(() => {
   mockProjectFilter = null;
   mockWorkflows = [buildWorkflowEntry()];
   mockAgents = [buildAgentEntry()];
+  mockMcps = [];
+  mockPlugins = [];
   mockGetAll = async () => ({
     success: true,
     data: [{ id: 1, name: 'Acme', path: '/tmp/acme', active: true, created_at: '', updated_at: '' }],
@@ -264,6 +296,8 @@ describe('GalleryStacked', () => {
       <GalleryStacked
         workflows={[buildWorkflowEntry()]}
         agents={[]}
+        mcps={[]}
+        plugins={[]}
         showProjectChip={false}
         agentsUnavailable={true}
       />,
@@ -276,13 +310,53 @@ describe('GalleryStacked', () => {
 
   it('shows the owning-project chip only in the all-projects view', () => {
     const { rerender } = render(
-      <GalleryStacked workflows={[buildWorkflowEntry()]} agents={[]} showProjectChip={true} agentsUnavailable={true} />,
+      <GalleryStacked workflows={[buildWorkflowEntry()]} agents={[]} mcps={[]} plugins={[]} showProjectChip={true} agentsUnavailable={true} />,
     );
     expect(screen.getByTestId('workflow-card-project-chip')).toHaveTextContent('Acme');
     rerender(
-      <GalleryStacked workflows={[buildWorkflowEntry()]} agents={[]} showProjectChip={false} agentsUnavailable={true} />,
+      <GalleryStacked workflows={[buildWorkflowEntry()]} agents={[]} mcps={[]} plugins={[]} showProjectChip={false} agentsUnavailable={true} />,
     );
     expect(screen.queryByTestId('workflow-card-project-chip')).not.toBeInTheDocument();
+  });
+
+  it('renders read-only MCPs + Plugins sections with count pills and cards', () => {
+    render(
+      <GalleryStacked
+        workflows={[buildWorkflowEntry()]}
+        agents={[]}
+        mcps={[buildMcpEntry(), buildMcpEntry({ name: 'fal-ai', transport: 'http', url: 'https://mcp.fal.ai/mcp', command: null })]}
+        plugins={[buildPluginEntry()]}
+        showProjectChip={false}
+        agentsUnavailable={true}
+      />,
+    );
+    expect(screen.getByTestId('gallery-section-mcps')).toBeInTheDocument();
+    expect(screen.getByTestId('gallery-section-mcps-count')).toHaveTextContent('2');
+    expect(screen.getByTestId('mcp-card-peekaboo')).toBeInTheDocument();
+    expect(screen.getByTestId('mcp-card-fal-ai')).toBeInTheDocument();
+
+    expect(screen.getByTestId('gallery-section-plugins')).toBeInTheDocument();
+    expect(screen.getByTestId('gallery-section-plugins-count')).toHaveTextContent('1');
+    expect(screen.getByTestId('plugin-card-frontend-design')).toBeInTheDocument();
+    // Read-only — no Edit/New affordance in either section.
+    expect(screen.queryByTestId('mcp-card-edit-peekaboo')).not.toBeInTheDocument();
+  });
+
+  it('shows empty-states for the MCPs + Plugins sections when both are empty', () => {
+    render(
+      <GalleryStacked
+        workflows={[buildWorkflowEntry()]}
+        agents={[]}
+        mcps={[]}
+        plugins={[]}
+        showProjectChip={false}
+        agentsUnavailable={true}
+      />,
+    );
+    expect(screen.getByTestId('gallery-mcps-empty')).toBeInTheDocument();
+    expect(screen.getByTestId('gallery-plugins-empty')).toBeInTheDocument();
+    expect(screen.getByTestId('gallery-section-mcps-count')).toHaveTextContent('0');
+    expect(screen.getByTestId('gallery-section-plugins-count')).toHaveTextContent('0');
   });
 });
 
