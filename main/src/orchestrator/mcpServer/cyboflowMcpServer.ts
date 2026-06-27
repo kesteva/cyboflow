@@ -295,8 +295,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             current_step: {
               type: 'string',
-              enum: ['implement', 'write-tests', 'code-review', 'task-verify', 'visual-verify'],
-              description: 'Optional per-task lane step the executing subagent is on',
+              enum: ['implement', 'write-tests', 'code-review', 'task-verify', 'visual-verify', 'awaiting-verify'],
+              description:
+                "Optional per-task lane step the executing subagent is on. Use 'awaiting-verify' to park the lane at the visual merge-gate after firing cyboflow_request_verification — the verifier drives the lane off it (PASS→integrated, FAIL→implement loopback).",
             },
             attempt: {
               type: 'number',
@@ -468,6 +469,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               },
             },
             baseline_key: { type: 'string', description: 'Optional golden-baseline key to compare against (absent = intent-only judging).' },
+            task_ref: {
+              type: 'string',
+              description:
+                "Optional lane ref of the task this verification is for (e.g. \"TASK-008\"), used by the visual merge-gate to drive the async verdict onto the right lane. Pass YOUR task's ref in a multi-task sprint; omit for a single-task run.",
+            },
           },
           required: ['intent'],
         },
@@ -1275,8 +1281,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         html_path?: unknown;
         viewports?: unknown;
         baseline_key?: unknown;
+        task_ref?: unknown;
       };
-      const { intent, type_override, url, html_path, viewports, baseline_key } = args;
+      const { intent, type_override, url, html_path, viewports, baseline_key, task_ref } = args;
       if (typeof intent !== 'string' || intent.length === 0) {
         return {
           content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'intent: string' }) }],
@@ -1311,6 +1318,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'baseline_key: string (optional)' }) }],
         };
       }
+      if (task_ref !== undefined && typeof task_ref !== 'string') {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'task_ref: string (optional)' }) }],
+        };
+      }
       const queryParams: Record<string, unknown> = { intent };
       if (type_override !== undefined) queryParams['typeOverride'] = type_override;
       if (url !== undefined) queryParams['url'] = url;
@@ -1320,6 +1332,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // can never fail a fire-and-continue request.
       if (viewports !== undefined) queryParams['viewports'] = viewports;
       if (baseline_key !== undefined) queryParams['baselineKey'] = baseline_key;
+      // taskRef: the lane attribution for the visual merge-gate (verdict→lane).
+      if (task_ref !== undefined) queryParams['taskRef'] = task_ref;
       return executeMcpQuery('mcp-request-verification', queryParams);
     }
 

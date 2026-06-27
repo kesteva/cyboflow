@@ -151,6 +151,15 @@ export interface VerificationRequestInput {
   htmlPath?: string;
   viewports?: Array<{ width: number; height: number; label?: string }>;
   baselineKey?: string;
+  /**
+   * The lane this request belongs to, for verdict→lane attribution in the visual
+   * merge-gate (locked decision #2). The lane agent passes its OWN display ref
+   * (e.g. "TASK-008") or opaque task id; the merge-gate driver resolves it through
+   * SprintLaneStore (ref OR id, same as updateLane). Optional + carried inside
+   * deliverable_json (no new column — migration 036 is frozen): absent for a
+   * single-lane batch (attribution is unambiguous) or a non-sprint run (no gate).
+   */
+  taskRef?: string;
 }
 
 /**

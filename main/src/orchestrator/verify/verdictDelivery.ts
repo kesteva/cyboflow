@@ -6,29 +6,45 @@
  * itself stays electron/service-free (standalone-typecheck invariant) because
  * this module is INJECTED into it from main/src/index.ts, never imported by it.
  *
- * Two deliveries, both ADVISORY for this slice (the merge-gate loopback is a
- * later layer — here a verdict only enriches the artifact + raises a finding):
+ * THREE deliveries (P8b promotes the lane gate from advisory to the visual
+ * MERGE-GATE — locked decision #2):
  *
  *  1. ArtifactRouter.apply(projectId, { op:'create', ... atype:'screenshots' })
  *     ENRICHES the SAME run-scoped 'screenshots' artifact (idempotent UPSERT by
  *     (runId, atype) — the producer/auto-mint already wrote `{ fileNames }`) with
  *     a `verdict` block. Done on EVERY judged outcome so the screenshots tab can
- *     render the verdict banner + per-image issues. A skipped/timeout request
- *     (no verdict) enriches nothing.
+ *     render the verdict banner + per-image issues. This is the ONLY of the three
+ *     deliveries gated on a PRESENT verdict — a skipped/timeout request and a
+ *     verdict-LESS FAIL (capture-fail / judge-throw) enrich nothing, but the
+ *     verdict-less FAIL STILL drives the merge-gate (#2) + raises a finding (#3) so
+ *     a transient capture failure never silently wedges the lane.
  *
- *  2. ReviewItemRouter.applyReviewItem(projectId, { op:'create', kind:'finding' })
+ *  2. MERGE-GATE lane drive (applyMergeGateVerdict — P8b). For a SPRINT run (one
+ *     with a batch + lanes), the verdict drives the lane off its `awaiting-verify`
+ *     park step: PASS → integrated; FAIL under the 3× cap → back to `implement`
+ *     with a bumped attempt (the loopback); FAIL at the cap → `failed`;
+ *     low_confidence → advisory pass-through. A non-sprint run (no batch) is a
+ *     no-op — the lane drive simply does nothing and only the finding informs.
+ *     The action returned decides the finding's `blocking` flag below.
+ *
+ *  3. ReviewItemRouter.applyReviewItem(projectId, { op:'create', kind:'finding' })
  *     raises ONE finding ONLY on a FAIL or low_confidence terminal verdict (PASS
  *     raises none; skipped/timeout raise none). Severity is mapped from the worst
- *     issue; the finding is soft-linked to the run's task when one exists. This is
- *     called once per terminal verdict (the scheduler delivers a request's verdict
- *     exactly once), so it does not spam a finding per drain.
+ *     issue; the finding is soft-linked to the run's task when one exists. In
+ *     merge-gate mode a FAIL finding is BLOCKING (it holds this lane's integration
+ *     until re-verified / escalated — isMergeGateBlocking); low_confidence stays
+ *     NON-blocking (advisory human review, never an auto-loop). This is called once
+ *     per terminal verdict (the scheduler delivers a request's verdict exactly
+ *     once), so it does not spam a finding per drain.
  *
- * Standalone-typecheck invariant: this file imports ONLY the two electron-free
- * orchestrator routers + shared types + the narrow DatabaseLike / LoggerLike — no
- * 'electron' / 'better-sqlite3' / 'fs' / services import.
+ * Standalone-typecheck invariant: this file imports ONLY the electron-free
+ * orchestrator routers + the merge-gate driver + shared types + the narrow
+ * DatabaseLike / LoggerLike — no 'electron' / 'better-sqlite3' / 'fs' / services
+ * import.
  */
 import { ArtifactRouter } from '../artifactRouter';
 import { ReviewItemRouter } from '../reviewItemRouter';
+import { applyMergeGateVerdict, isMergeGateBlocking } from './mergeGateLaneAdvance';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type { OnVerdict } from './verificationScheduler';
 import type { VerdictV1 } from '../../../../shared/types/visualVerification';
@@ -63,8 +79,13 @@ function toReviewSeverity(issueSeverity: 'low' | 'medium' | 'high' | undefined):
 /** Severity rank so the WORST issue drives the finding's severity. */
 const ISSUE_RANK: Record<'low' | 'medium' | 'high', number> = { low: 0, medium: 1, high: 2 };
 
-/** Pick the worst (highest-rank) issue severity from a verdict, or undefined when none. */
-function worstIssueSeverity(verdict: VerdictV1): 'low' | 'medium' | 'high' | undefined {
+/**
+ * Pick the worst (highest-rank) issue severity from a verdict, or undefined when
+ * none. A verdict-LESS FAIL (capture-fail / judge-throw — `verdict` undefined) has
+ * no issues to rank, so the caller falls back to the default 'warning' severity.
+ */
+function worstIssueSeverity(verdict: VerdictV1 | undefined): 'low' | 'medium' | 'high' | undefined {
+  if (!verdict) return undefined;
   let worst: 'low' | 'medium' | 'high' | undefined;
   for (const issue of verdict.issues) {
     if (worst === undefined || ISSUE_RANK[issue.severity] > ISSUE_RANK[worst]) {
@@ -79,15 +100,29 @@ function worstIssueSeverity(verdict: VerdictV1): 'low' | 'medium' | 'high' | und
  * gets a "needs human visual review" framing (it is never an auto-loop); fail gets a
  * "visual verification failed" framing. The body threads the judge feedback +
  * per-issue lines so the review queue carries the actionable detail.
+ *
+ * Tolerates an ABSENT verdict (a capture-fail / judge-throw delivers status 'failed'
+ * with `verdict` undefined): the title is still the FAIL framing and the body falls
+ * back to a generic "no images were captured / judged" line so the review inbox
+ * carries an actionable reason instead of an empty finding. (The concrete
+ * capture/judge error is persisted on verification_requests.error_message by the
+ * scheduler's markTerminal; it is not threaded to this hook, so the body stays
+ * generic-but-actionable rather than re-reading that row.)
  */
 function buildFindingText(
   status: string,
-  verdict: VerdictV1,
+  verdict: VerdictV1 | undefined,
 ): { title: string; body: string } {
   const title =
     status === 'low_confidence'
       ? 'Visual verification needs human review (low confidence)'
       : 'Visual verification failed';
+  if (!verdict) {
+    return {
+      title,
+      body: 'Visual verification could not produce a verdict (no screenshots were captured or judged). The lane was sent back to re-implement; investigate the capture/judge step (dev server reachable? selectors/URL valid?).',
+    };
+  }
   const lines: string[] = [];
   if (verdict.feedback) lines.push(verdict.feedback);
   if (verdict.issues.length > 0) {
@@ -131,37 +166,55 @@ function resolveRunTaskId(db: DatabaseLike, runId: string, logger?: LoggerLike):
 export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
   const { db, logger } = deps;
 
-  return async ({ runId, projectId, status, verdict, fileNames }) => {
-    // Only judged outcomes carry a verdict. A skipped/timeout request has nothing
-    // to enrich and never raises a finding.
-    if (!verdict) return;
-
+  return async ({ runId, projectId, status, verdict, fileNames, input }) => {
     // ---- 1. Enrich the SAME 'screenshots' artifact (idempotent UPSERT) ----
+    // Gated on a PRESENT verdict only: a judged outcome (passed/failed/low_confidence
+    // WITH a verdict) carries the verdict block to enrich. A verdict-LESS FAIL
+    // (capture-fail / judge-throw) and skipped/timeout have nothing to enrich — but
+    // a verdict-less FAIL STILL drives the merge-gate + raises a finding below (it
+    // must not wedge the lane), so the enrich is the ONLY part gated on `verdict`.
+    //
     // op:'create' UPSERTs by (runId, atype); the producer/auto-mint already wrote
     // `{ fileNames }`, so this re-derive refreshes the payload WITH the verdict
     // block. isNew:false so an already-surfaced screenshots tab does not re-pulse
     // its "new" dot just because a verdict arrived.
-    try {
-      const payload: ScreenshotsArtifactPayload = { fileNames, verdict };
-      await ArtifactRouter.getInstance().apply(projectId, {
-        op: 'create',
-        runId,
-        atype: 'screenshots',
-        label: `${fileNames.length} screenshot${fileNames.length === 1 ? '' : 's'}`,
-        payloadJson: JSON.stringify(payload),
-        stepOrigin: 'visual-verify',
-        isNew: false,
-        actor: 'orchestrator',
-      });
-    } catch (err) {
-      logger?.error('[verdictDelivery] artifact enrich failed (fail-soft)', {
-        runId,
-        projectId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+    if (verdict) {
+      try {
+        const payload: ScreenshotsArtifactPayload = { fileNames, verdict };
+        await ArtifactRouter.getInstance().apply(projectId, {
+          op: 'create',
+          runId,
+          atype: 'screenshots',
+          label: `${fileNames.length} screenshot${fileNames.length === 1 ? '' : 's'}`,
+          payloadJson: JSON.stringify(payload),
+          stepOrigin: 'visual-verify',
+          isNew: false,
+          actor: 'orchestrator',
+        });
+      } catch (err) {
+        logger?.error('[verdictDelivery] artifact enrich failed (fail-soft)', {
+          runId,
+          projectId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
-    // ---- 2. Raise ONE finding ONLY on FAIL / low_confidence (PASS: none) ----
+    // ---- 2. MERGE-GATE: drive the sprint lane off `awaiting-verify` ----
+    // For a sprint run (batch + lanes) the verdict advances/loops-back/fails the
+    // lane through the SprintLaneStore chokepoint; the returned action also decides
+    // whether the finding below is blocking. A non-sprint run resolves to a noop.
+    // Fully fail-soft inside the driver — a lane problem never blocks the finding.
+    const gateAction = applyMergeGateVerdict({
+      db,
+      runId,
+      status,
+      verdict,
+      taskRef: input?.taskRef,
+      logger,
+    });
+
+    // ---- 3. Raise ONE finding ONLY on FAIL / low_confidence (PASS: none) ----
     if (!FINDING_STATUSES.has(status)) return;
 
     try {
@@ -178,9 +231,12 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
         kind: 'finding',
         title,
         body,
-        // Advisory mode: a visual finding is non-blocking (it informs, it does not
-        // gate run resume — the merge-gate loopback is a later layer).
-        blocking: false,
+        // Merge-gate (locked decision #2): a FAIL finding BLOCKS — it holds this
+        // lane's integration (loopback re-implement, or terminal failure at the
+        // 3× cap) until re-verified / escalated. low_confidence stays NON-blocking
+        // (advisory human review; never an auto-loop). A non-sprint run (noop
+        // gateAction) also stays non-blocking — there is no lane to gate.
+        blocking: isMergeGateBlocking(gateAction),
         severity,
         source: 'visual-verify',
         // Soft-link to the run's task when one exists, else leave the link absent

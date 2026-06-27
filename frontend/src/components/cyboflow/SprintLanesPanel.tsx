@@ -41,6 +41,7 @@ const LANE_STEP_LABEL: Readonly<Record<SprintLaneStepId, string>> = {
   'code-review': 'Code review',
   'task-verify': 'Verify',
   'visual-verify': 'Visual verify',
+  'awaiting-verify': 'Awaiting visual verify',
 };
 
 /** Label for a reported lane step — falls back to the raw id for unknown values. */

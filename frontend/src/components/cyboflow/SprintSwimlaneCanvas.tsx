@@ -66,6 +66,9 @@ const LANE_STEP_SHORT_LABEL: Readonly<Record<SprintLaneStepId, string>> = {
   'code-review': 'Code review',
   'task-verify': 'Verify',
   'visual-verify': 'Visual check',
+  // The visual merge-gate park step — not a strip column (the sprint strip derives
+  // from the 5 fanOut inner ids), but the vocabulary map must be total.
+  'awaiting-verify': 'Awaiting verify',
 };
 
 /** One column of the lane step strip — id (lane currentStepId vocabulary) + label. */

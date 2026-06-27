@@ -3409,6 +3409,39 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     });
   });
 
+  it('threads taskRef into deliverable_json for the merge-gate verdict→lane attribution (P8b)', async () => {
+    seedVerifyRun(vdb, 'run-vtr', {
+      enabled: true,
+      type: 'static-render-snapshot',
+      chain: ['capturePage'],
+    });
+
+    const { socket, writes } = makeSocketDouble();
+    await vHandler.handleMessage(
+      {
+        type: 'mcp-request-verification',
+        requestId: 'rv-tr',
+        runId: 'run-vtr',
+        intent: 'the lane UI renders',
+        url: 'http://localhost:5173',
+        taskRef: 'TASK-008',
+      },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(true);
+    const data = response.data as { requestId?: string };
+    const row = vdb
+      .prepare('SELECT deliverable_json FROM verification_requests WHERE id = ?')
+      .get(data.requestId) as { deliverable_json: string } | undefined;
+    expect(JSON.parse(row!.deliverable_json)).toEqual({
+      intent: 'the lane UI renders',
+      url: 'http://localhost:5173',
+      taskRef: 'TASK-008',
+    });
+  });
+
   it('typeOverride NARROWS the chain to the override-type ∩ the run stamped chain', async () => {
     // Run resolved interactive-web (chain playwright,peekaboo) but an override to
     // static-render must intersect down to only the stamped backends that overlap.
