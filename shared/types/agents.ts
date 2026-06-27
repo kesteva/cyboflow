@@ -90,6 +90,8 @@ export interface AgentEntry {
    * resolves it to a concrete snapshot in the subagent `model:` frontmatter.
    */
   model: AgentModelAlias | null;
+  /** MCP server names this agent may call; rendered as `mcp__<server>__*` on the tools line. */
+  enabledMcps: string[];
   source: AgentSource;
   isCustom: boolean;
   isOverridden: boolean;

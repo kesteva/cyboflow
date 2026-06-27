@@ -70,6 +70,7 @@ const CUSTOM_AGENT: AgentEntry = {
   systemPrompt: '',
   tools: [],
   model: null,
+  enabledMcps: [],
   source: 'custom',
   isCustom: true,
   isOverridden: false,

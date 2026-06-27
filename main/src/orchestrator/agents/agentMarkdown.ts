@@ -23,6 +23,8 @@ export interface RenderableAgent {
   agentKey: string;
   description: string;
   tools: CliTool[];
+  /** MCP server names; each expands to the `mcp__<server>__*` wildcard on the tools line. */
+  enabledMcps: string[];
   systemPrompt: string;
   /** Concrete model id for the `model:` frontmatter; omit/empty = inherit run model. */
   model?: string;
@@ -48,7 +50,10 @@ function escapeYamlScalar(value: string): string {
 export function renderAgentMarkdown(a: RenderableAgent): string {
   const name = `cyboflow-${a.agentKey}`;
   const description = escapeYamlScalar(a.description);
-  const tools = a.tools.join(', ');
+  // Per-agent MCP grants render as `mcp__<server>__*` wildcards appended to the
+  // tools line so the subagent can call the whitelisted servers.
+  const mcpWildcards = a.enabledMcps.map((server) => `mcp__${server}__*`);
+  const tools = [...a.tools, ...mcpWildcards].join(', ');
   // model is appended last and only when pinned — keeps an inherit-model agent's
   // frontmatter byte-identical to the pre-model-feature output.
   const modelLine = a.model ? `\nmodel: ${escapeYamlScalar(a.model)}` : '';

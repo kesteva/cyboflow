@@ -63,6 +63,7 @@ describe('renderAgentMarkdown ↔ parseBundledAgent round-trip', () => {
       agentKey: 'implement',
       description: 'Implements a task: scoped to its acceptance criteria.',
       tools,
+      enabledMcps: [],
       systemPrompt: 'You are the implement subagent.\n\n## Result\nDone.',
     });
     const parsed = parseBundledAgent(md);
@@ -73,6 +74,17 @@ describe('renderAgentMarkdown ↔ parseBundledAgent round-trip', () => {
     // render emits the canonical "---\n\n<body>" spacer; parse returns the body with
     // that leading separator newline, so compare on trimmed content.
     expect(parsed.body.trim()).toBe('You are the implement subagent.\n\n## Result\nDone.');
+  });
+
+  it('appends mcp__<server>__* wildcards to the tools line for enabledMcps', () => {
+    const md = renderAgentMarkdown({
+      agentKey: 'implement',
+      description: 'Implements a task.',
+      tools: ['Read', 'Bash'],
+      enabledMcps: ['playwright', 'fal-ai'],
+      systemPrompt: 'You are the implement subagent.\n\n## Result\nDone.',
+    });
+    expect(md).toContain('tools: Read, Bash, mcp__playwright__*, mcp__fal-ai__*');
   });
 
   it('round-trips every bundled builtin name/description/tools through render→parse', () => {
@@ -86,6 +98,7 @@ describe('renderAgentMarkdown ↔ parseBundledAgent round-trip', () => {
         agentKey: agent.agentKey,
         description: agent.description,
         tools: agent.tools,
+        enabledMcps: [],
         systemPrompt: agent.systemPrompt,
       });
       const parsed = parseBundledAgent(md);
@@ -105,6 +118,7 @@ describe('validateAgentDraft', () => {
     description: 'A valid description.',
     systemPrompt: 'You are an agent.\n\n## Result\nOK.',
     tools: ['Read', 'Bash'],
+    enabledMcps: [],
     isCustom: true,
   };
 
@@ -151,6 +165,24 @@ describe('validateAgentDraft', () => {
 
   it('frontmatter_in_body when the prompt starts with ---', () => {
     expectCode({ ...base, systemPrompt: '---\nname: x\n---\n' }, 'frontmatter_in_body');
+  });
+
+  it('accepts valid MCP server names', () => {
+    expect(() =>
+      validateAgentDraft({ ...base, enabledMcps: ['playwright', 'fal-ai', 'context7'] }),
+    ).not.toThrow();
+  });
+
+  it('invalid_mcp for a malformed server name', () => {
+    expectCode({ ...base, enabledMcps: ['bad name!'] }, 'invalid_mcp');
+  });
+
+  it('invalid_mcp for the single-writer cyboflow server', () => {
+    expectCode({ ...base, enabledMcps: ['cyboflow'] }, 'invalid_mcp');
+  });
+
+  it('invalid_mcp for a cyboflow_-prefixed server', () => {
+    expectCode({ ...base, enabledMcps: ['cyboflow_update_task'] }, 'invalid_mcp');
   });
 });
 

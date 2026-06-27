@@ -41,6 +41,7 @@ const BUILTIN_ENTRY: AgentEntry = {
   systemPrompt: 'You are the implementer. Make the smallest diff that satisfies the criteria.',
   tools: ['Read', 'Edit', 'Write', 'Bash'],
   model: null,
+  enabledMcps: [],
   source: 'builtin',
   isCustom: false,
   isOverridden: false,
