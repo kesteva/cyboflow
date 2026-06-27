@@ -6,11 +6,17 @@
  * under a header row (filename, ± counts, path). Diff data comes from
  * useFileDiffData (the run's combined diff, filtered to this file).
  *
+ * When the file has NO diff (an unchanged file opened from the File Explorer),
+ * the tab falls back to the plain file contents (useFileContentData) instead of
+ * a dead-end "no changes" message — so opening any file always shows something:
+ * the diff if there is one, otherwise the file itself.
+ *
  * Design hexes are inline (warm-paper palette); the M7 polish pass tokenizes them.
  * (An "Open in editor" affordance is deferred — it needs an editor-open IPC.)
  */
 import type { ReactElement } from 'react';
 import { useFileDiffData } from '../../hooks/useFileDiffData';
+import { useFileContentData } from '../../hooks/useFileContentData';
 import type { DiffHunk, HunkLine } from '../../utils/parseFileHunks';
 import type { FileTabStatus } from '../../../../shared/types/centerPane';
 
@@ -93,7 +99,72 @@ function HunkRows({ hunk }: { hunk: DiffHunk }): ReactElement {
   );
 }
 
-export function FileTabRenderer({ sessionId, filePath, status }: FileTabRendererProps): ReactElement {
+/**
+ * FileContentView — plain file-contents body shown when the file has no diff.
+ * Mounted only in the no-diff branch so files that DO have a diff never fetch
+ * their contents. Mirrors the File Explorer takeover viewer's states (loading /
+ * error / binary / too-large / empty / text).
+ */
+function FileContentView({ sessionId, filePath }: { sessionId: string; filePath: string }): ReactElement {
+  const { loading, error, content } = useFileContentData(sessionId, filePath);
+
+  if (loading) {
+    return (
+      <div data-testid="file-tab-content-loading" style={{ padding: 16, fontSize: '12px', color: MUTED }}>
+        Loading file…
+      </div>
+    );
+  }
+  if (error) {
+    return (
+      <div data-testid="file-tab-content-error" style={{ padding: 16, fontSize: '12px', color: RUST }}>
+        {error}
+      </div>
+    );
+  }
+  if (content === null) {
+    return (
+      <div data-testid="file-tab-empty" style={{ padding: 16, fontSize: '12px', color: MUTED }}>
+        No changes in this file.
+      </div>
+    );
+  }
+  if (content.unviewableReason !== null) {
+    return (
+      <div data-testid="file-tab-content-unviewable" style={{ padding: 16, fontSize: '12px', color: MUTED }}>
+        {content.unviewableReason === 'binary'
+          ? 'Binary file — preview not available.'
+          : 'File too large to preview.'}
+      </div>
+    );
+  }
+  if (content.content === null || content.content === '') {
+    return (
+      <div data-testid="file-tab-content-empty" style={{ padding: 16, fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
+        Empty file
+      </div>
+    );
+  }
+  return (
+    <pre
+      data-testid="file-tab-content"
+      className="cf-scroll"
+      style={{
+        margin: 0,
+        padding: '12px 16px',
+        fontSize: '11px',
+        lineHeight: 1.55,
+        color: INK,
+        whiteSpace: 'pre',
+        fontFamily: 'var(--font-mono, monospace)',
+      }}
+    >
+      {content.content}
+    </pre>
+  );
+}
+
+export function FileTabRenderer({ sessionId, filePath }: FileTabRendererProps): ReactElement {
   const { loading, error, fileDiff } = useFileDiffData(sessionId, filePath);
 
   return (
@@ -137,9 +208,9 @@ export function FileTabRenderer({ sessionId, filePath, status }: FileTabRenderer
           {error}
         </div>
       ) : !fileDiff ? (
-        <div data-testid="file-tab-empty" style={{ padding: 16, fontSize: '12px', color: MUTED }}>
-          {status === 'A' ? 'New file — no diff to show.' : 'No changes in this file.'}
-        </div>
+        // No diff for this file → show the plain file contents (unchanged file
+        // opened from the explorer), not a dead-end message.
+        <FileContentView sessionId={sessionId} filePath={filePath} />
       ) : fileDiff.isBinary ? (
         <div data-testid="file-tab-binary" style={{ padding: 16, fontSize: '12px', color: MUTED }}>
           Binary file — diff not shown.

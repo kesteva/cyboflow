@@ -1,22 +1,29 @@
 /**
  * FileTabRenderer tests — center-pane file/diff tab.
  *
- * Drives each useFileDiffData state (loading / error / no-changes / new-file /
- * binary / parsed diff) and asserts the header (filename, ± counts) and the 3-col
- * hunk grid render.
+ * Drives each useFileDiffData state (loading / error / binary / parsed diff) and
+ * the no-diff fallback to plain file contents (useFileContentData), asserting the
+ * header (filename, ± counts), the 3-col hunk grid, and the content view render.
  */
 import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FileTabRenderer } from '../FileTabRenderer';
 import { useFileDiffData, type FileDiffData } from '../../../hooks/useFileDiffData';
+import { useFileContentData, type FileContentData } from '../../../hooks/useFileContentData';
 import type { ParsedFileDiff } from '../../../utils/parseFileHunks';
 
 vi.mock('../../../hooks/useFileDiffData', () => ({ useFileDiffData: vi.fn() }));
+vi.mock('../../../hooks/useFileContentData', () => ({ useFileContentData: vi.fn() }));
 const mockHook = vi.mocked(useFileDiffData);
+const mockContentHook = vi.mocked(useFileContentData);
 
 function setHook(value: FileDiffData): void {
   mockHook.mockReturnValue(value);
+}
+
+function setContentHook(value: FileContentData): void {
+  mockContentHook.mockReturnValue(value);
 }
 
 const PARSED: ParsedFileDiff = {
@@ -40,7 +47,13 @@ const PARSED: ParsedFileDiff = {
 };
 
 describe('FileTabRenderer', () => {
-  beforeEach(() => mockHook.mockReset());
+  beforeEach(() => {
+    mockHook.mockReset();
+    mockContentHook.mockReset();
+    // Default the content hook so diff-path tests (which never reach the
+    // content fallback) still have a defined return.
+    setContentHook({ loading: false, error: null, content: null });
+  });
 
   it('shows the loading state', () => {
     setHook({ loading: true, error: null, fileDiff: null });
@@ -54,16 +67,34 @@ describe('FileTabRenderer', () => {
     expect(screen.getByTestId('file-tab-error')).toHaveTextContent('boom');
   });
 
-  it('shows "no changes" when the file has no diff', () => {
+  it('falls back to the file contents when the file has no diff', () => {
     setHook({ loading: false, error: null, fileDiff: null });
+    setContentHook({
+      loading: false,
+      error: null,
+      content: { path: 'src/a.ts', content: 'hello world', size: 11, unviewableReason: null },
+    });
     render(<FileTabRenderer sessionId="s1" filePath="src/a.ts" />);
-    expect(screen.getByTestId('file-tab-empty')).toHaveTextContent('No changes in this file.');
+    expect(screen.getByTestId('file-tab-content')).toHaveTextContent('hello world');
+    expect(screen.queryByTestId('file-tab-empty')).not.toBeInTheDocument();
   });
 
-  it('shows a new-file note for status A with no diff', () => {
+  it('shows the content loading state while the no-diff file is fetched', () => {
     setHook({ loading: false, error: null, fileDiff: null });
-    render(<FileTabRenderer sessionId="s1" filePath="src/new.ts" status="A" />);
-    expect(screen.getByTestId('file-tab-empty')).toHaveTextContent('New file');
+    setContentHook({ loading: true, error: null, content: null });
+    render(<FileTabRenderer sessionId="s1" filePath="src/a.ts" />);
+    expect(screen.getByTestId('file-tab-content-loading')).toBeInTheDocument();
+  });
+
+  it('surfaces the binary notice for an unviewable no-diff file', () => {
+    setHook({ loading: false, error: null, fileDiff: null });
+    setContentHook({
+      loading: false,
+      error: null,
+      content: { path: 'img.png', content: null, size: 999, unviewableReason: 'binary' },
+    });
+    render(<FileTabRenderer sessionId="s1" filePath="img.png" />);
+    expect(screen.getByTestId('file-tab-content-unviewable')).toHaveTextContent('Binary file');
   });
 
   it('shows the binary notice', () => {
