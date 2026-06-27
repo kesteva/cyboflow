@@ -26,6 +26,7 @@ import {
 import { DEFAULT_WORKFLOW_NAME } from './wizard/workflowMeta';
 import { useSessionMetrics, formatTokenCount } from '../../hooks/useSessionMetrics';
 import { computeSessionCostUsd, formatCostUsd } from '../../utils/modelPricing';
+import { DEFAULT_QUICK_MODEL } from './ModelSelector';
 import { useLaunchWorkflow } from '../../hooks/useLaunchWorkflow';
 import { IdeaPickerModal } from './IdeaPickerModal';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
@@ -313,8 +314,12 @@ export function QuickSessionCanvas({
     { key: 'cache-read', label: 'Cache read', value: cacheRead },
   ];
   // Estimated USD cost of the whole-session token usage at the model's list
-  // price (null → '—' when the model is unknown).
-  const costLabel = formatCostUsd(computeSessionCostUsd(metrics.tokenBreakdown, metrics.model));
+  // price. A quick session always runs a Claude model, so an unset / 'auto'
+  // model (no explicit pick) is priced at the quick-session default (Opus)
+  // rather than rendering an unhelpful '—'.
+  const pricingModel =
+    metrics.model && metrics.model !== 'auto' ? metrics.model : DEFAULT_QUICK_MODEL;
+  const costLabel = formatCostUsd(computeSessionCostUsd(metrics.tokenBreakdown, pricingModel));
   const error = launchError ?? listError;
 
   return (

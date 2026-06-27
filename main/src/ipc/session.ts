@@ -2234,16 +2234,18 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         messageCount = databaseService.getConversationMessageCount(sessionId);
       }
       
-      // Resolve the session's model from its Claude panel state (model is
-      // managed at panel level, not on the session row). Used by the live
-      // session meter to price token usage. Null when unknown.
+      // Resolve the session's model from its Claude panel SETTINGS (model is
+      // managed at panel level, not on the session row — stored in
+      // tool_panels.settings JSON, not state.customState). Used by the live
+      // session meter to price token usage. The value is the picker alias
+      // ('opus' / 'sonnet' / 'haiku' / 'auto') or a concrete id; ratesForModel
+      // resolves families by substring, and the frontend defaults a missing /
+      // 'auto' model to the quick-session default. Null when no setting exists.
       const statsPanelModel = ((): string | null => {
-        const cs = statsClaudePanels[0]?.state?.customState;
-        if (cs && typeof cs === 'object' && 'model' in cs) {
-          const m = (cs as { model?: unknown }).model;
-          return typeof m === 'string' ? m : null;
-        }
-        return null;
+        const p = statsClaudePanels[0];
+        if (!p) return null;
+        const m = databaseService.getPanelSettings(p.id).model;
+        return typeof m === 'string' && m.length > 0 ? m : null;
       })();
 
       // Get session outputs count by type
