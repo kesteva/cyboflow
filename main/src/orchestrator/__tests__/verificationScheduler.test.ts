@@ -216,17 +216,18 @@ describe('VerificationScheduler', () => {
     const a = sched.enqueue({ runId: 'run-1', projectId: 1, type: 'native-desktop', input: { intent: 'a' }, chain: ['peekaboo'] });
     const b = sched.enqueue({ runId: 'run-1', projectId: 1, type: 'native-desktop', input: { intent: 'b' }, chain: ['peekaboo'] });
 
-    // First drain leases A (held 15ms); B can't get the screen lease → stays
-    // queued. Wait past A's hold so its capture + judge settle to passed.
-    await flushDrain();
-    await new Promise((r) => setTimeout(r, 40));
-    await flushDrain();
+    // The screen lease lets exactly ONE of {A,B} run per drain; the other stays
+    // queued and is picked up on a later nudge. Which goes first is a FIFO tie-break
+    // on the random row id (both share an enqueued_at second), so the test must NOT
+    // assume an A-then-B order — it pumps drains until both settle, then asserts the
+    // physics invariant: both passed AND the captures never overlapped.
+    for (let i = 0; i < 4 && (status(db, a) !== 'passed' || status(db, b) !== 'passed'); i++) {
+      sched.nudge();
+      await flushDrain();
+      await new Promise((r) => setTimeout(r, 40));
+      await flushDrain();
+    }
     expect(status(db, a)).toBe('passed');
-    // B was left queued during A's hold; nudge it again now the lease is free.
-    sched.nudge();
-    await flushDrain();
-    await new Promise((r) => setTimeout(r, 40));
-    await flushDrain();
     expect(status(db, b)).toBe('passed');
     expect(screenMaxConcurrent).toBe(1); // never overlapped — physics serialized
 
