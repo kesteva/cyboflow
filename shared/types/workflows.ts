@@ -8,6 +8,7 @@
 
 import type { CliSubstrate } from './substrate';
 import type { ExecutionModel } from './executionModel';
+import type { VerificationType } from './visualVerification';
 import type { WorkflowRunStatus } from './cyboflow';
 import type { ArtifactType } from './artifacts';
 import type { ExperimentArm } from './experiments';
@@ -171,6 +172,27 @@ export interface WorkflowRunRow {
    * the SHA read fails, fail-soft). Read by slice C's post-merge bug attribution.
    */
   merge_sha?: string | null;
+  /**
+   * Layered visual-verification posture stamped at launch (migration 055) — the
+   * third immutable run-stamp sibling to substrate / execution_model. Resolved
+   * ONCE by visualVerificationResolver and never updated (a run can't change
+   * posture mid-flight). 1 when this run participates in visual verification, 0
+   * otherwise (the SQLite INTEGER 0/1 boolean). Reads back 0 for every legacy
+   * row via the migration default (zero-behavior-change).
+   */
+  verify_enabled?: number;
+  /**
+   * Resolved VerificationType for the run, or NULL when verify_enabled=0
+   * (migration 055). Stamped-but-dormant until the VerificationScheduler lands.
+   */
+  verify_type?: VerificationType | null;
+  /**
+   * JSON-encoded VisualBackendId[] — the live easy→hard fall-forward chain
+   * (FALLBACK_CHAINS[type] ∩ host-available backends) resolved at launch, or
+   * NULL when verify_enabled=0 (migration 055). The scheduler reads + walks it;
+   * it is never rewritten on the row.
+   */
+  verify_chain?: string | null;
   started_at?: string | null;
   ended_at?: string | null;
   created_at: string;
