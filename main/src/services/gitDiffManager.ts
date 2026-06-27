@@ -67,6 +67,43 @@ export class GitDiffManager {
   }
 
   /**
+   * Capture the diff of a worktree's working tree against an arbitrary ref
+   * (commit / branch), INCLUDING committed, uncommitted, and untracked changes
+   * since that ref. `git diff <ref>` compares the working tree to <ref>, so
+   * unlike captureWorkingDirectoryDiff (which diffs vs HEAD and therefore hides
+   * anything already committed), this surfaces commits made since <ref> too.
+   *
+   * Used for the run-scoped Diff tab with the run's `base_sha` (the worktree HEAD
+   * snapshotted at launch): a flow that COMMITS its work — e.g. a sprint/ship run
+   * merging parallel task lanes back to the branch — would otherwise show nothing
+   * but stray untracked files, since the real changes are committed past HEAD.
+   */
+  async captureDiffAgainstRef(worktreePath: string, ref: string): Promise<GitDiffResult> {
+    try {
+      this.logger?.verbose(`Capturing git diff in ${worktreePath} against ref ${ref}`);
+      const diff = this.getGitDiffString(worktreePath, ref);
+      const changedFiles = this.getChangedFiles(worktreePath, ref);
+      const stats = this.getDiffStats(worktreePath, ref);
+      this.logger?.verbose(
+        `Captured diff vs ${ref}: ${stats.filesChanged} files, +${stats.additions} -${stats.deletions}`,
+      );
+      return {
+        diff,
+        stats,
+        changedFiles,
+        beforeHash: ref,
+        afterHash: undefined, // working tree — no fixed after hash
+      };
+    } catch (error) {
+      this.logger?.error(
+        `Failed to capture git diff against ${ref} in ${worktreePath}:`,
+        error instanceof Error ? error : undefined,
+      );
+      throw error;
+    }
+  }
+
+  /**
    * Capture git diff between two commits or between commit and working directory
    */
   async captureCommitDiff(worktreePath: string, fromCommit: string, toCommit?: string): Promise<GitDiffResult> {
@@ -371,7 +408,7 @@ export class GitDiffManager {
     }
   }
 
-  private getGitDiffString(worktreePath: string): string {
+  private getGitDiffString(worktreePath: string, ref: string = 'HEAD'): string {
     try {
       // First check if we're in a valid git repository
       try {
@@ -385,10 +422,11 @@ export class GitDiffManager {
       const status = execSync('git status --porcelain', { cwd: worktreePath, encoding: 'utf8' });
       console.log(`Git status in ${worktreePath}:`, status || '(no changes)');
 
-      // Get diff of both staged and unstaged changes against HEAD
-      // Using 'git diff HEAD' to include both staged and unstaged changes
-      let diff = execSync('git diff HEAD', { 
-        cwd: worktreePath, 
+      // Get diff of the working tree against <ref> (default HEAD), including both
+      // staged and unstaged changes. With a base ref this also surfaces commits
+      // made since <ref>; with HEAD it is committed-agnostic (uncommitted only).
+      let diff = execSync(`git diff ${ref}`, {
+        cwd: worktreePath,
         encoding: 'utf8',
         maxBuffer: 10 * 1024 * 1024 // 10MB buffer for large diffs
       });
@@ -425,12 +463,12 @@ export class GitDiffManager {
     }
   }
 
-  private getChangedFiles(worktreePath: string): string[] {
+  private getChangedFiles(worktreePath: string, ref: string = 'HEAD'): string[] {
     try {
-      // Get tracked changed files
-      const trackedOutput = execSync('git diff --name-only HEAD', { 
-        cwd: worktreePath, 
-        encoding: 'utf8' 
+      // Get tracked changed files (working tree vs <ref>)
+      const trackedOutput = execSync(`git diff --name-only ${ref}`, {
+        cwd: worktreePath,
+        encoding: 'utf8'
       });
       const trackedFiles = trackedOutput.trim().split('\n').filter((f: string) => f.length > 0);
       
@@ -459,11 +497,11 @@ export class GitDiffManager {
     }
   }
 
-  private getDiffStats(worktreePath: string): GitDiffStats {
+  private getDiffStats(worktreePath: string, ref: string = 'HEAD'): GitDiffStats {
     try {
-      const output = execSync('git diff --stat HEAD', { 
-        cwd: worktreePath, 
-        encoding: 'utf8' 
+      const output = execSync(`git diff --stat ${ref}`, {
+        cwd: worktreePath,
+        encoding: 'utf8'
       });
       
       const trackedStats = this.parseDiffStats(output);

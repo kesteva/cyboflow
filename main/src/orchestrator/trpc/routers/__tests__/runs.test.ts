@@ -2450,14 +2450,15 @@ describe('cyboflow.runs.gitDiff (run-scoped Diff tab)', () => {
   let db: Database.Database;
 
   beforeEach(() => {
-    db = createTestDb();
+    // base_sha is a migration-014 column (run->task link); the handler SELECTs it.
+    db = createTestDb({ includeWorkflowRunTaskColumns: true });
   });
 
   afterEach(() => {
     db.close();
   });
 
-  it('(a) resolves worktree_path → forwards to ctx.gitDiff and returns its payload', async () => {
+  it('(a) resolves worktree_path → forwards to ctx.gitDiff (base_sha undefined) and returns its payload', async () => {
     const { runId } = seedRun(db, { worktreePath: '/tmp/run-worktree' });
     const payload = {
       diff: 'diff --git a/x.ts b/x.ts\n@@ -0,0 +1 @@\n+hi\n',
@@ -2469,7 +2470,24 @@ describe('cyboflow.runs.gitDiff (run-scoped Diff tab)', () => {
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db), gitDiff }));
     const result = await caller.cyboflow.runs.gitDiff({ runId });
 
-    expect(gitDiff).toHaveBeenCalledWith('/tmp/run-worktree');
+    // No base_sha seeded → forwarded as undefined (working-directory fallback).
+    expect(gitDiff).toHaveBeenCalledWith('/tmp/run-worktree', undefined);
+    expect(result).toEqual(payload);
+  });
+
+  it('(a2) forwards the run base_sha so committed work is diffed against launch', async () => {
+    const { runId } = seedRun(db, { worktreePath: '/tmp/run-worktree', baseSha: 'base123' });
+    const payload = {
+      diff: 'diff --git a/y.ts b/y.ts\n@@ -0,0 +1 @@\n+yo\n',
+      stats: { additions: 1, deletions: 0, filesChanged: 1 },
+      changedFiles: ['y.ts'],
+    };
+    const gitDiff = vi.fn().mockResolvedValue(payload);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db), gitDiff }));
+    const result = await caller.cyboflow.runs.gitDiff({ runId });
+
+    expect(gitDiff).toHaveBeenCalledWith('/tmp/run-worktree', 'base123');
     expect(result).toEqual(payload);
   });
 

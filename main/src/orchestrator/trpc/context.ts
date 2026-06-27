@@ -148,16 +148,20 @@ export interface ContextDeps {
   getForcedSubstrate?: () => CliSubstrate | null;
 
   /**
-   * Captures the working-directory diff of an absolute worktree path.
+   * Captures the diff of an absolute worktree path. With `baseRef` (the run's
+   * base_sha) it diffs the working tree against that ref — surfacing committed,
+   * uncommitted, and untracked changes since launch — which is what a flow that
+   * COMMITS its work (sprint/ship merging task lanes) needs; without it, it falls
+   * back to the working-directory diff (vs HEAD, uncommitted only).
    *
    * Backs cyboflow.runs.gitDiff (the run-scoped Diff tab). Injected from
-   * `main/src/index.ts` as a closure over GitDiffManager.captureWorkingDirectoryDiff
-   * — kept as a plain function (like `setDockBadge`) so the standalone-typecheck
-   * invariant holds (the router never imports 'main/src/services/gitDiffManager').
-   * Returns the raw unified diff + aggregate stats. When omitted (unit tests that
-   * don't need it), the gitDiff procedure throws PRECONDITION_FAILED.
+   * `main/src/index.ts` as a closure over GitDiffManager — kept as a plain
+   * function (like `setDockBadge`) so the standalone-typecheck invariant holds
+   * (the router never imports 'main/src/services/gitDiffManager'). Returns the raw
+   * unified diff + aggregate stats. When omitted (unit tests that don't need it),
+   * the gitDiff procedure throws PRECONDITION_FAILED.
    */
-  gitDiff?: (worktreePath: string) => Promise<RunGitDiff>;
+  gitDiff?: (worktreePath: string, baseRef?: string) => Promise<RunGitDiff>;
 }
 
 /**
@@ -179,7 +183,7 @@ export function createContext(deps: ContextDeps = {}): {
   workflowRegistry?: WorkflowRegistryLike;
   agentOverrideRouter?: AgentOverrideRouterLike;
   getForcedSubstrate: () => CliSubstrate | null;
-  gitDiff?: (worktreePath: string) => Promise<RunGitDiff>;
+  gitDiff?: (worktreePath: string, baseRef?: string) => Promise<RunGitDiff>;
 } {
   const {
     setDockBadge = (_count: number) => undefined,

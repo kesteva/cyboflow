@@ -1357,8 +1357,13 @@ app.whenReady().then(async () => {
         // Run-scoped Diff tab: closure over GitDiffManager keeps the standalone
         // runs router free of a services/* import. Narrow the GitDiffResult down
         // to the RunGitDiff wire shape (diff + stats + changedFiles).
-        gitDiff: async (worktreePath: string) => {
-          const result = await gitDiffManager.captureWorkingDirectoryDiff(worktreePath);
+        gitDiff: async (worktreePath: string, baseRef?: string) => {
+          // With the run's base_sha, diff the working tree against it so commits
+          // made since launch (e.g. sprint/ship merging task lanes) show too;
+          // without it, fall back to the working-directory diff (vs HEAD).
+          const result = baseRef
+            ? await gitDiffManager.captureDiffAgainstRef(worktreePath, baseRef)
+            : await gitDiffManager.captureWorkingDirectoryDiff(worktreePath);
           return { diff: result.diff, stats: result.stats, changedFiles: result.changedFiles };
         },
       }),

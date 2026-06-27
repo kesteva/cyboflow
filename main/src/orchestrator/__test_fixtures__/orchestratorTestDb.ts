@@ -196,6 +196,8 @@ export interface SeedRunOverrides {
   worktreePath?: string;
   /** Override the branch_name column (defaults to NULL). */
   branchName?: string;
+  /** Override the base_sha column (defaults to NULL — not yet launched). */
+  baseSha?: string;
   /** Override the policy_json column (defaults to '{}'). */
   policyJson?: string;
 }
@@ -227,6 +229,13 @@ export function seedRun(db: Database.Database, overrides?: SeedRunOverrides): { 
        (id, workflow_id, project_id, worktree_path, branch_name, status, policy_json)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   ).run(runId, workflowId, projectId, worktreePath, branchName, status, policyJson);
+
+  // base_sha lives only on DBs created with includeWorkflowRunTaskColumns (it is a
+  // migration-014 column, not part of GATE_SCHEMA). Set it as a follow-up UPDATE
+  // only when the caller asked for it, so the default base schema is untouched.
+  if (overrides?.baseSha !== undefined) {
+    db.prepare('UPDATE workflow_runs SET base_sha = ? WHERE id = ?').run(overrides.baseSha, runId);
+  }
 
   return { workflowId, runId };
 }

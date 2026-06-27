@@ -1187,8 +1187,8 @@ export const runsRouter = router({
         });
       }
       const row = ctx.db
-        .prepare('SELECT worktree_path FROM workflow_runs WHERE id = ?')
-        .get(input.runId) as { worktree_path: string | null } | undefined;
+        .prepare('SELECT worktree_path, base_sha FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { worktree_path: string | null; base_sha: string | null } | undefined;
       if (!row) {
         throw new TRPCError({ code: 'NOT_FOUND', message: `Run ${input.runId} not found` });
       }
@@ -1196,7 +1196,11 @@ export const runsRouter = router({
         // No worktree yet (e.g. a not-yet-materialized run) — nothing to diff.
         return null;
       }
-      return ctx.gitDiff(row.worktree_path);
+      // Diff against the run's base_sha (worktree HEAD at launch) so committed
+      // work — sprint/ship runs merge parallel task lanes back to the branch —
+      // shows alongside uncommitted/untracked changes. Legacy runs without a
+      // base_sha fall back to the working-directory diff.
+      return ctx.gitDiff(row.worktree_path, row.base_sha ?? undefined);
     }),
 
   /**
