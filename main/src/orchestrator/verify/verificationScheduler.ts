@@ -28,6 +28,7 @@
  * a task already on that concurrency:1 queue, so enqueuing there self-deadlocks).
  */
 import { randomUUID } from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import { mutex as globalMutex, type Mutex } from '../../utils/mutex';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type {
@@ -43,6 +44,39 @@ import type {
   VlmJudge,
 } from '../../../../shared/types/visualVerification';
 import { VISUAL_VERIFY_DEFAULTS } from '../../../../shared/types/visualVerification';
+
+// ---------------------------------------------------------------------------
+// Verification terminal events
+//
+// A per-run EventEmitter the scheduler fires ONCE when a request reaches a
+// terminal status (passed/failed/low_confidence/skipped/timeout) — AFTER the
+// onVerdict delivery has run (so any lane write the merge-gate performed is
+// already visible to a subscriber). The PROGRAMMATIC visual merge-gate
+// (programmatic/visualVerifyGate.ts) subscribes to this to un-park a lane that is
+// awaiting its async verdict; it is the wake signal that covers EVERY terminal
+// status uniformly — including skipped/timeout, where the merge-gate performs no
+// lane write (so a lane-only subscription would never wake). Mirrors
+// sprintLaneEvents (sprintLaneStore.ts): a module-level emitter + a per-run channel.
+// ---------------------------------------------------------------------------
+
+/** Module-level emitter for verification terminal events, keyed by run channel. */
+export const verificationEvents = new EventEmitter();
+
+/** The per-run channel a VerificationTerminalEvent is emitted on. */
+export function verificationChannel(runId: string): string {
+  return `verify-run-${runId}`;
+}
+
+/** The payload emitted on `verificationChannel(runId)` when a request settles. */
+export interface VerificationTerminalEvent {
+  runId: string;
+  requestId: string;
+  projectId: number;
+  status: RequestStatus;
+  type: VerificationType;
+  /** The lane this request was attributed to (deliverable_json.taskRef), if any. */
+  taskRef?: string;
+}
 
 // ---------------------------------------------------------------------------
 // Lease names
@@ -836,20 +870,44 @@ export class VerificationScheduler {
     fileNames: string[],
     input?: VerificationRequestInput,
   ): Promise<void> {
-    if (!this.onVerdict) return;
+    if (this.onVerdict) {
+      try {
+        await this.onVerdict({
+          requestId: row.id,
+          runId: row.run_id,
+          projectId: row.project_id,
+          type: row.verify_type as VerificationType,
+          status,
+          verdict,
+          fileNames,
+          input,
+        });
+      } catch (err) {
+        this.logger?.error('[VerificationScheduler] onVerdict hook threw', {
+          requestId: row.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Fire the terminal event LAST — after onVerdict (so any merge-gate lane write
+    // is already visible) and REGARDLESS of whether a hook is wired. This is the
+    // wake signal the programmatic visual merge-gate awaits to un-park a lane. It
+    // fires for EVERY terminal status (incl. skipped/timeout, which the merge-gate
+    // does not lane-write) so a parked programmatic lane can never hang. Fail-soft:
+    // a throwing listener must never wedge the drain loop.
     try {
-      await this.onVerdict({
-        requestId: row.id,
+      const event: VerificationTerminalEvent = {
         runId: row.run_id,
+        requestId: row.id,
         projectId: row.project_id,
-        type: row.verify_type as VerificationType,
         status,
-        verdict,
-        fileNames,
-        input,
-      });
+        type: row.verify_type as VerificationType,
+        ...(input?.taskRef ? { taskRef: input.taskRef } : {}),
+      };
+      verificationEvents.emit(verificationChannel(row.run_id), event);
     } catch (err) {
-      this.logger?.error('[VerificationScheduler] onVerdict hook threw', {
+      this.logger?.error('[VerificationScheduler] terminal event emit threw', {
         requestId: row.id,
         error: err instanceof Error ? err.message : String(err),
       });

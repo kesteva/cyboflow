@@ -18,7 +18,10 @@ import {
   ResourceLeasePool,
   VerificationScheduler,
   VERIFY_SCREEN_LEASE,
+  verificationEvents,
+  verificationChannel,
   type OnVerdict,
+  type VerificationTerminalEvent,
 } from '../verify/verificationScheduler';
 import { Mutex } from '../../utils/mutex';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
@@ -156,6 +159,68 @@ describe('VerificationScheduler', () => {
     expect(row.current_backend).toBe('capturePage');
     expect(JSON.parse(row.verdict_json).status).toBe('pass');
     expect(row.ended_at).not.toBeNull();
+  });
+
+  it('emits a VerificationTerminalEvent on the run channel for every terminal verdict', async () => {
+    const events: VerificationTerminalEvent[] = [];
+    const onEvent = (e: VerificationTerminalEvent): void => void events.push(e);
+    verificationEvents.on(verificationChannel('run-1'), onEvent);
+    try {
+      const sched = VerificationScheduler.initialize({
+        db: dbAdapter(db),
+        backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null }) },
+        judge: fakeJudge(),
+        artifactsDirResolver: (runId) => `/tmp/${runId}`,
+        leasePool: new ResourceLeasePool(new Mutex()),
+      });
+      const id = sched.enqueue({
+        runId: 'run-1',
+        projectId: 1,
+        type: 'static-render-snapshot',
+        input: { intent: 'header centered', taskRef: 'TASK-008' },
+        chain: ['capturePage'],
+      });
+      await flushDrain();
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        runId: 'run-1',
+        requestId: id,
+        projectId: 1,
+        status: 'passed',
+        type: 'static-render-snapshot',
+        taskRef: 'TASK-008',
+      });
+    } finally {
+      verificationEvents.off(verificationChannel('run-1'), onEvent);
+    }
+  });
+
+  it('emits a terminal event even for a SKIPPED request (no backend / empty chain)', async () => {
+    const events: VerificationTerminalEvent[] = [];
+    const onEvent = (e: VerificationTerminalEvent): void => void events.push(e);
+    verificationEvents.on(verificationChannel('run-1'), onEvent);
+    try {
+      const sched = VerificationScheduler.initialize({
+        db: dbAdapter(db),
+        backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null }) },
+        judge: fakeJudge(),
+        artifactsDirResolver: (runId) => `/tmp/${runId}`,
+        leasePool: new ResourceLeasePool(new Mutex()),
+      });
+      const id = sched.enqueue({
+        runId: 'run-1',
+        projectId: 1,
+        type: 'static-render-snapshot',
+        input: { intent: 'native only' },
+        chain: [], // empty → skipped
+      });
+      await flushDrain();
+      expect(status(db, id)).toBe('skipped');
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({ requestId: id, status: 'skipped' });
+    } finally {
+      verificationEvents.off(verificationChannel('run-1'), onEvent);
+    }
   });
 
   it('picks the cheapest backend in the chain by rung', async () => {
