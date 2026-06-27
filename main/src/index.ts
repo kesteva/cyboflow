@@ -65,6 +65,9 @@ import { RunShellManager } from './services/runShellManager';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { VerificationScheduler } from './orchestrator/verify/verificationScheduler';
+import { CapturePageBackend } from './services/visualVerify/capturePageBackend';
+import { VlmJudgeImpl } from './services/visualVerify/vlmJudge';
+import type { VerdictV1, VlmJudge } from '../../shared/types/visualVerification';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import {
   setReviewItemsRunProbe,
@@ -773,32 +776,57 @@ async function initializeServices() {
   // verification_requests queue, the ResourceLeasePool (over the shared `mutex`),
   // and the waterfall drain loop (migration 036 / layered visual verification).
   // Lane agents fire-and-continue via the mcp-request-verification handler (P6),
-  // which reaches this singleton through getInstance() to enqueue + nudge. For
-  // this slice the backend registry is EMPTY ({} — capturePage/peekaboo/etc. land
-  // in later layers), the judge is a no-op placeholder, and the verdict-delivery
-  // side-effects (ArtifactRouter / ReviewItemRouter / SprintLaneStore) are deferred
-  // (P8 injects the real onVerdict). The artifactsDir resolver matches the
-  // screenshots auto-mint subtree (CYBOFLOW_DIR/artifacts/runs/<runId>). The
-  // resolved visualVerify config supplies the port / sim pools the lease pool
-  // serializes over. Standalone-typecheck invariant: the scheduler imports no
-  // electron/service code; everything electron-backed is injected here.
+  // which reaches this singleton through getInstance() to enqueue + nudge.
+  //
+  // P7 wires the Rung-0 backend (CapturePageBackend — offscreen BrowserWindow →
+  // capturePage → PNG) and the real Rung-4 VlmJudge (a stateless Claude vision
+  // call). Rungs 1-3 (playwright/peekaboo/maestro) land in later layers and are
+  // simply absent from the registry until then. The verdict-delivery side-effects
+  // (ArtifactRouter / ReviewItemRouter / SprintLaneStore) are still deferred (P8
+  // injects the real onVerdict). The artifactsDir resolver matches the screenshots
+  // auto-mint subtree (CYBOFLOW_DIR/artifacts/runs/<runId>). The resolved
+  // visualVerify config supplies the confidence threshold + port/sim pools.
+  // Standalone-typecheck invariant: the scheduler imports no electron/service
+  // code; everything electron-backed is injected here.
+  const visualVerifyConfig = configManager.getVisualVerifyConfig();
+  const realVlmJudge: VlmJudge = new VlmJudgeImpl({
+    confidenceThreshold: visualVerifyConfig.vlmConfidenceThreshold,
+    logger: cyboflowLogger,
+  });
+  // Per-run judge-call cap (bounds 2026 Agent-SDK vision billing). The scheduler
+  // calls the judge per request; this decorator counts calls per run and, beyond
+  // maxPerRunJudgeCalls, returns a low_confidence verdict (a human review_item)
+  // instead of spending another vision call — never a fabricated pass/fail.
+  const judgeCallsByRun = new Map<string, number>();
+  const cappedVlmJudge: VlmJudge = {
+    judge: async (judgeArgs, signal) => {
+      // The scheduler's judge args carry no runId; the artifactsDir is
+      // ...artifacts/runs/<runId>, so derive the run scope from its last segment.
+      const runId = path.basename(judgeArgs.artifactsDir);
+      const used = judgeCallsByRun.get(runId) ?? 0;
+      if (used >= visualVerifyConfig.maxPerRunJudgeCalls) {
+        const exhausted: VerdictV1 = {
+          status: 'low_confidence',
+          confidence: 0,
+          issues: [],
+          feedback: `per-run visual-judge budget exhausted (${visualVerifyConfig.maxPerRunJudgeCalls} calls); needs human visual review`,
+          judgedFileNames: judgeArgs.fileNames,
+          baselineUsed: !!judgeArgs.baselinePath,
+          model: 'capped',
+        };
+        return exhausted;
+      }
+      judgeCallsByRun.set(runId, used + 1);
+      return realVlmJudge.judge(judgeArgs, signal);
+    },
+  };
   VerificationScheduler.initialize({
     db: cyboflowDb,
-    backends: {},
-    judge: {
-      judge: async () => ({
-        status: 'low_confidence',
-        confidence: 0,
-        issues: [],
-        feedback: 'visual-verification judge not yet wired (MVP placeholder)',
-        judgedFileNames: [],
-        baselineUsed: false,
-        model: 'none',
-      }),
-    },
+    backends: { capturePage: new CapturePageBackend() },
+    judge: cappedVlmJudge,
     artifactsDirResolver: (runId: string) => getCyboflowSubdirectory('artifacts', 'runs', runId),
     logger: cyboflowLogger,
-    config: configManager.getVisualVerifyConfig(),
+    config: visualVerifyConfig,
   });
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).
