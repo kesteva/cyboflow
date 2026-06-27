@@ -19,7 +19,8 @@ import {
   Eye,
   ShieldCheck,
   Terminal,
-  FolderOpen
+  FolderOpen,
+  ScanEye
 } from 'lucide-react';
 import { Textarea, Checkbox } from './ui/Input';
 import { Button } from './ui/Button';
@@ -78,6 +79,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Where committed-artifact manifests are written on disk. Empty = use the
   // default ('.cyboflow/artifacts', resolved against each project's root).
   const [artifactCommitDir, setArtifactCommitDir] = useState('');
+  // Layered visual verification master switch (default OFF). MVP exposes only the
+  // master toggle; advanced numeric fields stay config-only for now.
+  const [visualVerifyEnabled, setVisualVerifyEnabled] = useState(false);
   const [notificationSettings, setNotificationSettings] = useState({
     enabled: true,
     playSound: true,
@@ -133,6 +137,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setErrorReportingEnabled(data.telemetry?.errorReportingEnabled ?? true);
       setUsageMetricsEnabled(data.telemetry?.usageMetricsEnabled ?? true);
       setArtifactCommitDir(data.artifactCommitDir ?? '');
+      setVisualVerifyEnabled(data.visualVerify?.enabled ?? false);
 
       // Load additional paths
       const paths = data.additionalPaths || [];
@@ -178,6 +183,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         // Empty field → undefined → the getter floors to the default (config.json
         // stays free of the key). A set value is trimmed before persisting.
         artifactCommitDir: artifactCommitDir.trim() ? artifactCommitDir.trim() : undefined,
+        // Preserve any advanced visualVerify fields the user set in config.json
+        // (the UI exposes only the master switch); overwrite just `enabled`.
+        visualVerify: { ..._config?.visualVerify, enabled: visualVerifyEnabled },
         additionalPaths: parsedPaths,
         notifications: notificationSettings,
         // Spread the existing telemetry first so the persisted installId is
@@ -566,6 +574,24 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                   relative path resolves against each project's root (so it survives the worktree being
                   torn down); an absolute path is used as-is. Leave empty to use the default
                   (<code>.cyboflow/artifacts</code>).
+                </p>
+              </SettingsSection>
+
+              <SettingsSection
+                title="Visual Verification"
+                description="Automatically screenshot and judge UI deliverables produced by workflow runs"
+                icon={<ScanEye className="w-4 h-4" />}
+              >
+                <Checkbox
+                  label="Enable visual verification"
+                  checked={visualVerifyEnabled}
+                  onChange={(e) => setVisualVerifyEnabled(e.target.checked)}
+                />
+                <p className="text-xs text-text-tertiary mt-1">
+                  When enabled, workflow runs can request a visual check of a UI deliverable: Cyboflow
+                  captures a screenshot (offscreen render, headless browser, or the live app) and a
+                  vision model judges it against the stated intent. Off by default; no captures run
+                  while disabled.
                 </p>
               </SettingsSection>
             </CollapsibleCard>

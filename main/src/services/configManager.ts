@@ -10,6 +10,10 @@ import {
   isQuickSessionWorktreeMode,
 } from '../../../shared/types/worktreeMode';
 import { DEFAULT_ARTIFACT_COMMIT_DIR } from '../../../shared/types/artifacts';
+import {
+  VISUAL_VERIFY_DEFAULTS,
+  type ResolvedVisualVerifyConfig,
+} from '../../../shared/types/visualVerification';
 import fs from 'fs/promises';
 import { readFileSync } from 'node:fs';
 import path from 'path';
@@ -374,6 +378,45 @@ export class ConfigManager extends EventEmitter {
   getArtifactCommitDir(): string {
     const dir = this.config.artifactCommitDir?.trim();
     return dir && dir.length > 0 ? dir : DEFAULT_ARTIFACT_COMMIT_DIR;
+  }
+
+  /**
+   * The global master switch for layered visual verification (see
+   * docs/visual-verification-design.md and shared/types/visualVerification.ts).
+   *
+   * Floors to false when the `visualVerify` block — or its `enabled` member — is
+   * absent: verification is OFF by default and no request is ever enqueued. Like
+   * `interactivePtyOnly` / `artifactCommitDir`, the block is intentionally NOT
+   * seeded into the constructor defaults, so existing config.json files stay
+   * byte-identical for users who never opt in.
+   */
+  getVisualVerifyEnabled(): boolean {
+    return this.config.visualVerify?.enabled ?? false;
+  }
+
+  /**
+   * The fully-resolved visualVerify block — every field present, with
+   * VISUAL_VERIFY_DEFAULTS applied for any member the persisted config omits.
+   * Mirrors getArtifactCommitDir's floor-on-read contract for a nested block: the
+   * stored shape stays partial (so config.json is never rewritten with defaults),
+   * while callers (resolver, scheduler, judge) get a complete, typed config.
+   */
+  getVisualVerifyConfig(): ResolvedVisualVerifyConfig {
+    const vv = this.config.visualVerify;
+    return {
+      enabled: vv?.enabled ?? VISUAL_VERIFY_DEFAULTS.enabled,
+      defaultType: vv?.defaultType ?? VISUAL_VERIFY_DEFAULTS.defaultType,
+      vlmConfidenceThreshold:
+        vv?.vlmConfidenceThreshold ?? VISUAL_VERIFY_DEFAULTS.vlmConfidenceThreshold,
+      maxPerRunJudgeCalls: vv?.maxPerRunJudgeCalls ?? VISUAL_VERIFY_DEFAULTS.maxPerRunJudgeCalls,
+      devServerPorts:
+        vv?.devServerPorts && vv.devServerPorts.length > 0
+          ? [...vv.devServerPorts]
+          : [...VISUAL_VERIFY_DEFAULTS.devServerPorts],
+      simulatorDevices: vv?.simulatorDevices
+        ? [...vv.simulatorDevices]
+        : [...VISUAL_VERIFY_DEFAULTS.simulatorDevices],
+    };
   }
 
   getSessionCreationPreferences() {
