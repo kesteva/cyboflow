@@ -22,13 +22,17 @@
  *     usage at all renders the empty-state text rather than a flat zero-height
  *     plot.
  *
- * Each segment carries an SVG <title> ('model · YYYY-MM-DD · N tokens') for a
- * native hover tooltip, and the plot is responsive via `viewBox` (it scales to
- * the container width at a fixed ~120px drawing height). The legend below the
- * plot shows each model's swatch, shortened name (leading 'claude-' stripped),
- * and compact total. With no points at all the component renders a muted
- * "No token usage recorded in the last N days." line in place of the SVG.
+ * Hovering a day surfaces a custom tooltip with that day's full per-model
+ * breakdown (swatch · name · tokens) and the day total — driven by full-height
+ * HTML hover zones overlaid on the plot, so even thin/empty segments are easy to
+ * target (the old per-segment SVG <title> only showed one model and was awkward
+ * to hit under preserveAspectRatio="none"). The plot is responsive via `viewBox`
+ * (it scales to the container width at a fixed ~120px drawing height). The legend
+ * below the plot shows each model's swatch, shortened name (leading 'claude-'
+ * stripped), and compact total. With no points at all the component renders a
+ * muted "No token usage recorded in the last N days." line in place of the SVG.
  */
+import { useState } from 'react';
 import type { DailyModelUsagePoint } from '../../../../../shared/types/insights';
 
 /**
@@ -146,6 +150,11 @@ export function DailyUsageChart({
   points,
   days = 30,
 }: DailyUsageChartProps): React.JSX.Element {
+  // Column index (0..days-1) currently hovered, or null. Drives the tooltip and
+  // the column highlight. Declared before the empty-state early return so the
+  // hook order stays stable.
+  const [hoveredCol, setHoveredCol] = useState<number | null>(null);
+
   // No usage at all → muted line instead of an empty/zero-height plot.
   if (points.length === 0) {
     return (
@@ -227,13 +236,46 @@ export function DailyUsageChart({
                   width={barWidth}
                   height={h}
                   fill={entry.color}
-                >
-                  <title>{`${entry.model} · ${key} · ${tokens} tokens`}</title>
-                </rect>
+                  opacity={hoveredCol === null || hoveredCol === col ? 1 : 0.35}
+                  style={{ transition: 'opacity 120ms' }}
+                />
               );
             });
           })}
         </svg>
+
+        {/* Full-height hover zones (one per day) overlaid on the plot. These give
+            an easy, reliable target for every day — including thin or empty
+            slots — and a single onMouseLeave on the wrapper clears the tooltip. */}
+        <div
+          className="absolute inset-0 flex"
+          onMouseLeave={() => setHoveredCol(null)}
+        >
+          {dayKeys.map((key, col) => (
+            <div
+              key={key}
+              className="h-full flex-1"
+              style={{
+                backgroundColor:
+                  hoveredCol === col
+                    ? 'var(--color-interactive-surface-hover)'
+                    : 'transparent',
+              }}
+              onMouseEnter={() => setHoveredCol(col)}
+              data-testid={`daily-usage-hover-${key}`}
+            />
+          ))}
+        </div>
+
+        {hoveredCol !== null && (
+          <DayTooltip
+            dayKey={dayKeys[hoveredCol]}
+            row={byDay.get(dayKeys[hoveredCol])!}
+            legend={legend}
+            col={hoveredCol}
+            days={days}
+          />
+        )}
       </div>
       <ul
         className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px]"
@@ -255,6 +297,88 @@ export function DailyUsageChart({
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+interface DayTooltipProps {
+  dayKey: string;
+  /** The hovered day's model -> tokens map (may be empty for a quiet day). */
+  row: Map<string, number>;
+  /** Legend order (model rank), so the tooltip rows match the stack/legend. */
+  legend: ModelLegendEntry[];
+  /** Hovered column index and total column count, for horizontal anchoring. */
+  col: number;
+  days: number;
+}
+
+/**
+ * Floating tooltip for the hovered day: the day key, each contributing model
+ * (swatch · short name · compact tokens) in legend order, and the day total.
+ * Anchored to the hovered column and flipped to an edge for the outer thirds so
+ * it never clips the plot. `pointer-events-none` so it can't steal the hover.
+ */
+function DayTooltip({
+  dayKey,
+  row,
+  legend,
+  col,
+  days,
+}: DayTooltipProps): React.JSX.Element {
+  const rows = legend
+    .map((entry) => ({ entry, tokens: row.get(entry.model) ?? 0 }))
+    .filter((r) => r.tokens > 0);
+  const total = rows.reduce((sum, r) => sum + r.tokens, 0);
+
+  // Anchor to the column center; flip to an edge in the outer thirds so the box
+  // stays inside the plot width instead of overflowing left/right.
+  const centerPct = ((col + 0.5) / days) * 100;
+  const align: 'left' | 'center' | 'right' =
+    col < days / 3 ? 'left' : col >= (days * 2) / 3 ? 'right' : 'center';
+  const position: React.CSSProperties =
+    align === 'left'
+      ? { left: `${(col / days) * 100}%` }
+      : align === 'right'
+        ? { right: `${((days - 1 - col) / days) * 100}%` }
+        : { left: `${centerPct}%`, transform: 'translateX(-50%)' };
+
+  return (
+    <div
+      role="tooltip"
+      className="pointer-events-none absolute top-1 z-10 min-w-[8rem] border border-border-primary bg-surface-secondary px-2 py-1.5 text-[11px] shadow-md"
+      style={position}
+      data-testid="daily-usage-tooltip"
+    >
+      <div className="mb-1 font-mono text-text-secondary">{dayKey}</div>
+      {rows.length === 0 ? (
+        <div className="text-text-tertiary">No usage</div>
+      ) : (
+        <ul className="flex flex-col gap-0.5">
+          {rows.map(({ entry, tokens }) => (
+            <li key={entry.model} className="flex items-center gap-1.5">
+              <span
+                aria-hidden
+                className="inline-block h-2.5 w-2.5 shrink-0 rounded-sm"
+                style={{ backgroundColor: entry.color }}
+              />
+              <span className="font-mono text-text-secondary">
+                {shortModelName(entry.model)}
+              </span>
+              <span className="ml-auto pl-2 font-mono tabular-nums text-text-tertiary">
+                {compactTokens(tokens)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {rows.length > 1 && (
+        <div className="mt-1 flex items-center gap-1.5 border-t border-border-primary pt-1">
+          <span className="font-mono text-text-tertiary">total</span>
+          <span className="ml-auto pl-2 font-mono tabular-nums text-text-secondary">
+            {compactTokens(total)}
+          </span>
+        </div>
+      )}
     </div>
   );
 }

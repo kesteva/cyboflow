@@ -7,8 +7,9 @@
  *   - modelLegend: ranks models by grand-total tokens DESC (stable tie-break),
  *     assigns palette colors by that rank.
  *   - Render: a multi-day / multi-model fixture draws one <rect> segment per
- *     (day, model) that has tokens, each with a hover <title>, plus a legend
- *     entry (swatch + shortened name + compact total) per model.
+ *     (day, model) that has tokens, plus a legend entry (swatch + shortened name
+ *     + compact total) per model. Hovering a day surfaces a tooltip with that
+ *     day's per-model breakdown and total.
  *   - The single-model case stacks one segment per populated day.
  *   - The empty state (no points) renders the muted line, not the SVG.
  *
@@ -17,7 +18,7 @@
  * confirming the helpers are wired into the DOM.
  */
 import { describe, it, expect } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { DailyModelUsagePoint } from '../../../../../../shared/types/insights';
 import {
   DailyUsageChart,
@@ -93,7 +94,7 @@ describe('modelLegend', () => {
 });
 
 describe('DailyUsageChart', () => {
-  it('renders one titled <rect> segment per populated (day, model) across a multi-model fixture', () => {
+  it('renders one <rect> segment per populated (day, model) across a multi-model fixture', () => {
     const today = new Date();
     const [d0, d1] = utcDayKeys(2, today);
     const points = [
@@ -108,13 +109,6 @@ describe('DailyUsageChart', () => {
     // 3 populated (day, model) buckets -> 3 segments.
     expect(rects).toHaveLength(3);
 
-    const titles = [...container.querySelectorAll('svg rect title')].map(
-      (t) => t.textContent,
-    );
-    expect(titles).toContain(`claude-opus · ${d0} · 200 tokens`);
-    expect(titles).toContain(`claude-sonnet · ${d0} · 40 tokens`);
-    expect(titles).toContain(`claude-opus · ${d1} · 100 tokens`);
-
     // Legend: one entry per model, shortened name (no 'claude-') + compact total.
     const legend = screen.getByTestId('daily-usage-legend');
     const items = within(legend).getAllByRole('listitem');
@@ -124,6 +118,43 @@ describe('DailyUsageChart', () => {
     // opus total 300 -> '300'; sonnet 40 -> '40'.
     expect(within(legend).getByText('300')).toBeInTheDocument();
     expect(within(legend).getByText('40')).toBeInTheDocument();
+  });
+
+  it('surfaces a per-day breakdown tooltip on hover and clears it on leave', () => {
+    const today = new Date();
+    const [d0, d1] = utcDayKeys(2, today);
+    const points = [
+      point(d0, 'claude-opus', 100, 100), // 200
+      point(d0, 'claude-sonnet', 20, 20), // 40
+      point(d1, 'claude-opus', 50, 50), // 100
+    ];
+    render(<DailyUsageChart points={points} days={2} />);
+
+    // No tooltip until a day is hovered.
+    expect(screen.queryByTestId('daily-usage-tooltip')).toBeNull();
+
+    // Hover the first day -> tooltip lists both models + their day tokens + total.
+    fireEvent.mouseEnter(screen.getByTestId(`daily-usage-hover-${d0}`));
+    const tip = screen.getByTestId('daily-usage-tooltip');
+    expect(within(tip).getByText(d0)).toBeInTheDocument();
+    expect(within(tip).getByText('opus')).toBeInTheDocument();
+    expect(within(tip).getByText('sonnet')).toBeInTheDocument();
+    expect(within(tip).getByText('200')).toBeInTheDocument(); // opus that day
+    expect(within(tip).getByText('40')).toBeInTheDocument(); // sonnet that day
+    expect(within(tip).getByText('total')).toBeInTheDocument();
+    expect(within(tip).getByText('240')).toBeInTheDocument(); // day total
+
+    // A single-model day shows just that model and no 'total' row.
+    fireEvent.mouseEnter(screen.getByTestId(`daily-usage-hover-${d1}`));
+    const tip1 = screen.getByTestId('daily-usage-tooltip');
+    expect(within(tip1).getByText(d1)).toBeInTheDocument();
+    expect(within(tip1).getByText('opus')).toBeInTheDocument();
+    expect(within(tip1).queryByText('sonnet')).toBeNull();
+    expect(within(tip1).queryByText('total')).toBeNull();
+
+    // Leaving the plot clears the tooltip.
+    fireEvent.mouseLeave(screen.getByTestId(`daily-usage-hover-${d1}`).parentElement!);
+    expect(screen.queryByTestId('daily-usage-tooltip')).toBeNull();
   });
 
   it('compacts large legend totals to the k-form', () => {
