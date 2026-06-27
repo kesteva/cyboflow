@@ -40,6 +40,7 @@ const BUILTIN_ENTRY: AgentEntry = {
   description: 'Implements one task at a time.',
   systemPrompt: 'You are the implementer. Make the smallest diff that satisfies the criteria.',
   tools: ['Read', 'Edit', 'Write', 'Bash'],
+  enabledMcps: [],
   source: 'builtin',
   isCustom: false,
   isOverridden: false,

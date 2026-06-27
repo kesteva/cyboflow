@@ -79,6 +79,7 @@ function createAgentsTestDb(): Database.Database {
       description    TEXT NOT NULL,
       system_prompt  TEXT NOT NULL,
       tools_json     TEXT NOT NULL,
+      enabled_mcps_json TEXT NOT NULL DEFAULT '[]',
       is_custom      INTEGER NOT NULL DEFAULT 0,
       version        INTEGER NOT NULL DEFAULT 1,
       created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,

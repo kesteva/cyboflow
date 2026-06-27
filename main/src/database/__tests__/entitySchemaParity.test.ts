@@ -59,6 +59,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '029_agent_overrides.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '034_findings_triage.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '035_agent_mcp_access.sql'), 'utf-8'));
   return db;
 }
 
@@ -196,6 +197,7 @@ describe('entity schema parity (migrations 015 + 024 + 028 + 034)', () => {
       'description',
       'system_prompt',
       'tools_json',
+      'enabled_mcps_json',
       'is_custom',
       'version',
       'created_at',

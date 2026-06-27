@@ -26,6 +26,8 @@ export interface EffectiveAgent {
   description: string;
   systemPrompt: string;
   tools: CliTool[];
+  /** MCP server names this agent may call; rendered as `mcp__<server>__*` on the tools line. */
+  enabledMcps: string[];
   source: AgentSource;
   /** Present for unoverridden builtins so the overlay can write the `.md` verbatim. */
   rawContent?: string;
@@ -41,6 +43,19 @@ function parseTools(toolsJson: string): CliTool[] {
   }
   if (!Array.isArray(raw)) return [];
   return raw.filter((t): t is CliTool => typeof t === 'string' && isCliTool(t));
+}
+
+/** Parse an override row's `enabled_mcps_json` into a string[] of MCP server names. */
+function parseMcps(mcpsJson: string | null | undefined): string[] {
+  if (!mcpsJson) return [];
+  let raw: unknown;
+  try {
+    raw = JSON.parse(mcpsJson);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((s): s is string => typeof s === 'string' && s.length > 0);
 }
 
 /**
@@ -62,6 +77,7 @@ export function mergeAgent(
       description: builtin.description,
       systemPrompt: builtin.systemPrompt,
       tools: builtin.tools,
+      enabledMcps: [],
       source: 'builtin',
       rawContent: builtin.rawContent,
     };
@@ -73,6 +89,7 @@ export function mergeAgent(
     description: override.description,
     systemPrompt: override.system_prompt,
     tools: parseTools(override.tools_json),
+    enabledMcps: parseMcps(override.enabled_mcps_json),
     source: 'builtin-override',
   };
 }
@@ -86,6 +103,7 @@ function customAgent(override: AgentOverrideRow): EffectiveAgent {
     description: override.description,
     systemPrompt: override.system_prompt,
     tools: parseTools(override.tools_json),
+    enabledMcps: parseMcps(override.enabled_mcps_json),
     source: 'custom',
   };
 }
@@ -131,6 +149,7 @@ export function buildEffectiveEntry(
     description: effective.description,
     systemPrompt: effective.systemPrompt,
     tools: effective.tools,
+    enabledMcps: effective.enabledMcps,
     source: effective.source,
     isCustom: effective.source === 'custom',
     isOverridden: effective.source === 'builtin-override',

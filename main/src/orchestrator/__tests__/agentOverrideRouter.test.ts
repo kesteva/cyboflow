@@ -72,6 +72,7 @@ function buildDb(): Database.Database {
       description TEXT NOT NULL,
       system_prompt TEXT NOT NULL,
       tools_json TEXT NOT NULL,
+      enabled_mcps_json TEXT NOT NULL DEFAULT '[]',
       is_custom INTEGER NOT NULL DEFAULT 0,
       version INTEGER NOT NULL DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -130,6 +131,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'Custom implementer',
       systemPrompt: 'Do the work.',
       tools: TOOLS,
+      enabledMcps: [],
     });
     expect(agentKey).toBe('implement');
 
@@ -155,6 +157,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'v1',
       systemPrompt: 'one',
       tools: TOOLS,
+      enabledMcps: [],
     });
     await router.applyChange(1, {
       op: 'upsert',
@@ -163,11 +166,58 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'v2',
       systemPrompt: 'two',
       tools: TOOLS,
+      enabledMcps: [],
     });
 
     const row = router.getByKey(1, 'implement') as AgentOverrideRow;
     expect(row.version).toBe(2);
     expect(row.description).toBe('v2');
+  });
+
+  it('round-trips enabled_mcps_json on upsert and createCustom', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'upsert',
+      agentKey: 'implement',
+      role: 'sprint',
+      description: 'grants mcps',
+      systemPrompt: 'do work',
+      tools: TOOLS,
+      enabledMcps: ['playwright', 'fal-ai'],
+    });
+    const overrideRow = router.getByKey(1, 'implement') as AgentOverrideRow;
+    expect(JSON.parse(overrideRow.enabled_mcps_json)).toEqual(['playwright', 'fal-ai']);
+
+    await router.applyChange(1, {
+      op: 'createCustom',
+      name: 'Mcp Helper',
+      role: null,
+      description: 'helps with mcp',
+      systemPrompt: 'help',
+      tools: TOOLS,
+      enabledMcps: ['context7'],
+    });
+    const customRow = router.getByKey(1, 'mcp-helper') as AgentOverrideRow;
+    expect(JSON.parse(customRow.enabled_mcps_json)).toEqual(['context7']);
+  });
+
+  it('upsert with an invalid mcp server name throws invalid_mcp', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await expect(
+      router.applyChange(1, {
+        op: 'upsert',
+        agentKey: 'implement',
+        role: 'sprint',
+        description: 'x',
+        systemPrompt: 'y',
+        tools: TOOLS,
+        enabledMcps: ['cyboflow'],
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_mcp' });
   });
 
   it('upsert of a non-builtin key throws invalid_key', async () => {
@@ -182,6 +232,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
         description: 'x',
         systemPrompt: 'y',
         tools: TOOLS,
+        enabledMcps: [],
       }),
     ).rejects.toMatchObject({ code: 'invalid_key' });
   });
@@ -197,6 +248,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'v1',
       systemPrompt: 'one',
       tools: TOOLS,
+      enabledMcps: [],
     });
 
     await expect(
@@ -207,6 +259,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
         description: 'v2',
         systemPrompt: 'two',
         tools: TOOLS,
+        enabledMcps: [],
         expectedVersion: 0, // current is 1
       }),
     ).rejects.toMatchObject({ code: 'version_conflict' });
@@ -227,6 +280,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'x',
       systemPrompt: 'y',
       tools: TOOLS,
+      enabledMcps: [],
     });
     expect(router.getByKey(1, 'implement')).not.toBeNull();
 
@@ -254,6 +308,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'helps',
       systemPrompt: 'help out',
       tools: TOOLS,
+      enabledMcps: [],
     });
 
     await expect(router.applyChange(1, { op: 'reset', agentKey: 'my-helper' })).rejects.toBeInstanceOf(
@@ -278,6 +333,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'writes docs',
       systemPrompt: 'write docs well',
       tools: TOOLS,
+      enabledMcps: [],
     });
     expect(agentKey).toBe('doc-writer');
 
@@ -300,6 +356,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
         description: 'shadow',
         systemPrompt: 'x',
         tools: TOOLS,
+        enabledMcps: [],
       }),
     ).rejects.toMatchObject({ code: 'reserved_key' });
   });
@@ -315,6 +372,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'writes docs',
       systemPrompt: 'x',
       tools: TOOLS,
+      enabledMcps: [],
     });
 
     await expect(
@@ -325,6 +383,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
         description: 'again',
         systemPrompt: 'y',
         tools: TOOLS,
+        enabledMcps: [],
       }),
     ).rejects.toMatchObject({ code: 'duplicate_key' });
   });
@@ -344,6 +403,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'x',
       systemPrompt: 'y',
       tools: TOOLS,
+      enabledMcps: [],
     });
 
     await router.applyChange(1, { op: 'deleteCustom', agentKey: 'doc-writer' });
@@ -361,6 +421,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'x',
       systemPrompt: 'y',
       tools: TOOLS,
+      enabledMcps: [],
     });
     seedWorkflowReferencing(db, 'My Flow', 'doc-writer');
 
@@ -387,6 +448,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'x',
       systemPrompt: 'y',
       tools: TOOLS,
+      enabledMcps: [],
     });
 
     await expect(
@@ -411,6 +473,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'x',
       systemPrompt: 'y',
       tools: TOOLS,
+      enabledMcps: [],
     });
     expect(totalEntityEvents(db)).toBe(before);
   });
@@ -437,6 +500,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'x',
       systemPrompt: 'y',
       tools: TOOLS,
+      enabledMcps: [],
     });
 
     expect(perProject).toEqual([{ projectId: 1, agentKey: 'implement' }]);
@@ -458,6 +522,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'x',
       systemPrompt: 'y',
       tools: TOOLS,
+      enabledMcps: [],
     });
     await router.applyChange(1, {
       op: 'createCustom',
@@ -466,6 +531,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'first',
       systemPrompt: 'y',
       tools: TOOLS,
+      enabledMcps: [],
     });
     await router.applyChange(2, {
       op: 'upsert',
@@ -474,6 +540,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'other proj',
       systemPrompt: 'y',
       tools: TOOLS,
+      enabledMcps: [],
     });
 
     const rows = router.listByProject(1);

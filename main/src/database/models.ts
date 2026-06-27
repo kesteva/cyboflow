@@ -470,6 +470,7 @@ export interface AgentOverrideRow {
   description: string;
   system_prompt: string;
   tools_json: string; // JSON-encoded CliTool[]
+  enabled_mcps_json: string; // JSON-encoded string[] of MCP server names (migration 035); '[]' = none
   is_custom: number; // 0 | 1
   version: number;
   created_at: string;

@@ -18,6 +18,7 @@ import type { CliTool } from '../../../../shared/types/cliTools';
 export type AgentOverrideErrorCode =
   | 'forbidden_writer_call'
   | 'forbidden_tool'
+  | 'invalid_mcp'
   | 'empty_tools'
   | 'empty_description'
   | 'invalid_key'
@@ -44,6 +45,7 @@ export interface AgentDraft {
   description: string;
   systemPrompt: string;
   tools: CliTool[];
+  enabledMcps: string[];
   isCustom: boolean;
 }
 
@@ -52,6 +54,13 @@ const KEBAB_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 
 /** Any single-writer entity-write MCP token an agent must never reference. */
 const FORBIDDEN_WRITER_RE = /cyboflow_/;
+
+/**
+ * A valid MCP server name as it appears in the `mcp__<server>__*` wildcard. Allows
+ * the chars Claude Code's MCP namespacing permits (letters/digits/`_`/`-`); the
+ * literal `cyboflow` server is rejected separately to preserve single-writer.
+ */
+const MCP_SERVER_RE = /^[A-Za-z0-9_-]+$/;
 
 /**
  * Validate a draft's project-agnostic shape. Throws `AgentOverrideError` on the
@@ -92,6 +101,19 @@ export function validateAgentDraft(draft: AgentDraft): void {
   for (const tool of draft.tools) {
     if (!isCliTool(tool)) {
       throw new AgentOverrideError('forbidden_tool', `"${tool}" is not a permitted CLI tool.`);
+    }
+  }
+
+  for (const server of draft.enabledMcps) {
+    if (!MCP_SERVER_RE.test(server)) {
+      throw new AgentOverrideError('invalid_mcp', `"${server}" is not a valid MCP server name.`);
+    }
+    // Single-writer invariant: the cyboflow_* entity-write MCP is never grantable.
+    if (server === 'cyboflow' || FORBIDDEN_WRITER_RE.test(server)) {
+      throw new AgentOverrideError(
+        'invalid_mcp',
+        'The cyboflow MCP server may not be granted to an agent (single-writer invariant).',
+      );
     }
   }
 }

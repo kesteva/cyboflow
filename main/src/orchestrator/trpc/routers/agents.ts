@@ -84,6 +84,7 @@ function rethrowAsTRPCError(err: unknown): never {
     const codeMap: Record<AgentOverrideError['code'], TRPCError['code']> = {
       forbidden_writer_call: 'BAD_REQUEST',
       forbidden_tool: 'BAD_REQUEST',
+      invalid_mcp: 'BAD_REQUEST',
       empty_tools: 'BAD_REQUEST',
       empty_description: 'BAD_REQUEST',
       invalid_key: 'BAD_REQUEST',
@@ -174,6 +175,7 @@ function findEffective(ctx: AgentsCtx, projectId: number, agentKey: string): Eff
 // ---------------------------------------------------------------------------
 
 const toolsSchema = z.array(z.enum(CLI_TOOLS)).min(1);
+const enabledMcpsSchema = z.array(z.string().regex(/^[A-Za-z0-9_-]+$/)).default([]);
 const agentKeySchema = z.string().regex(/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/);
 const projectIdSchema = z.number().int().positive();
 
@@ -227,6 +229,7 @@ export const agentsRouter = router({
         description: z.string().min(1),
         systemPrompt: z.string(),
         tools: toolsSchema,
+        enabledMcps: enabledMcpsSchema,
         role: z.string().nullable().optional(),
       }),
     )
@@ -240,6 +243,7 @@ export const agentsRouter = router({
           description: input.description,
           systemPrompt: input.systemPrompt,
           tools: input.tools,
+          enabledMcps: input.enabledMcps,
         });
       } catch (err) {
         rethrowAsTRPCError(err);
@@ -308,6 +312,7 @@ export const agentsRouter = router({
         description: z.string().min(1),
         systemPrompt: z.string(),
         tools: toolsSchema,
+        enabledMcps: enabledMcpsSchema,
         role: z.string().nullable().optional(),
       }),
     )
@@ -322,6 +327,7 @@ export const agentsRouter = router({
           description: input.description,
           systemPrompt: input.systemPrompt,
           tools: input.tools,
+          enabledMcps: input.enabledMcps,
         }));
       } catch (err) {
         rethrowAsTRPCError(err);
@@ -368,6 +374,7 @@ export const agentsRouter = router({
           description: source.description,
           systemPrompt: source.systemPrompt,
           tools: source.tools,
+          enabledMcps: source.enabledMcps,
         }));
       } catch (err) {
         rethrowAsTRPCError(err);

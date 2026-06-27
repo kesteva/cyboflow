@@ -1,0 +1,24 @@
+-- Migration 035: Add enabled_mcps_json to agent_overrides for per-agent MCP
+-- scoping (which MCP servers a given agent override may access).
+--
+-- JSON-encoded string[] of MCP server names the agent is scoped to. Empty array
+-- '[]' (the DEFAULT) means "no per-agent MCP grants" — same effective behavior
+-- as before this column existed. renderAgentMarkdown expands each server `s` to
+-- the `mcp__<s>__*` wildcard appended to the frontmatter `tools:` line.
+-- Validation (string[] shape, valid server names, never the single-writer
+-- 'cyboflow' server) is enforced IN CODE at the agent_overrides write chokepoint
+-- — no CHECK constraint, mirroring tools_json (migration 029) and the
+-- enum/shape-in-code pattern of migrations 016/026/029.
+--
+-- NOTE: No explicit BEGIN/COMMIT here — runFileBasedMigrations() in database.ts
+-- wraps every file in a this.transaction(...) call, so an inner BEGIN would nest.
+--
+-- Idempotency: SQLite has no ADD COLUMN IF NOT EXISTS; a re-run after a ledger
+-- reset throws "duplicate column name: enabled_mcps_json", which
+-- runFileBasedMigrations() catches as idempotent-ok (filename-keyed ledger).
+--
+-- Field-for-field source of truth for the row shape is
+-- main/src/database/models.ts (AgentOverrideRow); entitySchemaParity.test.ts
+-- pins the column list.
+
+ALTER TABLE agent_overrides ADD COLUMN enabled_mcps_json TEXT NOT NULL DEFAULT '[]';

@@ -16,6 +16,8 @@ export interface RenderableAgent {
   agentKey: string;
   description: string;
   tools: CliTool[];
+  /** MCP server names; each expands to the `mcp__<server>__*` wildcard on the tools line. */
+  enabledMcps: string[];
   systemPrompt: string;
 }
 
@@ -39,6 +41,7 @@ function escapeYamlScalar(value: string): string {
 export function renderAgentMarkdown(a: RenderableAgent): string {
   const name = `cyboflow-${a.agentKey}`;
   const description = escapeYamlScalar(a.description);
-  const tools = a.tools.join(', ');
+  const mcpWildcards = a.enabledMcps.map((server) => `mcp__${server}__*`);
+  const tools = [...a.tools, ...mcpWildcards].join(', ');
   return `---\nname: ${name}\ndescription: ${description}\ntools: ${tools}\n---\n\n${a.systemPrompt}`;
 }

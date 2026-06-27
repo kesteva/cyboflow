@@ -48,6 +48,8 @@ export interface AgentEntry {
   description: string;
   systemPrompt: string;
   tools: CliTool[];
+  /** MCP server names this agent may call; rendered as `mcp__<server>__*` on the tools line. */
+  enabledMcps: string[];
   source: AgentSource;
   isCustom: boolean;
   isOverridden: boolean;

@@ -64,6 +64,8 @@ export interface AgentUpsertChange {
   description: string;
   systemPrompt: string;
   tools: CliTool[];
+  /** MCP server names this agent may call (rendered as `mcp__<server>__*`). */
+  enabledMcps: string[];
   /** Optimistic-concurrency guard; when set must equal the current row version. */
   expectedVersion?: number;
 }
@@ -77,6 +79,8 @@ export interface AgentCreateCustomChange {
   description: string;
   systemPrompt: string;
   tools: CliTool[];
+  /** MCP server names this agent may call (rendered as `mcp__<server>__*`). */
+  enabledMcps: string[];
 }
 
 /** Reset a builtin override (DELETE its row → builtin shows through again). */
@@ -233,6 +237,7 @@ export class AgentOverrideRouter {
       description: change.description,
       systemPrompt: change.systemPrompt,
       tools: change.tools,
+      enabledMcps: change.enabledMcps,
       isCustom: false,
     };
     validateAgentDraft(draft);
@@ -241,6 +246,7 @@ export class AgentOverrideRouter {
     const now = new Date().toISOString();
     const id = `ago_${randomBytes(10).toString('hex')}`;
     const toolsJson = JSON.stringify(change.tools);
+    const enabledMcpsJson = JSON.stringify(change.enabledMcps);
 
     const txn = this.db.transaction(() => {
       // Optimistic concurrency: when expectedVersion is supplied, the existing
@@ -260,14 +266,15 @@ export class AgentOverrideRouter {
         .prepare(
           `INSERT INTO agent_overrides
              (id, project_id, agent_key, base_agent_key, name, role, description,
-              system_prompt, tools_json, is_custom, version, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
+              system_prompt, tools_json, enabled_mcps_json, is_custom, version, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
            ON CONFLICT(project_id, agent_key) DO UPDATE SET
              name = excluded.name,
              role = excluded.role,
              description = excluded.description,
              system_prompt = excluded.system_prompt,
              tools_json = excluded.tools_json,
+             enabled_mcps_json = excluded.enabled_mcps_json,
              version = agent_overrides.version + 1,
              updated_at = excluded.updated_at`,
         )
@@ -281,6 +288,7 @@ export class AgentOverrideRouter {
           change.description,
           systemPrompt,
           toolsJson,
+          enabledMcpsJson,
           now,
           now,
         );
@@ -305,6 +313,7 @@ export class AgentOverrideRouter {
       description: change.description,
       systemPrompt: change.systemPrompt,
       tools: change.tools,
+      enabledMcps: change.enabledMcps,
       isCustom: true,
     };
     // Kebab/forbidden/tool/description shape checks (throws invalid_key for a bad slug).
@@ -322,6 +331,7 @@ export class AgentOverrideRouter {
     const now = new Date().toISOString();
     const id = `ago_${randomBytes(10).toString('hex')}`;
     const toolsJson = JSON.stringify(change.tools);
+    const enabledMcpsJson = JSON.stringify(change.enabledMcps);
 
     const txn = this.db.transaction(() => {
       if (this.getByKey(projectId, agentKey)) {
@@ -335,8 +345,8 @@ export class AgentOverrideRouter {
         .prepare(
           `INSERT INTO agent_overrides
              (id, project_id, agent_key, base_agent_key, name, role, description,
-              system_prompt, tools_json, is_custom, version, created_at, updated_at)
-           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, 1, 1, ?, ?)`,
+              system_prompt, tools_json, enabled_mcps_json, is_custom, version, created_at, updated_at)
+           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 1, 1, ?, ?)`,
         )
         .run(
           id,
@@ -347,6 +357,7 @@ export class AgentOverrideRouter {
           change.description,
           systemPrompt,
           toolsJson,
+          enabledMcpsJson,
           now,
           now,
         );

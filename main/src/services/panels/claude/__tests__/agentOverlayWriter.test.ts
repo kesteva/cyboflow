@@ -115,6 +115,7 @@ describe('agentOverlayWriter — overlay content (AC-P1-8)', () => {
       agentKey: 'implement',
       description: 'Implements: tasks (colon forces YAML quoting)',
       tools: ['Read', 'Edit', 'Write', 'Bash'],
+      enabledMcps: [],
       systemPrompt: ensureResultSection('Do the work carefully.'),
     });
 
@@ -127,6 +128,7 @@ describe('agentOverlayWriter — overlay content (AC-P1-8)', () => {
       agentKey: 'foo',
       description: 'A custom helper agent.',
       tools: ['Read', 'Grep'],
+      enabledMcps: [],
       systemPrompt: ensureResultSection('Help with foo.'),
     });
 
