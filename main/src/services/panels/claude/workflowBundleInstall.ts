@@ -16,11 +16,73 @@
  * this helper bridges DB + resolver + writer, so it MAY import better-sqlite3 and
  * the orchestrator resolver (same latitude as the managers that call it).
  */
+import { execFileSync } from 'child_process';
+import * as fs from 'fs';
+import * as path from 'path';
 import type Database from 'better-sqlite3';
 import type { LoggerLike } from '../../../orchestrator/types';
 import { resolveWorkflowBundle } from '../../../orchestrator/workflows/workflowBundle';
 import type { WorkflowBundleWriter } from './workflowBundleWriter';
 import { installAgentOverlay } from './agentOverlayWriter';
+
+/** Marker line preceding the cyboflow patterns in a worktree's git exclude. */
+const CYBOFLOW_EXCLUDE_MARKER = '# cyboflow: generated agent/command bundle (not user code)';
+
+/**
+ * Glob patterns for the files BOTH writers above emit. Every cyboflow-generated
+ * agent/command is `cyboflow-<key>.md` (WorkflowBundleWriter + agentOverlayWriter
+ * both force that prefix), so these two lines cover the whole generated set and
+ * never match a user's own `.claude/agents` file.
+ */
+const CYBOFLOW_EXCLUDE_PATTERNS = [
+  '.claude/agents/cyboflow-*.md',
+  '.claude/commands/cyboflow-*.md',
+];
+
+/**
+ * Add the cyboflow bundle globs to the worktree's LOCAL git exclude
+ * (`$GIT_DIR/info/exclude`, NOT the tracked `.gitignore`) so the generated
+ * `cyboflow-*.md` files never surface in the run diff (`git ls-files --others
+ * --exclude-standard` / `git status` both honor it) or get accidentally
+ * committed. Idempotent (skips patterns already present) and fail-soft — a git
+ * or fs error here must not break a spawn.
+ */
+function ensureBundleExcluded(worktreePath: string, logger?: LoggerLike): void {
+  try {
+    const raw = execFileSync('git', ['rev-parse', '--git-path', 'info/exclude'], {
+      cwd: worktreePath,
+      encoding: 'utf8',
+    }).trim();
+    if (raw.length === 0) return;
+    const excludePath = path.isAbsolute(raw) ? raw : path.join(worktreePath, raw);
+
+    let existing = '';
+    try {
+      existing = fs.readFileSync(excludePath, 'utf8');
+    } catch {
+      /* file absent — created below */
+    }
+    const lines = existing.split(/\r?\n/);
+    const missing = CYBOFLOW_EXCLUDE_PATTERNS.filter((p) => !lines.includes(p));
+    if (missing.length === 0) return;
+
+    const parts: string[] = [];
+    if (existing.length > 0 && !existing.endsWith('\n')) parts.push(''); // close a dangling line
+    if (!lines.includes(CYBOFLOW_EXCLUDE_MARKER)) parts.push(CYBOFLOW_EXCLUDE_MARKER);
+    parts.push(...missing, '');
+
+    fs.mkdirSync(path.dirname(excludePath), { recursive: true });
+    fs.appendFileSync(excludePath, parts.join('\n'), 'utf8');
+    logger?.debug('[WorkflowBundleInstall] excluded cyboflow bundle from git', {
+      worktreePath,
+      added: missing,
+    });
+  } catch (err) {
+    logger?.warn(
+      `[WorkflowBundleInstall] could not update git exclude for ${worktreePath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
 
 /**
  * Read the run's `workflow_path` (the prose `.md`) from `workflow_runs JOIN
@@ -59,6 +121,10 @@ export function installWorkflowBundle(
   logger?: LoggerLike,
 ): void {
   try {
+    // Keep the generated cyboflow-*.md files out of git (run diff + commits)
+    // BEFORE writing them, so they never flicker into a diff poll.
+    ensureBundleExcluded(worktreePath, logger);
+
     const workflowPath = getRunWorkflowPath(db, runId, logger);
     const bundle = resolveWorkflowBundle(workflowPath);
     writer.write(worktreePath, bundle);
