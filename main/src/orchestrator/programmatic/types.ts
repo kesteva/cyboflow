@@ -205,6 +205,48 @@ export interface FanOutDriver {
 }
 
 /**
+ * The outcome of awaiting an async visual merge-gate verdict for ONE lane
+ * (programmatic actuation — closes the merge-gate's prose-only boundary). The
+ * scheduler delivers the verdict asynchronously; the merge-gate driver
+ * (verify/mergeGateLaneAdvance.ts) has ALREADY written the lane by the time this
+ * resolves, so the controller only REACTS:
+ *   - 'advance'  → the gate passed (or was advisory / skipped / not fired): let the
+ *                  lane fall through to 'integrated'.
+ *   - 'loopback' → the gate FAILED under the 3× cap: re-run from `implement` with
+ *                  the bumped `attempt` (the merge-gate already set the lane back).
+ *   - 'failed'   → the gate FAILED at the cap: the lane is terminal-failed.
+ *   - 'aborted'  → the run was canceled while awaiting; short the lane's walk.
+ */
+export type VisualGateOutcome =
+  | { kind: 'advance' }
+  | { kind: 'loopback'; attempt: number }
+  | { kind: 'failed' }
+  | { kind: 'aborted' };
+
+/**
+ * Awaits the async visual merge-gate verdict for one lane so the PROGRAMMATIC
+ * controller can actuate the loopback (re-dispatch implement) instead of leaving a
+ * FAILed lane parked. Injected on `ControllerHost.visualGate` (absent ⇒ the
+ * controller never parks — byte-identical to today). The production impl
+ * (programmatic/visualVerifyGate.ts) subscribes to the scheduler's
+ * `verificationEvents` and reads the merge-gate's lane write; test hosts fake it.
+ */
+export interface VisualVerifyGate {
+  /**
+   * SYNC guard: is the visual merge-gate ACTIVE for this run (verification
+   * enabled)? When false the controller skips parking + awaiting entirely, so a
+   * verify-disabled run is byte-identical to the pre-actuation behavior.
+   */
+  isActive(runId: string): boolean;
+  /**
+   * Park + await the async verdict for `itemId`'s lane, resolving the outcome the
+   * controller acts on. MUST be fail-soft (resolve, never reject) and honor
+   * `signal` (a canceled run resolves 'aborted', never hangs).
+   */
+  awaitVerdict(req: { runId: string; itemId: string; signal?: AbortSignal }): Promise<VisualGateOutcome>;
+}
+
+/**
  * The cyboflow-side effect surface the controller drives. `reportStep` +
  * `requestHumanGate` are owned by the host so the controller stays free of
  * DB/IPC/Electron concerns. The optional `triageFailure` seam consults the
@@ -307,6 +349,16 @@ export interface ControllerHost {
     ctx: ControllerStepContext,
     error: string | undefined,
   ): Promise<SystemicPauseVerdict>;
+
+  /**
+   * Optional visual merge-gate (programmatic actuation). Present ONLY on the
+   * programmatic host for a sprint-style run. When present AND active for the run,
+   * the controller PARKS each lane at `awaiting-verify` after its `visual-verify`
+   * inner step, AWAITS the async verdict, then advances / loops back to
+   * `implement` / fails the lane. Absent ⇒ the controller never parks (the lane
+   * integrates straight after visual-verify — today's behavior).
+   */
+  visualGate?: VisualVerifyGate;
 
   /** Optional structured log sink; absent ⇒ the controller stays silent. */
   log?(level: 'info' | 'warn', message: string): void;
