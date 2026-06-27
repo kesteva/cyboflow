@@ -36,7 +36,7 @@ import { WorkflowProgressTimeline } from './WorkflowProgressTimeline';
 import { SprintLanesPanel } from './SprintLanesPanel';
 import { SessionFileExplorer } from './SessionFileExplorer';
 import { RunDiffTabPanel } from './RunDiffTabPanel';
-import CombinedDiffView from '../panels/diff/CombinedDiffView';
+import { SessionDiffTabPanel } from './SessionDiffTabPanel';
 import { ArtifactsPanel } from './ArtifactsPanel';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
@@ -113,45 +113,6 @@ function selectActiveRunProjectId(
     if (row) return row.project_id;
   }
   return null;
-}
-
-/**
- * RunRightRailDiff — session-scoped Diff body: a compact wrapper around the
- * working CombinedDiffView, mirroring the minimal state DiffPanel owns
- * (selectedExecutions defaulting to [] == all uncommitted changes,
- * isGitOperationRunning false). This is the at-rest fallback the DIFF tab shows
- * when a session is selected but no workflow run is active — flow runs key off
- * runId (session_id NULL) and use RunDiffTabPanel instead, but a quick session
- * (and any session at rest) has a real `sessions` row whose worktree diff is
- * session-scoped. Keyed by sessionId so it remounts (reloads git data) whenever
- * the resolved session changes; CombinedDiffView also exposes a header refresh.
- */
-function RunRightRailDiff({
-  sessionId,
-  onOpenFile,
-}: {
-  sessionId: string;
-  onOpenFile?: (filePath: string) => void;
-}) {
-  // [] == all uncommitted changes (same default DiffPanel uses).
-  const [selectedExecutions] = useState<number[]>([]);
-
-  return (
-    <div
-      data-testid="run-right-rail-session-diff"
-      className="h-full flex flex-col bg-surface-primary"
-    >
-      <div className="flex-1 overflow-hidden">
-        <CombinedDiffView
-          sessionId={sessionId}
-          selectedExecutions={selectedExecutions}
-          isGitOperationRunning={false}
-          isVisible
-          onOpenFile={onOpenFile}
-        />
-      </div>
-    </div>
-  );
 }
 
 interface RunRightRailProps {
@@ -376,7 +337,7 @@ export function RunRightRail({ phaseState, collapsed, onToggleCollapse }: RunRig
               <RunDiffTabPanel runId={activeRunId} onOpenFile={openDiffFile} />
             </div>
           ) : selectedSessionId !== null ? (
-            <RunRightRailDiff sessionId={selectedSessionId} onOpenFile={openDiffFile} />
+            <SessionDiffTabPanel sessionId={selectedSessionId} onOpenFile={openDiffFile} />
           ) : (
             <div
               data-testid="run-right-rail-diff-empty-norun"

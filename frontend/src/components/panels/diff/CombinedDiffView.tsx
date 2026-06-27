@@ -20,8 +20,7 @@ const CombinedDiffView: React.FC<CombinedDiffViewProps> = memo(({
   selectedExecutions: initialSelected,
   isGitOperationRunning = false,
   isMainRepo = false,
-  isVisible = true,
-  onOpenFile
+  isVisible = true
 }) => {
   const [executions, setExecutions] = useState<ExecutionDiff[]>([]);
   const [selectedExecutions, setSelectedExecutions] = useState<number[]>(initialSelected);
@@ -686,7 +685,6 @@ const CombinedDiffView: React.FC<CombinedDiffViewProps> = memo(({
               sessionId={sessionId}
               className="h-full"
               onFileSave={handleFileSave}
-              onOpenFile={onOpenFile}
               isAllCommitsSelected={(() => {
                 // Check if this is showing all commits
                 const commits = executions.filter(e => e.id !== 0);

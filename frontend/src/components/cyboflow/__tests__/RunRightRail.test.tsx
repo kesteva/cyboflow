@@ -71,12 +71,12 @@ vi.mock('../RunDiffTabPanel', () => ({
   ),
 }));
 
-// Stub CombinedDiffView (the session-scoped diff body) so the at-rest Diff-tab
+// Stub SessionDiffTabPanel (the session-scoped diff body) so the at-rest Diff-tab
 // fallback test can assert the rail mounts it keyed by the selected session
 // WITHOUT firing the real session-diff IPC.
-vi.mock('../../panels/diff/CombinedDiffView', () => ({
-  default: ({ sessionId }: { sessionId: string }) => (
-    <div data-testid="combined-diff-view-mock">{sessionId}</div>
+vi.mock('../SessionDiffTabPanel', () => ({
+  SessionDiffTabPanel: ({ sessionId }: { sessionId: string }) => (
+    <div data-testid="session-diff-tab-panel-mock">{sessionId}</div>
   ),
 }));
 
@@ -294,7 +294,7 @@ describe('RunRightRail', () => {
 
     fireEvent.click(screen.getByRole('tab', { name: 'Diff' }));
 
-    const panel = screen.getByTestId('combined-diff-view-mock');
+    const panel = screen.getByTestId('session-diff-tab-panel-mock');
     expect(panel).toBeInTheDocument();
     expect(panel).toHaveTextContent('sess-diff-rest-001');
     // Not the run-scoped panel, and not the dead-end empty state.
@@ -309,7 +309,7 @@ describe('RunRightRail', () => {
 
     expect(screen.getByTestId('run-right-rail-diff-empty-norun')).toBeInTheDocument();
     expect(screen.queryByTestId('run-diff-tab-panel-mock')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('combined-diff-view-mock')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('session-diff-tab-panel-mock')).not.toBeInTheDocument();
   });
 });
 
