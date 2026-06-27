@@ -6,7 +6,7 @@
  * header (filename, ± counts), the 3-col hunk grid, and the content view render.
  */
 import '@testing-library/jest-dom';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FileTabRenderer } from '../FileTabRenderer';
 import { useFileDiffData, type FileDiffData } from '../../../hooks/useFileDiffData';
@@ -50,6 +50,8 @@ describe('FileTabRenderer', () => {
   beforeEach(() => {
     mockHook.mockReset();
     mockContentHook.mockReset();
+    // Reset the persisted view mode so each test starts in 'diff'.
+    localStorage.clear();
     // Default the content hook so diff-path tests (which never reach the
     // content fallback) still have a defined return.
     setContentHook({ loading: false, error: null, content: null });
@@ -107,7 +109,7 @@ describe('FileTabRenderer', () => {
     expect(screen.getByTestId('file-tab-binary')).toBeInTheDocument();
   });
 
-  it('renders the header and the 3-col hunk grid', () => {
+  it('renders the header and the 3-col hunk grid (Diff mode)', () => {
     setHook({ loading: false, error: null, fileDiff: PARSED });
     render(<FileTabRenderer sessionId="s1" filePath="src/a.ts" />);
     // Header: basename + dir + ± counts.
@@ -120,5 +122,45 @@ describe('FileTabRenderer', () => {
     const hunks = screen.getByTestId('file-tab-hunks');
     expect(hunks).toHaveTextContent('new line');
     expect(hunks).toHaveTextContent('old line');
+  });
+
+  it('switching to Split renders the side-by-side grid', () => {
+    setHook({ loading: false, error: null, fileDiff: PARSED });
+    render(<FileTabRenderer sessionId="s1" filePath="src/a.ts" />);
+
+    fireEvent.click(screen.getByTestId('file-tab-mode-split'));
+
+    const split = screen.getByTestId('file-tab-split');
+    expect(split).toHaveTextContent('new line');
+    expect(split).toHaveTextContent('old line');
+    expect(screen.queryByTestId('file-tab-hunks')).not.toBeInTheDocument();
+  });
+
+  it('switching to Preview renders the file contents (not the diff)', () => {
+    setHook({ loading: false, error: null, fileDiff: PARSED });
+    setContentHook({
+      loading: false,
+      error: null,
+      content: { path: 'src/a.ts', content: 'full file body', size: 14, unviewableReason: null },
+    });
+    render(<FileTabRenderer sessionId="s1" filePath="src/a.ts" />);
+
+    fireEvent.click(screen.getByTestId('file-tab-mode-preview'));
+
+    expect(screen.getByTestId('file-tab-content')).toHaveTextContent('full file body');
+    expect(screen.queryByTestId('file-tab-hunks')).not.toBeInTheDocument();
+  });
+
+  it('Preview renders Markdown for .md files', () => {
+    setHook({ loading: false, error: null, fileDiff: null });
+    setContentHook({
+      loading: false,
+      error: null,
+      content: { path: 'README.md', content: '# Title', size: 7, unviewableReason: null },
+    });
+    render(<FileTabRenderer sessionId="s1" filePath="README.md" />);
+
+    fireEvent.click(screen.getByTestId('file-tab-mode-preview'));
+    expect(screen.getByTestId('file-tab-content-markdown')).toBeInTheDocument();
   });
 });

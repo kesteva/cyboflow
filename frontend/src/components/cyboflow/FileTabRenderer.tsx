@@ -1,23 +1,28 @@
 /**
  * FileTabRenderer — center-pane file/diff tab content.
  *
- * Renders one file's working diff as the design's bespoke 3-col grid
- * (old line no │ new line no │ code) with `@@ … @@` hunk headers and +/- tinting,
- * under a header row (filename, ± counts, path). Diff data comes from
- * useFileDiffData (the run's combined diff, filtered to this file).
+ * One file, three views selectable from a header segmented control:
+ *   - Diff    — the design's bespoke unified 3-col grid (old no │ new no │ code)
+ *               with `@@ … @@` hunk headers and +/- tinting.
+ *   - Split   — the same hunks rendered side-by-side (old | new), del/add rows
+ *               paired per hunk.
+ *   - Preview — the plain file contents (Markdown is rendered for .md files).
  *
- * When the file has NO diff (an unchanged file opened from the File Explorer),
- * the tab falls back to the plain file contents (useFileContentData) instead of
- * a dead-end "no changes" message — so opening any file always shows something:
- * the diff if there is one, otherwise the file itself.
+ * Diff data comes from useFileDiffData (the run's combined diff, filtered to this
+ * file); the Preview body and the no-diff fallback come from useFileContentData
+ * (cyboflow.files.read). When a file is unchanged there is no diff to show, so
+ * the view falls back to Preview rather than a dead-end message.
+ *
+ * The chosen view persists in localStorage so it carries across tabs/sessions.
  *
  * Design hexes are inline (warm-paper palette); the M7 polish pass tokenizes them.
- * (An "Open in editor" affordance is deferred — it needs an editor-open IPC.)
  */
+import { useState } from 'react';
 import type { ReactElement } from 'react';
 import { useFileDiffData } from '../../hooks/useFileDiffData';
 import { useFileContentData } from '../../hooks/useFileContentData';
-import type { DiffHunk, HunkLine } from '../../utils/parseFileHunks';
+import { MarkdownPreview } from '../MarkdownPreview';
+import type { DiffHunk, HunkLine, ParsedFileDiff } from '../../utils/parseFileHunks';
 import type { FileTabStatus } from '../../../../shared/types/centerPane';
 
 const RAIL = 'var(--color-bg-secondary)';
@@ -35,6 +40,9 @@ const INK = 'var(--color-text-primary)';
 const ADD_BG = 'rgba(45,138,91,.12)';
 const DEL_BG = 'rgba(201,100,66,.12)';
 
+type ViewMode = 'diff' | 'split' | 'preview';
+const VIEW_MODE_KEY = 'cyboflow.fileTab.viewMode';
+
 interface FileTabRendererProps {
   /** Center-pane session key (= the run's parent session) — the diff source. */
   sessionId: string;
@@ -50,12 +58,26 @@ function dirname(p: string): string {
   const i = p.lastIndexOf('/');
   return i === -1 ? '' : p.slice(0, i + 1);
 }
+function isMarkdown(p: string): boolean {
+  const lower = p.toLowerCase();
+  return lower.endsWith('.md') || lower.endsWith('.markdown');
+}
+
+function readInitialViewMode(): ViewMode {
+  if (typeof localStorage === 'undefined') return 'diff';
+  const saved = localStorage.getItem(VIEW_MODE_KEY);
+  return saved === 'diff' || saved === 'split' || saved === 'preview' ? saved : 'diff';
+}
 
 function rowPrefix(kind: HunkLine['kind']): string {
   if (kind === 'add') return '+ ';
   if (kind === 'del') return '− ';
   return '  ';
 }
+
+// ---------------------------------------------------------------------------
+// Unified (Diff) view
+// ---------------------------------------------------------------------------
 
 function HunkRows({ hunk }: { hunk: DiffHunk }): ReactElement {
   return (
@@ -99,11 +121,142 @@ function HunkRows({ hunk }: { hunk: DiffHunk }): ReactElement {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Split (side-by-side) view — built from the same hunk lines.
+// ---------------------------------------------------------------------------
+
+interface SplitCell {
+  no: number | null;
+  text: string;
+  kind: 'context' | 'del' | 'add';
+}
+interface SplitRow {
+  left: SplitCell | null;
+  right: SplitCell | null;
+}
+
 /**
- * FileContentView — plain file-contents body shown when the file has no diff.
- * Mounted only in the no-diff branch so files that DO have a diff never fetch
- * their contents. Mirrors the File Explorer takeover viewer's states (loading /
- * error / binary / too-large / empty / text).
+ * Pair a hunk's lines into side-by-side rows: a context line fills both sides;
+ * a run of deletions pairs positionally with the following run of additions
+ * (leftover dels are left-only, leftover adds right-only). This is the standard
+ * GitHub-style alignment and reads correctly without per-token diffing.
+ */
+function toSplitRows(hunk: DiffHunk): SplitRow[] {
+  const rows: SplitRow[] = [];
+  let dels: SplitCell[] = [];
+  let adds: SplitCell[] = [];
+  const flush = () => {
+    const n = Math.max(dels.length, adds.length);
+    for (let i = 0; i < n; i++) {
+      rows.push({ left: dels[i] ?? null, right: adds[i] ?? null });
+    }
+    dels = [];
+    adds = [];
+  };
+  for (const ln of hunk.lines) {
+    if (ln.kind === 'del') {
+      dels.push({ no: ln.oldNo, text: ln.text, kind: 'del' });
+    } else if (ln.kind === 'add') {
+      adds.push({ no: ln.newNo, text: ln.text, kind: 'add' });
+    } else {
+      flush();
+      rows.push({
+        left: { no: ln.oldNo, text: ln.text, kind: 'context' },
+        right: { no: ln.newNo, text: ln.text, kind: 'context' },
+      });
+    }
+  }
+  flush();
+  return rows;
+}
+
+function SplitCellView({ cell }: { cell: SplitCell | null }): ReactElement {
+  if (cell === null) {
+    return <div style={{ display: 'grid', gridTemplateColumns: '30px 1fr', background: 'transparent' }} />;
+  }
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: '30px 1fr',
+        background: cell.kind === 'add' ? ADD_BG : cell.kind === 'del' ? DEL_BG : 'transparent',
+      }}
+    >
+      <span style={{ padding: '0 6px', textAlign: 'right', color: FAINT, fontSize: '9.5px' }}>
+        {cell.no ?? ''}
+      </span>
+      <span style={{ padding: '0 8px', whiteSpace: 'pre', color: cell.kind === 'context' ? MUTED : INK }}>
+        {cell.text}
+      </span>
+    </div>
+  );
+}
+
+function SplitHunkRows({ hunk }: { hunk: DiffHunk }): ReactElement {
+  const rows = toSplitRows(hunk);
+  return (
+    <>
+      <div
+        style={{
+          fontSize: '10px',
+          padding: '3px 16px',
+          color: FAINT,
+          background: RAIL,
+          borderBottom: `1px dashed ${HAIRLINE}`,
+          whiteSpace: 'pre',
+        }}
+      >
+        {hunk.header}
+      </div>
+      {rows.map((row, i) => (
+        <div
+          key={i}
+          style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', fontSize: '11px', lineHeight: 1.55 }}
+        >
+          <div style={{ borderRight: `1px solid ${SOFT}` }}>
+            <SplitCellView cell={row.left} />
+          </div>
+          <SplitCellView cell={row.right} />
+        </div>
+      ))}
+    </>
+  );
+}
+
+function DiffBody({ fileDiff, mode }: { fileDiff: ParsedFileDiff; mode: 'diff' | 'split' }): ReactElement {
+  if (fileDiff.isBinary) {
+    return (
+      <div data-testid="file-tab-binary" style={{ padding: 16, fontSize: '12px', color: MUTED }}>
+        Binary file — diff not shown.
+      </div>
+    );
+  }
+  if (mode === 'split') {
+    return (
+      <div data-testid="file-tab-split" style={{ borderBottom: `1px solid ${SOFT}` }}>
+        {fileDiff.hunks.map((hunk, i) => (
+          <SplitHunkRows key={i} hunk={hunk} />
+        ))}
+      </div>
+    );
+  }
+  return (
+    <div data-testid="file-tab-hunks" style={{ borderBottom: `1px solid ${SOFT}` }}>
+      {fileDiff.hunks.map((hunk, i) => (
+        <HunkRows key={i} hunk={hunk} />
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Preview / no-diff content view
+// ---------------------------------------------------------------------------
+
+/**
+ * FileContentView — plain (or rendered-Markdown) file contents. Used for the
+ * Preview mode and as the no-diff fallback. Mirrors the File Explorer takeover
+ * viewer's states (loading / error / binary / too-large / empty / text).
  */
 function FileContentView({ sessionId, filePath }: { sessionId: string; filePath: string }): ReactElement {
   const { loading, error, content } = useFileContentData(sessionId, filePath);
@@ -145,6 +298,13 @@ function FileContentView({ sessionId, filePath }: { sessionId: string; filePath:
       </div>
     );
   }
+  if (isMarkdown(filePath)) {
+    return (
+      <div data-testid="file-tab-content-markdown" style={{ padding: '12px 16px' }}>
+        <MarkdownPreview content={content.content} />
+      </div>
+    );
+  }
   return (
     <pre
       data-testid="file-tab-content"
@@ -164,8 +324,68 @@ function FileContentView({ sessionId, filePath }: { sessionId: string; filePath:
   );
 }
 
+// ---------------------------------------------------------------------------
+// View-mode segmented control
+// ---------------------------------------------------------------------------
+
+const MODES: { id: ViewMode; label: string }[] = [
+  { id: 'diff', label: 'Diff' },
+  { id: 'split', label: 'Split' },
+  { id: 'preview', label: 'Preview' },
+];
+
+function ViewModeControl({
+  mode,
+  onChange,
+}: {
+  mode: ViewMode;
+  onChange: (m: ViewMode) => void;
+}): ReactElement {
+  return (
+    <div
+      role="tablist"
+      aria-label="File view mode"
+      style={{ display: 'inline-flex', border: `1px solid ${HAIRLINE}`, borderRadius: 6, overflow: 'hidden' }}
+    >
+      {MODES.map((m) => {
+        const active = m.id === mode;
+        return (
+          <button
+            key={m.id}
+            type="button"
+            role="tab"
+            aria-selected={active}
+            data-testid={`file-tab-mode-${m.id}`}
+            onClick={() => onChange(m.id)}
+            style={{
+              padding: '2px 10px',
+              fontSize: '10px',
+              fontWeight: 700,
+              letterSpacing: '0.04em',
+              border: 'none',
+              cursor: 'pointer',
+              background: active ? 'var(--color-interactive-primary)' : 'transparent',
+              color: active ? 'var(--color-text-on-interactive, #fff)' : FAINT,
+            }}
+          >
+            {m.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
 export function FileTabRenderer({ sessionId, filePath }: FileTabRendererProps): ReactElement {
   const { loading, error, fileDiff } = useFileDiffData(sessionId, filePath);
+  const [mode, setMode] = useState<ViewMode>(readInitialViewMode);
+
+  const changeMode = (m: ViewMode) => {
+    setMode(m);
+    if (typeof localStorage !== 'undefined') localStorage.setItem(VIEW_MODE_KEY, m);
+  };
 
   return (
     <div data-testid="file-tab-renderer" className="cf-scroll" style={{ height: '100%', overflow: 'auto', background: 'var(--color-bg-primary)' }}>
@@ -192,10 +412,11 @@ export function FileTabRenderer({ sessionId, filePath }: FileTabRendererProps): 
             <span style={{ color: RUST }}>−{fileDiff.deletions}</span>
           </>
         )}
-        <span style={{ flex: 1 }} />
         {dirname(filePath) && (
           <span style={{ color: FAINT, fontWeight: 400, fontSize: '10px' }}>{dirname(filePath)}</span>
         )}
+        <span style={{ flex: 1 }} />
+        <ViewModeControl mode={mode} onChange={changeMode} />
       </div>
 
       {/* Body */}
@@ -207,20 +428,14 @@ export function FileTabRenderer({ sessionId, filePath }: FileTabRendererProps): 
         <div data-testid="file-tab-error" style={{ padding: 16, fontSize: '12px', color: RUST }}>
           {error}
         </div>
-      ) : !fileDiff ? (
-        // No diff for this file → show the plain file contents (unchanged file
-        // opened from the explorer), not a dead-end message.
+      ) : mode === 'preview' ? (
         <FileContentView sessionId={sessionId} filePath={filePath} />
-      ) : fileDiff.isBinary ? (
-        <div data-testid="file-tab-binary" style={{ padding: 16, fontSize: '12px', color: MUTED }}>
-          Binary file — diff not shown.
-        </div>
+      ) : !fileDiff ? (
+        // No diff for this file (unchanged) → show its contents rather than a
+        // dead-end message; Diff/Split have nothing to render.
+        <FileContentView sessionId={sessionId} filePath={filePath} />
       ) : (
-        <div data-testid="file-tab-hunks" style={{ borderBottom: `1px solid ${SOFT}` }}>
-          {fileDiff.hunks.map((hunk, i) => (
-            <HunkRows key={i} hunk={hunk} />
-          ))}
-        </div>
+        <DiffBody fileDiff={fileDiff} mode={mode} />
       )}
     </div>
   );
