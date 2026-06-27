@@ -59,6 +59,7 @@ import { RunShellManager } from './services/runShellManager';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { VerificationScheduler } from './orchestrator/verify/verificationScheduler';
+import { createVerdictDelivery } from './orchestrator/verify/verdictDelivery';
 import { CapturePageBackend } from './services/visualVerify/capturePageBackend';
 import { VlmJudgeImpl } from './services/visualVerify/vlmJudge';
 import type { VerdictV1, VlmJudge } from '../../shared/types/visualVerification';
@@ -683,13 +684,16 @@ async function initializeServices() {
   // P7 wires the Rung-0 backend (CapturePageBackend — offscreen BrowserWindow →
   // capturePage → PNG) and the real Rung-4 VlmJudge (a stateless Claude vision
   // call). Rungs 1-3 (playwright/peekaboo/maestro) land in later layers and are
-  // simply absent from the registry until then. The verdict-delivery side-effects
-  // (ArtifactRouter / ReviewItemRouter / SprintLaneStore) are still deferred (P8
-  // injects the real onVerdict). The artifactsDir resolver matches the screenshots
-  // auto-mint subtree (CYBOFLOW_DIR/artifacts/runs/<runId>). The resolved
-  // visualVerify config supplies the confidence threshold + port/sim pools.
-  // Standalone-typecheck invariant: the scheduler imports no electron/service
-  // code; everything electron-backed is injected here.
+  // simply absent from the registry until then. P8a wires the ADVISORY verdict
+  // delivery: createVerdictDelivery enriches the SAME 'screenshots' artifact with
+  // the verdict block (via ArtifactRouter) on every judged outcome and raises ONE
+  // non-blocking 'visual-regression' finding (via ReviewItemRouter) only on FAIL /
+  // low_confidence (PASS raises none); the merge-gate loopback is a later layer.
+  // The artifactsDir resolver matches the screenshots auto-mint subtree
+  // (CYBOFLOW_DIR/artifacts/runs/<runId>). The resolved visualVerify config
+  // supplies the confidence threshold + port/sim pools. Standalone-typecheck
+  // invariant: the scheduler imports no electron/service code — the verdict
+  // delivery hook (which calls the electron-free routers) is INJECTED here.
   const visualVerifyConfig = configManager.getVisualVerifyConfig();
   const realVlmJudge: VlmJudge = new VlmJudgeImpl({
     confidenceThreshold: visualVerifyConfig.vlmConfidenceThreshold,
@@ -729,6 +733,9 @@ async function initializeServices() {
     artifactsDirResolver: (runId: string) => getCyboflowSubdirectory('artifacts', 'runs', runId),
     logger: cyboflowLogger,
     config: visualVerifyConfig,
+    // P8a — advisory verdict delivery through the existing router chokepoints
+    // (artifact enrich on every judged outcome + a FAIL/low-confidence finding).
+    onVerdict: createVerdictDelivery({ db: cyboflowDb, logger: cyboflowLogger }),
   });
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).

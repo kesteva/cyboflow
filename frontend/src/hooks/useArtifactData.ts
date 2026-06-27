@@ -31,7 +31,7 @@
  */
 import { useEffect, useState } from 'react';
 import { trpc } from '../trpc/client';
-import type { Artifact } from '../../../shared/types/artifacts';
+import type { Artifact, ScreenshotsArtifactPayload } from '../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../shared/types/tasks';
 
 /** Parsed `payload_json` shape for the canvas (ui-prototype / generic) embed. */
@@ -42,12 +42,14 @@ export interface CanvasPayload {
   [key: string]: unknown;
 }
 
-/** Parsed `payload_json` shape for the screenshots gallery. */
-export interface ScreenshotsPayload {
-  /** On-disk file names of captured screenshots (bytes loaded separately later). */
-  fileNames?: string[];
-  [key: string]: unknown;
-}
+/**
+ * Parsed `payload_json` shape for the screenshots gallery. Re-exported alias of
+ * the shared {@link ScreenshotsArtifactPayload} (single source of truth for the
+ * fileNames + optional verdict block, kept in sync with the main-side verdict
+ * delivery chokepoint that enriches the same payload) — kept under this local
+ * name so existing renderer imports do not churn.
+ */
+export type ScreenshotsPayload = ScreenshotsArtifactPayload;
 
 /**
  * Discriminated content union the renderer switches on. `kind` mirrors the

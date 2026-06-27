@@ -14,6 +14,7 @@
  * change events) is added to this same file when the artifacts backend lands
  * (migration 029) — keep this the single home for artifact types.
  */
+import type { VerdictV1 } from './visualVerification';
 
 /**
  * Artifact kinds. The four bespoke (templated) types plus a `generic` fallback
@@ -114,6 +115,28 @@ export interface Artifact {
   sourceRef: string | null;
   createdAt: string;
   committedAt: string | null;
+}
+
+/**
+ * The parsed `payload_json` shape of a `screenshots` artifact. The producer
+ * (visual-verify agent / safety-net scan) writes `{ fileNames }`; the verdict
+ * delivery chokepoint (P8) ENRICHES the SAME artifact (idempotent UPSERT by
+ * (runId, atype)) with an optional `verdict` block once the VlmJudge has judged
+ * those PNGs. Both halves of the contract live here so the renderer's screenshots
+ * tab and the main-side enrich path read ONE shape (type-parity across the
+ * payload_json string boundary). Extra keys are tolerated (payload is per-atype).
+ */
+export interface ScreenshotsArtifactPayload {
+  /** On-disk basenames of the captured screenshots (bytes loaded separately). */
+  fileNames?: string[];
+  /**
+   * The structured visual-verification verdict for these screenshots, written by
+   * the scheduler's verdict-delivery hook. Absent until a judged outcome exists
+   * (a skipped/timeout request enriches no verdict). Drives the tab's verdict
+   * banner + per-image issues.
+   */
+  verdict?: VerdictV1;
+  [key: string]: unknown;
 }
 
 export type ArtifactChangeAction = 'created' | 'updated' | 'committed' | 'deleted';
