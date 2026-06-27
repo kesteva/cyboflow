@@ -257,6 +257,21 @@ export class API {
       return window.electronAPI.sessions.updateAgentPermissionMode(sessionId, mode);
     },
 
+    // Per-session MCP DENY list (migration 036). `disabledMcpServers` is the set
+    // of server names to disable (the complement of what the McpTogglePill shows
+    // checked); read at SDK spawn so it applies on the next turn.
+    async updateSessionMcps(sessionId: string, disabledMcpServers: string[]) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.sessions.updateSessionMcps(sessionId, disabledMcpServers);
+    },
+
+    // Per-session plugin ALLOW list (migration 036). `enabledPlugins` is the set
+    // of plugin ids to force-enable; read at SDK spawn (next-turn apply).
+    async updateSessionPlugins(sessionId: string, enabledPlugins: string[]) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.sessions.updateSessionPlugins(sessionId, enabledPlugins);
+    },
+
     async getGitCommands(sessionId: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.getGitCommands(sessionId);

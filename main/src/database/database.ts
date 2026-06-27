@@ -2387,6 +2387,14 @@ export class DatabaseService {
       updates.push('agent_permission_mode = ?');
       values.push(data.agent_permission_mode);
     }
+    if (data.disabled_mcp_servers_json !== undefined) {
+      updates.push('disabled_mcp_servers_json = ?');
+      values.push(data.disabled_mcp_servers_json);
+    }
+    if (data.enabled_plugins_json !== undefined) {
+      updates.push('enabled_plugins_json = ?');
+      values.push(data.enabled_plugins_json);
+    }
 
     if (updates.length === 0) {
       return this.getSession(id);
@@ -2394,7 +2402,7 @@ export class DatabaseService {
 
     // Only update the updated_at timestamp if we're changing something other than is_favorite, auto_commit, skip_continue_next, commit_mode, or commit_mode_settings
     // This prevents the session from showing as "unviewed" when just toggling these settings
-    const isOnlyToggleUpdate = updates.length === 1 && (updates[0] === 'is_favorite = ?' || updates[0] === 'auto_commit = ?' || updates[0] === 'skip_continue_next = ?' || updates[0] === 'commit_mode = ?' || updates[0] === 'commit_mode_settings = ?' || updates[0] === 'agent_permission_mode = ?');
+    const isOnlyToggleUpdate = updates.length === 1 && (updates[0] === 'is_favorite = ?' || updates[0] === 'auto_commit = ?' || updates[0] === 'skip_continue_next = ?' || updates[0] === 'commit_mode = ?' || updates[0] === 'commit_mode_settings = ?' || updates[0] === 'agent_permission_mode = ?' || updates[0] === 'disabled_mcp_servers_json = ?' || updates[0] === 'enabled_plugins_json = ?');
     if (!isOnlyToggleUpdate) {
       updates.push('updated_at = CURRENT_TIMESTAMP');
     }

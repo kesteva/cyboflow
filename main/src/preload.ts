@@ -259,7 +259,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     toggleFavorite: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:toggle-favorite', sessionId),
     toggleAutoCommit: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:toggle-auto-commit', sessionId),
     updateAgentPermissionMode: (sessionId: string, mode: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:update-agent-permission-mode', sessionId, mode),
-    
+    updateSessionMcps: (sessionId: string, disabledMcpServers: string[]): Promise<IPCResponse> => ipcRenderer.invoke('sessions:update-session-mcps', sessionId, disabledMcpServers),
+    updateSessionPlugins: (sessionId: string, enabledPlugins: string[]): Promise<IPCResponse> => ipcRenderer.invoke('sessions:update-session-plugins', sessionId, enabledPlugins),
+
     // IDE operations
     openIDE: (sessionId: string): Promise<IPCResponse> => ipcRenderer.invoke('sessions:open-ide', sessionId),
     

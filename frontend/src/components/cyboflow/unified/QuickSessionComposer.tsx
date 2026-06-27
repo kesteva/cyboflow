@@ -6,6 +6,8 @@ import { CommitModePill } from '../../CommitModeToggle';
 import { ModelPill, isOpusModel, modelDisplayLabel } from './ModelPill';
 import { FastModePill } from './FastModePill';
 import { PermissionModePill } from './PermissionModePill';
+import { McpTogglePill } from './McpTogglePill';
+import { PluginTogglePill } from './PluginTogglePill';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { UnifiedComposer } from './UnifiedComposer';
 import { resolveChatVisibility } from './useChatVisibility';
@@ -206,6 +208,32 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     />
   );
 
+  // Multi-select MCP / plugin selectors for an IDLE quick SDK session, next to
+  // the permission pill. The MCP pill shows servers enabled-by-default and
+  // persists the unchecked COMPLEMENT to sessions.disabled_mcp_servers_json (a
+  // DENY set); the plugin pill persists the checked set to enabled_plugins_json
+  // (an ALLOW set). Both are read at SDK spawn (next-turn apply) and mirrored
+  // into the session store here for an instant label refresh.
+  const mcpSlot =
+    !interactive && !running ? (
+      <McpTogglePill
+        sessionId={activeSession.id}
+        disabled={activeSession.disabledMcpServers ?? []}
+        onChange={(disabledMcpServers) =>
+          updateSession({ ...activeSession, disabledMcpServers })
+        }
+      />
+    ) : undefined;
+
+  const pluginSlot =
+    !interactive && !running ? (
+      <PluginTogglePill
+        sessionId={activeSession.id}
+        selected={activeSession.enabledPlugins ?? []}
+        onChange={(enabledPlugins) => updateSession({ ...activeSession, enabledPlugins })}
+      />
+    ) : undefined;
+
   // Read-only effort pill (set at session start; migration 029). Today the only
   // value is 'ultracode' — an interactive-only opt-in, so it shows on the PTY
   // composer (where the SDK-gated model pill never appears). null → no pill.
@@ -264,6 +292,8 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       modelLabel={modelLabel}
       modelSlot={modelSlot}
       permissionSlot={permissionSlot}
+      mcpSlot={mcpSlot}
+      pluginSlot={pluginSlot}
       effortLabel={effortLabel}
       checkpointSlot={checkpointSlot}
       fastSlot={fastModeSlot}

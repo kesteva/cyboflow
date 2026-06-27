@@ -119,6 +119,21 @@ export interface Session {
    * Mirror of main/src/types/session.ts Session.
    */
   agentPermissionMode?: PermissionMode;
+  /**
+   * Per-session MCP DENY list (migration 036) — the MCP server names disabled
+   * for this session. Persisted to sessions.disabled_mcp_servers_json; read at
+   * SDK spawn (next-turn apply). Edited from the composer McpTogglePill (which
+   * shows servers enabled-by-default and persists the unchecked complement).
+   * undefined/[] → nothing disabled. Mirror of main/src/types/session.ts Session.
+   */
+  disabledMcpServers?: string[];
+  /**
+   * Per-session plugin ALLOW list (migration 036) — the plugin ids force-enabled
+   * for this session. Persisted to sessions.enabled_plugins_json; read at SDK
+   * spawn (next-turn apply). Edited from the composer PluginTogglePill.
+   * undefined/[] → inherit file settings. Mirror of main/src/types/session.ts.
+   */
+  enabledPlugins?: string[];
 }
 
 export interface GitStatus {

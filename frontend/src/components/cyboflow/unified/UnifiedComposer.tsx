@@ -73,6 +73,12 @@ export interface UnifiedComposerProps {
    *  toolbar (interactive permission changes apply on terminal restart), and a
    *  flow run that supplies no node is unaffected. */
   permissionSlot?: React.ReactNode;
+  /** multi-select MCP-server toggle (quick SDK) — host supplies the node,
+   *  rendered after the permission affordance. */
+  mcpSlot?: React.ReactNode;
+  /** multi-select plugin toggle (quick SDK) — host supplies the node, rendered
+   *  after the MCP affordance. */
+  pluginSlot?: React.ReactNode;
   /** read-only effort label (e.g. "ultracode"). Shown whenever set, independent
    *  of substrate — cyboflow's only effort value is the interactive-only
    *  'ultracode', so it must not be gated on the SDK-only model affordance. */
@@ -110,6 +116,8 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
     modelLabel,
     modelSlot,
     permissionSlot,
+    mcpSlot,
+    pluginSlot,
     effortLabel,
     checkpointSlot,
     fastSlot,
@@ -351,6 +359,8 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
         {visibility.showModelEffort &&
           (modelSlot ?? (modelLabel ? <ReadonlyPill label={modelLabel} /> : null))}
         {permissionSlot}
+        {mcpSlot}
+        {pluginSlot}
         {effortLabel && <ReadonlyPill label={`effort: ${effortLabel}`} />}
 
         {/* Opus-only fast-mode toggle (speed), then checkpoint / commit-mode —

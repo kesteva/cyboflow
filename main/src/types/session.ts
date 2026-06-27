@@ -54,6 +54,21 @@ export interface Session {
    * takes effect on the next turn. Mirror of frontend/src/types/session.ts.
    */
   agentPermissionMode?: PermissionMode;
+  /**
+   * Per-session MCP DENY list (migration 036) — parsed from
+   * sessions.disabled_mcp_servers_json: the MCP server NAMES disabled for this
+   * session. claudeCodeManager.resolveSessionDisabledMcps re-reads the column on
+   * each SDK spawn (next-turn apply). undefined/[] → nothing disabled (all
+   * servers load). Mirror of frontend/src/types/session.ts Session.
+   */
+  disabledMcpServers?: string[];
+  /**
+   * Per-session plugin ALLOW list (migration 036) — parsed from
+   * sessions.enabled_plugins_json: the plugin ids force-enabled for this session.
+   * Read at SDK spawn by resolveSessionEnabledPlugins. undefined/[] → inherit the
+   * user's file settings. Mirror of frontend/src/types/session.ts Session.
+   */
+  enabledPlugins?: string[];
 }
 
 export interface GitStatus {

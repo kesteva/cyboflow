@@ -2105,6 +2105,68 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
+  // Per-session MCP DENY list (migration 036). Persists the disabled-server set
+  // to sessions.disabled_mcp_servers_json; claudeCodeManager.resolveSessionDisabledMcps
+  // re-reads the column on each SDK spawn so the change applies on the next turn
+  // (no respawn). Mirrors sessions:update-agent-permission-mode: persist + mutate
+  // the runtime session + 'session-updated' emit. An empty [] is byte-identical
+  // to the prior all-servers-load default.
+  ipcMain.handle('sessions:update-session-mcps', async (_event, sessionId: string, disabledMcpServers: string[]) => {
+    try {
+      if (!Array.isArray(disabledMcpServers) || !disabledMcpServers.every((m) => typeof m === 'string')) {
+        return { success: false, error: 'Invalid MCP selection' };
+      }
+      const updated = databaseService.updateSession(sessionId, {
+        disabled_mcp_servers_json: JSON.stringify(disabledMcpServers),
+      });
+      if (!updated) {
+        return { success: false, error: 'Session not found' };
+      }
+      const session = sessionManager.getSession(sessionId);
+      if (session) {
+        session.disabledMcpServers = disabledMcpServers;
+        sessionManager.emit('session-updated', session);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to update session MCPs:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to update session MCPs',
+      };
+    }
+  });
+
+  // Per-session plugin ALLOW list (migration 036). Persists the force-enabled
+  // plugin-id set to sessions.enabled_plugins_json; resolveSessionEnabledPlugins
+  // re-reads it on each SDK spawn (next-turn apply). Same persist + runtime mirror
+  // + emit shape; an empty [] inherits the user's file plugins (byte-identical).
+  ipcMain.handle('sessions:update-session-plugins', async (_event, sessionId: string, enabledPlugins: string[]) => {
+    try {
+      if (!Array.isArray(enabledPlugins) || !enabledPlugins.every((p) => typeof p === 'string')) {
+        return { success: false, error: 'Invalid plugin selection' };
+      }
+      const updated = databaseService.updateSession(sessionId, {
+        enabled_plugins_json: JSON.stringify(enabledPlugins),
+      });
+      if (!updated) {
+        return { success: false, error: 'Session not found' };
+      }
+      const session = sessionManager.getSession(sessionId);
+      if (session) {
+        session.enabledPlugins = enabledPlugins;
+        sessionManager.emit('session-updated', session);
+      }
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to update session plugins:', error);
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : 'Failed to update session plugins',
+      };
+    }
+  });
+
   ipcMain.handle('sessions:toggle-auto-commit', async (_event, sessionId: string) => {
     try {
       console.log('[IPC] sessions:toggle-auto-commit called for sessionId:', sessionId);
