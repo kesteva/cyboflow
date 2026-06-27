@@ -430,6 +430,48 @@ describe('cancelRunHandler — sprint-lane batch close-out', () => {
     expect(markBatchTerminal).not.toHaveBeenCalled();
   });
 
+  it('calls cancelVerificationsForRun(runId) exactly once after a successful cancel', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    const cancelVerificationsForRun = vi.fn();
+
+    const result = await cancelRunHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      cancelVerificationsForRun,
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(cancelVerificationsForRun).toHaveBeenCalledTimes(1);
+    expect(cancelVerificationsForRun).toHaveBeenCalledWith(runId);
+  });
+
+  it('does NOT call cancelVerificationsForRun on an already-terminal noOp (double-cancel)', async () => {
+    const { runId } = seedRun(db, { status: 'canceled' });
+    const cancelVerificationsForRun = vi.fn();
+
+    const result = await cancelRunHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      cancelVerificationsForRun,
+    });
+
+    expect(result).toEqual({ noOp: true, reason: 'already_terminal' });
+    expect(cancelVerificationsForRun).not.toHaveBeenCalled();
+  });
+
+  it('is fail-soft: a throwing cancelVerificationsForRun never fails the cancel', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    const cancelVerificationsForRun = vi.fn(() => {
+      throw new Error('scheduler offline');
+    });
+
+    const result = await cancelRunHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      cancelVerificationsForRun,
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(getRun(db, runId).status).toBe('canceled');
+  });
+
   it('is fail-soft: an omitted dep cancels fine; a throwing dep never fails the cancel', async () => {
     // Omitted dep — batch run still cancels.
     const first = seedRun(db, { status: 'running', id: 'run-no-dep' });

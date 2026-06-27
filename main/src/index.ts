@@ -1488,6 +1488,16 @@ app.whenReady().then(async () => {
       console.log(`[Main] Recovered active-state orphans (running: ${orphanRecovery.runningRecovered}, starting: ${orphanRecovery.startingRecovered}, approvals canceled: ${orphanRecovery.approvalsCanceled})`);
     }
 
+    // Boot recovery: verification_requests left 'leased'/'running' by a prior
+    // process have no live scheduler worker (the in-memory AbortController + lease +
+    // detached promise died with that process), so they cannot resume — re-drain
+    // them to 'timeout'. Mirrors recoverActiveStateOrphans for the visual-verify
+    // queue; runs once on the freshly-initialized singleton before any nudge.
+    const verifyOrphans = VerificationScheduler.getInstance().runRecovery();
+    if (verifyOrphans > 0) {
+      console.log(`[Main] Re-drained ${verifyOrphans} orphaned verification request(s) to timeout on boot`);
+    }
+
     // Crash-safe resume (Stage 3): re-drive PROGRAMMATIC runs the previous process
     // left mid-walk. recoverActiveStateOrphans reset them to 'starting' (NOT
     // force-failed); re-enqueue each on its per-run queue, threading the persisted
@@ -1586,6 +1596,11 @@ app.whenReady().then(async () => {
       // never strands non-terminal.
       markBatchTerminal: (batchId: string, status: 'canceled') =>
         SprintLaneStore.getInstance().markBatchTerminal(batchId, status),
+      // Visual-verify cleanup: abort in-flight captures/judges + mark the run's
+      // non-terminal verification_requests rows 'timeout'. tryGetInstance keeps it
+      // a no-op if the scheduler was never initialized; fail-soft inside the handler.
+      cancelVerificationsForRun: (runId: string) =>
+        VerificationScheduler.tryGetInstance()?.cancelForRun(runId),
       logger: loggerLike,
     };
     setCancelRunDeps(cancelRunDepsBag);
