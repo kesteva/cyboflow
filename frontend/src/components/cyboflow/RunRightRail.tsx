@@ -126,7 +126,13 @@ function selectActiveRunProjectId(
  * session-scoped. Keyed by sessionId so it remounts (reloads git data) whenever
  * the resolved session changes; CombinedDiffView also exposes a header refresh.
  */
-function RunRightRailDiff({ sessionId }: { sessionId: string }) {
+function RunRightRailDiff({
+  sessionId,
+  onOpenFile,
+}: {
+  sessionId: string;
+  onOpenFile?: (filePath: string) => void;
+}) {
   // [] == all uncommitted changes (same default DiffPanel uses).
   const [selectedExecutions] = useState<number[]>([]);
 
@@ -141,6 +147,7 @@ function RunRightRailDiff({ sessionId }: { sessionId: string }) {
           selectedExecutions={selectedExecutions}
           isGitOperationRunning={false}
           isVisible
+          onOpenFile={onOpenFile}
         />
       </div>
     </div>
@@ -223,6 +230,15 @@ export function RunRightRail({ phaseState, collapsed, onToggleCollapse }: RunRig
   // The center-pane key is the run's parent session when known, else the run id
   // (legacy parentless runs) — matches RunCenterPane's keying.
   const artifactsSessionKey = selectedSessionId ?? activeRunId ?? '';
+
+  // Clicking a file in the Diff tab opens it as a center-pane file tab (keyed by
+  // the selected session, like the File Explorer launcher). Undefined when no
+  // session backs the center pane (e.g. a parentless flow run) — the diff then
+  // keeps its click = toggle behavior.
+  const openDiffFile =
+    selectedSessionId !== null
+      ? (filePath: string) => openFileTab(selectedSessionId, { filePath })
+      : undefined;
 
   const currentTab = TABS.find((t) => t.id === activeTab) ?? TABS[0];
 
@@ -357,10 +373,10 @@ export function RunRightRail({ phaseState, collapsed, onToggleCollapse }: RunRig
           //    a dead-end "No active run".
           activeRunId !== null ? (
             <div className="h-full overflow-hidden">
-              <RunDiffTabPanel runId={activeRunId} />
+              <RunDiffTabPanel runId={activeRunId} onOpenFile={openDiffFile} />
             </div>
           ) : selectedSessionId !== null ? (
-            <RunRightRailDiff sessionId={selectedSessionId} />
+            <RunRightRailDiff sessionId={selectedSessionId} onOpenFile={openDiffFile} />
           ) : (
             <div
               data-testid="run-right-rail-diff-empty-norun"

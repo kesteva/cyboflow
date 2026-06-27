@@ -136,7 +136,7 @@ export interface DiffViewerHandle {
   scrollToFile: (index: number) => void;
 }
 
-const DiffViewer = memo(forwardRef<DiffViewerHandle, DiffViewerProps>(({ diff, sessionId, className = '', onFileSave, isAllCommitsSelected = true, mainBranch = 'main' }, ref) => {
+const DiffViewer = memo(forwardRef<DiffViewerHandle, DiffViewerProps>(({ diff, sessionId, className = '', onFileSave, isAllCommitsSelected = true, mainBranch = 'main', onOpenFile }, ref) => {
   const { theme } = useTheme();
   const [viewType, setViewType] = useState<'split' | 'inline'>('split');
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
@@ -422,14 +422,33 @@ const DiffViewer = memo(forwardRef<DiffViewerHandle, DiffViewerProps>(({ diff, s
                 data-file-path={file.path}
                 className="border-b border-border-primary"
               >
-                {/* File header */}
-                <div 
+                {/* File header. When onOpenFile is wired, the header opens the
+                    file (center-pane tab) and only the chevron toggles the inline
+                    diff; otherwise the whole header toggles (legacy behavior). */}
+                <div
                   className="px-4 py-3 bg-surface-secondary hover:bg-surface-hover cursor-pointer transition-colors"
-                  onClick={() => toggleFile(fileKey)}
+                  onClick={() => (onOpenFile ? onOpenFile(file.path) : toggleFile(fileKey))}
+                  title={onOpenFile ? 'Open file' : undefined}
                 >
                   <div className="flex items-center justify-between">
                     <span className="font-medium text-text-primary flex items-center gap-2">
-                      {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                      {onOpenFile ? (
+                        <button
+                          type="button"
+                          aria-label={isExpanded ? 'Collapse diff' : 'Expand diff'}
+                          className="flex items-center text-text-tertiary hover:text-text-primary"
+                          onClick={(e) => {
+                            // Don't let the chevron's toggle bubble to the
+                            // header's open-file handler.
+                            e.stopPropagation();
+                            toggleFile(fileKey);
+                          }}
+                        >
+                          {isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                        </button>
+                      ) : (
+                        isExpanded ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />
+                      )}
                       <FileText className="w-4 h-4" />
                       {file.path}
                       {isModified && (

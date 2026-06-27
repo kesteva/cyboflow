@@ -42,7 +42,14 @@ const INITIAL_STATE: RunDiffState = {
   error: null,
 };
 
-export function RunDiffTabPanel({ runId }: { runId: string }): ReactElement {
+export function RunDiffTabPanel({
+  runId,
+  onOpenFile,
+}: {
+  runId: string;
+  /** Forwarded to DiffViewer — click a file header to open it (vs. toggle). */
+  onOpenFile?: (filePath: string) => void;
+}): ReactElement {
   const [state, setState] = useState<RunDiffState>(INITIAL_STATE);
 
   useEffect(() => {
@@ -105,7 +112,7 @@ export function RunDiffTabPanel({ runId }: { runId: string }): ReactElement {
   // keeps it read-only (no Monaco save path).
   return (
     <div data-testid="run-right-rail-diff" className="h-full">
-      <DiffViewer diff={diffText} isAllCommitsSelected={false} />
+      <DiffViewer diff={diffText} isAllCommitsSelected={false} onOpenFile={onOpenFile} />
     </div>
   );
 }

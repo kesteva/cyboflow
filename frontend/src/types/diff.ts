@@ -51,6 +51,13 @@ export interface DiffViewerProps {
   onFileSave?: (filePath: string) => void;
   isAllCommitsSelected?: boolean;
   mainBranch?: string;
+  /**
+   * When provided, clicking a file's header OPENS that file (e.g. as a
+   * center-pane tab) instead of expanding/collapsing its diff inline. The
+   * chevron still toggles inline expansion. Omit to keep the click = toggle
+   * behavior.
+   */
+  onOpenFile?: (filePath: string) => void;
 }
 
 export interface ExecutionListProps {
@@ -71,4 +78,6 @@ export interface CombinedDiffViewProps {
   isGitOperationRunning?: boolean;
   isMainRepo?: boolean;
   isVisible?: boolean;
+  /** Forwarded to DiffViewer — click a file header to open it (vs. toggle). */
+  onOpenFile?: (filePath: string) => void;
 }
