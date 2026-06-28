@@ -89,10 +89,18 @@ import type { PermissionMode } from '../../../../../shared/types/workflows';
  *                      reads. A future explicit `--settings` MUST target the
  *                      writer's `.claude/settings.json` path, not the empty
  *                      `.cyboflow` file.
- *   resume/isResume  : v1 is FRESH-SESSION-ONLY. Interactive `--resume` /
- *                      `--session-id` continuity is NOT implemented (#44607 is
- *                      ignored interactively). isResume is accepted but no
- *                      `--resume` flag is emitted.
+ *   resume/isResume  : the legacy boolean `isResume` is still ignored (no
+ *                      `--resume` is emitted from it). RESUME of a lost quick
+ *                      session is driven by the explicit `resumeSessionId` option
+ *                      below: when set, buildCommandArgs emits
+ *                      `--resume <uuid> --fork-session`. `--fork-session` is
+ *                      LOAD-BEARING — claude resumes the prior conversation's
+ *                      context but writes a NEW session-id `.jsonl`, which the
+ *                      TranscriptTailSource (snapshot-diff discovery) can bind to
+ *                      (a plain `--resume` appends to the pre-existing file and
+ *                      would never be discovered) and which persistDiscoveredSessionId
+ *                      then re-stamps onto sessions.claude_session_id so the chain
+ *                      survives the next restart too.
  *   systemPromptAppend: NO interactive append channel exists. Delivery is via
  *                      prompt-body prepend in S6/TASK-811 — NOT implemented here.
  * ------------------------------------------------------------------------- */
@@ -105,10 +113,18 @@ interface InteractiveClaudeSpawnOptions {
   prompt: string;
   conversationHistory?: string[];
   /**
-   * v1 fresh-session-only: accepted for interface parity but NEVER emits a
-   * `--resume` flag interactively (#44607 ignored — see parity table).
+   * Legacy boolean: accepted for interface parity but NEVER emits a `--resume`
+   * flag interactively (use `resumeSessionId` below for real resume).
    */
   isResume?: boolean;
+  /**
+   * Resume a lost quick-session conversation by its persisted Claude session id
+   * (sessions.claude_session_id). When set, buildCommandArgs emits
+   * `--resume <resumeSessionId> --fork-session` (see the parity table for why the
+   * fork is required). Mirrors the SDK manager's `resumeSessionId`
+   * (claudeCodeManager.ts:125). Omitted → a fresh REPL (current behavior).
+   */
+  resumeSessionId?: string;
   permissionMode?: 'approve' | 'ignore';
   /**
    * Workflow 4-mode agent permission value resolved from the run snapshot
@@ -453,6 +469,15 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     const resolvedModel = interactiveModelArg(resolveModelAlias(options.model));
     if (resolvedModel && resolvedModel !== 'auto' && resolvedModel !== 'default') {
       args.push('--model', resolvedModel);
+    }
+
+    // resumeSessionId: resume a lost quick-session conversation. `--fork-session`
+    // is LOAD-BEARING (see the parity table): claude resumes the prior context but
+    // writes a NEW session-id transcript, which the snapshot-diff TranscriptTailSource
+    // can discover (a plain `--resume` reuses the pre-existing file and would never
+    // bind). Pushed before the end-of-options `--` separator like every other flag.
+    if (options.resumeSessionId) {
+      args.push('--resume', options.resumeSessionId, '--fork-session');
     }
 
     // strictMcpConfig: isolate to per-run .mcp.json servers only.
@@ -1400,6 +1425,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     model?: string,
     effort?: 'ultracode',
     fastMode?: boolean,
+    resumeSessionId?: string,
   ): Promise<void> {
     await this.spawnCliProcess({
       panelId,
@@ -1409,6 +1435,9 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       permissionMode,
       effort,
       fastMode,
+      // When set, buildCommandArgs emits `--resume <uuid> --fork-session` so the
+      // prior conversation's context is restored on this (deferred) first turn.
+      ...(resumeSessionId ? { resumeSessionId } : {}),
       // Quick/legacy interactive sessions resolve their 4-mode agent permission
       // here (per-session override else global default) — without it the
       // settings-writer's effectiveWriterMode never sees the 4-mode and ALWAYS
