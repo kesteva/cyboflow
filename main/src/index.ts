@@ -72,7 +72,10 @@ import { PlaywrightBackend } from './services/visualVerify/playwrightBackend';
 import { PeekabooBackend } from './services/visualVerify/peekabooBackend';
 import { VlmJudgeImpl } from './services/visualVerify/vlmJudge';
 import { DevServerManager } from './services/visualVerify/devServerManager';
+import { FsBaselineStore } from './services/visualVerify/baselineStore';
+import { comparePngFiles } from './services/visualVerify/pixelDiff';
 import { loadVerifyConfig } from './orchestrator/verifyConfigLoader';
+import { execFileSync } from 'node:child_process';
 import type {
   DeliverableVerifyConfig,
   VerdictV1,
@@ -764,15 +767,65 @@ async function initializeServices() {
   // a closure over configManager + databaseService so the router stays free of
   // ConfigManager/service imports (standalone-typecheck invariant). Fail-soft:
   // any lookup error returns null → the snapshot is skipped, never the commit.
-  ArtifactRouter.initialize(cyboflowDb, cyboflowLogger, (projectId: number) => {
-    try {
+  // S5 — the Accept-as-baseline committer (4th ArtifactRouter arg). The router stays
+  // fs/git-free (standalone-typecheck invariant); this closure does the concrete fs
+  // work via the FsBaselineStore (copy run-artifact PNGs into the git-tracked
+  // .cyboflow/artifacts/baselines/<key>/<viewport>.png tree at the project ROOT) and
+  // stages + commits them with `git`. It is the ONLY layer allowed to import the
+  // electron-backed cyboflowDirectory util + child_process. Mirrors the
+  // resolveCommitDir closure: a closure over databaseService + the run-artifacts-dir
+  // resolver. Returns the baselineKey actually written.
+  const fsBaselineStore = new FsBaselineStore();
+  ArtifactRouter.initialize(
+    cyboflowDb,
+    cyboflowLogger,
+    (projectId: number) => {
+      try {
+        const project = databaseService.getProject(projectId);
+        if (!project?.path) return null;
+        return resolveArtifactCommitDir(project.path, configManager.getArtifactCommitDir());
+      } catch {
+        return null;
+      }
+    },
+    async ({ projectId, runId, baselineKey, fileNames }) => {
       const project = databaseService.getProject(projectId);
-      if (!project?.path) return null;
-      return resolveArtifactCommitDir(project.path, configManager.getArtifactCommitDir());
-    } catch {
-      return null;
-    }
-  });
+      if (!project?.path) {
+        throw new Error(`accept-baseline: project ${projectId} has no path`);
+      }
+      const projectRoot = project.path;
+      const artifactsDir = getCyboflowSubdirectory('artifacts', 'runs', runId);
+      const written: string[] = [];
+      for (const fileName of fileNames) {
+        const stem = path.basename(fileName).replace(/\.png$/i, '');
+        const source = path.join(artifactsDir, path.basename(fileName));
+        // The viewport stem of the captured PNG IS its baseline viewport stem.
+        const dest = await fsBaselineStore.write(projectRoot, baselineKey, stem, source);
+        written.push(dest);
+      }
+      // Stage + commit the baselines tree (only the baselines paths we wrote). Run in
+      // the project ROOT (baselines are durable at root, not the run worktree).
+      if (written.length > 0) {
+        try {
+          execFileSync('git', ['add', '--', ...written], { cwd: projectRoot, stdio: 'pipe' });
+          execFileSync(
+            'git',
+            ['commit', '-m', `chore: accept visual baseline ${baselineKey}`, '--', ...written],
+            { cwd: projectRoot, stdio: 'pipe' },
+          );
+        } catch (err) {
+          // A git failure (no repo / nothing changed) is logged but does not undo the
+          // on-disk copy — the bytes are written; the human can commit manually.
+          cyboflowLogger?.warn('[acceptBaseline] git commit failed (fail-soft)', {
+            projectId,
+            baselineKey,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      return { baselineKey };
+    },
+  );
 
   // Inject the run-artifacts-dir resolver the screenshots auto-mint scan reads —
   // CYBOFLOW_DIR/artifacts/runs/<runId>, the SAME subtree artifacts:load-images
@@ -916,6 +969,49 @@ async function initializeServices() {
   // app-wide through the shared mutex. dev builds run under the 'Electron' app
   // owner; the packaged app owner is 'Cyboflow' (the backend's default appTarget).
   const peekabooBackend = new PeekabooBackend({ logger: cyboflowLogger });
+  // S5 — the golden-baseline SSIM pre-diff resolver. When a request carries a
+  // baselineKey, this closure resolves the accepted baseline PNG per captured
+  // viewport (FsBaselineStore) and compares it (comparePngFiles → nativeImage decode,
+  // zero-dep pixel/SSIM). It returns the MIN score across viewports + the first
+  // resolved baseline path; the scheduler owns the match gate (>= threshold ⇒ cheap
+  // PASS, no VLM). It does ALL fs + image-decode work so the scheduler stays
+  // fs/electron/service-free (standalone-typecheck invariant). null ⇒ no baselineKey
+  // resolved / no accepted baseline ⇒ intent-only judging (pre-S5 behavior).
+  const baselinePreDiff = async (args: {
+    projectId: number;
+    runId: string;
+    input: { baselineKey?: string };
+    artifactsDir: string;
+    fileNames: string[];
+  }): Promise<{ baselinePath?: string; ssimScore: number; match: boolean } | null> => {
+    const key = args.input.baselineKey;
+    if (!key || key.trim().length === 0) return null;
+    const project = databaseService.getProject(args.projectId);
+    if (!project?.path) return null;
+    const projectRoot = project.path;
+    let minScore = 1;
+    let firstBaselinePath: string | undefined;
+    let compared = 0;
+    for (const fileName of args.fileNames) {
+      const stem = path.basename(fileName).replace(/\.png$/i, '');
+      const baselinePath = await fsBaselineStore.read(projectRoot, key, stem);
+      if (!baselinePath) continue; // no accepted baseline for this viewport — skip it
+      if (!firstBaselinePath) firstBaselinePath = baselinePath;
+      const capturedPath = path.join(args.artifactsDir, path.basename(fileName));
+      const score = comparePngFiles(capturedPath, baselinePath);
+      if (score < minScore) minScore = score;
+      compared += 1;
+    }
+    // No captured viewport had an accepted baseline — nothing to compare.
+    if (compared === 0) return null;
+    return {
+      ...(firstBaselinePath ? { baselinePath: firstBaselinePath } : {}),
+      ssimScore: minScore,
+      // The scheduler re-derives the authoritative match against its own threshold;
+      // this is a hint only.
+      match: false,
+    };
+  };
   VerificationScheduler.initialize({
     db: cyboflowDb,
     backends: {
@@ -933,6 +1029,11 @@ async function initializeServices() {
     // S2 — scheduler-owned dev server per verify.json build/start/readyWhen/${PORT}.
     devServerProvider: devServerManager,
     devServerContextResolver,
+    // S5 — golden-baseline SSIM pre-diff gates the (paid) VLM. The per-project
+    // judge-call budget + judge_calls_used telemetry (migration 037) are enforced
+    // inside the scheduler off its injected db; the per-RUN cap stays the
+    // cappedVlmJudge decorator above.
+    baselinePreDiff,
   });
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).

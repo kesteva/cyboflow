@@ -266,6 +266,56 @@ export type DevServerContextResolver = (args: {
 }) => Promise<{ cwd: string; deliverable: DeliverableVerifyConfig } | null>;
 
 // ---------------------------------------------------------------------------
+// Golden-baseline pre-diff seam (S5 — SSIM gates the VLM)
+//
+// The DETERMINISTIC-FIRST order (decision #3) inserts an SSIM pre-diff between the
+// backend deterministic verdict and the paid VLM: if a request's baselineKey
+// resolves to an accepted baseline PNG, the scheduler compares the freshly-captured
+// PNG(s) to it; a near-pixel match (>= threshold) is a CHEAP deterministic PASS
+// (verdictSource:'ssim_match') with NO vision call. Below threshold the request
+// falls through to the VLM, now passing the resolved baselinePath (previously
+// always undefined).
+//
+// Resolution is INJECTED as a plain async function (wired at index.ts over the
+// FsBaselineStore + comparePngFiles + the project path) so the scheduler stays
+// fs/electron/service-free — the closure does ALL fs + image-decode work. It is
+// invoked ONCE per request from input.baselineKey; absent injection / no
+// baselineKey / no accepted baseline ⇒ null (intent-only judging = pre-S5 behavior).
+// ---------------------------------------------------------------------------
+
+/** The pre-diff outcome for a request whose baselineKey resolved to a baseline. */
+export interface BaselinePreDiffResult {
+  /**
+   * The resolved baseline PNG path (the first viewport's accepted baseline) the
+   * scheduler threads into the VlmJudge's baselinePath arg when the pre-diff did
+   * NOT match — so the judge still compares against the golden image. Absent when
+   * no baseline file exists for any captured viewport.
+   */
+  baselinePath?: string;
+  /** The MIN similarity score across the compared viewports (0..1; 1 = identical). */
+  ssimScore: number;
+  /** True when ssimScore >= the baseline-match threshold (a cheap deterministic PASS). */
+  match: boolean;
+}
+
+/**
+ * Resolve + compare a request's captured PNG(s) against its golden baseline. INJECTED
+ * (wired at index.ts) so the scheduler does no fs / image decoding. Given the request
+ * + the captured fileNames (relative to artifactsDir), it resolves the baseline PNGs
+ * for input.baselineKey under the project root and returns the comparison, or null
+ * when there is nothing to compare (no injection / no baselineKey / no accepted
+ * baseline for any captured viewport) — in which case the scheduler runs the VLM with
+ * no baselinePath, exactly as before S5.
+ */
+export type BaselinePreDiffResolver = (args: {
+  projectId: number;
+  runId: string;
+  input: VerificationRequestInput;
+  artifactsDir: string;
+  fileNames: string[];
+}) => Promise<BaselinePreDiffResult | null>;
+
+// ---------------------------------------------------------------------------
 // Injected collaborators + optional verdict side-effect hook
 // ---------------------------------------------------------------------------
 
@@ -301,6 +351,15 @@ export type OnVerdict = (args: {
  * row 'timeout' (releasing the lease). Tunable via VerificationSchedulerDeps.
  */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * The default SSIM baseline-match threshold (S5). A captured PNG scoring at or above
+ * this against its accepted baseline is a cheap deterministic PASS that SKIPS the
+ * paid VLM (verdictSource:'ssim_match'); below it the request falls through to the
+ * vision judge with the resolved baselinePath. Mirrors pixelDiff's default so the
+ * gate is consistent whether the resolver or the scheduler applies it.
+ */
+export const DEFAULT_SSIM_MATCH_THRESHOLD = 0.98;
 
 /**
  * How many concurrent batched holders a waiter on `sprint-verify-<batchId>` may
@@ -355,6 +414,24 @@ export interface VerificationSchedulerDeps {
    * to DEFAULT_REQUEST_TIMEOUT_MS (5 min). Tests pass a small value to exercise it.
    */
   requestTimeoutMs?: number;
+  /**
+   * S5 — the golden-baseline SSIM pre-diff resolver. When present AND a request's
+   * baselineKey resolves to an accepted baseline PNG, the scheduler compares the
+   * freshly-captured PNG(s) before spending a vision call: a near-pixel match is a
+   * cheap deterministic PASS (verdictSource:'ssim_match', NO VLM call); below the
+   * match threshold the request falls through to the VLM with the resolved
+   * baselinePath. Absent ⇒ intent-only judging (pre-S5 behavior, baselinePath
+   * undefined). The concrete resolver (fs + image decode) is wired at index.ts; the
+   * scheduler imports only this TYPE (standalone-typecheck invariant).
+   */
+  baselinePreDiff?: BaselinePreDiffResolver;
+  /**
+   * S5 — the SSIM baseline-match threshold (0..1). A pre-diff similarity at or above
+   * this short-circuits the VLM with an 'ssim_match' PASS. Defaults to
+   * DEFAULT_SSIM_MATCH_THRESHOLD. (The resolver itself returns `match`, but the
+   * scheduler stamps the threshold-derived PASS, so it owns the gate.)
+   */
+  baselineMatchThreshold?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +469,8 @@ export class VerificationScheduler {
   private readonly requestTimeoutMs: number;
   private readonly devServerProvider?: DevServerProvider;
   private readonly devServerContextResolver?: DevServerContextResolver;
+  private readonly baselinePreDiff?: BaselinePreDiffResolver;
+  private readonly baselineMatchThreshold: number;
 
   /** True while a drain pass is in flight — coalesces concurrent nudges into one loop. */
   private draining = false;
@@ -419,6 +498,8 @@ export class VerificationScheduler {
     this.requestTimeoutMs = deps.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.devServerProvider = deps.devServerProvider;
     this.devServerContextResolver = deps.devServerContextResolver;
+    this.baselinePreDiff = deps.baselinePreDiff;
+    this.baselineMatchThreshold = deps.baselineMatchThreshold ?? DEFAULT_SSIM_MATCH_THRESHOLD;
   }
 
   // --------------------------------------------------------------------------
@@ -858,26 +939,92 @@ export class VerificationScheduler {
 
       fileNames = capture.fileNames;
 
-      // DETERMINISTIC-FIRST (decision #3): a backend that reached a verdict WITHOUT
-      // a vision call (the Rung-1 Playwright backend's a11y/assertion gate) sets
-      // captureResult.deterministicVerdict. When present, USE it and SKIP the paid
-      // VLM; else fall through to the VLM judge exactly as before. A null verdict is
-      // treated as absent (no deterministic signal). The skip is conservative by
-      // construction: the backend only sets a deterministic PASS on all-pass explicit
-      // assertions, and a deterministic FAIL is always unambiguous.
-      const verdict =
-        capture.deterministicVerdict != null
-          ? capture.deterministicVerdict
-          : await this.judge.judge(
-              {
-                intent: input.intent,
-                artifactsDir: ctx.artifactsDir,
-                fileNames,
-                type,
-                baselinePath: undefined,
-              },
-              controller.signal,
-            );
+      // DETERMINISTIC-FIRST ORDER (decision #3, composing with S3 + S5):
+      //
+      //  (1) BACKEND DETERMINISTIC VERDICT — a backend that reached a verdict WITHOUT
+      //      a vision call (the Rung-1 Playwright backend's a11y/assertion gate) sets
+      //      captureResult.deterministicVerdict. When present, USE it and SKIP the
+      //      rest. A null verdict is treated as absent (no deterministic signal). The
+      //      skip is conservative by construction: a deterministic PASS only on
+      //      all-pass explicit assertions, a deterministic FAIL always unambiguous.
+      //
+      //  (2) SSIM PRE-DIFF (S5) — if no backend verdict AND the request's baselineKey
+      //      resolves to an accepted baseline PNG, compare the captured PNG(s) before
+      //      spending a vision call. A near-pixel match (>= baselineMatchThreshold) is
+      //      a CHEAP deterministic PASS (verdictSource:'ssim_match', NO VLM call).
+      //      Otherwise fall through to the VLM with the resolved baselinePath.
+      //
+      //  (3) BUDGET / VLM — if no deterministic + no SSIM match, run the VLM, passing
+      //      the resolved baselinePath. The per-project judge-call budget is enforced
+      //      HERE (before the call): exhausted ⇒ a non-blocking low_confidence verdict
+      //      (the SAME human-review finding path, never a FAIL / fabricated pass) with
+      //      NO vision call. A real VLM call increments this request's judge_calls_used
+      //      (the budget aggregation + cost-telemetry counter).
+      //
+      // The baseline PNGs are resolved ONCE per request here (from input.baselineKey).
+      let verdict: VerdictV1;
+      if (capture.deterministicVerdict != null) {
+        verdict = capture.deterministicVerdict;
+      } else {
+        const preDiff = await this.resolveBaselinePreDiff(row, input, ctx, fileNames);
+        if (controller.signal.aborted) {
+          this.markTerminal(row.id, 'timeout', {
+            backend: backend.id,
+            error: timedOut ? 'request timed out' : 'aborted',
+          });
+          await this.deliver(row, 'timeout', undefined, fileNames, input);
+          return;
+        }
+        if (preDiff?.match) {
+          // SSIM short-circuit: a cheap deterministic PASS, NO vision call.
+          verdict = {
+            status: 'pass',
+            confidence: 1,
+            issues: [],
+            feedback: `matched golden baseline (SSIM ${preDiff.ssimScore.toFixed(4)} ≥ ${this.baselineMatchThreshold})`,
+            judgedFileNames: fileNames,
+            baselineUsed: true,
+            model: 'ssim-prediff',
+            verdictSource: 'ssim_match',
+            ssimScore: preDiff.ssimScore,
+          };
+        } else if (this.isProjectBudgetExhausted(row.project_id)) {
+          // BUDGET-EXHAUSTION: route to the SAME non-blocking low_confidence finding
+          // path — never a FAIL, never a fabricated pass, and NO vision call spent.
+          verdict = {
+            status: 'low_confidence',
+            confidence: 0,
+            issues: [],
+            feedback: 'per-project visual-judge budget exhausted; needs human visual review',
+            judgedFileNames: fileNames,
+            baselineUsed: !!preDiff?.baselinePath,
+            model: 'budget-exhausted',
+            verdictSource: 'vlm_verdict',
+          };
+        } else {
+          // A real vision call: count it against the budget BEFORE judging (the
+          // counter UPDATE is this request's OWN row — consistent with markTerminal,
+          // within the no-direct-router-table-write rule).
+          this.incrementJudgeCallsUsed(row.id);
+          const vlmVerdict = await this.judge.judge(
+            {
+              intent: input.intent,
+              artifactsDir: ctx.artifactsDir,
+              fileNames,
+              type,
+              ...(preDiff?.baselinePath ? { baselinePath: preDiff.baselinePath } : {}),
+            },
+            controller.signal,
+          );
+          // Stamp provenance: a VLM-produced verdict is 'vlm_verdict' (+ the SSIM
+          // score when a baseline was compared but did not match, for telemetry).
+          verdict = {
+            ...vlmVerdict,
+            verdictSource: 'vlm_verdict',
+            ...(preDiff ? { ssimScore: preDiff.ssimScore } : {}),
+          };
+        }
+      }
 
       // A timeout/cancel that fired DURING judging: mark 'timeout', drop the verdict.
       if (controller.signal.aborted) {
@@ -1058,6 +1205,93 @@ export class VerificationScheduler {
         release();
       },
     };
+  }
+
+  /**
+   * S5 — resolve + run the golden-baseline SSIM pre-diff for a request, or null when
+   * there is nothing to compare (no resolver injected / no baselineKey / no accepted
+   * baseline for any captured viewport). Fail-soft: a resolver throw degrades to null
+   * (run the VLM with no baseline) rather than wedging the drain. The `match` flag is
+   * re-derived against THIS scheduler's threshold so the gate is owned here even if a
+   * resolver reports its own.
+   */
+  private async resolveBaselinePreDiff(
+    row: VerificationRequestRow,
+    input: VerificationRequestInput,
+    ctx: CaptureContext,
+    fileNames: string[],
+  ): Promise<BaselinePreDiffResult | null> {
+    if (!this.baselinePreDiff) return null;
+    if (!input.baselineKey || input.baselineKey.trim().length === 0) return null;
+    try {
+      const result = await this.baselinePreDiff({
+        projectId: row.project_id,
+        runId: row.run_id,
+        input,
+        artifactsDir: ctx.artifactsDir,
+        fileNames,
+      });
+      if (!result) return null;
+      // Own the gate: re-derive `match` against this scheduler's threshold.
+      return { ...result, match: result.ssimScore >= this.baselineMatchThreshold };
+    } catch (err) {
+      this.logger?.debug('[VerificationScheduler] baseline pre-diff failed; running VLM', {
+        requestId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * S5 — has this project reached its per-project judge-call budget cap? Reads
+   * projects.visual_verify_budget_calls (NULL = unlimited) + the cumulative
+   * SUM(verification_requests.judge_calls_used) for the project via the injected
+   * DatabaseLike. Returns true only when a budget is set AND the cumulative used
+   * count is at/above it. Fail-soft: a thrown query (missing column / minimal test
+   * DB) degrades to "not exhausted" so a budget-less deployment is byte-identical to
+   * before this layer (the per-run cap still applies upstream at the capped judge).
+   */
+  private isProjectBudgetExhausted(projectId: number): boolean {
+    try {
+      const proj = this.db
+        .prepare('SELECT visual_verify_budget_calls AS budget FROM projects WHERE id = ?')
+        .get(projectId) as { budget: number | null } | undefined;
+      const budget = proj?.budget;
+      if (typeof budget !== 'number' || budget < 0) return false; // NULL / unset = unlimited
+      const usedRow = this.db
+        .prepare(
+          'SELECT COALESCE(SUM(judge_calls_used), 0) AS used FROM verification_requests WHERE project_id = ?',
+        )
+        .get(projectId) as { used: number } | undefined;
+      const used = usedRow?.used ?? 0;
+      return used >= budget;
+    } catch (err) {
+      this.logger?.debug('[VerificationScheduler] budget lookup failed; treating as unlimited', {
+        projectId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
+  /**
+   * S5 — increment THIS request's judge_calls_used counter (budget aggregation +
+   * cost telemetry). A counter UPDATE on the request's OWN row, consistent with
+   * markTerminal — not a router-owned table, so it stays within the no-direct-write
+   * rules. Fail-soft (a minimal test DB without the column degrades silently).
+   */
+  private incrementJudgeCallsUsed(id: string): void {
+    try {
+      this.db
+        .prepare('UPDATE verification_requests SET judge_calls_used = judge_calls_used + 1 WHERE id = ?')
+        .run(id);
+    } catch (err) {
+      this.logger?.debug('[VerificationScheduler] judge_calls_used increment failed', {
+        requestId: id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /** Parse the integer port out of a 'verify:port:<p>' lease name; null otherwise. */

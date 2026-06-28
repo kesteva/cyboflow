@@ -1116,3 +1116,262 @@ describe('VerificationScheduler — batch worktree-sync mutex (S5 / L4)', () => 
     expect(lockedNames.some((n) => n.startsWith('sprint-verify-'))).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// S5 — golden-baseline SSIM pre-diff + per-project judge budget enforcement
+//
+// The DETERMINISTIC-FIRST order now inserts an SSIM pre-diff (injected
+// baselinePreDiff) BEFORE the VLM: a match >= threshold is a cheap PASS
+// (verdictSource:'ssim_match', no judge call); below it the resolved baselinePath is
+// threaded into the judge. The per-project budget (projects.visual_verify_budget_calls
+// + SUM(verification_requests.judge_calls_used)) is enforced before a VLM call:
+// exhausted ⇒ a non-blocking low_confidence verdict (no judge call), else a real call
+// increments judge_calls_used. These tests add a projects table for the budget read.
+// ---------------------------------------------------------------------------
+
+/** A DB with verification_requests AND projects (budget cap + telemetry counter). */
+function buildDbWithProjects(): Database.Database {
+  const dbP = buildDb();
+  dbP.exec(`
+    ALTER TABLE verification_requests ADD COLUMN judge_calls_used INTEGER NOT NULL DEFAULT 0;
+    CREATE TABLE projects (
+      id INTEGER PRIMARY KEY,
+      visual_verify_budget_calls INTEGER
+    );
+    INSERT INTO projects (id, visual_verify_budget_calls) VALUES (1, NULL);
+  `);
+  return dbP;
+}
+
+/** Insert one queued request with a baselineKey on the deliverable. */
+function enqueueRowWithBaseline(
+  dbX: Database.Database,
+  opts: { chain: VisualBackendId[]; baselineKey: string },
+): string {
+  const id = `vr_${Math.random().toString(36).slice(2)}`;
+  dbX.prepare(
+    `INSERT INTO verification_requests
+       (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt)
+     VALUES (?, 'run-1', 1, 'queued', 'static-render-snapshot', ?, ?, 0)`,
+  ).run(
+    id,
+    JSON.stringify({ intent: 'looks right', url: 'http://placeholder', baselineKey: opts.baselineKey }),
+    JSON.stringify(opts.chain),
+  );
+  return id;
+}
+
+const plainCapturePage: VisualBackend = {
+  id: 'capturePage',
+  rung: 0,
+  requiredLease: () => null,
+  healthCheck: async () => true,
+  capture: async () => ({ ok: true, fileNames: ['default.png'] }),
+};
+
+describe('VerificationScheduler — SSIM pre-diff gates the VLM (S5)', () => {
+  it('an SSIM match >= threshold returns PASS (verdictSource ssim_match) with NO judge call', async () => {
+    const dbP = buildDbWithProjects();
+    let judgeCalls = 0;
+    const countingJudge: VlmJudge = {
+      judge: async () => {
+        judgeCalls += 1;
+        return PASS_VERDICT;
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(dbP),
+      backends: { capturePage: plainCapturePage },
+      judge: countingJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      baselineMatchThreshold: 0.98,
+      baselinePreDiff: async () => ({ baselinePath: '/b/default.png', ssimScore: 0.995, match: true }),
+    });
+
+    const id = enqueueRowWithBaseline(dbP, { chain: ['capturePage'], baselineKey: 'home' });
+    await sched.drain();
+
+    expect(judgeCalls).toBe(0); // SSIM short-circuited the VLM
+    const row = dbP
+      .prepare('SELECT status, verdict_json, judge_calls_used FROM verification_requests WHERE id = ?')
+      .get(id) as { status: string; verdict_json: string | null; judge_calls_used: number };
+    expect(row.status).toBe('passed');
+    expect(row.judge_calls_used).toBe(0);
+    const verdict = JSON.parse(row.verdict_json as string) as VerdictV1;
+    expect(verdict.verdictSource).toBe('ssim_match');
+    expect(verdict.ssimScore).toBeCloseTo(0.995, 5);
+    expect(verdict.baselineUsed).toBe(true);
+    dbP.close();
+  });
+
+  it('below threshold passes the resolved baselinePath to the judge (verdictSource vlm_verdict)', async () => {
+    const dbP = buildDbWithProjects();
+    let seenBaselinePath: string | undefined;
+    const probingJudge: VlmJudge = {
+      judge: async (args) => {
+        seenBaselinePath = args.baselinePath;
+        return PASS_VERDICT;
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(dbP),
+      backends: { capturePage: plainCapturePage },
+      judge: probingJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      baselineMatchThreshold: 0.98,
+      // ssimScore below the threshold → fall through to the VLM with the baseline.
+      baselinePreDiff: async () => ({ baselinePath: '/b/default.png', ssimScore: 0.5, match: false }),
+    });
+
+    const id = enqueueRowWithBaseline(dbP, { chain: ['capturePage'], baselineKey: 'home' });
+    await sched.drain();
+
+    expect(seenBaselinePath).toBe('/b/default.png');
+    const row = dbP
+      .prepare('SELECT status, verdict_json, judge_calls_used FROM verification_requests WHERE id = ?')
+      .get(id) as { status: string; verdict_json: string | null; judge_calls_used: number };
+    expect(row.status).toBe('passed');
+    expect(row.judge_calls_used).toBe(1); // a real VLM call was made + counted
+    const verdict = JSON.parse(row.verdict_json as string) as VerdictV1;
+    expect(verdict.verdictSource).toBe('vlm_verdict');
+    expect(verdict.ssimScore).toBeCloseTo(0.5, 5); // telemetry: the below-threshold score
+    dbP.close();
+  });
+
+  it('runs the VLM with no baselinePath when there is no baselineKey / pre-diff result', async () => {
+    const dbP = buildDbWithProjects();
+    let seenBaselinePath: string | undefined = 'sentinel';
+    const probingJudge: VlmJudge = {
+      judge: async (args) => {
+        seenBaselinePath = args.baselinePath;
+        return PASS_VERDICT;
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(dbP),
+      backends: { capturePage: plainCapturePage },
+      judge: probingJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      // pre-diff resolver returns null (no accepted baseline).
+      baselinePreDiff: async () => null,
+    });
+
+    const id = enqueueRowWithBaseline(dbP, { chain: ['capturePage'], baselineKey: 'home' });
+    await sched.drain();
+
+    expect(seenBaselinePath).toBeUndefined();
+    const verdict = JSON.parse(
+      (dbP.prepare('SELECT verdict_json FROM verification_requests WHERE id = ?').get(id) as { verdict_json: string })
+        .verdict_json,
+    ) as VerdictV1;
+    expect(verdict.verdictSource).toBe('vlm_verdict');
+    expect(verdict.ssimScore).toBeUndefined(); // no baseline compared
+    dbP.close();
+  });
+});
+
+describe('VerificationScheduler — per-project judge budget (S5)', () => {
+  it('budget exhausted → non-blocking low_confidence finding, NOT FAIL, no judge call', async () => {
+    const dbP = buildDbWithProjects();
+    // Budget = 2; already spent 2 across prior requests.
+    dbP.prepare('UPDATE projects SET visual_verify_budget_calls = 2 WHERE id = 1').run();
+    dbP.prepare(
+      `INSERT INTO verification_requests (id, run_id, project_id, status, verify_type, deliverable_json, judge_calls_used)
+       VALUES ('vr_prior', 'run-0', 1, 'passed', 'static-render-snapshot', '{"intent":"x"}', 2)`,
+    ).run();
+
+    let judgeCalls = 0;
+    const countingJudge: VlmJudge = {
+      judge: async () => {
+        judgeCalls += 1;
+        return PASS_VERDICT;
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(dbP),
+      backends: { capturePage: plainCapturePage },
+      judge: countingJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const id = enqueueRow(dbP, { chain: ['capturePage'], url: 'http://placeholder' });
+    await sched.drain();
+
+    expect(judgeCalls).toBe(0); // budget gate skipped the VLM
+    const row = dbP
+      .prepare('SELECT status, verdict_json, judge_calls_used FROM verification_requests WHERE id = ?')
+      .get(id) as { status: string; verdict_json: string | null; judge_calls_used: number };
+    // NOT failed, NOT a fabricated pass — a non-blocking low_confidence verdict.
+    expect(row.status).toBe('low_confidence');
+    expect(row.judge_calls_used).toBe(0);
+    const verdict = JSON.parse(row.verdict_json as string) as VerdictV1;
+    expect(verdict.status).toBe('low_confidence');
+    expect(verdict.model).toBe('budget-exhausted');
+    dbP.close();
+  });
+
+  it('within budget → a real VLM call increments judge_calls_used', async () => {
+    const dbP = buildDbWithProjects();
+    dbP.prepare('UPDATE projects SET visual_verify_budget_calls = 5 WHERE id = 1').run();
+
+    let judgeCalls = 0;
+    const countingJudge: VlmJudge = {
+      judge: async () => {
+        judgeCalls += 1;
+        return PASS_VERDICT;
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(dbP),
+      backends: { capturePage: plainCapturePage },
+      judge: countingJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const id = enqueueRow(dbP, { chain: ['capturePage'], url: 'http://placeholder' });
+    await sched.drain();
+
+    expect(judgeCalls).toBe(1);
+    const row = dbP
+      .prepare('SELECT status, judge_calls_used FROM verification_requests WHERE id = ?')
+      .get(id) as { status: string; judge_calls_used: number };
+    expect(row.status).toBe('passed');
+    expect(row.judge_calls_used).toBe(1);
+    dbP.close();
+  });
+
+  it('a NULL budget (unlimited) never skips the VLM', async () => {
+    const dbP = buildDbWithProjects(); // projects.id=1 budget is NULL
+    let judgeCalls = 0;
+    const countingJudge: VlmJudge = {
+      judge: async () => {
+        judgeCalls += 1;
+        return PASS_VERDICT;
+      },
+    };
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(dbP),
+      backends: { capturePage: plainCapturePage },
+      judge: countingJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const id = enqueueRow(dbP, { chain: ['capturePage'], url: 'http://placeholder' });
+    await sched.drain();
+
+    expect(judgeCalls).toBe(1);
+    expect(rowStatus(dbP, id).status).toBe('passed');
+    dbP.close();
+  });
+});
