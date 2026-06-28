@@ -1,4 +1,4 @@
--- Migration 036: per-session MCP-disable / plugin-enable toggles.
+-- Migration 037: per-session MCP-disable / plugin-enable toggles.
 --
 -- Two JSON-string-array columns on the legacy `sessions` table, both read at SDK
 -- spawn time (claudeCodeManager.resolveSessionDisabledMcps /

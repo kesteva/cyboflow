@@ -2105,7 +2105,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
-  // Per-session MCP DENY list (migration 036). Persists the disabled-server set
+  // Per-session MCP DENY list (migration 037). Persists the disabled-server set
   // to sessions.disabled_mcp_servers_json; claudeCodeManager.resolveSessionDisabledMcps
   // re-reads the column on each SDK spawn so the change applies on the next turn
   // (no respawn). Mirrors sessions:update-agent-permission-mode: persist + mutate
@@ -2137,7 +2137,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
-  // Per-session plugin ALLOW list (migration 036). Persists the force-enabled
+  // Per-session plugin ALLOW list (migration 037). Persists the force-enabled
   // plugin-id set to sessions.enabled_plugins_json; resolveSessionEnabledPlugins
   // re-reads it on each SDK spawn (next-turn apply). Same persist + runtime mirror
   // + emit shape; an empty [] inherits the user's file plugins (byte-identical).

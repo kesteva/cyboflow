@@ -46,7 +46,7 @@ import { withLock } from '../utils/mutex';
 import { panelManager } from './panelManager';
 
 /**
- * Parse a JSON-string-array session column (migration 036's
+ * Parse a JSON-string-array session column (migration 037's
  * disabled_mcp_servers_json / enabled_plugins_json) into a `string[]`. Returns
  * undefined when the column is NULL/empty/malformed or not a string array, so a
  * default row maps to the no-op default (undefined → the pills seed `[]`).
@@ -236,7 +236,7 @@ export class SessionManager extends EventEmitter {
       substrate: dbSession.substrate,
       effort: dbSession.effort,
       agentPermissionMode: dbSession.agent_permission_mode,
-      // Per-session MCP/plugin toggles (migration 036). Parse the JSON columns
+      // Per-session MCP/plugin toggles (migration 037). Parse the JSON columns
       // into the runtime arrays the composer pills seed from; malformed/missing
       // JSON degrades to undefined (the byte-identical default — nothing disabled,
       // file plugins inherited). The columns themselves are read directly off the

@@ -1,4 +1,4 @@
--- Migration 035: Add enabled_mcps_json to agent_overrides for per-agent MCP
+-- Migration 036: Add enabled_mcps_json to agent_overrides for per-agent MCP
 -- scoping (which MCP servers a given agent override may access).
 --
 -- JSON-encoded string[] of MCP server names the agent is scoped to. Empty array
