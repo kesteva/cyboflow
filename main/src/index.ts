@@ -68,6 +68,7 @@ import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { VerificationScheduler, verificationEvents, verificationChannel } from './orchestrator/verify/verificationScheduler';
 import { createVerdictDelivery } from './orchestrator/verify/verdictDelivery';
 import { CapturePageBackend } from './services/visualVerify/capturePageBackend';
+import { PlaywrightBackend } from './services/visualVerify/playwrightBackend';
 import { VlmJudgeImpl } from './services/visualVerify/vlmJudge';
 import { DevServerManager } from './services/visualVerify/devServerManager';
 import { loadVerifyConfig } from './orchestrator/verifyConfigLoader';
@@ -877,9 +878,29 @@ async function initializeServices() {
       return null;
     }
   };
+  // S3 — Rung-1 PlaywrightBackend (interactive-web + multi-viewport + the
+  // deterministic-first a11y/assertion gate). It drives a REAL headless browser via
+  // the `playwright` LIBRARY in a fresh BrowserContext per capture (NOT the MCP
+  // server — its single shared profile cannot serve N concurrent lanes). chromium is
+  // LAZY-installed on first use (PlaywrightInstaller; idempotent + memoized), NOT
+  // bundled in the app package. It is registered unconditionally — and that is SAFE
+  // even though `playwright` is a ROOT devDependency electron-builder prunes when
+  // packaging: the backend + installer load the library LAZILY (`await
+  // import('playwright')`, never an eager top-level require), so an absent MODULE
+  // soft-fails (healthCheck/ensureChromium → false, capture → ok:false) exactly like
+  // an absent chromium BINARY — never a MODULE_NOT_FOUND boot crash. When chromium is
+  // unavailable + the install fails, healthCheck() returns false and capture()
+  // soft-fails (ok:false) so the request falls forward / is SKIPPED per
+  // never-silently-pass — a missing browser binary must never wedge a sprint. The
+  // backend sets CaptureResult.deterministicVerdict on an unambiguous nav/interaction
+  // FAIL or an all-pass explicit-assertions PASS; the scheduler then SKIPS the paid
+  // VLM (decision #3). It takes a verify:port lease ONLY when the deliverable
+  // declares a dev-server `start` (the scheduler then owns + leases the dev server,
+  // S2); a pre-existing static url needs no lease.
+  const playwrightBackend = new PlaywrightBackend({ logger: cyboflowLogger });
   VerificationScheduler.initialize({
     db: cyboflowDb,
-    backends: { capturePage: new CapturePageBackend() },
+    backends: { capturePage: new CapturePageBackend(), playwright: playwrightBackend },
     judge: cappedVlmJudge,
     artifactsDirResolver: (runId: string) => getCyboflowSubdirectory('artifacts', 'runs', runId),
     logger: cyboflowLogger,

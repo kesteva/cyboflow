@@ -44,7 +44,7 @@ import type {
   VisualBackendId,
   VlmJudge,
 } from '../../../../shared/types/visualVerification';
-import { VISUAL_VERIFY_DEFAULTS } from '../../../../shared/types/visualVerification';
+import { VERIFY_PORT_ANY, VISUAL_VERIFY_DEFAULTS } from '../../../../shared/types/visualVerification';
 
 // ---------------------------------------------------------------------------
 // Verification terminal events
@@ -672,12 +672,23 @@ export class VerificationScheduler {
    * Map a backend's requiredLease name to the configured pool of candidate slots,
    * or null when it is a singleton (non-pooled) lease. A 'verify:port:*' required
    * name expands to every configured dev port; 'verify:sim:*' to every configured
-   * simulator. The exact name the backend returned is included so a backend that
-   * names a specific port still contends within the pool.
+   * simulator.
+   *
+   * The VERIFY_PORT_ANY sentinel ("any free pooled port") expands PURELY from the
+   * configured pool — it is NEVER appended as an extra candidate. Appending it (or
+   * any synthetic ':0' name) would mint a phantom always-free count-1 slot that
+   * survives pool exhaustion, defeating the dev-server concurrency cap and yielding
+   * port 0 (portFromLease(sentinel) → null) under contention. A backend that names a
+   * CONCRETE 'verify:port:<p>' is included so it still contends within the pool, but
+   * we guard against the sentinel/':0' phantom names explicitly.
    */
   private poolCandidatesFor(required: string): readonly string[] | null {
-    if (required.startsWith('verify:port:')) {
+    if (required === VERIFY_PORT_ANY || required.startsWith('verify:port:')) {
       const fromPool = this.config.devServerPorts.map(verifyPortLease);
+      // Any-port sentinel + any non-real ':0' phantom: expand from the pool ONLY.
+      if (required === VERIFY_PORT_ANY || this.portFromLease(required) === null) {
+        return fromPool;
+      }
       return fromPool.includes(required) ? fromPool : [...fromPool, required];
     }
     if (required.startsWith('verify:sim:')) {
@@ -783,16 +794,27 @@ export class VerificationScheduler {
       }
 
       fileNames = capture.fileNames;
-      const verdict = await this.judge.judge(
-        {
-          intent: input.intent,
-          artifactsDir: ctx.artifactsDir,
-          fileNames,
-          type,
-          baselinePath: undefined,
-        },
-        controller.signal,
-      );
+
+      // DETERMINISTIC-FIRST (decision #3): a backend that reached a verdict WITHOUT
+      // a vision call (the Rung-1 Playwright backend's a11y/assertion gate) sets
+      // captureResult.deterministicVerdict. When present, USE it and SKIP the paid
+      // VLM; else fall through to the VLM judge exactly as before. A null verdict is
+      // treated as absent (no deterministic signal). The skip is conservative by
+      // construction: the backend only sets a deterministic PASS on all-pass explicit
+      // assertions, and a deterministic FAIL is always unambiguous.
+      const verdict =
+        capture.deterministicVerdict != null
+          ? capture.deterministicVerdict
+          : await this.judge.judge(
+              {
+                intent: input.intent,
+                artifactsDir: ctx.artifactsDir,
+                fileNames,
+                type,
+                baselinePath: undefined,
+              },
+              controller.signal,
+            );
 
       // A timeout/cancel that fired DURING judging: mark 'timeout', drop the verdict.
       if (controller.signal.aborted) {
