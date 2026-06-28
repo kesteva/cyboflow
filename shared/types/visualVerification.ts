@@ -150,6 +150,20 @@ export interface VerificationRequestInput {
   url?: string;
   htmlPath?: string;
   viewports?: Array<{ width: number; height: number; label?: string }>;
+  /**
+   * The ordered DOM steps for an interactive check (navigate/click/type/wait).
+   * Mirrors DeliverableVerifyConfig.interactions — the lane agent may pass them
+   * inline OR they may be hydrated from `.cyboflow/verify.json`. A non-empty list
+   * is the signal the resolver's type-ladder rung C reads to infer
+   * 'interactive-web-behavior' over the static type. Absent/empty ⇒ no inferred
+   * interaction (a render-only check).
+   */
+  interactions?: Array<{
+    action: 'click' | 'type' | 'navigate' | 'wait';
+    target?: string;
+    value?: string;
+    ms?: number;
+  }>;
   baselineKey?: string;
   /**
    * The lane this request belongs to, for verdict→lane attribution in the visual
@@ -334,3 +348,119 @@ export const VISUAL_VERIFY_DEFAULTS: ResolvedVisualVerifyConfig = {
   devServerPorts: [...DEFAULT_VERIFY_DEV_PORTS],
   simulatorDevices: [],
 };
+
+// ===========================================================================
+// Per-project `.cyboflow/verify.json` contract (read by verifyConfigLoader.ts)
+//
+// The per-deliverable "how to run this" product config that travels WITH the
+// deliverable at PROJECT ROOT (sibling to `.cyboflow/artifacts`) — deliberately
+// NOT in `.claude/settings.json` or the DB (design doc §"Config homes" + #6).
+// Shared infra: consumed by the createRun stamp (project enablement +
+// defaultType rungs), the S2 dev-server runner (`build` / `start` / `readyWhen`
+// / `${PORT}`), and the S5 baselines (`baselineKey`). EVERY member is optional —
+// an absent file (the common case) resolves to `null`, never a fatal error.
+// ===========================================================================
+
+/**
+ * A single deliverable's verification recipe inside `.cyboflow/verify.json`.
+ * `id` is the stable handle a lane agent references; the rest describe HOW to
+ * stand the deliverable up + WHAT to check.
+ *
+ *  - `type` — per-deliverable type override (participates in the resolver ladder
+ *    below the agent-declared type, above the inferred-from-kind rung).
+ *  - `build` / `start` — shell commands the S2 dev-server runner runs (build once,
+ *    then `start` long-lived); `${PORT}` in `start` is substituted with a leased
+ *    `verify:port:<p>` from the pool.
+ *  - `url` / `htmlPath` — the artifact the backend captures (`url` for a running
+ *    dev server, `htmlPath` for a static file).
+ *  - `readyWhen` — a readiness probe (e.g. an HTTP URL / log substring) the runner
+ *    polls before declaring the server up.
+ *  - `viewports` — widths for `responsive-multi-viewport`.
+ *  - `interactions` — the ordered DOM steps for `interactive-web-behavior`; a
+ *    non-empty list is what the resolver's rung-C inference reads to pick the
+ *    interactive type over the static one.
+ *  - `baselineKey` — selects a golden baseline for SSIM pre-diff (S5).
+ */
+export interface DeliverableVerifyConfig {
+  id: string;
+  type?: VerificationType;
+  build?: string;
+  start?: string;
+  url?: string;
+  htmlPath?: string;
+  readyWhen?: string;
+  viewports?: Array<{ width: number; height: number; label?: string }>;
+  interactions?: Array<{
+    action: 'click' | 'type' | 'navigate' | 'wait';
+    target?: string;
+    value?: string;
+    ms?: number;
+  }>;
+  baselineKey?: string;
+}
+
+/**
+ * The whole `.cyboflow/verify.json` document. `enabled` / `defaultType` feed the
+ * PROJECT-config rungs of the resolver ladder (below per-run, above global);
+ * `deliverables` is the per-deliverable recipe map. All optional — an empty
+ * `{}` file is valid and resolves every rung to "unset → fall through".
+ */
+export interface VerifyConfigFile {
+  enabled?: boolean;
+  defaultType?: VerificationType;
+  deliverables?: DeliverableVerifyConfig[];
+}
+
+/**
+ * Metadata for an accepted golden baseline (S5 — declared now, no consumer until
+ * then). `key` matches `DeliverableVerifyConfig.baselineKey`; `viewports` records
+ * the widths the baseline PNGs were captured at; `acceptedAt` is the ISO accept
+ * time; `notes` is an optional reviewer annotation. Persisted alongside the
+ * baseline PNGs via the ArtifactRouter accept-baseline write (never a direct
+ * table write).
+ */
+export interface BaselineMetadata {
+  key: string;
+  viewports: Array<{ width: number; height: number; label?: string }>;
+  acceptedAt: string;
+  notes?: string;
+}
+
+/**
+ * Additive baseline-comparison fields the VlmJudge verdict gains once SSIM
+ * pre-diff lands (S5 — declared now, no consumer until then). `ssimScore` is the
+ * structural-similarity score against the baseline (1.0 = identical);
+ * `verdictSource` records whether the verdict came from the deterministic SSIM
+ * match (cheap, skips the vision call) or the VLM. Kept separate from VerdictV1
+ * so the V1 shape stays frozen until S5 widens it.
+ */
+export interface VerdictV1BaselineExtension {
+  ssimScore?: number;
+  verdictSource?: 'ssim_match' | 'vlm_verdict';
+}
+
+/**
+ * One row of the `verification_requests` table (migration 036, written in a
+ * later slice) as read at the L6 verify-queue panel boundary (declared now for
+ * S7/L6 — no consumer until then). Snake_case mirrors the SQLite columns; the
+ * JSON columns (`deliverable_json` / `chain_json` / `verdict_json`) are stored as
+ * TEXT and parsed by the reader into VerificationRequestInput / VisualBackendId[]
+ * / VerdictV1 respectively. `current_backend` / `verdict_json` / lease+end times
+ * are nullable until the request advances through its lifecycle.
+ */
+export interface VerificationRequestRow {
+  id: string;
+  run_id: string;
+  project_id: number;
+  status: RequestStatus;
+  verify_type: VerificationType;
+  deliverable_json: string;
+  chain_json: string;
+  current_backend: VisualBackendId | null;
+  attempt: number;
+  verdict_json: string | null;
+  error_message: string | null;
+  enqueued_at: string;
+  leased_at: string | null;
+  ended_at: string | null;
+}
