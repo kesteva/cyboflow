@@ -136,6 +136,36 @@ export const artifactsRouter = router({
       }
     }),
 
+  /**
+   * S5 — Accept the run's PASS-verdict screenshots as the golden baseline. Forwards
+   * the accept-baseline GIT action through the ArtifactRouter chokepoint (which
+   * delegates the fs-copy + git commit to the injected BaselineAcceptor). Returns the
+   * baselineKey actually written. Native tRPC (no IPCResponse wrapper); the frontend
+   * consumes the inferred return via AppRouter.
+   */
+  acceptAsBaseline: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.number().int().positive(),
+        runId: z.string().min(1),
+        baselineKey: z.string().min(1),
+        fileNames: z.array(z.string().min(1)).min(1),
+      }),
+    )
+    .mutation(async ({ input }): Promise<{ baselineKey: string }> => {
+      try {
+        return await ArtifactRouter.getInstance().acceptAsBaseline(input.projectId, {
+          op: 'accept-baseline',
+          runId: input.runId,
+          baselineKey: input.baselineKey,
+          fileNames: input.fileNames,
+          actor: 'user',
+        });
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+    }),
+
   /** Project-scoped artifact change stream (created / updated / committed / deleted). */
   onArtifactChanged: protectedProcedure
     .input(z.object({ projectId: z.number().int().positive() }))

@@ -32,6 +32,29 @@ import { snapshotCommittedArtifact } from './artifactSnapshot';
  * resolution failed, or — in unit tests — no resolver was wired).
  */
 export type ArtifactCommitDirResolver = (projectId: number) => string | null;
+
+/**
+ * S5 — the injected committer for the Accept-as-baseline op. The fs-copy (run
+ * artifacts → .cyboflow/artifacts/baselines/<key>/<viewport>.png) + the `git add` +
+ * `git commit` are CONCRETE service work (electron/child_process/fs) that MUST NOT
+ * live in this orchestrator/* module (standalone-typecheck invariant). It is wired
+ * at index.ts as a closure over the FsBaselineStore + the project root + a git
+ * committer — exactly like `resolveCommitDir`. The router only resolves the
+ * PASS-verdict artifact + its fileNames + project here, then delegates the copy +
+ * commit. Returns the baselineKey actually written. Absent (unit tests) ⇒ the op is
+ * a no-op that throws `not_found` so a caller learns it was not wired.
+ */
+export interface AcceptBaselineArgs {
+  projectId: number;
+  /** The run whose committed/PASS screenshots become the baseline. */
+  runId: string;
+  /** The baseline key the PNGs are filed under (default = the deliverable/artifact key). */
+  baselineKey: string;
+  /** The captured PNG basenames (relative to the run artifacts dir) to accept. */
+  fileNames: string[];
+}
+
+export type BaselineAcceptor = (args: AcceptBaselineArgs) => Promise<{ baselineKey: string }>;
 import {
   ARTIFACT_RENDER_MODE,
   type Artifact,
@@ -122,7 +145,28 @@ export interface ArtifactCommit {
   actor: ArtifactActor;
 }
 
-export type ArtifactChange = ArtifactCreate | ArtifactUpdate | ArtifactCommit;
+/**
+ * S5 — Accept-as-baseline: copy the run's PASS-verdict screenshot PNGs into the
+ * git-tracked golden-baselines tree (.cyboflow/artifacts/baselines/<key>/<viewport>
+ * .png at project root) and stage+commit them. A GIT action through THIS chokepoint
+ * (so accept is auditable like every other artifact write), delegating the fs-copy +
+ * git work to the injected BaselineAcceptor (the router itself imports no fs/git).
+ * `fileNames` are the judged PASS PNG basenames; `baselineKey` defaults to the
+ * deliverable/artifact key on the calling side.
+ */
+export interface ArtifactAcceptBaseline {
+  op: 'accept-baseline';
+  runId: string;
+  baselineKey: string;
+  fileNames: string[];
+  actor: ArtifactActor;
+}
+
+export type ArtifactChange =
+  | ArtifactCreate
+  | ArtifactUpdate
+  | ArtifactCommit
+  | ArtifactAcceptBaseline;
 
 /** DB row shape (snake_case, numeric flags). */
 export interface ArtifactDbRow {
@@ -171,14 +215,16 @@ export class ArtifactRouter {
     private readonly db: DatabaseLike,
     private readonly logger?: LoggerLike,
     private readonly resolveCommitDir?: ArtifactCommitDirResolver,
+    private readonly acceptBaseline?: BaselineAcceptor,
   ) {}
 
   static initialize(
     db: DatabaseLike,
     logger?: LoggerLike,
     resolveCommitDir?: ArtifactCommitDirResolver,
+    acceptBaseline?: BaselineAcceptor,
   ): ArtifactRouter {
-    ArtifactRouter.instance = new ArtifactRouter(db, logger, resolveCommitDir);
+    ArtifactRouter.instance = new ArtifactRouter(db, logger, resolveCommitDir, acceptBaseline);
     return ArtifactRouter.instance;
   }
 
@@ -211,13 +257,32 @@ export class ArtifactRouter {
    */
   async apply(
     projectId: number,
-    change: ArtifactChange,
+    change: ArtifactCreate | ArtifactUpdate | ArtifactCommit,
   ): Promise<{ artifactId: string; event: { id: number; seq: number } }> {
     return this.getProjectQueue(projectId).add(() => {
       if (change.op === 'create') return this.runCreate(projectId, change);
       if (change.op === 'update') return this.runUpdate(projectId, change);
       return this.runCommit(projectId, change);
     }) as Promise<{ artifactId: string; event: { id: number; seq: number } }>;
+  }
+
+  /**
+   * S5 — Accept the run's PASS-verdict screenshots as the golden baseline. A GIT
+   * action through this chokepoint (serialized on the same per-project queue as
+   * every other artifact write), validating the run belongs to `projectId` and that
+   * a 'screenshots' artifact exists, then delegating the fs-copy + git commit to the
+   * injected BaselineAcceptor (the router imports no fs/git itself — standalone-
+   * typecheck invariant). Returns the baselineKey actually written. Throws
+   * `not_found` when no acceptor is wired (unit tests) or no screenshots artifact /
+   * run exists.
+   */
+  async acceptAsBaseline(
+    projectId: number,
+    change: ArtifactAcceptBaseline,
+  ): Promise<{ baselineKey: string }> {
+    return this.getProjectQueue(projectId).add(() =>
+      this.runAcceptBaseline(projectId, change),
+    ) as Promise<{ baselineKey: string }>;
   }
 
   /**
@@ -495,6 +560,79 @@ export class ArtifactRouter {
     await this.maybeSnapshot(trueProject, change.artifactId);
 
     return { artifactId: change.artifactId, event: { id: eventId, seq: eventSeq } };
+  }
+
+  /**
+   * S5 — run the Accept-as-baseline GIT action. Validates the run belongs to
+   * `projectId` and that a 'screenshots' artifact exists for it (you only accept what
+   * was verified), records ONE audit entity_event under that artifact, then delegates
+   * the fs-copy (run artifacts → baselines tree) + `git add`/`git commit` to the
+   * injected BaselineAcceptor (the router imports no fs/git). The copy/commit runs
+   * OUTSIDE any DB txn (it is filesystem + git work). Throws `not_found` when no
+   * acceptor is wired or no screenshots artifact / run exists; `invalid_atype` (BAD
+   * REQUEST domain) when fileNames is empty.
+   */
+  private async runAcceptBaseline(
+    projectId: number,
+    change: ArtifactAcceptBaseline,
+  ): Promise<{ baselineKey: string }> {
+    if (!this.acceptBaseline) {
+      throw new ArtifactError(
+        'not_found',
+        'accept-baseline is not wired (no BaselineAcceptor injected)',
+      );
+    }
+    if (change.fileNames.length === 0) {
+      throw new ArtifactError('invalid_atype', 'accept-baseline requires at least one fileName');
+    }
+    this.assertRun(change.runId);
+    // Resolve the run's TRUE project + assert it matches (no cross-project accept).
+    const run = this.db
+      .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
+      .get(change.runId) as { projectId: number } | undefined;
+    if (!run) throw new ArtifactError('run_not_found', `run ${change.runId} not found`);
+    if (run.projectId !== projectId) {
+      throw new ArtifactError(
+        'wrong_project',
+        `run ${change.runId} belongs to project ${run.projectId}, not ${projectId}`,
+      );
+    }
+    // You only accept what was verified: a 'screenshots' artifact must exist for the run.
+    const shots = this.db
+      .prepare("SELECT id FROM artifacts WHERE run_id = ? AND atype = 'screenshots'")
+      .get(change.runId) as { id: string } | undefined;
+    if (!shots) {
+      throw new ArtifactError('not_found', `no screenshots artifact for run ${change.runId}`);
+    }
+
+    // Delegate the fs-copy + git commit (injected service work, never imported here).
+    const result = await this.acceptBaseline({
+      projectId,
+      runId: change.runId,
+      baselineKey: change.baselineKey,
+      fileNames: change.fileNames,
+    });
+
+    // Audit: record ONE accept-baseline event under the screenshots artifact so the
+    // accept is visible in the entity_events log like every other artifact write.
+    const now = new Date().toISOString();
+    this.insertEvent(
+      shots.id,
+      'accepted-baseline',
+      change.actor,
+      change.runId,
+      [{ field: 'baselineKey', from: null, to: result.baselineKey }],
+      now,
+    );
+    this.emitChange(
+      projectId,
+      change.runId,
+      shots.id,
+      'screenshots',
+      'updated',
+      this.readById(shots.id),
+    );
+    return { baselineKey: result.baselineKey };
   }
 
   /**
