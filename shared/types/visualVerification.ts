@@ -226,6 +226,19 @@ export interface VerdictV1 {
   judgedFileNames: string[];
   baselineUsed: boolean;
   model: string;
+  /**
+   * ADDITIVE baseline-comparison fields (S5 — folds VerdictV1BaselineExtension
+   * onto V1 now that golden baselines + SSIM pre-diff land). Both OPTIONAL so an
+   * S1..S4 verdict (no baseline) is byte-identical:
+   *  - `verdictSource` records HOW the verdict was reached — `'ssim_match'` when
+   *    the deterministic SSIM pre-diff matched an existing baseline (cheap; the
+   *    paid VLM was skipped) or `'vlm_verdict'` when the vision judge produced it.
+   *    Absent on a pre-S5 verdict / a backend deterministic verdict.
+   *  - `ssimScore` is the structural-similarity score the SSIM pre-diff computed
+   *    against the baseline (1.0 = identical), present only on an `'ssim_match'`.
+   */
+  verdictSource?: 'ssim_match' | 'vlm_verdict';
+  ssimScore?: number;
 }
 
 /**
