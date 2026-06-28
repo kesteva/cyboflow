@@ -18,6 +18,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import type { WorkflowRegistry } from './workflowRegistry';
 import { QUICK_WORKFLOW_NAME } from './workflowRegistry';
+import { loadVerifyConfig } from './verifyConfigLoader';
 import type { WorktreeManager } from '../services/worktreeManager';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { PermissionMode } from '../../../shared/types/workflows';
@@ -308,14 +309,25 @@ export class RunLauncher {
     // omitted and createRun falls back to workflow.project_id. The `opts` object
     // is only passed when projectId is defined so the legacy fallback path stays
     // byte-identical for callers that never thread a project.
+    // Load the per-project `.cyboflow/verify.json` ONCE here (createRun is sync;
+    // the loader is async + fail-soft) so createRun can thread its enabled /
+    // defaultType into the visual-verification resolver's project rungs. Absent /
+    // malformed => null, and the resolver's project rungs simply fall through to
+    // the global rung + floor (zero-behavior-change with the master switch OFF).
+    const projectVerifyConfig = await loadVerifyConfig(projectPath, this.logger);
+
     // Pass the opts bag when EITHER an explicit project OR an explicit execution
-    // model is threaded; omit it entirely otherwise so the legacy fallback path
-    // (workflow.project_id + resolver floor) stays byte-identical.
+    // model is threaded, OR a project verify config was found; omit it entirely
+    // otherwise so the legacy fallback path (workflow.project_id + resolver floor)
+    // stays byte-identical.
     const createOpts =
-      projectId !== undefined || requestedExecutionModel !== undefined
+      projectId !== undefined ||
+      requestedExecutionModel !== undefined ||
+      projectVerifyConfig !== null
         ? {
             ...(projectId !== undefined ? { projectId } : {}),
             ...(requestedExecutionModel !== undefined ? { requestedExecutionModel } : {}),
+            ...(projectVerifyConfig !== null ? { projectVerifyConfig } : {}),
           }
         : undefined;
     const { runId, permissionMode, substrate: resolvedSubstrate } = this.workflowRegistry.createRun(
