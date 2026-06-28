@@ -33,6 +33,7 @@ import { mutex as globalMutex, type Mutex } from '../../utils/mutex';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type {
   CaptureContext,
+  DeliverableVerifyConfig,
   RequestStatus,
   ResolvedVisualVerifyConfig,
   VerificationBackendRegistry,
@@ -172,6 +173,71 @@ export class ResourceLeasePool {
 }
 
 // ---------------------------------------------------------------------------
+// Dev-server provider seam (S2 — scheduler-owned dev server)
+//
+// The scheduler OWNS the dev server (locked decision #1): for a deliverable whose
+// `.cyboflow/verify.json` recipe has a `start` command it stands the deliverable
+// up on the leased `verify:port:<p>`, threads the resulting baseUrl into capture,
+// and tears it down after. The concrete spawner (DevServerManager) lives under
+// main/src/services/* (it imports node:child_process); the scheduler knows ONLY
+// this narrow injected interface — it never imports the service (orchestrator->
+// services is forbidden; the service imports + implements these types, a
+// services->orchestrator import, which is allowed). Mirrors how CapturePageBackend
+// + VlmJudge are injected at index.ts.
+// ---------------------------------------------------------------------------
+
+/** The args the scheduler passes the provider to stand a deliverable up. */
+export interface DevServerSpawnArgs {
+  /** The deliverable's verify.json recipe (build/start/readyWhen/url). */
+  config: DeliverableVerifyConfig;
+  /** The leased port (parsed from the verify:port:<p> lease name). */
+  port: number;
+  /** The run's project worktree cwd the build/start commands run in. */
+  cwd: string;
+  /** Per-request abort — interrupts an in-flight build/start/readiness wait. */
+  signal: AbortSignal;
+}
+
+/**
+ * A live dev server the scheduler must tear down after capture. `baseUrl` is what
+ * the scheduler rewrites into ctx.input.url (the backend stays stateless — URL
+ * threading is the scheduler's job). `release()` performs the graceful-then-forced
+ * teardown of the process tree; the scheduler calls it exactly once, in the SAME
+ * finally that releases the port lease.
+ */
+export interface DevServerHandle {
+  baseUrl: string;
+  release(): Promise<void>;
+}
+
+/**
+ * The narrow spawner interface injected into the scheduler. `spawn` stands the
+ * deliverable up on the leased port and resolves a DevServerHandle once it is
+ * ready; it rejects (after tearing down whatever it spawned) on build/spawn/
+ * readiness failure or abort. The scheduler imports this TYPE only — the concrete
+ * DevServerManager (a service) implements it and is wired in at index.ts.
+ */
+export interface DevServerProvider {
+  spawn(args: DevServerSpawnArgs): Promise<DevServerHandle>;
+}
+
+/**
+ * Resolves the dev-server spawn context for a request: the project worktree `cwd`
+ * the commands run in + the matching `deliverable` recipe from the run's
+ * `.cyboflow/verify.json`. INJECTED as a plain async function (wired at index.ts
+ * over loadVerifyConfig + the project path) so the scheduler stays fs/electron/
+ * service-free — the closure does all the fs work. Returns null when there is no
+ * verify.json, no matching deliverable, or no resolvable worktree (the scheduler
+ * then skips the dev-server spawn and captures the static url/htmlPath unchanged —
+ * MVP Rung-0 behavior preserved).
+ */
+export type DevServerContextResolver = (args: {
+  runId: string;
+  projectId: number;
+  input: VerificationRequestInput;
+}) => Promise<{ cwd: string; deliverable: DeliverableVerifyConfig } | null>;
+
+// ---------------------------------------------------------------------------
 // Injected collaborators + optional verdict side-effect hook
 // ---------------------------------------------------------------------------
 
@@ -225,6 +291,23 @@ export interface VerificationSchedulerDeps {
   /** Shared lease pool override (tests). Defaults to a pool over the global mutex. */
   leasePool?: ResourceLeasePool;
   /**
+   * The scheduler-owned dev-server spawner (S2). When present AND a request's
+   * resolved deliverable recipe has a `start` command, the scheduler spawns a dev
+   * server on the leased port, threads its baseUrl into capture, and tears it down
+   * after. Absent (or no `start`) ⇒ the static url/htmlPath capture path is
+   * unchanged (MVP Rung-0 behavior). The concrete DevServerManager (a service) is
+   * injected at index.ts; the scheduler never imports it.
+   */
+  devServerProvider?: DevServerProvider;
+  /**
+   * Resolves a request's dev-server spawn context (project worktree cwd + the
+   * matching verify.json deliverable recipe). Injected as a plain async function so
+   * the scheduler stays fs/electron/service-free — the closure (wired at index.ts)
+   * does the loadVerifyConfig + project-path fs work. Absent ⇒ no dev server is
+   * ever spawned (static capture path preserved).
+   */
+  devServerContextResolver?: DevServerContextResolver;
+  /**
    * Per-request capture+judge deadline in ms. On expiry the in-flight attempt is
    * `signal.abort()`ed and the row is marked 'timeout' (lease released). Defaults
    * to DEFAULT_REQUEST_TIMEOUT_MS (5 min). Tests pass a small value to exercise it.
@@ -265,6 +348,8 @@ export class VerificationScheduler {
   private readonly onVerdict?: OnVerdict;
   private readonly leasePool: ResourceLeasePool;
   private readonly requestTimeoutMs: number;
+  private readonly devServerProvider?: DevServerProvider;
+  private readonly devServerContextResolver?: DevServerContextResolver;
 
   /** True while a drain pass is in flight — coalesces concurrent nudges into one loop. */
   private draining = false;
@@ -290,6 +375,8 @@ export class VerificationScheduler {
     this.onVerdict = deps.onVerdict;
     this.leasePool = deps.leasePool ?? new ResourceLeasePool();
     this.requestTimeoutMs = deps.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.devServerProvider = deps.devServerProvider;
+    this.devServerContextResolver = deps.devServerContextResolver;
   }
 
   // --------------------------------------------------------------------------
@@ -643,14 +730,36 @@ export class VerificationScheduler {
     }
 
     let fileNames: string[] = [];
+    // The scheduler-owned dev server (S2) for this request, if one is spawned. Held
+    // for the WHOLE capture lifetime and released in the SAME finally as the lease.
+    let devServerHandle: DevServerHandle | null = null;
 
     try {
+      // S2 — stand a dev server up on the leased port when the deliverable recipe
+      // has a `start` command. BEFORE building CaptureContext so the spawned baseUrl
+      // can be threaded into ctx.input.url. A null handle (no provider / no start /
+      // lease is not a port lease) leaves the static url/htmlPath capture unchanged.
+      devServerHandle = await this.maybeSpawnDevServer(row, input, lease, controller.signal);
+      // A timeout/cancel that fired DURING dev-server spawn: stop here, mark
+      // 'timeout', releasing both the dev server (in finally) and the lease.
+      if (controller.signal.aborted) {
+        this.markTerminal(row.id, 'timeout', {
+          backend: backend.id,
+          error: timedOut ? 'request timed out' : 'aborted',
+        });
+        await this.deliver(row, 'timeout', undefined, [], input);
+        return;
+      }
+
+      const captureInput: VerificationRequestInput = devServerHandle
+        ? { ...input, url: devServerHandle.baseUrl }
+        : input;
       const ctx: CaptureContext = {
         requestId: row.id,
         runId: row.run_id,
         artifactsDir: this.artifactsDirResolver(row.run_id),
         type,
-        input,
+        input: captureInput,
       };
 
       const capture = await backend.capture(ctx, controller.signal);
@@ -720,8 +829,81 @@ export class VerificationScheduler {
     } finally {
       clearTimeout(deadline);
       this.inFlight.delete(row.id);
+      // Tear the dev server down BEFORE releasing the port lease — release() kills
+      // the process tree that was holding the leased port. Guard on null (no dev
+      // server was spawned). Fail-soft: a teardown error must never leave the lease
+      // un-released, so it is logged, not propagated.
+      if (devServerHandle) {
+        try {
+          await devServerHandle.release();
+        } catch (err) {
+          this.logger?.error('[VerificationScheduler] dev-server teardown threw', {
+            requestId: row.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       lease.release();
     }
+  }
+
+  /**
+   * Stand a scheduler-owned dev server up for this request when its resolved
+   * deliverable recipe has a `start` command (S2 / locked decision #1). Returns the
+   * live DevServerHandle (the caller threads handle.baseUrl into ctx.input.url and
+   * release()s it in finally), or null when no dev server is spawned:
+   *   - no provider / no context resolver injected (static-capture deployment), OR
+   *   - the held lease is NOT a port lease (rung 0 / null lease — nothing to run on), OR
+   *   - no verify.json / no matching deliverable / no `start` command, OR
+   *   - the worktree cwd could not be resolved.
+   * In every null case the static url/htmlPath capture path is preserved unchanged.
+   *
+   * A spawn FAILURE (build/start/readiness reject) propagates so runChosen marks the
+   * request failed/timeout (the provider has already torn down what it spawned).
+   */
+  private async maybeSpawnDevServer(
+    row: VerificationRequestRow,
+    input: VerificationRequestInput,
+    lease: LeaseHandle,
+    signal: AbortSignal,
+  ): Promise<DevServerHandle | null> {
+    if (!this.devServerProvider || !this.devServerContextResolver) {
+      return null;
+    }
+    // A dev server is bound to a leased PORT. A rung-0 / null lease (no port) cannot
+    // host one — the request is a static url/htmlPath capture.
+    const port = this.portFromLease(lease.name);
+    if (port === null) {
+      return null;
+    }
+
+    const resolved = await this.devServerContextResolver({
+      runId: row.run_id,
+      projectId: row.project_id,
+      input,
+    });
+    if (!resolved) {
+      return null;
+    }
+    const { cwd, deliverable } = resolved;
+    if (!deliverable.start || deliverable.start.trim().length === 0) {
+      // No start command — nothing to stand up; capture the static target as-is.
+      return null;
+    }
+
+    this.logger?.debug('[VerificationScheduler] spawning dev server', {
+      requestId: row.id,
+      port,
+      deliverable: deliverable.id,
+    });
+    return this.devServerProvider.spawn({ config: deliverable, port, cwd, signal });
+  }
+
+  /** Parse the integer port out of a 'verify:port:<p>' lease name; null otherwise. */
+  private portFromLease(name: string | null): number | null {
+    if (!name || !name.startsWith('verify:port:')) return null;
+    const port = Number.parseInt(name.slice('verify:port:'.length), 10);
+    return Number.isInteger(port) ? port : null;
   }
 
   /**
