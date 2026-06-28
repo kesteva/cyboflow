@@ -47,7 +47,7 @@ export interface TelemetryEventMap {
     blocking?: boolean;
   };
   approval_decided: { decision: 'approve' | 'reject'; scope: 'single' | 'rest_of_run' };
-  view_opened: { view: 'human_review' | 'backlog' | 'insights' | 'workflows' };
+  view_opened: { view: 'human_review' | 'backlog' | 'insights' | 'workflows' | 'verify_queue' };
   settings_opened: Record<string, never>;
   telemetry_opt_out_changed: { channel: 'errors' | 'usage'; enabled: boolean };
 

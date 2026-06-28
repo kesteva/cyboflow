@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { trackEvent } from '../utils/telemetry';
 
 /** Fire a `view_opened` usage event for a center-pane panel (open-edge only). */
-function fireViewOpened(view: 'human_review' | 'backlog' | 'insights' | 'workflows'): void {
+function fireViewOpened(view: 'human_review' | 'backlog' | 'insights' | 'workflows' | 'verify_queue'): void {
   trackEvent('view_opened', { view });
 }
 
@@ -92,6 +92,15 @@ interface NavigationState {
    * so the center only ever hosts one full-width pane at a time.
    */
   workflowsOpen: boolean;
+  /**
+   * Whether the full-width Verify-Queue pane is the active center surface (App
+   * swaps it in over the home surface — fifth sibling alongside
+   * `humanReviewOpen` / `backlogOpen` / `insightsOpen` / `workflowsOpen`).
+   * Mutually exclusive with all four: opening it closes the others, and any
+   * other overlay/nav clears it, so the center only ever hosts one full-width
+   * pane at a time.
+   */
+  verifyQueueOpen: boolean;
 
   // Actions
   goHome: () => void;
@@ -113,6 +122,9 @@ interface NavigationState {
   openWorkflows: () => void;
   closeWorkflows: () => void;
   toggleWorkflows: () => void;
+  openVerifyQueue: () => void;
+  closeVerifyQueue: () => void;
+  toggleVerifyQueue: () => void;
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({
@@ -124,15 +136,17 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   backlogOpen: false,
   insightsOpen: false,
   workflowsOpen: false,
+  verifyQueueOpen: false,
 
   // Center-surface state machine. goHome returns to the rail-overlay surface
-  // (clearing any wizard opts + all four overlays); goToWizard swaps in the
+  // (clearing any wizard opts + all five overlays); goToWizard swaps in the
   // new-flow launcher; goToSession is called by the run/session OPEN handlers.
-  // Each transition also clears `insightsOpen` / `workflowsOpen` so navigating
-  // away always tears those panes down (mirrors the human-review / backlog clears).
-  goHome: () => set({ view: 'home', wizardOpts: null, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false }),
-  goToWizard: (opts) => set({ view: 'wizard', wizardOpts: opts ?? {}, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false }),
-  goToSession: () => set({ view: 'session', humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false }),
+  // Each transition also clears `insightsOpen` / `workflowsOpen` /
+  // `verifyQueueOpen` so navigating away always tears those panes down (mirrors
+  // the human-review / backlog clears).
+  goHome: () => set({ view: 'home', wizardOpts: null, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, verifyQueueOpen: false }),
+  goToWizard: (opts) => set({ view: 'wizard', wizardOpts: opts ?? {}, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, verifyQueueOpen: false }),
+  goToSession: () => set({ view: 'session', humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, verifyQueueOpen: false }),
 
   setActiveView: (view) => set({ activeView: view }),
 
@@ -148,10 +162,11 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     humanReviewOpen: false,
     backlogOpen: false,
     insightsOpen: false,
-    workflowsOpen: false
+    workflowsOpen: false,
+    verifyQueueOpen: false
   }),
 
-  // Navigating to sessions likewise dismisses all four full-width center panes.
+  // Navigating to sessions likewise dismisses all five full-width center panes.
   navigateToSessions: () => set({
     view: 'home',
     activeView: 'sessions',
@@ -159,45 +174,55 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     humanReviewOpen: false,
     backlogOpen: false,
     insightsOpen: false,
-    workflowsOpen: false
+    workflowsOpen: false,
+    verifyQueueOpen: false
   }),
 
   // Opening human review closes the backlog AND insights (the center hosts one
   // full-width pane at a time) and forces the home view — the overlays only ever
   // render over the home surface. Closing/toggling leave the sibling flags
   // untouched (toggle still clears them on the open transition).
-  openHumanReview: () => set({ view: 'home', humanReviewOpen: true, backlogOpen: false, insightsOpen: false, workflowsOpen: false }),
+  openHumanReview: () => set({ view: 'home', humanReviewOpen: true, backlogOpen: false, insightsOpen: false, workflowsOpen: false, verifyQueueOpen: false }),
   closeHumanReview: () => set({ humanReviewOpen: false }),
   toggleHumanReview: () => set((s) => {
     if (!s.humanReviewOpen) fireViewOpened('human_review');
-    return { view: 'home', humanReviewOpen: !s.humanReviewOpen, backlogOpen: false, insightsOpen: false, workflowsOpen: false };
+    return { view: 'home', humanReviewOpen: !s.humanReviewOpen, backlogOpen: false, insightsOpen: false, workflowsOpen: false, verifyQueueOpen: false };
   }),
 
   // Symmetric with the human-review actions — opening/toggling the backlog
-  // closes the other three overlays and forces home so the center never tries
+  // closes the other four overlays and forces home so the center never tries
   // to render two panes.
-  openBacklog: () => set({ view: 'home', backlogOpen: true, humanReviewOpen: false, insightsOpen: false, workflowsOpen: false }),
+  openBacklog: () => set({ view: 'home', backlogOpen: true, humanReviewOpen: false, insightsOpen: false, workflowsOpen: false, verifyQueueOpen: false }),
   closeBacklog: () => set({ backlogOpen: false }),
   toggleBacklog: () => set((s) => {
     if (!s.backlogOpen) fireViewOpened('backlog');
-    return { view: 'home', backlogOpen: !s.backlogOpen, humanReviewOpen: false, insightsOpen: false, workflowsOpen: false };
+    return { view: 'home', backlogOpen: !s.backlogOpen, humanReviewOpen: false, insightsOpen: false, workflowsOpen: false, verifyQueueOpen: false };
   }),
 
-  // Third sibling — opening/toggling insights closes the other three overlays and
+  // Third sibling — opening/toggling insights closes the other four overlays and
   // forces home, so the mutual-exclusion invariant holds in every direction.
-  openInsights: () => set({ view: 'home', insightsOpen: true, humanReviewOpen: false, backlogOpen: false, workflowsOpen: false }),
+  openInsights: () => set({ view: 'home', insightsOpen: true, humanReviewOpen: false, backlogOpen: false, workflowsOpen: false, verifyQueueOpen: false }),
   closeInsights: () => set({ insightsOpen: false }),
   toggleInsights: () => set((s) => {
     if (!s.insightsOpen) fireViewOpened('insights');
-    return { view: 'home', insightsOpen: !s.insightsOpen, humanReviewOpen: false, backlogOpen: false, workflowsOpen: false };
+    return { view: 'home', insightsOpen: !s.insightsOpen, humanReviewOpen: false, backlogOpen: false, workflowsOpen: false, verifyQueueOpen: false };
   }),
 
   // Fourth sibling — opening/toggling the Workflows gallery closes the other
-  // three overlays and forces home, mirroring the insights actions exactly.
-  openWorkflows: () => set({ view: 'home', workflowsOpen: true, humanReviewOpen: false, backlogOpen: false, insightsOpen: false }),
+  // four overlays and forces home, mirroring the insights actions exactly.
+  openWorkflows: () => set({ view: 'home', workflowsOpen: true, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, verifyQueueOpen: false }),
   closeWorkflows: () => set({ workflowsOpen: false }),
   toggleWorkflows: () => set((s) => {
     if (!s.workflowsOpen) fireViewOpened('workflows');
-    return { view: 'home', workflowsOpen: !s.workflowsOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false };
+    return { view: 'home', workflowsOpen: !s.workflowsOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, verifyQueueOpen: false };
+  }),
+
+  // Fifth sibling — opening/toggling the Verify Queue closes the other four
+  // overlays and forces home, mirroring the workflows actions exactly.
+  openVerifyQueue: () => set({ view: 'home', verifyQueueOpen: true, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false }),
+  closeVerifyQueue: () => set({ verifyQueueOpen: false }),
+  toggleVerifyQueue: () => set((s) => {
+    if (!s.verifyQueueOpen) fireViewOpened('verify_queue');
+    return { view: 'home', verifyQueueOpen: !s.verifyQueueOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false };
   }),
 }));
