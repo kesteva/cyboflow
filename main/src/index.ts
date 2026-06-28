@@ -69,6 +69,7 @@ import { VerificationScheduler, verificationEvents, verificationChannel } from '
 import { createVerdictDelivery } from './orchestrator/verify/verdictDelivery';
 import { CapturePageBackend } from './services/visualVerify/capturePageBackend';
 import { PlaywrightBackend } from './services/visualVerify/playwrightBackend';
+import { PeekabooBackend } from './services/visualVerify/peekabooBackend';
 import { VlmJudgeImpl } from './services/visualVerify/vlmJudge';
 import { DevServerManager } from './services/visualVerify/devServerManager';
 import { loadVerifyConfig } from './orchestrator/verifyConfigLoader';
@@ -898,9 +899,30 @@ async function initializeServices() {
   // declares a dev-server `start` (the scheduler then owns + leases the dev server,
   // S2); a pre-existing static url needs no lease.
   const playwrightBackend = new PlaywrightBackend({ logger: cyboflowLogger });
+  // S4 — Rung-2 PeekabooBackend (native-desktop). It is the ONLY backend that can
+  // see cyboflow's OWN renderer: it SCREENSHOTS the already-running app via the
+  // `peekaboo` CLI (DefaultPeekabooClient shells out behind the injected
+  // PeekabooClient seam) instead of bootstrapping a renderer that needs the
+  // preload-injected electronTRPC (capturePage / playwright both fail identically
+  // on cyboflow's own window). It is registered unconditionally; the runtime
+  // healthCheck() is the gate — it probes the `peekaboo` binary on PATH AND the two
+  // required macOS TCC grants (Screen Recording + Accessibility) on the host
+  // binary, returning false (⇒ resolver/scheduler drops peekaboo ⇒ SKIPPED) when
+  // the binary is absent or a grant is declined. A missing TCC grant must NEVER
+  // wedge a sprint (the recurring SPRINT-031..039 gotcha) — every error path
+  // soft-fails (capture ⇒ ok:false fall-forward), never throws/hangs. requiredLease
+  // ALWAYS returns the count-1 verify:screen lease (one display/focus/input), so
+  // the scheduler (Peekaboo's sole client) serializes all native-desktop captures
+  // app-wide through the shared mutex. dev builds run under the 'Electron' app
+  // owner; the packaged app owner is 'Cyboflow' (the backend's default appTarget).
+  const peekabooBackend = new PeekabooBackend({ logger: cyboflowLogger });
   VerificationScheduler.initialize({
     db: cyboflowDb,
-    backends: { capturePage: new CapturePageBackend(), playwright: playwrightBackend },
+    backends: {
+      capturePage: new CapturePageBackend(),
+      playwright: playwrightBackend,
+      peekaboo: peekabooBackend,
+    },
     judge: cappedVlmJudge,
     artifactsDirResolver: (runId: string) => getCyboflowSubdirectory('artifacts', 'runs', runId),
     logger: cyboflowLogger,
