@@ -102,6 +102,21 @@ export function verifySimLease(udid: string): string {
   return `verify:sim:${udid}`;
 }
 
+/**
+ * Build the batch worktree-sync mutex name for one sprint batch (L4 / locked
+ * decision #5). Acquired AFTER the dev-server/port lease and BEFORE backend
+ * capture for any verification operating on a batched run; a count-1
+ * serialization point per batchId over the SAME shared `mutex` as the
+ * port/screen leases. It prevents a verification reading a half-committed shared
+ * sprint worktree: while this is held, the next capture on the same batchId
+ * WAITS (it does not start while another lane's verification is mid-capture).
+ * A non-batch run (null/empty batch_id) acquires nothing — single-run captures
+ * are byte-identical to before this layer.
+ */
+export function sprintVerifyBatchLease(batchId: string): string {
+  return `sprint-verify-${batchId}`;
+}
+
 // ---------------------------------------------------------------------------
 // ResourceLeasePool — N-slot leasing over the count-1 `mutex`
 // ---------------------------------------------------------------------------
@@ -136,6 +151,19 @@ const NO_LEASE: LeaseHandle = { name: null, release: () => {} };
  */
 export class ResourceLeasePool {
   constructor(private readonly mutex: Mutex = globalMutex) {}
+
+  /**
+   * The underlying count-1 mutex this pool composes over. Exposed so the
+   * scheduler can take a BLOCKING count-1 lock (the batch worktree-sync mutex,
+   * `sprint-verify-<batchId>`) on the SAME mutex instance the port/screen leases
+   * use, so all named locks compose app-wide. Distinct from tryAcquire* (which is
+   * non-blocking): the batch mutex is a serialization point where the second
+   * concurrent capture WAITS for the first to release, not a pool that leaves a
+   * request queued.
+   */
+  get sharedMutex(): Mutex {
+    return this.mutex;
+  }
 
   /** A lease that needs no scarce resource. Always "available". */
   noLease(): LeaseHandle {
@@ -273,6 +301,20 @@ export type OnVerdict = (args: {
  * row 'timeout' (releasing the lease). Tunable via VerificationSchedulerDeps.
  */
 export const DEFAULT_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * How many concurrent batched holders a waiter on `sprint-verify-<batchId>` may
+ * legitimately queue behind. The batch mutex is a count-1 serialization point, so a
+ * waiter can stack behind several already-held captures (rung-0 null-lease captures
+ * truly run concurrently — see runChosen / drain Promise.allSettled). Each holder may
+ * legitimately hold for up to requestTimeoutMs (its own capture+judge deadline), so
+ * the waiter's acquire timeout must be sized as requestTimeoutMs * this factor — NOT
+ * the Mutex 30s default, which would spuriously throw 'Mutex timeout' and mark the
+ * second concurrent batched capture 'failed' instead of serializing it (the EXACT
+ * guarantee S5 exists to provide). Chosen larger than any realistic per-batch lane
+ * fan-out so a genuinely serialized waiter waits rather than fails.
+ */
+export const BATCH_MUTEX_MAX_QUEUED_HOLDERS = 16;
 
 /** The dependency bag VerificationScheduler.initialize takes. */
 export interface VerificationSchedulerDeps {
@@ -744,6 +786,10 @@ export class VerificationScheduler {
     // The scheduler-owned dev server (S2) for this request, if one is spawned. Held
     // for the WHOLE capture lifetime and released in the SAME finally as the lease.
     let devServerHandle: DevServerHandle | null = null;
+    // The batch worktree-sync mutex (L4) for a batched run, if this run carries a
+    // batch_id. Held across capture+judge and released in the SAME finally as the
+    // other leases. Null for a non-batch run (nothing acquired → nothing to release).
+    let batchLease: LeaseHandle | null = null;
 
     try {
       // S2 — stand a dev server up on the leased port when the deliverable recipe
@@ -753,6 +799,23 @@ export class VerificationScheduler {
       devServerHandle = await this.maybeSpawnDevServer(row, input, lease, controller.signal);
       // A timeout/cancel that fired DURING dev-server spawn: stop here, mark
       // 'timeout', releasing both the dev server (in finally) and the lease.
+      if (controller.signal.aborted) {
+        this.markTerminal(row.id, 'timeout', {
+          backend: backend.id,
+          error: timedOut ? 'request timed out' : 'aborted',
+        });
+        await this.deliver(row, 'timeout', undefined, [], input);
+        return;
+      }
+
+      // L4 batch worktree-sync mutex (locked decision #5): AFTER the dev-server/
+      // port lease, BEFORE capture. For a batched run this BLOCKS until any other
+      // verification on the same batchId releases, so a capture never reads a
+      // half-committed shared sprint worktree relative to a concurrent lane's
+      // verification. A non-batch run acquires nothing (byte-identical to before).
+      batchLease = await this.acquireBatchMutex(row.run_id);
+      // A timeout/cancel that fired WHILE we waited on the batch mutex: stop here,
+      // mark 'timeout'; the batch mutex (now held) is released in finally.
       if (controller.signal.aborted) {
         this.markTerminal(row.id, 'timeout', {
           backend: backend.id,
@@ -865,6 +928,12 @@ export class VerificationScheduler {
           });
         }
       }
+      // Release the L4 batch worktree-sync mutex (independent named mutex — reverse
+      // order vs. the port lease is not required). Guarded on null: a non-batch run
+      // acquired nothing, so there is nothing to release.
+      if (batchLease) {
+        batchLease.release();
+      }
       lease.release();
     }
   }
@@ -919,6 +988,76 @@ export class VerificationScheduler {
       deliverable: deliverable.id,
     });
     return this.devServerProvider.spawn({ config: deliverable, port, cwd, signal });
+  }
+
+  /**
+   * Read the run's `workflow_runs.batch_id` via the injected DatabaseLike. Returns
+   * the trimmed non-empty batch id, or null for a non-batch run / when the column
+   * or table is unavailable (e.g. a minimal test DB with only
+   * verification_requests). The scheduler never imports better-sqlite3/electron —
+   * this is a plain SELECT on the same injected db. Fail-soft: a thrown query
+   * (missing table) degrades to "no batch", so a non-batch capture path is
+   * byte-identical to before this layer.
+   */
+  private batchIdForRun(runId: string): string | null {
+    try {
+      const row = this.db
+        .prepare('SELECT batch_id FROM workflow_runs WHERE id = ?')
+        .get(runId) as { batch_id: string | null } | undefined;
+      const batchId = row?.batch_id;
+      if (typeof batchId !== 'string') return null;
+      const trimmed = batchId.trim();
+      return trimmed.length > 0 ? trimmed : null;
+    } catch (err) {
+      this.logger?.debug('[VerificationScheduler] batch_id lookup failed; treating as non-batch run', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Acquire the batch worktree-sync mutex (`sprint-verify-<batchId>`) for a batched
+   * run, or null for a non-batch run (no batch_id). BLOCKING count-1 over the SAME
+   * shared mutex the port/screen leases use (leasePool.sharedMutex) so it composes
+   * app-wide and serializes concurrent captures on the same batchId. Called in
+   * runChosen AFTER the dev-server/port lease and BEFORE backend.capture; released
+   * in the SAME finally as the other leases. The returned handle is idempotent on
+   * release (NO_LEASE-style), and null for a non-batch run so the finally guard has
+   * nothing to release.
+   */
+  private async acquireBatchMutex(runId: string): Promise<LeaseHandle | null> {
+    const batchId = this.batchIdForRun(runId);
+    if (!batchId) return null;
+    const name = sprintVerifyBatchLease(batchId);
+    // Count-1 BLOCKING acquire (NOT the non-blocking pool probe): the second
+    // concurrent capture on this batchId waits here until the first releases.
+    //
+    // Timeout MUST exceed how long a holder can legitimately hold this mutex. A
+    // holder keeps it for its WHOLE capture+judge lifetime, bounded by
+    // requestTimeoutMs (default 5 min) — far longer than the Mutex 30s default,
+    // which would THROW 'Mutex timeout' on any capture exceeding 30s and land in
+    // runChosen's catch as a spurious 'failed', defeating the very serialization
+    // this slice provides. A waiter can also stack behind several concurrent
+    // batched holders (rung-0 captures run in parallel), so size the bound as
+    // requestTimeoutMs * BATCH_MUTEX_MAX_QUEUED_HOLDERS — generous enough that a
+    // genuinely serialized waiter WAITS rather than fails.
+    const acquireTimeoutMs = this.requestTimeoutMs * BATCH_MUTEX_MAX_QUEUED_HOLDERS;
+    const release = await this.leasePool.sharedMutex.acquire(name, acquireTimeoutMs);
+    let released = false;
+    this.logger?.debug('[VerificationScheduler] acquired batch worktree-sync mutex', {
+      runId,
+      lease: name,
+    });
+    return {
+      name,
+      release: () => {
+        if (released) return;
+        released = true;
+        release();
+      },
+    };
   }
 
   /** Parse the integer port out of a 'verify:port:<p>' lease name; null otherwise. */
