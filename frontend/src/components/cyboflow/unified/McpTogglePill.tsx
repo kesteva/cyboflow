@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, Plug } from 'lucide-react';
 import { trpc } from '../../../trpc/client';
 import { API } from '../../../utils/api';
 import { Dropdown, type DropdownItem } from '../../ui/Dropdown';
 import { Pill } from '../../ui/Pill';
 import { cn } from '../../../utils/cn';
+import { sameStringSet } from '../../../utils/sameStringSet';
 import type { McpEntry } from '../../../../../shared/types/integrations';
 
 /**
@@ -40,6 +41,23 @@ export function McpTogglePill({
 }: McpTogglePillProps): React.ReactElement {
   const [open, setOpen] = useState(false);
 
+  // Optimistic local mirror of the persisted deny set. The composer feeds
+  // `disabled` from a FETCHED session copy (SessionProvider), NOT the zustand
+  // store our `onChange` updates — so a toggle never changes the prop and the
+  // label would stay stale until the session is re-fetched. Mirror locally for
+  // instant feedback, and re-sync ONLY when the prop VALUE genuinely changes
+  // (reload / session switch / async column arrival) — never on the fresh
+  // `?? []` identity the composer creates each render, which would otherwise
+  // clobber the optimistic state on every re-render.
+  const [localDisabled, setLocalDisabled] = useState<string[]>(disabled);
+  const lastProp = useRef<string[]>(disabled);
+  useEffect(() => {
+    if (!sameStringSet(lastProp.current, disabled)) {
+      lastProp.current = disabled;
+      setLocalDisabled(disabled);
+    }
+  }, [disabled]);
+
   // Read-only catalogue of MCP servers configured in the CLI (machine-global),
   // fetched once on mount; failures degrade to an empty list.
   const [servers, setServers] = useState<McpEntry[]>([]);
@@ -68,23 +86,30 @@ export function McpTogglePill({
       if (entry.name === 'cyboflow' || entry.name.startsWith('cyboflow_')) continue;
       names.add(entry.name);
     }
-    for (const name of disabled) names.add(name);
+    for (const name of localDisabled) names.add(name);
     return Array.from(names).sort();
-  }, [servers, disabled]);
+  }, [servers, localDisabled]);
 
-  const label = disabled.length === 0 ? 'MCP' : `MCP · ${disabled.length} off`;
+  const label = localDisabled.length === 0 ? 'MCP' : `MCP · ${localDisabled.length} off`;
 
   const handleToggle = async (name: string): Promise<void> => {
     // The CHECKED state shown is "enabled" = NOT in the deny set. Toggling a
     // checked server disables it (add to deny set); toggling an unchecked one
-    // re-enables it (remove from deny set).
-    const checked = !disabled.includes(name);
-    const next = checked ? [...disabled, name] : disabled.filter((x) => x !== name);
+    // re-enables it (remove from deny set). Apply optimistically so the label +
+    // row dot update on the click; revert if the persist fails.
+    const checked = !localDisabled.includes(name);
+    const next = checked ? [...localDisabled, name] : localDisabled.filter((x) => x !== name);
+    const prev = localDisabled;
+    setLocalDisabled(next);
     try {
       const res = await API.sessions.updateSessionMcps(sessionId, next);
       if (res.success) onChange(next);
-      else console.error('Failed to set MCP selection:', res.error);
+      else {
+        setLocalDisabled(prev);
+        console.error('Failed to set MCP selection:', res.error);
+      }
     } catch (err) {
+      setLocalDisabled(prev);
       console.error('Failed to set MCP selection:', err);
     }
   };
@@ -96,7 +121,7 @@ export function McpTogglePill({
     iconColor: 'text-text-secondary',
     onClick: () => void handleToggle(name),
     variant: 'default',
-    showDot: !disabled.includes(name),
+    showDot: !localDisabled.includes(name),
     dotColor: 'bg-interactive',
   }));
 

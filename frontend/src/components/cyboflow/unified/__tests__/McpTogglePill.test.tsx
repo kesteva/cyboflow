@@ -65,4 +65,36 @@ describe('McpTogglePill', () => {
     await waitFor(() => expect(mockUpdate).toHaveBeenCalledWith('s1', []));
     expect(onChange).toHaveBeenCalledWith([]);
   });
+
+  it('updates the label OPTIMISTICALLY even when the prop does not change (stale fetched copy)', async () => {
+    // The composer re-renders the pill with an UNCHANGED `disabled` prop after a
+    // toggle (it reads a fetched session copy, not the store the onChange mirror
+    // updates). The label must still reflect the toggle immediately.
+    const onChange = vi.fn();
+    const { rerender } = render(<McpTogglePill sessionId="s1" disabled={[]} onChange={onChange} />);
+    fireEvent.click(screen.getByText('MCP'));
+    fireEvent.click(await screen.findByText('peekaboo'));
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalledWith('s1', ['peekaboo']));
+    // A fresh `[]` literal (new identity, same value) must NOT clobber the optimism.
+    rerender(<McpTogglePill sessionId="s1" disabled={[]} onChange={onChange} />);
+    expect(screen.getByText('MCP · 1 off')).toBeInTheDocument();
+  });
+
+  it('REVERTS the optimistic label when the persist fails', async () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    mockUpdate.mockResolvedValue({ success: false, error: 'boom' });
+    render(<McpTogglePill sessionId="s1" disabled={[]} onChange={vi.fn()} />);
+    fireEvent.click(screen.getByText('MCP'));
+    fireEvent.click(await screen.findByText('peekaboo'));
+    await waitFor(() => expect(mockUpdate).toHaveBeenCalled());
+    await waitFor(() => expect(screen.getByText('MCP')).toBeInTheDocument());
+    errSpy.mockRestore();
+  });
+
+  it('ADOPTS a genuinely-changed prop value (reload / session switch)', async () => {
+    const { rerender } = render(<McpTogglePill sessionId="s1" disabled={[]} onChange={vi.fn()} />);
+    expect(screen.getByText('MCP')).toBeInTheDocument();
+    rerender(<McpTogglePill sessionId="s1" disabled={['playwright']} onChange={vi.fn()} />);
+    expect(screen.getByText('MCP · 1 off')).toBeInTheDocument();
+  });
 });

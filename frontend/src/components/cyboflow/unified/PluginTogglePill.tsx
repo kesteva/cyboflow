@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChevronDown, Puzzle } from 'lucide-react';
 import { trpc } from '../../../trpc/client';
 import { API } from '../../../utils/api';
 import { Dropdown, type DropdownItem } from '../../ui/Dropdown';
 import { Pill } from '../../ui/Pill';
 import { cn } from '../../../utils/cn';
+import { sameStringSet } from '../../../utils/sameStringSet';
 import type { PluginEntry } from '../../../../../shared/types/integrations';
 
 /**
@@ -38,6 +39,22 @@ export function PluginTogglePill({
 }: PluginTogglePillProps): React.ReactElement {
   const [open, setOpen] = useState(false);
 
+  // Optimistic local mirror of the persisted allow set. The composer feeds
+  // `selected` from a FETCHED session copy (SessionProvider), NOT the zustand
+  // store our `onChange` updates — so a toggle never changes the prop and the
+  // label would stay stale until the session is re-fetched. Mirror locally for
+  // instant feedback, and re-sync ONLY when the prop VALUE genuinely changes
+  // (reload / session switch / async column arrival) — never on the fresh
+  // `?? []` identity the composer creates each render.
+  const [localSelected, setLocalSelected] = useState<string[]>(selected);
+  const lastProp = useRef<string[]>(selected);
+  useEffect(() => {
+    if (!sameStringSet(lastProp.current, selected)) {
+      lastProp.current = selected;
+      setLocalSelected(selected);
+    }
+  }, [selected]);
+
   // Read-only catalogue of installed plugins (machine-global), fetched once on
   // mount; failures degrade to an empty list.
   const [plugins, setPlugins] = useState<PluginEntry[]>([]);
@@ -62,23 +79,31 @@ export function PluginTogglePill({
   const options = useMemo(() => {
     const byId = new Map<string, string>(); // id -> display name
     for (const p of plugins) if (!byId.has(p.id)) byId.set(p.id, p.name);
-    for (const id of selected) if (!byId.has(id)) byId.set(id, id);
+    for (const id of localSelected) if (!byId.has(id)) byId.set(id, id);
     return Array.from(byId.entries())
       .map(([id, name]) => ({ id, name }))
       .sort((a, b) => a.id.localeCompare(b.id));
-  }, [plugins, selected]);
+  }, [plugins, localSelected]);
 
-  const label = selected.length === 0 ? 'Plugins' : `Plugins · ${selected.length}`;
+  const label = localSelected.length === 0 ? 'Plugins' : `Plugins · ${localSelected.length}`;
 
   const handleToggle = async (id: string): Promise<void> => {
-    const next = selected.includes(id)
-      ? selected.filter((x) => x !== id)
-      : [...selected, id];
+    // Apply optimistically so the label + row dot update on the click; revert if
+    // the persist fails.
+    const next = localSelected.includes(id)
+      ? localSelected.filter((x) => x !== id)
+      : [...localSelected, id];
+    const prev = localSelected;
+    setLocalSelected(next);
     try {
       const res = await API.sessions.updateSessionPlugins(sessionId, next);
       if (res.success) onChange(next);
-      else console.error('Failed to set plugin selection:', res.error);
+      else {
+        setLocalSelected(prev);
+        console.error('Failed to set plugin selection:', res.error);
+      }
     } catch (err) {
+      setLocalSelected(prev);
       console.error('Failed to set plugin selection:', err);
     }
   };
@@ -91,7 +116,7 @@ export function PluginTogglePill({
     iconColor: 'text-text-secondary',
     onClick: () => void handleToggle(id),
     variant: 'default',
-    showDot: selected.includes(id),
+    showDot: localSelected.includes(id),
     dotColor: 'bg-interactive',
   }));
 
