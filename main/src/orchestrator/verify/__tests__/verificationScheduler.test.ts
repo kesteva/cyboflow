@@ -15,6 +15,9 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   VerificationScheduler,
   ResourceLeasePool,
@@ -25,6 +28,11 @@ import {
 } from '../verificationScheduler';
 import { Mutex } from '../../../utils/mutex';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
+import {
+  PlaywrightBackend,
+  type BrowserFactory,
+} from '../../../services/visualVerify/playwrightBackend';
+import { PlaywrightInstaller } from '../../../services/visualVerify/playwrightInstaller';
 import type {
   CaptureContext,
   CaptureResult,
@@ -123,7 +131,13 @@ function enqueueRow(
      VALUES (?, 'run-1', 1, 'queued', 'static-render-snapshot', ?, ?, 0)`,
   ).run(
     id,
-    JSON.stringify({ intent: 'looks right', url: opts.url ?? 'http://placeholder' }),
+    JSON.stringify({
+      intent: 'looks right',
+      url: opts.url ?? 'http://placeholder',
+      // `start` is the signal PlaywrightBackend.requiredLease keys off (hydrated from
+      // the deliverable). Only stamped when the test declares one.
+      ...(opts.start ? { start: opts.start } : {}),
+    }),
     JSON.stringify(opts.chain),
   );
   return id;
@@ -384,6 +398,93 @@ describe('VerificationScheduler — dev-server seam (S2)', () => {
     expect(sink.ctx?.input.url).toBe('http://placeholder'); // unchanged
   });
 
+  it('SKIPS the VLM and delivers the deterministic verdict when the backend sets one (S3)', async () => {
+    let judgeCalls = 0;
+    const countingJudge: VlmJudge = {
+      judge: async () => {
+        judgeCalls += 1;
+        return PASS_VERDICT;
+      },
+    };
+    // A backend that returns its OWN deterministic verdict (the Playwright a11y gate).
+    const detVerdict: VerdictV1 = {
+      status: 'fail',
+      confidence: 1,
+      issues: [{ severity: 'high', description: 'interaction target missing' }],
+      feedback: 'interaction 0 (click "#gone") failed',
+      judgedFileNames: ['default.png'],
+      baselineUsed: false,
+      model: 'playwright-deterministic',
+    };
+    const deterministicBackend: VisualBackend = {
+      id: 'playwright',
+      rung: 1,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async () => ({
+        ok: true,
+        fileNames: ['default.png'],
+        deterministicVerdict: detVerdict,
+      }),
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { playwright: deterministicBackend },
+      judge: countingJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const id = enqueueRow(db, { chain: ['playwright'], url: 'http://placeholder' });
+    await sched.drain();
+
+    // The VLM was NOT called (deterministic verdict short-circuited it)...
+    expect(judgeCalls).toBe(0);
+    // ...and the deterministic FAIL drove the terminal status + verdict_json.
+    const row = db
+      .prepare('SELECT status, verdict_json FROM verification_requests WHERE id = ?')
+      .get(id) as { status: string; verdict_json: string | null };
+    expect(row.status).toBe('failed');
+    expect(row.verdict_json).not.toBeNull();
+    const stored = JSON.parse(row.verdict_json as string) as VerdictV1;
+    expect(stored.model).toBe('playwright-deterministic');
+    expect(stored.feedback).toMatch(/#gone/);
+  });
+
+  it('runs the VLM as before when the backend sets NO deterministic verdict (S3)', async () => {
+    let judgeCalls = 0;
+    const countingJudge: VlmJudge = {
+      judge: async () => {
+        judgeCalls += 1;
+        return PASS_VERDICT;
+      },
+    };
+    // A backend that returns NO deterministic verdict (capturePage / undeclared assertions).
+    const plainBackend: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async () => ({ ok: true, fileNames: ['default.png'] }),
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: plainBackend },
+      judge: countingJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const id = enqueueRow(db, { chain: ['capturePage'], url: 'http://placeholder' });
+    await sched.drain();
+
+    // The VLM ran exactly once and its PASS drove the terminal status.
+    expect(judgeCalls).toBe(1);
+    expect(rowStatus(db, id).status).toBe('passed');
+  });
+
   it('marks the request failed (and releases the lease) when the dev-server spawn rejects', async () => {
     const mutex = new Mutex();
     const leasePool = new ResourceLeasePool(mutex);
@@ -416,5 +517,152 @@ describe('VerificationScheduler — dev-server seam (S2)', () => {
     expect(rowStatus(db, id).status).toBe('failed');
     expect(sink.ctx).toBeUndefined();
     expect(mutex.isLocked(verifyPortLease(5173))).toBe(false); // lease released
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MAJOR regression: route the REAL PlaywrightBackend.requiredLease through the
+// scheduler. The S2 tests above use a fakeBackend returning a concrete
+// 'verify:port:5173', so they never covered the real backend's lease seam. The real
+// backend returns the VERIFY_PORT_ANY sentinel ("any free pooled port"); the
+// scheduler must take a REAL configured port (never the old phantom 'verify:port:0'
+// slot that defeated the concurrency cap and yielded port 0 under contention).
+// ---------------------------------------------------------------------------
+
+/** An installer that reports chromium present without spawning npx (no real binary). */
+function presentInstaller(): PlaywrightInstaller {
+  return new PlaywrightInstaller({
+    executablePath: () => '/fake/chromium',
+    pathExists: () => true,
+    runInstall: async () => true,
+  });
+}
+
+/** A minimal fake browser the real PlaywrightBackend can drive (no real launch). */
+function fakeBrowserFactory(): BrowserFactory {
+  const ONE_PX_PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  const fakeBrowser = {
+    async newContext() {
+      return {
+        async newPage() {
+          return {
+            setDefaultTimeout(): void {},
+            setDefaultNavigationTimeout(): void {},
+            on(): void {},
+            async goto() {
+              return { ok: () => true, status: () => 200 };
+            },
+            async screenshot(): Promise<Buffer> {
+              return ONE_PX_PNG;
+            },
+          };
+        },
+        async close(): Promise<void> {},
+      };
+    },
+    async close(): Promise<void> {},
+  };
+  // The narrow slice the backend uses; the cast is confined to this test seam.
+  return async () => fakeBrowser as unknown as Awaited<ReturnType<BrowserFactory>>;
+}
+
+describe('VerificationScheduler — REAL PlaywrightBackend lease seam (S3 MAJOR)', () => {
+  let artifactsDir: string;
+
+  beforeEach(async () => {
+    artifactsDir = await mkdtemp(join(tmpdir(), 'cvv-sched-pw-'));
+  });
+
+  afterEach(async () => {
+    await rm(artifactsDir, { recursive: true, force: true });
+  });
+
+  it('start present → takes a REAL pooled port (never port 0) and spawns the dev server on it', async () => {
+    const calls: { spawnPort?: number } = {};
+    const mutex = new Mutex();
+    const leasePool = new ResourceLeasePool(mutex);
+    const provider: DevServerProvider = {
+      spawn: async (args): Promise<DevServerHandle> => {
+        calls.spawnPort = args.port;
+        return { baseUrl: `http://localhost:${args.port}`, release: async () => {} };
+      },
+    };
+    const backend = new PlaywrightBackend({
+      installer: presentInstaller(),
+      browserFactory: fakeBrowserFactory(),
+    });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { playwright: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => artifactsDir,
+      config: baseConfig, // devServerPorts: [5173, 3000]
+      leasePool,
+      devServerProvider: provider,
+      devServerContextResolver: async () => ({
+        cwd: '/tmp/wt',
+        deliverable: { id: 'web', start: 'npm run dev -- --port ${PORT}' },
+      }),
+    });
+
+    const id = enqueueRow(db, { chain: ['playwright'], start: 'npm run dev' });
+    await sched.drain();
+
+    // A REAL pooled port was taken (the first free configured one), NEVER 0.
+    expect(calls.spawnPort).toBe(5173);
+    expect(calls.spawnPort).not.toBe(0);
+    expect(rowStatus(db, id).status).toBe('passed');
+    // The phantom 'verify:port:0' slot never existed: only real pool members lock.
+    expect(mutex.isLocked('verify:port:0')).toBe(false);
+    expect(mutex.isLocked(verifyPortLease(5173))).toBe(false); // released in finally
+  });
+
+  it('pool exhausted → the request stays queued (no phantom always-free slot acquired)', async () => {
+    let spawned = 0;
+    const mutex = new Mutex();
+    const leasePool = new ResourceLeasePool(mutex);
+    const provider: DevServerProvider = {
+      spawn: async (args): Promise<DevServerHandle> => {
+        spawned += 1;
+        return { baseUrl: `http://localhost:${args.port}`, release: async () => {} };
+      },
+    };
+    const backend = new PlaywrightBackend({
+      installer: presentInstaller(),
+      browserFactory: fakeBrowserFactory(),
+    });
+
+    // Hold BOTH configured pool ports so the pool is fully exhausted.
+    const held5173 = await mutex.acquire(verifyPortLease(5173));
+    const held3000 = await mutex.acquire(verifyPortLease(3000));
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { playwright: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => artifactsDir,
+      config: baseConfig,
+      leasePool,
+      devServerProvider: provider,
+      devServerContextResolver: async () => ({
+        cwd: '/tmp/wt',
+        deliverable: { id: 'web', start: 'npm run dev -- --port ${PORT}' },
+      }),
+    });
+
+    const id = enqueueRow(db, { chain: ['playwright'], start: 'npm run dev' });
+    await sched.drain();
+
+    // No phantom slot was acquired: nothing spawned, request left queued (not failed).
+    expect(spawned).toBe(0);
+    expect(mutex.isLocked('verify:port:0')).toBe(false);
+    expect(rowStatus(db, id).status).toBe('queued');
+
+    held5173();
+    held3000();
   });
 });
