@@ -25,6 +25,7 @@ import { mcpsRouter } from './routers/mcps';
 import { pluginsRouter } from './routers/plugins';
 import { variantsRouter } from './routers/variants';
 import { experimentsRouter } from './routers/experiments';
+import { verificationRequestsRouter } from './routers/verificationRequests';
 
 export const appRouter = router({
   cyboflow: router({
@@ -46,6 +47,7 @@ export const appRouter = router({
     substrates: substratesRouter,
     tasks: tasksRouter,
     variants: variantsRouter,
+    verificationRequests: verificationRequestsRouter,
     workflows: workflowsRouter,
   }),
 });
