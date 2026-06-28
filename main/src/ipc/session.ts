@@ -151,6 +151,18 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     cyboflow
   } = services;
 
+  // Ephemeral, single-consume "resume the lost REPL" intent per session, armed by
+  // sessions:resume-interactive (the open-time "Resume previous session" choice)
+  // and consumed once by the sessions:input dead-REPL respawn branch. Lives only
+  // in memory for the app run — if the user closes before sending the first turn,
+  // the open-time prompt simply re-offers resume next launch (still resumable).
+  const pendingInteractiveResume = new Set<string>();
+
+  // Resolve the single server-side 'claude' panel id an interactive quick session
+  // owns (created by sessions:create-quick). Undefined if none exists yet.
+  const resolveClaudePanelId = (sessionId: string): string | undefined =>
+    panelManager.getPanelsForSession(sessionId).find((p) => p.type === 'claude')?.id;
+
   // Helper function to get CLI manager for a specific tool
   // TODO: This will be used in the future to support multiple CLI tools
   const getCliManager = async (toolId: string = 'claude') => {
@@ -976,6 +988,21 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           // contract) — awaiting would deadlock sessions:input until the
           // session ends.
           console.log(`[IPC] Interactive REPL not running for panel ${claudePanel.id}, re-spawning...`);
+          // Resume vs fresh: if the user chose "Resume previous session" at open
+          // time (sessions:resume-interactive armed the one-shot flag) and a prior
+          // claude_session_id is on the session row, resume the conversation on
+          // THIS first turn — startPanel emits `--resume <uuid> --fork-session` and
+          // the user's message rides as the positional prompt, so the context is
+          // restored and a transcript line is guaranteed (discovery binds). Else a
+          // fresh REPL (unchanged). One-shot: consume the flag regardless.
+          let resumeSessionId: string | undefined;
+          if (pendingInteractiveResume.delete(sessionId)) {
+            const storedClaudeSessionId = sessionManager.getClaudeSessionId(sessionId);
+            if (storedClaudeSessionId) {
+              resumeSessionId = storedClaudeSessionId;
+              console.log(`[IPC] Resuming interactive session ${sessionId} via --resume ${storedClaudeSessionId} --fork-session`);
+            }
+          }
           // Deterministic at-spawn registration (mirrors the create-quick eager
           // spawn): seed the facade's runId→panelId translation BEFORE the PTY
           // spawn so a relay/close-out racing the first PTY byte never falls
@@ -993,6 +1020,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               panelModel,
               undefined, // effort — re-spawn does not carry the ultracode card setting
               panelFastMode,
+              resumeSessionId, // resume the prior conversation when armed at open time
             )
             .catch((err: unknown) => {
               console.error(`[IPC] Interactive REPL re-spawn failed for session ${sessionId}:`, err);
@@ -1025,6 +1053,55 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     } catch (error) {
       console.error('Failed to send input:', error);
       return { success: false, error: 'Failed to send input' };
+    }
+  });
+
+  // INTERACTIVE RESUME (lost quick-session REPL recovery) ---------------------
+  // After an app close/restart the persistent interactive REPL is gone and its
+  // sentinel run is force-failed by boot recovery, but sessions.claude_session_id
+  // (persisted from the transcript filename) AND claude's on-disk transcript
+  // survive. These two handlers let the open-time UI offer "Resume previous
+  // session" vs "Start fresh": the query reports whether a resume is possible; the
+  // intent handler arms the one-shot flag consumed by the sessions:input dead-REPL
+  // respawn branch above. Scope: interactive quick sessions only.
+  ipcMain.handle('sessions:get-interactive-resume-state', async (_event, sessionId: string) => {
+    try {
+      const dbSession = databaseService.getSession(sessionId);
+      if (!dbSession) {
+        return { success: false, error: 'Session not found' };
+      }
+      const panelId = resolveClaudePanelId(sessionId);
+      const replRunning = panelId ? interactiveCliManager.isPanelRunning(panelId) : false;
+      const claudeSessionId = sessionManager.getClaudeSessionId(sessionId) ?? null;
+      const worktreeExists = !!dbSession.worktree_path && existsSync(dbSession.worktree_path);
+      return { success: true, data: { replRunning, claudeSessionId, worktreeExists } };
+    } catch (error) {
+      console.error('[IPC] Failed to get interactive resume state:', error);
+      return { success: false, error: 'Failed to get interactive resume state' };
+    }
+  });
+
+  ipcMain.handle('sessions:resume-interactive', async (_event, sessionId: string) => {
+    try {
+      const dbSession = databaseService.getSession(sessionId);
+      if (!dbSession) {
+        return { success: false, error: 'Session not found' };
+      }
+      if (dbSession.substrate !== 'interactive') {
+        return { success: false, error: 'Session is not an interactive session' };
+      }
+      const claudeSessionId = sessionManager.getClaudeSessionId(sessionId);
+      if (!claudeSessionId) {
+        return { success: false, error: 'No prior Claude conversation to resume' };
+      }
+      // Arm the one-shot resume; the next composer turn (sessions:input dead-REPL
+      // branch) spawns `claude --resume <uuid> --fork-session`.
+      pendingInteractiveResume.add(sessionId);
+      console.log(`[IPC] Armed interactive resume for session ${sessionId} (claude_session_id=${claudeSessionId})`);
+      return { success: true };
+    } catch (error) {
+      console.error('[IPC] Failed to arm interactive resume:', error);
+      return { success: false, error: 'Failed to arm interactive resume' };
     }
   });
 
