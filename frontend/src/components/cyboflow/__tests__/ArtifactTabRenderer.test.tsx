@@ -40,11 +40,13 @@ vi.mock('../../MarkdownPreview', () => ({
 }));
 
 const commitMutate = vi.fn().mockResolvedValue({ artifactId: 'art-1' });
+const acceptBaselineMutate = vi.fn().mockResolvedValue({ baselineKey: 'IDEA-018' });
 vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       artifacts: {
         commit: { mutate: (...args: unknown[]) => commitMutate(...args) },
+        acceptAsBaseline: { mutate: (...args: unknown[]) => acceptBaselineMutate(...args) },
       },
     },
   },
@@ -113,6 +115,7 @@ describe('ArtifactTabRenderer', () => {
     // Default: no resolved screenshot bytes (per-card fallback path).
     setImages({ images: {}, loading: false, error: null });
     commitMutate.mockClear();
+    acceptBaselineMutate.mockClear();
   });
 
   // --- idea-spec -----------------------------------------------------------
@@ -345,6 +348,73 @@ describe('ArtifactTabRenderer', () => {
     // PASS suppresses feedback + issue list.
     expect(screen.queryByTestId('artifact-verdict-feedback')).not.toBeInTheDocument();
     expect(screen.queryByTestId('artifact-verdict-issues')).not.toBeInTheDocument();
+  });
+
+  it('shows the Accept-as-baseline button ONLY on a PASS verdict and calls the mutation', async () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: {
+        kind: 'screenshots',
+        payload: {
+          fileNames: ['home.png'],
+          verdict: {
+            status: 'pass',
+            confidence: 0.9,
+            issues: [],
+            feedback: 'ok',
+            judgedFileNames: ['home.png'],
+            baselineUsed: false,
+            model: 'claude-opus-4-8',
+          },
+        },
+      },
+    });
+    render(
+      <ArtifactTabRenderer
+        artifact={makeArtifact({ atype: 'screenshots', mode: 'template', sourceRef: 'IDEA-018' })}
+        {...PROPS}
+      />,
+    );
+
+    const btn = screen.getByTestId('artifact-accept-baseline-button');
+    expect(btn).toHaveTextContent('Accept as baseline');
+    fireEvent.click(btn);
+
+    await waitFor(() =>
+      expect(acceptBaselineMutate).toHaveBeenCalledWith({
+        projectId: 1,
+        runId: 'run-1',
+        baselineKey: 'IDEA-018',
+        fileNames: ['home.png'],
+      }),
+    );
+    // After acceptance the button reflects the saved state.
+    await waitFor(() => expect(btn).toHaveTextContent('✓ Saved as baseline'));
+  });
+
+  it('does NOT render the Accept-as-baseline button on a FAIL verdict', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: {
+        kind: 'screenshots',
+        payload: {
+          fileNames: ['home.png'],
+          verdict: {
+            status: 'fail',
+            confidence: 0.8,
+            issues: [{ severity: 'high', description: 'broken' }],
+            feedback: 'nope',
+            judgedFileNames: ['home.png'],
+            baselineUsed: false,
+            model: 'claude-opus-4-8',
+          },
+        },
+      },
+    });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'screenshots', mode: 'template' })} {...PROPS} />);
+    expect(screen.queryByTestId('artifact-accept-baseline-button')).not.toBeInTheDocument();
   });
 
   it('renders the FAIL verdict banner with feedback + a per-issue list', () => {

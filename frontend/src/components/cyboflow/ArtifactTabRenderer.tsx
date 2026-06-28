@@ -24,6 +24,7 @@
  */
 import { useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
+import { trpc } from '../../trpc/client';
 import { MarkdownPreview } from '../MarkdownPreview';
 import { ArtifactHeader } from './ArtifactHeader';
 import { TaskDetailModal } from './TaskDetailModal';
@@ -394,11 +395,52 @@ function severityColor(severity: VerdictV1['issues'][number]['severity']): strin
  * on the leading edge. PASS shows only the confidence; FAIL / low_confidence add
  * the feedback line and a per-issue list when present.
  */
-function VerdictBanner({ verdict }: { verdict: VerdictV1 }): ReactElement {
+function VerdictBanner({
+  verdict,
+  projectId,
+  runId,
+  baselineKey,
+}: {
+  verdict: VerdictV1;
+  projectId: number;
+  runId: string;
+  /** The key the accepted baseline PNGs are filed under (the deliverable/artifact key). */
+  baselineKey: string;
+}): ReactElement {
   const { accent, icon, label } = verdictPresentation(verdict.status);
   const confidencePct = Math.round((verdict.confidence ?? 0) * 100);
   const showDetail = verdict.status !== 'pass';
   const issues = Array.isArray(verdict.issues) ? verdict.issues : [];
+
+  // Accept-as-baseline (S5) — only offered on a PASS verdict. Sends the judged PNGs
+  // to the artifacts.acceptAsBaseline mutation (which copies them into the git-tracked
+  // baselines tree + commits). Local in-flight + done/error state; the button never
+  // optimistically mutates the verdict.
+  const [accepting, setAccepting] = useState(false);
+  const [accepted, setAccepted] = useState(false);
+  const [acceptError, setAcceptError] = useState<string | null>(null);
+  const judgedFileNames = Array.isArray(verdict.judgedFileNames)
+    ? verdict.judgedFileNames.filter((n): n is string => typeof n === 'string')
+    : [];
+  const canAccept = verdict.status === 'pass' && judgedFileNames.length > 0 && !accepted;
+
+  const onAcceptBaseline = (): void => {
+    if (accepting || !canAccept) return;
+    setAccepting(true);
+    setAcceptError(null);
+    trpc.cyboflow.artifacts.acceptAsBaseline
+      .mutate({ projectId, runId, baselineKey, fileNames: judgedFileNames })
+      .then(
+        () => {
+          setAccepting(false);
+          setAccepted(true);
+        },
+        (err: unknown) => {
+          setAccepting(false);
+          setAcceptError(err instanceof Error ? err.message : 'Accept as baseline failed.');
+        },
+      );
+  };
 
   return (
     <div
@@ -478,6 +520,46 @@ function VerdictBanner({ verdict }: { verdict: VerdictV1 }): ReactElement {
           ))}
         </ul>
       )}
+      {/* Accept-as-baseline footer — ONLY on a PASS verdict (S5). Copies the judged
+          PNGs into the git-tracked baselines tree + commits them. */}
+      {verdict.status === 'pass' && (
+        <div
+          data-testid="artifact-verdict-footer"
+          style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 2 }}
+        >
+          <button
+            type="button"
+            data-testid="artifact-accept-baseline-button"
+            onClick={onAcceptBaseline}
+            disabled={!canAccept || accepting}
+            style={{
+              fontSize: '10px',
+              fontWeight: 700,
+              letterSpacing: '.02em',
+              padding: '4px 10px',
+              border: `1px solid ${accent}`,
+              background: 'transparent',
+              color: accent,
+              cursor: !canAccept || accepting ? 'default' : 'pointer',
+              opacity: !canAccept || accepting ? 0.55 : 1,
+            }}
+          >
+            {accepted
+              ? '✓ Saved as baseline'
+              : accepting
+                ? 'Saving baseline…'
+                : 'Accept as baseline'}
+          </button>
+          {acceptError && (
+            <span
+              data-testid="artifact-accept-baseline-error"
+              style={{ fontSize: '10px', color: VERDICT_FAIL }}
+            >
+              {acceptError}
+            </span>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -538,7 +620,16 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
       />
       {/* Verdict strip above the gallery — present whenever the payload carries a
           judged verdict, independent of whether bytes resolved. */}
-      {!loading && !error && verdict && <VerdictBanner verdict={verdict} />}
+      {!loading && !error && verdict && (
+        <VerdictBanner
+          verdict={verdict}
+          projectId={projectId}
+          runId={artifact.runId}
+          // Default the baseline key to the deliverable/artifact key (sourceRef when
+          // present, else the artifact id) so accepted PNGs file under a stable handle.
+          baselineKey={artifact.sourceRef ?? artifact.id}
+        />
+      )}
       {loading ? (
         <StateRow testid="artifact-shots-loading" color={MUTED} text="Loading screenshots…" />
       ) : error ? (
