@@ -21,6 +21,7 @@ import { reviewItemsRouter } from './routers/reviewItems';
 import { artifactsRouter } from './routers/artifacts';
 import { substratesRouter } from './routers/substrates';
 import { monitorRouter } from './routers/monitor';
+import { verificationRequestsRouter } from './routers/verificationRequests';
 
 export const appRouter = router({
   cyboflow: router({
@@ -38,6 +39,7 @@ export const appRouter = router({
     runs: runsRouter,
     substrates: substratesRouter,
     tasks: tasksRouter,
+    verificationRequests: verificationRequestsRouter,
     workflows: workflowsRouter,
   }),
 });
