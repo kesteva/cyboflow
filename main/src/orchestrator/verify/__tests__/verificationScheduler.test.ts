@@ -22,6 +22,8 @@ import {
   VerificationScheduler,
   ResourceLeasePool,
   verifyPortLease,
+  sprintVerifyBatchLease,
+  BATCH_MUTEX_MAX_QUEUED_HOLDERS,
   type DevServerProvider,
   type DevServerHandle,
   type DevServerSpawnArgs,
@@ -664,5 +666,453 @@ describe('VerificationScheduler — REAL PlaywrightBackend lease seam (S3 MAJOR)
 
     held5173();
     held3000();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// L4 — batch worktree-sync mutex (sprint-verify-<batchId>) (S5)
+//
+// For a verification operating on a BATCHED run the scheduler acquires a count-1
+// `sprint-verify-<batchId>` mutex AFTER the dev-server/port lease and BEFORE
+// backend.capture, and releases it in the SAME finally as the other leases. It
+// is a serialization point per batchId (two concurrent batched captures on the
+// same batchId serialize; different batchIds do not). A non-batch run (null
+// batch_id) acquires NO batch mutex. batch_id is read from workflow_runs via the
+// injected DatabaseLike, so these tests add that table.
+// ---------------------------------------------------------------------------
+
+/** A DB with verification_requests AND a minimal workflow_runs(id, batch_id). */
+function buildDbWithRuns(): Database.Database {
+  const db = buildDb();
+  db.exec(`
+    CREATE TABLE workflow_runs (
+      id        TEXT PRIMARY KEY,
+      batch_id  TEXT
+    );
+  `);
+  return db;
+}
+
+/** Register a run row with the given batch_id (null = non-batch run). */
+function insertRun(db: Database.Database, runId: string, batchId: string | null): void {
+  db.prepare('INSERT INTO workflow_runs (id, batch_id) VALUES (?, ?)').run(runId, batchId);
+}
+
+/** Insert one queued request for a specific run id (default fixtures use 'run-1'). */
+function enqueueRowForRun(
+  db: Database.Database,
+  runId: string,
+  opts: { chain: VisualBackendId[]; url?: string },
+): string {
+  const id = `vr_${Math.random().toString(36).slice(2)}`;
+  db.prepare(
+    `INSERT INTO verification_requests
+       (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt)
+     VALUES (?, ?, 1, 'queued', 'static-render-snapshot', ?, ?, 0)`,
+  ).run(
+    id,
+    runId,
+    JSON.stringify({ intent: 'looks right', url: opts.url ?? 'http://placeholder' }),
+    JSON.stringify(opts.chain),
+  );
+  return id;
+}
+
+describe('VerificationScheduler — batch worktree-sync mutex (S5 / L4)', () => {
+  it('a BATCHED run acquires sprint-verify-<batchId> before capture and releases it in finally on SUCCESS', async () => {
+    const dbR = buildDbWithRuns();
+    insertRun(dbR, 'run-b', 'batch-XYZ');
+
+    const mutex = new Mutex();
+    const leasePool = new ResourceLeasePool(mutex);
+    const sink: { ctx?: CaptureContext } = {};
+    let heldDuringCapture = false;
+    const backend: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async (ctx): Promise<CaptureResult> => {
+        sink.ctx = ctx;
+        // The batch mutex must be held by the time capture runs.
+        heldDuringCapture = mutex.isLocked(sprintVerifyBatchLease('batch-XYZ'));
+        return { ok: true, fileNames: ['default.png'] };
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(dbR),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      leasePool,
+    });
+
+    const id = enqueueRowForRun(dbR, 'run-b', { chain: ['capturePage'] });
+    await sched.drain();
+
+    expect(rowStatus(dbR, id).status).toBe('passed');
+    expect(heldDuringCapture).toBe(true); // mutex held during capture
+    // Released in finally — the batch lease is free again.
+    expect(mutex.isLocked(sprintVerifyBatchLease('batch-XYZ'))).toBe(false);
+
+    dbR.close();
+  });
+
+  it('a BATCHED run releases sprint-verify-<batchId> in finally on a CAPTURE THROW', async () => {
+    const dbR = buildDbWithRuns();
+    insertRun(dbR, 'run-b', 'batch-THROW');
+
+    const mutex = new Mutex();
+    const leasePool = new ResourceLeasePool(mutex);
+    const backend: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async (): Promise<CaptureResult> => {
+        throw new Error('capture boom');
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(dbR),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      leasePool,
+    });
+
+    const id = enqueueRowForRun(dbR, 'run-b', { chain: ['capturePage'] });
+    await sched.drain();
+
+    expect(rowStatus(dbR, id).status).toBe('failed');
+    // STILL released in finally despite the throw.
+    expect(mutex.isLocked(sprintVerifyBatchLease('batch-THROW'))).toBe(false);
+
+    dbR.close();
+  });
+
+  it('a NON-batch run (null batch_id) acquires NO batch mutex', async () => {
+    const dbR = buildDbWithRuns();
+    insertRun(dbR, 'run-solo', null);
+
+    const mutex = new Mutex();
+    const leasePool = new ResourceLeasePool(mutex);
+    let lockedNames: string[] = [];
+    const backend: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async (): Promise<CaptureResult> => {
+        lockedNames = mutex.getLockedResources();
+        return { ok: true, fileNames: ['default.png'] };
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(dbR),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      leasePool,
+    });
+
+    const id = enqueueRowForRun(dbR, 'run-solo', { chain: ['capturePage'] });
+    await sched.drain();
+
+    expect(rowStatus(dbR, id).status).toBe('passed');
+    // No sprint-verify-* lease was ever held during the capture.
+    expect(lockedNames.some((n) => n.startsWith('sprint-verify-'))).toBe(false);
+
+    dbR.close();
+  });
+
+  it('two concurrent BATCHED captures on the SAME batchId serialize (the second waits for the first)', async () => {
+    const dbR = buildDbWithRuns();
+    insertRun(dbR, 'run-a', 'batch-SAME');
+    insertRun(dbR, 'run-c', 'batch-SAME');
+
+    const mutex = new Mutex();
+    const leasePool = new ResourceLeasePool(mutex);
+
+    // Gate the FIRST capture so it holds the batch mutex until we release it; record
+    // the order captures actually begin to prove the second waited.
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstStarted = false;
+
+    const backend: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async (ctx): Promise<CaptureResult> => {
+        order.push(`start:${ctx.runId}`);
+        if (!firstStarted) {
+          firstStarted = true;
+          await firstGate; // hold the batch mutex (first capture) until released
+        }
+        order.push(`end:${ctx.runId}`);
+        return { ok: true, fileNames: ['default.png'] };
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(dbR),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      leasePool,
+    });
+
+    enqueueRowForRun(dbR, 'run-a', { chain: ['capturePage'] });
+    enqueueRowForRun(dbR, 'run-c', { chain: ['capturePage'] });
+
+    const drainP = sched.drain();
+    // Let the first capture start and PARK on the batch mutex for the second.
+    await new Promise((r) => setTimeout(r, 30));
+    // Only ONE capture has started; the second is blocked on the batch mutex.
+    expect(order.filter((e) => e.startsWith('start:')).length).toBe(1);
+
+    releaseFirst();
+    await drainP;
+
+    // The first fully finished BEFORE the second started → strict serialization:
+    // start, end, start, end (NOT start, start, ... which would mean both ran at once).
+    expect(order[0]).toMatch(/^start:/);
+    expect(order[1]).toMatch(/^end:/);
+    expect(order[2]).toMatch(/^start:/);
+    expect(order[3]).toMatch(/^end:/);
+    // The two captures belonged to the two different runs (both lanes verified).
+    expect(new Set(order.map((e) => e.split(':')[1]))).toEqual(new Set(['run-a', 'run-c']));
+
+    dbR.close();
+  });
+
+  it('a second batched capture whose holder runs LONGER than the Mutex default timeout still SERIALIZES and PASSES (not failed)', async () => {
+    // REGRESSION (S5 major): a holder legitimately holds sprint-verify-<batchId> for
+    // the WHOLE capture+judge lifetime (up to requestTimeoutMs, default 5 min). If the
+    // scheduler's blocking acquire reused the Mutex 30s DEFAULT timeout, a second
+    // concurrent capture on the same batchId whose wait exceeds that default would
+    // throw 'Mutex timeout' and be marked 'failed' — the EXACT opposite of the
+    // serialize-don't-fail guarantee. We prove the scheduler passes an explicit
+    // timeout that overrides the default by shrinking the Mutex default to a tiny
+    // value, holding the first capture LONGER than it, and asserting the second still
+    // waits and PASSES.
+    const dbR = buildDbWithRuns();
+    insertRun(dbR, 'run-a', 'batch-LONG');
+    insertRun(dbR, 'run-c', 'batch-LONG');
+
+    // A Mutex whose DEFAULT acquire timeout is tiny (20ms). If acquireBatchMutex relied
+    // on the default, the second capture (held ~80ms behind the first) would throw.
+    const TINY_DEFAULT_MS = 20;
+    const mutex = new Mutex();
+    (mutex as unknown as { defaultTimeout: number }).defaultTimeout = TINY_DEFAULT_MS;
+    const leasePool = new ResourceLeasePool(mutex);
+
+    const order: string[] = [];
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let firstStarted = false;
+
+    const backend: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async (ctx): Promise<CaptureResult> => {
+        order.push(`start:${ctx.runId}`);
+        if (!firstStarted) {
+          firstStarted = true;
+          await firstGate; // hold the batch mutex well past TINY_DEFAULT_MS
+        }
+        order.push(`end:${ctx.runId}`);
+        return { ok: true, fileNames: ['default.png'] };
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(dbR),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      leasePool,
+      // requestTimeoutMs * BATCH_MUTEX_MAX_QUEUED_HOLDERS is the acquire bound. Keep
+      // requestTimeoutMs comfortably above the hold duration so the per-request
+      // deadline never fires, isolating the acquire-timeout behavior under test.
+      requestTimeoutMs: 5000,
+    });
+
+    const idA = enqueueRowForRun(dbR, 'run-a', { chain: ['capturePage'] });
+    const idC = enqueueRowForRun(dbR, 'run-c', { chain: ['capturePage'] });
+
+    const drainP = sched.drain();
+    // Wait LONGER than the tiny Mutex default so a default-timeout acquire would have
+    // already thrown for the second capture by now.
+    await new Promise((r) => setTimeout(r, TINY_DEFAULT_MS * 4));
+    // Only the first capture has started; the second is still WAITING (not thrown).
+    expect(order.filter((e) => e.startsWith('start:')).length).toBe(1);
+
+    releaseFirst();
+    await drainP;
+
+    // Both serialized and BOTH PASSED — neither was spuriously marked 'failed'.
+    expect(rowStatus(dbR, idA).status).toBe('passed');
+    expect(rowStatus(dbR, idC).status).toBe('passed');
+    // Strict serialization order: start, end, start, end.
+    expect(order[0]).toMatch(/^start:/);
+    expect(order[1]).toMatch(/^end:/);
+    expect(order[2]).toMatch(/^start:/);
+    expect(order[3]).toMatch(/^end:/);
+
+    dbR.close();
+  });
+
+  it('acquires the batch mutex with an explicit timeout sized to requestTimeoutMs (never the 30s default)', async () => {
+    const dbR = buildDbWithRuns();
+    insertRun(dbR, 'run-b', 'batch-TO');
+
+    const mutex = new Mutex();
+    const acquireSpy = vi.spyOn(mutex, 'acquire');
+    const leasePool = new ResourceLeasePool(mutex);
+    const requestTimeoutMs = 5000;
+
+    const backend: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async (): Promise<CaptureResult> => ({ ok: true, fileNames: ['default.png'] }),
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(dbR),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      leasePool,
+      requestTimeoutMs,
+    });
+
+    const id = enqueueRowForRun(dbR, 'run-b', { chain: ['capturePage'] });
+    await sched.drain();
+
+    expect(rowStatus(dbR, id).status).toBe('passed');
+    // The batch mutex acquire was given an EXPLICIT timeout = requestTimeoutMs *
+    // BATCH_MUTEX_MAX_QUEUED_HOLDERS, far above the Mutex 30s default (so a legitimate
+    // long holder never trips a spurious 'Mutex timeout').
+    const batchCall = acquireSpy.mock.calls.find(
+      ([name]) => name === sprintVerifyBatchLease('batch-TO'),
+    );
+    expect(batchCall).toBeDefined();
+    expect(batchCall?.[1]).toBe(requestTimeoutMs * BATCH_MUTEX_MAX_QUEUED_HOLDERS);
+    expect(batchCall?.[1]).toBeGreaterThan(30000);
+
+    dbR.close();
+  });
+
+  it('two concurrent captures on DIFFERENT batchIds do NOT serialize against each other', async () => {
+    const dbR = buildDbWithRuns();
+    insertRun(dbR, 'run-a', 'batch-A');
+    insertRun(dbR, 'run-c', 'batch-C');
+
+    const mutex = new Mutex();
+    const leasePool = new ResourceLeasePool(mutex);
+
+    // Both captures park on the SAME gate; if they truly run in parallel both will be
+    // started before either is released. If the batch mutex (wrongly) serialized
+    // different batchIds, only one would have started.
+    let started = 0;
+    let resolveBothStarted!: () => void;
+    const bothStarted = new Promise<void>((resolve) => {
+      resolveBothStarted = resolve;
+    });
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+
+    const backend: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async (): Promise<CaptureResult> => {
+        started += 1;
+        if (started === 2) resolveBothStarted();
+        await gate;
+        return { ok: true, fileNames: ['default.png'] };
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(dbR),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      leasePool,
+    });
+
+    enqueueRowForRun(dbR, 'run-a', { chain: ['capturePage'] });
+    enqueueRowForRun(dbR, 'run-c', { chain: ['capturePage'] });
+
+    const drainP = sched.drain();
+    // Both captures must reach the gate concurrently (no cross-batch serialization).
+    await bothStarted;
+    expect(started).toBe(2);
+
+    releaseGate();
+    await drainP;
+
+    dbR.close();
+  });
+
+  it('a missing workflow_runs row / table degrades to a non-batch run (no batch mutex)', async () => {
+    // Use the plain buildDb() (NO workflow_runs table at all): the batch_id lookup
+    // must fail-soft to "no batch", preserving the byte-identical single-run path.
+    const sink: { ctx?: CaptureContext } = {};
+    const mutex = new Mutex();
+    const leasePool = new ResourceLeasePool(mutex);
+    let lockedNames: string[] = [];
+    const backend: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async (ctx): Promise<CaptureResult> => {
+        sink.ctx = ctx;
+        lockedNames = mutex.getLockedResources();
+        return { ok: true, fileNames: ['default.png'] };
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db), // the module-level `db` from buildDb() — no workflow_runs
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      leasePool,
+    });
+
+    const id = enqueueRow(db, { chain: ['capturePage'] });
+    await sched.drain();
+
+    expect(rowStatus(db, id).status).toBe('passed');
+    expect(lockedNames.some((n) => n.startsWith('sprint-verify-'))).toBe(false);
   });
 });
