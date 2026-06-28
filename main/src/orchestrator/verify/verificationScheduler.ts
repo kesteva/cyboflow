@@ -713,12 +713,28 @@ export class VerificationScheduler {
    */
   private async processRow(row: VerificationRequestRow): Promise<{ work: Promise<void> | null }> {
     const type = row.verify_type as VerificationType;
-    const input = this.parseInput(row.deliverable_json);
-    if (!input) {
+    const parsed = this.parseInput(row.deliverable_json);
+    if (!parsed) {
       this.markTerminal(row.id, 'skipped', { error: 'unparseable deliverable_json' });
       await this.deliver(row, 'skipped', undefined, []);
       return { work: null };
     }
+
+    // ROOT-CAUSE FIX (S8): hydrate the request input from the run's verify.json
+    // deliverable recipe BEFORE lease selection, so a startable deliverable's
+    // `start` is on `input` by the time the Rung-1 Playwright backend's
+    // requiredLease(input) runs — that is the SINGLE signal it keys off to ask for a
+    // `verify:port` lease (inputDeclaresDevServer). Without this the resolver was
+    // only read INSIDE maybeSpawnDevServer (AFTER the lease was chosen), so input
+    // never carried `start`, the backend never leased a port, and no dev server ever
+    // spawned — the dev-build verification path was inert. Resolve ONCE here and
+    // thread the result into maybeSpawnDevServer so verify.json is loaded a single
+    // time per request. Fail-soft: a resolver throw / no provider / no matching
+    // deliverable leaves the resolution null and input unhydrated (no `start` ⇒ no
+    // port lease ⇒ no dev server ⇒ the static url/htmlPath capture path runs exactly
+    // as before this layer).
+    const resolved = await this.resolveDeliverableContext(row, parsed);
+    const input = this.hydrateInput(parsed, resolved?.deliverable);
 
     const chain = this.parseChain(row.chain_json);
     // Live, present, capability-ordered backends for this request, cheapest first.
@@ -763,7 +779,81 @@ export class VerificationScheduler {
     // detach the capture work so the drain loop proceeds to the next row at once.
     this.markLeased(row.id, chosen.id);
     this.markRunning(row.id, chosen.id);
-    return { work: this.runChosen(row, type, input, chosen, lease) };
+    return { work: this.runChosen(row, type, input, chosen, lease, resolved) };
+  }
+
+  /**
+   * S8 — resolve the run's verify.json dev-server context ONCE per request (the
+   * project worktree cwd + the matching deliverable recipe), via the injected
+   * devServerContextResolver. The resolution is reused both for input hydration
+   * (BEFORE lease selection) and for maybeSpawnDevServer (AFTER the port lease), so
+   * verify.json is loaded a SINGLE time per request — no double fs read.
+   *
+   * Returns null when there is nothing to resolve (no resolver injected / no
+   * matching deliverable / no worktree) OR when the resolver throws — every null
+   * case fail-softs to the unhydrated, static-capture path. NEVER throws.
+   */
+  private async resolveDeliverableContext(
+    row: VerificationRequestRow,
+    input: VerificationRequestInput,
+  ): Promise<{ cwd: string; deliverable: DeliverableVerifyConfig } | null> {
+    if (!this.devServerContextResolver) return null;
+    try {
+      return await this.devServerContextResolver({
+        runId: row.run_id,
+        projectId: row.project_id,
+        input,
+      });
+    } catch (err) {
+      this.logger?.debug('[VerificationScheduler] deliverable context resolve failed; leaving input unhydrated', {
+        requestId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * S8 — merge a matched verify.json deliverable's recipe into the request input,
+   * producing the HYDRATED input fed to lease selection + capture. AGENT-PROVIDED
+   * VALUES WIN: a field already present (non-empty) on the request input is left
+   * untouched; only an absent/empty field is filled from the deliverable. No
+   * deliverable (resolver absent / no match) ⇒ input returned unchanged
+   * (referentially identical), so a non-dev-server request is byte-identical to
+   * before this layer.
+   *
+   * Only the fields that exist on VerificationRequestInput are hydrated:
+   *   - `start` — the SOLE signal the Rung-1 Playwright backend's requiredLease(input)
+   *     reads to ask for a `verify:port` lease (the whole point of this slice). The
+   *     deliverable's build/readyWhen stay on the `deliverable` (the provider reads
+   *     them off its `config` arg in maybeSpawnDevServer) — they are NOT input fields,
+   *     so no shared-type change is needed.
+   *   - `assertions` — explicit deterministic checks (decision #3). Filled only when
+   *     the agent passed none, so an inline assertion list is never clobbered.
+   */
+  private hydrateInput(
+    input: VerificationRequestInput,
+    deliverable: DeliverableVerifyConfig | undefined,
+  ): VerificationRequestInput {
+    if (!deliverable) return input;
+    const hydrated: VerificationRequestInput = { ...input };
+    let changed = false;
+    // `start` — the signal the Rung-1 Playwright backend's requiredLease reads.
+    if ((hydrated.start === undefined || hydrated.start.trim().length === 0) && deliverable.start) {
+      hydrated.start = deliverable.start;
+      changed = true;
+    }
+    // `assertions` — explicit deterministic checks (decision #3). Only fill when the
+    // agent passed none, so an inline assertion list is never clobbered.
+    if (
+      (hydrated.assertions === undefined || hydrated.assertions.length === 0) &&
+      deliverable.assertions &&
+      deliverable.assertions.length > 0
+    ) {
+      hydrated.assertions = deliverable.assertions;
+      changed = true;
+    }
+    return changed ? hydrated : input;
   }
 
   /**
@@ -839,6 +929,7 @@ export class VerificationScheduler {
     input: VerificationRequestInput,
     backend: VisualBackend,
     lease: LeaseHandle,
+    resolvedContext: { cwd: string; deliverable: DeliverableVerifyConfig } | null,
   ): Promise<void> {
     const controller = new AbortController();
     // Register the controller so cancelForRun(runId) + the per-request timeout can
@@ -877,7 +968,7 @@ export class VerificationScheduler {
       // has a `start` command. BEFORE building CaptureContext so the spawned baseUrl
       // can be threaded into ctx.input.url. A null handle (no provider / no start /
       // lease is not a port lease) leaves the static url/htmlPath capture unchanged.
-      devServerHandle = await this.maybeSpawnDevServer(row, input, lease, controller.signal);
+      devServerHandle = await this.maybeSpawnDevServer(row, lease, resolvedContext, controller.signal);
       // A timeout/cancel that fired DURING dev-server spawn: stop here, mark
       // 'timeout', releasing both the dev server (in finally) and the lease.
       if (controller.signal.aborted) {
@@ -1090,22 +1181,28 @@ export class VerificationScheduler {
    * deliverable recipe has a `start` command (S2 / locked decision #1). Returns the
    * live DevServerHandle (the caller threads handle.baseUrl into ctx.input.url and
    * release()s it in finally), or null when no dev server is spawned:
-   *   - no provider / no context resolver injected (static-capture deployment), OR
+   *   - no provider injected (static-capture deployment), OR
    *   - the held lease is NOT a port lease (rung 0 / null lease — nothing to run on), OR
    *   - no verify.json / no matching deliverable / no `start` command, OR
    *   - the worktree cwd could not be resolved.
    * In every null case the static url/htmlPath capture path is preserved unchanged.
+   *
+   * S8 — the verify.json deliverable was already resolved ONCE in processRow (used to
+   * hydrate `input` BEFORE lease selection) and is THREADED in here as
+   * `resolvedContext`, so verify.json is loaded a single time per request (no second
+   * devServerContextResolver call). A null resolvedContext is the same fail-soft
+   * "no dev server" path as before.
    *
    * A spawn FAILURE (build/start/readiness reject) propagates so runChosen marks the
    * request failed/timeout (the provider has already torn down what it spawned).
    */
   private async maybeSpawnDevServer(
     row: VerificationRequestRow,
-    input: VerificationRequestInput,
     lease: LeaseHandle,
+    resolvedContext: { cwd: string; deliverable: DeliverableVerifyConfig } | null,
     signal: AbortSignal,
   ): Promise<DevServerHandle | null> {
-    if (!this.devServerProvider || !this.devServerContextResolver) {
+    if (!this.devServerProvider) {
       return null;
     }
     // A dev server is bound to a leased PORT. A rung-0 / null lease (no port) cannot
@@ -1115,15 +1212,10 @@ export class VerificationScheduler {
       return null;
     }
 
-    const resolved = await this.devServerContextResolver({
-      runId: row.run_id,
-      projectId: row.project_id,
-      input,
-    });
-    if (!resolved) {
+    if (!resolvedContext) {
       return null;
     }
-    const { cwd, deliverable } = resolved;
+    const { cwd, deliverable } = resolvedContext;
     if (!deliverable.start || deliverable.start.trim().length === 0) {
       // No start command — nothing to stand up; capture the static target as-is.
       return null;
