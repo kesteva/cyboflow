@@ -138,6 +138,18 @@ export const REQUEST_STATUS: readonly RequestStatus[] = [
 ] as const;
 
 /**
+ * Sentinel `requiredLease()` return that means "I need SOME pooled dev-server port
+ * lease — pick any free configured one", WITHOUT naming a concrete port. The
+ * scheduler's poolCandidatesFor expands this purely from the configured
+ * devServerPorts pool (it does NOT append the sentinel as a phantom slot), so a
+ * backend that wants a port can never invent an extra always-free count-1 lease
+ * (which would defeat the dev-server concurrency cap and yield port 0 under
+ * contention). A backend that genuinely wants a SPECIFIC port may still return a
+ * concrete 'verify:port:<p>' name; this sentinel is the "any pooled port" case.
+ */
+export const VERIFY_PORT_ANY = 'verify:port:any';
+
+/**
  * What a lane agent asks for. `intent` is the natural-language acceptance the
  * VLM judge is told to check. `typeOverride` is the agent-declared (highest
  * precedence) type. `url` / `htmlPath` point at the deliverable; `viewports`
@@ -164,6 +176,24 @@ export interface VerificationRequestInput {
     value?: string;
     ms?: number;
   }>;
+  /**
+   * The deliverable's `start` command (mirrors DeliverableVerifyConfig.start),
+   * hydrated onto the request when a startable verify.json deliverable was matched.
+   * Its PRESENCE is the signal the Rung-1 Playwright backend's requiredLease() reads
+   * to ask for a `verify:port` lease (the scheduler then spawns + leases the dev
+   * server, locked decision #1 / S2). Absent ⇒ a pre-existing static url, no lease.
+   * The backend never runs this command (the scheduler owns the dev server); it only
+   * reads its presence.
+   */
+  start?: string;
+  /**
+   * EXPLICIT deterministic assertions (mirrors DeliverableVerifyConfig.assertions).
+   * The lane agent may pass them inline OR they are hydrated from the deliverable
+   * recipe. When present + ALL pass, the Rung-1 Playwright backend sets a
+   * deterministic PASS verdict and the scheduler skips the VLM (decision #3
+   * conservative-skip). Absent ⇒ structural success alone never short-circuits.
+   */
+  assertions?: DeliverableAssertion[];
   baselineKey?: string;
   /**
    * The lane this request belongs to, for verdict→lane attribution in the visual
@@ -220,6 +250,21 @@ export interface CaptureResult {
   ok: boolean;
   fileNames: string[];
   error?: string;
+  /**
+   * DETERMINISTIC-FIRST signal channel (design decision #3). When a backend can
+   * reach a verdict WITHOUT a paid vision call it sets this; the scheduler's
+   * runChosen then USES it and SKIPS the VlmJudge. Left `undefined` by a backend
+   * with no deterministic signal (capturePage / peekaboo) ⇒ the VLM runs exactly
+   * as before (backward-compatible). The Playwright backend (Rung 1) sets it:
+   *   - a deterministic FAIL (nav error / missing interaction target / uncaught
+   *     page error) ALWAYS short-circuits the VLM — unambiguous.
+   *   - a deterministic PASS is set ONLY when the deliverable declares EXPLICIT
+   *     assertions and ALL pass exactly (conservative-skip rule); structural
+   *     success WITHOUT declared assertions leaves this `undefined` so the VLM
+   *     runs (NEVER a fabricated pass).
+   * `null` is treated the same as `undefined` (no deterministic verdict).
+   */
+  deterministicVerdict?: VerdictV1 | null;
 }
 
 /**
@@ -230,8 +275,9 @@ export interface CaptureResult {
  *
  *  - `rung` orders the ladder (0 cheapest).
  *  - `requiredLease(input)` returns the ResourceLeasePool lease name this backend
- *    needs for THIS request (e.g. 'verify:screen', 'verify:port:<p>'), or null
- *    when it is fully parallel and needs no lease (rung 0 / rung 1 sans dev server).
+ *    needs for THIS request (e.g. 'verify:screen', a concrete 'verify:port:<p>',
+ *    or the VERIFY_PORT_ANY sentinel = "any free pooled port"), or null when it is
+ *    fully parallel and needs no lease (rung 0 / rung 1 sans dev server).
  *  - `healthCheck()` probes host-deps so the resolver can drop an unavailable
  *    backend from the chain (missing precondition ⇒ SKIP, never silent FAIL).
  *  - `capture(ctx, signal)` performs the capture, honoring the abort signal for
@@ -380,6 +426,11 @@ export const VISUAL_VERIFY_DEFAULTS: ResolvedVisualVerifyConfig = {
  *    non-empty list is what the resolver's rung-C inference reads to pick the
  *    interactive type over the static one.
  *  - `baselineKey` — selects a golden baseline for SSIM pre-diff (S5).
+ *  - `assertions` — EXPLICIT deterministic checks the Rung-1 Playwright backend
+ *    runs after the interactions play (decision #3 conservative-skip). When present
+ *    and ALL pass exactly, the backend sets a deterministic PASS verdict and the
+ *    scheduler SKIPS the (paid) VLM; any failing assertion is a deterministic FAIL.
+ *    Absent ⇒ structural success alone never short-circuits the VLM.
  */
 export interface DeliverableVerifyConfig {
   id: string;
@@ -397,6 +448,23 @@ export interface DeliverableVerifyConfig {
     ms?: number;
   }>;
   baselineKey?: string;
+  assertions?: DeliverableAssertion[];
+}
+
+/**
+ * One EXPLICIT deterministic assertion (decision #3 conservative-skip rule). The
+ * Rung-1 Playwright backend evaluates these after the interactions play; ALL must
+ * pass for a deterministic PASS that skips the VLM, and any failure is a
+ * deterministic FAIL. Kept a named export so the backend + verify.json authoring
+ * share one shape.
+ *   - 'visible' — `selector` must resolve to a visible element.
+ *   - 'hidden'  — `selector` must resolve to a hidden/absent element.
+ *   - 'text'    — `selector`'s text content must contain `text` (required for this kind).
+ */
+export interface DeliverableAssertion {
+  kind: 'visible' | 'hidden' | 'text';
+  selector: string;
+  text?: string;
 }
 
 /**
