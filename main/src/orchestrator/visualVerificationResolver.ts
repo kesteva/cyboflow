@@ -54,6 +54,23 @@ export const DEFAULT_VERIFICATION_TYPE: VerificationType = 'static-render-snapsh
 export const MVP_AVAILABLE_BACKENDS: readonly VisualBackendId[] = ['capturePage'] as const;
 
 /**
+ * The backends actually registered into the scheduler's VerificationBackendRegistry
+ * at boot (index.ts). createRun passes this as the resolver's `availableBackends`
+ * so the stamped `verify_chain` can list every SHIPPED rung (not just the rung-0
+ * floor); the per-backend runtime `healthCheck()` at drain is the SECOND gate (a
+ * shipped-but-unhealthy backend — e.g. chromium not installed, or 'playwright'
+ * pruned from a packaged build as a devDependency — is skipped then, never a
+ * fabricated pass). Keep this in sync with the index.ts registry; it grows as each
+ * backend slice lands (S3 'playwright', S4 'peekaboo', …). The resolver's own
+ * default stays MVP_AVAILABLE_BACKENDS so the standalone resolver never assumes a
+ * richer host than it can prove.
+ */
+export const SHIPPED_VERIFY_BACKENDS: readonly VisualBackendId[] = [
+  'capturePage',
+  'playwright',
+] as const;
+
+/**
  * Inputs for resolveVisualVerification. Every enablement / type level is
  * optional and untyped at the boundary because the values flow in from agent
  * frontmatter / per-request overrides, project config, and AppConfig — none of
