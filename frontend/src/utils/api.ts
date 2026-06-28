@@ -92,6 +92,17 @@ export class API {
       return window.electronAPI.sessions.continue(sessionId, prompt, model);
     },
 
+    // Interactive (PTY) quick-session resume — see ResumeSessionPrompt / ClaudePanel.
+    async getInteractiveResumeState(sessionId: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.sessions.getInteractiveResumeState(sessionId);
+    },
+
+    async resumeInteractive(sessionId: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.sessions.resumeInteractive(sessionId);
+    },
+
     async getOutput(sessionId: string, limit?: number) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.getOutput(sessionId, limit);

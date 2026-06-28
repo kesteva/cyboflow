@@ -23,6 +23,21 @@ interface PermissionResponse {
   reason?: string;
 }
 
+/**
+ * Resume eligibility for an interactive (PTY) quick session whose REPL was lost
+ * (app close/restart). Returned by sessions.getInteractiveResumeState. The UI
+ * offers "Resume previous session" when the session is interactive AND
+ * !replRunning AND claudeSessionId AND worktreeExists.
+ */
+interface InteractiveResumeState {
+  /** Whether the session's interactive REPL process is currently alive. */
+  replRunning: boolean;
+  /** Persisted Claude conversation id to resume with, or null if none. */
+  claudeSessionId: string | null;
+  /** Whether the session's worktree still exists on disk (resume needs it). */
+  worktreeExists: boolean;
+}
+
 // T defaults to `unknown` (not `any`) so callers must narrow before reading .data.
 // This enforces the type-contract at each IPC call site and prevents silent regressions
 // on field renames (e.g. the crystalDirectory → cyboflowDirectory incident).
@@ -99,6 +114,8 @@ interface ElectronAPI {
     delete: (sessionId: string) => Promise<IPCResponse<void>>;
     sendInput: (sessionId: string, input: string) => Promise<IPCResponse<void>>;
     continue: (sessionId: string, prompt?: string, model?: string) => Promise<IPCResponse<void>>;
+    getInteractiveResumeState: (sessionId: string) => Promise<IPCResponse<InteractiveResumeState>>;
+    resumeInteractive: (sessionId: string) => Promise<IPCResponse<void>>;
     // getOutput returns SessionOutput[] (not raw strings); callers pass to setSessionOutputs
     getOutput: (sessionId: string, limit?: number) => Promise<IPCDataResponse<SessionOutput[]>>;
     // getStatistics is locally typed in SessionStats.tsx; use IPCDataResponse so caller can access .data
