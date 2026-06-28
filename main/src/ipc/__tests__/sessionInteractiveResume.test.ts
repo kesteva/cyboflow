@@ -27,8 +27,8 @@ vi.mock('electron', () => ({
 }));
 
 vi.mock('../../services/panelManager', () => ({
-  // The session owns one server-side 'claude' panel (id matches PANEL_ID below;
-  // inlined here because vi.mock factories may not close over non-`mock` vars).
+  // The session owns one server-side 'claude' panel (id 'panel-1', inlined here
+  // because vi.mock factories may not close over non-`mock` module vars).
   panelManager: {
     getPanel: vi.fn(),
     getAllPanels: vi.fn(() => []),
@@ -67,7 +67,6 @@ import { registerSessionHandlers } from '../session';
 import type { AppServices } from '../types';
 
 const SESSION_ID = 'sess-001';
-const PANEL_ID = 'panel-1';
 const RUN_ID = 'run-1';
 const WORKTREE = '/tmp/project/quick-test';
 const CLAUDE_SESSION_ID = 'uuid-abc';

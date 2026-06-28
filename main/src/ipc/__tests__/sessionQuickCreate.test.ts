@@ -601,6 +601,7 @@ describe('sessions:input handler - substrate routing', () => {
       undefined, // model — no persisted panel settings in this test
       undefined, // effort — a respawn carries no ultracode card setting
       false, // fastMode — default off (no persisted opt-in)
+      undefined, // resumeSessionId — fresh respawn (resume not armed for this session)
     );
     expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
     expect(fakeSessionManager.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'running' });
