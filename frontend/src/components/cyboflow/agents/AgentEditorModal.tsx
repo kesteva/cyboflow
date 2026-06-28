@@ -174,17 +174,31 @@ export function AgentEditorModal({
         onClose();
         return;
       }
-      const saved = await trpc.cyboflow.agents.upsertOverride.mutate({
-        projectId,
-        agentKey,
-        name: state.draft.name,
-        description: state.draft.description,
-        systemPrompt: state.draft.systemPrompt,
-        tools: state.draft.enabledTools,
-        enabledMcps: state.draft.enabledMcps,
-        role: state.draft.role,
-        model: state.draft.model,
-      });
+      // Edit mode splits by kind: a CUSTOM agent has no builtin to shadow, so it
+      // updates its own row in place via updateCustom (the agentKey is immutable —
+      // the name field is read-only outside create mode); a builtin edits through
+      // the override upsert, which rejects a non-builtin key.
+      const saved = isCustom
+        ? await trpc.cyboflow.agents.updateCustom.mutate({
+            projectId,
+            agentKey,
+            description: state.draft.description,
+            systemPrompt: state.draft.systemPrompt,
+            tools: state.draft.enabledTools,
+            enabledMcps: state.draft.enabledMcps,
+            role: state.draft.role,
+          })
+        : await trpc.cyboflow.agents.upsertOverride.mutate({
+            projectId,
+            agentKey,
+            name: state.draft.name,
+            description: state.draft.description,
+            systemPrompt: state.draft.systemPrompt,
+            tools: state.draft.enabledTools,
+            enabledMcps: state.draft.enabledMcps,
+            role: state.draft.role,
+            model: state.draft.model,
+          });
       trackEvent('agent_saved', { custom: isCustom });
       setEntry(saved);
       dispatch({ type: 'SEED', entry: saved });

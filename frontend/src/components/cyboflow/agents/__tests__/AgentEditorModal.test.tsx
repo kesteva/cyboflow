@@ -77,6 +77,16 @@ const PROSE_ENTRY: AgentEntry = {
   usage: { workflowCount: 0, usedBy: [], dispatchedBy: ['planner'] },
 };
 
+/** A CUSTOM agent (is_custom=1) — edited in place via updateCustom. */
+const CUSTOM_ENTRY: AgentEntry = {
+  ...BUILTIN_ENTRY,
+  agentKey: 'my-helper',
+  name: 'cyboflow-my-helper',
+  source: 'custom',
+  isCustom: true,
+  isOverridden: true,
+};
+
 // ---------------------------------------------------------------------------
 // tRPC mock
 // ---------------------------------------------------------------------------
@@ -90,6 +100,7 @@ vi.mock('../../../../trpc/client', () => ({
         resetOverride: { mutate: vi.fn() },
         duplicate: { mutate: vi.fn() },
         createCustom: { mutate: vi.fn() },
+        updateCustom: { mutate: vi.fn() },
       },
       mcps: {
         list: { query: vi.fn() },
@@ -113,6 +124,7 @@ const mockUpsert = vi.mocked(trpc.cyboflow.agents.upsertOverride.mutate);
 const mockReset = vi.mocked(trpc.cyboflow.agents.resetOverride.mutate);
 const mockDuplicate = vi.mocked(trpc.cyboflow.agents.duplicate.mutate);
 const mockCreate = vi.mocked(trpc.cyboflow.agents.createCustom.mutate);
+const mockUpdateCustom = vi.mocked(trpc.cyboflow.agents.updateCustom.mutate);
 const mockMcpsList = vi.mocked(trpc.cyboflow.mcps.list.query);
 
 beforeEach(() => {
@@ -122,6 +134,7 @@ beforeEach(() => {
   mockReset.mockResolvedValue(structuredClone(BUILTIN_ENTRY));
   mockDuplicate.mockResolvedValue({ ...structuredClone(BUILTIN_ENTRY), agentKey: 'implement-copy', name: 'implement-copy', isCustom: true });
   mockCreate.mockResolvedValue({ ...structuredClone(BUILTIN_ENTRY), agentKey: 'my-helper', name: 'My Helper', isCustom: true });
+  mockUpdateCustom.mockResolvedValue(structuredClone(CUSTOM_ENTRY));
   mockMcpsList.mockResolvedValue(structuredClone(MCP_CATALOGUE));
 });
 
@@ -488,5 +501,33 @@ describe('AgentEditorModal — create (new custom agent)', () => {
     expect(arg.tools).toEqual([CLI_TOOLS[0]]);
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith('my-helper'));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+});
+
+describe('AgentEditorModal — custom edit', () => {
+  it('routes a custom-agent edit through updateCustom (NOT upsertOverride), with no name (key immutable)', async () => {
+    const { onSaved } = await renderModal({ entry: CUSTOM_ENTRY, agentKey: 'my-helper' });
+
+    // The name field is read-only for an existing agent (key immutable).
+    expect(screen.getByTestId('agent-name-input')).toHaveAttribute('readonly');
+
+    fireEvent.change(screen.getByTestId('agent-description-input'), {
+      target: { value: 'Edited custom description.' },
+    });
+    const saveBtn = screen.getByTestId('agent-editor-save-button');
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+
+    expect(mockUpsert).not.toHaveBeenCalled();
+    expect(mockUpdateCustom).toHaveBeenCalledTimes(1);
+    const arg = mockUpdateCustom.mock.calls[0][0];
+    expect(arg.projectId).toBe(PROJECT_ID);
+    expect(arg.agentKey).toBe('my-helper');
+    expect(arg.description).toBe('Edited custom description.');
+    // The key is immutable, so the rename-capable `name` field is NOT sent.
+    expect(arg).not.toHaveProperty('name');
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith('my-helper'));
   });
 });
