@@ -1375,3 +1375,263 @@ describe('VerificationScheduler — per-project judge budget (S5)', () => {
     dbP.close();
   });
 });
+
+// ---------------------------------------------------------------------------
+// S8 — hydrate VerificationRequestInput (start/assertions) from verify.json
+// BEFORE lease selection so the dev-server + Playwright path fires end-to-end.
+//
+// ROOT CAUSE this slice fixes: PlaywrightBackend.requiredLease(input) returns a
+// verify:port lease ONLY when input.start is present, but pre-S8 input.start was
+// never set (the resolver was read INSIDE maybeSpawnDevServer, AFTER the lease was
+// chosen). So the backend never leased a port → no dev server → the dev-build path
+// was inert. These tests use the REAL PlaywrightBackend so the lease seam is the
+// genuine one, and inject a deliverable carrying `start` to prove hydration now
+// flips requiredLease to a verify:port lease + spawns the dev server.
+// ---------------------------------------------------------------------------
+
+describe('VerificationScheduler — hydrate input from verify.json before lease selection (S8)', () => {
+  let artifactsDir: string;
+
+  beforeEach(async () => {
+    artifactsDir = await mkdtemp(join(tmpdir(), 'cvv-sched-s8-'));
+  });
+
+  afterEach(async () => {
+    await rm(artifactsDir, { recursive: true, force: true });
+  });
+
+  it('hydrates input.start from the deliverable → the REAL Playwright backend leases a verify:port + the dev server spawns', async () => {
+    const calls: { spawnPort?: number; leaseHeldAtSpawn?: boolean } = {};
+    const mutex = new Mutex();
+    const leasePool = new ResourceLeasePool(mutex);
+    const provider: DevServerProvider = {
+      spawn: async (args): Promise<DevServerHandle> => {
+        calls.spawnPort = args.port;
+        calls.leaseHeldAtSpawn = mutex.isLocked(verifyPortLease(args.port));
+        return { baseUrl: `http://localhost:${args.port}`, release: async () => {} };
+      },
+    };
+    // The REAL backend: requiredLease keys off input.start (VERIFY_PORT_ANY when set,
+    // null otherwise) — exactly the seam this slice exercises.
+    const backend = new PlaywrightBackend({
+      installer: presentInstaller(),
+      browserFactory: fakeBrowserFactory(),
+    });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { playwright: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => artifactsDir,
+      config: baseConfig, // devServerPorts: [5173, 3000]
+      leasePool,
+      devServerProvider: provider,
+      // Deliverable carries a `start`; the request's input does NOT.
+      devServerContextResolver: async () => ({
+        cwd: '/tmp/wt',
+        deliverable: { id: 'web', start: 'npm run dev -- --port ${PORT}' },
+      }),
+    });
+
+    // The request input LACKS start — pre-S8 this never leased a port.
+    const id = enqueueRow(db, { chain: ['playwright'], url: 'http://placeholder' });
+    await sched.drain();
+
+    // Hydration set input.start BEFORE lease selection → a REAL pooled port leased
+    // → the dev server spawned on it, with the lease already held.
+    expect(calls.spawnPort).toBe(5173);
+    expect(calls.leaseHeldAtSpawn).toBe(true);
+    expect(rowStatus(db, id).status).toBe('passed');
+    expect(mutex.isLocked(verifyPortLease(5173))).toBe(false); // released in finally
+  });
+
+  it('without a resolver (or no matching deliverable) input is unchanged → no port lease, no spawn (byte-identical to today)', async () => {
+    // No resolver injected at all → no hydration → the real backend stays null-lease.
+    const spawnSpy = vi.fn();
+    const provider: DevServerProvider = {
+      spawn: async (args): Promise<DevServerHandle> => {
+        spawnSpy();
+        return { baseUrl: `http://localhost:${args.port}`, release: async () => {} };
+      },
+    };
+    const backend = new PlaywrightBackend({
+      installer: presentInstaller(),
+      browserFactory: fakeBrowserFactory(),
+    });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { playwright: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => artifactsDir,
+      config: baseConfig,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      devServerProvider: provider,
+      // NO devServerContextResolver → resolveDeliverableContext returns null.
+    });
+
+    const id = enqueueRow(db, { chain: ['playwright'], url: 'http://placeholder' });
+    await sched.drain();
+
+    // No start hydrated → backend asked for no port lease → no dev server.
+    expect(spawnSpy).not.toHaveBeenCalled();
+    // Static capture still ran (the real backend captured the static url) → passed.
+    expect(rowStatus(db, id).status).toBe('passed');
+  });
+
+  it('a resolver that returns no matching deliverable leaves input unhydrated (no spawn)', async () => {
+    const spawnSpy = vi.fn();
+    const provider: DevServerProvider = {
+      spawn: async (args): Promise<DevServerHandle> => {
+        spawnSpy();
+        return { baseUrl: `http://localhost:${args.port}`, release: async () => {} };
+      },
+    };
+    const backend = new PlaywrightBackend({
+      installer: presentInstaller(),
+      browserFactory: fakeBrowserFactory(),
+    });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { playwright: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => artifactsDir,
+      config: baseConfig,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      devServerProvider: provider,
+      // Resolver returns null (no matching/startable deliverable).
+      devServerContextResolver: async () => null,
+    });
+
+    const id = enqueueRow(db, { chain: ['playwright'], url: 'http://placeholder' });
+    await sched.drain();
+
+    expect(spawnSpy).not.toHaveBeenCalled();
+    expect(rowStatus(db, id).status).toBe('passed');
+  });
+
+  it('an AGENT-PROVIDED input.start is NOT overwritten by the resolver value', async () => {
+    // The deliverable would supply a DIFFERENT start; the agent's wins. We assert via
+    // the dev-server config the provider receives (the deliverable's start is still
+    // what the provider runs — the provider reads its `config`, not input — but the
+    // KEY assertion is that the request was driven by the agent's start, i.e. it still
+    // leased + spawned). To prove input.start specifically was not clobbered we use a
+    // fakeBackend whose requiredLease echoes input.start into a sink.
+    const seen: { startAtLease?: string } = {};
+    const sink: { ctx?: CaptureContext } = {};
+    const backend: VisualBackend = {
+      id: 'playwright',
+      rung: 1,
+      // requiredLease reads input.start — the exact seam. Record what it saw.
+      requiredLease: (input) => {
+        seen.startAtLease = input.start;
+        return input.start && input.start.trim().length > 0 ? 'verify:port:5173' : null;
+      },
+      healthCheck: async () => true,
+      capture: async (ctx): Promise<CaptureResult> => {
+        sink.ctx = ctx;
+        return { ok: true, fileNames: ['default.png'] };
+      },
+    };
+    const provider: DevServerProvider = {
+      spawn: async (args): Promise<DevServerHandle> => ({
+        baseUrl: `http://localhost:${args.port}`,
+        release: async () => {},
+      }),
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { playwright: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => artifactsDir,
+      config: baseConfig,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      devServerProvider: provider,
+      // Deliverable supplies a DIFFERENT start.
+      devServerContextResolver: async () => ({
+        cwd: '/tmp/wt',
+        deliverable: { id: 'web', start: 'deliverable-start' },
+      }),
+    });
+
+    // Agent passes its OWN start inline.
+    enqueueRow(db, { chain: ['playwright'], start: 'agent-start' });
+    await sched.drain();
+
+    // The agent's start survived hydration (not overwritten by 'deliverable-start').
+    expect(seen.startAtLease).toBe('agent-start');
+  });
+
+  it('invokes the devServerContextResolver AT MOST ONCE per request (no double verify.json load)', async () => {
+    const resolverSpy = vi.fn(async () => ({
+      cwd: '/tmp/wt',
+      deliverable: { id: 'web', start: 'npm run dev -- --port ${PORT}' } as const,
+    }));
+    const provider: DevServerProvider = {
+      spawn: async (args): Promise<DevServerHandle> => ({
+        baseUrl: `http://localhost:${args.port}`,
+        release: async () => {},
+      }),
+    };
+    const backend = new PlaywrightBackend({
+      installer: presentInstaller(),
+      browserFactory: fakeBrowserFactory(),
+    });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { playwright: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => artifactsDir,
+      config: baseConfig,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      devServerProvider: provider,
+      devServerContextResolver: resolverSpy,
+    });
+
+    const id = enqueueRow(db, { chain: ['playwright'], url: 'http://placeholder' });
+    await sched.drain();
+
+    // Resolved ONCE for hydration + reused in maybeSpawnDevServer (not loaded twice).
+    expect(resolverSpy).toHaveBeenCalledTimes(1);
+    expect(rowStatus(db, id).status).toBe('passed');
+  });
+
+  it('a resolver that THROWS leaves input unhydrated and the request still proceeds (fail-soft)', async () => {
+    const spawnSpy = vi.fn();
+    const provider: DevServerProvider = {
+      spawn: async (args): Promise<DevServerHandle> => {
+        spawnSpy();
+        return { baseUrl: `http://localhost:${args.port}`, release: async () => {} };
+      },
+    };
+    const backend = new PlaywrightBackend({
+      installer: presentInstaller(),
+      browserFactory: fakeBrowserFactory(),
+    });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { playwright: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => artifactsDir,
+      config: baseConfig,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      devServerProvider: provider,
+      // Resolver throws — hydration must fail-soft (no throw, input unhydrated).
+      devServerContextResolver: async () => {
+        throw new Error('verify.json read boom');
+      },
+    });
+
+    const id = enqueueRow(db, { chain: ['playwright'], url: 'http://placeholder' });
+    // Must NOT throw out of drain.
+    await expect(sched.drain()).resolves.toBeUndefined();
+
+    // No start hydrated → no port lease → no spawn; the static capture still ran.
+    expect(spawnSpy).not.toHaveBeenCalled();
+    expect(rowStatus(db, id).status).toBe('passed');
+  });
+});
