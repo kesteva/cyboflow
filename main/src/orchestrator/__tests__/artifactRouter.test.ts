@@ -483,4 +483,105 @@ describe('ArtifactRouter', () => {
       rmSync(commitDir, { recursive: true, force: true });
     }
   });
+
+  // --- S5: accept-as-baseline op (injected committer, no real fs/git) ---------
+
+  it('accept-baseline delegates the PNG copy + commit to the injected committer and logs an audit event', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    // You only accept what was verified — a screenshots artifact must exist.
+    const acceptCalls: Array<{ runId: string; baselineKey: string; fileNames: string[] }> = [];
+    const router = ArtifactRouter.initialize(
+      dbAdapter(db),
+      undefined,
+      undefined,
+      async ({ runId, baselineKey, fileNames }) => {
+        acceptCalls.push({ runId, baselineKey, fileNames });
+        return { baselineKey };
+      },
+    );
+    const { artifactId } = await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'screenshots', label: '2 shots',
+      payloadJson: '{"fileNames":["desktop.png","mobile.png"]}', actor: 'orchestrator',
+    });
+
+    const res = await router.acceptAsBaseline(1, {
+      op: 'accept-baseline',
+      runId: 'run-1',
+      baselineKey: 'home',
+      fileNames: ['desktop.png', 'mobile.png'],
+      actor: 'user',
+    });
+
+    expect(res).toEqual({ baselineKey: 'home' });
+    // The committer (fake — no real git) got the exact PNGs + key.
+    expect(acceptCalls).toHaveLength(1);
+    expect(acceptCalls[0]).toMatchObject({
+      runId: 'run-1',
+      baselineKey: 'home',
+      fileNames: ['desktop.png', 'mobile.png'],
+    });
+    // An audit event was appended under the screenshots artifact (create + accept).
+    expect(countEvents(db, artifactId)).toBe(2);
+  });
+
+  it('accept-baseline throws not_found when no committer is wired', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+    await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'screenshots', label: 's', actor: 'orchestrator',
+    });
+    await expect(
+      router.acceptAsBaseline(1, {
+        op: 'accept-baseline', runId: 'run-1', baselineKey: 'home', fileNames: ['a.png'], actor: 'user',
+      }),
+    ).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('accept-baseline rejects a run with no screenshots artifact', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(
+      dbAdapter(db), undefined, undefined, async ({ baselineKey }) => ({ baselineKey }),
+    );
+    await expect(
+      router.acceptAsBaseline(1, {
+        op: 'accept-baseline', runId: 'run-1', baselineKey: 'home', fileNames: ['a.png'], actor: 'user',
+      }),
+    ).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  it('accept-baseline rejects an empty fileNames list', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(
+      dbAdapter(db), undefined, undefined, async ({ baselineKey }) => ({ baselineKey }),
+    );
+    await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'screenshots', label: 's', actor: 'orchestrator',
+    });
+    await expect(
+      router.acceptAsBaseline(1, {
+        op: 'accept-baseline', runId: 'run-1', baselineKey: 'home', fileNames: [], actor: 'user',
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_atype' });
+  });
+
+  it('accept-baseline rejects a cross-project run', async () => {
+    const db = buildDb();
+    seedRunInProject(db, 'run-2', 2);
+    const router = ArtifactRouter.initialize(
+      dbAdapter(db), undefined, undefined, async ({ baselineKey }) => ({ baselineKey }),
+    );
+    await router.apply(2, {
+      op: 'create', runId: 'run-2', atype: 'screenshots', label: 's', actor: 'orchestrator',
+    });
+    // Accepting run-2 (project 2) under project 1 must be rejected.
+    await expect(
+      router.acceptAsBaseline(1, {
+        op: 'accept-baseline', runId: 'run-2', baselineKey: 'home', fileNames: ['a.png'], actor: 'user',
+      }),
+    ).rejects.toMatchObject({ code: 'wrong_project' });
+  });
 });
