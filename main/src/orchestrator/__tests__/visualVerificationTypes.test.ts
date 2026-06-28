@@ -16,6 +16,11 @@ import {
   isVerificationType,
   type VerificationType,
   type VisualBackendId,
+  type VerifyConfigFile,
+  type DeliverableVerifyConfig,
+  type BaselineMetadata,
+  type VerdictV1BaselineExtension,
+  type VerificationRequestRow,
 } from '../../../../shared/types/visualVerification';
 
 const ALL_BACKENDS: VisualBackendId[] = ['capturePage', 'playwright', 'peekaboo', 'maestro'];
@@ -134,6 +139,64 @@ describe('visualVerification shared seam', () => {
           'timeout',
         ].sort(),
       );
+    });
+  });
+
+  describe('additive shared-type appends (S1) leave the matrix/chain contract intact', () => {
+    it('keeps the matrix + chains key-for-key identical after the additive interface appends', () => {
+      // Re-assert the core invariant pinned above: appending VerifyConfigFile /
+      // DeliverableVerifyConfig / BaselineMetadata / VerdictV1BaselineExtension /
+      // VerificationRequestRow must NOT widen the type space or the backend set.
+      expect(Object.keys(FALLBACK_CHAINS).sort()).toEqual([...VERIFICATION_TYPES].sort());
+      expect(Object.keys(BACKEND_CAPABILITIES).sort()).toEqual(
+        [...ALL_BACKENDS].sort(),
+      );
+      expect(new Set(VERIFICATION_TYPES).size).toBe(5);
+      expect(new Set(REQUEST_STATUS).size).toBe(8);
+    });
+
+    it('the new interfaces compose only existing union members (no new VerificationType / VisualBackendId)', () => {
+      // These literals must type-check ONLY because they reuse the existing
+      // unions — a regression that added a new type/backend would surface here.
+      const deliverable: DeliverableVerifyConfig = {
+        id: 'd1',
+        type: 'static-render-snapshot',
+        interactions: [{ action: 'click', target: '#x' }],
+      };
+      const config: VerifyConfigFile = {
+        enabled: true,
+        defaultType: 'interactive-web-behavior',
+        deliverables: [deliverable],
+      };
+      const baseline: BaselineMetadata = {
+        key: 'k',
+        viewports: [{ width: 1, height: 1 }],
+        acceptedAt: '2026-01-01T00:00:00.000Z',
+      };
+      const ext: VerdictV1BaselineExtension = { ssimScore: 0.99, verdictSource: 'ssim_match' };
+      const row: VerificationRequestRow = {
+        id: 'r1',
+        run_id: 'run1',
+        project_id: 1,
+        status: 'queued',
+        verify_type: 'static-render-snapshot',
+        deliverable_json: '{}',
+        chain_json: '[]',
+        current_backend: 'capturePage',
+        attempt: 0,
+        verdict_json: null,
+        error_message: null,
+        enqueued_at: '2026-01-01T00:00:00.000Z',
+        leased_at: null,
+        ended_at: null,
+      };
+
+      expect(isVerificationType(config.defaultType)).toBe(true);
+      expect(isVerificationType(deliverable.type)).toBe(true);
+      expect(isVerificationType(row.verify_type)).toBe(true);
+      expect(ALL_BACKENDS).toContain(row.current_backend);
+      expect(ext.verdictSource).toBe('ssim_match');
+      expect(baseline.viewports).toHaveLength(1);
     });
   });
 
