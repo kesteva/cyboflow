@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { trackEvent } from '../utils/telemetry';
 
 /** Fire a `view_opened` usage event for a center-pane panel (open-edge only). */
-function fireViewOpened(view: 'human_review' | 'backlog' | 'insights' | 'workflows'): void {
+function fireViewOpened(view: 'human_review' | 'backlog' | 'insights' | 'workflows' | 'verify_queue'): void {
   trackEvent('view_opened', { view });
 }
 
@@ -97,11 +97,20 @@ interface NavigationState {
    * testing slice C), or null when none is open. App.tsx renders
    * ExperimentComparisonView for this id with PRIORITY BEFORE `insightsOpen` (and
    * every other overlay), so a "View comparison" CTA always wins over whatever
-   * else is showing. Mutually exclusive with all four sibling overlays, mirroring
-   * `workflowsOpen`'s conventions exactly: opening it closes the other four, and
+   * else is showing. Mutually exclusive with all sibling overlays, mirroring
+   * `workflowsOpen`'s conventions exactly: opening it closes the others, and
    * every nav action / sibling-open action below clears it in turn.
    */
   experimentComparisonId: string | null;
+  /**
+   * Whether the full-width Verify-Queue pane is the active center surface (App
+   * swaps it in over the home surface — sibling alongside
+   * `humanReviewOpen` / `backlogOpen` / `insightsOpen` / `workflowsOpen`).
+   * Mutually exclusive with all the others: opening it closes them, and any
+   * other overlay/nav clears it, so the center only ever hosts one full-width
+   * pane at a time.
+   */
+  verifyQueueOpen: boolean;
 
   // Actions
   goHome: () => void;
@@ -126,6 +135,9 @@ interface NavigationState {
   /** Open the comparison overlay for `experimentId`, closing every sibling overlay. */
   openExperimentComparison: (experimentId: string) => void;
   closeExperimentComparison: () => void;
+  openVerifyQueue: () => void;
+  closeVerifyQueue: () => void;
+  toggleVerifyQueue: () => void;
 }
 
 export const useNavigationStore = create<NavigationState>((set) => ({
@@ -138,16 +150,17 @@ export const useNavigationStore = create<NavigationState>((set) => ({
   insightsOpen: false,
   workflowsOpen: false,
   experimentComparisonId: null,
+  verifyQueueOpen: false,
 
   // Center-surface state machine. goHome returns to the rail-overlay surface
   // (clearing any wizard opts + all five overlays); goToWizard swaps in the
   // new-flow launcher; goToSession is called by the run/session OPEN handlers.
   // Each transition also clears `insightsOpen` / `workflowsOpen` /
-  // `experimentComparisonId` so navigating away always tears those panes down
-  // (mirrors the human-review / backlog clears).
-  goHome: () => set({ view: 'home', wizardOpts: null, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null }),
-  goToWizard: (opts) => set({ view: 'wizard', wizardOpts: opts ?? {}, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null }),
-  goToSession: () => set({ view: 'session', humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null }),
+  // `experimentComparisonId` / `verifyQueueOpen` so navigating away always tears
+  // those panes down (mirrors the human-review / backlog clears).
+  goHome: () => set({ view: 'home', wizardOpts: null, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false }),
+  goToWizard: (opts) => set({ view: 'wizard', wizardOpts: opts ?? {}, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false }),
+  goToSession: () => set({ view: 'session', humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false }),
 
   setActiveView: (view) => set({ activeView: view }),
 
@@ -164,10 +177,11 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     backlogOpen: false,
     insightsOpen: false,
     workflowsOpen: false,
-    experimentComparisonId: null
+    experimentComparisonId: null,
+    verifyQueueOpen: false
   }),
 
-  // Navigating to sessions likewise dismisses all five full-width center panes.
+  // Navigating to sessions likewise dismisses all full-width center panes.
   navigateToSessions: () => set({
     view: 'home',
     activeView: 'sessions',
@@ -176,52 +190,62 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     backlogOpen: false,
     insightsOpen: false,
     workflowsOpen: false,
-    experimentComparisonId: null
+    experimentComparisonId: null,
+    verifyQueueOpen: false
   }),
 
-  // Opening human review closes the backlog, insights, workflows, AND the
-  // experiment comparison (the center hosts one full-width pane at a time) and
-  // forces the home view — the overlays only ever render over the home surface.
-  // Closing/toggling leave the sibling flags untouched (toggle still clears them
-  // on the open transition).
-  openHumanReview: () => set({ view: 'home', humanReviewOpen: true, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null }),
+  // Opening human review closes the backlog, insights, workflows, the experiment
+  // comparison, AND the verify queue (the center hosts one full-width pane at a
+  // time) and forces the home view — the overlays only ever render over the home
+  // surface. Closing/toggling leave the sibling flags untouched (toggle still
+  // clears them on the open transition).
+  openHumanReview: () => set({ view: 'home', humanReviewOpen: true, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false }),
   closeHumanReview: () => set({ humanReviewOpen: false }),
   toggleHumanReview: () => set((s) => {
     if (!s.humanReviewOpen) fireViewOpened('human_review');
-    return { view: 'home', humanReviewOpen: !s.humanReviewOpen, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null };
+    return { view: 'home', humanReviewOpen: !s.humanReviewOpen, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false };
   }),
 
   // Symmetric with the human-review actions — opening/toggling the backlog
-  // closes the other four overlays and forces home so the center never tries
+  // closes the other overlays and forces home so the center never tries
   // to render two panes.
-  openBacklog: () => set({ view: 'home', backlogOpen: true, humanReviewOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null }),
+  openBacklog: () => set({ view: 'home', backlogOpen: true, humanReviewOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false }),
   closeBacklog: () => set({ backlogOpen: false }),
   toggleBacklog: () => set((s) => {
     if (!s.backlogOpen) fireViewOpened('backlog');
-    return { view: 'home', backlogOpen: !s.backlogOpen, humanReviewOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null };
+    return { view: 'home', backlogOpen: !s.backlogOpen, humanReviewOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false };
   }),
 
-  // Third sibling — opening/toggling insights closes the other four overlays and
+  // Third sibling — opening/toggling insights closes the other overlays and
   // forces home, so the mutual-exclusion invariant holds in every direction.
-  openInsights: () => set({ view: 'home', insightsOpen: true, humanReviewOpen: false, backlogOpen: false, workflowsOpen: false, experimentComparisonId: null }),
+  openInsights: () => set({ view: 'home', insightsOpen: true, humanReviewOpen: false, backlogOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false }),
   closeInsights: () => set({ insightsOpen: false }),
   toggleInsights: () => set((s) => {
     if (!s.insightsOpen) fireViewOpened('insights');
-    return { view: 'home', insightsOpen: !s.insightsOpen, humanReviewOpen: false, backlogOpen: false, workflowsOpen: false, experimentComparisonId: null };
+    return { view: 'home', insightsOpen: !s.insightsOpen, humanReviewOpen: false, backlogOpen: false, workflowsOpen: false, experimentComparisonId: null, verifyQueueOpen: false };
   }),
 
   // Fourth sibling — opening/toggling the Workflows gallery closes the other
-  // three overlays + the experiment comparison and forces home, mirroring the
-  // insights actions exactly.
-  openWorkflows: () => set({ view: 'home', workflowsOpen: true, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, experimentComparisonId: null }),
+  // overlays + the experiment comparison + verify queue and forces home,
+  // mirroring the insights actions exactly.
+  openWorkflows: () => set({ view: 'home', workflowsOpen: true, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, experimentComparisonId: null, verifyQueueOpen: false }),
   closeWorkflows: () => set({ workflowsOpen: false }),
   toggleWorkflows: () => set((s) => {
     if (!s.workflowsOpen) fireViewOpened('workflows');
-    return { view: 'home', workflowsOpen: !s.workflowsOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, experimentComparisonId: null };
+    return { view: 'home', workflowsOpen: !s.workflowsOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, experimentComparisonId: null, verifyQueueOpen: false };
   }),
 
-  // Fifth sibling (A/B testing slice C) — opening the experiment comparison
-  // closes all four other overlays and forces home, mirroring the workflows
+  // Fifth sibling — opening/toggling the Verify Queue closes the other overlays
+  // + the experiment comparison and forces home, mirroring the workflows actions exactly.
+  openVerifyQueue: () => set({ view: 'home', verifyQueueOpen: true, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null }),
+  closeVerifyQueue: () => set({ verifyQueueOpen: false }),
+  toggleVerifyQueue: () => set((s) => {
+    if (!s.verifyQueueOpen) fireViewOpened('verify_queue');
+    return { view: 'home', verifyQueueOpen: !s.verifyQueueOpen, humanReviewOpen: false, backlogOpen: false, insightsOpen: false, workflowsOpen: false, experimentComparisonId: null };
+  }),
+
+  // Sixth sibling (A/B testing slice C) — opening the experiment comparison
+  // closes all the other overlays and forces home, mirroring the workflows
   // actions exactly. No toggle: the comparison is always opened with a specific
   // experimentId (from a run banner / dashboard row / review-queue card), never
   // from a rail affordance that would need a bare toggle.
@@ -232,6 +256,7 @@ export const useNavigationStore = create<NavigationState>((set) => ({
     backlogOpen: false,
     insightsOpen: false,
     workflowsOpen: false,
+    verifyQueueOpen: false,
   }),
   closeExperimentComparison: () => set({ experimentComparisonId: null }),
 }));

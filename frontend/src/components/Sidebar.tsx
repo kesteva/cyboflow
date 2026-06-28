@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { Settings } from './Settings';
 import { DraggableProjectTreeView } from './DraggableProjectTreeView';
 import { ArchiveProgress } from './ArchiveProgress';
-import { Info, Clock, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Kanban, Activity, Workflow } from 'lucide-react';
+import { Info, Clock, Check, Edit, CircleArrowDown, AlertTriangle, GitMerge, Kanban, Activity, Workflow, ScanEye } from 'lucide-react';
 import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { IconButton } from './ui/Button';
 import { Modal, ModalHeader, ModalBody } from './ui/Modal';
@@ -45,6 +45,10 @@ interface SidebarProps {
   workflowsActive?: boolean;
   /** Toggle the Workflows center pane. */
   onToggleWorkflows?: () => void;
+  /** Whether the Verify-Queue pane is the active center view. */
+  verifyQueueActive?: boolean;
+  /** Toggle the Verify-Queue center pane. */
+  onToggleVerifyQueue?: () => void;
 }
 
 export function Sidebar({
@@ -63,6 +67,8 @@ export function Sidebar({
   onToggleInsights,
   workflowsActive = false,
   onToggleWorkflows,
+  verifyQueueActive = false,
+  onToggleVerifyQueue,
 }: SidebarProps) {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<'general' | 'notifications' | 'updates'>('general');
@@ -318,6 +324,30 @@ export function Sidebar({
           <span className="min-w-0 flex-1">
             <span className="block text-[11.5px] font-bold leading-tight text-text-primary">Workflows</span>
             <span className="block text-[10px] text-text-secondary">Flows &amp; agents</span>
+          </span>
+        </button>
+
+        {/* Verify Queue — primary rail item directly below Workflows; opens the
+            full-width Verify-Queue pane (visual-verification requests). No badge
+            in v1. */}
+        <button
+          type="button"
+          onClick={() => onToggleVerifyQueue?.()}
+          aria-pressed={verifyQueueActive}
+          data-testid="verify-queue-rail-item"
+          className={`mx-2 mt-2 flex items-center gap-2.5 border px-3 py-2.5 text-left transition-colors ${
+            verifyQueueActive
+              ? 'border-border-emphasized bg-surface-primary'
+              : 'border-border-primary bg-bg-primary hover:border-border-emphasized'
+          }`}
+          style={verifyQueueActive ? { boxShadow: 'inset 3px 0 0 var(--color-interactive-primary)' } : undefined}
+        >
+          <span className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full bg-interactive text-text-on-interactive">
+            <ScanEye className="h-3 w-3" strokeWidth={2} />
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[11.5px] font-bold leading-tight text-text-primary">Verify Queue</span>
+            <span className="block text-[10px] text-text-secondary">Visual verification</span>
           </span>
         </button>
 
