@@ -13,7 +13,9 @@ import { PendingApprovalsForRun } from '../../ReviewQueue/PendingApprovalsForRun
 import { useSession } from '../../../contexts/SessionContext';
 import { useSessionStore } from '../../../stores/sessionStore';
 import { InteractiveTerminalView } from '../../cyboflow/InteractiveTerminalView';
+import { ResumeSessionPrompt } from '../../cyboflow/ResumeSessionPrompt';
 import { DemoTerminalView } from '../../cyboflow/DemoTerminalView';
+import { API } from '../../../utils/api';
 import { QuickSessionComposer } from '../../cyboflow/unified/QuickSessionComposer';
 import { ModeIdentityStrip } from '../../cyboflow/unified/ModeIdentityStrip';
 import { ChatMetaStrip } from '../../cyboflow/unified/ChatMetaStrip';
@@ -77,6 +79,18 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // for merge/PR/dismiss) so it co-locates with the composer that triggers it; a
   // permission-change message never overlaps CyboflowRoot's distinct copy.
   const [permissionToast, setPermissionToast] = useState<string | null>(null);
+
+  // Open-time resume recovery for a lost interactive (PTY) quick session. After an
+  // app restart the persistent REPL is gone but the prior conversation can be
+  // resumed (sessions.claude_session_id + claude's on-disk transcript survive).
+  // canOfferResume is set from the backend probe; while it is true and the user
+  // has neither dismissed nor chosen, ResumeSessionPrompt overlays the (empty)
+  // terminal. "Resume" arms the deferred resume (consumed by the next composer
+  // turn) and flips resumeArmed to show the restored-context hint.
+  const [resumePromptDismissed, setResumePromptDismissed] = useState(false);
+  const [resumeArmed, setResumeArmed] = useState(false);
+  const [canOfferResume, setCanOfferResume] = useState(false);
+
   useEffect(() => {
     if (interactiveRunId === null) {
       setComposerOpen(false);
@@ -102,6 +116,38 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     const id = requestAnimationFrame(() => hook.textareaRef.current?.focus());
     return () => cancelAnimationFrame(id);
   }, [composerOpen, hook.textareaRef]);
+
+  // Probe resume eligibility once per interactive quick session (skip demo, whose
+  // REPL is never real). Resumable = REPL not live + a stored claude_session_id +
+  // the worktree still on disk. Resets cleanly when the panel's session changes.
+  useEffect(() => {
+    const sessionId = panel.sessionId;
+    setResumePromptDismissed(false);
+    setResumeArmed(false);
+    setCanOfferResume(false);
+    if (interactiveRunId === null || showDemoTerminal || !sessionId) return;
+    let cancelled = false;
+    void API.sessions
+      .getInteractiveResumeState(sessionId)
+      .then((res) => {
+        if (cancelled) return;
+        const data = res?.data;
+        if (res?.success && data && !data.replRunning && data.claudeSessionId && data.worktreeExists) {
+          setCanOfferResume(true);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [panel.sessionId, interactiveRunId, showDemoTerminal]);
+
+  // "Resume previous session" → arm the deferred resume; the next composer turn
+  // continues the prior conversation (--resume --fork-session) server-side.
+  const handleResumeSession = (): void => {
+    setResumeArmed(true);
+    void API.sessions.resumeInteractive(panel.sessionId).catch(() => undefined);
+  };
 
   const claudePanelState = (panel.state.customState as ClaudePanelState | undefined) ?? {};
   // SDK substrate emits a "54k/200k tokens (27%)" string; null for PTY/empty.
@@ -281,6 +327,26 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
             <DemoTerminalView showComposer />
           ) : (
             <InteractiveTerminalView runId={interactiveRunId} guardFirstInteraction={false} />
+          )}
+          {/* Open-time recovery: offer to resume the lost REPL's conversation
+              instead of silently starting fresh on the next message. */}
+          {!showDemoTerminal && (
+            <ResumeSessionPrompt
+              isOpen={canOfferResume && !resumePromptDismissed && !resumeArmed}
+              onClose={() => setResumePromptDismissed(true)}
+              onResume={handleResumeSession}
+              onStartFresh={() => setResumePromptDismissed(true)}
+            />
+          )}
+          {/* After "Resume", cue that the next message continues the prior
+              conversation (the REPL respawns with --resume on that first turn). */}
+          {resumeArmed && (
+            <div
+              className="pointer-events-none absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded border border-interactive/40 bg-surface-secondary px-3 py-1.5 text-[11px] text-text-secondary shadow-sm"
+              data-testid="resume-restored-hint"
+            >
+              Conversation restored — send a message to continue with full context.
+            </div>
           )}
         </div>
       ) : (
