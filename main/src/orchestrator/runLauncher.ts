@@ -18,6 +18,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import type { WorkflowRegistry } from './workflowRegistry';
 import { QUICK_WORKFLOW_NAME } from './workflowRegistry';
+import { loadVerifyConfig } from './verifyConfigLoader';
 import type { WorktreeManager } from '../services/worktreeManager';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { PermissionMode } from '../../../shared/types/workflows';
@@ -407,17 +408,26 @@ export class RunLauncher {
       }) ?? null;
     const experiment = launchOptions?.experiment;
 
+    // Load the per-project `.cyboflow/verify.json` ONCE here (createRun is sync;
+    // the loader is async + fail-soft) so createRun can thread its enabled /
+    // defaultType into the visual-verification resolver's project rungs. Absent /
+    // malformed => null, and the resolver's project rungs simply fall through to
+    // the global rung + floor (zero-behavior-change with the master switch OFF).
+    const projectVerifyConfig = await loadVerifyConfig(projectPath, this.logger);
+
     // Pass the opts bag when an explicit project, execution model, model, per-run
-    // eval override, a resolved variant, OR an experiment stamp is threaded; omit it
-    // entirely otherwise so the legacy fallback path (workflow.project_id + resolver
-    // floor, no model/eval/variant pin) stays byte-identical.
+    // eval override, a resolved variant, an experiment stamp, OR a project verify
+    // config is threaded; omit it entirely otherwise so the legacy fallback path
+    // (workflow.project_id + resolver floor, no model/eval/variant pin) stays
+    // byte-identical.
     const createOpts =
       projectId !== undefined ||
       requestedExecutionModel !== undefined ||
       requestedModel !== undefined ||
       requestedEvalEnabled !== undefined ||
       rv !== null ||
-      experiment !== undefined
+      experiment !== undefined ||
+      projectVerifyConfig !== null
         ? {
             ...(projectId !== undefined ? { projectId } : {}),
             ...(requestedExecutionModel !== undefined ? { requestedExecutionModel } : {}),
@@ -435,6 +445,7 @@ export class RunLauncher {
             ...(experiment !== undefined
               ? { experimentId: experiment.experimentId, experimentArm: experiment.arm }
               : {}),
+            ...(projectVerifyConfig !== null ? { projectVerifyConfig } : {}),
           }
         : undefined;
     const { runId, permissionMode, substrate: resolvedSubstrate } = this.workflowRegistry.createRun(

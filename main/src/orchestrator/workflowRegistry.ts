@@ -24,7 +24,12 @@ import type {
   WorkflowVariantRow,
   WorkflowVariantStatus,
 } from '../../../shared/types/experiments';
-import type { ResolvedVisualVerifyConfig } from '../../../shared/types/visualVerification';
+import type {
+  ResolvedVisualVerifyConfig,
+  VerificationType,
+  VerifyConfigFile,
+  VerificationRequestInput,
+} from '../../../shared/types/visualVerification';
 import { resolveSubstrate } from './substrateResolver';
 import { resolveExecutionModel } from './executionModelResolver';
 import { resolveVisualVerification } from './visualVerificationResolver';
@@ -901,6 +906,35 @@ export class WorkflowRegistry {
       variantExecutionModel?: ExecutionModel;
       experimentId?: string;
       experimentArm?: ExperimentArm;
+      /**
+       * Per-run launch override for visual-verification ENABLEMENT (the highest
+       * rung of the enablement ladder). The caller (RunLauncher.launch) threads
+       * the launch-UI choice here. undefined => unset, falls through to the
+       * project / global rungs. (S1 reserves the rung; no picker surfaces it yet.)
+       */
+      requestedVerifyEnabled?: boolean | null;
+      /**
+       * Per-run launch override for the visual-verification TYPE (the highest
+       * type rung). undefined => unset, falls through to the project / inferred /
+       * global rungs. (S1 reserves the rung; no picker surfaces it yet.)
+       */
+      requestedVerifyType?: VerificationType | null;
+      /**
+       * The resolved per-project `.cyboflow/verify.json` document, loaded ONCE by
+       * the async caller (RunLauncher.launch) via loadVerifyConfig(projectPath) —
+       * createRun is synchronous, so the single fail-soft file read happens at the
+       * launch seam and the parsed result is threaded in. createRun owns the
+       * resolve+stamp; the caller owns only the I/O. null/undefined => no project
+       * config (absent or malformed file), the project rungs fall through.
+       */
+      projectVerifyConfig?: VerifyConfigFile | null;
+      /**
+       * The deliverable being verified, feeding the resolver's rung-C
+       * infer-from-deliverable-kind type rung. undefined/null => the inference
+       * rung is skipped. (S1 reserves it; the request-time deliverable is not yet
+       * threaded from a launch surface.)
+       */
+      verifyDeliverable?: VerificationRequestInput | null;
     },
   ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate; executionModel: ExecutionModel } {
     const workflow = this.getById(workflowId);
@@ -1022,20 +1056,28 @@ export class WorkflowRegistry {
     // whether this run participates in visual verification, which TYPE of check,
     // and the live easy→hard backend chain. The global enablement + default-type
     // rungs come from the injected config's getVisualVerifyConfig(); the per-run
-    // and project-config rungs are not yet wired (reserved for the launch UI /
-    // .cyboflow/verify.json) and resolution otherwise uses the global + floor.
-    // The host-available backends default to MVP_AVAILABLE_BACKENDS (only
+    // launch override (opts.requestedVerify*) and the project-config rungs
+    // (opts.projectVerifyConfig — the parsed .cyboflow/verify.json the async
+    // RunLauncher loaded ONCE and threaded in, since createRun is sync) sit above
+    // the global rung, and the deliverable feeds the rung-C inference. The
+    // host-available backends default to MVP_AVAILABLE_BACKENDS (only
     // 'capturePage') inside the resolver. When no config is injected (test
-    // fixtures) the global rung is unset and the run floors to the DISABLED
-    // posture. Like substrate, this is stamped ONCE at INSERT and is immutable
-    // for the run lifetime — there is no UPDATE path (a long run can't change
-    // posture mid-flight). With the master switch OFF (the default) every run
-    // stamps verify_enabled=0 / verify_type=NULL / verify_chain=NULL
+    // fixtures) every rung is unset and the run floors to the DISABLED posture.
+    // Like substrate, this is stamped ONCE at INSERT and is immutable for the run
+    // lifetime — there is no UPDATE path (a long run can't change posture
+    // mid-flight). With the master switch OFF (the default) every run stamps
+    // verify_enabled=0 / verify_type=NULL / verify_chain=NULL
     // (zero-behavior-change).
     const visualVerifyConfig = this.config?.getVisualVerifyConfig?.();
+    const projectVerifyConfig = opts?.projectVerifyConfig ?? null;
     const verify = resolveVisualVerification({
+      requestedEnabled: opts?.requestedVerifyEnabled ?? null,
+      projectConfigEnabled: projectVerifyConfig?.enabled ?? null,
       globalDefaultEnabled: visualVerifyConfig?.enabled ?? null,
+      requestedType: opts?.requestedVerifyType ?? null,
+      projectConfigDefaultType: projectVerifyConfig?.defaultType ?? null,
       globalDefaultType: visualVerifyConfig?.defaultType ?? null,
+      deliverable: opts?.verifyDeliverable ?? null,
     });
     const verifyEnabled = verify.enabled ? 1 : 0;
     const verifyType = verify.type;
