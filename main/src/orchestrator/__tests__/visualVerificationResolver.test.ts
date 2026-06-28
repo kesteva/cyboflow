@@ -12,10 +12,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   resolveVisualVerification,
+  inferTypeFromDeliverable,
   DEFAULT_VERIFICATION_TYPE,
   MVP_AVAILABLE_BACKENDS,
 } from '../visualVerificationResolver';
 import { FALLBACK_CHAINS } from '../../../../shared/types/visualVerification';
+import type { VerificationRequestInput } from '../../../../shared/types/visualVerification';
 
 describe('resolveVisualVerification — disabled posture (zero-behavior-change floor)', () => {
   it('floors to disabled when no enablement level is set', () => {
@@ -143,6 +145,120 @@ describe('resolveVisualVerification — type override ladder (only when enabled)
       globalDefaultType: 'also-bogus',
     });
     expect(r.type).toBe(DEFAULT_VERIFICATION_TYPE);
+  });
+});
+
+describe('inferTypeFromDeliverable — type-ladder rung C', () => {
+  it('infers interactive-web-behavior when the deliverable has interactions', () => {
+    const d: VerificationRequestInput = {
+      intent: 'click then check',
+      url: 'http://localhost:5173',
+      interactions: [{ action: 'click', target: '#go' }],
+    };
+    expect(inferTypeFromDeliverable(d)).toBe('interactive-web-behavior');
+  });
+
+  it('infers static-render-snapshot for a url with no interactions', () => {
+    expect(inferTypeFromDeliverable({ intent: 'render', url: 'http://x' })).toBe(
+      'static-render-snapshot',
+    );
+  });
+
+  it('infers static-render-snapshot for an htmlPath with no interactions', () => {
+    expect(inferTypeFromDeliverable({ intent: 'render', htmlPath: '/tmp/out.html' })).toBe(
+      'static-render-snapshot',
+    );
+  });
+
+  it('treats an empty interactions array as no interactions (falls to url-only static)', () => {
+    expect(inferTypeFromDeliverable({ intent: 'r', url: 'http://x', interactions: [] })).toBe(
+      'static-render-snapshot',
+    );
+  });
+
+  it('returns null for a deliverable with neither url/html nor interactions', () => {
+    expect(inferTypeFromDeliverable({ intent: 'nothing actionable' })).toBeNull();
+  });
+
+  it('returns null for an absent deliverable (skips the rung)', () => {
+    expect(inferTypeFromDeliverable(null)).toBeNull();
+    expect(inferTypeFromDeliverable(undefined)).toBeNull();
+  });
+
+  it('never infers native-desktop or mobile-flow (those require explicit declaration)', () => {
+    // No deliverable shape can yield those types — they are explicit-only.
+    expect(inferTypeFromDeliverable({ intent: 'app', interactions: [{ action: 'click' }] })).toBe(
+      'interactive-web-behavior',
+    );
+    expect(inferTypeFromDeliverable({ intent: 'app', url: 'http://x' })).toBe(
+      'static-render-snapshot',
+    );
+  });
+});
+
+describe('resolveVisualVerification — type-ladder rung C (infer-from-deliverable) precedence', () => {
+  it('uses the inferred type when no requested/project type is set (interactions => interactive)', () => {
+    const r = resolveVisualVerification({
+      globalDefaultEnabled: true,
+      deliverable: { intent: 'i', url: 'http://x', interactions: [{ action: 'click' }] },
+      availableBackends: ['capturePage', 'playwright', 'peekaboo'],
+    });
+    expect(r.type).toBe('interactive-web-behavior');
+  });
+
+  it('uses the inferred type when no requested/project type is set (url-only => static)', () => {
+    const r = resolveVisualVerification({
+      globalDefaultEnabled: true,
+      deliverable: { intent: 'i', url: 'http://x' },
+    });
+    expect(r.type).toBe('static-render-snapshot');
+  });
+
+  it('inference beats the global default type (rung C sits ABOVE global)', () => {
+    const r = resolveVisualVerification({
+      globalDefaultEnabled: true,
+      deliverable: { intent: 'i', url: 'http://x', interactions: [{ action: 'click' }] },
+      globalDefaultType: 'responsive-multi-viewport',
+      availableBackends: ['capturePage', 'playwright', 'peekaboo'],
+    });
+    expect(r.type).toBe('interactive-web-behavior');
+  });
+
+  it('requestedType still beats inference', () => {
+    const r = resolveVisualVerification({
+      globalDefaultEnabled: true,
+      requestedType: 'responsive-multi-viewport',
+      deliverable: { intent: 'i', url: 'http://x', interactions: [{ action: 'click' }] },
+      availableBackends: ['capturePage', 'playwright', 'peekaboo'],
+    });
+    expect(r.type).toBe('responsive-multi-viewport');
+  });
+
+  it('projectConfigDefaultType beats inference (rung C sits BELOW project default)', () => {
+    const r = resolveVisualVerification({
+      globalDefaultEnabled: true,
+      projectConfigDefaultType: 'responsive-multi-viewport',
+      deliverable: { intent: 'i', url: 'http://x', interactions: [{ action: 'click' }] },
+      availableBackends: ['capturePage', 'playwright', 'peekaboo'],
+    });
+    expect(r.type).toBe('responsive-multi-viewport');
+  });
+
+  it('an empty deliverable falls through inference to the global default, then the floor', () => {
+    // No url/html/interactions => inference returns null; global default wins.
+    const withGlobal = resolveVisualVerification({
+      globalDefaultEnabled: true,
+      deliverable: { intent: 'nothing' },
+      globalDefaultType: 'responsive-multi-viewport',
+    });
+    expect(withGlobal.type).toBe('responsive-multi-viewport');
+
+    // No global either => floor.
+    const floored = resolveVisualVerification({
+      globalDefaultEnabled: true,
+      deliverable: { intent: 'nothing' },
+    });
+    expect(floored.type).toBe(DEFAULT_VERIFICATION_TYPE);
   });
 });
 

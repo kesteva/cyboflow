@@ -33,6 +33,7 @@
 import {
   type VerificationType,
   type VisualBackendId,
+  type VerificationRequestInput,
   FALLBACK_CHAINS,
   isVerificationType,
 } from '../../../shared/types/visualVerification';
@@ -87,6 +88,19 @@ export interface VisualVerificationResolverInputs {
   globalDefaultType?: string | null;
 
   /**
+   * The deliverable being verified — feeds the type-ladder's rung C
+   * ("infer from deliverable kind"), which sits BELOW the project default and
+   * ABOVE the global default. When present + no higher rung resolves a
+   * recognized type, inferTypeFromDeliverable(deliverable) decides the type from
+   * the deliverable's shape (interactions ⇒ interactive-web-behavior; url/html
+   * with no interactions ⇒ static-render-snapshot; otherwise null = fall
+   * through). native-desktop / mobile-flow are never inferred — they always
+   * require an explicit declaration at a higher rung. Optional; absent => the
+   * inference rung is skipped (resolution falls to the global default + floor).
+   */
+  deliverable?: VerificationRequestInput | null;
+
+  /**
    * The backends whose host-deps are available on this host. The resolved chain
    * is intersected with this set. Defaults to MVP_AVAILABLE_BACKENDS (only
    * 'capturePage') so the standalone resolver never assumes a richer host.
@@ -132,15 +146,54 @@ function resolveEnabled(inputs: VisualVerificationResolverInputs): boolean {
 }
 
 /**
+ * Type-ladder rung C — infer the verification TYPE from the deliverable's shape.
+ * Only the two web types are ever inferred (a deterministic floor inference):
+ *
+ *   - a non-empty `interactions` list ⇒ 'interactive-web-behavior' (it clicks/types);
+ *   - else a `url` OR `htmlPath` (a renderable artifact, no interactions)
+ *       ⇒ 'static-render-snapshot';
+ *   - else null (nothing to infer from → fall through to the next rung).
+ *
+ * native-desktop / mobile-flow are NEVER inferred: a screenshot of the running
+ * app or a mobile build is too consequential to guess at, so those types must be
+ * declared explicitly at a higher rung (returns null here). responsive-multi-
+ * viewport is also not inferred (viewports alone don't disambiguate it from a
+ * static render); it too must be declared. Returns null for an absent deliverable.
+ */
+export function inferTypeFromDeliverable(
+  deliverable: VerificationRequestInput | null | undefined,
+): VerificationType | null {
+  if (!deliverable) {
+    return null;
+  }
+  if (deliverable.interactions && deliverable.interactions.length > 0) {
+    return 'interactive-web-behavior';
+  }
+  if (deliverable.url || deliverable.htmlPath) {
+    return 'static-render-snapshot';
+  }
+  return null;
+}
+
+/**
  * Resolve the verification TYPE via the override ladder. Each candidate is
  * validated with isVerificationType(); an unrecognized value is skipped and
  * resolution falls through to the next level, flooring to
  * DEFAULT_VERIFICATION_TYPE.
+ *
+ * Rung order (highest wins): requestedType (agent-declared) > projectConfigDefaultType
+ * (`.cyboflow/verify.json`) > inferred-from-deliverable-kind (rung C, between the
+ * project and global defaults) > globalDefaultType (AppConfig) > the floor
+ * 'static-render-snapshot'.
  */
 function resolveType(inputs: VisualVerificationResolverInputs): VerificationType {
   const candidates: Array<string | null | undefined> = [
     inputs.requestedType,
     inputs.projectConfigDefaultType,
+    // Rung C — inferred from the deliverable's shape, BELOW the project default
+    // and ABOVE the global default. inferTypeFromDeliverable returns a valid
+    // VerificationType or null; null falls through to the global rung.
+    inferTypeFromDeliverable(inputs.deliverable),
     inputs.globalDefaultType,
   ];
   for (const candidate of candidates) {
@@ -162,8 +215,9 @@ function resolveType(inputs: VisualVerificationResolverInputs): VerificationType
  *
  * When disabled → { enabled:false, type:null, chain:[] } (no chain resolution).
  *
- * When enabled, the TYPE is resolved (requestedType > project default > global
- * default > 'static-render-snapshot' floor) and the chain is
+ * When enabled, the TYPE is resolved (requestedType > project default >
+ * inferred-from-deliverable-kind > global default > 'static-render-snapshot'
+ * floor) and the chain is
  * FALLBACK_CHAINS[type] intersected with the host-available backends (default:
  * only 'capturePage'). Order follows FALLBACK_CHAINS (easy→hard), preserved
  * through the intersection. An empty intersection is returned as-is — the
