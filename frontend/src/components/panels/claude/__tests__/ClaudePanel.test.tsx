@@ -21,7 +21,7 @@
  * test (same treatment as RunChatView.test.tsx).
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
@@ -65,11 +65,22 @@ vi.mock('../../../../stores/configStore', () => ({
 // ---------------------------------------------------------------------------
 
 const mockSendInput = vi.fn();
+// Default: REPL is live → not resumable → no open-time resume prompt. Tests that
+// exercise the prompt override mockGetResumeState per-case.
+const mockGetResumeState = vi.fn((_sessionId?: string) =>
+  Promise.resolve({
+    success: true,
+    data: { replRunning: true, claudeSessionId: null as string | null, worktreeExists: false },
+  }),
+);
+const mockResumeInteractive = vi.fn((_sessionId?: string) => Promise.resolve({ success: true }));
 
 vi.mock('../../../../utils/api', () => ({
   API: {
     sessions: {
       sendInput: (sessionId: string, input: string) => mockSendInput(sessionId, input),
+      getInteractiveResumeState: (sessionId: string) => mockGetResumeState(sessionId),
+      resumeInteractive: (sessionId: string) => mockResumeInteractive(sessionId),
     },
   },
 }));
@@ -90,6 +101,28 @@ vi.mock('../../../cyboflow/InteractiveTerminalView', () => ({
       InteractiveTerminalView:{runId}:guard={String(guardFirstInteraction)}
     </div>
   ),
+}));
+
+vi.mock('../../../cyboflow/ResumeSessionPrompt', () => ({
+  ResumeSessionPrompt: ({
+    isOpen,
+    onResume,
+    onStartFresh,
+  }: {
+    isOpen: boolean;
+    onResume: () => void;
+    onStartFresh: () => void;
+  }) =>
+    isOpen ? (
+      <div data-testid="resume-session-prompt">
+        <button data-testid="resume-btn" onClick={onResume}>
+          Resume previous session
+        </button>
+        <button data-testid="fresh-btn" onClick={onStartFresh}>
+          Start fresh
+        </button>
+      </div>
+    ) : null,
 }));
 
 vi.mock('../RichOutputWithSidebar', () => ({
@@ -200,6 +233,13 @@ beforeEach(() => {
   mockSendInput.mockReset();
   // Default: sendInput succeeds.
   mockSendInput.mockResolvedValue({ success: true });
+  mockGetResumeState.mockReset();
+  mockGetResumeState.mockResolvedValue({
+    success: true,
+    data: { replRunning: true, claudeSessionId: null, worktreeExists: false },
+  });
+  mockResumeInteractive.mockReset();
+  mockResumeInteractive.mockResolvedValue({ success: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -288,5 +328,60 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
     expect(composer).toHaveAttribute('data-session-id', 's1');
     expect(composer).toHaveAttribute('data-effort', 'ultracode');
     expect(composer).toHaveAttribute('data-interactive', 'true');
+  });
+
+  // -------------------------------------------------------------------------
+  // Open-time resume recovery (lost interactive REPL)
+  // -------------------------------------------------------------------------
+  describe('open-time resume recovery', () => {
+    const resumable = {
+      success: true,
+      data: { replRunning: false, claudeSessionId: 'uuid-abc', worktreeExists: true },
+    };
+
+    it('shows the resume prompt when the REPL is lost but resumable', async () => {
+      mockGetResumeState.mockResolvedValue(resumable);
+      renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+
+      expect(await screen.findByTestId('resume-session-prompt')).toBeInTheDocument();
+      expect(mockGetResumeState).toHaveBeenCalledWith('s1');
+    });
+
+    it('does NOT show the prompt when the REPL is still running', async () => {
+      // beforeEach default already resolves replRunning:true.
+      renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+      // Let the probe settle, then assert no prompt.
+      await waitFor(() => expect(mockGetResumeState).toHaveBeenCalled());
+      expect(screen.queryByTestId('resume-session-prompt')).not.toBeInTheDocument();
+    });
+
+    it('does NOT probe for an SDK session', async () => {
+      renderWithProvider(makeSession({ substrate: undefined, runId: null }));
+      // No interactive runId → no probe, no prompt.
+      expect(mockGetResumeState).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('resume-session-prompt')).not.toBeInTheDocument();
+    });
+
+    it('Resume arms the deferred resume and shows the restored-context hint', async () => {
+      mockGetResumeState.mockResolvedValue(resumable);
+      renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+
+      fireEvent.click(await screen.findByTestId('resume-btn'));
+
+      await waitFor(() => expect(mockResumeInteractive).toHaveBeenCalledWith('s1'));
+      expect(screen.getByTestId('resume-restored-hint')).toBeInTheDocument();
+      expect(screen.queryByTestId('resume-session-prompt')).not.toBeInTheDocument();
+    });
+
+    it('Start fresh dismisses without arming a resume', async () => {
+      mockGetResumeState.mockResolvedValue(resumable);
+      renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+
+      fireEvent.click(await screen.findByTestId('fresh-btn'));
+
+      expect(mockResumeInteractive).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('resume-session-prompt')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('resume-restored-hint')).not.toBeInTheDocument();
+    });
   });
 });
