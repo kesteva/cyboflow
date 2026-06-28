@@ -137,7 +137,9 @@ export interface UpdateSessionData {
   exit_code?: number;
   pid?: number;
   folder_id?: string | null;
-  claude_session_id?: string;
+  // null clears the column — used to invalidate a now-stale interactive resume id
+  // when a fork-resume spawn's transcript never bound (avoids a silent rewind).
+  claude_session_id?: string | null;
   run_started_at?: string;
   is_favorite?: boolean;
   auto_commit?: boolean;

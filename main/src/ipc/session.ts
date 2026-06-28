@@ -1,5 +1,6 @@
 import { IpcMain } from 'electron';
 import * as path from 'path';
+import * as os from 'os';
 import * as fs from 'fs/promises';
 import { existsSync } from 'fs';
 import type { AppServices } from './types';
@@ -31,6 +32,29 @@ import { pruneSessionOnlyArtifacts } from '../orchestrator/artifactLifecycle';
 import { isCliSubstrate } from '../../../shared/types/substrate';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 import { InteractiveSettingsWriter } from '../services/panels/claude/interactiveSettingsWriter';
+import { encodeCwd } from '../services/panels/claude/transcript/encodeCwd';
+
+/**
+ * Whether claude's own on-disk transcript for a resumable session still exists at
+ * `~/.claude/projects/<encodeCwd(worktree)>/<uuid>.jsonl`. Resume (`claude --resume
+ * <uuid>`) fails if it is gone (cleared ~/.claude, moved project, etc.), so the
+ * resume offer is gated on this — otherwise the first message rides a failed spawn
+ * and is lost. Mirrors TranscriptTailSource's path scheme.
+ */
+function interactiveTranscriptExists(
+  worktreePath: string | null | undefined,
+  claudeSessionId: string | null | undefined,
+): boolean {
+  if (!worktreePath || !claudeSessionId) return false;
+  const file = path.join(
+    os.homedir(),
+    '.claude',
+    'projects',
+    encodeCwd(worktreePath),
+    `${claudeSessionId}.jsonl`,
+  );
+  return existsSync(file);
+}
 
 /**
  * Project an ordered array of raw stored outputs into UnifiedMessage[].
@@ -1072,7 +1096,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       }
       const panelId = resolveClaudePanelId(sessionId);
       const replRunning = panelId ? interactiveCliManager.isPanelRunning(panelId) : false;
-      const claudeSessionId = sessionManager.getClaudeSessionId(sessionId) ?? null;
+      // Only surface a resumable id when claude's on-disk transcript still exists —
+      // a missing transcript makes `claude --resume` fail and would lose the first
+      // message to a dead spawn.
+      const storedId = sessionManager.getClaudeSessionId(sessionId) ?? null;
+      const claudeSessionId = interactiveTranscriptExists(dbSession.worktree_path, storedId)
+        ? storedId
+        : null;
       const worktreeExists = !!dbSession.worktree_path && existsSync(dbSession.worktree_path);
       return { success: true, data: { replRunning, claudeSessionId, worktreeExists } };
     } catch (error) {
@@ -1091,7 +1121,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         return { success: false, error: 'Session is not an interactive session' };
       }
       const claudeSessionId = sessionManager.getClaudeSessionId(sessionId);
-      if (!claudeSessionId) {
+      if (!claudeSessionId || !interactiveTranscriptExists(dbSession.worktree_path, claudeSessionId)) {
         return { success: false, error: 'No prior Claude conversation to resume' };
       }
       // Arm the one-shot resume; the next composer turn (sessions:input dead-REPL
@@ -1103,6 +1133,14 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       console.error('[IPC] Failed to arm interactive resume:', error);
       return { success: false, error: 'Failed to arm interactive resume' };
     }
+  });
+
+  // Disarm a previously-armed resume so "Start fresh" is authoritative: without
+  // this, a user who armed Resume (e.g. then navigated away) and later chose Start
+  // fresh would still resume on their next message. Idempotent; safe for any id.
+  ipcMain.handle('sessions:cancel-interactive-resume', async (_event, sessionId: string) => {
+    pendingInteractiveResume.delete(sessionId);
+    return { success: true };
   });
 
   ipcMain.handle('sessions:get-or-create-main-repo', async (_event, projectId: number) => {

@@ -73,6 +73,7 @@ const CLAUDE_SESSION_ID = 'uuid-abc';
 
 const RESUME_STATE = 'sessions:get-interactive-resume-state';
 const RESUME = 'sessions:resume-interactive';
+const CANCEL = 'sessions:cancel-interactive-resume';
 const INPUT = 'sessions:input';
 
 function makeHandlerCapture() {
@@ -217,6 +218,16 @@ describe('sessions:get-interactive-resume-state', () => {
     expect(res.data?.worktreeExists).toBe(false);
   });
 
+  it('reports claudeSessionId=null when the on-disk transcript is gone', async () => {
+    // Worktree present, but claude's <uuid>.jsonl transcript is missing.
+    mockExistsSync.mockImplementation((p: string) => !p.endsWith('.jsonl'));
+    const { services } = makeServices();
+    const handlers = registerWith(services);
+    const res = (await invoke(handlers, RESUME_STATE, SESSION_ID)) as ResumeStateResult;
+    expect(res.data?.worktreeExists).toBe(true);
+    expect(res.data?.claudeSessionId).toBeNull();
+  });
+
   it('fails when the session does not exist', async () => {
     const { services } = makeServices({ sessionExists: false });
     const handlers = registerWith(services);
@@ -245,6 +256,26 @@ describe('sessions:resume-interactive (arm intent)', () => {
     const handlers = registerWith(services);
     const res = (await invoke(handlers, RESUME, SESSION_ID)) as { success: boolean };
     expect(res.success).toBe(false);
+  });
+
+  it('refuses when the on-disk transcript is gone', async () => {
+    mockExistsSync.mockImplementation((p: string) => !p.endsWith('.jsonl'));
+    const { services } = makeServices({ substrate: 'interactive' });
+    const handlers = registerWith(services);
+    const res = (await invoke(handlers, RESUME, SESSION_ID)) as { success: boolean };
+    expect(res.success).toBe(false);
+  });
+});
+
+describe('sessions:cancel-interactive-resume (disarm)', () => {
+  it('disarms an armed resume so the next turn spawns fresh', async () => {
+    const { services, startPanel } = makeServices({ replRunning: false });
+    const handlers = registerWith(services);
+    await invoke(handlers, RESUME, SESSION_ID); // arm
+    await invoke(handlers, CANCEL, SESSION_ID); // disarm (Start fresh)
+    await invoke(handlers, INPUT, SESSION_ID, 'hello');
+    expect(startPanel).toHaveBeenCalledTimes(1);
+    expect(startPanel.mock.calls[0][8]).toBeUndefined();
   });
 });
 

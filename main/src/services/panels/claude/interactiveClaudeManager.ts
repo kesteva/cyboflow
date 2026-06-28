@@ -994,8 +994,10 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // claude_session_id from the DISCOVERED transcript filename UUID. The SDK
     // event-driven write (sessionManager.ts:590, GenericMessageData.session_id)
     // belongs to the SDK substrate — the two NEVER both run for one run, so this
-    // does not race/clobber the SDK path.
-    this.persistDiscoveredSessionId(sessionId, tailSource);
+    // does not race/clobber the SDK path. On a fork-resume spawn the discovered
+    // UUID is the NEW forked id that MUST replace the stored (now pre-resume) id;
+    // wasResume lets persist invalidate the stale id if discovery failed.
+    this.persistDiscoveredSessionId(sessionId, tailSource, options.resumeSessionId !== undefined);
 
     return spawnPromise;
   }
@@ -1275,9 +1277,33 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * single-writer-per-substrate: only the interactive substrate writes from the
    * filename; the SDK event-driven write belongs to the SDK substrate.
    */
-  private persistDiscoveredSessionId(sessionId: string, tailSource: TranscriptSource): void {
+  private persistDiscoveredSessionId(
+    sessionId: string,
+    tailSource: TranscriptSource,
+    wasResume = false,
+  ): void {
     const uuid = this.readDiscoveredSessionUuid(tailSource);
-    if (!uuid) return;
+    if (!uuid) {
+      // A fork-resume spawn (`--resume <id> --fork-session`) whose forked transcript
+      // never bound (e.g. discovery timeout). The live REPL is now a NEW forked
+      // session id we failed to capture, so the STORED id points at the frozen
+      // pre-resume transcript — leaving it would silently REWIND the conversation on
+      // the next restart's resume. Invalidate it so the next launch offers a clean
+      // Start-fresh instead. (Fresh spawns have nothing to invalidate → skip.)
+      if (wasResume) {
+        try {
+          this.sessionManager.db.updateSession(sessionId, { claude_session_id: null });
+          this.logger?.warn(
+            `[InteractiveClaudeManager] resume-spawn transcript never bound for session ${sessionId}; cleared stale claude_session_id to avoid a silent rewind on next restart`,
+          );
+        } catch (err) {
+          this.logger?.warn(
+            `[InteractiveClaudeManager] failed to clear stale claude_session_id for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      return;
+    }
     try {
       // Mirror the SDK substrate's DB-level write (sessionManager.ts:590) — the
       // high-level updateSession(SessionUpdate) does not pass claude_session_id

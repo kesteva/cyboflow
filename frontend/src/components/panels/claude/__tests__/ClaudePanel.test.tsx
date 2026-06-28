@@ -74,6 +74,7 @@ const mockGetResumeState = vi.fn((_sessionId?: string) =>
   }),
 );
 const mockResumeInteractive = vi.fn((_sessionId?: string) => Promise.resolve({ success: true }));
+const mockCancelInteractiveResume = vi.fn((_sessionId?: string) => Promise.resolve({ success: true }));
 
 vi.mock('../../../../utils/api', () => ({
   API: {
@@ -81,6 +82,7 @@ vi.mock('../../../../utils/api', () => ({
       sendInput: (sessionId: string, input: string) => mockSendInput(sessionId, input),
       getInteractiveResumeState: (sessionId: string) => mockGetResumeState(sessionId),
       resumeInteractive: (sessionId: string) => mockResumeInteractive(sessionId),
+      cancelInteractiveResume: (sessionId: string) => mockCancelInteractiveResume(sessionId),
     },
   },
 }));
@@ -180,7 +182,7 @@ vi.mock('../../../ReviewQueue/PendingApprovalsForRun', () => ({
 // Imports after mocks
 // ---------------------------------------------------------------------------
 
-import { ClaudePanel } from '../ClaudePanel';
+import { ClaudePanel, __resetDeclinedResumeForTests } from '../ClaudePanel';
 import { SessionProvider } from '../../../../contexts/SessionContext';
 import { useSessionStore } from '../../../../stores/sessionStore';
 import type { Session } from '../../../../types/session';
@@ -240,6 +242,9 @@ beforeEach(() => {
   });
   mockResumeInteractive.mockReset();
   mockResumeInteractive.mockResolvedValue({ success: true });
+  mockCancelInteractiveResume.mockReset();
+  mockCancelInteractiveResume.mockResolvedValue({ success: true });
+  __resetDeclinedResumeForTests();
 });
 
 // ---------------------------------------------------------------------------
@@ -373,15 +378,31 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
       expect(screen.queryByTestId('resume-session-prompt')).not.toBeInTheDocument();
     });
 
-    it('Start fresh dismisses without arming a resume', async () => {
+    it('Start fresh dismisses and disarms any prior resume intent', async () => {
       mockGetResumeState.mockResolvedValue(resumable);
       renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
 
       fireEvent.click(await screen.findByTestId('fresh-btn'));
 
       expect(mockResumeInteractive).not.toHaveBeenCalled();
+      // Authoritative decline: the backend resume intent is cleared.
+      await waitFor(() => expect(mockCancelInteractiveResume).toHaveBeenCalledWith('s1'));
       expect(screen.queryByTestId('resume-session-prompt')).not.toBeInTheDocument();
       expect(screen.queryByTestId('resume-restored-hint')).not.toBeInTheDocument();
+    });
+
+    it('does not re-offer resume after Start fresh, even on remount', async () => {
+      mockGetResumeState.mockResolvedValue(resumable);
+      const { unmount } = renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+      fireEvent.click(await screen.findByTestId('fresh-btn'));
+      await waitFor(() => expect(mockCancelInteractiveResume).toHaveBeenCalled());
+      unmount();
+      mockGetResumeState.mockClear();
+
+      // Re-open the same session: the declined memory short-circuits the probe.
+      renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+      expect(screen.queryByTestId('resume-session-prompt')).not.toBeInTheDocument();
+      expect(mockGetResumeState).not.toHaveBeenCalled();
     });
   });
 });

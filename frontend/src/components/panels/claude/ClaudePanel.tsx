@@ -21,6 +21,17 @@ import { ModeIdentityStrip } from '../../cyboflow/unified/ModeIdentityStrip';
 import { ChatMetaStrip } from '../../cyboflow/unified/ChatMetaStrip';
 import { SessionActionToast } from '../../cyboflow/SessionActionToast';
 
+// Sessions whose open-time resume prompt the user explicitly declined ("Start
+// fresh") this app run. Module-level so the decision survives ClaudePanel
+// remounts (e.g. switching sessions and back) — without it the probe would
+// re-offer resume every remount until the user finally sends a message.
+const declinedResumeSessions = new Set<string>();
+
+/** Test-only: clear the module-level declined-resume memory between cases. */
+export function __resetDeclinedResumeForTests(): void {
+  declinedResumeSessions.clear();
+}
+
 export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive }) => {
   const hook = useClaudePanel(panel.id, isActive);
   const [activeView, setActiveView] = useState<'richOutput' | 'messages' | 'stats'>('richOutput');
@@ -126,6 +137,9 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     setResumeArmed(false);
     setCanOfferResume(false);
     if (interactiveRunId === null || showDemoTerminal || !sessionId) return;
+    // The user already chose "Start fresh" for this session this app run — don't
+    // re-offer until the REPL is live again (a new loss episode).
+    if (declinedResumeSessions.has(sessionId)) return;
     let cancelled = false;
     void API.sessions
       .getInteractiveResumeState(sessionId)
@@ -142,11 +156,28 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     };
   }, [panel.sessionId, interactiveRunId, showDemoTerminal]);
 
+  // The restored-context hint is a one-time cue ("send a message to continue").
+  // Auto-clear it so it never sticks forever — by then the user has sent the turn
+  // and the resumed REPL is responding in the terminal below.
+  useEffect(() => {
+    if (!resumeArmed) return;
+    const id = setTimeout(() => setResumeArmed(false), 12_000);
+    return () => clearTimeout(id);
+  }, [resumeArmed]);
+
   // "Resume previous session" → arm the deferred resume; the next composer turn
   // continues the prior conversation (--resume --fork-session) server-side.
   const handleResumeSession = (): void => {
     setResumeArmed(true);
     void API.sessions.resumeInteractive(panel.sessionId).catch(() => undefined);
+  };
+
+  // "Start fresh" (or Escape) → decline: disarm any prior resume intent server-side
+  // so it can't fire on a later turn, remember the choice, and hide the prompt.
+  const handleDeclineResume = (): void => {
+    setResumePromptDismissed(true);
+    declinedResumeSessions.add(panel.sessionId);
+    void API.sessions.cancelInteractiveResume(panel.sessionId).catch(() => undefined);
   };
 
   const claudePanelState = (panel.state.customState as ClaudePanelState | undefined) ?? {};
@@ -333,9 +364,9 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
           {!showDemoTerminal && (
             <ResumeSessionPrompt
               isOpen={canOfferResume && !resumePromptDismissed && !resumeArmed}
-              onClose={() => setResumePromptDismissed(true)}
+              onClose={handleDeclineResume}
               onResume={handleResumeSession}
-              onStartFresh={() => setResumePromptDismissed(true)}
+              onStartFresh={handleDeclineResume}
             />
           )}
           {/* After "Resume", cue that the next message continues the prior

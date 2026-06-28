@@ -26,6 +26,7 @@ import { Button } from '../ui/Button';
 
 export interface ResumeSessionPromptProps {
   isOpen: boolean;
+  /** Modal dismissal via Escape — the caller treats this as declining (start fresh). */
   onClose: () => void;
   /** Primary action: resume the prior conversation on the next message. */
   onResume: () => void;
@@ -39,16 +40,9 @@ export function ResumeSessionPrompt({
   onResume,
   onStartFresh,
 }: ResumeSessionPromptProps): ReactElement {
-  const handleResume = (): void => {
-    onResume();
-    onClose();
-  };
-
-  const handleStartFresh = (): void => {
-    onStartFresh();
-    onClose();
-  };
-
+  // Actions do NOT call onClose themselves — the parent owns isOpen (it closes the
+  // prompt by flipping its armed/dismissed state). This keeps Resume from being
+  // immediately undone by an onClose that the parent maps to "decline".
   return (
     <Modal
       isOpen={isOpen}
@@ -89,10 +83,10 @@ export function ResumeSessionPrompt({
         </p>
 
         <div className="mt-5 flex items-center justify-end gap-2">
-          <Button variant="ghost" size="sm" onClick={handleStartFresh}>
+          <Button variant="ghost" size="sm" onClick={onStartFresh}>
             Start fresh
           </Button>
-          <Button variant="primary" size="sm" onClick={handleResume}>
+          <Button variant="primary" size="sm" onClick={onResume}>
             Resume previous session
           </Button>
         </div>
