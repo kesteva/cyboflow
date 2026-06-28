@@ -267,6 +267,92 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // updateCustom
+  // -------------------------------------------------------------------------
+
+  it('updateCustom edits an existing custom in place (key immutable, version bumps, is_custom stays 1)', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'createCustom',
+      name: 'My Helper',
+      role: null,
+      description: 'first',
+      systemPrompt: 'one',
+      tools: TOOLS,
+      enabledMcps: ['context7'],
+    });
+    const before = router.getByKey(1, 'my-helper') as AgentOverrideRow;
+    expect(before.version).toBe(1);
+
+    const { agentKey } = await router.applyChange(1, {
+      op: 'updateCustom',
+      agentKey: 'my-helper',
+      role: 'reviewer',
+      description: 'second',
+      systemPrompt: 'two',
+      tools: ['Read'],
+      enabledMcps: ['playwright', 'fal-ai'],
+    });
+    expect(agentKey).toBe('my-helper');
+
+    const after = router.getByKey(1, 'my-helper') as AgentOverrideRow;
+    expect(after.is_custom).toBe(1);
+    expect(after.base_agent_key).toBeNull();
+    expect(after.name).toBe('cyboflow-my-helper'); // name derived from immutable key
+    expect(after.description).toBe('second');
+    expect(after.role).toBe('reviewer');
+    expect(JSON.parse(after.tools_json)).toEqual(['Read']);
+    expect(JSON.parse(after.enabled_mcps_json)).toEqual(['playwright', 'fal-ai']);
+    expect(after.version).toBe(2); // bumped
+  });
+
+  it('updateCustom on a non-existent key throws invalid_key', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await expect(
+      router.applyChange(1, {
+        op: 'updateCustom',
+        agentKey: 'ghost',
+        role: null,
+        description: 'x',
+        systemPrompt: 'y',
+        tools: TOOLS,
+        enabledMcps: [],
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_key' });
+  });
+
+  it('updateCustom on a builtin override throws invalid_key (use upsert)', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'upsert',
+      agentKey: 'implement',
+      role: 'sprint',
+      description: 'x',
+      systemPrompt: 'y',
+      tools: TOOLS,
+      enabledMcps: [],
+    });
+
+    await expect(
+      router.applyChange(1, {
+        op: 'updateCustom',
+        agentKey: 'implement',
+        role: null,
+        description: 'x',
+        systemPrompt: 'y',
+        tools: TOOLS,
+        enabledMcps: [],
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_key' });
+  });
+
+  // -------------------------------------------------------------------------
   // reset
   // -------------------------------------------------------------------------
 

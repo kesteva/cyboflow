@@ -87,6 +87,24 @@ export interface AgentCreateCustomChange {
   enabledMcps: string[];
 }
 
+/**
+ * Update an EXISTING custom agent in place (is_custom=1). The agentKey is
+ * IMMUTABLE — it was derived from the name at creation and is load-bearing for
+ * workflow-step bindings, so an edit never renames it (the editor's name field
+ * is read-only outside create mode). Total-replaces role / description / system
+ * prompt / tools / enabledMcps on the existing row.
+ */
+export interface AgentUpdateCustomChange {
+  op: 'updateCustom';
+  agentKey: string;
+  role: string | null;
+  description: string;
+  systemPrompt: string;
+  tools: CliTool[];
+  /** MCP server names this agent may call (rendered as `mcp__<server>__*`). */
+  enabledMcps: string[];
+}
+
 /** Reset a builtin override (DELETE its row → builtin shows through again). */
 export interface AgentResetChange {
   op: 'reset';
@@ -102,6 +120,7 @@ export interface AgentDeleteCustomChange {
 export type AgentOverrideChange =
   | AgentUpsertChange
   | AgentCreateCustomChange
+  | AgentUpdateCustomChange
   | AgentResetChange
   | AgentDeleteCustomChange;
 
@@ -211,6 +230,8 @@ export class AgentOverrideRouter {
           return this.runUpsert(projectId, change);
         case 'createCustom':
           return this.runCreateCustom(projectId, change);
+        case 'updateCustom':
+          return this.runUpdateCustom(projectId, change);
         case 'reset':
           return this.runReset(projectId, change);
         case 'deleteCustom':
@@ -371,6 +392,77 @@ export class AgentOverrideRouter {
           model,
           now,
           now,
+        );
+    });
+    (txn as () => void)();
+
+    this.emitChange(projectId, agentKey);
+    return { agentKey };
+  }
+
+  // --------------------------------------------------------------------------
+  // updateCustom — edit an existing custom agent in place (key immutable)
+  // --------------------------------------------------------------------------
+
+  private runUpdateCustom(projectId: number, change: AgentUpdateCustomChange): { agentKey: string } {
+    const agentKey = change.agentKey;
+
+    const draft: AgentDraft = {
+      agentKey,
+      // name stays derived from the immutable key (the editor never renames a
+      // custom agent), so it is NOT a write input here.
+      name: `cyboflow-${agentKey}`,
+      role: change.role,
+      description: change.description,
+      systemPrompt: change.systemPrompt,
+      tools: change.tools,
+      enabledMcps: change.enabledMcps,
+      isCustom: true,
+    };
+    // Kebab/forbidden/tool/description/MCP shape checks (mirrors createCustom).
+    validateAgentDraft(draft);
+    const systemPrompt = ensureResultSection(draft.systemPrompt);
+
+    const now = new Date().toISOString();
+    const toolsJson = JSON.stringify(change.tools);
+    const enabledMcpsJson = JSON.stringify(change.enabledMcps);
+
+    const txn = this.db.transaction(() => {
+      const existing = this.getByKey(projectId, agentKey);
+      if (!existing) {
+        throw new AgentOverrideError(
+          'invalid_key',
+          `No custom agent "${agentKey}" exists in this project.`,
+        );
+      }
+      if (existing.is_custom !== 1) {
+        throw new AgentOverrideError(
+          'invalid_key',
+          `Agent "${agentKey}" is a builtin override — use upsert, not updateCustom.`,
+        );
+      }
+
+      this.db
+        .prepare(
+          `UPDATE agent_overrides SET
+             role = ?,
+             description = ?,
+             system_prompt = ?,
+             tools_json = ?,
+             enabled_mcps_json = ?,
+             version = version + 1,
+             updated_at = ?
+           WHERE project_id = ? AND agent_key = ?`,
+        )
+        .run(
+          change.role,
+          change.description,
+          systemPrompt,
+          toolsJson,
+          enabledMcpsJson,
+          now,
+          projectId,
+          agentKey,
         );
     });
     (txn as () => void)();

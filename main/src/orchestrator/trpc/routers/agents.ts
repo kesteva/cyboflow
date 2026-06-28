@@ -351,6 +351,58 @@ export const agentsRouter = router({
     }),
 
   /**
+   * Update an EXISTING custom agent in place (total-replace description / system
+   * prompt / tools / enabledMcps / role). The agentKey is immutable, so unlike
+   * the builtin path this routes through the `updateCustom` chokepoint op rather
+   * than `upsert`. Pre-checks BAD_REQUEST when the key is not a custom agent (a
+   * builtin / builtin-override — use upsertOverride). Returns the fresh
+   * `AgentEntry`.
+   */
+  updateCustom: protectedProcedure
+    .input(
+      z.object({
+        projectId: projectIdSchema,
+        agentKey: agentKeySchema,
+        description: z.string().min(1),
+        systemPrompt: z.string(),
+        tools: toolsSchema,
+        enabledMcps: enabledMcpsSchema,
+        role: z.string().nullable().optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }): Promise<AgentEntry> => {
+      const deps = requireDeps(ctx);
+      const existing = deps.agentOverrideRouter.getByKey(input.projectId, input.agentKey);
+      if (!existing || existing.is_custom !== 1) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: `Agent "${input.agentKey}" is not a custom agent — use upsertOverride, not updateCustom`,
+        });
+      }
+      try {
+        await deps.agentOverrideRouter.applyChange(input.projectId, {
+          op: 'updateCustom',
+          agentKey: input.agentKey,
+          role: input.role ?? null,
+          description: input.description,
+          systemPrompt: input.systemPrompt,
+          tools: input.tools,
+          enabledMcps: input.enabledMcps,
+        });
+      } catch (err) {
+        rethrowAsTRPCError(err);
+      }
+      const entry = getEntry(deps, input.projectId, input.agentKey);
+      if (!entry) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: `Custom agent "${input.agentKey}" not found after update`,
+        });
+      }
+      return entry;
+    }),
+
+  /**
    * Duplicate any effective agent (builtin / builtin-override / custom) into a
    * new custom agent under `newName`. Seeds description / system prompt / tools /
    * role from the source, then routes through `createCustom` (CONFLICT on key

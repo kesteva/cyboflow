@@ -321,6 +321,52 @@ describe('cyboflow.agents.createCustom / duplicate / deleteCustom', () => {
       caller.cyboflow.agents.deleteCustom({ projectId: PROJECT_ID, agentKey: 'implement' }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
   });
+
+  it('updateCustom edits a custom agent in place (key immutable, fields + mcps replaced)', async () => {
+    const caller = makeWiredCaller(createAgentsTestDb());
+
+    await caller.cyboflow.agents.createCustom({
+      projectId: PROJECT_ID,
+      name: 'My Helper',
+      description: 'first',
+      systemPrompt: 'one',
+      tools: ['Read'],
+    });
+
+    const updated = await caller.cyboflow.agents.updateCustom({
+      projectId: PROJECT_ID,
+      agentKey: 'my-helper',
+      description: 'second',
+      systemPrompt: 'two',
+      tools: ['Read', 'Edit'],
+      enabledMcps: ['peekaboo'],
+      role: 'reviewer',
+    });
+    expect(updated.agentKey).toBe('my-helper');
+    expect(updated.source).toBe('custom');
+    expect(updated.isCustom).toBe(true);
+    expect(updated.description).toBe('second');
+    expect(updated.tools).toEqual(['Read', 'Edit']);
+    expect(updated.enabledMcps).toEqual(['peekaboo']);
+
+    // Still a single custom agent (an in-place edit, not a new row).
+    const listed = await caller.cyboflow.agents.list({ projectId: PROJECT_ID });
+    expect(listed.filter((e) => e.agentKey === 'my-helper')).toHaveLength(1);
+  });
+
+  it('updateCustom on a builtin key is BAD_REQUEST (use upsertOverride)', async () => {
+    const caller = makeWiredCaller(createAgentsTestDb());
+    await expect(
+      caller.cyboflow.agents.updateCustom({
+        projectId: PROJECT_ID,
+        agentKey: 'implement',
+        description: 'x',
+        systemPrompt: 'y',
+        tools: ['Read'],
+        enabledMcps: [],
+      }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+  });
 });
 
 describe('cyboflow.agents — PRECONDITION_FAILED when deps unwired', () => {
@@ -360,6 +406,16 @@ describe('cyboflow.agents — PRECONDITION_FAILED when deps unwired', () => {
     ).rejects.toSatisfy(isPrecond);
     await expect(
       caller.cyboflow.agents.duplicate({ projectId: PROJECT_ID, agentKey: 'implement', newName: 'Y' }),
+    ).rejects.toSatisfy(isPrecond);
+    await expect(
+      caller.cyboflow.agents.updateCustom({
+        projectId: PROJECT_ID,
+        agentKey: 'my-helper',
+        description: 'd',
+        systemPrompt: 's',
+        tools: ['Read'],
+        enabledMcps: [],
+      }),
     ).rejects.toSatisfy(isPrecond);
     await expect(
       caller.cyboflow.agents.deleteCustom({ projectId: PROJECT_ID, agentKey: 'my-helper' }),
