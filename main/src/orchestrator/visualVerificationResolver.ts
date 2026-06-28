@@ -68,6 +68,7 @@ export const MVP_AVAILABLE_BACKENDS: readonly VisualBackendId[] = ['capturePage'
 export const SHIPPED_VERIFY_BACKENDS: readonly VisualBackendId[] = [
   'capturePage',
   'playwright',
+  'peekaboo',
 ] as const;
 
 /**
