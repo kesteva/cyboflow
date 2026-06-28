@@ -63,7 +63,13 @@ import { VerificationScheduler, verificationEvents, verificationChannel } from '
 import { createVerdictDelivery } from './orchestrator/verify/verdictDelivery';
 import { CapturePageBackend } from './services/visualVerify/capturePageBackend';
 import { VlmJudgeImpl } from './services/visualVerify/vlmJudge';
-import type { VerdictV1, VlmJudge } from '../../shared/types/visualVerification';
+import { DevServerManager } from './services/visualVerify/devServerManager';
+import { loadVerifyConfig } from './orchestrator/verifyConfigLoader';
+import type {
+  DeliverableVerifyConfig,
+  VerdictV1,
+  VlmJudge,
+} from '../../shared/types/visualVerification';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
@@ -727,6 +733,52 @@ async function initializeServices() {
       return realVlmJudge.judge(judgeArgs, signal);
     },
   };
+  // S2 — the scheduler-owned dev-server runner. DevServerManager (a service that
+  // imports node:child_process) is the concrete spawner; the scheduler knows only
+  // the narrow DevServerProvider interface. The context resolver closure does the
+  // fs work (loadVerifyConfig) + project/worktree path lookup so the scheduler
+  // stays fs/electron/service-free (standalone-typecheck invariant) — mirrors the
+  // ArtifactRouter artifactCommitDir + artifactsDir resolver closures above. It
+  // returns the run's worktree cwd (the build artifacts live there) + the matching
+  // verify.json deliverable recipe whose `start` the runner runs on the leased port.
+  const devServerManager = new DevServerManager({ logger: cyboflowLogger });
+  const devServerContextResolver = async (args: {
+    runId: string;
+    projectId: number;
+    input: { url?: string; htmlPath?: string };
+  }): Promise<{ cwd: string; deliverable: DeliverableVerifyConfig } | null> => {
+    try {
+      const project = databaseService.getProject(args.projectId);
+      if (!project?.path) return null;
+      const verifyConfig = await loadVerifyConfig(project.path, cyboflowLogger);
+      const deliverables = verifyConfig?.deliverables ?? [];
+      // Only a deliverable with a `start` command needs a dev server.
+      const startable = deliverables.filter((d) => d.start && d.start.trim().length > 0);
+      if (startable.length === 0) return null;
+      // Match the deliverable to the request: prefer one whose url/htmlPath matches
+      // the request's; otherwise fall back to the first startable deliverable (the
+      // common single-deliverable project case).
+      const matched =
+        startable.find(
+          (d) =>
+            (args.input.url && d.url === args.input.url) ||
+            (args.input.htmlPath && d.htmlPath === args.input.htmlPath),
+        ) ?? startable[0];
+      // Run the build/start in the run's WORKTREE (the deliverable was built there),
+      // falling back to the project root when the run has no worktree_path yet.
+      const row = cyboflowDb
+        .prepare('SELECT worktree_path FROM workflow_runs WHERE id = ?')
+        .get(args.runId) as { worktree_path: string | null } | undefined;
+      const cwd = row?.worktree_path ?? project.path;
+      return { cwd, deliverable: matched };
+    } catch (err) {
+      cyboflowLogger?.warn('[VerificationScheduler] dev-server context resolve failed', {
+        runId: args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  };
   VerificationScheduler.initialize({
     db: cyboflowDb,
     backends: { capturePage: new CapturePageBackend() },
@@ -737,6 +789,9 @@ async function initializeServices() {
     // P8a — advisory verdict delivery through the existing router chokepoints
     // (artifact enrich on every judged outcome + a FAIL/low-confidence finding).
     onVerdict: createVerdictDelivery({ db: cyboflowDb, logger: cyboflowLogger }),
+    // S2 — scheduler-owned dev server per verify.json build/start/readyWhen/${PORT}.
+    devServerProvider: devServerManager,
+    devServerContextResolver,
   });
 
   // Passive dynamic-workflow tracker (Workflow tool / ultracode detection).
