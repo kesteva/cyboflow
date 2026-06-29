@@ -23,6 +23,7 @@
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { ReactNode } from 'react';
 
 // ---------------------------------------------------------------------------
 // Hoisted mutable holder — the useClaudePanel mock reads activeSession from it
@@ -125,16 +126,31 @@ vi.mock('../../../cyboflow/ResumeSessionPrompt', () => ({
     ) : null,
 }));
 
-vi.mock('../RichOutputWithSidebar', () => ({
-  RichOutputWithSidebar: () => <div data-testid="sdk-rich-output">RichOutputWithSidebar</div>,
+// The SDK transcript surface is now the shared UnifiedChatView. Stub it so the
+// substrate-swap branch is under test (not the transcript internals): the stub
+// echoes its transport and renders the host-supplied interactiveBody (the live
+// terminal + resume overlay) and bottomSlot (approvals + composer + toast).
+vi.mock('../../../cyboflow/unified/UnifiedChatView', () => ({
+  UnifiedChatView: ({
+    transport,
+    interactiveBody,
+    bottomSlot,
+  }: {
+    transport: string;
+    interactiveBody?: ReactNode;
+    bottomSlot?: ReactNode;
+  }) => (
+    <div data-testid="unified-chat-view" data-transport={transport}>
+      {interactiveBody}
+      {bottomSlot}
+    </div>
+  ),
 }));
 
-vi.mock('../../ai/MessagesView', () => ({
-  MessagesView: () => <div data-testid="messages-view">MessagesView</div>,
-}));
-
-vi.mock('../SessionStats', () => ({
-  SessionStats: () => <div data-testid="session-stats">SessionStats</div>,
+// The panel-scoped message source is exercised in useUnifiedPanelMessages tests;
+// here it is stubbed so ClaudePanel's branch logic does not hit the panels API.
+vi.mock('../../../cyboflow/unified/useUnifiedPanelMessages', () => ({
+  useUnifiedPanelMessages: () => ({ messages: [], isLoading: false, loadError: null }),
 }));
 
 // The composer is now the shared QuickSessionComposer; its send behavior lives
@@ -160,14 +176,6 @@ vi.mock('../../../cyboflow/unified/QuickSessionComposer', () => ({
       QuickSessionComposer
     </div>
   ),
-}));
-
-vi.mock('../ClaudeSettingsPanel', () => ({
-  ClaudeSettingsPanel: () => <div data-testid="claude-settings-panel">ClaudeSettingsPanel</div>,
-}));
-
-vi.mock('../../ai/transformers/ClaudeMessageTransformer', () => ({
-  ClaudeMessageTransformer: class ClaudeMessageTransformer {},
 }));
 
 vi.mock('../../../ReviewQueue/PendingApprovalsForRun', () => ({
@@ -256,8 +264,9 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
     // Quick sessions are user-driven: the first-interaction guardrail is off.
     expect(terminal).toHaveTextContent('guard=false');
     expect(screen.getByTestId('claude-panel-interactive-terminal')).toBeInTheDocument();
-    // The SDK structured surface stays dormant (not in the DOM).
-    expect(screen.queryByTestId('sdk-rich-output')).not.toBeInTheDocument();
+    // The shared chat surface renders in interactive mode (its body is the live
+    // terminal, not the structured transcript).
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'interactive');
     // The unified composer mounts in interactive mode (⌃G handling lives inside
     // it; it is hidden by default — ptyOpen starts false).
     const composer = screen.getByTestId('quick-session-composer');
@@ -282,7 +291,7 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
   it('substrate undefined: renders the SDK surface + the SDK (non-interactive) composer', () => {
     renderWithProvider(makeSession({ runId: 'run-q1' }));
 
-    expect(screen.getByTestId('sdk-rich-output')).toBeInTheDocument();
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'sdk');
     expect(screen.queryByTestId('interactive-terminal-view')).not.toBeInTheDocument();
     expect(screen.getByTestId('quick-session-composer')).toHaveAttribute('data-interactive', 'false');
   });
@@ -290,7 +299,7 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
   it("substrate 'interactive' + null runId: falls through to the SDK surface (no crash)", () => {
     renderWithProvider(makeSession({ substrate: 'interactive', runId: null }));
 
-    expect(screen.getByTestId('sdk-rich-output')).toBeInTheDocument();
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'sdk');
     expect(screen.queryByTestId('interactive-terminal-view')).not.toBeInTheDocument();
   });
 
@@ -304,7 +313,7 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
     expect(screen.getByTestId('interactive-terminal-view')).toHaveTextContent(
       'InteractiveTerminalView:run-q2',
     );
-    expect(screen.queryByTestId('sdk-rich-output')).not.toBeInTheDocument();
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'interactive');
   });
 
   it('feeds the composer the PANE session, not a diverging global activeSession (live-smoke regression)', () => {

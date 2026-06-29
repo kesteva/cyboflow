@@ -1,12 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { AIPanelProps, RichOutputSettings } from '../ai/AbstractAIPanel';
-import { RichOutputWithSidebar } from './RichOutputWithSidebar';
-import { MessagesView } from '../ai/MessagesView';
-import { SessionStats } from './SessionStats';
+import { AIPanelProps } from '../ai/AbstractAIPanel';
 import { useClaudePanel } from '../../../hooks/useClaudePanel';
-import { ClaudeSettingsPanel } from './ClaudeSettingsPanel';
-import { ClaudeMessageTransformer } from '../ai/transformers/ClaudeMessageTransformer';
-import { Settings } from 'lucide-react';
 import { useConfigStore } from '../../../stores/configStore';
 import type { ClaudePanelState } from '../../../../../shared/types/panels';
 import { PendingApprovalsForRun } from '../../ReviewQueue/PendingApprovalsForRun';
@@ -17,8 +11,8 @@ import { ResumeSessionPrompt } from '../../cyboflow/ResumeSessionPrompt';
 import { DemoTerminalView } from '../../cyboflow/DemoTerminalView';
 import { API } from '../../../utils/api';
 import { QuickSessionComposer } from '../../cyboflow/unified/QuickSessionComposer';
-import { ModeIdentityStrip } from '../../cyboflow/unified/ModeIdentityStrip';
-import { ChatMetaStrip } from '../../cyboflow/unified/ChatMetaStrip';
+import { UnifiedChatView } from '../../cyboflow/unified/UnifiedChatView';
+import { useUnifiedPanelMessages } from '../../cyboflow/unified/useUnifiedPanelMessages';
 import { SessionActionToast } from '../../cyboflow/SessionActionToast';
 
 // Sessions whose open-time resume prompt the user explicitly declined ("Start
@@ -32,23 +26,19 @@ export function __resetDeclinedResumeForTests(): void {
   declinedResumeSessions.clear();
 }
 
+/**
+ * ClaudePanel — quick-session host for the shared <UnifiedChatView>.
+ *
+ * Renders the SAME chat surface a workflow run renders (RunChatView): the SDK
+ * substrate feeds the structured transcript from `useUnifiedPanelMessages`
+ * (panel-scoped `getJsonMessages` + live `session-output-available`), and the
+ * interactive (PTY) substrate swaps in the live xterm as the `interactiveBody`.
+ * This file owns only the quick-session-specific wiring: the substrate render
+ * gate, the open-time REPL resume recovery, the ⌃G composer reveal, and the
+ * bottom region (approvals + the unified composer + permission toast).
+ */
 export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive }) => {
   const hook = useClaudePanel(panel.id, isActive);
-  const [activeView, setActiveView] = useState<'richOutput' | 'messages' | 'stats'>('richOutput');
-  const [showSettings, setShowSettings] = useState(false);
-  const [richOutputSettings, setRichOutputSettings] = useState(() => {
-    const saved = localStorage.getItem('richOutputSettings');
-    return saved ? JSON.parse(saved) : {
-      showToolCalls: true,
-      compactMode: false,
-      collapseTools: true,  // Changed to true for collapsed by default
-      showThinking: true,
-      showSessionInit: false,
-    };
-  });
-
-  // Create transformer once and memoize it
-  const transformer = React.useMemo(() => new ClaudeMessageTransformer(), []);
   const activeSession = hook.activeSession;
   // Reliable run id for inline approvals: the surrounding SessionProvider holds
   // the freshly-fetched session (effectiveSession), whose runId reflects the
@@ -59,18 +49,15 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // Interactive-PTY render swap (PTY-backed quick sessions): when this panel's
   // session runs on the 'interactive' substrate, the live xterm
   // (InteractiveTerminalView, keyed by the sentinel __quick__ run id) replaces
-  // the SDK structured transcript below. Session resolution mirrors
-  // approvalRunId — prefer the SessionProvider's freshly-fetched session, fall
-  // back to the store copy keyed by the panel's sessionId. Null-safe: an
-  // interactive session whose runId has not landed yet keeps the SDK surface.
+  // the SDK structured transcript. Session resolution mirrors approvalRunId —
+  // prefer the SessionProvider's freshly-fetched session, fall back to the store
+  // copy keyed by the panel's sessionId.
   const panelStoreSession = useSessionStore((state) =>
     state.sessions.find((s) => s.id === panel.sessionId),
   );
   const substrateSession = sessionCtx?.session ?? panelStoreSession;
   const interactiveRunId =
     substrateSession?.substrate === 'interactive' ? substrateSession.runId ?? null : null;
-  const devModeEnabled = useConfigStore((state) => state.config?.devMode ?? false);
-  const showDebugTabs = devModeEnabled;
   // Demo mode: an interactive quick session is stamped 'interactive' so this
   // panel swaps in a terminal surface, but the real PTY is never spawned
   // (ipc/session.ts). Render the canned DemoTerminalView instead of the live
@@ -81,23 +68,16 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // Interactive quick sessions are driven by typing DIRECTLY into the live PTY
   // terminal above, so the separate "Message the live session" composer is
   // redundant and is hidden by default. Ctrl+G summons it for rich multi-line
-  // text entry (a slim hint bar advertises the shortcut while it is hidden).
-  // Captured at the window level (capture phase) so the keystroke toggles the
-  // composer instead of reaching xterm as a BEL (\x07).
+  // text entry. Captured at the window level (capture phase) so the keystroke
+  // toggles the composer instead of reaching xterm as a BEL (\x07).
   const [composerOpen, setComposerOpen] = useState(false);
   // Substrate-aware confirmation for a permission-mode change from the composer
-  // pill. Hosted here (not via CyboflowRoot, whose toast is local state reserved
-  // for merge/PR/dismiss) so it co-locates with the composer that triggers it; a
-  // permission-change message never overlaps CyboflowRoot's distinct copy.
+  // pill, co-located with the composer that triggers it.
   const [permissionToast, setPermissionToast] = useState<string | null>(null);
 
-  // Open-time resume recovery for a lost interactive (PTY) quick session. After an
-  // app restart the persistent REPL is gone but the prior conversation can be
+  // Open-time resume recovery for a lost interactive (PTY) quick session. After
+  // an app restart the persistent REPL is gone but the prior conversation can be
   // resumed (sessions.claude_session_id + claude's on-disk transcript survive).
-  // canOfferResume is set from the backend probe; while it is true and the user
-  // has neither dismissed nor chosen, ResumeSessionPrompt overlays the (empty)
-  // terminal. "Resume" arms the deferred resume (consumed by the next composer
-  // turn) and flips resumeArmed to show the restored-context hint.
   const [resumePromptDismissed, setResumePromptDismissed] = useState(false);
   const [resumeArmed, setResumeArmed] = useState(false);
   const [canOfferResume, setCanOfferResume] = useState(false);
@@ -119,9 +99,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   }, [interactiveRunId]);
 
   // On ⌃G reveal, move focus into the composer so the user's next keystrokes
-  // land in the rich text box instead of the live PTY terminal (otherwise they
-  // have to click it). The rAF lets the textarea mount first — `inputVisible`
-  // flips to true on the same render that sets composerOpen.
+  // land in the rich text box instead of the live PTY terminal.
   useEffect(() => {
     if (!composerOpen) return;
     const id = requestAnimationFrame(() => hook.textareaRef.current?.focus());
@@ -157,8 +135,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   }, [panel.sessionId, interactiveRunId, showDemoTerminal]);
 
   // The "Resuming…" hint is a transient cue shown while claude reopens the prior
-  // conversation in the terminal below. Auto-clear it so it never sticks forever —
-  // by then the resumed REPL has painted and is ready for input.
+  // conversation. Auto-clear it so it never sticks forever.
   useEffect(() => {
     if (!resumeArmed) return;
     const id = setTimeout(() => setResumeArmed(false), 12_000);
@@ -166,10 +143,10 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   }, [resumeArmed]);
 
   // "Resume previous session" → EAGERLY re-spawn the REPL (`--resume <uuid>`,
-  // server-side) so the prior conversation reopens live immediately — no first
-  // message required. Also DISMISS the prompt for this mount: the probe never
-  // re-runs for a quick session (its sentinel runId is constant), so canOfferResume
-  // stays stale-true and the prompt would re-pop once the "Resuming…" hint clears.
+  // server-side) so the prior conversation reopens live immediately. Also DISMISS
+  // the prompt for this mount: the probe never re-runs for a quick session (its
+  // sentinel runId is constant), so canOfferResume stays stale-true and the
+  // prompt would re-pop once the "Resuming…" hint clears.
   const handleResumeSession = (): void => {
     setResumeArmed(true);
     setResumePromptDismissed(true);
@@ -177,8 +154,6 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   };
 
   // "Start fresh" (or Escape) → decline: remember the choice and hide the prompt.
-  // No server call needed — nothing was spawned, and the next message simply opens
-  // a fresh REPL via the sessions:input dead-REPL respawn path.
   const handleDeclineResume = (): void => {
     setResumePromptDismissed(true);
     declinedResumeSessions.add(panel.sessionId);
@@ -188,51 +163,36 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // SDK substrate emits a "54k/200k tokens (27%)" string; null for PTY/empty.
   const contextUsage = claudePanelState.contextUsage ?? null;
 
-  // Extract and store slash commands when we get JSON messages with init
+  // Extract and store slash commands when we get JSON messages with init.
   useEffect(() => {
     if (!activeSession) return;
-
-    const handleSlashCommandsFromMessages = () => {
-      const jsonMessages = activeSession.jsonMessages || [];
-
-      // Look for init message with slash_commands
-      const initMessage = jsonMessages.find((msg: { type?: string; subtype?: string; slash_commands?: string[] }) =>
-        msg.type === 'system' && msg.subtype === 'init' && msg.slash_commands
-      );
-
-      if (initMessage && Array.isArray(initMessage.slash_commands)) {
-        console.log('[slash-debug] Found init message with slash commands for Cyboflow session:', activeSession.id);
-        console.log('[slash-debug] Commands:', initMessage.slash_commands);
-
-        try {
-          const slashCommandsKey = `slashCommands_${activeSession.id}`;
-          localStorage.setItem(slashCommandsKey, JSON.stringify(initMessage.slash_commands));
-          console.log('[slash-debug] Stored slash commands for Cyboflow session:', activeSession.id);
-        } catch (e) {
-          console.warn('[slash-debug] Failed to store slash commands for Cyboflow session:', e);
-        }
+    const jsonMessages = activeSession.jsonMessages || [];
+    const initMessage = jsonMessages.find(
+      (msg: { type?: string; subtype?: string; slash_commands?: string[] }) =>
+        msg.type === 'system' && msg.subtype === 'init' && msg.slash_commands,
+    );
+    if (initMessage && Array.isArray(initMessage.slash_commands)) {
+      try {
+        const slashCommandsKey = `slashCommands_${activeSession.id}`;
+        localStorage.setItem(slashCommandsKey, JSON.stringify(initMessage.slash_commands));
+      } catch (e) {
+        console.warn('[slash-debug] Failed to store slash commands for Cyboflow session:', e);
       }
-    };
-
-    handleSlashCommandsFromMessages();
+    }
   }, [activeSession?.jsonMessages, activeSession?.id]);
 
-  const handleRichOutputSettingsChange = (newSettings: RichOutputSettings) => {
-    setRichOutputSettings(newSettings);
-    localStorage.setItem('richOutputSettings', JSON.stringify(newSettings));
-  };
+  // Unified-chat chrome derivations for this quick session. Use the PANE's own
+  // session (substrateSession), falling back to the global activeSession only
+  // when neither context nor store copy is present — the global store
+  // activeSession can point at a different / lagging session than this panel.
+  const paneSession = substrateSession ?? activeSession;
+  const isInteractive = interactiveRunId !== null;
 
-  const toggleSettings = () => {
-    setShowSettings(!showSettings);
-  };
+  // SDK structured transcript source (panel-scoped). Disabled on the interactive
+  // substrate, whose live xterm owns the conversation surface.
+  const { messages, loadError } = useUnifiedPanelMessages(panel.id, !isInteractive);
 
-  useEffect(() => {
-    if (!devModeEnabled && activeView !== 'richOutput') {
-      setActiveView('richOutput');
-    }
-  }, [devModeEnabled, activeView]);
-
-  if (!activeSession) {
+  if (!activeSession || !paneSession) {
     return (
       <div className="flex-1 flex items-center justify-center text-text-secondary">
         <div className="text-center p-8">
@@ -244,193 +204,56 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     );
   }
 
-  // Unified-chat chrome derivations for this quick session.
-  //
-  // Use the PANE's own session — substrateSession (the SessionProvider's
-  // freshly-fetched session, else the store copy keyed by panel.sessionId),
-  // falling back to the global activeSession only when neither is present. The
-  // global store `activeSession` is keyed by the GLOBAL activeSessionId, which
-  // can point at a different / lagging session than the one THIS panel renders
-  // (same "prefer context over the laggy store copy" reasoning already applied
-  // to approvalRunId + the substrate swap above). Feeding the composer the wrong
-  // session read the wrong effort (read-only pill blank), folder/branch, running
-  // state, AND send target. In normal single-session use paneSession ===
-  // activeSession, so this is behavior-neutral there.
-  const paneSession = substrateSession ?? activeSession;
-  const isInteractive = interactiveRunId !== null;
   const sessionRunning = paneSession.status === 'running';
   const worktreePath = paneSession.worktreePath ?? null;
   const folderLabel =
     worktreePath !== null ? worktreePath.split('/').filter(Boolean).pop() ?? null : null;
   const branchName = hook.gitCommands?.currentBranch ?? null;
 
-  return (
-    <div className="relative flex-1 flex flex-col h-full bg-background">
-      {/* Mode-identity strip — constant across SDK / PTY quick sessions. */}
-      <ModeIdentityStrip
-        name={isInteractive ? 'Terminal' : 'Claude'}
-        transport={isInteractive ? 'interactive' : 'sdk'}
-        mode="quick"
-        running={sessionRunning}
-      />
-
-      {/* Header — debug tabs drive the SDK structured views only, so they are
-          dropped while the live PTY terminal owns the body. */}
-      {showDebugTabs && interactiveRunId === null && (
-        <div className="border-b border-border-primary bg-surface-primary shadow-sm">
-          <div className="flex items-center justify-between px-4 h-12">
-            <div className="flex items-center gap-2">
-              <div className="flex">
-                <button
-                  onClick={() => setActiveView('richOutput')}
-                  className={`px-4 py-2 text-sm font-medium transition-colors relative ${
-                    activeView === 'richOutput'
-                      ? 'text-text-primary'
-                      : 'text-text-secondary hover:text-text-primary'
-                  }`}
-                >
-                  Output
-                  {activeView === 'richOutput' && (
-                    <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-interactive" />
-                  )}
-                </button>
-                {devModeEnabled && (
-                  <>
-                    <button
-                      onClick={() => setActiveView('messages')}
-                      className={`px-4 py-2 text-sm font-medium transition-colors relative ${
-                        activeView === 'messages'
-                          ? 'text-text-primary'
-                          : 'text-text-secondary hover:text-text-primary'
-                      }`}
-                    >
-                      Messages
-                      {activeView === 'messages' && (
-                        <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-interactive" />
-                      )}
-                    </button>
-                    <button
-                      onClick={() => setActiveView('stats')}
-                      className={`px-4 py-2 text-sm font-medium transition-colors relative ${
-                        activeView === 'stats'
-                          ? 'text-text-primary'
-                          : 'text-text-secondary hover:text-text-primary'
-                      }`}
-                    >
-                      Stats
-                      {activeView === 'stats' && (
-                        <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-interactive" />
-                      )}
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              {activeView === 'richOutput' && (
-                <button
-                  onClick={toggleSettings}
-                  className="p-1.5 rounded hover:bg-surface-hover transition-colors"
-                  title="Display settings"
-                >
-                  <Settings className="w-4 h-4 text-text-secondary" />
-                </button>
-              )}
-            </div>
+  // Interactive (PTY) substrate body — the live xterm (+ open-time resume
+  // recovery overlay). guardFirstInteraction={false}: quick sessions are
+  // user-driven, so direct typing into the terminal is the expected interaction.
+  const interactiveBody =
+    interactiveRunId !== null ? (
+      <div className="flex-1 overflow-hidden relative h-full" data-testid="claude-panel-interactive-terminal">
+        {showDemoTerminal ? (
+          <DemoTerminalView showComposer />
+        ) : (
+          <InteractiveTerminalView runId={interactiveRunId} guardFirstInteraction={false} />
+        )}
+        {/* Open-time recovery: offer to resume the lost REPL's conversation. */}
+        {!showDemoTerminal && (
+          <ResumeSessionPrompt
+            isOpen={canOfferResume && !resumePromptDismissed && !resumeArmed}
+            onClose={handleDeclineResume}
+            onResume={handleResumeSession}
+            onStartFresh={handleDeclineResume}
+          />
+        )}
+        {/* Transient cue while claude reopens the prior conversation. */}
+        {resumeArmed && (
+          <div
+            className="pointer-events-none absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded border border-interactive/40 bg-surface-secondary px-3 py-1.5 text-[11px] text-text-secondary shadow-sm"
+            data-testid="resume-restored-hint"
+          >
+            Resuming previous session — your conversation will reappear below.
           </div>
-        </div>
-      )}
+        )}
+      </div>
+    ) : undefined;
 
-      {/* Main content area */}
-      {interactiveRunId !== null ? (
-        /* Interactive substrate: the live PTY xterm IS the conversation
-           surface (mirrors RunChatView's swap for workflow runs). The SDK
-           structured surface stays dormant (not rendered) so the conversation
-           is never double-rendered. The composer below is the dedicated
-           InteractiveSessionComposer, which routes through the session-scoped
-           sessions:input channel (relayed into the live PTY server-side).
-           guardFirstInteraction={false}: quick sessions are user-driven, so
-           direct typing into the terminal is the expected interaction — no
-           first-mousedown warn dialog, keystroke relay on from mount (workflow
-           runs keep the guardrail because cyboflow orchestrates them). */
-        <div
-          className="flex-1 overflow-hidden relative"
-          data-testid="claude-panel-interactive-terminal"
-        >
-          {showDemoTerminal ? (
-            <DemoTerminalView showComposer />
-          ) : (
-            <InteractiveTerminalView runId={interactiveRunId} guardFirstInteraction={false} />
-          )}
-          {/* Open-time recovery: offer to resume the lost REPL's conversation
-              instead of silently starting fresh on the next message. */}
-          {!showDemoTerminal && (
-            <ResumeSessionPrompt
-              isOpen={canOfferResume && !resumePromptDismissed && !resumeArmed}
-              onClose={handleDeclineResume}
-              onResume={handleResumeSession}
-              onStartFresh={handleDeclineResume}
-            />
-          )}
-          {/* After "Resume", a transient cue while claude reopens the prior
-              conversation in the terminal below (the REPL respawns with --resume). */}
-          {resumeArmed && (
-            <div
-              className="pointer-events-none absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded border border-interactive/40 bg-surface-secondary px-3 py-1.5 text-[11px] text-text-secondary shadow-sm"
-              data-testid="resume-restored-hint"
-            >
-              Resuming previous session — your conversation will reappear below.
-            </div>
-          )}
-        </div>
-      ) : (
-        <ClaudeMainContent
-          panelId={panel.id}
-          activeView={activeView}
-          showDebugTabs={showDebugTabs}
-          devModeEnabled={devModeEnabled}
-          activeSession={activeSession}
-          richOutputSettings={richOutputSettings}
-          handleRichOutputSettingsChange={handleRichOutputSettingsChange}
-          transformer={transformer}
-          toggleSettings={toggleSettings}
-        />
-      )}
-
-      {/* Settings Panel */}
-      {showSettings && (
-        <ClaudeSettingsPanel
-          settings={richOutputSettings}
-          onSettingsChange={handleRichOutputSettingsChange}
-          onClose={() => setShowSettings(false)}
-        />
-      )}
-
-      {/* Meta strip — folder · branch · token/context meter, directly above the
-          approvals + composer (consolidates the old ClaudeInputWithImages
-          context bar). */}
-      <ChatMetaStrip
-        folderLabel={folderLabel}
-        folderTitle={worktreePath}
-        branchName={branchName}
-        contextUsage={contextUsage}
-      />
-
+  // Bottom region — approvals + the unified composer + permission toast +
+  // archived banner. The composer's substrate-specific send is owned by
+  // QuickSessionComposer; demo interactive sessions render their own cosmetic
+  // composer inside DemoTerminalView, so suppress the relay composer there.
+  const bottomSlot = (
+    <>
       {/* Inline permission prompts — surfaces ApprovalRouter approvals directly
-          above the input (instead of only in the detached Review Queue). Returns
-          null when the session has no run or no pending approval for it. */}
+          above the input. Returns null when there is no pending approval. */}
       <PendingApprovalsForRun runId={approvalRunId} className="shrink-0 mx-4 mb-2" />
 
-      {/* Composer — unified across SDK + PTY quick sessions. The interactive
-          (PTY) variant routes through API.sessions.sendInput (relayed into the
-          live PTY) and is hidden behind ⌃G; the SDK variant uses the
-          panel-scoped handlers. The substrate-specific send is owned by
-          QuickSessionComposer, never the panel. */}
-      {!paneSession.archived && (
-        // Demo interactive sessions render the cosmetic composer INSIDE
-        // DemoTerminalView (showComposer), so suppress the relay composer here.
-        showDemoTerminal ? null : (
+      {!paneSession.archived &&
+        (showDemoTerminal ? null : (
           <QuickSessionComposer
             activeSession={paneSession}
             input={hook.input}
@@ -447,12 +270,10 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
             onTogglePtyOpen={() => setComposerOpen((v) => !v)}
             onPermissionApplied={setPermissionToast}
           />
-        )
-      )}
+        ))}
 
       {/* Permission-change confirmation — substrate-aware copy supplied by the
-          composer (SDK: applies next message; PTY: applies on terminal restart).
-          Positioned above the composer; auto-dismisses. */}
+          composer. Positioned above the composer; auto-dismisses. */}
       {permissionToast !== null && (
         <div className="pointer-events-none absolute bottom-24 left-1/2 z-20 -translate-x-1/2">
           <div className="pointer-events-auto">
@@ -465,81 +286,37 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
         </div>
       )}
 
-      {/* Show archived message if session is archived */}
       {paneSession.archived && (
         <div className="bg-surface-secondary border-t border-border-primary px-4 py-3 text-center text-text-muted text-sm">
           This session is archived. Unarchive it to continue the conversation.
         </div>
       )}
+    </>
+  );
 
+  return (
+    <div className="relative flex-1 flex flex-col h-full bg-background">
+      <UnifiedChatView
+        name={isInteractive ? 'Terminal' : 'Claude'}
+        transport={isInteractive ? 'interactive' : 'sdk'}
+        mode="quick"
+        running={sessionRunning}
+        messages={messages}
+        loadError={loadError}
+        isWaitingForResponse={sessionRunning}
+        folderLabel={folderLabel}
+        folderTitle={worktreePath}
+        branchName={branchName}
+        contextUsage={contextUsage}
+        railId={panel.id}
+        interactiveBody={interactiveBody}
+        bottomSlot={bottomSlot}
+      />
     </div>
   );
 });
 
 ClaudePanel.displayName = 'ClaudePanel';
-
-// Memoized main content component to prevent unnecessary re-renders when input changes
-const ClaudeMainContent = React.memo<{
-  panelId: string;
-  activeView: string;
-  showDebugTabs: boolean;
-  devModeEnabled: boolean;
-  activeSession: { id: string; status: string };
-  richOutputSettings: RichOutputSettings;
-  handleRichOutputSettingsChange: (settings: RichOutputSettings) => void;
-  transformer: ClaudeMessageTransformer;
-  toggleSettings: () => void;
-}>(({ panelId, activeView, showDebugTabs, devModeEnabled, activeSession, richOutputSettings, handleRichOutputSettingsChange, transformer, toggleSettings }) => {
-  return (
-    <div className="flex-1 overflow-hidden relative">
-      {!showDebugTabs && (
-        <div className="absolute top-3 right-3 z-10">
-          <button
-            onClick={toggleSettings}
-            className="p-2 rounded border border-border-primary bg-surface-secondary shadow-sm hover:bg-surface-hover transition-colors"
-            title="Display settings"
-            aria-label="Open Claude settings"
-          >
-            <Settings className="w-4 h-4 text-text-secondary" />
-          </button>
-        </div>
-      )}
-      {activeView === 'richOutput' && (
-        <RichOutputWithSidebar
-          panelId={panelId}
-          sessionStatus={activeSession.status}
-          settings={richOutputSettings}
-          onSettingsChange={handleRichOutputSettingsChange}
-          transformer={transformer}
-        />
-      )}
-      {devModeEnabled && activeView === 'messages' && (
-        <MessagesView
-          panelId={panelId}
-          agentType="claude"
-          outputEventName="session:output"
-        />
-      )}
-      {devModeEnabled && activeView === 'stats' && (
-        <SessionStats sessionId={activeSession.id} />
-      )}
-    </div>
-  );
-}, (prevProps, nextProps) => {
-  // Custom comparison function - only re-render if these specific props change
-  return (
-    prevProps.panelId === nextProps.panelId &&
-    prevProps.activeView === nextProps.activeView &&
-    prevProps.showDebugTabs === nextProps.showDebugTabs &&
-    prevProps.devModeEnabled === nextProps.devModeEnabled &&
-    prevProps.activeSession.id === nextProps.activeSession.id &&
-    prevProps.activeSession.status === nextProps.activeSession.status &&
-    prevProps.richOutputSettings === nextProps.richOutputSettings &&
-    prevProps.transformer === nextProps.transformer
-  );
-});
-
-ClaudeMainContent.displayName = 'ClaudeMainContent';
 
 // Default export for lazy loading
 export default ClaudePanel;
