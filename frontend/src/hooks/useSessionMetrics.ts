@@ -192,6 +192,11 @@ export function useSessionMetrics(session: Session | null): SessionMetrics {
 
   return {
     elapsed: formatElapsed(elapsedMs),
+    // Headline TOKENS = input + output ONLY (excludes cache) BY DESIGN — "new
+    // generation", not context re-reads. Consequence: on a cache-dominated turn
+    // (e.g. a RESUMED session re-feeding its whole context as cache_read) the
+    // breakdown's Cache rows jump by tens of thousands while this headline moves
+    // only slightly. That is expected, not a stale/un-updated meter.
     tokens: formatTokenCount(input + output),
     tokenBreakdown: { input, output, cacheWrite, cacheRead },
     filesSeen: stats?.files?.totalFilesChanged ?? 0,

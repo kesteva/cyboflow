@@ -547,8 +547,11 @@ export function QuickSessionCanvas({
               </div>
 
               {/* Token usage — granular breakdown across the WHOLE session
-                  (quick chat + any workflow runs hosted by it; the headline
-                  TOKENS stat above stays input+output). */}
+                  (quick chat + any workflow runs hosted by it). The headline
+                  TOKENS stat above is input+output ONLY (excludes cache) by
+                  design, so on a cache-dominated turn (e.g. a resumed session
+                  re-feeding its context as cache_read) these Cache rows jump
+                  while the headline moves only slightly — not a bug. */}
               <div
                 style={{
                   marginTop: 12,
