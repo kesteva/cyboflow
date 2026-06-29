@@ -326,6 +326,46 @@ describe('sessions:create-quick handler - workflow_runs pipeline', () => {
     expect(result.success).toBe(true);
     expect(result.data?.runId).toBe('test-run-id-abc');
   });
+
+  it("threads the resolved host session id as createRun's 3rd (sessionId) arg", async () => {
+    const { services, createRunArgs } = makeServices();
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerSessionHandlers(
+      ipcMain as unknown as Parameters<typeof registerSessionHandlers>[0],
+      services,
+    );
+
+    await invoke(handlers, 'sessions:create-quick', { projectId: 42, branchName: TEST_BRANCH });
+
+    // Permission-mode redesign slice 1a: the sentinel run is now session-owned —
+    // createRun receives session.id (was `undefined`) so it stamps
+    // workflow_runs.session_id. fakeSession.id === 'sess-001'.
+    expect(createRunArgs).toHaveLength(1);
+    expect(createRunArgs[0][2]).toBe('sess-001');
+  });
+
+  it('no longer emits a standalone UPDATE workflow_runs SET session_id stamp (createRun owns it)', async () => {
+    // The interactive-only conditional `UPDATE workflow_runs SET session_id` was
+    // removed in slice 1a — createRun stamps session_id from the threaded
+    // session.id for BOTH substrates, so neither path re-stamps it directly here.
+    const sdk = makeServices();
+    const interactive = makeServices({ resolvedSubstrateDefault: 'interactive' });
+
+    for (const made of [sdk, interactive]) {
+      const { ipcMain, handlers } = makeHandlerCapture();
+      registerSessionHandlers(
+        ipcMain as unknown as Parameters<typeof registerSessionHandlers>[0],
+        made.services,
+      );
+
+      await invoke(handlers, 'sessions:create-quick', { projectId: 42, branchName: TEST_BRANCH });
+
+      const sessionIdStamps = made.dbRunCalls.filter((c) =>
+        c.sql.includes('UPDATE workflow_runs SET session_id'),
+      );
+      expect(sessionIdStamps).toHaveLength(0);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

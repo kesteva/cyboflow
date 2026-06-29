@@ -785,11 +785,13 @@ export const runsRouter = router({
       // launcher writes workflow_runs.seed_idea_id DIRECTLY (no stage derivation);
       // RunExecutor.getPrompt injects the idea body as a `# Selected idea` block.
       ideaId: z.string().min(1).optional(),
-      // Optional session host (session<->run restructure, Phase 1 / migration 019).
-      // When supplied, the run executes inside that session's existing worktree
-      // instead of creating its own. DORMANT in Phase 1 — no caller passes it yet
-      // (the frontend wires it in Phase 3).
-      sessionId: z.string().min(1).optional(),
+      // REQUIRED session host (session<->run restructure / migration 019;
+      // permission-mode redesign slice 1a). The run executes inside this session's
+      // existing worktree, and createRun stamps workflow_runs.session_id from it so
+      // every run is session-owned (the never-session-less invariant; the createRun
+      // throw + signature tighten land in slice 1b). All frontend launch surfaces
+      // thread a session via ensureSessionForLaunch, so requiring it here is safe.
+      sessionId: z.string().min(1),
       // Optional per-run agent permission override (WorkflowPicker). When supplied,
       // it is the HIGHEST-precedence rung of the permission ladder in
       // WorkflowRegistry.createRun (requestedMode > frontmatter > global > 'default'),

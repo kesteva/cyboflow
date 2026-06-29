@@ -91,7 +91,7 @@ describe('appRouter (createCaller)', () => {
 
   it('cyboflow.runs.start throws METHOD_NOT_SUPPORTED when deps not wired', async () => {
     await expect(
-      caller.cyboflow.runs.start({ workflowId: 'wf-1', projectId: 1 }),
+      caller.cyboflow.runs.start({ workflowId: 'wf-1', projectId: 1, sessionId: 'sess-1' }),
     ).rejects.toSatisfy(isNotImplemented);
   });
 

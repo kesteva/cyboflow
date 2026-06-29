@@ -309,7 +309,7 @@ describe('cyboflow.runs.start', () => {
 
     try {
       const caller = appRouter.createCaller(createContext());
-      const result = await caller.cyboflow.runs.start({ workflowId: 'wf-abc', projectId: 1 });
+      const result = await caller.cyboflow.runs.start({ workflowId: 'wf-abc', projectId: 1, sessionId: 'sess-1' });
 
       expect(result).toEqual({
         runId: 'run-start-abc',
@@ -318,11 +318,13 @@ describe('cyboflow.runs.start', () => {
       });
 
       // The explicit launch projectId (migration 030 — global workflows) is now
-      // ALWAYS threaded: start calls the full-form launch with every optional arg
-      // undefined EXCEPT the trailing projectId (10th slot), so createRun can stamp
-      // workflow_runs.project_id even for a GLOBAL flow (workflow.project_id NULL).
+      // ALWAYS threaded, and (permission-mode redesign slice 1a) sessionId is now
+      // REQUIRED at the tRPC boundary: start calls the full-form launch with every
+      // optional arg undefined EXCEPT sessionId (6th slot) and the trailing
+      // projectId (10th slot), so createRun can stamp both workflow_runs.session_id
+      // and project_id even for a GLOBAL flow (workflow.project_id NULL).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 1, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined, undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined);
     } finally {
       // Reset module state regardless of test outcome.
       setStartRunDeps({
@@ -349,16 +351,16 @@ describe('cyboflow.runs.start', () => {
 
     try {
       const caller = appRouter.createCaller(createContext());
-      await caller.cyboflow.runs.start({ workflowId: 'wf-planner', projectId: 1, ideaId: 'IDEA-7' });
+      await caller.cyboflow.runs.start({ workflowId: 'wf-planner', projectId: 1, sessionId: 'sess-1', ideaId: 'IDEA-7' });
 
       // With an ideaId present, start calls the full-form launch — substrate +
-      // taskId undefined, ideaId in the 5th slot, sessionId (6th) +
-      // requestedPermissionMode (7th) + baseBranch (8th) + seedTaskIds (9th)
-      // undefined, and the explicit launch projectId (migration 030) in the 10th
-      // slot — so the launcher writes workflow_runs.seed_idea_id directly (no
+      // taskId undefined, ideaId in the 5th slot, the now-REQUIRED sessionId (6th)
+      // 'sess-1', requestedPermissionMode (7th) + baseBranch (8th) + seedTaskIds
+      // (9th) undefined, and the explicit launch projectId (migration 030) in the
+      // 10th slot — so the launcher writes workflow_runs.seed_idea_id directly (no
       // stage derivation).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', undefined, undefined, undefined, undefined, 1, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -420,14 +422,15 @@ describe('cyboflow.runs.start', () => {
 
     try {
       const caller = appRouter.createCaller(createContext());
-      await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, permissionMode: 'auto' });
+      await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, sessionId: 'sess-1', permissionMode: 'auto' });
 
       // With permissionMode present, start calls the full-form launch —
-      // substrate/taskId/ideaId/sessionId undefined, permissionMode 'auto' in the
-      // 7th slot, baseBranch (8th) + seedTaskIds (9th) undefined, and the explicit
-      // launch projectId (migration 030) in the 10th slot.
+      // substrate/taskId/ideaId undefined, the now-REQUIRED sessionId (6th)
+      // 'sess-1', permissionMode 'auto' in the 7th slot, baseBranch (8th) +
+      // seedTaskIds (9th) undefined, and the explicit launch projectId (migration
+      // 030) in the 10th slot.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, undefined, 'auto', undefined, undefined, 1, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-1', 'auto', undefined, undefined, 1, undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -452,7 +455,7 @@ describe('cyboflow.runs.start', () => {
       const caller = appRouter.createCaller(createContext());
 
       await expect(
-        caller.cyboflow.runs.start({ workflowId: 'wf-missing', projectId: 999 }),
+        caller.cyboflow.runs.start({ workflowId: 'wf-missing', projectId: 999, sessionId: 'sess-1' }),
       ).rejects.toSatisfy(
         (err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND',
       );
@@ -491,13 +494,14 @@ describe('cyboflow.runs.start', () => {
       await caller.cyboflow.runs.start({
         workflowId: 'wf-compound',
         projectId: 1,
+        sessionId: 'sess-1',
         findingIds: ['rvw_a', 'rvw_b'],
       });
 
       // With findingIds present, start calls the full-form launch — every optional
-      // arg undefined EXCEPT the launch projectId (10th slot) and findingIds (12th,
-      // LAST slot). Positions 8 (baseBranch) and 11 (requestedExecutionModel) stay
-      // undefined.
+      // arg undefined EXCEPT the now-REQUIRED sessionId (6th slot), the launch
+      // projectId (10th slot) and findingIds (12th, LAST slot). Positions 8
+      // (baseBranch) and 11 (requestedExecutionModel) stay undefined.
       expect(launchMock).toHaveBeenCalledOnce();
       expect(launchMock).toHaveBeenCalledWith(
         'wf-compound',
@@ -505,7 +509,7 @@ describe('cyboflow.runs.start', () => {
         undefined, // substrate
         undefined, // taskId
         undefined, // ideaId
-        undefined, // sessionId
+        'sess-1', // sessionId
         undefined, // permissionMode
         undefined, // baseBranch (position 8 placeholder)
         undefined, // taskIds
@@ -540,7 +544,7 @@ describe('cyboflow.runs.start', () => {
 
     try {
       const caller = appRouter.createCaller(createContext());
-      await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1 });
+      await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, sessionId: 'sess-1' });
 
       expect(launchMock).toHaveBeenCalledOnce();
       expect(launchMock).toHaveBeenCalledWith(
@@ -549,7 +553,7 @@ describe('cyboflow.runs.start', () => {
         undefined, // substrate
         undefined, // taskId
         undefined, // ideaId
-        undefined, // sessionId
+        'sess-1', // sessionId
         undefined, // permissionMode
         undefined, // baseBranch (position 8 placeholder)
         undefined, // taskIds
@@ -632,7 +636,7 @@ describe('cyboflow.runs.start', () => {
 
     try {
       const caller = appRouter.createCaller(createContext());
-      await caller.cyboflow.runs.start({ workflowId: 'wf-compound', projectId: 1, findingIds: [] });
+      await caller.cyboflow.runs.start({ workflowId: 'wf-compound', projectId: 1, sessionId: 'sess-1', findingIds: [] });
 
       expect(launchMock).toHaveBeenCalledOnce();
       const lastArg = launchMock.mock.calls[0][11] as string[] | undefined;

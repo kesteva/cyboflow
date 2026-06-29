@@ -195,7 +195,11 @@ export class RunLauncher {
     ideaId?: string,
     // Session<->run restructure, Phase 1 (migration 019). When supplied, the run
     // is hosted inside this session's existing worktree instead of creating its
-    // own. OPTIONAL + DORMANT in Phase 1 (no caller passes it yet).
+    // own, and is threaded into WorkflowRegistry.createRun (below) to stamp
+    // workflow_runs.session_id. The live caller (runs.start) now REQUIRES it
+    // (permission-mode redesign slice 1a), so a real session always reaches
+    // createRun; the signature stays optional until the end-to-end tighten in 1b
+    // (delete the legacy no-session worktree branch + unwrap the guards).
     sessionId?: string,
     // The user's explicit per-run agent-permission choice (WorkflowPicker),
     // threaded to the highest-precedence `requestedMode` rung of the permission

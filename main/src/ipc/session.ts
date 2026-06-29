@@ -465,10 +465,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // stamped onto workflow_runs.substrate — everything below (the session
       // stamp + the eager spawn gate) keys off that RESOLVED value, never the
       // requested one, so the run row and the session can never diverge.
+      // Thread the already-resolved host session (:405-422) so createRun stamps
+      // workflow_runs.session_id for the sentinel — the never-session-less
+      // invariant (permission-mode redesign slice 1a; the createRun throw lands
+      // in 1b). This stamps session_id for the SDK sentinel too, so the prior
+      // interactive-only conditional stamp below is now redundant and removed.
       const { runId, substrate: resolvedSubstrate } = cyboflow.workflowRegistry.createRun(
         sentinelWorkflowId,
         requestedSubstrate,
-        undefined,
+        session.id,
         requestedAgentMode,
       );
 
@@ -502,23 +507,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // Backfill sessions.run_id.
       db.prepare(`UPDATE sessions SET run_id = ? WHERE id = ?`).run(runId, session.id);
 
-      // INTERACTIVE ONLY: stamp the sentinel run's session_id so the live session
-      // meter counts its tokens. An interactive (PTY) quick session never writes
-      // session_outputs (its Claude panel is deliberately NOT registered with
-      // ClaudePanelManager — see the eager-spawn note below), so its chat tokens
-      // live ONLY in the sentinel run's `assistant` raw_events. The session meter
-      // sums getSessionTokenUsage (session_outputs) + selectSessionRunTokenTotals
-      // (workflow_runs WHERE session_id → raw_events); with session_id NULL the
-      // sentinel is never scanned and PTY quick-chat tokens read 0.
-      //
-      // SDK quick sessions DELIBERATELY leave session_id NULL: they write BOTH
-      // session_outputs AND sentinel raw_events, so counting the run would
-      // DOUBLE-COUNT against getSessionTokenUsage. The two token sources are only
-      // disjoint (per selectSessionRunTokenTotals' contract) while the SDK
-      // sentinel stays unstamped — so gate this stamp on the resolved substrate.
-      if (resolvedSubstrate === 'interactive') {
-        db.prepare(`UPDATE workflow_runs SET session_id = ? WHERE id = ?`).run(session.id, runId);
-      }
+      // NOTE: the sentinel run's session_id is now stamped by createRun above (it
+      // received session.id), for BOTH substrates — the prior interactive-only
+      // `UPDATE workflow_runs SET session_id` conditional has been removed. An SDK
+      // sentinel's session_id was previously held NULL to keep the session meter
+      // from double-counting (it writes both session_outputs AND sentinel
+      // raw_events). The token-scan exclusion that makes the stamped SDK sentinel
+      // safe co-ships in slice 1b (insightsQueries `NOT (name='__quick__' AND
+      // substrate='sdk')`); a transient SDK quick-turn double-count between the
+      // 1a and 1b commits is expected and acceptable.
 
       // Persist the per-session agent-permission override (migration 021) so the
       // quick Claude panel spawn (resolveSessionAgentPermissionMode → getDbSession)
