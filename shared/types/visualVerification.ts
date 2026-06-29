@@ -388,10 +388,23 @@ export interface ResolvedVisualVerifyConfig {
 /**
  * The default dev-server port pool — 5 ports (= SPRINT_BATCH_CAP, one per
  * concurrent sprint lane) so port-bound web captures never out-contend the lane
- * fan-out. Common Vite / CRA / Next / generic dev ports; users override via
- * AppConfig.visualVerify.devServerPorts.
+ * fan-out. Users override via AppConfig.visualVerify.devServerPorts.
+ *
+ * Deliberately NOT the common dev ports (5173/3000/4173/8080/4321): since the
+ * scheduler owns + binds these directly (the per-port lease guards the logical
+ * slot, NOT the OS socket — see verificationScheduler.poolCandidatesFor), a port
+ * a user already has Vite/Next/etc. squatting would make the spawned dev server
+ * fail to bind or the readiness probe answer the WRONG server. So this is an
+ * intentionally-uncommon block (mnemonic: CYBO → 2926 on a phone keypad → 2926x)
+ * chosen to collide with as little as possible. It also sits below BOTH the Linux
+ * ephemeral floor (32768) and the macOS ephemeral floor (49152) so the OS never
+ * hands these out as outbound source ports.
+ *
+ * The slots step by 2 (not 1) so each leased port has an adjacent free port: dev
+ * servers commonly grab a SECOND port next to the main one (e.g. Vite's HMR
+ * websocket), and the +1 gap keeps that sidecar from landing on the next slot.
  */
-export const DEFAULT_VERIFY_DEV_PORTS: readonly number[] = [5173, 3000, 4173, 8080, 4321] as const;
+export const DEFAULT_VERIFY_DEV_PORTS: readonly number[] = [29260, 29262, 29264, 29266, 29268] as const;
 
 /**
  * The floors ConfigManager.getVisualVerifyConfig() applies when a member of the
