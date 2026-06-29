@@ -147,6 +147,14 @@ class FakeTranscriptSource implements TranscriptSource {
     return this.uuid;
   }
 
+  /** Records no-fork resume binds; sets the uuid as the real source would. */
+  readonly bindKnownFileFromEndCalls: string[] = [];
+  bindKnownFileFromEnd(sessionUuid: string): boolean {
+    this.bindKnownFileFromEndCalls.push(sessionUuid);
+    this.uuid = sessionUuid;
+    return true;
+  }
+
   /** Test driver: push one already-normalized line through onLine. */
   pushLine(obj: unknown): void {
     this.onLine?.(obj);
@@ -1213,6 +1221,41 @@ describe('InteractiveClaudeManager', () => {
       // event-derived high-level updateSession(SessionUpdate) path is NOT used.
       expect(sessionDbUpdate).toHaveBeenCalledWith(sessionId, { claude_session_id: 'discovered-uuid-xyz' });
       expect(sessionUpdate).not.toHaveBeenCalledWith(sessionId, expect.objectContaining({ claude_session_id: expect.anything() }));
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('no-fork resume binds the KNOWN transcript from EOF and re-persists the SAME id (idempotent)', async () => {
+      const sessionDbUpdate = vi.fn();
+      const sm = createMockSessionManager({
+        db: { updateSession: sessionDbUpdate } as unknown as MockDb,
+      });
+      const mgr = new TestableInteractiveClaudeManager(
+        sm,
+        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(),
+        db,
+      );
+
+      const panelId = 'panel-resume';
+      const sessionId = 'sess-resume';
+      // EAGER resume spawn: empty prompt + a stored claude_session_id.
+      const spawn = mgr.spawnCliProcess({
+        panelId,
+        sessionId,
+        worktreePath: '/tmp/wt-resume',
+        prompt: '',
+        resumeSessionId: 'resume-uuid-abc',
+      });
+      await waitFor(() => mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
+
+      // The spawn binds the pre-existing transcript directly (discovery can't see
+      // it) so the structured pipeline / token meter flows for the resumed session.
+      expect(mgr.fakeSources[0].bindKnownFileFromEndCalls).toEqual(['resume-uuid-abc']);
+      // getSessionUuid now returns the resumed id → persist re-writes it (no rewind).
+      expect(sessionDbUpdate).toHaveBeenCalledWith(sessionId, { claude_session_id: 'resume-uuid-abc' });
 
       mgr.ptys[0].fireExit(0);
       await new Promise((r) => setTimeout(r, 600));

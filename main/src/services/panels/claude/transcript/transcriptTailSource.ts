@@ -269,6 +269,43 @@ export class TranscriptTailSource implements TranscriptSource {
     this.startTail();
   }
 
+  /**
+   * Bind a KNOWN, pre-existing `<uuid>.jsonl` and tail from its CURRENT END
+   * (no-fork resume — see the interface doc). Must be called AFTER start() (which
+   * installs onLine/onTurnEnd + the firstLine promise) and is a no-op once already
+   * bound/settled/stopped. Sets `offset` to the file's current size so only lines
+   * APPENDED after the resume dispatch — the prior history is never re-emitted as
+   * duplicate events. Returns false (leaving discovery running) if the file is
+   * absent.
+   */
+  bindKnownFileFromEnd(sessionUuid: string): boolean {
+    if (this.bound || this.settled || this.stopped) return false;
+    const candidate = path.join(this.keyDir, `${sessionUuid}.jsonl`);
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(candidate);
+    } catch {
+      // Not on disk — leave discovery running (it will time out non-fatally).
+      this.logger.verbose?.(
+        `[Cyboflow Transcript] bindKnownFileFromEnd: ${candidate} not found, staying in discovery`,
+      );
+      return false;
+    }
+    this.bound = true;
+    this.boundPath = candidate;
+    this.sessionUuid = sessionUuid;
+    this.offset = stat.size; // tail from EOF — skip the prior history
+    this.buffer = '';
+    this.inode = stat.ino;
+    this.clearDiscovery();
+    this.logger.verbose?.(
+      `[Cyboflow Transcript] bound KNOWN session ${sessionUuid} from EOF (offset=${stat.size}, ${candidate})`,
+    );
+    this.settle(true);
+    this.startTail();
+    return true;
+  }
+
   private onDiscoveryTimeout(): void {
     if (this.settled || this.bound) return;
     this.logger.error(

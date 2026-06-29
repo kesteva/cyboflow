@@ -100,9 +100,10 @@ import type { PermissionMode } from '../../../../../shared/types/workflows';
  *                      it forks the transcript lazily on the first turn, so an eager
  *                      prompt-less resume would diverge from the stored id and
  *                      silently rewind on the next restart.) The snapshot-diff
- *                      TranscriptTailSource cannot bind the pre-existing file, so a
- *                      no-fork resume forgoes the structured pipeline; the live xterm
- *                      is fed by the raw PTY byte path, independent of discovery.
+ *                      TranscriptTailSource cannot DISCOVER the pre-existing file,
+ *                      so the spawn path binds it directly from EOF
+ *                      (bindKnownFileFromEnd) to keep the structured pipeline (token
+ *                      meter) flowing; the live xterm rides the raw PTY byte path.
  *   systemPromptAppend: NO interactive append channel exists. Delivery is via
  *                      prompt-body prepend in S6/TASK-811 — NOT implemented here.
  * ------------------------------------------------------------------------- */
@@ -482,10 +483,10 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // transcript LAZILY on the first turn — verified empirically — so an eager,
     // prompt-less resume would never bind discovery at startup and the forked turns
     // would diverge from the stored id, silently rewinding on the next restart.)
-    // The snapshot-diff TranscriptTailSource cannot bind the pre-existing file, so
-    // a no-fork resume forgoes the structured event pipeline; the live xterm is fed
-    // by the raw PTY byte path, which is independent of discovery. Pushed before the
-    // end-of-options `--` separator like every other flag.
+    // The snapshot-diff TranscriptTailSource cannot bind the pre-existing file via
+    // discovery, so the spawn path binds it directly from EOF
+    // (TranscriptTailSource.bindKnownFileFromEnd) to keep the structured pipeline
+    // (token meter) flowing. Pushed before the end-of-options `--` separator.
     if (options.resumeSessionId) {
       args.push('--resume', options.resumeSessionId);
     }
@@ -982,6 +983,22 @@ export class InteractiveClaudeManager extends AbstractCliManager {
 
     await tailSource.start(onLine, onTurnEnd);
 
+    // No-fork RESUME: `claude --resume <uuid>` appends to the EXISTING
+    // `<uuid>.jsonl`, which snapshot-diff discovery never binds (it only sees NEW
+    // files). Bind that known file directly and tail from its EOF so the structured
+    // pipeline (and the token meter) flows for the resumed session WITHOUT
+    // re-emitting the prior history. settle(true) makes waitForFirstLine resolve
+    // immediately (no 15s discovery wait). Fail-soft: if the file is gone the bind
+    // returns false and discovery stays running (times out non-fatally below).
+    if (options.resumeSessionId && typeof tailSource.bindKnownFileFromEnd === 'function') {
+      const bound = tailSource.bindKnownFileFromEnd(options.resumeSessionId);
+      if (!bound) {
+        this.logger?.warn(
+          `[InteractiveClaudeManager] resume: known transcript ${options.resumeSessionId}.jsonl not bound for panel ${panelId}; structured pipeline will be absent`,
+        );
+      }
+    }
+
     // The initial prompt is NOT injected into the PTY here — it rides claude's
     // POSITIONAL argument (set in spawnCliProcess above), so claude is ALREADY
     // engaging the prompt as its first turn by the time we reach this point. This
@@ -990,7 +1007,8 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // claude writes the transcript `.jsonl` only after it starts processing the
     // argv prompt: ORDER matters — a waitForFirstLine timeout calls
     // clearDiscovery() which IRREVERSIBLY stops the 50ms poller, so discovery must
-    // be awaited on the same path that spawned claude.
+    // be awaited on the same path that spawned claude. (A bound resume already
+    // settled above, so this resolves immediately.)
     //
     // Now await transcript discovery (claude is engaging the argv prompt) — loud on timeout.
     try {
@@ -1001,13 +1019,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     }
 
     // single-writer-per-substrate: the interactive substrate writes
-    // claude_session_id from the DISCOVERED transcript filename UUID. The SDK
-    // event-driven write (sessionManager.ts:590, GenericMessageData.session_id)
-    // belongs to the SDK substrate — the two NEVER both run for one run, so this
-    // does not race/clobber the SDK path. A no-fork resume reopens the SAME id and
-    // appends to the pre-existing file, which snapshot-diff discovery cannot bind —
-    // so getSessionUuid() is undefined and persist is a clean no-op, correctly
-    // LEAVING the already-correct stored id in place (no fork → no rewind risk).
+    // claude_session_id from the DISCOVERED (or directly-bound) transcript filename
+    // UUID. The SDK event-driven write (sessionManager.ts:590,
+    // GenericMessageData.session_id) belongs to the SDK substrate — the two NEVER
+    // both run for one run, so this does not race/clobber the SDK path. A no-fork
+    // resume binds the pre-existing file from EOF, so getSessionUuid() returns the
+    // SAME id we resumed → persist re-writes it idempotently (no rewind, no churn).
     this.persistDiscoveredSessionId(sessionId, tailSource);
 
     return spawnPromise;

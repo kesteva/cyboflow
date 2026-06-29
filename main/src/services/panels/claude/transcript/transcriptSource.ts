@@ -54,4 +54,24 @@ export interface TranscriptSource {
    * within `timeoutMs`.
    */
   waitForFirstLine(timeoutMs: number): Promise<void>;
+
+  /**
+   * The bound session UUID (the bound file basename sans `.jsonl`), or undefined
+   * before binding. Optional: sources with no on-disk file concept may omit it.
+   */
+  getSessionUuid?(): string | undefined;
+
+  /**
+   * Bind a KNOWN, pre-existing transcript file by its session UUID and tail from
+   * its CURRENT END (no-fork resume). Normal discovery binds only NEW files
+   * (snapshot-diff), but a plain `claude --resume <uuid>` reopens the SAME id and
+   * APPENDS to the existing `<uuid>.jsonl`, which discovery never sees. Binding
+   * from EOF surfaces only POST-resume lines so the structured pipeline (and the
+   * token meter) flows for resumed sessions WITHOUT re-emitting the prior history
+   * as duplicate events (the xterm already shows it via the raw PTY path).
+   * Returns true if bound; false (leaving discovery running) if the file is
+   * absent or the source is already bound/settled. Optional: a source with no
+   * known-file concept may omit it.
+   */
+  bindKnownFileFromEnd?(sessionUuid: string): boolean;
 }

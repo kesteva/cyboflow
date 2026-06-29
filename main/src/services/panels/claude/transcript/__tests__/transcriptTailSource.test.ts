@@ -279,4 +279,82 @@ describe('TranscriptTailSource', () => {
     await src.waitForFirstLine(2000);
     expect(src.getSessionUuid()).toBe(matchUuid);
   });
+
+  // bindKnownFileFromEnd — no-fork resume: bind the pre-existing transcript and
+  // tail from EOF so post-resume lines flow WITHOUT re-emitting the prior history.
+  describe('bindKnownFileFromEnd (no-fork resume)', () => {
+    it('binds a pre-existing file from EOF: prior history is NOT re-emitted, new appends ARE', async () => {
+      const logger = makeSpyLogger();
+      const received: unknown[] = [];
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 1500,
+        logger,
+      });
+
+      // Pre-existing transcript with prior history (would be re-emitted if bound
+      // from offset 0).
+      const uuid = 'resume-1234-5678-9abc-def000000000';
+      const file = path.join(keyDir, `${uuid}.jsonl`);
+      fs.writeFileSync(
+        file,
+        assistantTextLine('history one') + '\n' + assistantTextLine('history two') + '\n',
+      );
+
+      await src.start((obj) => received.push(obj));
+      const bound = src.bindKnownFileFromEnd(uuid);
+      expect(bound).toBe(true);
+      await src.waitForFirstLine(1500);
+      expect(src.getSessionUuid()).toBe(uuid);
+
+      // Nothing dispatched yet — we tailed from EOF, skipping the prior history.
+      await new Promise((r) => setTimeout(r, 120));
+      expect(received).toHaveLength(0);
+
+      // A new (post-resume) append IS dispatched.
+      fs.appendFileSync(file, assistantTextLine('after resume') + '\n');
+      await waitFor(() => received.length >= 1);
+      const last = received[received.length - 1] as { message: { content: Array<{ text: string }> } };
+      expect(last.message.content[0].text).toBe('after resume');
+    });
+
+    it('returns false when the known file is absent (leaves discovery running)', async () => {
+      const logger = makeSpyLogger();
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 80,
+        logger,
+      });
+
+      await src.start(() => undefined);
+      const bound = src.bindKnownFileFromEnd('does-not-exist-0000-0000-000000000000');
+      expect(bound).toBe(false);
+      // Discovery still owns settlement → times out loudly (not silently bound).
+      await expect(src.waitForFirstLine(80)).rejects.toThrow(/discovery timeout/i);
+    });
+
+    it('is a no-op once already bound via discovery', async () => {
+      const logger = makeSpyLogger();
+      const src = trackedSource({
+        worktreePath: WORKTREE,
+        projectsRoot: tmpRoot,
+        discoveryTimeoutMs: 1500,
+        logger,
+      });
+
+      await src.start(() => undefined);
+      const discovered = 'disc-1111-2222-3333-444444444444';
+      fs.writeFileSync(path.join(keyDir, `${discovered}.jsonl`), assistantTextLine('hi') + '\n');
+      await src.waitForFirstLine(1500);
+      expect(src.getSessionUuid()).toBe(discovered);
+
+      // A pre-existing other file exists, but bind is refused (already bound).
+      const other = 'other-9999-8888-7777-666666666666';
+      fs.writeFileSync(path.join(keyDir, `${other}.jsonl`), assistantTextLine('x') + '\n');
+      expect(src.bindKnownFileFromEnd(other)).toBe(false);
+      expect(src.getSessionUuid()).toBe(discovered);
+    });
+  });
 });
