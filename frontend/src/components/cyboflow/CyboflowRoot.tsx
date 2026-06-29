@@ -357,7 +357,6 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                 onPanelClose={handlePanelClose}
                 context="project"
                 onAddTerminal={handleAddTerminal}
-                onAddClaude={ensureClaudePanel}
               />
               {currentActivePanel && (
                 <div className="flex-1 overflow-hidden relative">

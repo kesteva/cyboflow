@@ -132,7 +132,6 @@ export const ProjectView: React.FC<ProjectViewProps> = ({
             onPanelClose={handlePanelClose}
             context="project"
             onAddTerminal={handleAddTerminal}
-            onAddClaude={ensureClaudePanel}
           />
         </SessionProvider>
       )}

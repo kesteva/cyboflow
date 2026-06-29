@@ -14,8 +14,7 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
   onPanelSelect,
   onPanelClose,
   context = 'worktree',  // Default to worktree for backward compatibility
-  onAddTerminal,
-  onAddClaude
+  onAddTerminal
 }) => {
   const sessionContext = useSession();
   const { gitBranchActions, isMerging } = sessionContext || {};
@@ -95,16 +94,6 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
       });
     }
   }, [onAddTerminal]);
-
-  const handleAddClaude = useCallback(() => {
-    if (!onAddClaude) return;
-    const result = onAddClaude();
-    if (result instanceof Promise) {
-      result.catch((err: unknown) => {
-        console.error('[PanelTabBar] Failed to add claude panel:', err);
-      });
-    }
-  }, [onAddClaude]);
 
   // Focus input when editing starts
   useEffect(() => {
@@ -263,8 +252,8 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
           );
         })}
         
-        {/* Trailing actions: Add Terminal button + Add Claude button + Branch Actions (worktree only) */}
-        {(onAddTerminal || onAddClaude || (context === 'worktree' && gitBranchActions && gitBranchActions.length > 0)) && (
+        {/* Trailing actions: Add Terminal button + Branch Actions (worktree only) */}
+        {(onAddTerminal || (context === 'worktree' && gitBranchActions && gitBranchActions.length > 0)) && (
           <div className="ml-auto flex items-center gap-2 pr-2 h-8">
             {onAddTerminal && (
               <button
@@ -277,19 +266,6 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
                 <Plus className="w-4 h-4" />
                 <Terminal className="w-4 h-4" />
                 <span className="sr-only">Add terminal panel</span>
-              </button>
-            )}
-            {onAddClaude && (
-              <button
-                type="button"
-                onClick={handleAddClaude}
-                aria-label="Add Claude panel"
-                title="Add Claude panel"
-                className="inline-flex items-center gap-1 h-7 px-2 rounded text-sm text-text-secondary hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
-              >
-                <Plus className="w-4 h-4" />
-                <MessageSquare className="w-4 h-4" />
-                <span className="sr-only">Add Claude panel</span>
               </button>
             )}
             {context === 'worktree' && gitBranchActions && gitBranchActions.length > 0 && (
