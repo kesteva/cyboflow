@@ -33,6 +33,7 @@ import { isCliSubstrate } from '../../../shared/types/substrate';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 import { InteractiveSettingsWriter } from '../services/panels/claude/interactiveSettingsWriter';
 import { encodeCwd } from '../services/panels/claude/transcript/encodeCwd';
+import { updateSessionAgentPermissionMode } from '../orchestrator/sessionPermissionMode';
 
 /**
  * Whether claude's own on-disk transcript for a resumable session still exists at
@@ -2060,48 +2061,25 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       if (!isPermissionMode(mode)) {
         return { success: false, error: `Invalid agent permission mode: ${String(mode)}` };
       }
-      const updated = databaseService.updateSession(sessionId, { agent_permission_mode: mode });
-      if (!updated) {
+      // Funnel through the single session-mode write chokepoint (permission-mode
+      // redesign §3d): persist + runtime mutate + 'session-updated' emit + the
+      // interactive .claude/settings.json next-spawn re-prime. cyboflow.runs.
+      // setPermissionMode + RunLauncher.launch share the SAME chokepoint so every
+      // mode write lands identically on the session. The InteractiveSettingsWriter
+      // is constructed here (electron layer) and injected so the chokepoint stays
+      // free of the services/* graph (standalone-typecheck invariant).
+      const result = updateSessionAgentPermissionMode(
+        {
+          databaseService,
+          sessionManager,
+          configManager,
+          settingsWriter: new InteractiveSettingsWriter(),
+        },
+        sessionId,
+        mode,
+      );
+      if (!result.ok) {
         return { success: false, error: 'Session not found' };
-      }
-      const session = sessionManager.getSession(sessionId);
-      if (session) {
-        session.agentPermissionMode = mode;
-        sessionManager.emit('session-updated', session);
-      }
-
-      // INTERACTIVE substrate (sessions.substrate, migration 027): the live PTY
-      // `claude` reads its gating from the worktree's .claude/settings.json at
-      // SPAWN only — relayUserTurn/submitToRepl never re-read it — so the SDK
-      // next-turn re-read (resolveSessionAgentPermissionMode) does NOT apply. To
-      // make the change effective on the NEXT spawn (terminal restart), prime the
-      // settings file now: default/acceptEdits keep the wildcard PreToolUse hook;
-      // auto/dontAsk remove it (auto hands gating to native Claude, dontAsk opts
-      // out). Demo mode never spawns a real REPL, so skip it. Fully fail-soft:
-      // never throw across the IPC boundary, and guard the teardown race (a
-      // dismissed session's worktree is gone) by requiring the worktree to exist.
-      try {
-        if (!configManager.isDemoMode()) {
-          const dbSession = databaseService.getSession(sessionId);
-          const worktreePath = dbSession?.worktree_path;
-          if (
-            dbSession?.substrate === 'interactive' &&
-            typeof worktreePath === 'string' &&
-            worktreePath.length > 0 &&
-            existsSync(worktreePath)
-          ) {
-            const writer = new InteractiveSettingsWriter();
-            if (mode === 'auto' || mode === 'dontAsk') {
-              writer.remove(worktreePath);
-            } else {
-              writer.write(worktreePath, { permissionMode: mode });
-            }
-          }
-        }
-      } catch (settingsErr) {
-        // Priming the interactive hook is best-effort: a failure leaves the prior
-        // mode in effect for the next spawn but must not fail the persist.
-        console.warn('[IPC] Failed to prime interactive .claude/settings.json for permission mode:', settingsErr);
       }
 
       return { success: true };

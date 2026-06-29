@@ -40,7 +40,7 @@ import {
   type CancelRunDeps,
   type CancelRunResult,
 } from '../../cancelRunHandler';
-import type { WorkflowRunRow, RunStatusChangedEvent } from '../../../../../shared/types/cyboflow';
+import type { WorkflowRunRow } from '../../../../../shared/types/cyboflow';
 import {
   nudgeRunHandler,
   type NudgeRunDeps,
@@ -62,6 +62,10 @@ import {
   type ReopenRunResult,
 } from '../../reopenRunHandler';
 import { stepTransitionEvents, eventToAsyncIterable, runStatusEvents } from './events';
+import {
+  updateSessionAgentPermissionMode,
+  type SessionAgentPermissionModeDeps,
+} from '../../sessionPermissionMode';
 
 // ---------------------------------------------------------------------------
 // cancelAndRestart dependency bag
@@ -306,6 +310,30 @@ let startRunDeps: StartRunDeps | null = null;
  */
 export function setStartRunDeps(deps: StartRunDeps): void {
   startRunDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// setPermissionMode dependency bag (permission-mode redesign §3d / Slice 5)
+//
+// cyboflow.runs.setPermissionMode is re-routed through the SHARED session-mode
+// write chokepoint (updateSessionAgentPermissionMode): the mode lives on
+// sessions.agent_permission_mode (the execution SoT), NOT on
+// workflow_runs.permission_mode_snapshot (demoted to a launch-time audit value).
+// The chokepoint's collaborators (DatabaseService / SessionManager / ConfigManager
+// / InteractiveSettingsWriter) are services, so they are injected at boot by
+// main/src/index.ts via setSetPermissionModeDeps() — the SAME deps object the
+// RunLauncher receives. Until wired the mutation throws METHOD_NOT_SUPPORTED.
+// ---------------------------------------------------------------------------
+
+let setPermissionModeDeps: SessionAgentPermissionModeDeps | null = null;
+
+/**
+ * Wire up the shared session-mode write chokepoint deps for the setPermissionMode
+ * mutation. Called once at boot by main/src/index.ts. Until this is called the
+ * mutation throws METHOD_NOT_SUPPORTED.
+ */
+export function setSetPermissionModeDeps(deps: SessionAgentPermissionModeDeps): void {
+  setPermissionModeDeps = deps;
 }
 
 // ---------------------------------------------------------------------------
@@ -996,40 +1024,31 @@ export const runsRouter = router({
     }),
 
   /**
-   * Change the agent permission mode of a NON-TERMINAL workflow run at runtime
-   * (ISSUE #2). workflow_runs.permission_mode_snapshot is normally stamped ONCE
-   * at run creation (WorkflowRegistry.createRun via permissionModeResolver) and
-   * treated as immutable; this is the single controlled runtime-UPDATE path.
+   * Change the agent permission mode for the session that hosts a workflow run
+   * (permission-mode redesign §3d / Slice 5). The mode is a SESSION property —
+   * the sole execution authority is sessions.agent_permission_mode (the SDK hook
+   * + the interactive PTY both re-read it). workflow_runs.permission_mode_snapshot
+   * is demoted to a launch-time audit value and is NO LONGER written here.
    *
-   * NEXT-TURN apply (no executor change): RunExecutor.buildOptionsOverrides reads
-   * `run.permission_mode_snapshot` FRESH off the workflow_runs row on every spawn
-   * and threads it to the spawner as agentPermissionMode, so the new mode governs
-   * the NEXT nudge/resume/turn spawn. A mid-stream change is out of scope. NOTE:
-   * the interactive PTY substrate writes its permission hook to .claude/settings.json
-   * at SPAWN only (interactiveSettingsWriter) and does not live-update — so for a
-   * running interactive run the new mode likewise only applies on the next spawn;
-   * the UI gates this pill to SDK runs accordingly.
+   * Re-routed through the SHARED session-mode write chokepoint
+   * (updateSessionAgentPermissionMode), so this mutation fires the SAME four side
+   * effects as the composer pill (sessions:update-agent-permission-mode) and the
+   * launch picker: persist sessions.agent_permission_mode + 'session-updated'
+   * emit (the session-store-derived pill refreshes, no respawn) + runtime mutate +
+   * the interactive .claude/settings.json next-spawn re-prime. A raw UPDATE would
+   * skip the pill refresh and the interactive re-prime.
    *
-   * Guards:
-   *   - NOT_FOUND-style noOp when the run is absent;
-   *   - a terminal run (completed/failed/canceled) is rejected as a graceful
-   *     noOp so the UI can no-op rather than error;
-   *   - the UPDATE is guarded `status NOT IN (terminal)` so a concurrent
-   *     cancel/complete that won is never overwritten post-mortem.
+   * NO terminal-status guard for the session write (this is the #4
+   * chat-after-terminal-flow case): the owning session is resolved from the run
+   * REGARDLESS of run status, so a terminal flow run can still change its
+   * session's mode for the next chat turn. noOp:'not_found' is returned ONLY when
+   * no session resolves (run absent OR run.session_id NULL) — never 'already_terminal'.
    *
-   * On a successful UPDATE the run's CURRENT status is re-read and re-emitted on
-   * the existing runStatusEvents 'changed' channel — the SAME signal
-   * activeRunsStore.init() subscribes to (onRunStatusChanged), so the store
-   * re-fetches runs.list and the composer pill reflects the new value with no new
-   * subscription. The status is unchanged here; the emit is purely an invalidation
-   * trigger.
+   * Standalone-typecheck invariant holds — the chokepoint + its deps are
+   * structurally typed (no electron/better-sqlite3/services import is added). The
+   * service-backed deps are injected at boot via setSetPermissionModeDeps().
    *
-   * ctx.db-direct (no dep-bag wiring): pure DB + event, mirroring `end`.
-   * Standalone-typecheck invariant holds — no electron/better-sqlite3/services
-   * import is added.
-   *
-   * Returns { updated: true } or { noOp: true, reason } — 'not_found' /
-   * 'already_terminal'.
+   * Returns { updated: true } or { noOp: true, reason: 'not_found' }.
    */
   setPermissionMode: protectedProcedure
     .input(z.object({
@@ -1041,41 +1060,36 @@ export const runsRouter = router({
     }))
     .mutation(async ({ ctx, input }): Promise<
       | { updated: true }
-      | { noOp: true; reason: 'not_found' | 'already_terminal' }
+      | { noOp: true; reason: 'not_found' }
     > => {
       if (!ctx.db) {
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
       }
+      if (!setPermissionModeDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'setPermissionMode deps not wired',
+        });
+      }
       const db = ctx.db;
-      const run = db
-        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
-        .get(input.runId) as { status?: string } | undefined;
-      if (!run?.status) return { noOp: true, reason: 'not_found' };
-      if (['completed', 'failed', 'canceled'].includes(run.status)) {
-        return { noOp: true, reason: 'already_terminal' };
-      }
+      // Resolve the owning session from the run REGARDLESS of run status. Mode is
+      // a session property, so a terminal flow run must NOT block it. noOp only
+      // when no session resolves (run absent OR run.session_id NULL).
+      const row = db
+        .prepare('SELECT session_id FROM workflow_runs WHERE id = ?')
+        .get(input.runId) as { session_id?: string | null } | undefined;
+      const sessionId = row?.session_id;
+      if (!sessionId) return { noOp: true, reason: 'not_found' };
 
-      const info = db
-        .prepare(
-          `UPDATE workflow_runs
-              SET permission_mode_snapshot = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND status NOT IN ('completed', 'failed', 'canceled')`,
-        )
-        .run(input.permissionMode, input.runId) as { changes: number };
-      if (info.changes === 0) return { noOp: true, reason: 'already_terminal' }; // concurrent terminal transition won
-
-      // Re-read the current status and re-emit on the run-status channel as an
-      // invalidation signal so activeRunsStore re-fetches runs.list (the status
-      // itself is unchanged — this is purely a refresh trigger).
-      const after = db
-        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
-        .get(input.runId) as { status?: RunStatusChangedEvent['status'] } | undefined;
-      if (after?.status) {
-        runStatusEvents.emit(
-          'changed',
-          { runId: input.runId, status: after.status } satisfies RunStatusChangedEvent,
-        );
-      }
+      // Write through the shared chokepoint (persist + emit + runtime mutate +
+      // interactive re-prime). A not_found here means the session row was deleted
+      // between resolving it from the run and the persist.
+      const result = updateSessionAgentPermissionMode(
+        setPermissionModeDeps,
+        sessionId,
+        input.permissionMode,
+      );
+      if (!result.ok) return { noOp: true, reason: 'not_found' };
       return { updated: true };
     }),
 

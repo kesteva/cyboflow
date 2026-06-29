@@ -26,6 +26,7 @@ import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { withTempDir } from '../../__test_fixtures__/tmp';
 import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
+import type { SessionAgentPermissionModeDeps } from '../sessionPermissionMode';
 
 // Shared stubs for the 4 required MCP collaborators.
 // All tests that construct RunLauncher must pass these (or equivalent stubs)
@@ -104,6 +105,32 @@ function sessionWorktreeStub(
     getHeadCommit: vi.fn().mockResolvedValue(headSha),
   } as unknown as WorktreeManager;
   return { worktree, createDeterministicWorktree };
+}
+
+/**
+ * A fake session-mode write chokepoint deps bag (permission-mode redesign §3e).
+ * The launch picker writes the host session's mode through it when an explicit
+ * requestedPermissionMode is supplied; `updateSession` is the spy under test.
+ */
+function makeFakeSessionPermDeps(): {
+  deps: SessionAgentPermissionModeDeps;
+  updateSession: ReturnType<typeof vi.fn>;
+} {
+  const updateSession = vi.fn(() => ({ id: 'sess-1' }));
+  const deps: SessionAgentPermissionModeDeps = {
+    databaseService: {
+      updateSession,
+      // 'sdk' substrate → the chokepoint skips the interactive re-prime branch.
+      getSession: vi.fn(() => ({ substrate: 'sdk', worktree_path: undefined })),
+    },
+    sessionManager: {
+      getSession: vi.fn(() => ({ agentPermissionMode: 'default' as const })),
+      emit: vi.fn(),
+    },
+    configManager: { isDemoMode: () => false },
+    settingsWriter: { write: vi.fn(), remove: vi.fn() },
+  };
+  return { deps, updateSession };
 }
 
 // ---------------------------------------------------------------------------
@@ -452,6 +479,94 @@ describe('RunLauncher.launch', () => {
         undefined,
         { requestedModel: 'opus' },
       );
+    });
+  });
+
+  it('writes the HOST session mode through the chokepoint when an explicit mode is supplied (§3e)', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = sessionHostedDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const seedWorkflowId = randomUUID();
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+      ).run(seedWorkflowId);
+      interface IdRow { id: string }
+      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+      seedSession(db, 'sess-1', join(tmpDir, 'wt'));
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const realRegistry = {
+        getById: (id: string) =>
+          db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
+        createRun: vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
+          db.prepare(
+            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'auto', ?)",
+          ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+          return { runId: cannedRunId, permissionMode: 'auto' as const, substrate: substrate ?? ('sdk' as const) };
+        }),
+      } as unknown as WorkflowRegistry;
+
+      const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
+      const { deps, updateSession } = makeFakeSessionPermDeps();
+
+      const launcher = new RunLauncher(
+        adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider,
+        fakeBridgeScriptResolver, fakeNodeResolver,
+        undefined, undefined, undefined, undefined, undefined, deps,
+      );
+
+      // sessionId = 'sess-1' (6th positional), requestedPermissionMode = 'auto' (7th).
+      await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1', 'auto');
+
+      // The picker permanently sets the host session's mode via the shared chokepoint.
+      expect(updateSession).toHaveBeenCalledWith('sess-1', { agent_permission_mode: 'auto' });
+    });
+  });
+
+  it('leaves the session mode untouched when no explicit mode is supplied (§3e)', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = sessionHostedDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const seedWorkflowId = randomUUID();
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+      ).run(seedWorkflowId);
+      interface IdRow { id: string }
+      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+      seedSession(db, 'sess-1', join(tmpDir, 'wt'));
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const realRegistry = {
+        getById: (id: string) =>
+          db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
+        createRun: vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
+          db.prepare(
+            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+          ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+          return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
+        }),
+      } as unknown as WorkflowRegistry;
+
+      const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
+      const { deps, updateSession } = makeFakeSessionPermDeps();
+
+      const launcher = new RunLauncher(
+        adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider,
+        fakeBridgeScriptResolver, fakeNodeResolver,
+        undefined, undefined, undefined, undefined, undefined, deps,
+      );
+
+      // No requestedPermissionMode (7th positional omitted) → the chokepoint is
+      // NEVER invoked, so the host session's mode is left untouched.
+      await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
+
+      expect(updateSession).not.toHaveBeenCalled();
     });
   });
 

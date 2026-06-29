@@ -53,7 +53,9 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps } from './orchestrator/trpc/routers/runs';
+import { InteractiveSettingsWriter } from './services/panels/claude/interactiveSettingsWriter';
+import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
 import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
@@ -137,6 +139,10 @@ let runLauncher: RunLauncher;
 // Module-scoped so the tRPC boot wiring block (setNudgeRunDeps) can reach the
 // same RunExecutor instance built in initializeServices().
 let runExecutor: RunExecutor;
+// Module-scoped (permission-mode redesign §3d / Slice 5) so the tRPC boot wiring
+// block (setSetPermissionModeDeps) can reach the SAME shared session-mode write
+// chokepoint deps the RunLauncher was constructed with in initializeServices().
+let sessionPermissionModeDeps: SessionAgentPermissionModeDeps;
 let orchestratorHealth: OrchestratorHealth;
 // Promoted to module scope (IDEA-030 / TASK-817) so the run dep-bag wiring in
 // the app.whenReady() block can reach it for the live-input relay. Assigned in
@@ -1134,6 +1140,21 @@ async function initializeServices() {
   // it, the run stays at `starting` forever.
   runQueues = new RunQueueRegistry();
 
+  // Shared session-mode write chokepoint deps (permission-mode redesign §3d/§3e /
+  // Slice 5). The SAME four side effects (persist sessions.agent_permission_mode +
+  // 'session-updated' emit + runtime mutate + interactive .claude/settings.json
+  // re-prime) back three callers: the composer pill IPC handler (builds its own
+  // deps from AppServices), runs.setPermissionMode (setSetPermissionModeDeps
+  // below), and RunLauncher.launch (the constructor param below). The
+  // InteractiveSettingsWriter is stateless apart from its logger, so one instance
+  // is shared. The concrete services satisfy the chokepoint's structural deps.
+  sessionPermissionModeDeps = {
+    databaseService,
+    sessionManager,
+    configManager,
+    settingsWriter: new InteractiveSettingsWriter(cyboflowLogger),
+  };
+
   runLauncher = new RunLauncher(
     cyboflowDb,
     workflowRegistry,
@@ -1154,6 +1175,10 @@ async function initializeServices() {
       createForRun: (projectId, substrate, taskIds) =>
         sprintLaneStore.createForRun(projectId, substrate, taskIds),
     },
+    // Launch-picker → host-session mode (permission-mode redesign §3e): when an
+    // explicit requestedPermissionMode is supplied, launch() writes it to the host
+    // session through the shared chokepoint before createRun.
+    sessionPermissionModeDeps,
   );
 
   // Capture the orch socket path once for the lifecycle + CLI-manager wiring.
@@ -1635,6 +1660,15 @@ app.whenReady().then(async () => {
       sessionManager,
     });
     console.log('[Main] runs.start deps wired');
+
+    // runs.setPermissionMode → shared session-mode write chokepoint (permission-
+    // mode redesign §3d / Slice 5). Re-routes the chat / flow-run permission pill
+    // through the SAME updateSessionAgentPermissionMode chokepoint the composer
+    // pill + launch picker use, so the mode write lands on
+    // sessions.agent_permission_mode (the execution SoT) with the full four side
+    // effects — never on the demoted workflow_runs.permission_mode_snapshot.
+    setSetPermissionModeDeps(sessionPermissionModeDeps);
+    console.log('[Main] runs.setPermissionMode deps wired');
 
     // Sprint-lane read dep (feat/parallel-sprint, single-run lane model). Backs
     // cyboflow.runs.sprintLanes; the singleton was initialized in

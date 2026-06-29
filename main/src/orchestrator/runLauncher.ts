@@ -29,6 +29,10 @@ import type { McpConfigWriter } from './mcpConfigWriter';
 import type { RunExecutor } from './runExecutor';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import type { TaskChange } from './taskChangeRouter';
+import {
+  updateSessionAgentPermissionMode,
+  type SessionAgentPermissionModeDeps,
+} from './sessionPermissionMode';
 
 /**
  * Provides the Unix socket path that the orchestrator IPC server listens on.
@@ -137,6 +141,20 @@ export class RunLauncher {
      * the lanes are load-bearing for the sprint orchestrator agent.
      */
     private readonly sprintLanes?: SprintLanesLike,
+    /**
+     * Optional session-mode write chokepoint deps (permission-mode redesign §3e /
+     * Slice 5). When injected AND a launch supplies an explicit
+     * `requestedPermissionMode`, the launcher writes that mode to the HOST session
+     * via updateSessionAgentPermissionMode (the SAME chokepoint the composer pill +
+     * runs.setPermissionMode use) — persist + 'session-updated' emit + runtime
+     * mutate + interactive .claude/settings.json re-prime. When omitted (legacy
+     * call sites / tests that predate the chokepoint), the session-mode write is
+     * silently skipped — backward-compatible. The launch picker permanently sets
+     * the host session's mode; when no explicit mode is supplied the session's mode
+     * is LEFT UNTOUCHED (the createRun ladder still stamps permission_mode_snapshot
+     * as an audit-only value that may diverge).
+     */
+    private readonly sessionPermissionModeDeps?: SessionAgentPermissionModeDeps,
   ) {
     // Legacy-bridge collaborators are required only when no runExecutor is
     // supplied.  Under the SDK substrate, the PreToolUse hook gates permissions
@@ -320,6 +338,18 @@ export class RunLauncher {
       throw new Error(
         `RunLauncher.launch: session ${sessionId} already has a running workflow`,
       );
+    }
+
+    // Launch-picker → host-session mode (permission-mode redesign §3e / Slice 5).
+    // When an EXPLICIT mode is supplied, write it to the host session via the SAME
+    // chokepoint the composer pill + runs.setPermissionMode use (persist +
+    // 'session-updated' emit + runtime mutate + interactive re-prime) BEFORE
+    // createRun — so launching a flow with an explicit mode permanently sets the
+    // session's mode (affecting later chat + later flows). When OMITTED the
+    // session's mode is LEFT UNTOUCHED (never clobbered with the createRun ladder).
+    // The chokepoint deps are optional for legacy/test call sites that omit them.
+    if (requestedPermissionMode !== undefined && this.sessionPermissionModeDeps) {
+      updateSessionAgentPermissionMode(this.sessionPermissionModeDeps, sessionId, requestedPermissionMode);
     }
 
     // Thread the EXPLICIT launch project (migration 030) so createRun stamps it
