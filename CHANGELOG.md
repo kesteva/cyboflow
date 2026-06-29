@@ -6,6 +6,29 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.10] — 2026-06-29
+
+### Added
+
+- **Resume a lost interactive session.** When you reopen a quick session whose
+  interactive (PTY) REPL was lost — typically after an app restart — Cyboflow now
+  offers to **Resume previous session** or **Start fresh**. Choosing Resume
+  reopens the prior conversation live the moment you click (no typing required):
+  it re-spawns the REPL with a plain `claude --resume`, so the session continues
+  on its existing transcript with no forked or rewound history across restarts.
+  The structured token meter is restored for the resumed session.
+
+### Fixed
+
+- Typing directly into a lost or dead interactive terminal no longer raises an
+  "unexpected error" modal — the keystroke is swallowed, and recovery happens
+  through the composer (which respawns the REPL) rather than raw keystrokes.
+- The resume prompt no longer re-appears in a loop after you choose Resume, and
+  **Start fresh** is now authoritative — a previously-armed resume is disarmed and
+  the declined session isn't re-offered when the panel remounts.
+- The "restored context" hint now auto-clears after a few seconds instead of
+  sticking indefinitely.
+
 ## [0.1.9] — 2026-06-27
 
 ### Added
