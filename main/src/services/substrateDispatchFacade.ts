@@ -269,7 +269,23 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
       this.logger.debug('[SubstrateDispatchFacade] relayInput no-op for SDK substrate', { runId });
       return;
     }
-    mgr.sendInput(this.toLivePanelId(runId), text);
+    const panelId = this.toLivePanelId(runId);
+    // Dead-REPL guard: after an app restart (or a crashed REPL) the persistent
+    // interactive process is gone, yet the xterm still accepts keystrokes and
+    // relays them here verbatim. Writing to a missing process throws
+    // "No <tool> process found for panel <id>" (AbstractCliManager.sendInput),
+    // which surfaces as an "unexpected error" modal in the renderer. Raw
+    // byte-by-byte keystrokes can't meaningfully respawn a session, so swallow
+    // them when the REPL is not live — recovery happens through a COMPOSER turn
+    // (sessions:input dead-REPL respawn / --resume), not direct typing.
+    if (!mgr.isPanelRunning(panelId)) {
+      this.logger.debug('[SubstrateDispatchFacade] relayInput dropped — interactive REPL not running', {
+        runId,
+        panelId,
+      });
+      return;
+    }
+    mgr.sendInput(panelId, text);
   }
 
   /**

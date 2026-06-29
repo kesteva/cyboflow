@@ -48,6 +48,10 @@ class SpyManager extends EventEmitter {
   // manager. No `resizePanel` here: this base spy is deliberately NOT
   // resize-capable so the facade's feature-detection no-op branch is exercised.
   sendInput = vi.fn<(panelId: string, input: string) => void>();
+  // Liveness probe — the facade's relayInput dead-REPL guard reads this before
+  // writing. Default 'running' so the existing relay tests keep reaching sendInput;
+  // the dead-REPL test overrides it to false.
+  isPanelRunning = vi.fn<(panelId: string) => boolean>().mockReturnValue(true);
 }
 
 /**
@@ -392,6 +396,25 @@ describe('SubstrateDispatchFacade — relayInput routes to the interactive manag
 
     expect(sdk.sendInput).not.toHaveBeenCalled();
     expect(interactive.sendInput).not.toHaveBeenCalled();
+  });
+
+  it('relayInput is a fail-soft NO-OP (no throw) when the interactive REPL is NOT running (dead-REPL guard)', () => {
+    // After an app restart the persistent REPL is gone but the xterm still relays
+    // keystrokes; writing to the missing process would throw and surface as an
+    // "unexpected error" modal. The guard swallows the keystroke instead.
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    interactive.isPanelRunning.mockReturnValue(false);
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    expect(() => facade.relayInput(run.id, 'typed into a dead repl')).not.toThrow();
+
+    // Liveness was probed, but no write reached the (missing) process.
+    expect(interactive.isPanelRunning).toHaveBeenCalledOnce();
+    expect(interactive.sendInput).not.toHaveBeenCalled();
+    expect(sdk.sendInput).not.toHaveBeenCalled();
   });
 });
 
