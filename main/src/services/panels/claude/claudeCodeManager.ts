@@ -17,6 +17,7 @@ import { ApprovalRouter } from '../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../orchestrator/questionRouter';
 import type { QuestionPayload } from '../../../orchestrator/questionRouter';
 import { routePreToolUseThroughApprovalRouter } from '../../../orchestrator/preToolUseHookHelper';
+import { SprintLaneStore } from '../../../orchestrator/sprintLaneStore';
 import { loadMergedPermissionRules, isToolAllowed } from '../../../orchestrator/permissionRules';
 import type { MergedPermissionRules } from '../../../orchestrator/permissionRules';
 import { ACCEPT_EDITS_AUTO_APPROVE_TOOLS } from '../../../orchestrator/permissionModeMapper';
@@ -93,13 +94,15 @@ interface ClaudeSpawnOptions {
   isResume?: boolean;
   permissionMode?: 'approve' | 'ignore';
   /**
-   * Workflow 4-mode agent permission value resolved from the run snapshot
-   * (`workflow_runs.permission_mode_snapshot`) and threaded by RunExecutor.
-   * This is the NEW 4-mode field ('default' | 'acceptEdits' | 'auto' | 'dontAsk')
-   * governing workflow runs — DISTINCT from the legacy session `permissionMode`
-   * above ('approve' | 'ignore'), which stays for quick/legacy sessions.
-   * Behavior branching off this value lands in a later step; here it is only
-   * carried so the field threads through and compiles.
+   * Workflow 4-mode agent permission value threaded by RunExecutor (resolved per
+   * the permission-mode redesign from the owning SESSION, not the demoted
+   * `permission_mode_snapshot`). This is the NEW 4-mode field
+   * ('default' | 'acceptEdits' | 'auto' | 'dontAsk') — DISTINCT from the legacy
+   * session `permissionMode` above ('approve' | 'ignore'), which stays for
+   * quick/legacy sessions. NOTE: the SDK PreToolUse hook no longer consumes this
+   * field directly — it LIVE-READS `sessions.agent_permission_mode` on every tool
+   * call (§3b/§4). The field is retained for parity/observability and any
+   * non-SDK-hook reader.
    */
   agentPermissionMode?: PermissionMode;
   model?: string;
@@ -923,11 +926,6 @@ export class ClaudeCodeManager extends AbstractCliManager {
   // ---------------------------------------------------------------------------
 
   private async buildSdkOptions(options: ClaudeSpawnOptions): Promise<Options> {
-    // Resolve the effective mode ONCE (applies the model-eligibility guard, may
-    // warn). Both the hook installation and the native-auto permissionMode flag
-    // derive from this single value so the guard never logs twice.
-    const effectiveMode = this.resolveEffectiveSdkMode(options);
-
     const sdkOptions: Options = {
       cwd: options.worktreePath,
       includePartialMessages: true,
@@ -949,7 +947,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
           previewFormat: 'markdown' as const,
         },
       },
-      ...this.composeHookOptions(options, effectiveMode),
+      ...this.composeHookOptions(options),
     };
 
     // Packaging fix: in a packaged app the SDK resolves its native `claude`
@@ -964,11 +962,17 @@ export class ClaudeCodeManager extends AbstractCliManager {
       this.logger?.info(`[ClaudeCodeManager] Using packaged claude executable: ${claudeExecutable}`);
     }
 
-    // Native Claude auto-mode (model classifier owns gating). Set ONLY when the
-    // resolved effective mode is 'auto' — the eligibility guard inside
-    // resolveEffectiveSdkMode() has already downgraded unsupported models to
-    // 'default', so this never sets permissionMode on an old pinned id.
-    if (effectiveMode === 'auto') {
+    // Native Claude auto-mode is pinned WHENEVER the model supports the
+    // classifier — NOT only when the spawn's mode is 'auto'. The always-installed
+    // dynamic PreToolUse hook (composeHookOptions) pre-empts the classifier for
+    // every hook-decided mode (default/acceptEdits/dontAsk emit a concrete
+    // decision; PreToolUse runs first in the CLI permission order) and DEFERS to
+    // it only when the live session mode is 'auto'. Pinning unconditionally (per
+    // supported model) is what makes a live switch INTO 'auto' take effect on the
+    // next tool call with no re-spawn. On an auto-UNSUPPORTED model the flag stays
+    // unset and the hook's per-call eligibility check routes 'auto' through the
+    // ApprovalRouter instead (there is no classifier to defer to).
+    if (modelSupportsAutoMode(options.model)) {
       // SDK PermissionMode includes 'auto' (sdk.d.ts). This is the native
       // auto-mode the LOCKED design routes BOTH substrates through.
       sdkOptions.permissionMode = 'auto';
@@ -1124,84 +1128,174 @@ export class ClaudeCodeManager extends AbstractCliManager {
   }
 
   /**
-   * Resolve the effective hook-installation mode for a spawn.
+   * Compose the `hooks` slice of the SDK Options.
    *
-   * Precedence (per the LOCKED design): the NEW 4-mode `agentPermissionMode`
-   * (workflow runs) wins when present; otherwise fall back to the legacy
-   * `permissionMode` ('ignore' → 'dontAsk', anything else → 'default') so
-   * quick/legacy sessions behave exactly as before this step.
+   * ALWAYS installs exactly ONE dynamic PreToolUse hook (no per-mode fork, no
+   * dontAsk early-return). The hook live-reads the owning session's permission
+   * mode on EVERY tool call (permission-mode redesign §3b/§4), so entering or
+   * leaving any of the four modes takes effect on the NEXT tool call with no
+   * re-spawn:
+   *   - 'dontAsk'              → the hook emits 'allow' (pre-empts the classifier).
+   *   - 'acceptEdits'          → edit-tool fast-allow → allowlist → ApprovalRouter.
+   *   - 'default'              → allowlist → ApprovalRouter.
+   *   - 'auto' (model capable) → EMPTY PreToolUse output → defer to the native
+   *                              classifier (permissionMode:'auto' is pinned in
+   *                              buildSdkOptions whenever the model supports it).
+   *   - 'auto' (model NOT capable) → allowlist → ApprovalRouter (no classifier
+   *                              exists to defer to — model-eligibility is checked
+   *                              PER CALL inside the hook).
+   * AskUserQuestion is routed through QuestionRouter in ALL modes (incl. dontAsk).
    *
-   * Returns the 4-mode value DIRECTLY (no eligibility downgrade) — the
-   * separate resolveEffectiveSdkMode() applies the model-eligibility guard for
-   * the native-auto path so the two concerns stay independent.
+   * The owning session is resolved ONCE here from the gate `runId` via the
+   * `workflow_runs → sessions` join (immutable for the life of the run), and the
+   * user/project allow-list is loaded ONCE — both captured in the hook closure so
+   * the per-call path does only a single-column session read and never touches the
+   * FS. §1 ROOT FIX: keying the live read on the gate runId (NOT options.sessionId)
+   * is required because for flow runs sessionId === runId, so a WHERE sessions.id =
+   * runId lookup would miss and strand the run at the global default.
    */
-  private resolveHookMode(options: ClaudeSpawnOptions): PermissionMode {
-    if (options.agentPermissionMode) {
-      return options.agentPermissionMode;
-    }
-    return options.permissionMode === 'ignore' ? 'dontAsk' : 'default';
-  }
-
-  /**
-   * Resolve the effective mode the SDK should run under, applying the
-   * MODEL-ELIGIBILITY GUARD for native auto-mode.
-   *
-   * Native auto requires a recent classifier-capable model (Opus 4.6+ /
-   * Sonnet 4.6+). When 'auto' is requested but the pinned model is clearly
-   * older, fall back to 'default' (the normal approval hook is installed) and
-   * log a warning so auto never silently degrades to approve on an unsupported
-   * model. Any other mode passes through unchanged.
-   */
-  private resolveEffectiveSdkMode(options: ClaudeSpawnOptions): PermissionMode {
-    const mode = this.resolveHookMode(options);
-    if (mode === 'auto' && !modelSupportsAutoMode(options.model)) {
-      this.logger?.warn(
-        `[ClaudeCodeManager] auto permission mode requested but model '${options.model}' does not support native auto-mode; falling back to 'default' (approval hook installed).`,
-      );
-      return 'default';
-    }
-    return mode;
-  }
-
-  /**
-   * Compose the `hooks` slice of the SDK Options based on the effective mode.
-   *
-   * HOOK PRE-EMPTION RULE: PreToolUse hooks run FIRST in the CLI permission
-   * order. The hook installed here MUST match the mode so it never pre-empts a
-   * native decision:
-   *   - 'dontAsk' → NO PreToolUse hook (unrestricted; legacy 'ignore' parity).
-   *   - 'auto'    → an AskUserQuestion-ONLY hook (question gates still reach
-   *                 QuestionRouter) that defers EVERY other tool to the native
-   *                 classifier — it MUST NOT route through ApprovalRouter.
-   *   - 'default' / 'acceptEdits' → the full permission hook (allowlist +
-   *                 optional acceptEdits auto-allow + ApprovalRouter routing),
-   *                 with AskUserQuestion routed to QuestionRouter.
-   *
-   * The user/project allow-list is loaded ONCE per spawn and captured in the
-   * hook closure (the hook fires per tool call and must not touch the FS each
-   * time).
-   *
-   * @param mode - the already-resolved effective mode (post eligibility guard);
-   *   passed in by buildSdkOptions so the guard's warn only fires once.
-   */
-  private composeHookOptions(options: ClaudeSpawnOptions, mode: PermissionMode): Pick<Options, 'hooks'> {
-    const runId = options.runId ?? options.panelId;
-
-    if (mode === 'dontAsk') {
-      // No PreToolUse hook — every tool call is auto-allowed by the SDK
-      // (matches the pre-SDK / legacy 'ignore' "skip the bridge" behavior).
-      return {};
-    }
-
-    const hook =
-      mode === 'auto'
-        ? this.makeAutoModePreToolUseHook(runId)
-        : this.makePreToolUseHook(runId, loadMergedPermissionRules(options.worktreePath), mode);
+  private composeHookOptions(options: ClaudeSpawnOptions): Pick<Options, 'hooks'> {
+    const gateRunId = options.runId ?? options.panelId;
+    const ownerSessionId = this.resolveOwnerSessionId(gateRunId);
+    const allowRules = loadMergedPermissionRules(options.worktreePath);
+    const hook = this.makeDynamicPreToolUseHook(gateRunId, ownerSessionId, allowRules, options.model);
 
     return {
       hooks: {
         PreToolUse: [{ hooks: [hook] }],
       },
+    };
+  }
+
+  /**
+   * Resolve the owning session UUID for a gate run ONCE at spawn from the gate
+   * `runId` (permission-mode redesign §3b). Robust for BOTH entry shapes:
+   *   - chat turn → gate run = a `__quick__` chat sentinel → its `session_id`
+   *   - flow run  → gate run = the flow run itself → its `session_id`
+   * (for flows sessionId === runId, so the run→session indirection is the fix).
+   * Returns undefined when no row resolves (legacy sentinel left NULL by design,
+   * or an unknown run) — readLiveSessionMode then floors to the global default.
+   */
+  private resolveOwnerSessionId(gateRunId: string): string | undefined {
+    try {
+      const row = this.db
+        .prepare('SELECT session_id FROM workflow_runs WHERE id = ?')
+        .get(gateRunId) as { session_id?: unknown } | undefined;
+      return typeof row?.session_id === 'string' && row.session_id.length > 0
+        ? row.session_id
+        : undefined;
+    } catch {
+      // Fail-soft (matches the spawn-seam revive/lane-derive guards): a read
+      // failure (e.g. an older DB predating migration 019's session_id column)
+      // floors the live read to the global default rather than crashing the spawn.
+      return undefined;
+    }
+  }
+
+  /**
+   * Live-read the owning session's 4-mode permission value (the single execution
+   * authority — `sessions.agent_permission_mode`). Called once per hook
+   * invocation so a mid-run mode switch takes effect on the next tool call. Floors
+   * to the global default (Settings → Agent Permission Mode) when the column is
+   * unset/invalid or the session does not resolve. Does NOT trust
+   * BaseHookInput.permission_mode (that reflects the SDK's own mode, not the
+   * session column).
+   */
+  private readLiveSessionMode(ownerSessionId: string | undefined): PermissionMode {
+    if (ownerSessionId) {
+      const row = this.db
+        .prepare('SELECT agent_permission_mode AS m FROM sessions WHERE id = ?')
+        .get(ownerSessionId) as { m?: unknown } | undefined;
+      const m: unknown = row?.m;
+      if (isPermissionMode(m)) return m;
+    }
+    // 4-mode floor ('ask before edits') when no configManager is wired — matches
+    // resolveRunAgentPermissionMode / permissionModeResolver's DEFAULT floor. (The
+    // legacy DEFAULT_PERMISSION_MODE constant is the 2-mode 'approve', not this.)
+    return this.configManager?.getDefaultAgentPermissionMode() ?? 'default';
+  }
+
+  /**
+   * Build the single always-installed dynamic PreToolUse hook (permission-mode
+   * redesign §4). Merges the former per-mode hooks (makePreToolUseHook +
+   * makeAutoModePreToolUseHook) behind one live-mode branch. Per call, in order:
+   *
+   *   0. deriveLaneFromTaskDispatch (observe-only) — BEFORE the mode branch so a
+   *      sprint Task dispatch advances its lane in EVERY mode, including auto-defer
+   *      and dontAsk (which never reach the ApprovalRouter, where the in-router
+   *      twin of this call lives). Strict no-op off the sprint path; never throws.
+   *   1. mode = readLiveSessionMode() — re-read fresh on every call.
+   *   2. AskUserQuestion → QuestionRouter in ALL modes (incl. dontAsk; intentional
+   *      — it is the agent's CONTENT question, not a permission prompt).
+   *   3. branch on the freshly-read mode (see composeHookOptions doc).
+   *
+   * The default/acceptEdits and auto-unsupported branches delegate to the pre-built
+   * makePreToolUseHook closures (allowlist + acceptEdits fast-allow + ApprovalRouter
+   * routing); the auto-supported branch delegates to makeAutoModePreToolUseHook
+   * (empty defer output). The closures are built ONCE here, not per call.
+   */
+  private makeDynamicPreToolUseHook(
+    gateRunId: string,
+    ownerSessionId: string | undefined,
+    allowRules: MergedPermissionRules,
+    model: string | undefined,
+  ): HookCallback {
+    const loggerLike = makeLoggerLike(this.logger);
+    // Per-mode delegate hooks, built once (each captures gateRunId + allowRules).
+    const routerDefaultHook = this.makePreToolUseHook(gateRunId, allowRules, 'default');
+    const routerAcceptEditsHook = this.makePreToolUseHook(gateRunId, allowRules, 'acceptEdits');
+    const autoDeferHook = this.makeAutoModePreToolUseHook(gateRunId);
+
+    return async (input, toolUseId, ctx) => {
+      const pretool = input as PreToolUseHookInput;
+
+      // (0) Observe-only sprint-lane auto-derive — BEFORE the mode branch so it
+      // fires even on the auto-defer / dontAsk paths that never reach the router.
+      // (routePreToolUseThroughApprovalRouter fires the in-process twin too; the
+      // call is idempotent/monotonic-forward, so the redundant default/acceptEdits
+      // fire is harmless.) Defensive: never disturbs the gating verdict.
+      try {
+        SprintLaneStore.getInstance().deriveLaneFromTaskDispatch({
+          runId: gateRunId,
+          toolName: pretool.tool_name,
+          toolInput: (pretool.tool_input ?? {}) as Record<string, unknown>,
+        });
+      } catch {
+        // SprintLaneStore not initialized / read failure — auto-derive is best-effort.
+      }
+
+      // (1) Live-read the owning session's mode for THIS call.
+      const mode = this.readLiveSessionMode(ownerSessionId);
+
+      // (2) AskUserQuestion → QuestionRouter in EVERY mode (intentional change —
+      // dontAsk previously used the SDK's native handler).
+      if (pretool.tool_name === 'AskUserQuestion') {
+        return this.routeAskUserQuestion(pretool, gateRunId, loggerLike);
+      }
+
+      // (3) Branch on the freshly-read mode.
+      switch (mode) {
+        case 'dontAsk':
+          return {
+            hookSpecificOutput: {
+              hookEventName: 'PreToolUse' as const,
+              permissionDecision: 'allow' as const,
+            },
+          };
+        case 'acceptEdits':
+          return routerAcceptEditsHook(input, toolUseId, ctx);
+        case 'auto':
+          // Model-eligibility is evaluated PER CALL: defer to the native
+          // classifier only on a classifier-capable model; otherwise route
+          // through the ApprovalRouter (treat like 'default') since no classifier
+          // exists to defer to.
+          return modelSupportsAutoMode(model)
+            ? autoDeferHook(input, toolUseId, ctx)
+            : routerDefaultHook(input, toolUseId, ctx);
+        case 'default':
+        default:
+          return routerDefaultHook(input, toolUseId, ctx);
+      }
     };
   }
 
@@ -1589,13 +1683,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // per-session override (sessions.agent_permission_mode, migration 021) when
       // set, else the GLOBAL default — so both the Settings control AND the
       // Session Start Wizard step-3 / quick-session config govern them (not just
-      // workflow runs). resolveHookMode prefers agentPermissionMode over the
-      // legacy 'approve'|'ignore' value, so this is what takes effect. An explicit
-      // legacy 'ignore' (don't-ask) is a stronger statement and is preserved by
-      // leaving agentPermissionMode unset (the legacy 'ignore' → 'dontAsk' branch
-      // in resolveHookMode then governs). Workflow runs never reach this path
-      // (they call spawnCliProcess directly with agentPermissionMode already set
-      // from the run snapshot).
+      // workflow runs). NOTE (permission-mode redesign §3b/§4): the SDK PreToolUse
+      // hook now LIVE-READS this same session column on every tool call (the single
+      // execution authority), so this seeded value is a launch-time hint that the
+      // hook re-derives from the DB rather than a value the hook consumes directly.
+      // Threaded here for parity/observability and for any non-SDK reader.
       agentPermissionMode: this.resolveSessionAgentPermissionMode(sessionId, permissionMode),
       model
     };

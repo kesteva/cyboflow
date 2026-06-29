@@ -1,26 +1,32 @@
 /**
- * Unit tests for the 4-mode agent-permission wiring in ClaudeCodeManager
- * (Step E+G of the global agent-permission-mode feature).
+ * Unit tests for the 4-mode agent-permission wiring in ClaudeCodeManager.
+ *
+ * Permission-mode redesign Slice 6 (SDK dynamic PreToolUse hook): buildSdkOptions
+ * now ALWAYS installs exactly ONE dynamic PreToolUse hook that LIVE-READS the
+ * owning session's `agent_permission_mode` on EVERY tool call (resolved once at
+ * spawn from the gate runId via the workflow_runs→sessions join), and pins native
+ * `permissionMode:'auto'` WHENEVER the model supports the classifier.
  *
  * Coverage:
- *   E) buildSdkOptions branches on options.agentPermissionMode:
- *      - 'dontAsk'     → NO PreToolUse hook installed.
- *      - 'auto' (supported model) → sdkOptions.permissionMode='auto' AND an
- *        AskUserQuestion-ONLY hook that defers every other tool (no
- *        ApprovalRouter routing).
- *      - 'auto' (unsupported model) → FALLBACK: no permissionMode, the normal
- *        permission hook installed, logger.warn fired.
- *      - 'acceptEdits' → the hook auto-allows Edit/Write/MultiEdit BEFORE the
- *        allowlist; routes the rest through ApprovalRouter.
- *      - 'default' (and undefined agentPermissionMode + legacy permissionMode)
- *        → behavior unchanged.
  *   modelSupportsAutoMode pure-helper eligibility table.
+ *   buildSdkOptions — always one hook installed; native-auto pin per supported model.
+ *   makeDynamicPreToolUseHook (live per-call mode):
+ *      - re-reads the mode per call (default→acceptEdits flips edit auto-allow next call);
+ *      - dontAsk → allow (no router); default/acceptEdits → allowlist → ApprovalRouter;
+ *      - auto (supported) → empty defer output; auto (UNSUPPORTED) → ApprovalRouter;
+ *      - the user/project allowlist is honored;
+ *      - FLOW run (sessionId===runId) reads the HOST session via the join, not the
+ *        global default (the §1 root-fix regression guard);
+ *      - deriveLaneFromTaskDispatch fires (observe-only) even on the auto-defer path;
+ *      - AskUserQuestion routes through QuestionRouter in ALL modes (incl. dontAsk).
+ *   spawnClaudeCode quick/legacy session permission seeding (resolveSessionAgentPermissionMode).
  *   G) maybeFoldAutoDenyVisibility folds a NON-BLOCKING permission review item
  *      when a system/permission_denied SDK message arrives for a workflow run.
  *
  * Design: the SDK is mocked (no real query). A Testable subclass exposes the
- * private buildSdkOptions/makeAutoModePreToolUseHook so we can inspect the
- * composed Options + invoke the hook callback directly without a full spawn.
+ * private buildSdkOptions so we can inspect the composed Options + invoke the
+ * installed hook callback directly without a full spawn; the run→session join is
+ * seeded into the test DB so the hook's live mode read resolves.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -30,6 +36,8 @@ import { join } from 'node:path';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../../orchestrator/questionRouter';
 import { ReviewItemRouter } from '../../../../orchestrator/reviewItemRouter';
+import { SprintLaneStore } from '../../../../orchestrator/sprintLaneStore';
+import { loadMergedPermissionRules } from '../../../../orchestrator/permissionRules';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
 import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
 import { makeProdLoggerSpy } from '../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
@@ -155,16 +163,51 @@ describe('modelSupportsAutoMode', () => {
 });
 
 // ---------------------------------------------------------------------------
-// buildSdkOptions — mode branching
+// Live-mode test DB: the run→session join the dynamic hook reads
+// (workflow_runs.session_id [migration 019, via includeSubstrate] +
+// sessions.agent_permission_mode [migration 021]).
 // ---------------------------------------------------------------------------
 
-describe('ClaudeCodeManager.buildSdkOptions — agentPermissionMode branching', () => {
+/** Build a test DB carrying the run→session join the dynamic hook live-reads. */
+function buildModeDb(): Database.Database {
+  const db = createTestDb({ includeSubstrate: true });
+  db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, agent_permission_mode TEXT)');
+  return db;
+}
+
+/**
+ * Seed the gate run + its owning session at a live mode. `sessionUuid === null`
+ * leaves workflow_runs.session_id NULL (the join-miss / orphan case) and inserts
+ * no session row, so the hook floors to the global default.
+ */
+function seedRunSession(
+  db: Database.Database,
+  gateRunId: string,
+  sessionUuid: string | null,
+  mode: string | null,
+): void {
+  db.prepare(
+    "INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf', 1, 'wf', '{}')",
+  ).run();
+  db.prepare(
+    "INSERT INTO workflow_runs (id, workflow_id, project_id, status, session_id) VALUES (?, 'wf', 1, 'running', ?)",
+  ).run(gateRunId, sessionUuid);
+  if (sessionUuid !== null) {
+    db.prepare('INSERT INTO sessions (id, agent_permission_mode) VALUES (?, ?)').run(sessionUuid, mode);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// buildSdkOptions — always ONE dynamic PreToolUse hook + native-auto pin
+// ---------------------------------------------------------------------------
+
+describe('ClaudeCodeManager.buildSdkOptions — dynamic hook installation + native-auto pin', () => {
   let db: Database.Database;
   let logger: LoggerSpy;
   let mgr: TestableClaudeCodeManager;
 
   beforeEach(() => {
-    db = createTestDb();
+    db = buildModeDb();
     logger = makeProdLoggerSpy();
     const adapter = dbAdapter(db);
     ApprovalRouter.initialize(adapter);
@@ -184,153 +227,310 @@ describe('ClaudeCodeManager.buildSdkOptions — agentPermissionMode branching', 
     vi.clearAllMocks();
   });
 
-  it("dontAsk installs NO PreToolUse hook", async () => {
+  it('ALWAYS installs exactly ONE PreToolUse hook — even for dontAsk (formerly NO hook)', async () => {
+    seedRunSession(db, 'run-da', 'sess-da', 'dontAsk');
     const opts = await mgr.publicBuildSdkOptions({
-      panelId: 'p1', sessionId: 's1', worktreePath: '/tmp/w', prompt: 'go',
-      agentPermissionMode: 'dontAsk',
+      panelId: 'run-da', sessionId: 'sess-da', worktreePath: '/tmp/w', prompt: 'go', runId: 'run-da',
     });
-    expect(opts.hooks?.PreToolUse).toBeUndefined();
-    expect(opts.permissionMode).toBeUndefined();
+    const matchers = opts.hooks?.PreToolUse as HookCallbackMatcher[] | undefined;
+    expect(matchers).toHaveLength(1);
+    expect(matchers?.[0]?.hooks).toHaveLength(1);
+    expect(extractPreToolUseHook(opts)).not.toBeNull();
   });
 
-  it("auto (supported model) sets permissionMode='auto' + AskUserQuestion-only hook that defers other tools", async () => {
-    const requestApproval = vi.fn();
-    vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue({ requestApproval } as unknown as ApprovalRouter);
-
+  it("pins permissionMode='auto' whenever the model supports auto — regardless of the session mode (here dontAsk)", async () => {
+    seedRunSession(db, 'run-da2', 'sess-da2', 'dontAsk');
     const opts = await mgr.publicBuildSdkOptions({
-      panelId: 'p2', sessionId: 's2', worktreePath: '/tmp/w', prompt: 'go',
-      agentPermissionMode: 'auto', model: 'sonnet',
+      panelId: 'run-da2', sessionId: 'sess-da2', worktreePath: '/tmp/w', prompt: 'go', runId: 'run-da2', model: 'sonnet',
     });
-
-    // Native auto is set.
+    // The native pin is now decoupled from the session mode (the hook pre-empts).
     expect(opts.permissionMode).toBe('auto');
-
-    const hook = extractPreToolUseHook(opts);
-    expect(hook).not.toBeNull();
-
-    // A non-AskUserQuestion tool defers (no permissionDecision) and NEVER
-    // touches ApprovalRouter.
-    const deferOut = (await hook!(
-      { ...basePreTool, tool_name: 'Bash', tool_use_id: 'tu1', tool_input: { command: 'ls' } },
-      'tu1',
-      undefined as never,
-    )) as { hookSpecificOutput: { hookEventName: string; permissionDecision?: string } };
-    expect(deferOut.hookSpecificOutput.hookEventName).toBe('PreToolUse');
-    expect(deferOut.hookSpecificOutput.permissionDecision).toBeUndefined();
-    expect(requestApproval).not.toHaveBeenCalled();
-
-    // AskUserQuestion still routes to QuestionRouter.
-    const fakeAnswer = { answers: { Q: 'A' } };
-    vi.spyOn(QuestionRouter, 'getInstance').mockReturnValue({
-      requestQuestion: vi.fn().mockResolvedValue(fakeAnswer),
-    } as unknown as QuestionRouter);
-    const askOut = (await hook!(
-      { ...basePreTool, tool_name: 'AskUserQuestion', tool_use_id: 'tu2', tool_input: { questions: [] } },
-      'tu2',
-      undefined as never,
-    )) as { hookSpecificOutput: { permissionDecision: string; updatedInput?: unknown } };
-    expect(askOut.hookSpecificOutput.permissionDecision).toBe('allow');
-    expect(askOut.hookSpecificOutput.updatedInput).toEqual({ questions: [], answers: fakeAnswer.answers });
   });
 
-  it('auto (unsupported model) falls back: no permissionMode, normal hook installed, logger.warn fired', async () => {
-    const requestApproval = vi.fn().mockResolvedValue({ behavior: 'allow' as const });
-    vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue({ requestApproval } as unknown as ApprovalRouter);
-
+  it("pins permissionMode='auto' for an undefined model (SDK default is classifier-capable)", async () => {
+    seedRunSession(db, 'run-um', 'sess-um', 'default');
     const opts = await mgr.publicBuildSdkOptions({
-      panelId: 'p3', sessionId: 's3', worktreePath: '/tmp/w', prompt: 'go',
-      agentPermissionMode: 'auto', model: 'claude-3-5-sonnet',
+      panelId: 'run-um', sessionId: 'sess-um', worktreePath: '/tmp/w', prompt: 'go', runId: 'run-um',
     });
+    expect(opts.permissionMode).toBe('auto');
+  });
 
+  it('does NOT pin permissionMode on an auto-UNSUPPORTED model', async () => {
+    seedRunSession(db, 'run-old', 'sess-old', 'auto');
+    const opts = await mgr.publicBuildSdkOptions({
+      panelId: 'run-old', sessionId: 'sess-old', worktreePath: '/tmp/w', prompt: 'go', runId: 'run-old', model: 'claude-3-5-sonnet',
+    });
     expect(opts.permissionMode).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// makeDynamicPreToolUseHook — live per-call session mode (redesign §3b/§4)
+// ---------------------------------------------------------------------------
+
+describe('ClaudeCodeManager dynamic PreToolUse hook — live per-call mode', () => {
+  let db: Database.Database;
+  let logger: LoggerSpy;
+  let mgr: TestableClaudeCodeManager;
+  let requestApproval: ReturnType<typeof vi.fn>;
+  let deriveLaneFromTaskDispatch: ReturnType<typeof vi.fn>;
+  let approvalSpy: ReturnType<typeof vi.spyOn>;
+  let laneSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    db = buildModeDb();
+    logger = makeProdLoggerSpy();
+    const adapter = dbAdapter(db);
+    ApprovalRouter.initialize(adapter);
+    QuestionRouter.initialize(adapter);
+    mgr = new TestableClaudeCodeManager(
+      createMockSessionManager(),
+      logger as unknown as Logger,
+      makeConfigManager(), // global default 'default'
+      db,
+    );
+
+    requestApproval = vi.fn().mockResolvedValue({ behavior: 'allow' as const });
+    approvalSpy = vi
+      .spyOn(ApprovalRouter, 'getInstance')
+      .mockReturnValue({ requestApproval } as unknown as ApprovalRouter);
+
+    // The SprintLaneStore singleton is uninitialized in this unit boundary
+    // (getInstance() would throw, swallowed by the hook's step-0 guard). Spy it so
+    // the observe-only call is deterministic and assertable.
+    deriveLaneFromTaskDispatch = vi.fn();
+    laneSpy = vi
+      .spyOn(SprintLaneStore, 'getInstance')
+      .mockReturnValue({ deriveLaneFromTaskDispatch } as unknown as SprintLaneStore);
+  });
+
+  afterEach(() => {
+    // mockRestore (not restoreAllMocks) so the module-level vi.mock factory for
+    // loadMergedPermissionRules is NOT reset to a no-op for later describes.
+    approvalSpy.mockRestore();
+    laneSpy.mockRestore();
+    ApprovalRouter._resetForTesting();
+    QuestionRouter._resetForTesting();
+    db.close();
+    vi.clearAllMocks();
+  });
+
+  /** Build + extract the installed dynamic hook for a gate run. */
+  async function installedHook(o: {
+    runId: string;
+    sessionId?: string;
+    panelId?: string;
+    model?: string;
+  }): Promise<HookCallback> {
+    const opts = await mgr.publicBuildSdkOptions({
+      panelId: o.panelId ?? 'panel',
+      sessionId: o.sessionId ?? 'session',
+      worktreePath: '/tmp/w',
+      prompt: 'go',
+      runId: o.runId,
+      model: o.model,
+    });
     const hook = extractPreToolUseHook(opts);
     expect(hook).not.toBeNull();
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('does not support native auto-mode'));
+    return hook!;
+  }
 
-    // The fallback hook is the normal 'default' hook → routes through ApprovalRouter.
-    await hook!(
-      { ...basePreTool, tool_name: 'Bash', tool_use_id: 'tu3', tool_input: { command: 'ls' } },
-      'tu3',
+  function fire(hook: HookCallback, toolName: string, toolInput: Record<string, unknown>, id = 'tu'): Promise<unknown> {
+    return hook(
+      { ...basePreTool, tool_name: toolName, tool_use_id: id, tool_input: toolInput },
+      id,
       undefined as never,
-    );
+    ) as Promise<unknown>;
+  }
+
+  it('re-reads the session mode per call: default → acceptEdits flips edit auto-allow on the NEXT call', async () => {
+    seedRunSession(db, 'run-flip', 'sess-flip', 'default');
+    const hook = await installedHook({ runId: 'run-flip', sessionId: 'sess-flip' });
+
+    // 1st call under 'default' → Edit is NOT auto-allowed → routes through the router.
+    await fire(hook, 'Edit', { file_path: '/tmp/f' }, 't1');
+    expect(requestApproval).toHaveBeenCalledTimes(1);
+
+    // Flip the SESSION mode live — no re-spawn, same hook instance.
+    db.prepare('UPDATE sessions SET agent_permission_mode = ? WHERE id = ?').run('acceptEdits', 'sess-flip');
+
+    // 2nd call → the SAME hook now auto-allows Edit WITHOUT touching the router.
+    const out = (await fire(hook, 'Edit', { file_path: '/tmp/f' }, 't2')) as {
+      hookSpecificOutput: { permissionDecision: string };
+    };
+    expect(out.hookSpecificOutput.permissionDecision).toBe('allow');
+    expect(requestApproval).toHaveBeenCalledTimes(1); // unchanged — no new router call
+  });
+
+  it('dontAsk → returns allow without touching ApprovalRouter', async () => {
+    seedRunSession(db, 'run-da', 'sess-da', 'dontAsk');
+    const hook = await installedHook({ runId: 'run-da', sessionId: 'sess-da' });
+
+    const out = (await fire(hook, 'Bash', { command: 'rm -rf /' })) as {
+      hookSpecificOutput: { permissionDecision: string };
+    };
+    expect(out.hookSpecificOutput.permissionDecision).toBe('allow');
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it('default → routes every tool through ApprovalRouter (Edit is NOT auto-allowed)', async () => {
+    seedRunSession(db, 'run-def', 'sess-def', 'default');
+    const hook = await installedHook({ runId: 'run-def', sessionId: 'sess-def' });
+
+    await fire(hook, 'Edit', { file_path: '/tmp/f' });
     expect(requestApproval).toHaveBeenCalledOnce();
   });
 
-  it('acceptEdits auto-allows Edit/Write/MultiEdit without ApprovalRouter, routes the rest', async () => {
-    const requestApproval = vi.fn().mockResolvedValue({ behavior: 'allow' as const });
-    vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue({ requestApproval } as unknown as ApprovalRouter);
-
-    const opts = await mgr.publicBuildSdkOptions({
-      panelId: 'p4', sessionId: 's4', worktreePath: '/tmp/w', prompt: 'go',
-      agentPermissionMode: 'acceptEdits',
-    });
-    expect(opts.permissionMode).toBeUndefined();
-    const hook = extractPreToolUseHook(opts);
-    expect(hook).not.toBeNull();
+  it('acceptEdits → auto-allows Edit/Write/MultiEdit, routes the rest through ApprovalRouter', async () => {
+    seedRunSession(db, 'run-ae', 'sess-ae', 'acceptEdits');
+    const hook = await installedHook({ runId: 'run-ae', sessionId: 'sess-ae' });
 
     for (const tool of ['Edit', 'Write', 'MultiEdit']) {
-      const out = (await hook!(
-        { ...basePreTool, tool_name: tool, tool_use_id: `tu-${tool}`, tool_input: { file_path: '/tmp/f' } },
-        `tu-${tool}`,
-        undefined as never,
-      )) as { hookSpecificOutput: { permissionDecision: string } };
+      const out = (await fire(hook, tool, { file_path: '/tmp/f' }, `tu-${tool}`)) as {
+        hookSpecificOutput: { permissionDecision: string };
+      };
       expect(out.hookSpecificOutput.permissionDecision).toBe('allow');
     }
     expect(requestApproval).not.toHaveBeenCalled();
 
-    // A non-edit tool still routes through ApprovalRouter.
-    await hook!(
-      { ...basePreTool, tool_name: 'Bash', tool_use_id: 'tu-bash', tool_input: { command: 'rm -rf /' } },
-      'tu-bash',
-      undefined as never,
-    );
+    await fire(hook, 'Bash', { command: 'rm -rf /' }, 'tu-bash');
     expect(requestApproval).toHaveBeenCalledOnce();
   });
 
-  it('default routes every tool through ApprovalRouter (behavior unchanged)', async () => {
-    const requestApproval = vi.fn().mockResolvedValue({ behavior: 'allow' as const });
-    vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue({ requestApproval } as unknown as ApprovalRouter);
+  it('honors the user/project allowlist (auto-allow without the router) in default mode', async () => {
+    // composeHookOptions loads the rules ONCE at spawn; mockReturnValueOnce applies
+    // to exactly that call, then reverts to the empty-rules factory default.
+    vi.mocked(loadMergedPermissionRules).mockReturnValueOnce({ allow: ['Bash(git status:*)'], deny: [] });
+    seedRunSession(db, 'run-al', 'sess-al', 'default');
+    const hook = await installedHook({ runId: 'run-al', sessionId: 'sess-al' });
 
+    const out = (await fire(hook, 'Bash', { command: 'git status -s' })) as {
+      hookSpecificOutput: { permissionDecision: string };
+    };
+    expect(out.hookSpecificOutput.permissionDecision).toBe('allow');
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it('FLOW run (sessionId === runId) reads the HOST session via the run→session join, NOT the global default (§1 regression guard)', async () => {
+    // The gate run id EQUALS the panel/session id (the flow invariant). The owning
+    // session is a DISTINCT uuid resolved via workflow_runs.session_id. A naive
+    // `WHERE sessions.id = runId` lookup would miss → global default ('default') →
+    // Edit would route through the router. Reading the HOST session ('acceptEdits')
+    // proves the join is used.
+    const flowRunId = 'flow-run';
+    seedRunSession(db, flowRunId, 'host-sess', 'acceptEdits');
+    const hook = await installedHook({ runId: flowRunId, sessionId: flowRunId, panelId: flowRunId });
+
+    const out = (await fire(hook, 'Edit', { file_path: '/tmp/f' })) as {
+      hookSpecificOutput: { permissionDecision: string };
+    };
+    expect(out.hookSpecificOutput.permissionDecision).toBe('allow'); // acceptEdits fast-allow
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it('auto on an auto-UNSUPPORTED model routes through ApprovalRouter (no classifier to defer to)', async () => {
+    seedRunSession(db, 'run-auto-old', 'sess-auto-old', 'auto');
     const opts = await mgr.publicBuildSdkOptions({
-      panelId: 'p5', sessionId: 's5', worktreePath: '/tmp/w', prompt: 'go',
-      agentPermissionMode: 'default',
+      panelId: 'panel', sessionId: 'sess-auto-old', worktreePath: '/tmp/w', prompt: 'go',
+      runId: 'run-auto-old', model: 'claude-3-5-sonnet',
     });
-    expect(opts.permissionMode).toBeUndefined();
+    expect(opts.permissionMode).toBeUndefined(); // not pinned on an unsupported model
     const hook = extractPreToolUseHook(opts);
     expect(hook).not.toBeNull();
 
-    // Edit is NOT auto-allowed in default mode.
-    await hook!(
-      { ...basePreTool, tool_name: 'Edit', tool_use_id: 'tu-edit', tool_input: { file_path: '/tmp/f' } },
-      'tu-edit',
-      undefined as never,
-    );
+    await fire(hook!, 'Bash', { command: 'ls' });
     expect(requestApproval).toHaveBeenCalledOnce();
   });
 
-  it('legacy permissionMode=ignore (no agentPermissionMode) installs NO hook', async () => {
+  it('auto on a SUPPORTED model defers to the native classifier (EMPTY PreToolUse output, no router)', async () => {
+    seedRunSession(db, 'run-auto', 'sess-auto', 'auto');
     const opts = await mgr.publicBuildSdkOptions({
-      panelId: 'p6', sessionId: 's6', worktreePath: '/tmp/w', prompt: 'go',
-      permissionMode: 'ignore',
+      panelId: 'panel', sessionId: 'sess-auto', worktreePath: '/tmp/w', prompt: 'go',
+      runId: 'run-auto', model: 'sonnet',
     });
-    expect(opts.hooks?.PreToolUse).toBeUndefined();
+    expect(opts.permissionMode).toBe('auto');
+    const hook = extractPreToolUseHook(opts);
+    expect(hook).not.toBeNull();
+
+    const out = (await fire(hook!, 'Bash', { command: 'ls' })) as {
+      hookSpecificOutput: { hookEventName: string; permissionDecision?: string };
+    };
+    expect(out.hookSpecificOutput.hookEventName).toBe('PreToolUse');
+    expect(out.hookSpecificOutput.permissionDecision).toBeUndefined();
+    expect(requestApproval).not.toHaveBeenCalled();
   });
 
-  it('legacy permissionMode=approve (no agentPermissionMode) installs the default hook', async () => {
-    const requestApproval = vi.fn().mockResolvedValue({ behavior: 'allow' as const });
-    vi.spyOn(ApprovalRouter, 'getInstance').mockReturnValue({ requestApproval } as unknown as ApprovalRouter);
+  it('derives the sprint lane (observe-only) on a Task dispatch even in auto-defer (step 0 runs before the mode branch)', async () => {
+    seedRunSession(db, 'run-lane', 'sess-lane', 'auto');
+    const hook = await installedHook({ runId: 'run-lane', sessionId: 'sess-lane', model: 'sonnet' });
 
-    const opts = await mgr.publicBuildSdkOptions({
-      panelId: 'p7', sessionId: 's7', worktreePath: '/tmp/w', prompt: 'go',
-      permissionMode: 'approve',
+    const toolInput = { subagent_type: 'cyboflow-implement', prompt: 'Implement TASK-1' };
+    const out = (await fire(hook, 'Task', toolInput)) as {
+      hookSpecificOutput: { permissionDecision?: string };
+    };
+
+    // Lane derivation fired with the GATE run id...
+    expect(deriveLaneFromTaskDispatch).toHaveBeenCalledTimes(1);
+    expect(deriveLaneFromTaskDispatch).toHaveBeenCalledWith({
+      runId: 'run-lane',
+      toolName: 'Task',
+      toolInput,
+    });
+    // ...and the verdict still DEFERS (auto-supported) — proving step 0 runs even
+    // though the ApprovalRouter (the other deriveLane caller) is NEVER reached.
+    expect(out.hookSpecificOutput.permissionDecision).toBeUndefined();
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it('routes AskUserQuestion through QuestionRouter in ALL modes (including dontAsk)', async () => {
+    const fakeAnswer = { answers: { Q: 'A' } };
+    const requestQuestion = vi.fn().mockResolvedValue(fakeAnswer);
+    const questionSpy = vi
+      .spyOn(QuestionRouter, 'getInstance')
+      .mockReturnValue({ requestQuestion } as unknown as QuestionRouter);
+
+    // dontAsk would otherwise return a plain allow — the question must still route.
+    seedRunSession(db, 'run-q', 'sess-q', 'dontAsk');
+    const hook = await installedHook({ runId: 'run-q', sessionId: 'sess-q' });
+
+    const out = (await fire(hook, 'AskUserQuestion', { questions: [] })) as {
+      hookSpecificOutput: { permissionDecision: string; updatedInput?: unknown };
+    };
+    expect(requestQuestion).toHaveBeenCalledOnce();
+    expect(out.hookSpecificOutput.permissionDecision).toBe('allow');
+    expect(out.hookSpecificOutput.updatedInput).toEqual({ questions: [], answers: fakeAnswer.answers });
+    expect(requestApproval).not.toHaveBeenCalled();
+
+    questionSpy.mockRestore();
+  });
+
+  it('an unresolved session (NULL session_id) floors to the GLOBAL default — here dontAsk → allow', async () => {
+    // ownerSessionId undefined → readLiveSessionMode → configManager global default.
+    const mgrDontAsk = new TestableClaudeCodeManager(
+      createMockSessionManager(),
+      logger as unknown as Logger,
+      makeConfigManager('dontAsk'),
+      db,
+    );
+    seedRunSession(db, 'run-orphan', null, null);
+    const opts = await mgrDontAsk.publicBuildSdkOptions({
+      panelId: 'panel', sessionId: 'sess-x', worktreePath: '/tmp/w', prompt: 'go', runId: 'run-orphan',
     });
     const hook = extractPreToolUseHook(opts);
     expect(hook).not.toBeNull();
-    await hook!(
-      { ...basePreTool, tool_name: 'Edit', tool_use_id: 'tu-e', tool_input: {} },
-      'tu-e',
-      undefined as never,
-    );
+
+    const out = (await fire(hook!, 'Bash', { command: 'ls' })) as {
+      hookSpecificOutput: { permissionDecision: string };
+    };
+    expect(out.hookSpecificOutput.permissionDecision).toBe('allow');
+    expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  it('an unresolved session with a default global mode routes through ApprovalRouter (conservative gate)', async () => {
+    seedRunSession(db, 'run-orphan2', null, null);
+    const hook = await installedHook({ runId: 'run-orphan2', sessionId: 'sess-y' });
+
+    await fire(hook, 'Edit', {});
     expect(requestApproval).toHaveBeenCalledOnce();
   });
 });
