@@ -175,13 +175,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     cyboflow
   } = services;
 
-  // Ephemeral, single-consume "resume the lost REPL" intent per session, armed by
-  // sessions:resume-interactive (the open-time "Resume previous session" choice)
-  // and consumed once by the sessions:input dead-REPL respawn branch. Lives only
-  // in memory for the app run — if the user closes before sending the first turn,
-  // the open-time prompt simply re-offers resume next launch (still resumable).
-  const pendingInteractiveResume = new Set<string>();
-
   // Resolve the single server-side 'claude' panel id an interactive quick session
   // owns (created by sessions:create-quick). Undefined if none exists yet.
   const resolveClaudePanelId = (sessionId: string): string | undefined =>
@@ -1006,27 +999,16 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           // cycle where each input re-enters 'running'.
           await sessionManager.updateSession(sessionId, { status: 'running' });
         } else {
-          // REPL died or the app restarted — re-spawn with the user's input as
-          // the first prompt. ⚠️ NEVER await startPanel: the interactive spawn
+          // REPL died or the app restarted — re-spawn FRESH with the user's input
+          // as the first prompt. ⚠️ NEVER await startPanel: the interactive spawn
           // promise resolves only when the REPL EXITS (persistent-session
-          // contract) — awaiting would deadlock sessions:input until the
-          // session ends.
-          console.log(`[IPC] Interactive REPL not running for panel ${claudePanel.id}, re-spawning...`);
-          // Resume vs fresh: if the user chose "Resume previous session" at open
-          // time (sessions:resume-interactive armed the one-shot flag) and a prior
-          // claude_session_id is on the session row, resume the conversation on
-          // THIS first turn — startPanel emits `--resume <uuid> --fork-session` and
-          // the user's message rides as the positional prompt, so the context is
-          // restored and a transcript line is guaranteed (discovery binds). Else a
-          // fresh REPL (unchanged). One-shot: consume the flag regardless.
-          let resumeSessionId: string | undefined;
-          if (pendingInteractiveResume.delete(sessionId)) {
-            const storedClaudeSessionId = sessionManager.getClaudeSessionId(sessionId);
-            if (storedClaudeSessionId) {
-              resumeSessionId = storedClaudeSessionId;
-              console.log(`[IPC] Resuming interactive session ${sessionId} via --resume ${storedClaudeSessionId} --fork-session`);
-            }
-          }
+          // contract) — awaiting would deadlock sessions:input until the session
+          // ends. RESUMING a lost conversation is NOT done here: it is an explicit,
+          // EAGER user choice (sessions:resume-interactive, the open-time "Resume
+          // previous session" prompt), which spawns `--resume <uuid>` immediately.
+          // By the time a turn reaches this branch the REPL is already live (the
+          // relay branch above), so this path is only ever a fresh fallback.
+          console.log(`[IPC] Interactive REPL not running for panel ${claudePanel.id}, re-spawning fresh...`);
           // Deterministic at-spawn registration (mirrors the create-quick eager
           // spawn): seed the facade's runId→panelId translation BEFORE the PTY
           // spawn so a relay/close-out racing the first PTY byte never falls
@@ -1044,7 +1026,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               panelModel,
               undefined, // effort — re-spawn does not carry the ultracode card setting
               panelFastMode,
-              resumeSessionId, // resume the prior conversation when armed at open time
             )
             .catch((err: unknown) => {
               console.error(`[IPC] Interactive REPL re-spawn failed for session ${sessionId}:`, err);
@@ -1084,10 +1065,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   // After an app close/restart the persistent interactive REPL is gone and its
   // sentinel run is force-failed by boot recovery, but sessions.claude_session_id
   // (persisted from the transcript filename) AND claude's on-disk transcript
-  // survive. These two handlers let the open-time UI offer "Resume previous
-  // session" vs "Start fresh": the query reports whether a resume is possible; the
-  // intent handler arms the one-shot flag consumed by the sessions:input dead-REPL
-  // respawn branch above. Scope: interactive quick sessions only.
+  // survive. These handlers back the open-time UI's "Resume previous session" vs
+  // "Start fresh" prompt: the query reports whether a resume is possible; the
+  // resume handler EAGERLY re-spawns the REPL with `--resume <uuid>` (no fork, no
+  // first message required) so the prior conversation reopens live the moment the
+  // user clicks. Scope: interactive quick sessions only.
   ipcMain.handle('sessions:get-interactive-resume-state', async (_event, sessionId: string) => {
     try {
       const dbSession = databaseService.getSession(sessionId);
@@ -1124,23 +1106,57 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       if (!claudeSessionId || !interactiveTranscriptExists(dbSession.worktree_path, claudeSessionId)) {
         return { success: false, error: 'No prior Claude conversation to resume' };
       }
-      // Arm the one-shot resume; the next composer turn (sessions:input dead-REPL
-      // branch) spawns `claude --resume <uuid> --fork-session`.
-      pendingInteractiveResume.add(sessionId);
-      console.log(`[IPC] Armed interactive resume for session ${sessionId} (claude_session_id=${claudeSessionId})`);
+      const claudePanelId = resolveClaudePanelId(sessionId);
+      if (!claudePanelId) {
+        return { success: false, error: 'No Claude panel for this session' };
+      }
+      // Already live (e.g. a double-click, or the REPL was never actually lost) —
+      // nothing to do.
+      if (interactiveCliManager.isPanelRunning(claudePanelId)) {
+        return { success: true };
+      }
+      const session = await sessionManager.getSession(sessionId);
+      if (!session) {
+        return { success: false, error: 'Session not found' };
+      }
+      // Per-panel launch config (model / fast-mode) persisted at quick-session
+      // launch — thread it on the resume respawn exactly like sessions:input does.
+      const panelLaunchSettings = databaseService.getPanelSettings(claudePanelId);
+      const panelModel = typeof panelLaunchSettings?.model === 'string' ? panelLaunchSettings.model : undefined;
+      const panelFastMode = panelLaunchSettings?.fastMode === true;
+      // Seed the facade's runId→panelId translation BEFORE the PTY spawn (mirrors
+      // the create-quick eager spawn) so a relay/close-out racing the first PTY byte
+      // never falls back to the sentinel runId.
+      if (dbSession.run_id) {
+        registerLivePanel(dbSession.run_id, claudePanelId);
+      }
+      // EAGER resume: spawn the REPL NOW with an EMPTY prompt so it reopens directly
+      // into the prior conversation (`claude --resume <uuid>`, no fork, no turn).
+      // ⚠️ NEVER await startPanel: the interactive spawn promise resolves only when
+      // the REPL EXITS (persistent-session contract). The live xterm paints from the
+      // raw PTY byte path as soon as claude renders the resumed conversation.
+      console.log(`[IPC] Eagerly resuming interactive session ${sessionId} via --resume ${claudeSessionId}`);
+      void interactiveCliManager
+        .startPanel(
+          claudePanelId,
+          sessionId,
+          session.worktreePath,
+          '', // empty prompt → bare resumed REPL, no first turn forced
+          session.permissionMode,
+          panelModel,
+          undefined, // effort — resume does not carry the ultracode card setting
+          panelFastMode,
+          claudeSessionId, // → `--resume <uuid>` (no fork)
+        )
+        .catch((err: unknown) => {
+          console.error(`[IPC] Interactive resume spawn failed for session ${sessionId}:`, err);
+        });
+      await sessionManager.updateSession(sessionId, { status: 'running' });
       return { success: true };
     } catch (error) {
-      console.error('[IPC] Failed to arm interactive resume:', error);
-      return { success: false, error: 'Failed to arm interactive resume' };
+      console.error('[IPC] Failed to resume interactive session:', error);
+      return { success: false, error: 'Failed to resume interactive session' };
     }
-  });
-
-  // Disarm a previously-armed resume so "Start fresh" is authoritative: without
-  // this, a user who armed Resume (e.g. then navigated away) and later chose Start
-  // fresh would still resume on their next message. Idempotent; safe for any id.
-  ipcMain.handle('sessions:cancel-interactive-resume', async (_event, sessionId: string) => {
-    pendingInteractiveResume.delete(sessionId);
-    return { success: true };
   });
 
   ipcMain.handle('sessions:get-or-create-main-repo', async (_event, projectId: number) => {

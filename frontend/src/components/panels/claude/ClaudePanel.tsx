@@ -156,33 +156,32 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     };
   }, [panel.sessionId, interactiveRunId, showDemoTerminal]);
 
-  // The restored-context hint is a one-time cue ("send a message to continue").
-  // Auto-clear it so it never sticks forever — by then the user has sent the turn
-  // and the resumed REPL is responding in the terminal below.
+  // The "Resuming…" hint is a transient cue shown while claude reopens the prior
+  // conversation in the terminal below. Auto-clear it so it never sticks forever —
+  // by then the resumed REPL has painted and is ready for input.
   useEffect(() => {
     if (!resumeArmed) return;
     const id = setTimeout(() => setResumeArmed(false), 12_000);
     return () => clearTimeout(id);
   }, [resumeArmed]);
 
-  // "Resume previous session" → arm the deferred resume; the next composer turn
-  // continues the prior conversation (--resume --fork-session) server-side. Also
-  // DISMISS the prompt for this mount: the probe never re-runs for a quick session
-  // (its sentinel runId is constant), so canOfferResume stays stale-true and the
-  // prompt would re-pop once the restored-context hint auto-clears. The user has
-  // already chosen — mirror handleDeclineResume's one-shot dismissal.
+  // "Resume previous session" → EAGERLY re-spawn the REPL (`--resume <uuid>`,
+  // server-side) so the prior conversation reopens live immediately — no first
+  // message required. Also DISMISS the prompt for this mount: the probe never
+  // re-runs for a quick session (its sentinel runId is constant), so canOfferResume
+  // stays stale-true and the prompt would re-pop once the "Resuming…" hint clears.
   const handleResumeSession = (): void => {
     setResumeArmed(true);
     setResumePromptDismissed(true);
     void API.sessions.resumeInteractive(panel.sessionId).catch(() => undefined);
   };
 
-  // "Start fresh" (or Escape) → decline: disarm any prior resume intent server-side
-  // so it can't fire on a later turn, remember the choice, and hide the prompt.
+  // "Start fresh" (or Escape) → decline: remember the choice and hide the prompt.
+  // No server call needed — nothing was spawned, and the next message simply opens
+  // a fresh REPL via the sessions:input dead-REPL respawn path.
   const handleDeclineResume = (): void => {
     setResumePromptDismissed(true);
     declinedResumeSessions.add(panel.sessionId);
-    void API.sessions.cancelInteractiveResume(panel.sessionId).catch(() => undefined);
   };
 
   const claudePanelState = (panel.state.customState as ClaudePanelState | undefined) ?? {};
@@ -374,14 +373,14 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
               onStartFresh={handleDeclineResume}
             />
           )}
-          {/* After "Resume", cue that the next message continues the prior
-              conversation (the REPL respawns with --resume on that first turn). */}
+          {/* After "Resume", a transient cue while claude reopens the prior
+              conversation in the terminal below (the REPL respawns with --resume). */}
           {resumeArmed && (
             <div
               className="pointer-events-none absolute left-1/2 top-2 z-10 -translate-x-1/2 rounded border border-interactive/40 bg-surface-secondary px-3 py-1.5 text-[11px] text-text-secondary shadow-sm"
               data-testid="resume-restored-hint"
             >
-              Conversation restored — send a message to continue with full context.
+              Resuming previous session — your conversation will reappear below.
             </div>
           )}
         </div>

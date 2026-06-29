@@ -116,7 +116,6 @@ interface ElectronAPI {
     continue: (sessionId: string, prompt?: string, model?: string) => Promise<IPCResponse<void>>;
     getInteractiveResumeState: (sessionId: string) => Promise<IPCResponse<InteractiveResumeState>>;
     resumeInteractive: (sessionId: string) => Promise<IPCResponse<void>>;
-    cancelInteractiveResume: (sessionId: string) => Promise<IPCResponse<void>>;
     // getOutput returns SessionOutput[] (not raw strings); callers pass to setSessionOutputs
     getOutput: (sessionId: string, limit?: number) => Promise<IPCDataResponse<SessionOutput[]>>;
     // getStatistics is locally typed in SessionStats.tsx; use IPCDataResponse so caller can access .data

@@ -4,12 +4,13 @@
  *
  *  - sessions:get-interactive-resume-state — reports replRunning + claudeSessionId
  *    + worktreeExists so the UI can decide whether to offer resume.
- *  - sessions:resume-interactive — arms a one-shot, per-session resume intent
- *    (guarded on substrate + a stored claude_session_id).
- *  - sessions:input dead-REPL respawn — when the intent is armed, threads the
- *    stored claude_session_id to interactiveCliManager.startPanel as the 9th
- *    (resumeSessionId) arg so the first turn resumes via --resume --fork-session;
- *    otherwise a fresh spawn. The intent is consumed exactly once.
+ *  - sessions:resume-interactive — EAGERLY re-spawns the REPL with a plain
+ *    `--resume <uuid>` (no fork, empty prompt) the moment the user clicks "Resume
+ *    previous session": startPanel is called with an empty prompt and the stored
+ *    claude_session_id as the 9th (resumeSessionId) arg. Guarded on substrate + a
+ *    stored claude_session_id + an on-disk transcript; a no-op if already live.
+ *  - sessions:input dead-REPL respawn — ALWAYS a FRESH spawn (no resumeSessionId);
+ *    resume is an explicit eager choice, never coupled to the first message.
  *
  * Exercised via the same handler-capture harness as sessionPermissionMode.test.ts.
  */
@@ -73,7 +74,6 @@ const CLAUDE_SESSION_ID = 'uuid-abc';
 
 const RESUME_STATE = 'sessions:get-interactive-resume-state';
 const RESUME = 'sessions:resume-interactive';
-const CANCEL = 'sessions:cancel-interactive-resume';
 const INPUT = 'sessions:input';
 
 function makeHandlerCapture() {
@@ -236,75 +236,74 @@ describe('sessions:get-interactive-resume-state', () => {
   });
 });
 
-describe('sessions:resume-interactive (arm intent)', () => {
-  it('arms for an interactive session with a stored claude_session_id', async () => {
-    const { services } = makeServices({ substrate: 'interactive' });
+describe('sessions:resume-interactive (eager spawn)', () => {
+  it('eagerly spawns the REPL with an empty prompt and the stored id as resumeSessionId', async () => {
+    const { services, startPanel } = makeServices({ substrate: 'interactive', replRunning: false });
     const handlers = registerWith(services);
     const res = (await invoke(handlers, RESUME, SESSION_ID)) as { success: boolean };
     expect(res.success).toBe(true);
+    expect(startPanel).toHaveBeenCalledTimes(1);
+    // startPanel(panelId, sessionId, worktree, prompt, perm, model, effort, fast, resumeSessionId)
+    const call = startPanel.mock.calls[0];
+    expect(call[0]).toBe('panel-1');
+    expect(call[1]).toBe(SESSION_ID);
+    expect(call[3]).toBe(''); // empty prompt → bare resumed REPL, no first turn
+    expect(call[8]).toBe(CLAUDE_SESSION_ID); // → plain `--resume <uuid>`
+  });
+
+  it('is a no-op when the REPL is already running (does not re-spawn)', async () => {
+    const { services, startPanel } = makeServices({ substrate: 'interactive', replRunning: true });
+    const handlers = registerWith(services);
+    const res = (await invoke(handlers, RESUME, SESSION_ID)) as { success: boolean };
+    expect(res.success).toBe(true);
+    expect(startPanel).not.toHaveBeenCalled();
   });
 
   it('refuses a non-interactive session', async () => {
-    const { services } = makeServices({ substrate: 'sdk' });
+    const { services, startPanel } = makeServices({ substrate: 'sdk' });
     const handlers = registerWith(services);
     const res = (await invoke(handlers, RESUME, SESSION_ID)) as { success: boolean; error?: string };
     expect(res.success).toBe(false);
+    expect(startPanel).not.toHaveBeenCalled();
   });
 
   it('refuses when no prior claude_session_id is stored', async () => {
-    const { services } = makeServices({ substrate: 'interactive', claudeSessionId: undefined });
+    const { services, startPanel } = makeServices({ substrate: 'interactive', claudeSessionId: undefined });
     const handlers = registerWith(services);
     const res = (await invoke(handlers, RESUME, SESSION_ID)) as { success: boolean };
     expect(res.success).toBe(false);
+    expect(startPanel).not.toHaveBeenCalled();
   });
 
   it('refuses when the on-disk transcript is gone', async () => {
     mockExistsSync.mockImplementation((p: string) => !p.endsWith('.jsonl'));
-    const { services } = makeServices({ substrate: 'interactive' });
+    const { services, startPanel } = makeServices({ substrate: 'interactive' });
     const handlers = registerWith(services);
     const res = (await invoke(handlers, RESUME, SESSION_ID)) as { success: boolean };
     expect(res.success).toBe(false);
+    expect(startPanel).not.toHaveBeenCalled();
   });
 });
 
-describe('sessions:cancel-interactive-resume (disarm)', () => {
-  it('disarms an armed resume so the next turn spawns fresh', async () => {
-    const { services, startPanel } = makeServices({ replRunning: false });
-    const handlers = registerWith(services);
-    await invoke(handlers, RESUME, SESSION_ID); // arm
-    await invoke(handlers, CANCEL, SESSION_ID); // disarm (Start fresh)
-    await invoke(handlers, INPUT, SESSION_ID, 'hello');
-    expect(startPanel).toHaveBeenCalledTimes(1);
-    expect(startPanel.mock.calls[0][8]).toBeUndefined();
-  });
-});
-
-describe('sessions:input deferred resume wiring', () => {
-  it('threads the stored claude_session_id to startPanel after Resume is armed', async () => {
-    const { services, startPanel } = makeServices({ replRunning: false });
-    const handlers = registerWith(services);
-    await invoke(handlers, RESUME, SESSION_ID); // arm
-    await invoke(handlers, INPUT, SESSION_ID, 'continue please');
-    expect(startPanel).toHaveBeenCalledTimes(1);
-    // startPanel(panelId, sessionId, worktree, prompt, perm, model, effort, fast, resumeSessionId)
-    expect(startPanel.mock.calls[0][8]).toBe(CLAUDE_SESSION_ID);
-  });
-
-  it('spawns fresh (no resumeSessionId) when Resume was not armed', async () => {
+describe('sessions:input dead-REPL respawn is always FRESH (resume is eager, not deferred)', () => {
+  it('spawns fresh with NO resumeSessionId on a dead-REPL message', async () => {
     const { services, startPanel } = makeServices({ replRunning: false });
     const handlers = registerWith(services);
     await invoke(handlers, INPUT, SESSION_ID, 'hello');
     expect(startPanel).toHaveBeenCalledTimes(1);
-    expect(startPanel.mock.calls[0][8]).toBeUndefined();
+    // startPanel(panelId, sessionId, worktree, prompt, perm, model, effort, fast)
+    expect(startPanel.mock.calls[0][3]).toBe('hello'); // the message rides as the prompt
+    expect(startPanel.mock.calls[0][8]).toBeUndefined(); // never resumes from here
   });
 
-  it('consumes the resume intent exactly once', async () => {
+  it('does NOT resume even right after a prior resume click (eager spawn owns resume)', async () => {
+    // A resume click eagerly spawns; if the REPL is still considered dead and a
+    // message arrives, sessions:input must still spawn FRESH — it carries no
+    // resume intent of its own.
     const { services, startPanel } = makeServices({ replRunning: false });
     const handlers = registerWith(services);
-    await invoke(handlers, RESUME, SESSION_ID); // arm once
-    await invoke(handlers, INPUT, SESSION_ID, 'turn 1');
-    await invoke(handlers, INPUT, SESSION_ID, 'turn 2');
-    expect(startPanel.mock.calls[0][8]).toBe(CLAUDE_SESSION_ID); // resumed
-    expect(startPanel.mock.calls[1][8]).toBeUndefined(); // fresh (flag consumed)
+    await invoke(handlers, RESUME, SESSION_ID); // eager spawn (call 0)
+    await invoke(handlers, INPUT, SESSION_ID, 'turn after resume'); // fresh (call 1)
+    expect(startPanel.mock.calls[1][8]).toBeUndefined();
   });
 });

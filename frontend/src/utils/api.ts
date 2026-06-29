@@ -103,11 +103,6 @@ export class API {
       return window.electronAPI.sessions.resumeInteractive(sessionId);
     },
 
-    async cancelInteractiveResume(sessionId: string) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.sessions.cancelInteractiveResume(sessionId);
-    },
-
     async getOutput(sessionId: string, limit?: number) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.sessions.getOutput(sessionId, limit);

@@ -414,7 +414,7 @@ describe('InteractiveClaudeManager', () => {
       expect(withoutFlag).not.toContain('--strict-mcp-config');
     });
 
-    it('emits "--resume <uuid> --fork-session" when resumeSessionId is set', () => {
+    it('emits a plain "--resume <uuid>" (NO --fork-session) when resumeSessionId is set', () => {
       const args = mgr.callBuildCommandArgs({
         panelId: 'p1',
         sessionId: 's1',
@@ -425,9 +425,10 @@ describe('InteractiveClaudeManager', () => {
       const idx = args.indexOf('--resume');
       expect(idx).toBeGreaterThanOrEqual(0);
       expect(args[idx + 1]).toBe('abc-123-uuid');
-      // --fork-session is LOAD-BEARING (a plain --resume reuses the pre-existing
-      // transcript, which the snapshot-diff TranscriptTailSource never discovers).
-      expect(args[idx + 2]).toBe('--fork-session');
+      // NO fork: eager resume reopens the SAME id and appends to the existing
+      // transcript (stable id, no rewind). Fork was rejected — it forks lazily on
+      // the first turn, so an eager prompt-less resume would diverge from the id.
+      expect(args).not.toContain('--fork-session');
     });
 
     it('omits --resume and --fork-session when resumeSessionId is unset', () => {

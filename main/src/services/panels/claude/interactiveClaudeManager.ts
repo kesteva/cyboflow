@@ -92,15 +92,17 @@ import type { PermissionMode } from '../../../../../shared/types/workflows';
  *   resume/isResume  : the legacy boolean `isResume` is still ignored (no
  *                      `--resume` is emitted from it). RESUME of a lost quick
  *                      session is driven by the explicit `resumeSessionId` option
- *                      below: when set, buildCommandArgs emits
- *                      `--resume <uuid> --fork-session`. `--fork-session` is
- *                      LOAD-BEARING — claude resumes the prior conversation's
- *                      context but writes a NEW session-id `.jsonl`, which the
- *                      TranscriptTailSource (snapshot-diff discovery) can bind to
- *                      (a plain `--resume` appends to the pre-existing file and
- *                      would never be discovered) and which persistDiscoveredSessionId
- *                      then re-stamps onto sessions.claude_session_id so the chain
- *                      survives the next restart too.
+ *                      below: when set, buildCommandArgs emits a PLAIN
+ *                      `--resume <uuid>` (NO `--fork-session`). claude reopens the
+ *                      SAME session id and appends to the existing transcript, so
+ *                      sessions.claude_session_id stays correct across restarts with
+ *                      no rewind and no re-persist. (`--fork-session` was rejected:
+ *                      it forks the transcript lazily on the first turn, so an eager
+ *                      prompt-less resume would diverge from the stored id and
+ *                      silently rewind on the next restart.) The snapshot-diff
+ *                      TranscriptTailSource cannot bind the pre-existing file, so a
+ *                      no-fork resume forgoes the structured pipeline; the live xterm
+ *                      is fed by the raw PTY byte path, independent of discovery.
  *   systemPromptAppend: NO interactive append channel exists. Delivery is via
  *                      prompt-body prepend in S6/TASK-811 — NOT implemented here.
  * ------------------------------------------------------------------------- */
@@ -119,9 +121,10 @@ interface InteractiveClaudeSpawnOptions {
   isResume?: boolean;
   /**
    * Resume a lost quick-session conversation by its persisted Claude session id
-   * (sessions.claude_session_id). When set, buildCommandArgs emits
-   * `--resume <resumeSessionId> --fork-session` (see the parity table for why the
-   * fork is required). Mirrors the SDK manager's `resumeSessionId`
+   * (sessions.claude_session_id). When set, buildCommandArgs emits a plain
+   * `--resume <resumeSessionId>` (NO fork — see the parity table). Used for EAGER
+   * resume with an empty `prompt` so the REPL reopens directly into the prior
+   * conversation. Mirrors the SDK manager's `resumeSessionId`
    * (claudeCodeManager.ts:125). Omitted → a fresh REPL (current behavior).
    */
   resumeSessionId?: string;
@@ -471,13 +474,20 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       args.push('--model', resolvedModel);
     }
 
-    // resumeSessionId: resume a lost quick-session conversation. `--fork-session`
-    // is LOAD-BEARING (see the parity table): claude resumes the prior context but
-    // writes a NEW session-id transcript, which the snapshot-diff TranscriptTailSource
-    // can discover (a plain `--resume` reuses the pre-existing file and would never
-    // bind). Pushed before the end-of-options `--` separator like every other flag.
+    // resumeSessionId: resume a lost quick-session conversation. EAGER resume uses
+    // a PLAIN `--resume <uuid>` (NO `--fork-session`): claude reopens the SAME
+    // session id and APPENDS new turns to the existing transcript, so
+    // sessions.claude_session_id stays correct across future restarts with no
+    // rewind and no re-persist needed. (`--fork-session` was rejected: it forks the
+    // transcript LAZILY on the first turn — verified empirically — so an eager,
+    // prompt-less resume would never bind discovery at startup and the forked turns
+    // would diverge from the stored id, silently rewinding on the next restart.)
+    // The snapshot-diff TranscriptTailSource cannot bind the pre-existing file, so
+    // a no-fork resume forgoes the structured event pipeline; the live xterm is fed
+    // by the raw PTY byte path, which is independent of discovery. Pushed before the
+    // end-of-options `--` separator like every other flag.
     if (options.resumeSessionId) {
-      args.push('--resume', options.resumeSessionId, '--fork-session');
+      args.push('--resume', options.resumeSessionId);
     }
 
     // strictMcpConfig: isolate to per-run .mcp.json servers only.
@@ -994,10 +1004,11 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // claude_session_id from the DISCOVERED transcript filename UUID. The SDK
     // event-driven write (sessionManager.ts:590, GenericMessageData.session_id)
     // belongs to the SDK substrate — the two NEVER both run for one run, so this
-    // does not race/clobber the SDK path. On a fork-resume spawn the discovered
-    // UUID is the NEW forked id that MUST replace the stored (now pre-resume) id;
-    // wasResume lets persist invalidate the stale id if discovery failed.
-    this.persistDiscoveredSessionId(sessionId, tailSource, options.resumeSessionId !== undefined);
+    // does not race/clobber the SDK path. A no-fork resume reopens the SAME id and
+    // appends to the pre-existing file, which snapshot-diff discovery cannot bind —
+    // so getSessionUuid() is undefined and persist is a clean no-op, correctly
+    // LEAVING the already-correct stored id in place (no fork → no rewind risk).
+    this.persistDiscoveredSessionId(sessionId, tailSource);
 
     return spawnPromise;
   }
@@ -1280,28 +1291,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   private persistDiscoveredSessionId(
     sessionId: string,
     tailSource: TranscriptSource,
-    wasResume = false,
   ): void {
     const uuid = this.readDiscoveredSessionUuid(tailSource);
     if (!uuid) {
-      // A fork-resume spawn (`--resume <id> --fork-session`) whose forked transcript
-      // never bound (e.g. discovery timeout). The live REPL is now a NEW forked
-      // session id we failed to capture, so the STORED id points at the frozen
-      // pre-resume transcript — leaving it would silently REWIND the conversation on
-      // the next restart's resume. Invalidate it so the next launch offers a clean
-      // Start-fresh instead. (Fresh spawns have nothing to invalidate → skip.)
-      if (wasResume) {
-        try {
-          this.sessionManager.db.updateSession(sessionId, { claude_session_id: null });
-          this.logger?.warn(
-            `[InteractiveClaudeManager] resume-spawn transcript never bound for session ${sessionId}; cleared stale claude_session_id to avoid a silent rewind on next restart`,
-          );
-        } catch (err) {
-          this.logger?.warn(
-            `[InteractiveClaudeManager] failed to clear stale claude_session_id for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
+      // No transcript bound. For a FRESH spawn this is a discovery miss (nothing to
+      // persist). For a no-fork RESUME the pre-existing file is never bindable by
+      // snapshot-diff discovery — but the stored claude_session_id is ALREADY the
+      // id we resumed (no fork → same id → no rewind), so leaving it untouched is
+      // exactly right. Either way: no-op.
       return;
     }
     try {
@@ -1461,8 +1458,8 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       permissionMode,
       effort,
       fastMode,
-      // When set, buildCommandArgs emits `--resume <uuid> --fork-session` so the
-      // prior conversation's context is restored on this (deferred) first turn.
+      // When set, buildCommandArgs emits a plain `--resume <uuid>` (no fork) so the
+      // prior conversation reopens live — eager resume passes an empty prompt.
       ...(resumeSessionId ? { resumeSessionId } : {}),
       // Quick/legacy interactive sessions resolve their 4-mode agent permission
       // here (per-session override else global default) — without it the
