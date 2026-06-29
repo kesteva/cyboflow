@@ -84,6 +84,7 @@ function createInsightsDb(): Database.Database {
       outcome TEXT,
       task_id TEXT,
       session_id TEXT,
+      substrate TEXT NOT NULL DEFAULT 'sdk',
       spec_hash TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       started_at DATETIME,
@@ -166,13 +167,15 @@ interface SeedRunOpts {
   specHash?: string | null;
   /** Owning quick session (migration 019); null = standalone flow run. */
   sessionId?: string | null;
+  /** CLI substrate stamp (IDEA-013); defaults to 'sdk'. The SDK `__quick__` sentinel exclusion keys off it. */
+  substrate?: string;
 }
 
 function seedRun(db: Database.Database, opts: SeedRunOpts): void {
   db.prepare(
     `INSERT INTO workflow_runs
-       (id, workflow_id, project_id, status, outcome, session_id, spec_hash, created_at, started_at, ended_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)`,
+       (id, workflow_id, project_id, status, outcome, session_id, substrate, spec_hash, created_at, started_at, ended_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), ?, ?)`,
   ).run(
     opts.id,
     opts.workflowId,
@@ -180,6 +183,7 @@ function seedRun(db: Database.Database, opts: SeedRunOpts): void {
     opts.status ?? 'completed',
     opts.outcome ?? null,
     opts.sessionId ?? null,
+    opts.substrate ?? 'sdk',
     opts.specHash ?? null,
     opts.createdAt ?? null,
     opts.startedAt ?? null,
@@ -710,6 +714,61 @@ describe('selectSessionRunTokenTotals', () => {
     seedRun(db, { id: 'r1', workflowId: 'wf1', sessionId: null });
     seedRunUsage(db, { runId: 'r1', inputTokens: 100, outputTokens: 40, cacheReadTokens: 1000, cacheCreationTokens: 500, totalTokens: 140 });
     expect(selectSessionRunTokenTotals(dbAdapter(db), 'sess-1').runInputTokens).toBe(0);
+  });
+
+  // ─── SDK __quick__ sentinel exclusion (permission-mode redesign slice 1b, §7d) ───
+
+  it('EXCLUDES the SDK __quick__ sentinel run (its tokens are already counted via session_outputs)', () => {
+    // Once the SDK sentinel's session_id is stamped, this run scan would otherwise
+    // double-count every SDK chat turn (getSessionTokenUsage already counts it).
+    seedWorkflow(db, { id: 'wf-quick', name: '__quick__' });
+    seedRun(db, { id: 'r-sdk', workflowId: 'wf-quick', sessionId: 'sess-x', substrate: 'sdk' });
+    seedRunUsage(db, {
+      runId: 'r-sdk',
+      inputTokens: 500, outputTokens: 500, cacheReadTokens: 500, cacheCreationTokens: 500, totalTokens: 1000,
+    });
+
+    expect(selectSessionRunTokenTotals(dbAdapter(db), 'sess-x')).toEqual({
+      runInputTokens: 0,
+      runOutputTokens: 0,
+      runCacheReadTokens: 0,
+      runCacheCreationTokens: 0,
+    });
+  });
+
+  it('COUNTS the INTERACTIVE __quick__ sentinel run (no session_outputs to double-count)', () => {
+    // Interactive sentinels write NO session_outputs, so they MUST stay counted via
+    // the run scan — hence the substrate discriminator (only sdk sentinels excluded).
+    seedWorkflow(db, { id: 'wf-quick', name: '__quick__' });
+    seedRun(db, { id: 'r-int', workflowId: 'wf-quick', sessionId: 'sess-x', substrate: 'interactive' });
+    seedRunUsage(db, {
+      runId: 'r-int',
+      inputTokens: 70, outputTokens: 30, cacheReadTokens: 200, cacheCreationTokens: 100, totalTokens: 100,
+    });
+
+    expect(selectSessionRunTokenTotals(dbAdapter(db), 'sess-x')).toEqual({
+      runInputTokens: 70,
+      runOutputTokens: 30,
+      runCacheReadTokens: 200,
+      runCacheCreationTokens: 100,
+    });
+  });
+
+  it('excludes ONLY the SDK sentinel — the session\'s real (non-__quick__) SDK flow run is still counted', () => {
+    seedWorkflow(db, { id: 'wf-quick', name: '__quick__' });
+    // SDK sentinel — excluded.
+    seedRun(db, { id: 'r-sdk', workflowId: 'wf-quick', sessionId: 'sess-x', substrate: 'sdk' });
+    seedRunUsage(db, { runId: 'r-sdk', inputTokens: 999, outputTokens: 999, cacheReadTokens: 999, cacheCreationTokens: 999, totalTokens: 1998 });
+    // A real SDK flow run on the same session — same substrate, but NOT __quick__, so counted.
+    seedRun(db, { id: 'r-flow', workflowId: 'wf1', sessionId: 'sess-x', substrate: 'sdk' });
+    seedRunUsage(db, { runId: 'r-flow', inputTokens: 10, outputTokens: 5, cacheReadTokens: 20, cacheCreationTokens: 8, totalTokens: 15 });
+
+    expect(selectSessionRunTokenTotals(dbAdapter(db), 'sess-x')).toEqual({
+      runInputTokens: 10,
+      runOutputTokens: 5,
+      runCacheReadTokens: 20,
+      runCacheCreationTokens: 8,
+    });
   });
 });
 

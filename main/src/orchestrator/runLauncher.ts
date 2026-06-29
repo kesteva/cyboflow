@@ -153,13 +153,12 @@ export class RunLauncher {
    * Launch a workflow run:
    *   1. ensureGitignoreEntry — idempotent; adds `.cyboflow/worktrees/` if absent
    *   2. createRun — inserts workflow_runs row (status='queued')
-   *   3. Worktree resolution (one of):
-   *      a. LEGACY (no sessionId): createDeterministicWorktree — creates a
-   *         dedicated git worktree + branch for the run.
-   *      b. SESSION-HOSTED (sessionId supplied): reuse the EXISTING session's
-   *         worktree. No new worktree/branch is created; base_sha is snapshotted
-   *         from the session worktree's HEAD and the session's run_id back-link is
-   *         dual-written for legacy readers (session<->run restructure, Phase 1).
+   *   3. Worktree resolution (SESSION-HOSTED only, slice 1b): reuse the EXISTING
+   *      session's worktree. No new worktree/branch is created; base_sha is
+   *      snapshotted from the session worktree's HEAD and the session's run_id
+   *      back-link is dual-written for legacy readers (session<->run restructure,
+   *      Phase 1). The legacy session-less createDeterministicWorktree branch was
+   *      removed when the never-session-less invariant was hard-enforced.
    *   4. UPDATE workflow_runs — sets worktree_path, branch_name, status='starting'
    *   5. (When a `taskId` is supplied AND a taskStageDeriver is injected)
    *      link the run to the task, capture base_branch/base_sha/steps_snapshot_json,
@@ -170,12 +169,11 @@ export class RunLauncher {
    * (ad-hoc workflow runs predate native tasks). The task-derivation block is a
    * complete no-op when `taskId` is omitted or no deriver is wired.
    *
-   * `sessionId` (session<->run restructure, Phase 1 / migration 019) is OPTIONAL
-   * and DORMANT in Phase 1 — no caller passes it yet (the frontend wires it in
-   * Phase 3). When supplied, the run executes inside that session's worktree
-   * instead of creating its own; a one-running-at-a-time guard rejects a second
-   * concurrent run for the same session. When omitted the launch is byte-identical
-   * to before (session_id stays NULL).
+   * `sessionId` (session<->run restructure, Phase 1 / migration 019) is REQUIRED
+   * (permission-mode redesign slice 1b): the run executes inside that session's
+   * worktree, and a one-running-at-a-time guard rejects a second concurrent run for
+   * the same session. launch throws when it is missing; there is no session-less
+   * path anymore.
    *
    * Returns the runId, worktreePath, branchName, and snapshotted permissionMode.
    */
@@ -193,25 +191,25 @@ export class RunLauncher {
     // (no entry-stage capture, no recomputeTaskExecutionStage, so no not_found
     // throw for an id absent from the tasks table). task_id stays task-only.
     ideaId?: string,
-    // Session<->run restructure, Phase 1 (migration 019). When supplied, the run
-    // is hosted inside this session's existing worktree instead of creating its
-    // own, and is threaded into WorkflowRegistry.createRun (below) to stamp
-    // workflow_runs.session_id. The live caller (runs.start) now REQUIRES it
-    // (permission-mode redesign slice 1a), so a real session always reaches
-    // createRun; the signature stays optional until the end-to-end tighten in 1b
-    // (delete the legacy no-session worktree branch + unwrap the guards).
+    // Session<->run restructure, Phase 1 (migration 019). The run is hosted inside
+    // this session's existing worktree, and is threaded into
+    // WorkflowRegistry.createRun (below) to stamp workflow_runs.session_id. REQUIRED
+    // as of the permission-mode redesign slice 1b: launch throws when it is missing
+    // and the legacy session-less worktree branch was removed. The declared type
+    // stays `?: string` only because TS1016 forbids a required parameter after the
+    // preceding optional params; the runtime guard is the enforcement.
     sessionId?: string,
     // The user's explicit per-run agent-permission choice (WorkflowPicker),
     // threaded to the highest-precedence `requestedMode` rung of the permission
     // ladder in WorkflowRegistry.createRun. OPTIONAL — when omitted the ladder
     // falls through to frontmatter → global default → 'default'.
     requestedPermissionMode?: PermissionMode,
-    // Parallel-sprint (feat/parallel-sprint, P4). When supplied, the run's
-    // worktree branch is cut off `baseBranch` (the CURRENT integration tip) so a
-    // dependent task sees its already-integrated prereqs' changes — instead of
-    // the project's default branch. Forwarded straight into
-    // createDeterministicWorktree (which already supports the 4th baseBranch arg).
-    // Ignored for session-hosted runs (they reuse the session worktree).
+    // Parallel-sprint (feat/parallel-sprint, P4). Historically forwarded into
+    // createDeterministicWorktree to cut a dependent task's worktree branch off the
+    // CURRENT integration tip. DORMANT since slice 1b removed the session-less
+    // worktree path: every run reuses the session worktree, so this is ignored. The
+    // param is retained for positional-call-site ABI stability; a later slice will
+    // re-home base-branch selection onto the session worktree if needed.
     baseBranch?: string,
     // Parallel-sprint (feat/parallel-sprint, single-run lane model). When
     // supplied, the run is a session-hosted `sprint` run seeded with these task
@@ -287,31 +285,41 @@ export class RunLauncher {
       }
     }
 
-    // One-running-at-a-time guard for SESSION-HOSTED runs: a session may own many
-    // runs over its lifetime but only ONE may be in flight at a time. Checked
-    // BEFORE createRun so we never leave a half-created run behind on rejection.
+    // Session invariant (permission-mode redesign slice 1b): every run is hosted by
+    // a session — there is no session-less launch path anymore. Enforced here AFTER
+    // the sprint/finding request validation (so an invalid request still surfaces
+    // its own specific error first) and BEFORE the one-running guard binds sessionId
+    // into SQL. createRun re-asserts this as the hard chokepoint; this guard gives a
+    // clean message and narrows sessionId to a non-empty string for the body below.
+    // (The signature stays `sessionId?: string` only because TS1016 forbids a
+    // required parameter after the preceding optional params.)
+    if (!sessionId) {
+      throw new Error('RunLauncher.launch: sessionId is required (run cannot be session-less)');
+    }
+
+    // One-running-at-a-time guard: a session may own many runs over its lifetime
+    // but only ONE may be in flight at a time. Checked BEFORE createRun so we never
+    // leave a half-created run behind on rejection.
     //
     // The __quick__ SENTINEL run (created by sessions:create-quick to back a quick
     // session in the workflow_runs pipeline) is permanently 'running' and must NOT
     // count toward this limit — otherwise launching the FIRST real workflow into a
     // quick session would always be wrongly blocked by its own sentinel. Exclude
     // any run whose workflow is the sentinel.
-    if (sessionId) {
-      const activeRow = this.db
-        .prepare(
-          // 'paused' (Phase 4b) is non-terminal — a paused run still occupies the
-          // session and must block launching a second run into it.
-          `SELECT COUNT(*) AS n FROM workflow_runs
-            WHERE session_id = ?
-              AND status IN ('queued','starting','running','awaiting_review','stuck','awaiting_input','paused')
-              AND workflow_id NOT IN (SELECT id FROM workflows WHERE name = ?)`,
-        )
-        .get(sessionId, QUICK_WORKFLOW_NAME) as { n: number };
-      if (activeRow.n > 0) {
-        throw new Error(
-          `RunLauncher.launch: session ${sessionId} already has a running workflow`,
-        );
-      }
+    const activeRow = this.db
+      .prepare(
+        // 'paused' (Phase 4b) is non-terminal — a paused run still occupies the
+        // session and must block launching a second run into it.
+        `SELECT COUNT(*) AS n FROM workflow_runs
+          WHERE session_id = ?
+            AND status IN ('queued','starting','running','awaiting_review','stuck','awaiting_input','paused')
+            AND workflow_id NOT IN (SELECT id FROM workflows WHERE name = ?)`,
+      )
+      .get(sessionId, QUICK_WORKFLOW_NAME) as { n: number };
+    if (activeRow.n > 0) {
+      throw new Error(
+        `RunLauncher.launch: session ${sessionId} already has a running workflow`,
+      );
     }
 
     // Thread the EXPLICIT launch project (migration 030) so createRun stamps it
@@ -340,14 +348,10 @@ export class RunLauncher {
     );
 
     try {
-      const { worktreePath, branchName } = sessionId
-        ? await this.resolveSessionHostedWorktree(runId, sessionId)
-        : await this.worktreeManager.createDeterministicWorktree(
-            projectPath,
-            workflow.name,
-            runId,
-            baseBranch,
-          );
+      // Every run is session-hosted (slice 1b): the run executes inside the owning
+      // session's EXISTING worktree. The legacy session-less createDeterministicWorktree
+      // branch (and the `baseBranch` it consumed) was removed with the invariant.
+      const { worktreePath, branchName } = await this.resolveSessionHostedWorktree(runId, sessionId);
 
       // Write the per-run .mcp.json into the worktree so Claude can discover
       // the cyboflow-permissions bridge.
@@ -376,23 +380,22 @@ export class RunLauncher {
       // legacy sessions.run_id back-link so readers that still consult
       // sessions.run_id (e.g. useLifecycleSession.ts until Phase 3) keep working.
       // The forward link (workflow_runs.session_id) was stamped at createRun.
-      if (sessionId) {
-        const baseSha = await this.worktreeManager.getHeadCommit(worktreePath);
-        this.db
-          .prepare('UPDATE workflow_runs SET base_sha = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-          .run(baseSha, runId);
-        // Dual-write the legacy back-link AND keep the session's substrate in
-        // lockstep with the run it hosts. Without the substrate stamp a session
-        // created on the SDK default (ensureSessionForLaunch) that hosts an
-        // INTERACTIVE run would, on cancel/end, return to its resting view as
-        // SDK — the session never reflected the PTY substrate the run actually
-        // used. The frontend resting view (ClaudePanel) reads sessions.substrate,
-        // and the live REPL re-spawn (sessions:input) re-registers the PTY channel
-        // under sessions.run_id, so this keeps the resting view a PTY surface.
-        this.db
-          .prepare('UPDATE sessions SET run_id = ?, substrate = ? WHERE id = ?')
-          .run(runId, resolvedSubstrate, sessionId);
-      }
+      // Always runs now — the session-less launch path was removed in slice 1b.
+      const baseSha = await this.worktreeManager.getHeadCommit(worktreePath);
+      this.db
+        .prepare('UPDATE workflow_runs SET base_sha = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+        .run(baseSha, runId);
+      // Dual-write the legacy back-link AND keep the session's substrate in
+      // lockstep with the run it hosts. Without the substrate stamp a session
+      // created on the SDK default (ensureSessionForLaunch) that hosts an
+      // INTERACTIVE run would, on cancel/end, return to its resting view as
+      // SDK — the session never reflected the PTY substrate the run actually
+      // used. The frontend resting view (ClaudePanel) reads sessions.substrate,
+      // and the live REPL re-spawn (sessions:input) re-registers the PTY channel
+      // under sessions.run_id, so this keeps the resting view a PTY surface.
+      this.db
+        .prepare('UPDATE sessions SET run_id = ?, substrate = ? WHERE id = ?')
+        .run(runId, resolvedSubstrate, sessionId);
 
       // Planner pre-launch seed idea (migration 017). A direct workflow_runs
       // write — NOT a tasks write, and NOT routed through the stage deriver

@@ -61,6 +61,14 @@ function buildDescriptors(
 const BUILTIN_NAMES_SORTED = [...CYBOFLOW_WORKFLOW_NAMES].sort();
 
 /**
+ * A canned owning-session id threaded as the 3rd positional `createRun` arg.
+ * createRun now THROWS when session-less (permission-mode redesign slice 1b), so
+ * every run-creating test passes one. workflow_runs.session_id is a soft link (no
+ * FK), so a synthetic id needs no backing `sessions` row for these registry tests.
+ */
+const TEST_SESSION_ID = 'sess-test';
+
+/**
  * Minimal structurally-valid `WorkflowDefinition` for the editor write-path
  * tests (updateSpec / createCustom). The registry does NOT re-validate, so this
  * only needs to round-trip through JSON.stringify and back via
@@ -563,7 +571,7 @@ describe('WorkflowRegistry', () => {
            VALUES ('wf-1-planner', 1, 'planner', '{}', 'default')`,
         ).run();
         // A run pinned to that phantom row — pruning it would cascade the run away.
-        registry.createRun('wf-1-planner');
+        registry.createRun('wf-1-planner', undefined, TEST_SESSION_ID);
 
         registry.ensureGlobalBuiltIns(buildDescriptors(tmpDir));
 
@@ -666,7 +674,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const { runId } = registry.createRun(workflowId);
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         interface SnapshotRow { permission_mode_snapshot: string }
         const row = db.prepare('SELECT permission_mode_snapshot FROM workflow_runs WHERE id = ?').get(runId) as SnapshotRow;
@@ -681,7 +689,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        const { runId } = registry.createRun(workflowId);
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         expect(runId).toMatch(/^[0-9a-f]{32}$/);
       });
@@ -694,7 +702,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const { runId } = registry.createRun(workflowId);
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         interface StatusRow { status: string }
         const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as StatusRow;
@@ -710,7 +718,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        const result = registry.createRun(workflowId);
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         expect(result.permissionMode).toBe('dontAsk');
       });
@@ -731,7 +739,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const result = cfgRegistry.createRun(workflowId);
+        const result = cfgRegistry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         // Column was 'default' (treated as unset) → global default 'auto' wins.
         expect(result.permissionMode).toBe('auto');
@@ -750,7 +758,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        const result = cfgRegistry.createRun(workflowId);
+        const result = cfgRegistry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         // Column 'dontAsk' is an explicit per-agent opt-in → wins over the
         // global default 'auto'.
@@ -770,7 +778,7 @@ describe('WorkflowRegistry', () => {
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
         // requestedPermissionMode = 'acceptEdits' is the HIGHEST-precedence rung.
-        const result = cfgRegistry.createRun(workflowId, undefined, undefined, 'acceptEdits');
+        const result = cfgRegistry.createRun(workflowId, undefined, TEST_SESSION_ID, 'acceptEdits');
 
         expect(result.permissionMode).toBe('acceptEdits');
         interface SnapshotRow { permission_mode_snapshot: string }
@@ -787,7 +795,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const result = registry.createRun(workflowId);
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         expect(result.permissionMode).toBe('default');
       });
@@ -802,7 +810,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        const result = registry.createRun(workflowId);
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         // Returned value floors to 'sdk'.
         expect(result.substrate).toBe('sdk');
@@ -823,7 +831,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        const result = registry.createRun(workflowId);
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         // Returned value floors to 'orchestrated'.
         expect(result.executionModel).toBe('orchestrated');
@@ -883,7 +891,7 @@ describe('WorkflowRegistry', () => {
           interface IdRow { id: string }
           const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
           // SDK substrate (default) — programmatic is available, so the env wins.
-          const result = registry.createRun(workflowId);
+          const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
           expect(result.substrate).toBe('sdk');
           expect(result.executionModel).toBe('programmatic');
@@ -912,7 +920,7 @@ describe('WorkflowRegistry', () => {
           interface IdRow { id: string }
           const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('compound') as IdRow;
           // Explicit interactive substrate — the hard rule outranks the env override.
-          const result = registry.createRun(workflowId, 'interactive');
+          const result = registry.createRun(workflowId, 'interactive', TEST_SESSION_ID);
 
           expect(result.substrate).toBe('interactive');
           expect(result.executionModel).toBe('orchestrated');
@@ -937,7 +945,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        const result = registry.createRun(workflowId, undefined, undefined, undefined, {
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
           projectId: 1,
           requestedExecutionModel: 'programmatic',
         });
@@ -954,7 +962,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const result = registry.createRun(workflowId, 'interactive', undefined, undefined, {
+        const result = registry.createRun(workflowId, 'interactive', TEST_SESSION_ID, undefined, {
           projectId: 1,
           requestedExecutionModel: 'programmatic',
         });
@@ -971,7 +979,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const { runId, executionModel } = registry.createRun(workflowId);
+        const { runId, executionModel } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         const run = registry.getRunById(runId);
         expect(run!.execution_model).toBe(executionModel);
@@ -989,7 +997,7 @@ describe('WorkflowRegistry', () => {
 
           interface IdRow { id: string }
           const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-          const result = registry.createRun(workflowId);
+          const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
           expect(result.substrate).toBe('interactive');
 
@@ -1024,18 +1032,26 @@ describe('WorkflowRegistry', () => {
       });
     });
 
-    it('leaves session_id NULL when no sessionId is supplied (legacy parentless run)', async () => {
+    it('throws when no sessionId is supplied (run cannot be session-less, slice 1b invariant)', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'no-session-link.md', '---\n---\n');
         registry.seed(1, [{ name: 'planner', path }]);
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const { runId } = registry.createRun(workflowId);
 
-        interface SessionRow { session_id: string | null }
-        const row = db.prepare('SELECT session_id FROM workflow_runs WHERE id = ?').get(runId) as SessionRow;
-        expect(row.session_id).toBeNull();
+        // The session invariant is the single hard chokepoint: a session-less run is
+        // rejected outright (undefined as the 3rd positional sessionId arg). The throw
+        // fires AFTER the workflow lookup, so a valid workflow id still reaches it.
+        expect(() => registry.createRun(workflowId, undefined, undefined)).toThrow(
+          'WorkflowRegistry.createRun: sessionId is required (run cannot be session-less)',
+        );
+
+        // No half-created row is left behind (the throw precedes the INSERT tx).
+        const count = db
+          .prepare('SELECT COUNT(*) AS n FROM workflow_runs WHERE workflow_id = ?')
+          .get(workflowId) as { n: number };
+        expect(count.n).toBe(0);
       });
     });
 
@@ -1050,7 +1066,7 @@ describe('WorkflowRegistry', () => {
         const { id: workflowId } = db
           .prepare("SELECT id FROM workflows WHERE name = 'planner' AND project_id IS NULL")
           .get() as IdRow;
-        const { runId } = registry.createRun(workflowId, undefined, undefined, undefined, { projectId: 5 });
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, { projectId: 5 });
 
         interface ProjectRow { project_id: number }
         const row = db.prepare('SELECT project_id FROM workflow_runs WHERE id = ?').get(runId) as ProjectRow;
@@ -1066,7 +1082,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        const { runId } = registry.createRun(workflowId, undefined, undefined, undefined, { projectId: 9 });
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, { projectId: 9 });
 
         interface ProjectRow { project_id: number }
         const row = db.prepare('SELECT project_id FROM workflow_runs WHERE id = ?').get(runId) as ProjectRow;
@@ -1082,7 +1098,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare("SELECT id FROM workflows WHERE project_id = 4").get() as IdRow;
-        const { runId } = registry.createRun(workflowId);
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         interface ProjectRow { project_id: number }
         const row = db.prepare('SELECT project_id FROM workflow_runs WHERE id = ?').get(runId) as ProjectRow;
@@ -1100,7 +1116,7 @@ describe('WorkflowRegistry', () => {
           .get() as IdRow;
         // No opts.projectId, and workflow.project_id is NULL → cannot stamp the
         // NOT-NULL workflow_runs.project_id.
-        expect(() => registry.createRun(workflowId)).toThrow(/global.*projectId is required/i);
+        expect(() => registry.createRun(workflowId, undefined, TEST_SESSION_ID)).toThrow(/global.*projectId is required/i);
       });
     });
 
@@ -1122,7 +1138,7 @@ describe('WorkflowRegistry', () => {
 
           interface IdRow { id: string }
           const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-          const result = cfgRegistry.createRun(workflowId);
+          const result = cfgRegistry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
           expect(result.substrate).toBe('interactive');
         });
@@ -1144,7 +1160,7 @@ describe('WorkflowRegistry', () => {
 
         interface SpecRow { id: string; spec_json: string }
         const wf = db.prepare('SELECT id, spec_json FROM workflows WHERE name = ?').get('planner') as SpecRow;
-        const { runId } = registry.createRun(wf.id);
+        const { runId } = registry.createRun(wf.id, undefined, TEST_SESSION_ID);
 
         interface HashRow { spec_hash: string | null }
         const row = db.prepare('SELECT spec_hash FROM workflow_runs WHERE id = ?').get(runId) as HashRow;
@@ -1164,7 +1180,7 @@ describe('WorkflowRegistry', () => {
         const edited = makeDefinition('planner');
         registry.updateSpec(workflowId, edited);
 
-        const { runId } = registry.createRun(workflowId);
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         interface HashRow { spec_hash: string | null }
         const row = db.prepare('SELECT spec_hash FROM workflow_runs WHERE id = ?').get(runId) as HashRow;
@@ -1181,7 +1197,7 @@ describe('WorkflowRegistry', () => {
 
         interface SpecRow { id: string; spec_json: string }
         const wf = db.prepare('SELECT id, spec_json FROM workflows WHERE name = ?').get('sprint') as SpecRow;
-        registry.createRun(wf.id);
+        registry.createRun(wf.id, undefined, TEST_SESSION_ID);
 
         interface RevRow { workflow_id: string; spec_hash: string; spec_json: string }
         const rev = db
@@ -1203,7 +1219,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        registry.createRun(workflowId);
+        registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         interface CountRow { count: number }
         const { count } = db
@@ -1220,8 +1236,8 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        registry.createRun(workflowId);
-        registry.createRun(workflowId);
+        registry.createRun(workflowId, undefined, TEST_SESSION_ID);
+        registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         interface CountRow { count: number }
         const { count } = db
@@ -1239,7 +1255,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const { runId } = registry.createRun(workflowId);
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         interface HashRow { spec_hash: string | null }
         const before = db.prepare('SELECT spec_hash FROM workflow_runs WHERE id = ?').get(runId) as HashRow;
@@ -1274,7 +1290,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const { runId } = registry.createRun(workflowId);
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         const run = registry.getRunById(runId);
         expect(run).not.toBeNull();
@@ -1296,7 +1312,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const { runId } = registry.createRun(workflowId);
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         db.prepare(
           `UPDATE workflow_runs
@@ -1320,7 +1336,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const { runId } = registry.createRun(workflowId);
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         const run = registry.getRunById(runId);
         expect(run).not.toBeNull();
@@ -1336,7 +1352,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const { runId } = registry.createRun(workflowId);
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         db.prepare(
           `UPDATE workflow_runs
@@ -1360,7 +1376,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const { runId, substrate } = registry.createRun(workflowId);
+        const { runId, substrate } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         const run = registry.getRunById(runId);
         expect(run).not.toBeNull();
@@ -1378,7 +1394,7 @@ describe('WorkflowRegistry', () => {
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
         // The per-run UI choice (WorkflowPicker → runs.start → launch) is threaded
         // as the highest-precedence override and must be stamped onto the row.
-        const { runId, substrate } = registry.createRun(workflowId, 'interactive');
+        const { runId, substrate } = registry.createRun(workflowId, 'interactive', TEST_SESSION_ID);
 
         expect(substrate).toBe('interactive');
         const run = registry.getRunById(runId);
@@ -1393,7 +1409,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
-        const { runId } = registry.createRun(workflowId);
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
 
         // Progress the run through a couple of status transitions; substrate must
         // not move (createRun is the only writer; there is no UPDATE path).
@@ -1809,7 +1825,7 @@ describe('WorkflowRegistry', () => {
         name: 'Has Runs',
         specJson: JSON.stringify(makeDefinition('has-runs')),
       });
-      registry.createRun(row.id);
+      registry.createRun(row.id, undefined, TEST_SESSION_ID);
       expect(() => registry.deleteWorkflow(row.id)).toThrow(/run history/i);
       // The flow is preserved so its run history is never orphaned/destroyed.
       expect(registry.getById(row.id)).not.toBeNull();

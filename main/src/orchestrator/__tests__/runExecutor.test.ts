@@ -2014,10 +2014,31 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
 // RunLauncher integration tests
 // ---------------------------------------------------------------------------
 
+/**
+ * A session-hosted test DB for the RunLauncher enqueue-integration tests
+ * (permission-mode redesign slice 1b: every launch is session-hosted). Layers the
+ * session_id/base_sha columns + a minimal sessions table on top of the shared
+ * fixture so the launch path's worktree-resolution + finalization resolve.
+ */
+function enqueueIntegrationDb(): ReturnType<typeof createTestDb> {
+  const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+  db.exec(`
+    CREATE TABLE sessions (
+      id TEXT PRIMARY KEY,
+      worktree_path TEXT,
+      base_branch TEXT,
+      run_id TEXT,
+      substrate TEXT
+    )
+  `);
+  return db;
+}
+
 describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
   it('(f) enqueues execute() via RunQueueRegistry AFTER publisher.publish run_started', async () => {
     await withTempDir('runexecutor-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = enqueueIntegrationDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
@@ -2030,6 +2051,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
       const cannedRunId = randomUUID().replace(/-/g, '');
       const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
       const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
+      db.prepare("INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES ('sess-exec', ?, 'main', NULL)").run(cannedWorktreePath);
 
       const fakeRegistry = {
         getById: (id: string) => {
@@ -2040,21 +2062,18 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
             .get(id);
           return row ?? null;
         },
-        createRun: vi.fn(() => {
+        createRun: vi.fn((_id: string, substrate?: string, sessionId?: string) => {
           db.prepare(
-            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-          ).run(cannedRunId, workflowId, 1);
-          return { runId: cannedRunId, permissionMode: 'default' as const };
+            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+          ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+          return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? 'sdk' };
         }),
       } as unknown as WorkflowRegistry;
 
       const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockResolvedValue({
-          worktreePath: cannedWorktreePath,
-          branchName: cannedBranchName,
-          baseCommit: 'abc123',
-          baseBranch: 'HEAD',
-        }),
+        createDeterministicWorktree: vi.fn(),
+        getProjectMainBranch: vi.fn().mockResolvedValue(cannedBranchName),
+        getHeadCommit: vi.fn().mockResolvedValue('abc123def456'),
       } as unknown as WorktreeManager;
 
       // Track call ordering
@@ -2109,7 +2128,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
         runQueueRegistry,
       );
 
-      const result = await launcher.launch(workflowId, tmpDir);
+      const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-exec');
 
       // launch() must have returned before execute() ran (fire-and-forget)
       expect(result.runId).toBe(cannedRunId);
@@ -2130,7 +2149,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
 
   it('(g) execute() is NOT called synchronously — only after queue.add fires it', async () => {
     await withTempDir('runexecutor-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = enqueueIntegrationDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
@@ -2142,6 +2161,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
       const cannedRunId = randomUUID().replace(/-/g, '');
       const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
       const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
+      db.prepare("INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES ('sess-exec', ?, 'main', NULL)").run(cannedWorktreePath);
 
       const fakeRegistry = {
         getById: (id: string) => {
@@ -2152,21 +2172,18 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
             .get(id);
           return row ?? null;
         },
-        createRun: vi.fn(() => {
+        createRun: vi.fn((_id: string, substrate?: string, sessionId?: string) => {
           db.prepare(
-            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-          ).run(cannedRunId, workflowId, 1);
-          return { runId: cannedRunId, permissionMode: 'default' as const };
+            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+          ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+          return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? 'sdk' };
         }),
       } as unknown as WorkflowRegistry;
 
       const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockResolvedValue({
-          worktreePath: cannedWorktreePath,
-          branchName: cannedBranchName,
-          baseCommit: 'abc123',
-          baseBranch: 'HEAD',
-        }),
+        createDeterministicWorktree: vi.fn(),
+        getProjectMainBranch: vi.fn().mockResolvedValue(cannedBranchName),
+        getHeadCommit: vi.fn().mockResolvedValue('abc123def456'),
       } as unknown as WorktreeManager;
 
       let executeCalled = false;
@@ -2209,7 +2226,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
       );
 
       // Before the queue drains, execute() must not have been called yet
-      await launcher.launch(workflowId, tmpDir);
+      await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-exec');
       // execute() could have been called synchronously — it should NOT be
       // (the queue schedules it asynchronously on the microtask queue)
       // We check that it hasn't run at this synchronous point:
@@ -2224,7 +2241,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
 
   it('(h) launch() returns correct shape when executor/registry omitted (backward-compat)', async () => {
     await withTempDir('runexecutor-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = enqueueIntegrationDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
@@ -2236,6 +2253,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
       const cannedRunId = randomUUID().replace(/-/g, '');
       const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
       const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
+      db.prepare("INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES ('sess-exec', ?, 'main', NULL)").run(cannedWorktreePath);
 
       const fakeRegistry = {
         getById: (id: string) => {
@@ -2246,21 +2264,18 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
             .get(id);
           return row ?? null;
         },
-        createRun: vi.fn(() => {
+        createRun: vi.fn((_id: string, substrate?: string, sessionId?: string) => {
           db.prepare(
-            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-          ).run(cannedRunId, workflowId, 1);
-          return { runId: cannedRunId, permissionMode: 'default' as const };
+            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+          ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+          return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? 'sdk' };
         }),
       } as unknown as WorkflowRegistry;
 
       const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockResolvedValue({
-          worktreePath: cannedWorktreePath,
-          branchName: cannedBranchName,
-          baseCommit: 'abc123',
-          baseBranch: 'HEAD',
-        }),
+        createDeterministicWorktree: vi.fn(),
+        getProjectMainBranch: vi.fn().mockResolvedValue(cannedBranchName),
+        getHeadCommit: vi.fn().mockResolvedValue('abc123def456'),
       } as unknown as WorktreeManager;
 
       // No executor or runQueueRegistry — backward-compat mode
@@ -2275,7 +2290,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
         fakeNodeResolver,
       );
 
-      const result = await launcher.launch(workflowId, tmpDir);
+      const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-exec');
 
       expect(result.runId).toBe(cannedRunId);
       expect(result.worktreePath).toBe(cannedWorktreePath);
@@ -2286,7 +2301,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
 
   it('executor error is caught and logged, launch return value is unaffected', async () => {
     await withTempDir('runexecutor-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = enqueueIntegrationDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
@@ -2298,6 +2313,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
       const cannedRunId = randomUUID().replace(/-/g, '');
       const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
       const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
+      db.prepare("INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES ('sess-exec', ?, 'main', NULL)").run(cannedWorktreePath);
 
       const fakeRegistry = {
         getById: (id: string) => {
@@ -2308,21 +2324,18 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
             .get(id);
           return row ?? null;
         },
-        createRun: vi.fn(() => {
+        createRun: vi.fn((_id: string, substrate?: string, sessionId?: string) => {
           db.prepare(
-            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-          ).run(cannedRunId, workflowId, 1);
-          return { runId: cannedRunId, permissionMode: 'default' as const };
+            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+          ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+          return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? 'sdk' };
         }),
       } as unknown as WorkflowRegistry;
 
       const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockResolvedValue({
-          worktreePath: cannedWorktreePath,
-          branchName: cannedBranchName,
-          baseCommit: 'abc123',
-          baseBranch: 'HEAD',
-        }),
+        createDeterministicWorktree: vi.fn(),
+        getProjectMainBranch: vi.fn().mockResolvedValue(cannedBranchName),
+        getHeadCommit: vi.fn().mockResolvedValue('abc123def456'),
       } as unknown as WorktreeManager;
 
       // Executor that always throws (e.g. NOT_IMPLEMENTED from base class)
@@ -2359,7 +2372,7 @@ describe('RunLauncher.launch — RunExecutor enqueue integration', () => {
       );
 
       // launch() must succeed despite executor error
-      const result = await launcher.launch(workflowId, tmpDir);
+      const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-exec');
       expect(result.runId).toBe(cannedRunId);
 
       // Drain the queue — error is swallowed

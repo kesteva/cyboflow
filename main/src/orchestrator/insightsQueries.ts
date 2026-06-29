@@ -455,13 +455,26 @@ export interface SessionRunTokenTotals {
  * `selectRunUsageRollups` so a still-running session-hosted run (no materialized
  * row yet) is counted live from raw_events. Returns zeros for a session with no
  * hosted runs (the empty-id short-circuit makes that allocation-free).
+ *
+ * SDK quick-sentinel exclusion (permission-mode redesign slice 1b, §7d): once the
+ * SDK `__quick__` sentinel gets its `session_id` stamped (so the run→session join
+ * resolves for chat gating), this run scan would otherwise DOUBLE-COUNT every SDK
+ * chat turn — `getSessionTokenUsage` already counts it via `session_outputs`. We
+ * exclude the SDK sentinel via the workflows JOIN. INTERACTIVE sentinels write no
+ * `session_outputs`, so they MUST stay counted via this run scan — hence the
+ * substrate discriminator (only `__quick__` AND `sdk` is excluded).
  */
 export function selectSessionRunTokenTotals(
   db: DatabaseLike,
   sessionId: string,
 ): SessionRunTokenTotals {
   const runRows = db
-    .prepare(`SELECT id FROM workflow_runs WHERE session_id = ?`)
+    .prepare(
+      `SELECT r.id FROM workflow_runs r
+       JOIN workflows w ON w.id = r.workflow_id
+       WHERE r.session_id = ?
+         AND NOT (w.name = '__quick__' AND r.substrate = 'sdk')`,
+    )
     .all(sessionId) as Array<{ id: string }>;
   const rollups = selectRunUsageRollups(
     db,

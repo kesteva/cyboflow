@@ -640,6 +640,19 @@ export class WorkflowRegistry {
       throw new Error(`WorkflowRegistry.createRun: workflow ${workflowId} not found`);
     }
 
+    // Session invariant (permission-mode redesign slice 1b): a run can NEVER be
+    // session-less. The owning session is the sole execution authority for the
+    // agent permission mode and the chat gate vehicle resolves through it, so a
+    // NULL session_id would strand the run. This is the single hard chokepoint —
+    // both callers (ipc/session.ts quick sentinel + runLauncher.launch) thread a
+    // real session id. (The signature stays `sessionId?: string` only because
+    // TS1016 forbids a required parameter after the preceding optional
+    // `requestedSubstrate?`; this throw is the runtime enforcement and narrows
+    // sessionId to a non-empty string for the INSERT below.)
+    if (!sessionId) {
+      throw new Error('WorkflowRegistry.createRun: sessionId is required (run cannot be session-less)');
+    }
+
     // Stamp the EXPLICIT launch project (migration 030). For a GLOBAL workflow
     // (built-in or global custom) workflow.project_id is NULL, so the launch
     // project must be threaded by the caller (runs.start → runLauncher.launch).
@@ -738,7 +751,7 @@ export class WorkflowRegistry {
     `);
 
     const createTx = this.db.transaction(() => {
-      insert.run(runId, workflowId, runProjectId, permissionMode, substrate, executionModel, model, sessionId ?? null, specHash);
+      insert.run(runId, workflowId, runProjectId, permissionMode, substrate, executionModel, model, sessionId, specHash);
       // Ensure the frozen hash is always resolvable to its spec: snapshot a
       // revision for the spec we just stamped. INSERT OR IGNORE keyed on
       // UNIQUE(workflow_id, spec_hash) makes this idempotent, so a workflow that

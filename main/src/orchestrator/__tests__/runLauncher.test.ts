@@ -52,6 +52,61 @@ const fakeNodeResolver: NodeResolver = {
 beforeEach(() => vi.clearAllMocks());
 
 // ---------------------------------------------------------------------------
+// Session-hosted test helpers (permission-mode redesign slice 1b)
+//
+// Every run is now session-hosted: the session-less createDeterministicWorktree
+// branch was removed and launch THROWS without a sessionId. These helpers build
+// the session_id/base_sha columns + sessions table the launch path reads/writes,
+// seed a session row whose worktree the run reuses, and stub a session-aware
+// WorktreeManager (createDeterministicWorktree must NEVER fire — branch is read
+// via getProjectMainBranch, base_sha via getHeadCommit). The dedicated Phase-1
+// block below keeps its own near-identical makeSessionDb/makeSessionRegistry.
+// ---------------------------------------------------------------------------
+
+/** A session-hosted test DB: the columns + sessions table the launch path touches. */
+function sessionHostedDb(): Database.Database {
+  const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+  // Migration 034: seed_finding_ids is written by the compound launch path.
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
+  db.exec(`
+    CREATE TABLE sessions (
+      id TEXT PRIMARY KEY,
+      worktree_path TEXT,
+      base_branch TEXT,
+      run_id TEXT,
+      substrate TEXT
+    )
+  `);
+  return db;
+}
+
+/** Seed the session row whose EXISTING worktree the run will reuse. */
+function seedSession(db: Database.Database, id: string, worktreePath: string, baseBranch = 'main'): void {
+  db.prepare(
+    'INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES (?, ?, ?, NULL)',
+  ).run(id, worktreePath, baseBranch);
+}
+
+/**
+ * A session-aware WorktreeManager stub. createDeterministicWorktree is present
+ * but must NEVER be called (asserted per test); the run reuses the session tree,
+ * resolving its branch from getProjectMainBranch and base_sha from getHeadCommit.
+ */
+function sessionWorktreeStub(
+  branchName: string,
+  headSha = 'abc123def456',
+): { worktree: WorktreeManager; createDeterministicWorktree: ReturnType<typeof vi.fn> } {
+  const createDeterministicWorktree = vi.fn();
+  const worktree = {
+    createDeterministicWorktree,
+    getProjectMainBranch: vi.fn().mockResolvedValue(branchName),
+    getHeadCommit: vi.fn().mockResolvedValue(headSha),
+  } as unknown as WorktreeManager;
+  return { worktree, createDeterministicWorktree };
+}
+
+// ---------------------------------------------------------------------------
 // ensureGitignoreEntry
 // ---------------------------------------------------------------------------
 
@@ -157,7 +212,7 @@ describe('RunLauncher.ensureGitignoreEntry', () => {
 describe('RunLauncher.launch', () => {
   it('updates workflow_runs row with worktree_path, branch_name, and status=starting', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = sessionHostedDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
@@ -170,40 +225,37 @@ describe('RunLauncher.launch', () => {
       interface IdRow { id: string }
       const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
 
-      // Canned values returned by the stubs
+      // Canned values returned by the stubs. The run reuses the session worktree, so
+      // the expected worktree_path is the SESSION's tree and the branch is what
+      // getProjectMainBranch reports.
       const cannedRunId = randomUUID().replace(/-/g, '');
       const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
       const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
+      seedSession(db, 'sess-1', cannedWorktreePath);
 
       // Mock WorkflowRegistry: use the real getById (reads from our in-memory db),
-      // but stub createRun so the runId is predictable
+      // but stub createRun so the runId is predictable (and stamp session_id like
+      // the real one does).
       const realRegistry = {
         getById: (id: string) => {
           const row = db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id);
           return row ?? null;
         },
-        createRun: vi.fn(() => {
+        createRun: vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
           // Manually insert the row that the real createRun would insert
           db.prepare(
-            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-          ).run(cannedRunId, workflowId, 1);
-          return { runId: cannedRunId, permissionMode: 'default' as const };
+            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+          ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+          return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
         }),
       } as unknown as WorkflowRegistry;
 
-      // Mock WorktreeManager
-      const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockResolvedValue({
-          worktreePath: cannedWorktreePath,
-          branchName: cannedBranchName,
-          baseCommit: 'abc123',
-          baseBranch: 'HEAD',
-        }),
-      } as unknown as WorktreeManager;
+      // Session-aware WorktreeManager: branch resolved from the session worktree.
+      const { worktree: fakeWorktree, createDeterministicWorktree } = sessionWorktreeStub(cannedBranchName);
 
       const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
-      const result = await launcher.launch(workflowId, tmpDir);
+      const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
 
       // Verify return values
       expect(result.runId).toBe(cannedRunId);
@@ -218,16 +270,50 @@ describe('RunLauncher.launch', () => {
       expect(row.branch_name).toBe(cannedBranchName);
       expect(row.status).toBe('starting');
 
-      // Verify worktree manager was called with correct args. The 4th arg is the
-      // optional baseBranch (parallel-sprint P4) — undefined for a non-batch launch,
-      // forwarded verbatim into createDeterministicWorktree.
-      expect(fakeWorktree.createDeterministicWorktree).toHaveBeenCalledWith(tmpDir, 'sprint', cannedRunId, undefined);
+      // The run reuses the session worktree — NO dedicated worktree is ever created.
+      expect(createDeterministicWorktree).not.toHaveBeenCalled();
+    });
+  });
+
+  it('throws when no sessionId is supplied (run cannot be session-less, slice 1b invariant)', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = sessionHostedDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const seedWorkflowId = randomUUID();
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+      ).run(seedWorkflowId);
+      interface IdRow { id: string }
+      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+      const createRunSpy = vi.fn();
+      const realRegistry = {
+        getById: (id: string) =>
+          db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
+        createRun: createRunSpy,
+      } as unknown as WorkflowRegistry;
+
+      const { worktree: fakeWorktree, createDeterministicWorktree } = sessionWorktreeStub('main');
+
+      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+
+      // A valid workflow but NO sessionId — the launch-level guard fires (after the
+      // sprint/finding validation, before the one-running guard binds sessionId).
+      await expect(launcher.launch(workflowId, tmpDir)).rejects.toThrow(
+        'RunLauncher.launch: sessionId is required (run cannot be session-less)',
+      );
+
+      // No run is created and no worktree is touched.
+      expect(createRunSpy).not.toHaveBeenCalled();
+      expect(createDeterministicWorktree).not.toHaveBeenCalled();
     });
   });
 
   it('threads the per-run substrate choice into WorkflowRegistry.createRun', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = sessionHostedDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
@@ -238,12 +324,14 @@ describe('RunLauncher.launch', () => {
       interface IdRow { id: string }
       const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
 
+      seedSession(db, 'sess-1', join(tmpDir, 'wt'));
+
       const cannedRunId = randomUUID().replace(/-/g, '');
-      const createRunSpy = vi.fn((_id: string, _substrate?: CliSubstrate) => {
+      const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
         db.prepare(
-          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-        ).run(cannedRunId, workflowId, 1);
-        return { runId: cannedRunId, permissionMode: 'default' as const };
+          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+        ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+        return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
       });
       const realRegistry = {
         getById: (id: string) =>
@@ -251,31 +339,24 @@ describe('RunLauncher.launch', () => {
         createRun: createRunSpy,
       } as unknown as WorkflowRegistry;
 
-      const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockResolvedValue({
-          worktreePath: join(tmpDir, 'wt'),
-          branchName: 'cyboflow/sprint/x',
-          baseCommit: 'abc123',
-          baseBranch: 'HEAD',
-        }),
-      } as unknown as WorktreeManager;
+      const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
 
       const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
-      await launcher.launch(workflowId, tmpDir, 'interactive');
+      await launcher.launch(workflowId, tmpDir, 'interactive', undefined, undefined, 'sess-1');
 
       // The explicit per-run substrate choice must be forwarded to createRun as
       // its 2nd argument (the bug: it was previously dropped as `_substrate`).
-      // The 3rd arg (sessionId) and 4th arg (requestedPermissionMode) are
-      // undefined on the legacy no-session, no-permission-override launch; the 5th
-      // (the launch projectId opts) is undefined when no projectId is threaded.
-      expect(createRunSpy).toHaveBeenCalledWith(workflowId, 'interactive', undefined, undefined, undefined);
+      // The 3rd arg is the (now-required) sessionId; the 4th (requestedPermissionMode)
+      // is undefined on this no-permission-override launch; the 5th (the launch
+      // projectId opts) is undefined when no projectId is threaded.
+      expect(createRunSpy).toHaveBeenCalledWith(workflowId, 'interactive', 'sess-1', undefined, undefined);
     });
   });
 
   it('threads the per-run agent permission choice into WorkflowRegistry.createRun', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = sessionHostedDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
@@ -286,12 +367,14 @@ describe('RunLauncher.launch', () => {
       interface IdRow { id: string }
       const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
 
+      seedSession(db, 'sess-1', join(tmpDir, 'wt'));
+
       const cannedRunId = randomUUID().replace(/-/g, '');
-      const createRunSpy = vi.fn(() => {
+      const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
         db.prepare(
-          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'auto')",
-        ).run(cannedRunId, workflowId, 1);
-        return { runId: cannedRunId, permissionMode: 'auto' as const };
+          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'auto', ?)",
+        ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+        return { runId: cannedRunId, permissionMode: 'auto' as const, substrate: substrate ?? ('sdk' as const) };
       });
       const realRegistry = {
         getById: (id: string) =>
@@ -299,23 +382,17 @@ describe('RunLauncher.launch', () => {
         createRun: createRunSpy,
       } as unknown as WorkflowRegistry;
 
-      const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockResolvedValue({
-          worktreePath: join(tmpDir, 'wt'),
-          branchName: 'cyboflow/sprint/x',
-          baseCommit: 'abc123',
-          baseBranch: 'HEAD',
-        }),
-      } as unknown as WorktreeManager;
+      const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
 
       const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
-      // sessionId omitted (undefined), requestedPermissionMode = 'auto'.
-      await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, undefined, 'auto');
+      // sessionId = 'sess-1' (6th positional), requestedPermissionMode = 'auto' (7th).
+      await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1', 'auto');
 
       // The explicit per-run permission choice must be forwarded to createRun as
-      // its 4th argument (the highest-precedence `requestedMode` rung).
-      expect(createRunSpy).toHaveBeenCalledWith(workflowId, undefined, undefined, 'auto', undefined);
+      // its 4th argument (the highest-precedence `requestedMode` rung); the 3rd is
+      // the now-required sessionId.
+      expect(createRunSpy).toHaveBeenCalledWith(workflowId, undefined, 'sess-1', 'auto', undefined);
     });
   });
 
@@ -397,9 +474,9 @@ describe('RunLauncher.launch', () => {
     });
   });
 
-  it('writes per-run mcp config after worktree created, in the correct order', async () => {
+  it('writes per-run mcp config after worktree resolved, in the correct order', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = sessionHostedDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
@@ -415,6 +492,7 @@ describe('RunLauncher.launch', () => {
       const cannedRunId = randomUUID().replace(/-/g, '');
       const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
       const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
+      seedSession(db, 'sess-1', cannedWorktreePath);
 
       // Track call ordering via a sequence array
       const callOrder: string[] = [];
@@ -424,24 +502,23 @@ describe('RunLauncher.launch', () => {
           const row = db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id);
           return row ?? null;
         },
-        createRun: vi.fn(() => {
+        createRun: vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
           db.prepare(
-            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-          ).run(cannedRunId, workflowId, 1);
-          return { runId: cannedRunId, permissionMode: 'default' as const };
+            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+          ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+          return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
         }),
       } as unknown as WorkflowRegistry;
 
+      // The session worktree is resolved (getProjectMainBranch) before the mcp.json
+      // is written — record that ordering.
       const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockImplementation(async () => {
-          callOrder.push('createDeterministicWorktree');
-          return {
-            worktreePath: cannedWorktreePath,
-            branchName: cannedBranchName,
-            baseCommit: 'abc123',
-            baseBranch: 'HEAD',
-          };
+        createDeterministicWorktree: vi.fn(),
+        getProjectMainBranch: vi.fn().mockImplementation(async () => {
+          callOrder.push('resolveWorktree');
+          return cannedBranchName;
         }),
+        getHeadCommit: vi.fn().mockResolvedValue('abc123def456'),
       } as unknown as WorktreeManager;
 
       const writeForRunSpy = vi.fn().mockImplementation(async () => {
@@ -476,7 +553,7 @@ describe('RunLauncher.launch', () => {
         fakeNodeResolver,
       );
 
-      const result = await launcher.launch(workflowId, tmpDir);
+      const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
 
       // writeForRun must have been called exactly once
       expect(writeForRunSpy).toHaveBeenCalledOnce();
@@ -495,8 +572,8 @@ describe('RunLauncher.launch', () => {
       expect(callArgs.bridgeScriptPath).toBe('/stub/bridge.js');
       expect(callArgs.nodeExecutablePath).toBe('/usr/local/bin/node');
 
-      // createDeterministicWorktree must be called BEFORE writeForRun
-      const worktreeIdx = callOrder.indexOf('createDeterministicWorktree');
+      // The session worktree must be resolved BEFORE writeForRun
+      const worktreeIdx = callOrder.indexOf('resolveWorktree');
       const writeIdx = callOrder.indexOf('writeForRun');
       expect(worktreeIdx).toBeGreaterThanOrEqual(0);
       expect(writeIdx).toBeGreaterThan(worktreeIdx);
@@ -532,45 +609,51 @@ describe('RunLauncher.launch error handling', () => {
         ).get(id);
         return row ?? null;
       },
-      createRun: vi.fn(() => {
+      createRun: vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
         db.prepare(
-          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-        ).run(cannedRunId, workflowId, 1);
-        return { runId: cannedRunId, permissionMode: 'default' as const };
+          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+        ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+        return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
       }),
     } as unknown as WorkflowRegistry;
 
     return { workflowId, cannedRunId, fakeRegistry };
   }
 
-  it('marks run failed when createDeterministicWorktree throws', async () => {
+  it('marks run failed when the session worktree HEAD snapshot throws', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = sessionHostedDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
       const { workflowId, cannedRunId, fakeRegistry } = makeErrorHandlingFixture(db);
+      seedSession(db, 'sess-err', join(tmpDir, 'session-tree'));
 
+      // The session worktree resolves, but snapshotting its HEAD (base_sha) throws.
       const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockRejectedValue(new Error('git worktree add failed')),
+        createDeterministicWorktree: vi.fn(),
+        getProjectMainBranch: vi.fn().mockResolvedValue('main'),
+        getHeadCommit: vi.fn().mockRejectedValue(new Error('git rev-parse failed')),
       } as unknown as WorktreeManager;
 
       const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
-      await expect(launcher.launch(workflowId, tmpDir)).rejects.toThrow('git worktree add failed');
+      await expect(
+        launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-err'),
+      ).rejects.toThrow('git rev-parse failed');
 
       interface RunRow { status: string; error_message: string | null }
       const row = db.prepare('SELECT status, error_message FROM workflow_runs WHERE id = ?').get(cannedRunId) as RunRow;
 
       expect(row.status).toBe('failed');
       expect(row.error_message).not.toBeNull();
-      expect(row.error_message).toContain('git worktree add failed');
+      expect(row.error_message).toContain('git rev-parse failed');
     });
   });
 
   it('marks run failed when mcpConfigWriter.writeForRun throws', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = sessionHostedDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
@@ -578,15 +661,9 @@ describe('RunLauncher.launch error handling', () => {
 
       const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
       const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
+      seedSession(db, 'sess-err', cannedWorktreePath);
 
-      const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockResolvedValue({
-          worktreePath: cannedWorktreePath,
-          branchName: cannedBranchName,
-          baseCommit: 'abc123',
-          baseBranch: 'HEAD',
-        }),
-      } as unknown as WorktreeManager;
+      const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
 
       const fakeMcpConfigWriter = {
         writeForRun: vi.fn().mockRejectedValue(new Error('mcp.json write denied')),
@@ -607,7 +684,9 @@ describe('RunLauncher.launch error handling', () => {
         fakeNodeResolver,
       );
 
-      await expect(launcher.launch(workflowId, tmpDir)).rejects.toThrow('mcp.json write denied');
+      await expect(
+        launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-err'),
+      ).rejects.toThrow('mcp.json write denied');
 
       interface RunRow { status: string; error_message: string | null }
       const row = db.prepare('SELECT status, error_message FROM workflow_runs WHERE id = ?').get(cannedRunId) as RunRow;
@@ -618,21 +697,30 @@ describe('RunLauncher.launch error handling', () => {
     });
   });
 
-  it('does not orphan a row in queued state when worktree creation fails', async () => {
+  it('does not orphan a row in queued state when worktree resolution fails', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = sessionHostedDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
       const { workflowId, cannedRunId, fakeRegistry } = makeErrorHandlingFixture(db);
+      // Session row exists but has NO worktree_path → resolveSessionHostedWorktree
+      // throws while the run is still 'queued'; the catch must mark it failed.
+      db.prepare(
+        "INSERT INTO sessions (id, worktree_path, base_branch, run_id) VALUES ('sess-err', NULL, 'main', NULL)",
+      ).run();
 
       const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockRejectedValue(new Error('disk full')),
+        createDeterministicWorktree: vi.fn(),
+        getProjectMainBranch: vi.fn(),
+        getHeadCommit: vi.fn(),
       } as unknown as WorktreeManager;
 
       const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
 
-      await expect(launcher.launch(workflowId, tmpDir)).rejects.toThrow('disk full');
+      await expect(
+        launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-err'),
+      ).rejects.toThrow(/no worktree_path/);
 
       interface RunRow { status: string; error_message: string | null }
       const row = db.prepare('SELECT status, error_message FROM workflow_runs WHERE id = ?').get(cannedRunId) as RunRow;
@@ -653,7 +741,7 @@ describe('RunLauncher.launch error handling', () => {
 describe('RunLauncher.launch publisher', () => {
   it('calls publisher.publish with run_started event after status update', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = sessionHostedDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
@@ -669,6 +757,7 @@ describe('RunLauncher.launch publisher', () => {
       const cannedRunId = randomUUID().replace(/-/g, '');
       const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
       const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
+      seedSession(db, 'sess-1', cannedWorktreePath);
 
       const fakeRegistry = {
         getById: (id: string) => {
@@ -677,22 +766,15 @@ describe('RunLauncher.launch publisher', () => {
           ).get(id);
           return row ?? null;
         },
-        createRun: vi.fn(() => {
+        createRun: vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
           db.prepare(
-            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-          ).run(cannedRunId, workflowId, 1);
-          return { runId: cannedRunId, permissionMode: 'default' as const };
+            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+          ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+          return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
         }),
       } as unknown as WorkflowRegistry;
 
-      const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockResolvedValue({
-          worktreePath: cannedWorktreePath,
-          branchName: cannedBranchName,
-          baseCommit: 'abc123',
-          baseBranch: 'HEAD',
-        }),
-      } as unknown as WorktreeManager;
+      const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
 
       // Spy publisher satisfying StreamEventPublisher interface
       const publishSpy = vi.fn();
@@ -710,7 +792,7 @@ describe('RunLauncher.launch publisher', () => {
         spyPublisher,
       );
 
-      const result = await launcher.launch(workflowId, tmpDir);
+      const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
 
       // publisher.publish must have been called at least once
       expect(publishSpy).toHaveBeenCalled();
@@ -743,7 +825,7 @@ describe('RunLauncher.launch publisher', () => {
 
   it('launch succeeds without a publisher (publisher is optional)', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = sessionHostedDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
@@ -758,6 +840,7 @@ describe('RunLauncher.launch publisher', () => {
       const cannedRunId = randomUUID().replace(/-/g, '');
       const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
       const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
+      seedSession(db, 'sess-1', cannedWorktreePath);
 
       const fakeRegistry = {
         getById: (id: string) => {
@@ -766,26 +849,19 @@ describe('RunLauncher.launch publisher', () => {
           ).get(id);
           return row ?? null;
         },
-        createRun: vi.fn(() => {
+        createRun: vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
           db.prepare(
-            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-          ).run(cannedRunId, workflowId, 1);
-          return { runId: cannedRunId, permissionMode: 'default' as const };
+            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+          ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+          return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
         }),
       } as unknown as WorkflowRegistry;
 
-      const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockResolvedValue({
-          worktreePath: cannedWorktreePath,
-          branchName: cannedBranchName,
-          baseCommit: 'abc123',
-          baseBranch: 'HEAD',
-        }),
-      } as unknown as WorktreeManager;
+      const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
 
       // No publisher passed — 9th arg omitted entirely (publisher is still optional)
       const launcher = new RunLauncher(adapter, fakeRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
-      const result = await launcher.launch(workflowId, tmpDir);
+      const result = await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
 
       expect(result.runId).toBe(cannedRunId);
     });
@@ -854,7 +930,7 @@ describe('RunLauncher constructor validation', () => {
 
   it('launch without runExecutor still calls mcpConfigWriter.writeForRun (legacy path regression guard)', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = sessionHostedDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
@@ -866,6 +942,7 @@ describe('RunLauncher constructor validation', () => {
       const cannedRunId = randomUUID().replace(/-/g, '');
       const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'sprint', cannedRunId.slice(0, 8));
       const cannedBranchName = `cyboflow/sprint/${cannedRunId.slice(0, 8)}`;
+      seedSession(db, 'sess-1', cannedWorktreePath);
 
       const fakeRegistry = {
         getById: (id: string) => {
@@ -874,22 +951,15 @@ describe('RunLauncher constructor validation', () => {
           ).get(id);
           return row ?? null;
         },
-        createRun: vi.fn(() => {
+        createRun: vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
           db.prepare(
-            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-          ).run(cannedRunId, workflowId, 1);
-          return { runId: cannedRunId, permissionMode: 'default' as const };
+            "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+          ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+          return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
         }),
       } as unknown as WorkflowRegistry;
 
-      const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockResolvedValue({
-          worktreePath: cannedWorktreePath,
-          branchName: cannedBranchName,
-          baseCommit: 'abc123',
-          baseBranch: 'HEAD',
-        }),
-      } as unknown as WorktreeManager;
+      const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
 
       const writeForRunSpy = vi.fn().mockResolvedValue(join(cannedWorktreePath, '.mcp.json'));
       const spyMcpConfigWriter: McpConfigWriter = { writeForRun: writeForRunSpy } as unknown as McpConfigWriter;
@@ -899,7 +969,7 @@ describe('RunLauncher constructor validation', () => {
         spyMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
       );
 
-      await launcher.launch(workflowId, tmpDir);
+      await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-1');
 
       // Must have been called — no runExecutor supplied, so legacy path is active
       expect(writeForRunSpy).toHaveBeenCalledOnce();
@@ -923,6 +993,10 @@ describe('RunLauncher constructor validation', () => {
     const cannedRunId = randomUUID().replace(/-/g, '');
     const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'prune', cannedRunId.slice(0, 8));
     const cannedBranchName = `cyboflow/prune/${cannedRunId.slice(0, 8)}`;
+    // Every run is session-hosted now — seed the owning session whose worktree the
+    // run reuses, and hand the caller its id to thread into launch.
+    const sessionId = 'sess-sdk';
+    seedSession(db, sessionId, cannedWorktreePath);
 
     const fakeRegistry = {
       getById: (id: string) => {
@@ -931,38 +1005,31 @@ describe('RunLauncher constructor validation', () => {
         ).get(id);
         return row ?? null;
       },
-      createRun: vi.fn(() => {
+      createRun: vi.fn((_id: string, substrate?: CliSubstrate, sid?: string) => {
         db.prepare(
-          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-        ).run(cannedRunId, workflowId, 1);
-        return { runId: cannedRunId, permissionMode: 'default' as const };
+          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+        ).run(cannedRunId, workflowId, 1, sid ?? null);
+        return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
       }),
     } as unknown as WorkflowRegistry;
 
-    const fakeWorktree = {
-      createDeterministicWorktree: vi.fn().mockResolvedValue({
-        worktreePath: cannedWorktreePath,
-        branchName: cannedBranchName,
-        baseCommit: 'abc123',
-        baseBranch: 'HEAD',
-      }),
-    } as unknown as WorktreeManager;
+    const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
 
     // A RunExecutor stub — execute() resolves immediately (no real spawn)
     const fakeRunExecutor = {
       execute: vi.fn().mockResolvedValue(undefined),
     } as unknown as RunExecutor;
 
-    return { workflowId, cannedRunId, cannedWorktreePath, cannedBranchName, fakeRegistry, fakeWorktree, fakeRunExecutor };
+    return { workflowId, sessionId, cannedRunId, cannedWorktreePath, cannedBranchName, fakeRegistry, fakeWorktree, fakeRunExecutor };
   }
 
   it('launch with runExecutor skips mcpConfigWriter.writeForRun', async () => {
     await withTempDir('runlauncher-sdk-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = sessionHostedDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
-      const { workflowId, fakeRegistry, fakeWorktree, fakeRunExecutor } = await makeSDKFixture(db, tmpDir);
+      const { workflowId, sessionId, fakeRegistry, fakeWorktree, fakeRunExecutor } = await makeSDKFixture(db, tmpDir);
 
       const writeForRunSpy = vi.fn().mockResolvedValue('/fake/.mcp.json');
       const spyMcpConfigWriter: McpConfigWriter = { writeForRun: writeForRunSpy } as unknown as McpConfigWriter;
@@ -982,7 +1049,7 @@ describe('RunLauncher constructor validation', () => {
         fakeRunExecutor,
       );
 
-      await launcher.launch(workflowId, tmpDir);
+      await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, sessionId);
 
       // writeForRun must NOT be called on the SDK path
       expect(writeForRunSpy).not.toHaveBeenCalled();
@@ -991,11 +1058,11 @@ describe('RunLauncher constructor validation', () => {
 
   it('launch with runExecutor skips orchSocketProvider.getSocketPath', async () => {
     await withTempDir('runlauncher-sdk-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = sessionHostedDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
-      const { workflowId, fakeRegistry, fakeWorktree, fakeRunExecutor } = await makeSDKFixture(db, tmpDir);
+      const { workflowId, sessionId, fakeRegistry, fakeWorktree, fakeRunExecutor } = await makeSDKFixture(db, tmpDir);
 
       // Sentinel: if getSocketPath() is called, the test fails immediately.
       const throwingOrchSocketProvider: OrchSocketProvider = {
@@ -1018,7 +1085,7 @@ describe('RunLauncher constructor validation', () => {
       );
 
       // Must not throw from the sentinel
-      await expect(launcher.launch(workflowId, tmpDir)).resolves.not.toThrow();
+      await expect(launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, sessionId)).resolves.not.toThrow();
     });
   });
 
@@ -1072,6 +1139,8 @@ describe('RunLauncher.launch ideaId seed', () => {
     const cannedRunId = randomUUID().replace(/-/g, '');
     const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', 'planner', cannedRunId.slice(0, 8));
     const cannedBranchName = `cyboflow/planner/${cannedRunId.slice(0, 8)}`;
+    const sessionId = 'sess-idea';
+    seedSession(db, sessionId, cannedWorktreePath);
 
     const fakeRegistry = {
       getById: (id: string) => {
@@ -1080,22 +1149,15 @@ describe('RunLauncher.launch ideaId seed', () => {
         ).get(id);
         return row ?? null;
       },
-      createRun: vi.fn(() => {
+      createRun: vi.fn((_id: string, substrate?: CliSubstrate, sid?: string) => {
         db.prepare(
-          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-        ).run(cannedRunId, workflowId, 1);
-        return { runId: cannedRunId, permissionMode: 'default' as const };
+          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+        ).run(cannedRunId, workflowId, 1, sid ?? null);
+        return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
       }),
     } as unknown as WorkflowRegistry;
 
-    const fakeWorktree = {
-      createDeterministicWorktree: vi.fn().mockResolvedValue({
-        worktreePath: cannedWorktreePath,
-        branchName: cannedBranchName,
-        baseCommit: 'abc123',
-        baseBranch: 'HEAD',
-      }),
-    } as unknown as WorktreeManager;
+    const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
 
     const recomputeSpy = vi.fn().mockResolvedValue(undefined);
     const applyChangeSpy = vi.fn();
@@ -1116,15 +1178,15 @@ describe('RunLauncher.launch ideaId seed', () => {
       deriver,   // taskStageDeriver (12th arg)
     );
 
-    return { launcher, workflowId, cannedRunId, recomputeSpy };
+    return { launcher, workflowId, sessionId, cannedRunId, recomputeSpy };
   }
 
   it('writes seed_idea_id directly and does NOT call the task-stage deriver', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
-      const { launcher, workflowId, cannedRunId, recomputeSpy } = makeSeedFixture(db, tmpDir);
+      const db = sessionHostedDb();
+      const { launcher, workflowId, sessionId, cannedRunId, recomputeSpy } = makeSeedFixture(db, tmpDir);
 
-      await launcher.launch(workflowId, tmpDir, undefined, undefined, 'IDEA-42');
+      await launcher.launch(workflowId, tmpDir, undefined, undefined, 'IDEA-42', sessionId);
 
       interface SeedRow { seed_idea_id: string | null; task_id: string | null }
       const row = db
@@ -1141,10 +1203,10 @@ describe('RunLauncher.launch ideaId seed', () => {
 
   it('leaves seed_idea_id null when no ideaId is supplied', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
-      const { launcher, workflowId, cannedRunId } = makeSeedFixture(db, tmpDir);
+      const db = sessionHostedDb();
+      const { launcher, workflowId, sessionId, cannedRunId } = makeSeedFixture(db, tmpDir);
 
-      await launcher.launch(workflowId, tmpDir);
+      await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, sessionId);
 
       const row = db
         .prepare('SELECT seed_idea_id FROM workflow_runs WHERE id = ?')
@@ -1158,9 +1220,10 @@ describe('RunLauncher.launch ideaId seed', () => {
 // ---------------------------------------------------------------------------
 // RunLauncher.launch — seedTaskIds (feat/parallel-sprint, single-run lane model)
 //
-// A session-less variant is used for simplicity: the seed path is independent
-// of whether the run is session-hosted. The sprint-lane store is a narrow spy
-// (SprintLanesLike) — no real sprint_batches tables are needed.
+// Every run is session-hosted (slice 1b): the fixture seeds a session whose
+// worktree the run reuses. The sprint-lane store is a narrow spy (SprintLanesLike)
+// — no real sprint_batches tables are needed. The seedTaskIds-validation rejection
+// tests fire BEFORE the session guard, so they still launch session-less.
 // ---------------------------------------------------------------------------
 
 describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
@@ -1183,11 +1246,13 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
     const cannedRunId = randomUUID().replace(/-/g, '');
     const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', workflowName, cannedRunId.slice(0, 8));
     const cannedBranchName = `cyboflow/${workflowName}/${cannedRunId.slice(0, 8)}`;
+    const sessionId = 'sess-sprint';
+    seedSession(db, sessionId, cannedWorktreePath);
 
-    const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate) => {
+    const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate, sid?: string) => {
       db.prepare(
-        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-      ).run(cannedRunId, seedWorkflowId, 1);
+        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+      ).run(cannedRunId, seedWorkflowId, 1, sid ?? null);
       // Mirror the real registry: the RESOLVED substrate is returned (request
       // wins; floor 'sdk').
       return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
@@ -1199,14 +1264,7 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
       createRun: createRunSpy,
     } as unknown as WorkflowRegistry;
 
-    const fakeWorktree = {
-      createDeterministicWorktree: vi.fn().mockResolvedValue({
-        worktreePath: cannedWorktreePath,
-        branchName: cannedBranchName,
-        baseCommit: 'abc123',
-        baseBranch: 'HEAD',
-      }),
-    } as unknown as WorktreeManager;
+    const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
 
     const createForRunSpy = vi.fn((_projectId: number, _substrate: CliSubstrate, _taskIds: string[]) => ({
       batchId: 'batch-test-1',
@@ -1228,13 +1286,13 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
       opts?.omitSprintLanes ? undefined : { createForRun: createForRunSpy }, // sprintLanes (13th arg)
     );
 
-    return { launcher, workflowId: seedWorkflowId, cannedRunId, createRunSpy, createForRunSpy };
+    return { launcher, workflowId: seedWorkflowId, sessionId, cannedRunId, createRunSpy, createForRunSpy };
   }
 
   it('creates the lanes via createForRun (project_id + RESOLVED substrate + taskIds) and stamps batch_id', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
-      const { launcher, workflowId, cannedRunId, createForRunSpy } = makeSprintFixture(db, tmpDir, 'sprint');
+      const db = sessionHostedDb();
+      const { launcher, workflowId, sessionId, cannedRunId, createForRunSpy } = makeSprintFixture(db, tmpDir, 'sprint');
 
       await launcher.launch(
         workflowId,
@@ -1242,7 +1300,7 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
         'interactive',
         undefined, // taskId
         undefined, // ideaId
-        undefined, // sessionId
+        sessionId, // sessionId (required)
         undefined, // requestedPermissionMode
         undefined, // baseBranch
         ['TASK-1', 'TASK-2'], // seedTaskIds
@@ -1262,7 +1320,7 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
 
   it('rejects seedTaskIds for a non-sprint workflow BEFORE creating a run row', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const db = sessionHostedDb();
       const { launcher, workflowId, createRunSpy, createForRunSpy } = makeSprintFixture(db, tmpDir, 'planner');
 
       await expect(
@@ -1277,7 +1335,7 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
 
   it('rejects an empty seedTaskIds array', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const db = sessionHostedDb();
       const { launcher, workflowId, createRunSpy } = makeSprintFixture(db, tmpDir, 'sprint');
 
       await expect(
@@ -1289,7 +1347,7 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
 
   it('rejects seedTaskIds when no sprintLanes store is wired', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const db = sessionHostedDb();
       const { launcher, workflowId, createRunSpy } = makeSprintFixture(db, tmpDir, 'sprint', { omitSprintLanes: true });
 
       await expect(
@@ -1301,10 +1359,10 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
 
   it('does not touch the lane store and leaves batch_id null when seedTaskIds is omitted', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
-      const { launcher, workflowId, cannedRunId, createForRunSpy } = makeSprintFixture(db, tmpDir, 'sprint');
+      const db = sessionHostedDb();
+      const { launcher, workflowId, sessionId, cannedRunId, createForRunSpy } = makeSprintFixture(db, tmpDir, 'sprint');
 
-      await launcher.launch(workflowId, tmpDir);
+      await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, sessionId);
 
       expect(createForRunSpy).not.toHaveBeenCalled();
       const row = db
@@ -1318,12 +1376,12 @@ describe('RunLauncher.launch seedTaskIds (sprint lanes)', () => {
 // ---------------------------------------------------------------------------
 // RunLauncher.launch — findingIds (findings-triage redesign / migration 034)
 //
-// A session-less variant is used for simplicity: the seed path is independent of
-// whether the run is session-hosted. findingIds is the 11th positional launch arg
-// (AFTER projectId). The seed is a direct workflow_runs write — no store
-// dependency — so the only collaborators are the registry + worktree stubs. The
-// fixture layers the migration-034 seed_finding_ids column on top of the shared
-// test DB (which does not carry it).
+// Every run is session-hosted (slice 1b): the fixture seeds a session whose
+// worktree the run reuses. findingIds is the 12th (LAST) positional launch arg.
+// The seed is a direct workflow_runs write — no store dependency — so the only
+// collaborators are the registry + worktree stubs. seed_finding_ids comes from
+// sessionHostedDb(). The findingIds-validation rejection tests fire BEFORE the
+// session guard, so they still launch session-less.
 // ---------------------------------------------------------------------------
 
 describe('RunLauncher.launch findingIds (compound seed)', () => {
@@ -1333,9 +1391,7 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
    * compound-only guard. The DB gains the migration-034 seed_finding_ids column.
    */
   function makeFindingFixture(db: Database.Database, tmpDir: string, workflowName: string) {
-    // Migration 034: seed_finding_ids is written by the launch path but is NOT in
-    // the shared fixture schema — layer the additive ALTER on top here.
-    db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
+    // seed_finding_ids (migration 034) is provided by sessionHostedDb() — no ALTER here.
     const adapter = dbAdapter(db);
     const logger = makeSpyLogger();
 
@@ -1347,11 +1403,13 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
     const cannedRunId = randomUUID().replace(/-/g, '');
     const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', workflowName, cannedRunId.slice(0, 8));
     const cannedBranchName = `cyboflow/${workflowName}/${cannedRunId.slice(0, 8)}`;
+    const sessionId = 'sess-finding';
+    seedSession(db, sessionId, cannedWorktreePath);
 
-    const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate) => {
+    const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate, sid?: string) => {
       db.prepare(
-        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-      ).run(cannedRunId, seedWorkflowId, 1);
+        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+      ).run(cannedRunId, seedWorkflowId, 1, sid ?? null);
       return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
     });
 
@@ -1361,14 +1419,7 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
       createRun: createRunSpy,
     } as unknown as WorkflowRegistry;
 
-    const fakeWorktree = {
-      createDeterministicWorktree: vi.fn().mockResolvedValue({
-        worktreePath: cannedWorktreePath,
-        branchName: cannedBranchName,
-        baseCommit: 'abc123',
-        baseBranch: 'HEAD',
-      }),
-    } as unknown as WorktreeManager;
+    const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
 
     const launcher = new RunLauncher(
       adapter,
@@ -1381,13 +1432,13 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
       fakeNodeResolver,
     );
 
-    return { launcher, workflowId: seedWorkflowId, cannedRunId, createRunSpy };
+    return { launcher, workflowId: seedWorkflowId, sessionId, cannedRunId, createRunSpy };
   }
 
   it('stamps seed_finding_ids = JSON.stringify(ids) for a compound launch', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
-      const { launcher, workflowId, cannedRunId } = makeFindingFixture(db, tmpDir, 'compound');
+      const db = sessionHostedDb();
+      const { launcher, workflowId, sessionId, cannedRunId } = makeFindingFixture(db, tmpDir, 'compound');
 
       await launcher.launch(
         workflowId,
@@ -1395,7 +1446,7 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
         undefined, // substrate
         undefined, // taskId
         undefined, // ideaId
-        undefined, // sessionId
+        sessionId, // sessionId (required)
         undefined, // requestedPermissionMode
         undefined, // baseBranch
         undefined, // seedTaskIds
@@ -1413,7 +1464,7 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
 
   it('rejects findingIds for a non-compound workflow BEFORE creating a run row', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const db = sessionHostedDb();
       const { launcher, workflowId, createRunSpy } = makeFindingFixture(db, tmpDir, 'sprint');
 
       await expect(
@@ -1431,7 +1482,7 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
 
   it('rejects an empty findingIds array BEFORE creating a run row', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
+      const db = sessionHostedDb();
       const { launcher, workflowId, createRunSpy } = makeFindingFixture(db, tmpDir, 'compound');
 
       await expect(
@@ -1447,10 +1498,10 @@ describe('RunLauncher.launch findingIds (compound seed)', () => {
 
   it('leaves seed_finding_ids null when findingIds is omitted (legacy path byte-identical)', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb({ includeWorkflowRunTaskColumns: true });
-      const { launcher, workflowId, cannedRunId } = makeFindingFixture(db, tmpDir, 'compound');
+      const db = sessionHostedDb();
+      const { launcher, workflowId, sessionId, cannedRunId } = makeFindingFixture(db, tmpDir, 'compound');
 
-      await launcher.launch(workflowId, tmpDir);
+      await launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, sessionId);
 
       const row = db
         .prepare('SELECT seed_finding_ids FROM workflow_runs WHERE id = ?')
