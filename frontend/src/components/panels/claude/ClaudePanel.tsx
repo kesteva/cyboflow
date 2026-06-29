@@ -205,6 +205,12 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   }
 
   const sessionRunning = paneSession.status === 'running';
+  // Working indicator parity with the prior RichOutputView: show it while the
+  // agent is producing (running) OR when the session is waiting and the last
+  // turn was the user's (the agent is about to respond).
+  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : undefined;
+  const isWaitingForResponse =
+    sessionRunning || (paneSession.status === 'waiting' && lastMessage?.role === 'user');
   const worktreePath = paneSession.worktreePath ?? null;
   const folderLabel =
     worktreePath !== null ? worktreePath.split('/').filter(Boolean).pop() ?? null : null;
@@ -215,7 +221,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // user-driven, so direct typing into the terminal is the expected interaction.
   const interactiveBody =
     interactiveRunId !== null ? (
-      <div className="flex-1 overflow-hidden relative h-full" data-testid="claude-panel-interactive-terminal">
+      <div className="overflow-hidden relative h-full" data-testid="claude-panel-interactive-terminal">
         {showDemoTerminal ? (
           <DemoTerminalView showComposer />
         ) : (
@@ -252,6 +258,22 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
           above the input. Returns null when there is no pending approval. */}
       <PendingApprovalsForRun runId={approvalRunId} className="shrink-0 mx-4 mb-2" />
 
+      {/* Permission-change confirmation — substrate-aware copy supplied by the
+          composer. Centered on the chat column (the relative wrapper makes the
+          toast track the composer, not the panel root + prompt rail) and pinned
+          just above the composer; auto-dismisses. Mirrors RunChatView's toast. */}
+      {permissionToast !== null && (
+        <div className="pointer-events-none relative">
+          <div className="pointer-events-auto absolute bottom-2 left-1/2 z-20 -translate-x-1/2">
+            <SessionActionToast
+              message={permissionToast}
+              isVisible={permissionToast !== null}
+              onDismiss={() => setPermissionToast(null)}
+            />
+          </div>
+        </div>
+      )}
+
       {!paneSession.archived &&
         (showDemoTerminal ? null : (
           <QuickSessionComposer
@@ -272,20 +294,6 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
           />
         ))}
 
-      {/* Permission-change confirmation — substrate-aware copy supplied by the
-          composer. Positioned above the composer; auto-dismisses. */}
-      {permissionToast !== null && (
-        <div className="pointer-events-none absolute bottom-24 left-1/2 z-20 -translate-x-1/2">
-          <div className="pointer-events-auto">
-            <SessionActionToast
-              message={permissionToast}
-              isVisible={permissionToast !== null}
-              onDismiss={() => setPermissionToast(null)}
-            />
-          </div>
-        </div>
-      )}
-
       {paneSession.archived && (
         <div className="bg-surface-secondary border-t border-border-primary px-4 py-3 text-center text-text-muted text-sm">
           This session is archived. Unarchive it to continue the conversation.
@@ -303,7 +311,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
         running={sessionRunning}
         messages={messages}
         loadError={loadError}
-        isWaitingForResponse={sessionRunning}
+        isWaitingForResponse={isWaitingForResponse}
         folderLabel={folderLabel}
         folderTitle={worktreePath}
         branchName={branchName}

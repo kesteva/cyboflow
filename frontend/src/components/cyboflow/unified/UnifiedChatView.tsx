@@ -178,8 +178,11 @@ export function UnifiedChatView({
     );
   }, [messages, settings.showSessionInit]);
 
-  // Auto-expand sub-agent (Task) tools so nested transcripts show (additive —
-  // never collapses a tool the user manually opened/closed).
+  // Auto-expand sub-agent (Task) tools so nested transcripts show. Additive: it
+  // only ADDS newly-seen Task ids to the expanded set (never removes), so it
+  // never triggers a render loop. Note a manually-collapsed Task can re-expand on
+  // the next message delta — this matches the prior RunChatView/RichOutputView
+  // behavior (both auto-expanded Task tools on every load).
   useEffect(() => {
     const subAgentIds = new Set<string>();
     for (const msg of messages) {

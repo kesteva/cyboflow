@@ -1,3 +1,8 @@
+// @cyboflow-hidden: the data-fetching wrapper around <ChatTranscript> for the
+// legacy quick-session SDK transcript (Crystal-preserved). Its only importer was
+// RichOutputWithSidebar (also @cyboflow-hidden); the shared `UnifiedChatView`
+// + `useUnifiedPanelMessages` now own this read path. Re-enable by rendering
+// <RichOutputWithSidebar> in ClaudePanel's SDK branch again.
 import React, { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react';
 import { API } from '../../../utils/api';
 import { MessageTransformer, UnifiedMessage } from './transformers/MessageTransformer';
