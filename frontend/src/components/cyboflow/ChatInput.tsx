@@ -45,13 +45,13 @@ import { useEffect, useMemo, useState, useRef } from 'react';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useQuestionStore } from '../../stores/questionStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
+import { useSessionStore } from '../../stores/sessionStore';
 import { API } from '../../utils/api';
 import type { IPCResponse } from '../../utils/api';
 import { trpc } from '../../trpc/client';
 import { UnifiedComposer } from './unified/UnifiedComposer';
 import { PermissionModePill } from './unified/PermissionModePill';
 import { resolveChatVisibility } from './unified/useChatVisibility';
-import type { PermissionMode } from '../../../../shared/types/workflows';
 
 /**
  * Delay (ms) between relaying the message body and the separate '\r' that submits
@@ -76,22 +76,6 @@ function nudgeReasonMessage(reason: string): string {
       return 'The agent could not be re-driven — check the run logs.';
     default:
       return `Nudge ignored: ${reason}`;
-  }
-}
-
-/**
- * Human-readable message for a setPermissionMode no-op reason. The mutation
- * returns `{ noOp: true, reason: 'not_found' | 'already_terminal' }`; mapping it
- * here gives PermissionModePill a meaningful error to log instead of `undefined`.
- */
-function setPermissionModeReasonMessage(reason: 'not_found' | 'already_terminal'): string {
-  switch (reason) {
-    case 'not_found':
-      return 'Run not found';
-    case 'already_terminal':
-      return 'Run has ended and its permission mode can no longer change';
-    default:
-      return `Permission mode change ignored: ${reason}`;
   }
 }
 
@@ -146,6 +130,9 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
   const selectedSessionId = useCyboflowStore((s) => s.selectedSessionId);
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
+  const sessions = useSessionStore((s) => s.sessions);
+  const activeMainRepoSession = useSessionStore((s) => s.activeMainRepoSession);
+  const updateSession = useSessionStore((s) => s.updateSession);
 
   const activeQuestion = useQuestionStore((s) =>
     s.queue.find((q) => q.runId === runId && q.status === 'pending'),
@@ -160,6 +147,18 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
     }
     return null;
   }, [activeRunId, runsByProject]);
+
+  // The run's HOST session (migration 019, soft link via workflow_runs.session_id).
+  // Permission mode is a SESSION property, so the run-chat pill reads + writes the
+  // host session exactly like QuickSessionComposer — both composers hit the single
+  // sessions.agent_permission_mode chokepoint. NULL for legacy parentless flow runs
+  // (no session to gate on → no pill).
+  const hostSession = useMemo(() => {
+    const sid = activeRun?.session_id;
+    if (sid == null) return null;
+    if (activeMainRepoSession?.id === sid) return activeMainRepoSession;
+    return sessions.find((s) => s.id === sid) ?? null;
+  }, [activeRun?.session_id, sessions, activeMainRepoSession]);
 
   const [text, setText] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
@@ -439,37 +438,30 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
     ptyOpen,
   });
 
-  // Runtime agent-permission selector for a NON-TERMINAL SDK run (ISSUE #2).
-  // Persists to workflow_runs.permission_mode_snapshot via runs.setPermissionMode;
-  // the executor re-reads it FRESH per spawn so the change governs the next turn.
-  // Gated to substrate === 'sdk' because the interactive PTY substrate writes its
-  // permission hook to .claude/settings.json at SPAWN only (no live update). We do
-  // NOT mirror into the store optimistically — the setPermissionMode emit triggers
-  // activeRunsStore.refresh(), which re-reads the canonical value within a tick.
+  // Runtime agent-permission selector for a NON-TERMINAL SDK run, sourced from and
+  // persisted to the HOST SESSION (sessions.agent_permission_mode) — the single
+  // source of truth shared with QuickSessionComposer. The pill reads the host
+  // session's current mode and writes via API.sessions.updateAgentPermissionMode,
+  // so both chat hosts hit the identical chokepoint; the SDK executor re-reads the
+  // session row FRESH per spawn so the change governs the next turn. Gated to
+  // substrate === 'sdk' because the interactive PTY substrate writes its permission
+  // hook to .claude/settings.json at SPAWN only (no live update). Requires a
+  // resolved host session (NULL for legacy parentless flow runs → no pill); the
+  // change is mirrored into the session store so the label refreshes immediately.
   const runIsTerminal =
     activeRun != null &&
     ['completed', 'failed', 'canceled'].includes(activeRun.status);
   const permissionSlot =
-    runId != null && activeRun != null && !isInteractive && !runIsTerminal ? (
+    runId != null && activeRun != null && !isInteractive && !runIsTerminal && hostSession != null ? (
       <PermissionModePill
-        currentMode={activeRun.permission_mode_snapshot ?? 'default'}
-        persist={async (mode: PermissionMode) => {
-          const res = await trpc.cyboflow.runs.setPermissionMode.mutate({
-            runId,
-            permissionMode: mode,
-          });
-          // Map the noOp reason to a user-facing error so PermissionModePill logs
-          // a meaningful message (not `undefined`) instead of silently swallowing
-          // the failure.
-          if ('updated' in res) return { success: true };
-          return { success: false, error: setPermissionModeReasonMessage(res.reason) };
-        }}
-        // No-op: activeRun is store-derived; the setPermissionMode emit triggers a
-        // runs.list refresh so the canonical value flows back through the store.
-        onModeChange={() => {}}
+        currentMode={hostSession.agentPermissionMode ?? 'default'}
+        persist={(mode) => API.sessions.updateAgentPermissionMode(hostSession.id, mode)}
+        onModeChange={(mode) =>
+          updateSession({ ...hostSession, agentPermissionMode: mode })
+        }
         // Confirmation toast (hoisted to RunChatView) on a confirmed write only.
-        // SDK runs re-read permission_mode_snapshot per spawn, so the change
-        // governs the next message — not the in-flight turn.
+        // The SDK re-reads the session mode per spawn, so the change governs the
+        // next message — not the in-flight turn.
         onApplied={onPermissionApplied ? (_mode, message) => onPermissionApplied(message) : undefined}
         appliedMessage="Permission mode updated — applies on your next message"
       />

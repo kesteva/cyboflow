@@ -727,7 +727,9 @@ export default function SessionStartWizard(): React.JSX.Element {
           <div className="flex flex-col gap-4" data-testid="wizard-step3">
             {projectBannerCard}
 
-            {/* Agent permission — shown for BOTH workflow and quick launches. */}
+            {/* Session permission — shown for BOTH workflow and quick launches; an
+                explicit choice writes the host session's agent_permission_mode (the
+                sole execution authority) for either launch kind. */}
             <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
 
             {/* Model picker — shown for QUICK and WORKFLOW launches. Quick threads

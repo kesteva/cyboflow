@@ -9,10 +9,12 @@
 import type { PermissionMode } from '../../../../shared/types/workflows';
 
 /**
- * The per-run/per-session agent-permission options. Selecting one threads it into
- * the launch as the highest-precedence `requestedMode` rung of the permission
- * ladder (per-run > frontmatter > global) for workflow runs, or onto
- * sessions.agent_permission_mode for quick sessions.
+ * The session agent-permission options. Selecting one writes the host session's
+ * sessions.agent_permission_mode: directly for a quick session, and — when an
+ * explicit mode is supplied at launch — permanently for a workflow run's host
+ * session too (the launch still stamps workflow_runs.permission_mode_snapshot as a
+ * launch-time audit value that may diverge). The session column is the sole
+ * execution authority.
  */
 export const PERMISSION_MODE_OPTIONS: ReadonlyArray<{ id: PermissionMode; label: string; hint: string }> = [
   { id: 'default', label: 'Ask before edits', hint: 'Prompt for each edit' },
@@ -33,7 +35,7 @@ interface AgentPermissionModeSelectorProps {
 export function AgentPermissionModeSelector({
   value,
   onChange,
-  label = 'Agent permission',
+  label = 'Session permission',
   className,
 }: AgentPermissionModeSelectorProps): React.JSX.Element {
   return (

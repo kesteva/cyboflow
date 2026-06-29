@@ -327,8 +327,10 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         caveatsTestId="workflow-picker-substrate-caveats"
       />
 
-      {/* Per-run agent permission selector — overrides the global default for
-          this run only (highest-precedence `requestedMode` rung). */}
+      {/* Session permission selector — an explicit choice permanently sets the
+          host session's mode (the sole execution authority), affecting later chat
+          and later flows in that session; the launch still stamps the audit-only
+          permission_mode_snapshot. Omitted → the session mode is left untouched. */}
       <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
 
       {/* Per-run model selector — pins the model a workflow run (or quick session)

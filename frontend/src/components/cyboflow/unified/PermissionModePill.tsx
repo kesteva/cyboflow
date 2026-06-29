@@ -10,11 +10,11 @@ import { cn } from '../../../utils/cn';
  * PermissionModePill — interactive agent-permission selector for a composer,
  * rendered next to the {@link ModelPill}.
  *
- * The pill is persist-source-agnostic: the host passes a {@link persist} fn so
- * the SAME component serves both a quick SDK session (QuickSessionComposer →
- * `sessions:update-agent-permission-mode` IPC → sessions.agent_permission_mode)
- * and a running SDK workflow run (ChatInput → cyboflow.runs.setPermissionMode →
- * workflow_runs.permission_mode_snapshot — ISSUE #2). In BOTH cases the new mode
+ * The pill is persist-source-agnostic: the host passes a {@link persist} fn, but
+ * both hosts now target the SAME chokepoint — sessions.agent_permission_mode. A
+ * quick SDK session (QuickSessionComposer) and a running SDK workflow run
+ * (ChatInput, resolving the host session from activeRun.session_id) both persist
+ * via `sessions:update-agent-permission-mode` IPC. In BOTH cases the new mode
  * takes effect on the NEXT turn (the SDK re-reads the stored mode on each spawn).
  * Mirrors the CommitModePill/ModelPill pattern (Dropdown + Pill + onChange so the
  * host mirrors it into its local state immediately).
@@ -29,9 +29,10 @@ const MODE_LABELS = Object.fromEntries(
 interface PermissionModePillProps {
   currentMode: PermissionMode;
   /**
-   * Persist the chosen mode to its backing store (session row or run snapshot).
-   * Returns `{ success }` so the pill can mirror optimistically only on a
-   * confirmed write. A thrown error is caught + logged by handleSelect.
+   * Persist the chosen mode to its backing store (the host session's
+   * sessions.agent_permission_mode for both composers). Returns `{ success }` so
+   * the pill can mirror optimistically only on a confirmed write. A thrown error
+   * is caught + logged by handleSelect.
    */
   persist: (mode: PermissionMode) => Promise<{ success: boolean; error?: string }>;
   /** Invoked after the mode is persisted so the host updates its local state. */

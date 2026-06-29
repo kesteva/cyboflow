@@ -85,11 +85,16 @@ vi.mock('../../../trpc/client', () => ({
 // ---------------------------------------------------------------------------
 
 const mockSendInput = vi.fn();
+const mockUpdateAgentPermissionMode = vi.fn();
 
 vi.mock('../../../utils/api', () => ({
   API: {
     sessions: {
       sendInput: (sessionId: string, input: string) => mockSendInput(sessionId, input),
+      // Slice 8: the run-chat permission pill writes the HOST session's mode via
+      // this chokepoint (NOT runs.setPermissionMode), identical to the quick path.
+      updateAgentPermissionMode: (sessionId: string, mode: string) =>
+        mockUpdateAgentPermissionMode(sessionId, mode),
     },
   },
 }));
@@ -102,9 +107,12 @@ import { ChatInput } from '../ChatInput';
 import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useQuestionStore } from '../../../stores/questionStore';
 import { useActiveRunsStore } from '../../../stores/activeRunsStore';
+import { useSessionStore } from '../../../stores/sessionStore';
 import { trpc } from '../../../trpc/client';
 import type { Question } from '../../../../../shared/types/questions';
 import type { ActiveRunRow } from '../../../stores/activeRunsStore';
+import type { Session } from '../../../types/session';
+import type { PermissionMode } from '../../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -116,9 +124,12 @@ beforeEach(() => {
     useCyboflowStore.getState().clearActiveQuickSession();
     useQuestionStore.getState().replaceAll([]);
     useActiveRunsStore.setState({ runsByProject: {} });
+    useSessionStore.setState({ sessions: [], activeMainRepoSession: null });
   });
 
   mockSendInput.mockClear();
+  mockUpdateAgentPermissionMode.mockClear();
+  mockUpdateAgentPermissionMode.mockResolvedValue({ success: true });
   vi.mocked(trpc.cyboflow.questions.answer.mutate).mockClear();
   vi.mocked(trpc.cyboflow.runs.relayInput.mutate).mockClear();
   vi.mocked(trpc.cyboflow.runs.relayInput.mutate).mockResolvedValue({ success: true });
@@ -976,9 +987,26 @@ describe('ChatInput — workflow paused (Phase 4b)', () => {
 // <ChatMetaStrip> (rendered by RunChatView). Its chip rendering is covered by
 // ChatMetaStrip's own test; ChatInput no longer renders chips.
 
-describe('ChatInput — run permission pill (ISSUE #2)', () => {
+describe('ChatInput — run permission pill (host-session SoT, Slice 8)', () => {
   const RUN_ID = 'run-perm-001';
+  const SESSION_ID = 'sess-perm-001';
   const PROJECT_ID = 21;
+
+  // The run's HOST session — the pill now sources + writes its mode here, NOT the
+  // run snapshot. The run row carries session_id pointing at it (migration 019).
+  function makeHostSession(mode: PermissionMode): Session {
+    return {
+      id: SESSION_ID,
+      name: 'perm host session',
+      worktreePath: '/Users/me/worktrees/perm-x',
+      prompt: '',
+      status: 'running',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      output: [],
+      jsonMessages: [],
+      agentPermissionMode: mode,
+    };
+  }
 
   function makeSdkRow(overrides: Partial<ActiveRunRow> = {}): ActiveRunRow {
     return {
@@ -987,6 +1015,7 @@ describe('ChatInput — run permission pill (ISSUE #2)', () => {
       project_id: PROJECT_ID,
       status: 'awaiting_review',
       substrate: 'sdk',
+      session_id: SESSION_ID,
       worktree_path: '/Users/me/worktrees/perm-x',
       branch_name: 'planner/perm-x',
       created_at: '2026-01-01T00:00:00.000Z',
@@ -1000,51 +1029,76 @@ describe('ChatInput — run permission pill (ISSUE #2)', () => {
     };
   }
 
-  const activate = (overrides: Partial<ActiveRunRow> = {}) => {
+  // sessionMode seeds the host session's agent_permission_mode; the run row's
+  // permission_mode_snapshot is intentionally left at the demoted audit default so
+  // the test proves the pill reads the SESSION, not the snapshot.
+  const activate = (sessionMode: PermissionMode, overrides: Partial<ActiveRunRow> = {}) => {
     act(() => {
+      useSessionStore.setState({ sessions: [makeHostSession(sessionMode)] });
       useCyboflowStore.getState().setActiveRun(RUN_ID);
       useActiveRunsStore.setState({ runsByProject: { [PROJECT_ID]: [makeSdkRow(overrides)] } });
     });
   };
 
-  beforeEach(() => {
-    vi.mocked(trpc.cyboflow.runs.setPermissionMode.mutate).mockClear();
-    vi.mocked(trpc.cyboflow.runs.setPermissionMode.mutate).mockResolvedValue({ updated: true });
-  });
-
-  it('renders the permission pill for a non-terminal SDK run, seeded with the current mode', () => {
-    activate({ permission_mode_snapshot: 'auto' });
+  it('renders the permission pill seeded from the HOST SESSION mode (not the run snapshot)', () => {
+    // session mode 'auto' while the run snapshot stays 'default' → 'Auto' proves
+    // the pill reads the session.
+    activate('auto');
     render(<ChatInput runId={RUN_ID} />);
-    // 'auto' → 'Auto' label.
     expect(screen.getByText('Auto')).toBeInTheDocument();
   });
 
-  it('selecting a mode calls runs.setPermissionMode with { runId, permissionMode }', async () => {
-    activate({ permission_mode_snapshot: 'default' });
+  it('selecting a mode persists via API.sessions.updateAgentPermissionMode (NOT runs.setPermissionMode)', async () => {
+    activate('default');
     render(<ChatInput runId={RUN_ID} />);
 
     fireEvent.click(screen.getByText('Ask before edits')); // open the dropdown
     fireEvent.click(await screen.findByText('Auto'));
 
     await waitFor(() => {
-      expect(vi.mocked(trpc.cyboflow.runs.setPermissionMode.mutate)).toHaveBeenCalledWith({
-        runId: RUN_ID,
-        permissionMode: 'auto',
-      });
+      expect(mockUpdateAgentPermissionMode).toHaveBeenCalledWith(SESSION_ID, 'auto');
+    });
+    // The run-snapshot write path must NOT be used by the chat host anymore.
+    expect(vi.mocked(trpc.cyboflow.runs.setPermissionMode.mutate)).not.toHaveBeenCalled();
+  });
+
+  it('mirrors the confirmed mode back into the session store (instant label refresh)', async () => {
+    activate('default');
+    render(<ChatInput runId={RUN_ID} />);
+
+    fireEvent.click(screen.getByText('Ask before edits'));
+    fireEvent.click(await screen.findByText('Auto'));
+
+    await waitFor(() => {
+      const host = useSessionStore.getState().sessions.find((s) => s.id === SESSION_ID);
+      expect(host?.agentPermissionMode).toBe('auto');
     });
   });
 
   it('does NOT render the pill for a terminal (failed) run', () => {
-    activate({ status: 'failed' });
+    activate('default', { status: 'failed' });
     render(<ChatInput runId={RUN_ID} />);
     expect(screen.queryByText('Ask before edits')).toBeNull();
   });
 
   it('does NOT render the pill for an interactive run', () => {
-    activate({ substrate: 'interactive', status: 'running' });
+    activate('default', { substrate: 'interactive', status: 'running' });
     render(<ChatInput runId={RUN_ID} />);
     expect(screen.queryByText('Ask before edits')).toBeNull();
-    expect(vi.mocked(trpc.cyboflow.runs.setPermissionMode.mutate)).not.toHaveBeenCalled();
+    expect(mockUpdateAgentPermissionMode).not.toHaveBeenCalled();
+  });
+
+  it('does NOT render the pill when the run has no resolvable host session', () => {
+    // Legacy parentless flow run (session_id NULL) → no session to gate on.
+    act(() => {
+      useSessionStore.setState({ sessions: [] });
+      useCyboflowStore.getState().setActiveRun(RUN_ID);
+      useActiveRunsStore.setState({
+        runsByProject: { [PROJECT_ID]: [makeSdkRow({ session_id: null })] },
+      });
+    });
+    render(<ChatInput runId={RUN_ID} />);
+    expect(screen.queryByText('Ask before edits')).toBeNull();
   });
 });
 
