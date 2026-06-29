@@ -154,6 +154,84 @@ export function transitionToRunning(
 }
 
 // ---------------------------------------------------------------------------
+// reviveQuickRunToRunning (quick-session sentinel — per-turn approval-gate fix)
+// ---------------------------------------------------------------------------
+
+export interface ReviveQuickRunResult {
+  /** True when the row was flipped to 'running' by this call. */
+  revived: boolean;
+  /** The status the run held before this call (null when no sentinel row matched). */
+  fromStatus: string | null;
+}
+
+/**
+ * Ensure a QUICK-SESSION sentinel run is `'running'` at the start of a chat turn.
+ *
+ * A quick session's `__quick__` sentinel `workflow_runs` row is transitioned to
+ * `'running'` exactly ONCE — at session creation (ipc/session.ts). The
+ * ApprovalRouter permission gate (`requestApproval`) is a guarded
+ * `UPDATE workflow_runs SET status='awaiting_review' WHERE id=? AND status='running'`,
+ * so a tool approval can only be raised while the run is `'running'`. But the
+ * sentinel run LEAVES `'running'` and is never restored when:
+ *   - the app restarts → runRecovery force-fails the orphan to `'failed'`, or
+ *   - the session is closed out → Merge/Create-PR `'completed'`, Dismiss `'canceled'`.
+ * No quick-turn entry path (sessions:input / claude-panels:continue / startPanel)
+ * put it back, so every approval-gated tool on a LATER turn was silently DENIED
+ * (`requestApproval` threw RunNotRunningError → the PreToolUse hook returned
+ * `permissionDecision: 'deny'`) and NO permission prompt ever surfaced — the agent
+ * just reported "this needs your approval, run it yourself."
+ *
+ * This flips the sentinel run back to `'running'` from ANY non-running state,
+ * clearing the stale terminal stamps (`error_message`, `ended_at`) so the row is
+ * truthful. It DELIBERATELY bypasses {@link assertTransitionAllowed} — like
+ * runRecovery's boot sweep and reopenRunHandler's failed→running flip, a recovery
+ * transition is allowed to re-enter `'running'` from a terminal status.
+ *
+ * STRICTLY gated to the `__quick__` sentinel workflow via the JOIN guard: a real
+ * workflow run (whose lifecycle is owned by RunExecutor) never matches, so this is
+ * a hard no-op for it — even though both quick and workflow spawns funnel through
+ * the same SDK `spawnCliProcess`. Also a no-op when the run is already `'running'`
+ * or the row is missing.
+ *
+ * @returns `{ revived, fromStatus }` so the caller can log the recovery.
+ */
+export function reviveQuickRunToRunning(
+  db: Database.Database,
+  runId: string,
+): ReviveQuickRunResult {
+  // '__quick__' is QUICK_WORKFLOW_NAME (orchestrator/workflowRegistry). Inlined
+  // here to keep transitions.ts from importing the heavyweight registry module —
+  // the sentinel name is a DB-persisted constant that never changes.
+  const row = db
+    .prepare(
+      `SELECT wr.status AS status
+         FROM workflow_runs wr
+         JOIN workflows w ON w.id = wr.workflow_id
+        WHERE wr.id = @runId AND w.name = '__quick__'`,
+    )
+    .get({ runId }) as { status: string } | undefined;
+
+  // Not a quick sentinel run (or row missing) → never touch it.
+  if (!row) return { revived: false, fromStatus: null };
+  // Already live → nothing to do (the common steady-state case).
+  if (row.status === 'running') return { revived: false, fromStatus: 'running' };
+
+  const result = db
+    .prepare(
+      `UPDATE workflow_runs
+          SET status = 'running',
+              error_message = NULL,
+              ended_at = NULL,
+              started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+              updated_at = CURRENT_TIMESTAMP
+        WHERE id = @runId AND status != 'running'`,
+    )
+    .run({ runId }) as { changes: number };
+
+  return { revived: result.changes > 0, fromStatus: row.status };
+}
+
+// ---------------------------------------------------------------------------
 // transitionToCompleted
 // ---------------------------------------------------------------------------
 

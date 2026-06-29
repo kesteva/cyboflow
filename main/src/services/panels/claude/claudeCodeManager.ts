@@ -30,7 +30,7 @@ import { installWorkflowBundle } from './workflowBundleInstall';
 import { withLock } from '../../../utils/mutex';
 import { enhancePromptForStructuredCommit } from '../../../utils/promptEnhancer';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
-import { transitionToAwaitingReview } from '../../cyboflow/transitions';
+import { transitionToAwaitingReview, reviveQuickRunToRunning } from '../../cyboflow/transitions';
 import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
 import { isPermissionMode, type PermissionMode } from '../../../../../shared/types/workflows';
@@ -483,6 +483,30 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // (sessions:create-quick) and differs from panelId.
       const sessionRow = this.sessionManager.getDbSession(sessionId);
       const runId = (sessionRow?.run_id as string | null) ?? panelId;
+
+      // Approval-gate revival (quick sessions only). A quick session's `__quick__`
+      // sentinel run is set to 'running' once at creation, but leaves 'running'
+      // when the app restarts (force-failed by runRecovery) or the session is
+      // closed out — and no quick-turn path restored it. The ApprovalRouter gate
+      // (running → awaiting_review) then matches 0 rows, so every approval-gated
+      // tool on a later turn was silently denied with no prompt. Flip the sentinel
+      // back to 'running' before the hook is wired so this turn's approvals work.
+      // STRICTLY gated to the '__quick__' sentinel — a real workflow run (panelId
+      // === runId, RunExecutor-owned) never matches the JOIN and is untouched.
+      try {
+        const revival = reviveQuickRunToRunning(this.db, runId);
+        if (revival.revived) {
+          this.logger?.info(
+            `[ClaudeCodeManager] revived quick sentinel run ${runId} '${revival.fromStatus}' → 'running' for approval gate`,
+          );
+        }
+      } catch (err) {
+        // Best-effort: a revival failure must never block the spawn. The worst
+        // case is the pre-fix behavior (approvals denied) for this one turn.
+        this.logger?.warn(
+          `[ClaudeCodeManager] quick run revival skipped for ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
 
       // Build the final prompt BEFORE any per-spawn / per-run resource is
       // registered below. enhancePromptForStructuredCommit / getDbSession are the

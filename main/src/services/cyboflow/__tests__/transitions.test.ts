@@ -20,6 +20,7 @@ import {
   transitionToCompleted,
   transitionToPaused,
   transitionPausedToRunning,
+  reviveQuickRunToRunning,
   TransitionRejectedError,
 } from '../transitions';
 import { IllegalTransitionError } from '../stateMachine';
@@ -622,6 +623,89 @@ describe('transitions', () => {
         .prepare('SELECT status FROM workflow_runs WHERE id = ?')
         .get(RUN_ID) as { status: string };
       expect(after.status).toBe('running');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // reviveQuickRunToRunning — quick-session sentinel per-turn approval-gate fix
+  // -------------------------------------------------------------------------
+
+  describe('reviveQuickRunToRunning', () => {
+    const QUICK_WF_ID = 'wf-quick-001';
+    const QUICK_RUN_ID = 'run-quick-001';
+
+    function seedQuickWorkflow(): void {
+      db.prepare(
+        `INSERT INTO workflows (id, project_id, name, spec_json)
+         VALUES (?, 1, '__quick__', '{}')`,
+      ).run(QUICK_WF_ID);
+    }
+
+    function seedQuickRun(status: string, opts: { error?: string; ended?: string } = {}): void {
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, status, policy_json, error_message, ended_at)
+         VALUES (?, ?, 1, '/tmp/wt', ?, '{}', ?, ?)`,
+      ).run(QUICK_RUN_ID, QUICK_WF_ID, status, opts.error ?? null, opts.ended ?? null);
+    }
+
+    function readRun(): { status: string; error_message: string | null; ended_at: string | null } {
+      return db
+        .prepare('SELECT status, error_message, ended_at FROM workflow_runs WHERE id = ?')
+        .get(QUICK_RUN_ID) as { status: string; error_message: string | null; ended_at: string | null };
+    }
+
+    it("revives a force-failed sentinel run to 'running' and clears the failure stamp", () => {
+      seedQuickWorkflow();
+      seedQuickRun('failed', { error: 'app_restart', ended: '2026-06-29 00:00:00' });
+
+      const result = reviveQuickRunToRunning(db, QUICK_RUN_ID);
+
+      expect(result).toEqual({ revived: true, fromStatus: 'failed' });
+      const run = readRun();
+      expect(run.status).toBe('running');
+      expect(run.error_message).toBeNull();
+      expect(run.ended_at).toBeNull();
+    });
+
+    it.each(['completed', 'canceled', 'awaiting_review'])(
+      "revives a sentinel run parked in '%s' back to 'running'",
+      (parked) => {
+        seedQuickWorkflow();
+        seedQuickRun(parked, { ended: '2026-06-29 00:00:00' });
+
+        const result = reviveQuickRunToRunning(db, QUICK_RUN_ID);
+
+        expect(result).toEqual({ revived: true, fromStatus: parked });
+        expect(readRun().status).toBe('running');
+      },
+    );
+
+    it("is a no-op when the sentinel run is already 'running'", () => {
+      seedQuickWorkflow();
+      seedQuickRun('running');
+
+      const result = reviveQuickRunToRunning(db, QUICK_RUN_ID);
+
+      expect(result).toEqual({ revived: false, fromStatus: 'running' });
+      expect(readRun().status).toBe('running');
+    });
+
+    it('NEVER touches a real (non-__quick__) workflow run — the JOIN gate excludes it', () => {
+      // seedWorkflow() in beforeEach created WORKFLOW_ID with name 'Test Workflow'.
+      seedRun(db, 'failed'); // RUN_ID belongs to the non-quick workflow
+
+      const result = reviveQuickRunToRunning(db, RUN_ID);
+
+      expect(result).toEqual({ revived: false, fromStatus: null });
+      const run = db
+        .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+        .get(RUN_ID) as { status: string };
+      expect(run.status).toBe('failed'); // untouched
+    });
+
+    it('is a no-op for a missing run id', () => {
+      const result = reviveQuickRunToRunning(db, 'no-such-run');
+      expect(result).toEqual({ revived: false, fromStatus: null });
     });
   });
 });
