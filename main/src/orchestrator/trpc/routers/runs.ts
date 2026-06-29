@@ -401,16 +401,21 @@ export function setRelayDeps(deps: RelayDeps): void {
 // ---------------------------------------------------------------------------
 
 export interface RunShellDeps {
-  /** Lazily spawn the run's worktree shell (idempotent). `ok:false` +
-   *  `reason:'no_worktree'` when the run has no worktree to anchor it in. */
-  open(runId: string): { ok: boolean; reason?: string };
-  /** Write user keystrokes verbatim into the run's shell. */
-  write(runId: string, data: string): void;
-  /** Relay an xterm geometry change into the run's shell. */
-  resize(runId: string, cols: number, rows: number): void;
+  /** Lazily spawn a worktree terminal for a run (idempotent). `terminalId`
+   *  defaults to `runId` (the run's primary terminal); pass a distinct id for
+   *  additional terminals. `ok:false` + `reason:'no_worktree'` when the run has
+   *  no worktree to anchor it in. */
+  open(runId: string, terminalId: string): { ok: boolean; reason?: string };
+  /** Write user keystrokes verbatim into a terminal. */
+  write(terminalId: string, data: string): void;
+  /** Relay an xterm geometry change into a terminal. */
+  resize(terminalId: string, cols: number, rows: number): void;
   /** The retained scrollback tail, replayed into a (re)mounting xterm. */
-  getBacklog(runId: string): string;
-  /** Terminate + forget the run's shell (close-out, before worktree removal). */
+  getBacklog(terminalId: string): string;
+  /** Terminate + forget a SINGLE terminal (UI close of an added terminal tab). */
+  closeOne(terminalId: string): void;
+  /** Terminate + forget EVERY terminal for a run (close-out, before worktree
+   *  removal). */
   close(runId: string): void;
 }
 
@@ -1436,7 +1441,7 @@ export const runsRouter = router({
    * METHOD_NOT_SUPPORTED until setRunShellDeps() is wired.
    */
   shellOpen: protectedProcedure
-    .input(z.object({ runId: z.string().min(1) }))
+    .input(z.object({ runId: z.string().min(1), terminalId: z.string().min(1).optional() }))
     .mutation(({ input }): { ok: boolean; reason?: string } => {
       if (!runShellDeps) {
         throw new TRPCError({
@@ -1444,12 +1449,13 @@ export const runsRouter = router({
           message: 'run shell dependencies not wired yet. Call setRunShellDeps() at boot.',
         });
       }
-      return runShellDeps.open(input.runId);
+      // terminalId defaults to runId (the run's primary terminal).
+      return runShellDeps.open(input.runId, input.terminalId ?? input.runId);
     }),
 
-  /** Write keystrokes verbatim into the run's worktree shell. */
+  /** Write keystrokes verbatim into a run worktree terminal (by terminalId). */
   shellInput: protectedProcedure
-    .input(z.object({ runId: z.string().min(1), text: z.string() }))
+    .input(z.object({ terminalId: z.string().min(1), text: z.string() }))
     .mutation(({ input }): { success: true } => {
       if (!runShellDeps) {
         throw new TRPCError({
@@ -1457,14 +1463,14 @@ export const runsRouter = router({
           message: 'run shell dependencies not wired yet. Call setRunShellDeps() at boot.',
         });
       }
-      runShellDeps.write(input.runId, input.text);
+      runShellDeps.write(input.terminalId, input.text);
       return { success: true };
     }),
 
-  /** Relay a PTY geometry change into the run's worktree shell. */
+  /** Relay a PTY geometry change into a run worktree terminal (by terminalId). */
   shellResize: protectedProcedure
     .input(z.object({
-      runId: z.string().min(1),
+      terminalId: z.string().min(1),
       cols: z.number().int().positive(),
       rows: z.number().int().positive(),
     }))
@@ -1475,18 +1481,18 @@ export const runsRouter = router({
           message: 'run shell dependencies not wired yet. Call setRunShellDeps() at boot.',
         });
       }
-      runShellDeps.resize(input.runId, input.cols, input.rows);
+      runShellDeps.resize(input.terminalId, input.cols, input.rows);
       return { success: true };
     }),
 
   /**
-   * The retained scrollback tail for the run's worktree shell. The Shell tab
-   * fetches this once on mount and replays it into the xterm so a (re)mounting
-   * terminal reconstructs recent output instead of rendering blank (mirrors
-   * getPtyBacklog for the agent PTY). '' for an unknown run.
+   * The retained scrollback tail for a run worktree terminal (by terminalId).
+   * The terminal tab fetches this once on mount and replays it into the xterm so
+   * a (re)mounting terminal reconstructs recent output instead of rendering blank
+   * (mirrors getPtyBacklog for the agent PTY). '' for an unknown terminal.
    */
   shellBacklog: protectedProcedure
-    .input(z.object({ runId: z.string().min(1) }))
+    .input(z.object({ terminalId: z.string().min(1) }))
     .query(({ input }): { backlog: string } => {
       if (!runShellDeps) {
         throw new TRPCError({
@@ -1494,7 +1500,25 @@ export const runsRouter = router({
           message: 'run shell dependencies not wired yet. Call setRunShellDeps() at boot.',
         });
       }
-      return { backlog: runShellDeps.getBacklog(input.runId) };
+      return { backlog: runShellDeps.getBacklog(input.terminalId) };
+    }),
+
+  /**
+   * Terminate a SINGLE run worktree terminal (the user closed an added terminal
+   * tab). The run's primary terminal (terminalId === runId) is never closed this
+   * way; it is torn down with the run at close-out. No-op for an unknown id.
+   */
+  shellClose: protectedProcedure
+    .input(z.object({ terminalId: z.string().min(1) }))
+    .mutation(({ input }): { success: true } => {
+      if (!runShellDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'run shell dependencies not wired yet. Call setRunShellDeps() at boot.',
+        });
+      }
+      runShellDeps.closeOne(input.terminalId);
+      return { success: true };
     }),
 
   /**

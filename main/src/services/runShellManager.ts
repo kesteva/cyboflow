@@ -58,7 +58,12 @@ export type OpenShellResult = { ok: true } | { ok: false; reason: 'no_worktree' 
 
 interface RunShell {
   pty: ManagedPty;
+  /** The run this terminal belongs to (resolves the worktree + run close-out). */
   runId: string;
+  /** The stable per-terminal key (the Map key). Equals `runId` for a run's
+   *  PRIMARY terminal; additional terminals carry a distinct id (e.g.
+   *  `${runId}::t1`). The renderer subscribes on `cyboflow:shell:<terminalId>`. */
+  terminalId: string;
   worktreePath: string;
   /** Rolling tail of all bytes the PTY has emitted, replayed to a (re)mounting
    *  xterm so a late/returning terminal reconstructs recent output instead of
@@ -67,6 +72,8 @@ interface RunShell {
 }
 
 export class RunShellManager {
+  /** Keyed by terminalId (NOT runId) so a single run can host MULTIPLE worktree
+   *  terminals. The primary terminal uses terminalId === runId (back-compat). */
   private readonly shells = new Map<string, RunShell>();
   /** Keep ~256 KB of scrollback per shell — enough to repaint a screenful of dev
    *  server output on remount without unbounded memory growth. */
@@ -76,20 +83,21 @@ export class RunShellManager {
     /** Resolve a run's absolute worktree directory, or null if it has none yet
      *  (launch not finished / failed before the worktree_path UPDATE). */
     private readonly resolveWorktree: (runId: string) => string | null,
-    /** Push a raw PTY chunk to the renderer (wired to `cyboflow:shell:<runId>`). */
-    private readonly emitBytes: (runId: string, chunk: string) => void,
+    /** Push a raw PTY chunk to the renderer (wired to `cyboflow:shell:<terminalId>`). */
+    private readonly emitBytes: (terminalId: string, chunk: string) => void,
     /** node-pty spawner (production: `pty.spawn`; tests: a fake). */
     private readonly spawn: ShellSpawner,
   ) {}
 
   /**
-   * Lazily spawn the run's user shell. Idempotent: a second call for a run that
-   * already has a live shell is a no-op success (so the Shell tab can call this
-   * on every mount). Returns `{ ok:false, reason:'no_worktree' }` if the run has
-   * no worktree to anchor the shell in.
+   * Lazily spawn a worktree shell for a run. Idempotent: a second call for a
+   * terminal that already has a live shell is a no-op success (so a terminal tab
+   * can call this on every mount). `terminalId` defaults to `runId` (the run's
+   * primary terminal); pass a distinct id for additional terminals. Returns
+   * `{ ok:false, reason:'no_worktree' }` if the run has no worktree to anchor in.
    */
-  open(runId: string): OpenShellResult {
-    if (this.shells.has(runId)) return { ok: true };
+  open(runId: string, terminalId: string = runId): OpenShellResult {
+    if (this.shells.has(terminalId)) return { ok: true };
 
     const cwd = this.resolveWorktree(runId);
     if (!cwd) return { ok: false, reason: 'no_worktree' };
@@ -114,72 +122,87 @@ export class RunShellManager {
       },
     });
 
-    const shell: RunShell = { pty: ptyProcess, runId, worktreePath: cwd, backlog: '' };
-    this.shells.set(runId, shell);
+    const shell: RunShell = { pty: ptyProcess, runId, terminalId, worktreePath: cwd, backlog: '' };
+    this.shells.set(terminalId, shell);
 
     ptyProcess.onData((data) => {
       shell.backlog += data;
       if (shell.backlog.length > this.MAX_BACKLOG) {
         shell.backlog = shell.backlog.slice(-this.MAX_BACKLOG);
       }
-      this.emitBytes(runId, data);
+      this.emitBytes(terminalId, data);
     });
 
     // The shell process exiting (user typed `exit`, or it crashed) frees the
     // slot so a later `open` re-spawns a fresh shell instead of writing to a dead
     // PTY. We do NOT emit anything here — the renderer keeps its scrollback.
     ptyProcess.onExit(() => {
-      this.shells.delete(runId);
+      this.shells.delete(terminalId);
     });
 
     return { ok: true };
   }
 
-  /** Write user keystrokes verbatim into the run's shell. No-op for an unknown run. */
-  write(runId: string, data: string): void {
-    const shell = this.shells.get(runId);
+  /** Write user keystrokes verbatim into a terminal. No-op for an unknown id. */
+  write(terminalId: string, data: string): void {
+    const shell = this.shells.get(terminalId);
     if (!shell) return;
     shell.pty.write(data);
   }
 
-  /** Relay an xterm geometry change into the run's shell. No-op for an unknown run
+  /** Relay an xterm geometry change into a terminal. No-op for an unknown id
    *  or non-positive dimensions (a 0×0 resize would throw in node-pty). */
-  resize(runId: string, cols: number, rows: number): void {
-    const shell = this.shells.get(runId);
+  resize(terminalId: string, cols: number, rows: number): void {
+    const shell = this.shells.get(terminalId);
     if (!shell) return;
     if (cols <= 0 || rows <= 0) return;
     shell.pty.resize(cols, rows);
   }
 
-  /** The retained scrollback tail for a run's shell ('' for an unknown run). */
-  getBacklog(runId: string): string {
-    return this.shells.get(runId)?.backlog ?? '';
+  /** The retained scrollback tail for a terminal ('' for an unknown id). */
+  getBacklog(terminalId: string): string {
+    return this.shells.get(terminalId)?.backlog ?? '';
   }
 
-  /** Whether a live shell exists for a run. */
-  isOpen(runId: string): boolean {
-    return this.shells.has(runId);
+  /** Whether a live shell exists for a terminal id. */
+  isOpen(terminalId: string): boolean {
+    return this.shells.has(terminalId);
   }
 
-  /** Terminate and forget a run's shell (run close-out, before worktree removal). */
-  close(runId: string): void {
-    const shell = this.shells.get(runId);
+  /** Terminate and forget a SINGLE terminal (UI close of an added terminal tab). */
+  closeOne(terminalId: string): void {
+    const shell = this.shells.get(terminalId);
     if (!shell) return;
     try {
       shell.pty.kill();
     } catch (error) {
-      console.error(`[RunShellManager] Error killing shell for run ${runId}:`, error);
+      console.error(`[RunShellManager] Error killing terminal ${terminalId}:`, error);
     }
-    this.shells.delete(runId);
+    this.shells.delete(terminalId);
+  }
+
+  /** Terminate and forget EVERY terminal for a run (run close-out, before
+   *  worktree removal). Closes the primary (terminalId === runId) plus any
+   *  additional terminals spawned in the same worktree. */
+  close(runId: string): void {
+    for (const [terminalId, shell] of this.shells) {
+      if (shell.runId !== runId) continue;
+      try {
+        shell.pty.kill();
+      } catch (error) {
+        console.error(`[RunShellManager] Error killing terminal ${terminalId} (run ${runId}):`, error);
+      }
+      this.shells.delete(terminalId);
+    }
   }
 
   /** Terminate every shell (app quit) so no orphaned shells / dev servers linger. */
   destroyAll(): void {
-    for (const [runId, shell] of this.shells) {
+    for (const [terminalId, shell] of this.shells) {
       try {
         shell.pty.kill();
       } catch (error) {
-        console.error(`[RunShellManager] Error killing shell for run ${runId}:`, error);
+        console.error(`[RunShellManager] Error killing terminal ${terminalId}:`, error);
       }
     }
     this.shells.clear();

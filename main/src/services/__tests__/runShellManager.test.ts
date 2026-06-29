@@ -71,7 +71,7 @@ function makeHarness(opts?: { worktree?: string | null }) {
   // coexist); an explicit value (incl. null) → return it for every run.
   const fixed = opts?.worktree;
   const spawns: SpawnRecord[] = [];
-  const emits: Array<{ runId: string; chunk: string }> = [];
+  const emits: Array<{ terminalId: string; chunk: string }> = [];
   const spawner: ShellSpawner = (file, args, options) => {
     const pty = makeFakePty();
     spawns.push({ file, args, options: options as SpawnRecord['options'], pty });
@@ -80,7 +80,7 @@ function makeHarness(opts?: { worktree?: string | null }) {
   const resolveWorktree = vi.fn((runId: string) =>
     fixed === undefined ? `/wt/${runId}` : fixed,
   );
-  const emitBytes = (runId: string, chunk: string) => emits.push({ runId, chunk });
+  const emitBytes = (terminalId: string, chunk: string) => emits.push({ terminalId, chunk });
   const mgr = new RunShellManager(resolveWorktree, emitBytes, spawner);
   return { mgr, spawns, emits, resolveWorktree };
 }
@@ -137,8 +137,8 @@ describe('RunShellManager byte stream', () => {
     spawns[0].pty.emitData('world');
 
     expect(emits).toEqual([
-      { runId: 'run-1', chunk: 'hello ' },
-      { runId: 'run-1', chunk: 'world' },
+      { terminalId: 'run-1', chunk: 'hello ' },
+      { terminalId: 'run-1', chunk: 'world' },
     ]);
     expect(mgr.getBacklog('run-1')).toBe('hello world');
   });
@@ -225,5 +225,87 @@ describe('RunShellManager teardown', () => {
     expect(spawns.every((s) => s.pty.killed)).toBe(true);
     expect(mgr.isOpen('run-1')).toBe(false);
     expect(mgr.isOpen('run-2')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// multiple terminals per run (terminalId)
+// ---------------------------------------------------------------------------
+
+describe('RunShellManager multi-terminal', () => {
+  it('spawns additional terminals in the SAME run worktree, keyed by terminalId', () => {
+    const { mgr, spawns, resolveWorktree } = makeHarness({ worktree: '/wt/run-1' });
+
+    expect(mgr.open('run-1')).toEqual({ ok: true }); // primary (terminalId === runId)
+    expect(mgr.open('run-1', 'run-1::t1')).toEqual({ ok: true }); // added terminal
+
+    expect(spawns).toHaveLength(2);
+    // Both terminals anchor in the run's worktree (resolved from the runId).
+    expect(spawns[0].options.cwd).toBe('/wt/run-1');
+    expect(spawns[1].options.cwd).toBe('/wt/run-1');
+    expect(resolveWorktree).toHaveBeenCalledWith('run-1');
+    expect(mgr.isOpen('run-1')).toBe(true);
+    expect(mgr.isOpen('run-1::t1')).toBe(true);
+  });
+
+  it('routes input / backlog / emits independently per terminalId', () => {
+    const { mgr, spawns, emits } = makeHarness({ worktree: '/wt/run-1' });
+    mgr.open('run-1');
+    mgr.open('run-1', 'run-1::t1');
+
+    mgr.write('run-1', 'primary\r');
+    mgr.write('run-1::t1', 'added\r');
+    spawns[0].pty.emitData('P');
+    spawns[1].pty.emitData('A');
+
+    expect(spawns[0].pty.written).toEqual(['primary\r']);
+    expect(spawns[1].pty.written).toEqual(['added\r']);
+    expect(emits).toEqual([
+      { terminalId: 'run-1', chunk: 'P' },
+      { terminalId: 'run-1::t1', chunk: 'A' },
+    ]);
+    expect(mgr.getBacklog('run-1')).toBe('P');
+    expect(mgr.getBacklog('run-1::t1')).toBe('A');
+  });
+
+  it('closeOne() kills ONLY the named terminal, leaving siblings live', () => {
+    const { mgr, spawns } = makeHarness({ worktree: '/wt/run-1' });
+    mgr.open('run-1');
+    mgr.open('run-1', 'run-1::t1');
+
+    mgr.closeOne('run-1::t1');
+
+    expect(spawns[1].pty.killed).toBe(true);
+    expect(spawns[0].pty.killed).toBe(false);
+    expect(mgr.isOpen('run-1::t1')).toBe(false);
+    expect(mgr.isOpen('run-1')).toBe(true);
+  });
+
+  it('close(runId) tears down the primary AND every added terminal for that run', () => {
+    const { mgr, spawns } = makeHarness({ worktree: '/wt/run-1' });
+    mgr.open('run-1');
+    mgr.open('run-1', 'run-1::t1');
+    mgr.open('run-1', 'run-1::t2');
+
+    mgr.close('run-1');
+
+    expect(spawns.every((s) => s.pty.killed)).toBe(true);
+    expect(mgr.isOpen('run-1')).toBe(false);
+    expect(mgr.isOpen('run-1::t1')).toBe(false);
+    expect(mgr.isOpen('run-1::t2')).toBe(false);
+  });
+
+  it('close(runId) leaves OTHER runs untouched', () => {
+    // Distinct worktree per run id.
+    const { mgr } = makeHarness();
+    mgr.open('run-1');
+    mgr.open('run-1', 'run-1::t1');
+    mgr.open('run-2');
+
+    mgr.close('run-1');
+
+    expect(mgr.isOpen('run-1')).toBe(false);
+    expect(mgr.isOpen('run-1::t1')).toBe(false);
+    expect(mgr.isOpen('run-2')).toBe(true);
   });
 });

@@ -1681,19 +1681,20 @@ app.whenReady().then(async () => {
           .get(runId) as { worktree_path: string | null } | undefined;
         return row?.worktree_path ?? null;
       },
-      (runId, chunk) => {
-        mainWindow?.webContents.send(`cyboflow:shell:${runId}`, chunk);
+      (terminalId, chunk) => {
+        mainWindow?.webContents.send(`cyboflow:shell:${terminalId}`, chunk);
       },
       (file, args, options) => pty.spawn(file, args, options),
     );
     setRunShellDeps({
-      open: (runId) => runShellManager!.open(runId),
-      write: (runId, data) => runShellManager!.write(runId, data),
-      resize: (runId, cols, rows) => runShellManager!.resize(runId, cols, rows),
-      getBacklog: (runId) => runShellManager!.getBacklog(runId),
+      open: (runId, terminalId) => runShellManager!.open(runId, terminalId),
+      write: (terminalId, data) => runShellManager!.write(terminalId, data),
+      resize: (terminalId, cols, rows) => runShellManager!.resize(terminalId, cols, rows),
+      getBacklog: (terminalId) => runShellManager!.getBacklog(terminalId),
+      closeOne: (terminalId) => runShellManager!.closeOne(terminalId),
       close: (runId) => runShellManager!.close(runId),
     });
-    console.log('[Main] runs.shellOpen/shellInput/shellResize/shellBacklog deps wired');
+    console.log('[Main] runs.shellOpen/shellInput/shellResize/shellBacklog/shellClose deps wired');
 
     // GAP-B: wire the run close-out (merge / dismiss + worktree cleanup) deps.
     // worktreeManager.removeWorktreeByPath takes the run's absolute nested

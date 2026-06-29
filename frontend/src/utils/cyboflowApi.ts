@@ -145,24 +145,25 @@ export function subscribeToPtyBytes({
 }
 
 /**
- * Subscribe to the RAW user-shell byte stream for a run (worktree-terminal).
+ * Subscribe to the RAW user-shell byte stream for a run worktree terminal.
  *
- * Twin of {@link subscribeToPtyBytes} but for the PLAIN worktree shell behind the
- * run "Shell" tab (RunShellManager), on the dedicated `cyboflow:shell:<runId>`
- * channel. Same contract: raw ANSI `string` chunks fed straight to
- * `xterm.Terminal.write()`, NOT an `IPCResponse`, NEVER routed into the structured
- * cyboflow stream store (Q3 store-isolation). This is the USER's shell, wholly
- * separate from the agent PTY on `cyboflow:pty:<runId>`.
+ * Twin of {@link subscribeToPtyBytes} but for the PLAIN worktree shells behind the
+ * run terminal tabs (RunShellManager), on the dedicated `cyboflow:shell:<terminalId>`
+ * channel. `terminalId` is the run id for a run's PRIMARY terminal; additional
+ * terminals carry a distinct id. Same contract: raw ANSI `string` chunks fed
+ * straight to `xterm.Terminal.write()`, NOT an `IPCResponse`, NEVER routed into the
+ * structured cyboflow stream store (Q3 store-isolation). Wholly separate from the
+ * agent PTY on `cyboflow:pty:<runId>`.
  */
 export function subscribeToShellBytes({
-  runId,
+  terminalId,
   onData,
 }: {
-  runId: string;
+  terminalId: string;
   onData: (chunk: string) => void;
 }): () => void {
   const electron = requireElectron();
-  const channel = `cyboflow:shell:${runId}`;
+  const channel = `cyboflow:shell:${terminalId}`;
   // The IPC preload bridges events as (...args) where args[0] is the raw chunk.
   const handler = (...args: unknown[]) => {
     onData(args[0] as string);

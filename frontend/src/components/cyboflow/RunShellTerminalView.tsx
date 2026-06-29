@@ -60,7 +60,16 @@ function writeWithAutoScroll(term: Terminal, chunk: string): void {
   if (atBottom) term.scrollToBottom();
 }
 
-export function RunShellTerminalView({ runId }: { runId: string }): ReactElement {
+export function RunShellTerminalView({
+  runId,
+  terminalId = runId,
+}: {
+  runId: string;
+  /** Per-terminal key. Defaults to runId (the run's PRIMARY terminal); added
+   *  terminal tabs pass a distinct id. Channel + input/resize/backlog key off it;
+   *  shellOpen still needs runId to resolve the worktree. */
+  terminalId?: string;
+}): ReactElement {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
   const { theme } = useTheme();
@@ -115,7 +124,7 @@ export function RunShellTerminalView({ runId }: { runId: string }): ReactElement
     const pending: string[] = [];
 
     const unsubscribe = subscribeToShellBytes({
-      runId,
+      terminalId,
       onData: (chunk) => {
         if (opened && backlogSettled) {
           writeWithAutoScroll(term, chunk);
@@ -127,7 +136,7 @@ export function RunShellTerminalView({ runId }: { runId: string }): ReactElement
 
     // Keystrokes relay verbatim (xterm encodes Enter as '\r'); stdin is always on.
     const inputDisposable = term.onData((data) => {
-      void trpc.cyboflow.runs.shellInput.mutate({ runId, text: data });
+      void trpc.cyboflow.runs.shellInput.mutate({ terminalId, text: data });
     });
 
     const flushPending = (): void => {
@@ -186,7 +195,7 @@ export function RunShellTerminalView({ runId }: { runId: string }): ReactElement
       if (resizeTimer) clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         if (disposed) return;
-        void trpc.cyboflow.runs.shellResize.mutate({ runId, cols, rows });
+        void trpc.cyboflow.runs.shellResize.mutate({ terminalId, cols, rows });
       }, 100);
     });
     resizeObserver.observe(container);
@@ -210,7 +219,7 @@ export function RunShellTerminalView({ runId }: { runId: string }): ReactElement
     let retryTimer: ReturnType<typeof setTimeout> | undefined;
     const attemptOpen = (attemptsLeft: number): void => {
       void trpc.cyboflow.runs.shellOpen
-        .mutate({ runId })
+        .mutate({ runId, terminalId })
         .then((res) => {
           if (disposed) return undefined;
           if (!res.ok) {
@@ -228,7 +237,7 @@ export function RunShellTerminalView({ runId }: { runId: string }): ReactElement
             return undefined;
           }
           setError(null);
-          return trpc.cyboflow.runs.shellBacklog.query({ runId });
+          return trpc.cyboflow.runs.shellBacklog.query({ terminalId });
         })
         .then((backlogRes) => {
           if (disposed) return;
@@ -262,7 +271,7 @@ export function RunShellTerminalView({ runId }: { runId: string }): ReactElement
         /* ignore double-dispose */
       }
     };
-  }, [runId]);
+  }, [runId, terminalId]);
 
   return (
     <div className="flex h-full w-full flex-col" data-testid="run-shell-terminal-view">
