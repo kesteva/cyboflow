@@ -7,13 +7,13 @@ import { resolveClaudeExecutablePath } from './claudeExecutablePath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
 import { resolveModelAlias, sdkModelAndBetas } from './modelContext';
-import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
+import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig, CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
 import type Database from 'better-sqlite3';
 import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
-import { ApprovalRouter } from '../../../orchestrator/approvalRouter';
+import { ApprovalRouter, RunNotRunningError } from '../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../orchestrator/questionRouter';
 import type { QuestionPayload } from '../../../orchestrator/questionRouter';
 import { routePreToolUseThroughApprovalRouter } from '../../../orchestrator/preToolUseHookHelper';
@@ -1153,8 +1153,19 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * FS. §1 ROOT FIX: keying the live read on the gate runId (NOT options.sessionId)
    * is required because for flow runs sessionId === runId, so a WHERE sessions.id =
    * runId lookup would miss and strand the run at the global default.
+   *
+   * canUseTool (permission-mode redesign §5 / Slice 7) is composed here too — from
+   * the SAME gateRunId + allowRules (loaded once) — and returned UNCONDITIONALLY so
+   * the native auto-mode classifier's terminal 'ask' verdict becomes a blocking
+   * ApprovalRouter prompt. It is INERT in every hook-decided mode (the hook emits a
+   * concrete decision that pre-empts the classifier, so the SDK never issues a
+   * `can_use_tool` control-request); see makeCanUseTool.
+   *
+   * MUTUAL EXCLUSION: canUseTool ⊥ permissionPromptToolName — the SDK throws at
+   * runtime if BOTH are set. cyboflow sets permissionPromptToolName NOWHERE
+   * (grep = 0); do NOT introduce it while canUseTool is installed.
    */
-  private composeHookOptions(options: ClaudeSpawnOptions): Pick<Options, 'hooks'> {
+  private composeHookOptions(options: ClaudeSpawnOptions): Pick<Options, 'hooks' | 'canUseTool'> {
     const gateRunId = options.runId ?? options.panelId;
     const ownerSessionId = this.resolveOwnerSessionId(gateRunId);
     const allowRules = loadMergedPermissionRules(options.worktreePath);
@@ -1164,6 +1175,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       hooks: {
         PreToolUse: [{ hooks: [hook] }],
       },
+      canUseTool: this.makeCanUseTool(gateRunId, allowRules),
     };
   }
 
@@ -1330,6 +1342,64 @@ export class ClaudeCodeManager extends AbstractCliManager {
           hookEventName: 'PreToolUse' as const,
         },
       };
+    };
+  }
+
+  /**
+   * Build the UNCONDITIONAL `canUseTool` callback (permission-mode redesign §5 /
+   * Slice 7 — auto-mode prompting). The terminal sink for the native auto-mode
+   * classifier's 'ask' verdict.
+   *
+   * SDK permission precedence (sdk.d.ts): static rules → PreToolUse hook →
+   * permission-mode eval (the auto classifier, ONLY when permissionMode:'auto') →
+   * if the resolved verdict is 'ask', the SDK issues a `can_use_tool`
+   * control-request → THIS callback. Because the always-installed dynamic hook
+   * (makeDynamicPreToolUseHook) emits a concrete allow/deny for EVERY hook-decided
+   * mode (default / acceptEdits / dontAsk, and 'auto' on an auto-UNSUPPORTED model),
+   * canUseTool is reached ONLY on the auto path where the hook deferred and the
+   * classifier said 'ask'. It is INERT (never invoked) in the hook-decided modes —
+   * no double-prompt. Installing it unconditionally keeps a live switch INTO 'auto'
+   * (no re-spawn) fully gated.
+   *
+   * It mirrors routePreToolUseThroughApprovalRouter (the hook's router path),
+   * mapping an ApprovalDecision → PermissionResult:
+   *   - allowlist short-circuit (defense-in-depth: honor user/project grants even on
+   *     the auto path) → { behavior: 'allow' };
+   *   - allow → { behavior: 'allow', updatedInput? };
+   *   - deny  → { behavior: 'deny', message } (message is MANDATORY on deny);
+   *   - RunNotRunningError → { behavior: 'deny', message: 'Run not active' };
+   *   - any other error → rethrow (matches the hook's fail-soft boundary living one
+   *     layer up; only the run-not-running case is a benign deny).
+   * `interrupt` is deliberately NOT set — let the agent retry, matching the hook
+   * deny path. deriveLaneFromTaskDispatch is NOT here: it lives in the always-firing
+   * hook (the classifier auto-allows a benign Task dispatch, so canUseTool would
+   * never fire for it).
+   *
+   * MUTUAL EXCLUSION: canUseTool ⊥ permissionPromptToolName (the SDK throws at
+   * runtime if both are set). cyboflow sets permissionPromptToolName NOWHERE.
+   */
+  private makeCanUseTool(gateRunId: string, allowRules: MergedPermissionRules): CanUseTool {
+    return async (toolName, input, _opts): Promise<PermissionResult> => {
+      // Defense-in-depth: honor the user/project allowlist even on the auto path.
+      if (isToolAllowed(toolName, input, allowRules)) {
+        return { behavior: 'allow' };
+      }
+      try {
+        const decision = await ApprovalRouter.getInstance().requestApproval(
+          gateRunId,
+          toolName,
+          input,
+          () => {}, // socketReply is a no-op on the SDK path (the decision arrives via the gate)
+        );
+        return decision.behavior === 'allow'
+          ? { behavior: 'allow', ...(decision.updatedInput ? { updatedInput: decision.updatedInput } : {}) }
+          : { behavior: 'deny', message: decision.message ?? 'Denied by reviewer' };
+      } catch (err) {
+        if (err instanceof RunNotRunningError) {
+          return { behavior: 'deny', message: 'Run not active' };
+        }
+        throw err;
+      }
     };
   }
 
