@@ -1,19 +1,25 @@
 /**
- * Tab shell wrapping the run view content. Tab state is local; cyboflowStore is
- * unchanged.
+ * Tab shell wrapping the run view content. Pill-styled tabs (matching the
+ * quick-session PanelTabBar) plus a ＋terminal button that spawns ADDITIONAL
+ * worktree shells — parity with quick sessions. Tab state is local;
+ * cyboflowStore is unchanged.
  *
  * Tabs:
  *   - Chat        — the unified run transcript (default).
  *   - Agent       — the live AGENT PTY (interactive substrate) or the scripted
  *                   demo terminal. Present ONLY when such a terminal exists
  *                   (interactive run, or demo mode); SDK runs have no agent PTY.
- *   - Shell       — a PLAIN user shell ($SHELL) in the run's worktree, for running
- *                   commands against the code a flow built (e.g. a dev server).
- *                   ALWAYS available, every substrate. Distinct process + lifecycle
- *                   from the agent terminal: it survives run completion.
+ *   - Terminal N  — a PLAIN user shell ($SHELL) in the run's worktree, for
+ *                   running commands against the code a flow built (e.g. a dev
+ *                   server). The PRIMARY terminal (terminalId === runId) is ALWAYS
+ *                   present; ＋terminal spawns additional, closeable terminals,
+ *                   each an independent shell in the same worktree. Distinct
+ *                   process + lifecycle from the agent terminal: they survive run
+ *                   completion (torn down at run close-out).
  *   - Data Stream — the raw event log.
  */
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Activity, Bot, MessageSquare, Plus, Terminal as TerminalIcon, X } from 'lucide-react';
 import { RunView } from './RunView';
 import { RunChatView } from './RunChatView';
 import { DemoTerminalView } from './DemoTerminalView';
@@ -22,60 +28,38 @@ import { RunShellTerminalView } from './RunShellTerminalView';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useConfigStore } from '../../stores/configStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
+import { trpc } from '../../trpc/client';
+import { cn } from '../../utils/cn';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-type TabId = 'chat' | 'agent' | 'shell' | 'data-stream';
+type TabKind = 'chat' | 'agent' | 'terminal' | 'data-stream';
 
-interface LocalTabBarProps {
-  tabs: ReadonlyArray<{ id: TabId; label: string }>;
-  activeTab: TabId;
-  onTabChange: (id: TabId) => void;
+interface RunTab {
+  /** Unique tab id — the kind for fixed tabs, the terminalId for terminal tabs. */
+  id: string;
+  kind: TabKind;
+  label: string;
+  /** For kind==='terminal': the per-terminal id (primary === runId). */
+  terminalId?: string;
+  /** Added terminals can be closed; fixed tabs (incl. the primary terminal) cannot. */
+  closeable?: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// LocalTabBar — private to this module
-// ---------------------------------------------------------------------------
-
-function LocalTabBar({ tabs, activeTab, onTabChange }: LocalTabBarProps) {
-  return (
-    <div
-      role="tablist"
-      className="flex border-b border-border-primary bg-bg-secondary"
-    >
-      {tabs.map((tab) => {
-        const isActive = tab.id === activeTab;
-        return (
-          <button
-            key={tab.id}
-            role="tab"
-            aria-selected={isActive}
-            data-testid={`run-bottom-pane-tab-${tab.id}`}
-            onClick={() => onTabChange(tab.id)}
-            className={
-              isActive
-                ? 'border-b-2 border-interactive px-4 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-text-primary'
-                : 'px-4 py-2 text-[10px] font-bold uppercase tracking-[0.14em] text-text-tertiary hover:text-text-primary'
-            }
-          >
-            {tab.label}
-          </button>
-        );
-      })}
-    </div>
-  );
+function tabIcon(kind: TabKind) {
+  switch (kind) {
+    case 'chat':
+      return <MessageSquare className="h-4 w-4" />;
+    case 'agent':
+      return <Bot className="h-4 w-4" />;
+    case 'terminal':
+      return <TerminalIcon className="h-4 w-4" />;
+    case 'data-stream':
+      return <Activity className="h-4 w-4" />;
+  }
 }
-
-// ---------------------------------------------------------------------------
-// Tab definitions
-// ---------------------------------------------------------------------------
-
-const CHAT_TAB = { id: 'chat', label: 'Chat' } as const;
-const AGENT_TAB = { id: 'agent', label: 'Agent' } as const;
-const SHELL_TAB = { id: 'shell', label: 'Shell' } as const;
-const DATA_STREAM_TAB = { id: 'data-stream', label: 'Data Stream' } as const;
 
 // ---------------------------------------------------------------------------
 // RunBottomPane
@@ -84,7 +68,12 @@ const DATA_STREAM_TAB = { id: 'data-stream', label: 'Data Stream' } as const;
 export function RunBottomPane() {
   // Default to the unified Chat transcript so a run opens to the same rich
   // experience as a quick session.
-  const [activeTab, setActiveTab] = useState<TabId>('chat');
+  const [activeId, setActiveId] = useState<string>('chat');
+  // Terminal ids of ADDED terminals (beyond the always-present primary).
+  const [extraTerminals, setExtraTerminals] = useState<string[]>([]);
+  // Monotonic per-run terminal sequence so a closed+re-added terminal never
+  // reuses an id (which could collide with a still-live backend shell).
+  const nextTerminalSeq = useRef(1);
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   // Demo mode swaps the Agent tab for a canned, scripted Claude Code terminal so
   // the PTY surface can be illustrated end-to-end.
@@ -94,7 +83,7 @@ export function RunBottomPane() {
   // active-runs rows for this run id). Only the interactive substrate has a live
   // AGENT PTY; an SDK run's agent executes in-process and has none — so the Agent
   // tab is offered ONLY when an agent terminal actually exists (interactive run,
-  // or demo mode). The Shell tab is independent of this and always present.
+  // or demo mode). The worktree terminals are independent of this.
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
   const isInteractive = useMemo(() => {
     if (activeRunId === null) return false;
@@ -106,26 +95,129 @@ export function RunBottomPane() {
   }, [activeRunId, runsByProject]);
   const agentTerminalAvailable = demoModeEnabled || isInteractive;
 
-  const tabs = useMemo(
-    () => [
-      CHAT_TAB,
-      ...(agentTerminalAvailable ? [AGENT_TAB] : []),
-      SHELL_TAB,
-      DATA_STREAM_TAB,
-    ],
-    [agentTerminalAvailable],
-  );
-  // If the Agent tab vanished (e.g. an SDK run replaced an interactive one) while
-  // it was active, fall back to Chat so the pane never renders an unavailable tab.
-  // The Shell tab is always available, so it never needs a fallback.
-  const effectiveTab: TabId = activeTab === 'agent' && !agentTerminalAvailable ? 'chat' : activeTab;
+  // Terminal ids are run-scoped; carrying an old run's added terminals into a
+  // newly-selected run would mis-render. Reset on run change.
+  useEffect(() => {
+    setExtraTerminals([]);
+    setActiveId('chat');
+    nextTerminalSeq.current = 1;
+  }, [activeRunId]);
+
+  const tabs = useMemo<RunTab[]>(() => {
+    const list: RunTab[] = [{ id: 'chat', kind: 'chat', label: 'Chat' }];
+    if (agentTerminalAvailable) list.push({ id: 'agent', kind: 'agent', label: 'Agent' });
+    if (activeRunId !== null) {
+      // Primary worktree terminal (terminalId === runId).
+      list.push({ id: activeRunId, kind: 'terminal', label: 'Terminal', terminalId: activeRunId });
+      extraTerminals.forEach((tid, i) =>
+        list.push({
+          id: tid,
+          kind: 'terminal',
+          label: `Terminal ${i + 2}`,
+          terminalId: tid,
+          closeable: true,
+        }),
+      );
+    }
+    list.push({ id: 'data-stream', kind: 'data-stream', label: 'Data Stream' });
+    return list;
+  }, [agentTerminalAvailable, activeRunId, extraTerminals]);
+
+  // Resolve the active tab; if the selected id vanished (e.g. the Agent tab went
+  // away with the substrate, or a terminal was closed), fall back to Chat.
+  const activeTab = tabs.find((t) => t.id === activeId) ?? tabs[0];
+
+  const handleAddTerminal = useCallback(() => {
+    if (activeRunId === null) return;
+    const tid = `${activeRunId}::t${nextTerminalSeq.current++}`;
+    setExtraTerminals((prev) => [...prev, tid]);
+    setActiveId(tid);
+  }, [activeRunId]);
+
+  const handleCloseTerminal = useCallback((terminalId: string) => {
+    // Kill the backend shell, then drop the tab. Fail-soft: a close-out race or
+    // an unwired dep just leaves the tab removal.
+    void trpc.cyboflow.runs.shellClose.mutate({ terminalId }).catch(() => undefined);
+    setExtraTerminals((prev) => prev.filter((t) => t !== terminalId));
+    setActiveId((cur) => (cur === terminalId ? 'chat' : cur));
+  }, []);
 
   return (
     <div className="flex h-full flex-col">
-      <LocalTabBar tabs={tabs} activeTab={effectiveTab} onTabChange={setActiveTab} />
+      {/* Pill tab bar — same visual language as the quick-session PanelTabBar. */}
+      <div className="border-b border-border-primary bg-surface-secondary dark:border-border-hover">
+        <div
+          className="flex min-h-[2rem] flex-wrap items-center gap-x-1 px-2"
+          role="tablist"
+          aria-label="Run Panel Tabs"
+        >
+          {tabs.map((tab) => {
+            const isActive = tab.id === activeTab?.id;
+            return (
+              <div
+                key={tab.id}
+                role="tab"
+                aria-label={tab.label}
+                aria-selected={isActive}
+                tabIndex={isActive ? 0 : -1}
+                data-testid={`run-bottom-pane-tab-${tab.id}`}
+                onClick={() => setActiveId(tab.id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setActiveId(tab.id);
+                  }
+                }}
+                className={cn(
+                  'group relative inline-flex h-8 cursor-pointer select-none items-center whitespace-nowrap px-3 text-sm',
+                  'rounded-t-md border border-b-0 border-border-primary -mb-px dark:border-border-hover',
+                  isActive
+                    ? 'bg-surface-primary text-text-primary shadow-tactile'
+                    : 'bg-surface-secondary text-text-secondary hover:bg-surface-hover hover:text-text-primary',
+                )}
+              >
+                {tabIcon(tab.kind)}
+                <span className="ml-2 text-sm">{tab.label}</span>
+                {tab.closeable && tab.terminalId && (
+                  <button
+                    type="button"
+                    aria-label={`Close ${tab.label}`}
+                    className="ml-1 rounded p-0.5 text-text-muted transition-colors hover:bg-surface-hover hover:text-status-error focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCloseTerminal(tab.terminalId!);
+                    }}
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+            );
+          })}
+
+          {/* ＋terminal — spawn an additional worktree shell (parity with quick). */}
+          {activeRunId !== null && (
+            <div className="ml-auto flex h-8 items-center pr-1">
+              <button
+                type="button"
+                onClick={handleAddTerminal}
+                aria-label="Add terminal"
+                title="Add terminal"
+                data-testid="run-bottom-pane-add-terminal"
+                className="inline-flex h-7 items-center gap-1 rounded px-2 text-sm text-text-secondary hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
+              >
+                <Plus className="h-4 w-4" />
+                <TerminalIcon className="h-4 w-4" />
+                <span className="sr-only">Add terminal</span>
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
       <div role="tabpanel" className="flex-1 overflow-auto">
-        {effectiveTab === 'data-stream' && <RunView />}
-        {effectiveTab === 'agent' && agentTerminalAvailable && (
+        {activeTab?.kind === 'data-stream' && <RunView />}
+        {activeTab?.kind === 'agent' && agentTerminalAvailable && (
           demoModeEnabled ? (
             <div className="h-full" data-testid="run-bottom-pane-terminal-demo">
               <DemoTerminalView />
@@ -136,18 +228,18 @@ export function RunBottomPane() {
             </div>
           )
         )}
-        {effectiveTab === 'shell' && (
+        {activeTab?.kind === 'terminal' && activeRunId !== null && activeTab.terminalId && (
           <div className="h-full" data-testid="run-bottom-pane-terminal-shell">
-            {activeRunId !== null ? (
-              <RunShellTerminalView runId={activeRunId} />
-            ) : (
-              <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
-                No active run.
-              </div>
-            )}
+            {/* key by terminalId so switching terminals mounts a fresh xterm; the
+                backend shell survives the unmount and replays its backlog. */}
+            <RunShellTerminalView
+              key={activeTab.terminalId}
+              runId={activeRunId}
+              terminalId={activeTab.terminalId}
+            />
           </div>
         )}
-        {effectiveTab === 'chat' && <RunChatView runId={activeRunId} />}
+        {activeTab?.kind === 'chat' && <RunChatView runId={activeRunId} />}
       </div>
     </div>
   );

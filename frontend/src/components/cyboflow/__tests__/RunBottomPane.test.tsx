@@ -2,13 +2,15 @@
  * RunBottomPane component tests (TASK-756, updated TASK-761 + worktree-terminal).
  *
  * Behaviors verified:
- *   1. An SDK run shows Chat + Shell + Data Stream, but NO Agent tab (SDK has no
- *      agent PTY).
+ *   1. An SDK run shows Chat + Terminal + Data Stream, but NO Agent tab (SDK has
+ *      no agent PTY).
  *   2. An interactive run offers an Agent tab that mounts the live agent terminal.
- *   3. The Shell tab is ALWAYS present (every substrate) and mounts the user shell.
+ *   3. The primary Terminal tab is ALWAYS present (every substrate) and mounts the
+ *      user shell (terminalId === runId).
  *   4. Chat is the default active tab; RunChatView is mounted on first render.
  *   5. Clicking Data Stream tab mounts RunView (raw event log) and hides the chat.
  *   6. Clicking Chat tab after switching away restores RunChatView.
+ *   7. ＋terminal spawns an additional, closeable terminal with a distinct id.
  */
 import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent } from '@testing-library/react';
@@ -36,6 +38,9 @@ vi.mock('../../../trpc/client', () => ({
         listRawEvents: {
           query: vi.fn(async () => []),
         },
+        shellClose: {
+          mutate: vi.fn(async () => ({ success: true })),
+        },
       },
     },
   },
@@ -57,11 +62,13 @@ vi.mock('../InteractiveTerminalView', () => ({
   ),
 }));
 
-// Mock RunShellTerminalView so the Shell tab does not boot a real xterm / shell
-// trpc calls in jsdom.
+// Mock RunShellTerminalView so the Terminal tabs do not boot a real xterm / shell
+// trpc calls in jsdom. Exposes the terminalId so multi-terminal routing is testable.
 vi.mock('../RunShellTerminalView', () => ({
-  RunShellTerminalView: ({ runId }: { runId: string }) => (
-    <div data-testid="run-shell-terminal-mock">{runId}</div>
+  RunShellTerminalView: ({ runId, terminalId }: { runId: string; terminalId?: string }) => (
+    <div data-testid="run-shell-terminal-mock" data-terminal-id={terminalId ?? runId}>
+      {runId}
+    </div>
   ),
 }));
 
@@ -105,12 +112,12 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('RunBottomPane', () => {
-  it('an SDK run shows Chat + Shell + Data Stream, but no Agent tab', () => {
+  it('an SDK run shows Chat + Terminal + Data Stream, but no Agent tab', () => {
     seedRun('run-xyz', 'sdk');
     setActiveRun('run-xyz');
     render(<RunBottomPane />);
     expect(screen.getByRole('tab', { name: 'Chat' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Shell' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Terminal' })).toBeInTheDocument();
     expect(screen.getByRole('tab', { name: 'Data Stream' })).toBeInTheDocument();
     expect(screen.queryByRole('tab', { name: 'Agent' })).not.toBeInTheDocument();
   });
@@ -128,25 +135,51 @@ describe('RunBottomPane', () => {
     expect(screen.queryByTestId('run-chat-view-mock')).not.toBeInTheDocument();
   });
 
-  it('the Shell tab is always present and mounts the user shell (SDK run)', () => {
+  it('the primary Terminal tab is always present and mounts the user shell (SDK run)', () => {
     seedRun('run-xyz', 'sdk');
     setActiveRun('run-xyz');
     render(<RunBottomPane />);
 
-    const shellTab = screen.getByRole('tab', { name: 'Shell' });
+    const shellTab = screen.getByRole('tab', { name: 'Terminal' });
     expect(shellTab).toBeInTheDocument();
 
     fireEvent.click(shellTab);
-    expect(screen.getByTestId('run-shell-terminal-mock')).toHaveTextContent('run-xyz');
+    const mock = screen.getByTestId('run-shell-terminal-mock');
+    expect(mock).toHaveTextContent('run-xyz');
+    // The primary terminal's id is the run id.
+    expect(mock).toHaveAttribute('data-terminal-id', 'run-xyz');
     expect(screen.queryByTestId('run-chat-view-mock')).not.toBeInTheDocument();
   });
 
-  it('an interactive run shows both Agent and Shell tabs', () => {
+  it('an interactive run shows both Agent and Terminal tabs', () => {
     seedRun('run-pty', 'interactive');
     setActiveRun('run-pty');
     render(<RunBottomPane />);
     expect(screen.getByRole('tab', { name: 'Agent' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: 'Shell' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Terminal' })).toBeInTheDocument();
+  });
+
+  it('＋terminal adds a closeable second terminal (distinct id), then close removes it', () => {
+    seedRun('run-xyz', 'sdk');
+    setActiveRun('run-xyz');
+    render(<RunBottomPane />);
+
+    // Only the primary terminal initially.
+    expect(screen.getByRole('tab', { name: 'Terminal' })).toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Terminal 2' })).not.toBeInTheDocument();
+
+    // Add → "Terminal 2" appears, is focused, and mounts a shell with a distinct id.
+    fireEvent.click(screen.getByTestId('run-bottom-pane-add-terminal'));
+    expect(screen.getByRole('tab', { name: 'Terminal 2' })).toBeInTheDocument();
+    expect(screen.getByTestId('run-shell-terminal-mock')).toHaveAttribute(
+      'data-terminal-id',
+      'run-xyz::t1',
+    );
+
+    // Close it → the tab is gone and the pane falls back to Chat.
+    fireEvent.click(screen.getByRole('button', { name: 'Close Terminal 2' }));
+    expect(screen.queryByRole('tab', { name: 'Terminal 2' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('run-chat-view-mock')).toBeInTheDocument();
   });
 
   it('defaults to Chat tab and mounts RunChatView', () => {
