@@ -182,6 +182,34 @@ describe('RunBottomPane', () => {
     expect(screen.getByTestId('run-chat-view-mock')).toBeInTheDocument();
   });
 
+  it('restores a run’s added terminals after switching away and back (per-run persistence)', () => {
+    // Two active runs so the substrate resolves for both.
+    act(() => {
+      useActiveRunsStore.setState({
+        runsByProject: {
+          1: [
+            { id: 'run-a', substrate: 'sdk' },
+            { id: 'run-b', substrate: 'sdk' },
+          ] as unknown as ActiveRunRow[],
+        },
+      });
+    });
+    setActiveRun('run-a');
+    render(<RunBottomPane />);
+
+    // Add a terminal to run-a.
+    fireEvent.click(screen.getByTestId('run-bottom-pane-add-terminal'));
+    expect(screen.getByRole('tab', { name: 'Terminal 2' })).toBeInTheDocument();
+
+    // Switch to run-b → run-a's added terminal is NOT carried over.
+    setActiveRun('run-b');
+    expect(screen.queryByRole('tab', { name: 'Terminal 2' })).not.toBeInTheDocument();
+
+    // Switch back to run-a → Terminal 2 (and its live shell) is restored.
+    setActiveRun('run-a');
+    expect(screen.getByRole('tab', { name: 'Terminal 2' })).toBeInTheDocument();
+  });
+
   it('defaults to Chat tab and mounts RunChatView', () => {
     seedRun('run-xyz', 'sdk');
     setActiveRun('run-xyz');

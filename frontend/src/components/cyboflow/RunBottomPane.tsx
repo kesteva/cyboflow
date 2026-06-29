@@ -69,11 +69,17 @@ export function RunBottomPane() {
   // Default to the unified Chat transcript so a run opens to the same rich
   // experience as a quick session.
   const [activeId, setActiveId] = useState<string>('chat');
-  // Terminal ids of ADDED terminals (beyond the always-present primary).
+  // Terminal ids of ADDED terminals (beyond the always-present primary) for the
+  // CURRENTLY-selected run. Mirrors perRunTerminals.current[runId].ids; kept as
+  // state so adds/closes re-render.
   const [extraTerminals, setExtraTerminals] = useState<string[]>([]);
-  // Monotonic per-run terminal sequence so a closed+re-added terminal never
-  // reuses an id (which could collide with a still-live backend shell).
-  const nextTerminalSeq = useRef(1);
+  // Per-run added-terminal registry, persisted across run switches so returning
+  // to a run restores its added terminals (and thus reaches their still-live
+  // backend shells — e.g. a dev server). `seq` is a monotonic per-run counter so
+  // a closed+re-added terminal never reuses an id (which could collide with a
+  // still-live backend shell). RunBottomPane stays mounted across run switches,
+  // so this ref survives them; entries are reaped with the run at close-out.
+  const perRunTerminals = useRef<Map<string, { ids: string[]; seq: number }>>(new Map());
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   // Demo mode swaps the Agent tab for a canned, scripted Claude Code terminal so
   // the PTY surface can be illustrated end-to-end.
@@ -95,12 +101,18 @@ export function RunBottomPane() {
   }, [activeRunId, runsByProject]);
   const agentTerminalAvailable = demoModeEnabled || isInteractive;
 
-  // Terminal ids are run-scoped; carrying an old run's added terminals into a
-  // newly-selected run would mis-render. Reset on run change.
+  // Terminal ids are run-scoped; on a run switch RESTORE the newly-selected run's
+  // added terminals from the registry (not reset to []), so a run's added
+  // terminals — and the live shells behind them — survive switching away and back.
+  // Always land on Chat for the freshly-shown run.
   useEffect(() => {
-    setExtraTerminals([]);
+    if (activeRunId === null) {
+      setExtraTerminals([]);
+      setActiveId('chat');
+      return;
+    }
+    setExtraTerminals(perRunTerminals.current.get(activeRunId)?.ids ?? []);
     setActiveId('chat');
-    nextTerminalSeq.current = 1;
   }, [activeRunId]);
 
   const tabs = useMemo<RunTab[]>(() => {
@@ -129,18 +141,31 @@ export function RunBottomPane() {
 
   const handleAddTerminal = useCallback(() => {
     if (activeRunId === null) return;
-    const tid = `${activeRunId}::t${nextTerminalSeq.current++}`;
-    setExtraTerminals((prev) => [...prev, tid]);
+    const entry = perRunTerminals.current.get(activeRunId) ?? { ids: [], seq: 1 };
+    const tid = `${activeRunId}::t${entry.seq}`;
+    const next = { ids: [...entry.ids, tid], seq: entry.seq + 1 };
+    perRunTerminals.current.set(activeRunId, next);
+    setExtraTerminals(next.ids);
     setActiveId(tid);
   }, [activeRunId]);
 
-  const handleCloseTerminal = useCallback((terminalId: string) => {
-    // Kill the backend shell, then drop the tab. Fail-soft: a close-out race or
-    // an unwired dep just leaves the tab removal.
-    void trpc.cyboflow.runs.shellClose.mutate({ terminalId }).catch(() => undefined);
-    setExtraTerminals((prev) => prev.filter((t) => t !== terminalId));
-    setActiveId((cur) => (cur === terminalId ? 'chat' : cur));
-  }, []);
+  const handleCloseTerminal = useCallback(
+    (terminalId: string) => {
+      // Kill the backend shell, then drop the tab. Fail-soft: a close-out race or
+      // an unwired dep just leaves the tab removal.
+      void trpc.cyboflow.runs.shellClose.mutate({ terminalId }).catch(() => undefined);
+      if (activeRunId !== null) {
+        const entry = perRunTerminals.current.get(activeRunId);
+        if (entry) {
+          const ids = entry.ids.filter((t) => t !== terminalId);
+          perRunTerminals.current.set(activeRunId, { ids, seq: entry.seq });
+          setExtraTerminals(ids);
+        }
+      }
+      setActiveId((cur) => (cur === terminalId ? 'chat' : cur));
+    },
+    [activeRunId],
+  );
 
   return (
     <div className="flex h-full flex-col">
