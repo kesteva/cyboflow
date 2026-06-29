@@ -65,12 +65,13 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
   // work is accepted, so a live persistent interactive REPL should exit instead
   // of lingering orphaned. Graceful EOF/`/exit` (endLiveSession) is correct here
   // — claude is idle post-merge and reads PTY stdin. The facade translates the
-  // sentinel `__quick__` runId to the live panelId and strictly NO-OPs for the
+  // chat `__quick__` sentinel runId to the live panelId and strictly NO-OPs for the
   // SDK substrate / workflow runs. Fire-and-forget fail-soft: a close failure
-  // must never fail the git operation itself.
+  // must never fail the git operation itself. Role-G: the live REPL gates on the
+  // chatRunId sentinel (the gate vehicle), not runId (the latest flow run).
   const endLiveReplIfInteractive = (session: Session, sessionId: string): void => {
-    if (session.substrate !== 'interactive' || !session.runId) return;
-    void endLiveSession(session.runId).catch((err: unknown) => {
+    if (session.substrate !== 'interactive' || !session.chatRunId) return;
+    void endLiveSession(session.chatRunId).catch((err: unknown) => {
       console.warn(`[IPC:git] Failed to end live interactive REPL for session ${sessionId}:`, err);
     });
   };

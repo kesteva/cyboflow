@@ -40,24 +40,27 @@ export function __resetDeclinedResumeForTests(): void {
 export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive }) => {
   const hook = useClaudePanel(panel.id, isActive);
   const activeSession = hook.activeSession;
-  // Reliable run id for inline approvals: the surrounding SessionProvider holds
-  // the freshly-fetched session (effectiveSession), whose runId reflects the
-  // backfilled workflow_runs.id. The session-store copy (activeSession) can lag
-  // with a null runId for freshly-created quick sessions, so prefer context.
+  // Reliable run id for inline approvals (Role-G — permission-mode redesign §6):
+  // chat turns gate on the persistent __quick__ chat_run_id sentinel, DECOUPLED
+  // from runId (the latest flow run). The surrounding SessionProvider holds the
+  // freshly-fetched session, whose chatRunId reflects the minted/backfilled
+  // sentinel; the session-store copy (activeSession) can lag with a null chatRunId
+  // for freshly-created quick sessions, so prefer context.
   const sessionCtx = useSession();
-  const approvalRunId = sessionCtx?.session.runId ?? activeSession?.runId ?? null;
+  const approvalRunId = sessionCtx?.session.chatRunId ?? activeSession?.chatRunId ?? null;
   // Interactive-PTY render swap (PTY-backed quick sessions): when this panel's
   // session runs on the 'interactive' substrate, the live xterm
-  // (InteractiveTerminalView, keyed by the sentinel __quick__ run id) replaces
-  // the SDK structured transcript. Session resolution mirrors approvalRunId —
-  // prefer the SessionProvider's freshly-fetched session, fall back to the store
-  // copy keyed by the panel's sessionId.
+  // (InteractiveTerminalView, keyed by the chat __quick__ sentinel run id) replaces
+  // the SDK structured transcript below. Session resolution mirrors
+  // approvalRunId — prefer the SessionProvider's freshly-fetched session, fall
+  // back to the store copy keyed by the panel's sessionId. Null-safe: an
+  // interactive session whose chatRunId has not landed yet keeps the SDK surface.
   const panelStoreSession = useSessionStore((state) =>
     state.sessions.find((s) => s.id === panel.sessionId),
   );
   const substrateSession = sessionCtx?.session ?? panelStoreSession;
   const interactiveRunId =
-    substrateSession?.substrate === 'interactive' ? substrateSession.runId ?? null : null;
+    substrateSession?.substrate === 'interactive' ? substrateSession.chatRunId ?? null : null;
   // Demo mode: an interactive quick session is stamped 'interactive' so this
   // panel swaps in a terminal surface, but the real PTY is never spawned
   // (ipc/session.ts). Render the canned DemoTerminalView instead of the live

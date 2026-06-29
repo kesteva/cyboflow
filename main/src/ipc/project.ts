@@ -337,12 +337,13 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
         // session.ts): a live interactive REPL must not be orphaned when its
         // worktree is torn out from under it below. HARD kill (not the graceful
         // EOF/`/exit` end — claude may be mid-turn and never read PTY stdin).
-        // The facade translates the sentinel runId to the live panelId and
+        // The facade translates the chat sentinel runId to the live panelId and
         // NO-OPs for SDK/NULL-substrate rows. Fail-soft: a kill failure must
-        // never block the project deletion.
-        if (session.substrate === 'interactive' && session.run_id) {
+        // never block the project deletion. Role-G: the live REPL gates on the
+        // chat_run_id sentinel (the gate vehicle), not sessions.run_id.
+        if (session.substrate === 'interactive' && session.chat_run_id) {
           try {
-            await killLiveSession(session.run_id);
+            await killLiveSession(session.chat_run_id);
           } catch (error) {
             console.warn(`[Main] Failed to kill live interactive REPL for session ${session.id}:`, error);
           }

@@ -32,6 +32,8 @@ import { enhancePromptForStructuredCommit } from '../../../utils/promptEnhancer'
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
 import { transitionToAwaitingReview, reviveQuickRunToRunning } from '../../cyboflow/transitions';
 import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transitions';
+import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
+import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelProvider';
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
 import { isPermissionMode, type PermissionMode } from '../../../../../shared/types/workflows';
 
@@ -205,6 +207,25 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // races against a not-yet-resolved promise.  The result is stored as a
     // Promise field; composeMcpServers() awaits it rather than polling.
     this.cachedNodePathPromise = findNodeExecutable();
+  }
+
+  /**
+   * The injected chat-gate sentinel provider (permission-mode redesign §6).
+   * Resolves a chat turn's approval-gate run to the session's persistent
+   * `__quick__` `chat_run_id` sentinel (minted on read), DECOUPLED from
+   * `sessions.run_id` (the latest flow run). Set once at boot after the
+   * WorkflowRegistry is constructed (index.ts). Null in tests / pre-wiring boot —
+   * `resolveGateRunId` then falls back to the pre-redesign `run_id ?? panelId`.
+   */
+  private chatSentinelProvider: ChatSentinelProvider | null = null;
+
+  /**
+   * Inject the chat-gate sentinel provider (§6). Mirrors setOrchSocketPath: a
+   * single boot-time injection seam, constructed at the orchestrator layer where
+   * WorkflowRegistry ownership lives. Idempotent.
+   */
+  setChatSentinelProvider(provider: ChatSentinelProvider): void {
+    this.chatSentinelProvider = provider;
   }
 
   /**
@@ -477,12 +498,21 @@ export class ClaudeCodeManager extends AbstractCliManager {
         }
       }
 
-      // Resolve the workflow_runs runId from the session's DB row.
-      // For workflow runs: panelId === runId (invariant from RunExecutor).
-      // For quick sessions: sessions.run_id was backfilled by the IPC handler
-      // (sessions:create-quick) and differs from panelId.
+      // Resolve the approval-gate runId via the gate-vehicle discriminator (§6).
+      // CHAT turn (getDbSession resolves a real session row) → the persistent
+      // `__quick__` chat_run_id sentinel, minted on read by chatSentinelProvider —
+      // DECOUPLED from sessions.run_id (the latest flow run) so a chat turn after a
+      // terminal flow no longer silent-denies (#4). The provider also rejects a
+      // chat turn while the session's flow run is non-terminal (ChatDuringActiveFlowError).
+      // FLOW step (panelId === sessionId === runId, getDbSession → undefined) → panelId,
+      // byte-identical to before. NO `?? run_id` arm in production.
       const sessionRow = this.sessionManager.getDbSession(sessionId);
-      const runId = (sessionRow?.run_id as string | null) ?? panelId;
+      const runId = resolveGateRunId({
+        sessionRow,
+        panelId,
+        sessionId,
+        provider: this.chatSentinelProvider,
+      });
 
       // Approval-gate revival (quick sessions only). A quick session's `__quick__`
       // sentinel run is set to 'running' once at creation, but leaves 'running'

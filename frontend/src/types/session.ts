@@ -100,6 +100,15 @@ export interface Session {
   commitModeSettings?: string; // JSON string of CommitModeSettings
   runId?: string | null;
   /**
+   * Persistent chat-sentinel gate vehicle (sessions.chat_run_id, migration 038),
+   * DISTINCT from runId. runId is the latest FLOW run (Role-D: display/diff/
+   * close-out); chatRunId is the never-clobbered `__quick__` sentinel chat turns
+   * gate on (Role-G — PendingApprovalsForRun + the interactive terminal run id).
+   * undefined/NULL until minted on the next chat turn. Mirror of
+   * main/src/types/session.ts Session.
+   */
+  chatRunId?: string | null;
+  /**
    * Which CLI substrate the session's claude panel runs on ('sdk'|'interactive').
    * Stamped by sessions:create-quick (sessions.substrate, migration 027);
    * undefined/NULL → sdk (legacy). Mirror of main/src/types/session.ts Session.

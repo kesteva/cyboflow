@@ -212,7 +212,7 @@ const PANEL: ToolPanel = {
 };
 
 function makeSession(overrides: Partial<Session> = {}): Session {
-  return {
+  const merged: Session = {
     id: 's1',
     name: 'quick-1',
     worktreePath: '/repo/.cyboflow/worktrees/quick-1',
@@ -223,6 +223,13 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     jsonMessages: [],
     ...overrides,
   };
+  // Permission-mode redesign §6: the chat surface (PendingApprovalsForRun +
+  // InteractiveTerminalView) gates on chatRunId (the persistent __quick__ sentinel),
+  // not runId (the latest flow run). For a quick session they coincide — mirror
+  // runId → chatRunId unless an override sets chatRunId explicitly, so the existing
+  // swap-driving cases keep exercising the interactive/approval surfaces.
+  if (merged.chatRunId === undefined) merged.chatRunId = merged.runId ?? null;
+  return merged;
 }
 
 /** Render inside the SessionProvider, the way CyboflowRoot wraps the quick pane. */

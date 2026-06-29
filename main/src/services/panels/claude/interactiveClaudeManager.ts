@@ -22,6 +22,8 @@ import { InteractiveMcpEnabler } from './interactiveMcpEnabler';
 import type { LoggerLike } from '../../../orchestrator/types';
 import { buildStepReportingAppend } from '../../../orchestrator/prompts/step-reporting-instructions';
 import { QUICK_WORKFLOW_NAME } from '../../../orchestrator/workflowRegistry';
+import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
+import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelProvider';
 import { isPermissionMode, resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 import { WorkflowBundleWriter } from './workflowBundleWriter';
 import { installWorkflowBundle } from './workflowBundleInstall';
@@ -380,6 +382,24 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     this.shellApprovalCanceller = fn;
   }
 
+  /**
+   * The injected chat-gate sentinel provider (permission-mode redesign §6).
+   * Resolves a chat turn's approval-gate run (and the live REPL run id) to the
+   * session's persistent `__quick__` `chat_run_id` sentinel (minted on read),
+   * DECOUPLED from `sessions.run_id` (the latest flow run). Set once at boot after
+   * the WorkflowRegistry is constructed (index.ts). Null in tests / pre-wiring
+   * boot — `resolveGateRunId` then falls back to `run_id ?? options.runId ?? panelId`.
+   */
+  private chatSentinelProvider: ChatSentinelProvider | null = null;
+
+  /**
+   * Inject the chat-gate sentinel provider (§6). Mirrors setOrchSocketPath: a
+   * single boot-time injection seam constructed at the orchestrator layer.
+   */
+  setChatSentinelProvider(provider: ChatSentinelProvider): void {
+    this.chatSentinelProvider = provider;
+  }
+
   // ---------------------------------------------------------------------------
   // Required AbstractCliManager abstract-method implementations
   // ---------------------------------------------------------------------------
@@ -666,8 +686,19 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   protected async initializeCliEnvironment(options: InteractiveClaudeSpawnOptions): Promise<{ [key: string]: string }> {
     const env: { [key: string]: string } = {};
     if (this.orchSocketPath) {
+      // Gate-vehicle discriminator (§6): a CHAT turn (real session row) resolves
+      // CYBOFLOW_RUN_ID to the persistent __quick__ chat_run_id sentinel (minted on
+      // read), DECOUPLED from sessions.run_id; a FLOW step (getDbSession → undefined)
+      // keeps options.runId ?? panelId (the flow run). Both gate the SAME run the
+      // shell-approval fast-path (handleShellApprovalRequest) requests against.
       const sessionRow = this.sessionManager.getDbSession(options.sessionId);
-      const runId = (sessionRow?.run_id as string | null | undefined) ?? options.runId ?? options.panelId;
+      const runId = resolveGateRunId({
+        sessionRow,
+        panelId: options.panelId,
+        sessionId: options.sessionId,
+        provider: this.chatSentinelProvider,
+        flowRunId: options.runId,
+      });
       env.CYBOFLOW_RUN_ID = runId;
       env.CYBOFLOW_ORCH_SOCKET = this.orchSocketPath;
     }
@@ -771,10 +802,19 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       throw new Error(`${this.getCliToolName()} CLI not available: ${availability.error}`);
     }
 
-    // Resolve the workflow_runs runId from the session's DB row (RunExecutor
-    // invariant: for workflow runs panelId === runId).
+    // Resolve the approval-gate / pipeline runId via the gate-vehicle
+    // discriminator (§6). CHAT turn (real session row) → the persistent __quick__
+    // chat_run_id sentinel (minted on read), DECOUPLED from sessions.run_id; FLOW
+    // step (getDbSession → undefined, RunExecutor invariant panelId === runId) →
+    // options.runId ?? panelId. NO `?? run_id` arm in production.
     const sessionRow = this.sessionManager.getDbSession(sessionId);
-    const runId = (sessionRow?.run_id as string | null | undefined) ?? options.runId ?? panelId;
+    const runId = resolveGateRunId({
+      sessionRow,
+      panelId,
+      sessionId,
+      provider: this.chatSentinelProvider,
+      flowRunId: options.runId,
+    });
 
     // Per-run pipeline (EventRouter + RawEventsSink). The manager OWNS raw_events
     // persistence (single INSERT per line); the RunExecutor bridge for interactive

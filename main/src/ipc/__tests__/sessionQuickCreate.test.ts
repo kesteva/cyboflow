@@ -580,6 +580,10 @@ describe('sessions:input handler - substrate routing', () => {
       commit_mode: undefined,
       substrate: opts.substrate,
       run_id: opts.runId,
+      // For a quick session the chat-gate sentinel coincides with run_id (migration
+      // 038 / §6). The interactive re-spawn now registers the chat_run_id sentinel
+      // (Role-G), so the fixture carries it alongside run_id.
+      chat_run_id: opts.runId,
     });
     vi.mocked(panelManager.getPanelsForSession).mockReturnValue(
       [PANEL] as unknown as ReturnType<typeof panelManager.getPanelsForSession>,

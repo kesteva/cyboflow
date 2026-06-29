@@ -179,6 +179,29 @@ describe('convertDbSessionToSession — run_id → runId mapping', () => {
     const legacySession = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(legacy);
     expect(legacySession.agentPermissionMode).toBeUndefined();
   });
+
+  it('copies chat_run_id to chatRunId; null/undefined → null (migration 038 — Role-G gate vehicle)', () => {
+    // Permission-mode redesign §6: chat turns gate on the persistent __quick__
+    // chat_run_id sentinel (Role-G), DISTINCT from run_id (Role-D). Without this
+    // projection ClaudePanel's approvalRunId/interactiveRunId + git.ts close-out
+    // silently drop the gate vehicle (IPC silent-drop class).
+    const stamped = makeDbSession({ chat_run_id: 'chat-sentinel-1' });
+    const mgr = new SessionManager(
+      makeDbMock(stamped) as unknown as ConstructorParameters<typeof SessionManager>[0]
+    );
+    const session = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(stamped);
+    expect(session.chatRunId).toBe('chat-sentinel-1');
+
+    // Explicit NULL (flow-only/legacy session — sentinel minted on next chat turn).
+    const nulled = makeDbSession({ chat_run_id: null });
+    const nulledSession = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(nulled);
+    expect(nulledSession.chatRunId).toBeNull();
+
+    // Legacy row missing the column entirely → coalesced to null (not undefined).
+    const legacy = makeDbSession();
+    const legacySession = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(legacy);
+    expect(legacySession.chatRunId).toBeNull();
+  });
 });
 
 // ------------------------------------------------------------------
@@ -274,5 +297,42 @@ describe('DB round-trip — run_id INSERT persistence', () => {
     const mgr = new SessionManager(dbMock as unknown as ConstructorParameters<typeof SessionManager>[0]);
     const session = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(readBack!);
     expect(session.runId).toBeNull();
+  });
+
+  it('Case C: migration 038 chat_run_id column round-trips to chatRunId (Role-G gate vehicle)', () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'cyboflow-mig038-c-'));
+    const dbPath = join(tmpDir, 'test.db');
+    const realMigrationsDir = join(__dirname, '../../database/migrations');
+
+    const svc = new DatabaseService(dbPath);
+    svc.setMigrationsDirForTesting(realMigrationsDir);
+    svc.initialize();
+
+    const project = seedProject(dbPath);
+
+    svc.createSession({
+      id: 'sess-chat-1',
+      name: 'Chat Session',
+      initial_prompt: 'ask something',
+      worktree_name: 'chat-1',
+      worktree_path: '/tmp/chat-1',
+      project_id: project.id,
+    });
+
+    // The create-quick handler writes chat_run_id via a direct UPDATE (createSession
+    // itself never sets it). Mirror that here against the real migrated schema —
+    // proving migration 038 added the column and the mapper projects it.
+    const rawDb = new Database(dbPath);
+    rawDb.prepare('UPDATE sessions SET chat_run_id = ? WHERE id = ?').run('chat-sentinel-1', 'sess-chat-1');
+    rawDb.close();
+
+    const readBack = svc.getSession('sess-chat-1');
+    expect(readBack).toBeDefined();
+    expect(readBack!.chat_run_id).toBe('chat-sentinel-1');
+
+    const dbMock = makeDbMock(readBack!);
+    const mgr = new SessionManager(dbMock as unknown as ConstructorParameters<typeof SessionManager>[0]);
+    const session = (mgr as unknown as SessionManagerWithPrivate).convertDbSessionToSession(readBack!);
+    expect(session.chatRunId).toBe('chat-sentinel-1');
   });
 });

@@ -504,8 +504,17 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         `UPDATE workflow_runs SET worktree_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
       ).run(session.worktreePath, runId);
 
-      // Backfill sessions.run_id.
-      db.prepare(`UPDATE sessions SET run_id = ? WHERE id = ?`).run(runId, session.id);
+      // Backfill sessions.run_id AND sessions.chat_run_id (migration 038). For a
+      // freshly-created quick session the sentinel IS both the latest run (Role-D)
+      // and the persistent chat gate vehicle (Role-G), so they coincide here; a
+      // later flow launch overwrites run_id only, leaving chat_run_id pinned to this
+      // sentinel (the permission-mode redesign §6 split — chat turns never lose
+      // their gate to a terminal/active flow run).
+      db.prepare(`UPDATE sessions SET run_id = ?, chat_run_id = ? WHERE id = ?`).run(
+        runId,
+        runId,
+        session.id,
+      );
 
       // NOTE: the sentinel run's session_id is now stamped by createRun above (it
       // received session.id), for BOTH substrates — the prior interactive-only
@@ -739,12 +748,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // orphaned when its session is dismissed/archived. HARD kill (not the
       // graceful EOF/`/exit` end — a dismissed session's claude may be mid-turn
       // and never read PTY stdin) BEFORE the worktree-removal cleanup below
-      // tears the cwd out from under it. The facade translates the sentinel
+      // tears the cwd out from under it. The facade translates the chat sentinel
       // runId to the live panelId and NO-OPs for the SDK substrate. Fail-soft:
-      // a kill failure must never block the dismiss.
-      if (dbSession.substrate === 'interactive' && dbSession.run_id) {
+      // a kill failure must never block the dismiss. Role-G: the live REPL gates on
+      // the chat_run_id sentinel (the gate vehicle), not sessions.run_id.
+      if (dbSession.substrate === 'interactive' && dbSession.chat_run_id) {
         try {
-          await killLiveSession(dbSession.run_id);
+          await killLiveSession(dbSession.chat_run_id);
         } catch (err) {
           console.warn(`[IPC:session] Failed to kill live interactive REPL for dismissed session ${sessionId}:`, err);
         }
@@ -1009,9 +1019,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           // Deterministic at-spawn registration (mirrors the create-quick eager
           // spawn): seed the facade's runId→panelId translation BEFORE the PTY
           // spawn so a relay/close-out racing the first PTY byte never falls
-          // back to the sentinel runId.
-          if (dbSession?.run_id) {
-            registerLivePanel(dbSession.run_id, claudePanel.id);
+          // back to the sentinel runId. Role-G: the interactive REPL gates on the
+          // chat_run_id sentinel (the gate vehicle the manager spawn resolves), not
+          // sessions.run_id — register the chat sentinel so the translation matches.
+          if (dbSession?.chat_run_id) {
+            registerLivePanel(dbSession.chat_run_id, claudePanel.id);
           }
           void interactiveCliManager
             .startPanel(

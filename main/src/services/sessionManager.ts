@@ -233,6 +233,10 @@ export class SessionManager extends EventEmitter {
       commitMode: dbSession.commit_mode,
       commitModeSettings: dbSession.commit_mode_settings,
       runId: dbSession.run_id ?? null,
+      // Persistent chat-sentinel gate vehicle (migration 038). DISTINCT from runId:
+      // runId is the latest FLOW run (Role-D); chatRunId is the never-clobbered
+      // __quick__ sentinel chat turns gate on (Role-G). NULL until minted on read.
+      chatRunId: dbSession.chat_run_id ?? null,
       substrate: dbSession.substrate,
       effort: dbSession.effort,
       agentPermissionMode: dbSession.agent_permission_mode,

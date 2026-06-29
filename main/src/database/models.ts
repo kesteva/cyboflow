@@ -78,6 +78,15 @@ export interface Session {
   commit_mode_settings?: string; // JSON string of CommitModeSettings
   skip_continue_next?: boolean;
   run_id?: string | null;
+  /**
+   * Persistent chat-sentinel gate vehicle (migration 038), DISTINCT from run_id.
+   * run_id keeps pointing at the latest FLOW run (Role-D: display/diff/close-out);
+   * chat_run_id holds a never-clobbered `__quick__` sentinel that chat turns gate
+   * on (Role-G). NULL for flow-only/legacy sessions until a sentinel is minted
+   * ON READ at the gate-resolution chokepoint (chatSentinelProvider) on the next
+   * chat turn.
+   */
+  chat_run_id?: string | null;
   /** Set to true for sessions created outside any workflow flow (TASK-787 / IDEA-027). */
   is_quick?: boolean;
   /**

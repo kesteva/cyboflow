@@ -76,6 +76,7 @@ import type { DatabaseLike } from './orchestrator/types';
 import { buildApprovalCreatedEvent } from './orchestrator/approvalCreatedBridge';
 import { buildQuestionCreatedEvent } from './orchestrator/questionCreatedBridge';
 import { WorkflowRegistry } from './orchestrator/workflowRegistry';
+import { makeChatSentinelProvider } from './orchestrator/chatSentinelProvider';
 import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
@@ -1096,15 +1097,19 @@ async function initializeServices() {
   // sessionManager.addSessionOutput marks the DB row 'completed' on the
   // system/result message (rendered as completed_unviewed/stopped by
   // mapDbStatusToSessionStatus). Guarded to sessions whose substrate is
-  // 'interactive' AND whose sessions.run_id matches the payload runId — workflow
-  // runs (hosted sessions, runId ≠ sessions.run_id) are untouched. Fail-soft: a
-  // status-flip failure must never disturb the live REPL.
+  // 'interactive' AND whose sessions.chat_run_id (the chat sentinel) matches the
+  // payload runId — workflow runs (hosted sessions, runId ≠ chat_run_id) are
+  // untouched. Fail-soft: a status-flip failure must never disturb the live REPL.
   substrateFacade.on('turn-end', (payload) => {
     try {
       const evt = payload as { panelId: string; sessionId: string; runId: string };
       const dbSession = sessionManager.getDbSession(evt.sessionId);
       if (!dbSession || dbSession.substrate !== 'interactive') return;
-      if (!dbSession.run_id || dbSession.run_id !== evt.runId) return;
+      // Role-G: the interactive turn-end carries the gate run = the chat_run_id
+      // sentinel (the live chat REPL), DECOUPLED from sessions.run_id (Role-D, the
+      // latest flow run). Match on chat_run_id so a flow run's turn-end never rests
+      // the chat session (and vice versa).
+      if (!dbSession.chat_run_id || dbSession.chat_run_id !== evt.runId) return;
       if (dbSession.status !== 'running') return;
       // Direct DB write + manual session-updated emit — the same shape as the
       // SDK exit handler in events.ts (updateSession would re-map 'completed'
@@ -1168,11 +1173,23 @@ async function initializeServices() {
   // concrete subclass), so narrow via instanceof — the factory creates a
   // ClaudeCodeManager for 'claude' and an InteractiveClaudeManager for
   // 'claude-interactive' at runtime.
+  // Chat-gate sentinel provider (permission-mode redesign §6). Constructed here —
+  // after the WorkflowRegistry exists — and injected into BOTH managers so a chat
+  // turn's approval gate resolves the session's persistent `__quick__` chat_run_id
+  // sentinel (minted on read) instead of the overloaded sessions.run_id. Shares the
+  // raw better-sqlite3 handle the managers received via additionalOptions.db.
+  const chatSentinelProvider = makeChatSentinelProvider({
+    db: databaseService.getDb(),
+    workflowRegistry,
+    logger: cyboflowLogger,
+  });
   if (defaultCliManager instanceof ClaudeCodeManager) {
     defaultCliManager.setOrchSocketPath(socketPath);
+    defaultCliManager.setChatSentinelProvider(chatSentinelProvider);
   }
   if (interactiveCliManager instanceof InteractiveClaudeManager) {
     interactiveCliManager.setOrchSocketPath(socketPath);
+    interactiveCliManager.setChatSentinelProvider(chatSentinelProvider);
     // Wire the deny-on-teardown shell-approval canceller (IDEA-030 / TASK-819):
     // the interactive teardown seam denies/closes any in-flight PreToolUse shell-
     // approval sockets for the run BEFORE the PTY is killed, delegating to the
