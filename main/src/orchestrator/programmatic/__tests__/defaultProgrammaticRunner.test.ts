@@ -48,6 +48,9 @@ function ctxFor(def: WorkflowDefinition, opts?: { batchId?: string | null }): Pr
     worktreePath: '/wt',
     run,
     workflow,
+    // Session-resolved mode (permission-mode redesign §3c#2); RunExecutor
+    // computes this in production, here supplied directly for the runner.
+    agentPermissionMode: 'auto',
     signal: new AbortController().signal,
     injectEvent: () => {},
   };
@@ -118,6 +121,19 @@ describe('DefaultProgrammaticRunner', () => {
   it('resolves (does NOT throw) when a human gate is rejected — a terminal human decision, not a failure', async () => {
     const runner = new DefaultProgrammaticRunner({ spawner: makeSpawner(), reporter, gate: gateOf('reject') });
     await expect(runner.run(ctxFor(gateDef()))).resolves.toBeUndefined();
+  });
+
+  it('threads ctx.agentPermissionMode (the session-resolved mode) into each step spawn, NOT the snapshot', async () => {
+    // ctx.run.permission_mode_snapshot is 'auto' (the demoted audit value), but
+    // the runner must spawn under ctx.agentPermissionMode (the session authority).
+    const spawner = makeSpawner();
+    const runner = new DefaultProgrammaticRunner({ spawner, reporter, gate: gateOf('approve') });
+    const ctx: ProgrammaticRunContext = { ...ctxFor(oneStepDef()), agentPermissionMode: 'dontAsk' };
+
+    await runner.run(ctx);
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.agentPermissionMode).toBe('dontAsk');
   });
 
   it('throws when the run has no resolvable workflow definition', async () => {

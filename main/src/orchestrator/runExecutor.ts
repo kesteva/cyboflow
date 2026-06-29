@@ -24,6 +24,7 @@ import type { RunEventBridge, BridgeEventsOptions } from './runEventBridge';
 import { bridgeEvents as bridgeEventsImpl } from './runEventBridge';
 import type { StreamEventPublisher } from './runLauncher';
 import { rollupRunUsage } from './runUsageRollup';
+import { resolveRunAgentPermissionMode } from './permissionModeResolver';
 import { buildSeedTasksBlock } from './seedTasksBlock';
 import type { FindingTagBucket } from '../../../shared/types/reviews';
 import { findingBucket } from '../../../shared/types/reviews';
@@ -197,6 +198,17 @@ export interface ProgrammaticRunContext {
   worktreePath: string;
   run: WorkflowRunRow;
   workflow: WorkflowRow;
+  /**
+   * The run's resolved 4-mode agent permission mode (permission-mode redesign
+   * §3c#2). Computed ONCE at the start of `executeProgrammatic` from the owning
+   * SESSION via `resolveRunAgentPermissionMode` (the session is the execution
+   * authority; the immutable `permission_mode_snapshot` is audit-only). The
+   * runner threads it into `SpawnStepRunner` so every step turn spawns under the
+   * session's mode rather than the demoted snapshot. (Per-tool-call freshness
+   * within a step comes from the SDK substrate's live PreToolUse hook over the
+   * shared spawn seam.)
+   */
+  agentPermissionMode: PermissionMode;
   /**
    * Fires when the run is canceled. The runner threads it into the
    * WorkflowController (which checks it each step) and the human gate (which
@@ -559,7 +571,30 @@ export class RunExecutor {
      * floor). See QueuedInputDelivererLike.
      */
     private readonly queuedInputDeliverer?: QueuedInputDelivererLike,
+    /**
+     * Optional global-default agent-permission-mode thunk (permission-mode
+     * redesign §3c#1). Supplies the fallback handed to
+     * `resolveRunAgentPermissionMode` when the owning session's
+     * `agent_permission_mode` is NULL (inherit the global default). A plain
+     * function type — no ConfigManager import — preserves the standalone-typecheck
+     * invariant. When absent the resolver floors to its own 'default'.
+     */
+    private readonly getDefaultAgentPermissionMode?: () => PermissionMode,
   ) {}
+
+  /**
+   * Resolve the run's LIVE 4-mode agent permission mode from the owning SESSION
+   * (permission-mode redesign §3c#1/§3c#2). The session column is the execution
+   * authority; the immutable `permission_mode_snapshot` is audit-only. When no
+   * `db` is injected (test-only constructions that never reach a real spawn) we
+   * fall back to the snapshot so those paths stay byte-identical.
+   */
+  private resolveLiveAgentPermissionMode(runId: string, run: WorkflowRunRow): PermissionMode {
+    if (!this.db) {
+      return run.permission_mode_snapshot;
+    }
+    return resolveRunAgentPermissionMode(this.db, runId, this.getDefaultAgentPermissionMode?.());
+  }
 
   /**
    * Execute a workflow run by runId.
@@ -814,6 +849,9 @@ export class RunExecutor {
           worktreePath: run.worktree_path,
           run,
           workflow,
+          // Resolved LIVE from the owning session (permission-mode redesign
+          // §3c#2), NOT the demoted snapshot. SpawnStepRunner re-reads it per step.
+          agentPermissionMode: this.resolveLiveAgentPermissionMode(runId, run),
           signal: abort.signal,
           injectEvent,
           ...(resumeFromStepId ? { resumeFromStepId } : {}),
@@ -1446,14 +1484,15 @@ export class RunExecutor {
 
   /**
    * Returns optional overrides for ClaudeSpawnerOptions.
-   * Threads the run's resolved 4-mode agentPermissionMode (read from the
-   * IMMUTABLE snapshot `run.permission_mode_snapshot`, NOT the live
-   * `workflow.permission_mode`) to the spawning manager, plus any pending
-   * system-prompt append. Substrate behavior branching off this value lands in
-   * a later step.
+   * Threads the run's resolved 4-mode agentPermissionMode (read LIVE from the
+   * owning SESSION via `resolveRunAgentPermissionMode`, NOT the demoted
+   * `permission_mode_snapshot` audit column — permission-mode redesign §3c#1) to
+   * the spawning manager, plus any pending system-prompt append. Re-entered per
+   * turn for SDK orchestrated runs; per-tool-call freshness comes from the SDK
+   * PreToolUse hook.
    *
    * @param runId     The workflow run ID.
-   * @param run       The workflow_runs row (source of the permission snapshot).
+   * @param run       The workflow_runs row (snapshot fallback when no db).
    * @param _workflow The workflow row.
    */
   protected async buildOptionsOverrides(
@@ -1464,7 +1503,7 @@ export class RunExecutor {
     const systemPromptAppend = this.pendingSystemPromptAppend.get(runId) || undefined;
     const overrides: Partial<ClaudeSpawnerOptions> = {
       systemPromptAppend,
-      agentPermissionMode: run.permission_mode_snapshot,
+      agentPermissionMode: this.resolveLiveAgentPermissionMode(runId, run),
       // Per-run model pin (migration 037), read FRESH off the run row like
       // agentPermissionMode so it governs the next spawn. NULL/absent → undefined
       // → the spawner sets no SDK `model` (SDK default; byte-identical to before).

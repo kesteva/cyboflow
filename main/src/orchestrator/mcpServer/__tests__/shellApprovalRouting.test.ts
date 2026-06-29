@@ -151,6 +151,11 @@ describe('shell-approval-request handler branch', () => {
 
   beforeEach(() => {
     db = createTestDb({ disableForeignKeys: true });
+    // resolveRunPermissionMode now joins the owning SESSION (permission-mode
+    // redesign §3c#3); the GATE_SCHEMA carries neither, so layer the run.session_id
+    // link column + a minimal sessions table the join reads.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+    db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, agent_permission_mode TEXT)');
     ApprovalRouter.initialize(dbAdapter(db));
     handler = new McpQueryHandler(dbAdapter(db), makeSpyLogger());
     realHome = process.env.HOME;
@@ -188,12 +193,16 @@ describe('shell-approval-request handler branch', () => {
   }
 
   /**
-   * Seed a run with an empty allow-list and stamp its permission_mode_snapshot
-   * (the immutable 4-mode value the handler reads for the acceptEdits fast-path).
+   * Seed a run with an empty allow-list whose OWNING SESSION carries the given
+   * 4-mode value (the execution authority the handler reads via the run→session
+   * join for the acceptEdits fast-path — permission-mode redesign §3c#3). The
+   * `permission_mode_snapshot` column is demoted to audit-only and no longer read.
    */
   function seedRunWithMode(runId: string, mode: string): string {
     const worktree = seedWorktreeWithAllow(runId, []);
-    db.prepare(`UPDATE workflow_runs SET permission_mode_snapshot = ? WHERE id = ?`).run(mode, runId);
+    const sessionId = `sess-${runId}`;
+    db.prepare(`INSERT INTO sessions (id, agent_permission_mode) VALUES (?, ?)`).run(sessionId, mode);
+    db.prepare(`UPDATE workflow_runs SET session_id = ? WHERE id = ?`).run(sessionId, runId);
     return worktree;
   }
 
@@ -280,6 +289,32 @@ describe('shell-approval-request handler branch', () => {
     // No acceptEdits fast-path; the edit needs a human (one pending approval).
     expect(writes).toHaveLength(0);
     expect(pendingApprovalCount('run-default-edit')).toBe(1);
+  });
+
+  it('(a5) JOIN-MISS arm: a run whose session_id is NULL (legacy sentinel) does NOT acceptEdits-fast-path — it routes through the gate (conservative null→router-gate contract)', async () => {
+    // seedWorktreeWithAllow leaves session_id NULL: the run→session join misses,
+    // resolveRunPermissionMode returns null, and an Edit MUST NOT be auto-allowed.
+    // This is the legacy-sentinel arm — it prompts (router gate) rather than
+    // stranding the run; the sentinel's session_id is stamped at creation so the
+    // miss never persists beyond the first mint-on-read turn.
+    seedWorktreeWithAllow('run-joinmiss-edit', []);
+    const { socket, writes } = makeEmitterSocketDouble();
+
+    await handler.handleMessage(
+      {
+        type: 'shell-approval-request',
+        requestId: 'req-joinmiss-edit',
+        runId: 'run-joinmiss-edit',
+        toolName: 'Edit',
+        toolInput: { file_path: '/tmp/x.ts', content: 'x' },
+      },
+      socket,
+    );
+    await flush();
+
+    // Null mode ⇒ no fast-path ⇒ the edit needs a human (one pending approval).
+    expect(writes).toHaveLength(0);
+    expect(pendingApprovalCount('run-joinmiss-edit')).toBe(1);
   });
 
   it('(b) rejects the "orchestrator" sentinel runId with a deny and NO approvals row', async () => {
@@ -519,6 +554,13 @@ describe('shell-approval-request review_item fold (P4, socket still held)', () =
     reviewDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
     reviewDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
     reviewDb.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+    // resolveRunPermissionMode joins the owning SESSION (permission-mode redesign
+    // §3c#3); migrations 019 (session_id) / 021 (agent_permission_mode) are not in
+    // this fixture's set, so add the minimal join surface. These review-fold runs
+    // carry no mode ⇒ the join yields null ⇒ the conservative router gate (the
+    // existing behavior under test).
+    reviewDb.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+    reviewDb.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, agent_permission_mode TEXT)');
     return reviewDb;
   }
 
@@ -610,6 +652,10 @@ describe('shell-approval-request over a live OrchSocketServer (held-open socket)
 
   beforeEach(async () => {
     db = createTestDb({ disableForeignKeys: true });
+    // Run→session join surface for resolveRunPermissionMode (§3c#3); these runs
+    // carry no mode ⇒ the join yields null ⇒ the conservative router gate.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+    db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, agent_permission_mode TEXT)');
     ApprovalRouter.initialize(dbAdapter(db));
     realHome = process.env.HOME;
     fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), `cyboflow-home-${process.pid}-`));

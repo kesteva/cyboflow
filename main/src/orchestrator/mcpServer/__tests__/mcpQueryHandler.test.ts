@@ -2348,6 +2348,12 @@ describe('mcp-update-sprint-task (sprint lane writes)', () => {
     laneDb.exec(readFileSync(join(migDir, '022_sprint_batches.sql'), 'utf-8'));
     laneDb.exec(readFileSync(join(migDir, '023_sprint_lane_step.sql'), 'utf-8'));
     laneDb.exec(readFileSync(join(migDir, '025_sprint_lane_attempts.sql'), 'utf-8'));
+    // resolveRunPermissionMode now joins the owning SESSION (permission-mode
+    // redesign §3c#3); migrations 019 (session_id) / 021 (agent_permission_mode)
+    // are outside this fixture's set, so add the minimal join surface so the
+    // handler's join resolves (these runs carry no mode ⇒ null ⇒ router gate).
+    laneDb.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+    laneDb.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, agent_permission_mode TEXT)');
     return laneDb;
   }
 
@@ -2607,6 +2613,12 @@ describe('shell-approval-request -> auto-derive sprint lane', () => {
     laneDb.exec(readFileSync(join(migDir, '022_sprint_batches.sql'), 'utf-8'));
     laneDb.exec(readFileSync(join(migDir, '023_sprint_lane_step.sql'), 'utf-8'));
     laneDb.exec(readFileSync(join(migDir, '025_sprint_lane_attempts.sql'), 'utf-8'));
+    // resolveRunPermissionMode now joins the owning SESSION (permission-mode
+    // redesign §3c#3); migrations 019 (session_id) / 021 (agent_permission_mode)
+    // are outside this fixture's set, so add the minimal join surface so the
+    // handler's join resolves (these runs carry no mode ⇒ null ⇒ router gate).
+    laneDb.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+    laneDb.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, agent_permission_mode TEXT)');
     return laneDb;
   }
 

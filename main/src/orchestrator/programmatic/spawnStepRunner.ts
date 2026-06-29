@@ -35,7 +35,15 @@ export interface SpawnStepRunnerOptions {
   runId: string;
   worktreePath: string;
   workflowName: string;
-  agentPermissionMode?: PermissionMode;
+  /**
+   * Per-step agent-permission-mode RESOLVER (permission-mode redesign §3c#2).
+   * Invoked ONCE per `runStep` (NOT captured at construction) so each step turn
+   * spawns under the mode resolved at step time rather than a value frozen when
+   * the runner was built — the session is the live execution authority.
+   * `undefined` (the thunk absent OR returning undefined) ⇒ no override threaded
+   * to the spawn (byte-identical to the no-mode path).
+   */
+  agentPermissionMode?: () => PermissionMode | undefined;
   /**
    * The sprint's task-scope block (the `# Sprint tasks` body), resolved once per
    * run by DefaultProgrammaticRunner from the run's batch_id. Threaded into EVERY
@@ -64,6 +72,10 @@ export class SpawnStepRunner implements StepRunner {
       ...(ctx.item ? { item: ctx.item } : {}),
       ...(this.opts.taskScope ? { taskScope: this.opts.taskScope } : {}),
     });
+    // Re-resolve the agent permission mode PER STEP (permission-mode redesign
+    // §3c#2) — never captured at construction — so a mid-run mode change is
+    // honored on the next step turn.
+    const agentPermissionMode = this.opts.agentPermissionMode?.();
     try {
       await this.spawner.spawnCliProcess({
         panelId: this.opts.panelId,
@@ -71,7 +83,7 @@ export class SpawnStepRunner implements StepRunner {
         runId: this.opts.runId,
         worktreePath: this.opts.worktreePath,
         prompt,
-        ...(this.opts.agentPermissionMode ? { agentPermissionMode: this.opts.agentPermissionMode } : {}),
+        ...(agentPermissionMode ? { agentPermissionMode } : {}),
         // Additive per-lane spawn identity — forwarded ONLY when present so the
         // non-fan-out (no-item) case stays byte-identical; the spawner defaults
         // spawnKey to panelId when absent.

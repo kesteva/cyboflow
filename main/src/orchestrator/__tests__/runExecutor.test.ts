@@ -332,7 +332,7 @@ describe('RunExecutor.executeProgrammatic — inject seam (monitor-unify)', () =
     };
 
     // Real in-memory db so the persisting bridge can INSERT a raw_events row.
-    const db = makeRawEventsDb();
+    const db = withModeJoinSurface(makeRawEventsDb());
 
     // The runner injects one assistant turn, then resolves (drains to rest).
     const runner: ProgrammaticRunner = {
@@ -387,7 +387,7 @@ describe('RunExecutor.executeProgrammatic — inject seam (monitor-unify)', () =
         published.push({ runId, type: (envelope as { type: string }).type });
       },
     };
-    const db = makeRawEventsDb();
+    const db = withModeJoinSurface(makeRawEventsDb());
 
     // Capture the run's injectEvent so the test can call it AFTER the walk drains.
     let capturedInject: ((event: ReturnType<typeof buildAssistantTextEvent>) => void) | undefined;
@@ -1835,6 +1835,20 @@ import { EventRouter, RawEventsSink } from '../../services/streamParser';
 import { makeRawEventsDb, countRawEvents } from '../__test_fixtures__/rawEvents';
 
 /**
+ * Augment a raw-events-only fixture db with the minimal workflow_runs→sessions
+ * JOIN surface that buildOptionsOverrides / executeProgrammatic now read via
+ * resolveRunAgentPermissionMode (permission-mode redesign §3c#1/§3c#2). These
+ * execute()-level tests inject a real db, so the live mode resolver runs; the
+ * runs carry no owning session ⇒ the LEFT JOIN yields null ⇒ the global default
+ * (mode is never asserted in these bridge/inject-seam tests).
+ */
+function withModeJoinSurface(db: ReturnType<typeof makeRawEventsDb>): ReturnType<typeof makeRawEventsDb> {
+  db.exec('CREATE TABLE IF NOT EXISTS workflow_runs (id TEXT PRIMARY KEY, session_id TEXT)');
+  db.exec('CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, agent_permission_mode TEXT)');
+  return db;
+}
+
+/**
  * Emit a synthetic 'output' event matching the ClaudeCodeManager contract
  * (panelId must equal runId; type must be 'json').
  */
@@ -1871,7 +1885,7 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
     const spawner = makeSpawner();
 
     // Use a real in-memory DB so the CCM-style pipeline can INSERT raw_events rows.
-    const db = makeRawEventsDb();
+    const db = withModeJoinSurface(makeRawEventsDb());
 
     // Simulate CCM's own EventRouter + RawEventsSink pipeline — this is the sole
     // persistence path when the bridge has skipPersistence: true (TASK-664).
@@ -1985,7 +1999,7 @@ describe('RunExecutor.bridgeEvents — source arg integration', () => {
       getRunById: vi.fn().mockReturnValue(run),
       getById: vi.fn().mockReturnValue(workflow),
     };
-    const db = makeRawEventsDb();
+    const db = withModeJoinSurface(makeRawEventsDb());
     const publisher: StreamEventPublisher = { publish: vi.fn() };
 
     // No source — 8th arg omitted.
@@ -2407,7 +2421,7 @@ describe('panelId/runId alignment — integration with RunEventBridge', () => {
       getById: vi.fn().mockReturnValue(workflow),
     };
 
-    const db = makeRawEventsDb();
+    const db = withModeJoinSurface(makeRawEventsDb());
 
     const publisher: StreamEventPublisher = { publish: vi.fn() };
     const source = new EventEmitter();

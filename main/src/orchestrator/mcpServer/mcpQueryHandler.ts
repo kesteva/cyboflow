@@ -2133,21 +2133,32 @@ export class McpQueryHandler {
   }
 
   /**
-   * Resolve the run's effective 4-mode agentPermissionMode from the IMMUTABLE
-   * `workflow_runs.permission_mode_snapshot` (Step F). Returns null when the run
-   * row is absent or the column holds an unrecognized value — the caller then
-   * falls through to the existing allow-list + router gate (conservative; never
-   * auto-allows on an unknown mode). Used by the acceptEdits fast-path; the
-   * 'auto'/'dontAsk' modes never reach this handler (no shell hook installed).
+   * Resolve the run's effective 4-mode agentPermissionMode from its owning
+   * SESSION (`sessions.agent_permission_mode`), keyed on the run via the
+   * `workflow_runs → sessions` join (permission-mode redesign §3c#3). The
+   * session is the execution authority; the `permission_mode_snapshot` column is
+   * demoted to audit-only.
+   *
+   * Returns null when the run row is absent, the join misses (a legacy sentinel
+   * whose `session_id` was never backfilled ⇒ LEFT JOIN yields NULL), or the
+   * column holds an unrecognized value — the caller then falls through to the
+   * existing allow-list + router gate (conservative; never auto-allows on an
+   * unknown/absent mode). The join-miss case cannot strand a dontAsk/acceptEdits
+   * session in prompt-everything beyond the first mint-on-read turn (the
+   * sentinel's `session_id` is stamped at creation). Used by the acceptEdits
+   * fast-path; the 'auto'/'dontAsk' modes never reach this handler (no shell hook
+   * installed).
    */
   private resolveRunPermissionMode(runId: string): PermissionMode | null {
     const row = this.db
-      .prepare(`SELECT permission_mode_snapshot FROM workflow_runs WHERE id = ?`)
-      .get(runId) as { permission_mode_snapshot?: unknown } | undefined;
-    if (!row || !isPermissionMode(row.permission_mode_snapshot)) {
-      return null;
-    }
-    return row.permission_mode_snapshot;
+      .prepare(
+        `SELECT s.agent_permission_mode AS m
+           FROM workflow_runs r LEFT JOIN sessions s ON s.id = r.session_id
+          WHERE r.id = ?`,
+      )
+      .get(runId) as { m?: unknown } | undefined;
+    const m: unknown = row?.m;
+    return isPermissionMode(m) ? m : null;
   }
 
   /**

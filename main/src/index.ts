@@ -1076,6 +1076,10 @@ async function initializeServices() {
         void nudgeRunHandler(runId, text, { db: cyboflowDb, runQueues, runExecutor });
       },
     },
+    // Global-default agent-permission-mode thunk (permission-mode redesign
+    // §3c#1): the fallback resolveRunAgentPermissionMode uses when a run's owning
+    // session has a NULL agent_permission_mode (inherit the global default).
+    () => configManager.getDefaultAgentPermissionMode(),
   );
 
   // Raw-PTY byte path (TASK-814 / IDEA-030): subscribe the facade's 'pty-output'

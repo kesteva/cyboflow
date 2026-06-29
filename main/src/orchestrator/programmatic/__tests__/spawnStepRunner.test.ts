@@ -22,7 +22,9 @@ const opts = {
   runId: 'r',
   worktreePath: '/wt',
   workflowName: 'planner',
-  agentPermissionMode: 'auto' as const,
+  // Per-step resolver thunk (permission-mode redesign §3c#2) — invoked each
+  // runStep, never captured at construction.
+  agentPermissionMode: () => 'auto' as const,
 };
 
 describe('SpawnStepRunner', () => {
@@ -85,6 +87,35 @@ describe('SpawnStepRunner', () => {
 
     const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
     expect(passed.agentPermissionMode).toBeUndefined();
+  });
+
+  it('omits agentPermissionMode when the bound resolver returns undefined (thunk present, value absent)', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, { ...opts, agentPermissionMode: () => undefined });
+
+    await runner.runStep(step({ id: 'a' }), ctx);
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect('agentPermissionMode' in passed).toBe(false);
+  });
+
+  it('RE-RESOLVES agentPermissionMode per step — invokes the thunk each runStep, not captured at construction', async () => {
+    const spawner = makeSpawner();
+    // A resolver whose return value CHANGES between steps (mirrors a mid-run
+    // session-mode flip): the spawn for each step must carry the freshly-resolved
+    // value, proving the mode is read per runStep rather than frozen at build time.
+    const modes = ['default', 'acceptEdits'] as const;
+    let call = 0;
+    const resolve = vi.fn<() => (typeof modes)[number]>(() => modes[Math.min(call++, modes.length - 1)]);
+    const runner = new SpawnStepRunner(spawner, { ...opts, agentPermissionMode: resolve });
+
+    await runner.runStep(step({ id: 's1' }), ctx);
+    await runner.runStep(step({ id: 's2' }), ctx);
+
+    expect(resolve).toHaveBeenCalledTimes(2);
+    const calls = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls;
+    expect((calls[0][0] as ClaudeSpawnerOptions).agentPermissionMode).toBe('default');
+    expect((calls[1][0] as ClaudeSpawnerOptions).agentPermissionMode).toBe('acceptEdits');
   });
 
   // ── cancellation: SDK abort resolves the spawn cleanly, so a resolved spawn

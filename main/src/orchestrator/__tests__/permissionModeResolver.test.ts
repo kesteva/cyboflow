@@ -9,10 +9,13 @@
  *     an invalid-value-ignored case (fail-soft fall-through).
  */
 import { describe, it, expect } from 'vitest';
+import Database from 'better-sqlite3';
 import {
   resolvePermissionMode,
+  resolveRunAgentPermissionMode,
   DEFAULT_PERMISSION_MODE,
 } from '../permissionModeResolver';
+import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
 describe('resolvePermissionMode — override ladder', () => {
   it("floors to 'default' when nothing is set (zero-behavior-change invariant)", () => {
@@ -106,5 +109,99 @@ describe('resolvePermissionMode — override ladder', () => {
         globalDefaultMode: 'dontAsk',
       }),
     ).toBe('dontAsk');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveRunAgentPermissionMode — the session-is-authority join resolver
+// (permission-mode redesign §3a). Keyed on the RUN via workflow_runs → sessions.
+// ---------------------------------------------------------------------------
+
+/**
+ * Minimal schema for the run→session join: just the two columns the resolver
+ * touches (`workflow_runs.session_id` + `sessions.agent_permission_mode`).
+ */
+function buildJoinDb(): Database.Database {
+  const db = new Database(':memory:');
+  db.exec('CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, session_id TEXT)');
+  db.exec('CREATE TABLE sessions (id TEXT PRIMARY KEY, agent_permission_mode TEXT)');
+  return db;
+}
+
+function seedRun(db: Database.Database, runId: string, sessionId: string | null): void {
+  db.prepare('INSERT INTO workflow_runs (id, session_id) VALUES (?, ?)').run(runId, sessionId);
+}
+
+function seedSession(db: Database.Database, sessionId: string, mode: string | null): void {
+  db.prepare('INSERT INTO sessions (id, agent_permission_mode) VALUES (?, ?)').run(sessionId, mode);
+}
+
+describe('resolveRunAgentPermissionMode — session-via-run join', () => {
+  it('SESSION HIT: returns the owning session mode when set (the execution authority)', () => {
+    const db = buildJoinDb();
+    seedSession(db, 'sess-1', 'dontAsk');
+    seedRun(db, 'run-1', 'sess-1');
+
+    // The session mode wins over the supplied global default.
+    expect(resolveRunAgentPermissionMode(dbAdapter(db), 'run-1', 'default')).toBe('dontAsk');
+    db.close();
+  });
+
+  it("flow shape (sessionId===runId) still resolves the HOST session via the join, not a WHERE sessions.id=runId miss", () => {
+    // The run id and the session id are DISTINCT (the join is by session_id), so a
+    // naive `WHERE sessions.id = runId` would miss — the join is the fix (§3a #1).
+    const db = buildJoinDb();
+    seedSession(db, 'sess-host', 'acceptEdits');
+    seedRun(db, 'flow-run', 'sess-host');
+
+    expect(resolveRunAgentPermissionMode(dbAdapter(db), 'flow-run', 'default')).toBe('acceptEdits');
+    db.close();
+  });
+
+  it('NULL session mode → falls back to the supplied global default', () => {
+    const db = buildJoinDb();
+    seedSession(db, 'sess-2', null); // mode column NULL ⇒ inherit the global default
+    seedRun(db, 'run-2', 'sess-2');
+
+    expect(resolveRunAgentPermissionMode(dbAdapter(db), 'run-2', 'auto')).toBe('auto');
+    // And to the resolver's own 'default' floor when the caller omits the arg.
+    expect(resolveRunAgentPermissionMode(dbAdapter(db), 'run-2')).toBe('default');
+    db.close();
+  });
+
+  it('JOIN MISS (legacy sentinel, session_id NULL) → global default, never strands the run', () => {
+    // A run whose session_id was never backfilled: the LEFT JOIN yields m=NULL.
+    // It must fall back to the default (→ conservative router gate), NOT throw or
+    // strand a dontAsk/acceptEdits session in prompt-everything.
+    const db = buildJoinDb();
+    seedRun(db, 'run-orphan', null);
+
+    expect(resolveRunAgentPermissionMode(dbAdapter(db), 'run-orphan', 'default')).toBe('default');
+    // The fallback is whatever global default the caller threads.
+    expect(resolveRunAgentPermissionMode(dbAdapter(db), 'run-orphan', 'acceptEdits')).toBe('acceptEdits');
+    db.close();
+  });
+
+  it('JOIN MISS (session_id points at a missing session row) → global default', () => {
+    const db = buildJoinDb();
+    seedRun(db, 'run-dangling', 'sess-gone'); // no such session row
+
+    expect(resolveRunAgentPermissionMode(dbAdapter(db), 'run-dangling', 'auto')).toBe('auto');
+    db.close();
+  });
+
+  it('UNKNOWN run id → global default (no row at all)', () => {
+    const db = buildJoinDb();
+    expect(resolveRunAgentPermissionMode(dbAdapter(db), 'nope', 'dontAsk')).toBe('dontAsk');
+    db.close();
+  });
+
+  it('invalid mode value in the column is ignored (fail-soft) → global default', () => {
+    const db = buildJoinDb();
+    seedSession(db, 'sess-bad', 'yolo'); // not a PermissionMode
+    seedRun(db, 'run-bad', 'sess-bad');
+
+    expect(resolveRunAgentPermissionMode(dbAdapter(db), 'run-bad', 'default')).toBe('default');
+    db.close();
   });
 });

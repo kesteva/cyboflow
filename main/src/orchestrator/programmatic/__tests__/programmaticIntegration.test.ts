@@ -98,6 +98,8 @@ function ctxFor(runId: string): ProgrammaticRunContext {
     worktreePath: '/wt',
     run,
     workflow,
+    // Session-resolved mode (permission-mode redesign §3c#2).
+    agentPermissionMode: 'auto',
     signal: new AbortController().signal,
     injectEvent: () => {},
   };
@@ -207,6 +209,8 @@ function fanOutCtx(runId: string, specJson: string, batchId: string | null): Pro
     worktreePath: '/wt',
     run,
     workflow,
+    // Session-resolved mode (permission-mode redesign §3c#2).
+    agentPermissionMode: 'auto',
     signal: new AbortController().signal,
     injectEvent: () => {},
   };

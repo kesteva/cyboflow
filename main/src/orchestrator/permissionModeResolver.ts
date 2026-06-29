@@ -17,6 +17,7 @@ import {
   type PermissionMode,
   isPermissionMode,
 } from '../../../shared/types/workflows';
+import type { DatabaseLike } from './types';
 
 /** The mode every run falls back to when nothing overrides it. */
 export const DEFAULT_PERMISSION_MODE: PermissionMode = 'default';
@@ -79,4 +80,44 @@ export function resolvePermissionMode(
   }
 
   return DEFAULT_PERMISSION_MODE;
+}
+
+/**
+ * Resolve the LIVE agent permission mode for a run from its owning session
+ * (`sessions.agent_permission_mode`), keyed on the RUN id via the
+ * `workflow_runs → sessions` join (permission-mode redesign §3a).
+ *
+ * Source of truth: the host session's mode column, which is now the single
+ * execution authority (the `workflow_runs.permission_mode_snapshot` column is
+ * demoted to a launch-time audit value, no longer read for execution).
+ *
+ * Keying on the run (not a bare sessionId) is correct for BOTH entry shapes,
+ * because the gate run resolves to its host session either way:
+ *   - chat turn  → gate run = a `__quick__` chat sentinel → its `session_id`
+ *   - flow run   → gate run = the flow run itself → its `session_id`
+ * (for flows `sessionId === runId`, so a `WHERE sessions.id = runId` lookup
+ * would miss — the join is the fix). This is the same join `mcpQueryHandler`
+ * adopts for the interactive shell-approval fast-path (§3c#3).
+ *
+ * LEFT JOIN so a run whose `session_id` never resolves (legacy SDK sentinel
+ * left NULL by design, or a join-miss) yields `m = NULL`, which fails the
+ * `isPermissionMode` guard and falls back to `globalDefault` — never strands a
+ * run in an unrecognized mode.
+ *
+ * Standalone-typecheck-safe: imports only `DatabaseLike` + `isPermissionMode`.
+ */
+export function resolveRunAgentPermissionMode(
+  db: DatabaseLike,
+  runId: string,
+  globalDefault: PermissionMode = 'default',
+): PermissionMode {
+  const row = db
+    .prepare(
+      `SELECT s.agent_permission_mode AS m
+         FROM workflow_runs r LEFT JOIN sessions s ON s.id = r.session_id
+        WHERE r.id = ?`,
+    )
+    .get(runId) as { m?: unknown } | undefined;
+  const m: unknown = row?.m;
+  return isPermissionMode(m) ? m : globalDefault;
 }

@@ -111,7 +111,10 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         runId: ctx.runId,
         worktreePath: ctx.worktreePath,
         workflowName: ctx.workflow.name,
-        agentPermissionMode: ctx.run.permission_mode_snapshot,
+        // Per-step resolver (permission-mode redesign §3c#2): SpawnStepRunner
+        // invokes this each step, reading the run's session-resolved mode off the
+        // context rather than the demoted `permission_mode_snapshot` audit column.
+        agentPermissionMode: () => ctx.agentPermissionMode,
         ...(taskScope ? { taskScope } : {}),
       },
       this.deps.logger,
