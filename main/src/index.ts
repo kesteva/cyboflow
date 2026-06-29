@@ -1665,15 +1665,16 @@ app.whenReady().then(async () => {
     });
     console.log('[Main] runs.relayInput/relayResize/endSession/killSession/getPtyBacklog deps wired');
 
-    // Wire the run user-shell (worktree-terminal feature): a plain $SHELL PTY in
-    // the run's worktree, keyed by runId, backing the run "Shell" tab. The cwd is
-    // resolved from workflow_runs.worktree_path (flow runs have no sessions row,
-    // so they can't use the panel/session terminal stack). Raw bytes stream to the
-    // renderer on `cyboflow:shell:<runId>` (mirrors the agent PTY's
-    // cyboflow:pty:<runId>); input/resize/backlog ride tRPC (setRunShellDeps).
+    // Wire the run user-shell (worktree-terminal feature): plain $SHELL PTYs in
+    // the run's worktree, keyed by terminalId, backing the run "Terminal" tabs (a
+    // run can host MULTIPLE via ＋terminal; the primary's terminalId === runId). The
+    // cwd is resolved from workflow_runs.worktree_path (flow runs have no sessions
+    // row, so they can't use the panel/session terminal stack). Raw bytes stream to
+    // the renderer on `cyboflow:shell:<terminalId>` (mirrors the agent PTY's
+    // cyboflow:pty:<runId>); input/resize/backlog/close ride tRPC (setRunShellDeps).
     // Independent of the RunExecutor, so a shell — and any dev server it launched —
-    // SURVIVES run completion; close() fires at run close-out and destroyAll() at
-    // app quit.
+    // SURVIVES run completion; close() reaps every terminal for a run at close-out
+    // and destroyAll() at app quit.
     runShellManager = new RunShellManager(
       (runId) => {
         const row = db

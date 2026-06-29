@@ -1,24 +1,26 @@
 /**
  * RunShellTerminalView — live xterm.js terminal for a run's PLAIN worktree shell.
  *
- * This is the renderer half of the run "Shell" tab: a bare `$SHELL` running in the
+ * This is the renderer half of a run "Terminal" tab: a bare `$SHELL` running in the
  * run's worktree (backed by `RunShellManager`), for running arbitrary commands
  * against the code a flow built — most importantly launching a dev server to test
  * the changes. It is DELIBERATELY NOT the agent PTY (`InteractiveTerminalView`,
  * `cyboflow:pty:<runId>`): no first-interaction guardrail, no relay/stdin gate —
- * the user types freely.
+ * the user types freely. A run can host MULTIPLE such terminals (＋terminal), each
+ * a distinct `terminalId` (the primary's terminalId === runId).
  *
- * Channel (mirrors the agent PTY): raw bytes arrive on `cyboflow:shell:<runId>`
+ * Channel (mirrors the agent PTY): raw bytes arrive on `cyboflow:shell:<terminalId>`
  * via {@link subscribeToShellBytes} and are written DIRECTLY to `term.write()`
  * (never into the structured cyboflow stream store — Q3 store-isolation).
  * Keystrokes relay verbatim via `runs.shellInput`; geometry via `runs.shellResize`.
  * On mount we lazily `runs.shellOpen` (idempotent server-side) and replay
  * `runs.shellBacklog` so a (re)mounting terminal reconstructs recent output.
  *
- * Lifecycle: the BACKEND shell PTY is keyed by runId and SURVIVES this view's
- * unmount (a Chat↔Shell tab switch) and run completion — it is killed only at run
- * close-out (merge/dismiss) and app quit. So a dev server keeps running while the
- * user is on another tab; on return the 256 KB backlog repaints recent output.
+ * Lifecycle: the BACKEND shell PTY is keyed by terminalId and SURVIVES this view's
+ * unmount (a tab switch) and run completion — it is killed only by closing an added
+ * terminal tab (shellClose), at run close-out (merge/dismiss), and at app quit. So a
+ * dev server keeps running while the user is on another tab; on return the 256 KB
+ * backlog repaints recent output.
  * (We intentionally do NOT keep the xterm instance alive across unmounts the way
  * the agent terminal does — the backend backlog replay is sufficient for a
  * line-oriented shell, and it avoids a renderer-side eviction hook.)
