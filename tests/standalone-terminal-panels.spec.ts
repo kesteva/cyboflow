@@ -165,7 +165,7 @@ test.describe('Add Terminal Button — PanelTabBar', () => {
   });
 });
 
-test.describe('CyboflowRoot — Add Terminal + Add Claude', () => {
+test.describe('CyboflowRoot — Add Terminal', () => {
   test.beforeEach(async ({ page }) => {
     ensureTestResultsDir();
     await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -211,80 +211,9 @@ test.describe('CyboflowRoot — Add Terminal + Add Claude', () => {
     await page.screenshot({ path: path.join(TEST_RESULTS_DIR, 'add-terminal-cyboflow-root.png') });
   });
 
-  test('Add Claude button on CyboflowRoot panel tab bar creates a new Claude tab', async ({ page }) => {
-    const hasProject = await navigateToFirstProject(page);
-
-    if (!hasProject) {
-      test.skip();
-      return;
-    }
-
-    // Wait for the CyboflowRoot panel tab bar to appear
-    await page.waitForSelector('[aria-label="Panel Tabs"]', { timeout: 10000 });
-
-    const addClaudeButton = page.getByRole('button', { name: 'Add Claude panel' });
-    await expect(addClaudeButton).toBeVisible({ timeout: 5000 });
-    await expect(addClaudeButton).toBeEnabled();
-
-    // Count existing tabs before clicking
-    const tabsBefore = await page.locator('[role="tab"]').count();
-
-    // Click the Add Claude button
-    await addClaudeButton.click();
-
-    // Wait for a new tab to appear
-    await page.waitForFunction(
-      (prevCount: number) => document.querySelectorAll('[role="tab"]').length > prevCount,
-      tabsBefore,
-      { timeout: 10000 },
-    );
-
-    const tabsAfter = await page.locator('[role="tab"]').count();
-    expect(tabsAfter).toBeGreaterThan(tabsBefore);
-
-    // The newly created Claude tab should be active
-    const activeTab = page.locator('[role="tab"][aria-selected="true"]');
-    await expect(activeTab).toBeVisible({ timeout: 5000 });
-
-    await page.screenshot({ path: path.join(TEST_RESULTS_DIR, 'add-claude-cyboflow-root.png') });
-  });
-
-  test('Add Claude button is idempotent — second click does NOT create a duplicate', async ({ page }) => {
-    const hasProject = await navigateToFirstProject(page);
-
-    if (!hasProject) {
-      test.skip();
-      return;
-    }
-
-    // Wait for the CyboflowRoot panel tab bar to appear
-    await page.waitForSelector('[aria-label="Panel Tabs"]', { timeout: 10000 });
-
-    const addClaudeButton = page.getByRole('button', { name: 'Add Claude panel' });
-    await expect(addClaudeButton).toBeVisible({ timeout: 5000 });
-
-    // First click — creates the Claude panel
-    await addClaudeButton.click();
-
-    // Wait for the tab to appear
-    await page.waitForFunction(
-      () => document.querySelectorAll('[role="tab"][aria-selected="true"]').length > 0,
-      { timeout: 10000 },
-    );
-
-    const tabsAfterFirst = await page.locator('[role="tab"]').count();
-
-    // Second click — should NOT create a duplicate; instead activates the existing Claude tab
-    await addClaudeButton.click();
-    await page.waitForTimeout(1000); // allow any async operations to complete
-
-    const tabsAfterSecond = await page.locator('[role="tab"]').count();
-    expect(tabsAfterSecond).toBe(tabsAfterFirst);
-
-    // The active tab should still be aria-selected=true
-    const activeTab = page.locator('[role="tab"][aria-selected="true"]');
-    await expect(activeTab).toBeVisible({ timeout: 5000 });
-
-    await page.screenshot({ path: path.join(TEST_RESULTS_DIR, 'add-claude-idempotent.png') });
-  });
+  // NOTE: the "Add Claude" (＋chat) button was intentionally removed from the
+  // panel tab bar — a quick session keeps ONE primary chat panel plus terminals.
+  // Its former tests lived here; the supported entry points are now the
+  // boot-ensure (useEnsureClaudePanel) and the add-claude keyboard shortcut
+  // (useAddClaudeShortcut), not a tab-bar button.
 });
