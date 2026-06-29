@@ -166,9 +166,14 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   }, [resumeArmed]);
 
   // "Resume previous session" → arm the deferred resume; the next composer turn
-  // continues the prior conversation (--resume --fork-session) server-side.
+  // continues the prior conversation (--resume --fork-session) server-side. Also
+  // DISMISS the prompt for this mount: the probe never re-runs for a quick session
+  // (its sentinel runId is constant), so canOfferResume stays stale-true and the
+  // prompt would re-pop once the restored-context hint auto-clears. The user has
+  // already chosen — mirror handleDeclineResume's one-shot dismissal.
   const handleResumeSession = (): void => {
     setResumeArmed(true);
+    setResumePromptDismissed(true);
     void API.sessions.resumeInteractive(panel.sessionId).catch(() => undefined);
   };
 

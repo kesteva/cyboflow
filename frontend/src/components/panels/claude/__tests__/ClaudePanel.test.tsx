@@ -21,7 +21,7 @@
  * test (same treatment as RunChatView.test.tsx).
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
@@ -389,6 +389,43 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
       await waitFor(() => expect(mockCancelInteractiveResume).toHaveBeenCalledWith('s1'));
       expect(screen.queryByTestId('resume-session-prompt')).not.toBeInTheDocument();
       expect(screen.queryByTestId('resume-restored-hint')).not.toBeInTheDocument();
+    });
+
+    it('does NOT re-pop the resume prompt after Resume once the restored-context hint auto-clears', async () => {
+      // Regression: the probe never re-runs for a quick session (its sentinel runId
+      // is constant), so canOfferResume stays stale-true after the REPL comes back.
+      // Without dismissing on Resume, the prompt re-pops the moment the 12s hint
+      // auto-clears (resumeArmed → false). Fix B dismisses the prompt on Resume.
+      mockGetResumeState.mockResolvedValue(resumable);
+      vi.useFakeTimers();
+      try {
+        renderWithProvider(makeSession({ substrate: 'interactive', runId: 'run-q1' }));
+        // Flush the async resume-state probe so the prompt mounts.
+        await act(async () => {
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+        expect(screen.getByTestId('resume-session-prompt')).toBeInTheDocument();
+
+        // Choose Resume → restored-context hint shows, prompt hides.
+        await act(async () => {
+          fireEvent.click(screen.getByTestId('resume-btn'));
+          await Promise.resolve();
+        });
+        expect(screen.getByTestId('resume-restored-hint')).toBeInTheDocument();
+        expect(screen.queryByTestId('resume-session-prompt')).not.toBeInTheDocument();
+
+        // Advance past the 12s hint auto-clear.
+        await act(async () => {
+          vi.advanceTimersByTime(12_001);
+        });
+
+        // Hint is gone AND the prompt must stay dismissed (no re-pop).
+        expect(screen.queryByTestId('resume-restored-hint')).not.toBeInTheDocument();
+        expect(screen.queryByTestId('resume-session-prompt')).not.toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('does not re-offer resume after Start fresh, even on remount', async () => {
