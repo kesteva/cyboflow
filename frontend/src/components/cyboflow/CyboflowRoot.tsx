@@ -25,6 +25,8 @@ import { WorkflowSummaryPanel } from './WorkflowSummaryPanel';
 import { QuickSessionCanvas } from './QuickSessionCanvas';
 import { WorkflowEditorModal } from './WorkflowEditorModal';
 import { RunCenterPane } from './RunCenterPane';
+import { TerminalDock } from './TerminalDock';
+import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
 import { RunRightRail } from './RunRightRail';
 import { Modal } from '../ui/Modal';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -140,6 +142,41 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
   useAddTerminalShortcut(handleAddTerminal);
   useAddClaudeShortcut(ensureClaudePanel);
+
+  // Quick-session terminal dock collapse state — mirrors the run's RunCenterPane
+  // dock so a quick session gets the SAME ▴▾ collapse/expand arrows. Reuses
+  // centerPaneStore keyed by the session id (FALLBACK seeds terminalOpen=true),
+  // so the dock state is consistent whether the session is resting (quick) or
+  // hosting a run.
+  const quickDockKey = effectiveSession ? String(effectiveSession.id) : '__none__';
+  const quickDockOpen = useCenterPaneSession(quickDockKey).terminalOpen;
+  const toggleQuickDock = useCenterPaneStore((s) => s.toggleTerminal);
+
+  // The quick-session panel surface (tab bar + active panel). Rendered as
+  // flex-column children of either the TerminalDock body (worktree sessions —
+  // dock body is already display:flex/flex-col) or the bare center column
+  // (main-repo). PanelTabBar sits above; the active panel fills the rest.
+  const quickPanelSurface = (
+    <>
+      <PanelTabBar
+        panels={sessionPanels}
+        activePanel={currentActivePanel}
+        onPanelSelect={handlePanelSelect}
+        onPanelClose={handlePanelClose}
+        context="project"
+        onAddTerminal={handleAddTerminal}
+      />
+      {currentActivePanel && (
+        <div className="flex-1 overflow-hidden relative">
+          <PanelContainer
+            panel={currentActivePanel}
+            isActive
+            isMainRepo={!!effectiveSession?.isMainRepo}
+          />
+        </div>
+      )}
+    </>
+  );
 
   const quickSession = useQuickSession({ projectId });
 
@@ -330,42 +367,38 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
               {/* Resting view — a worktree-backed session with NO active run
                   (a fresh quick session, or one a finished run handed back).
                   QuickSessionCanvas fills the top plane (mirroring the run's
-                  WorkflowCanvas slot) so the layout never collapses; the chat /
-                  terminal panel surface stays below. The bare main-repo session
-                  keeps its panels-only layout (no worktree node to show). */}
-              {!effectiveSession.isMainRepo && projectId !== null && (
-                <div style={{ flexBasis: '46%', overflow: 'hidden', flexShrink: 0 }}>
-                  <QuickSessionCanvas
-                    session={effectiveSession}
-                    projectId={projectId}
-                    projectName={projectName}
-                    onBrowseAll={() => {
-                      // "Browse all" is the in-session add-a-workflow path (only
-                      // reached for SDK sessions; PTY routes to the confirm below),
-                      // so it REUSES this session — explicit forceNew=false.
-                      setPickerForceNew(false);
-                      setIsPickerOpen(true);
-                    }}
-                    onAddWorkflowToNewSession={() => setAddWorkflowConfirmOpen(true)}
-                  />
-                </div>
-              )}
-              <PanelTabBar
-                panels={sessionPanels}
-                activePanel={currentActivePanel}
-                onPanelSelect={handlePanelSelect}
-                onPanelClose={handlePanelClose}
-                context="project"
-                onAddTerminal={handleAddTerminal}
-              />
-              {currentActivePanel && (
-                <div className="flex-1 overflow-hidden relative">
-                  <PanelContainer
-                    panel={currentActivePanel}
-                    isActive
-                    isMainRepo={!!effectiveSession?.isMainRepo}
-                  />
-                </div>
+                  WorkflowCanvas slot) and the chat / terminal panel surface sits
+                  in a collapsible TerminalDock below — SAME ▴▾ arrows as a run.
+                  The bare main-repo session keeps its panels-only layout (no
+                  worktree node to show, so no dock). */}
+              {!effectiveSession.isMainRepo && projectId !== null ? (
+                <>
+                  <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+                    <QuickSessionCanvas
+                      session={effectiveSession}
+                      projectId={projectId}
+                      projectName={projectName}
+                      onBrowseAll={() => {
+                        // "Browse all" is the in-session add-a-workflow path (only
+                        // reached for SDK sessions; PTY routes to the confirm below),
+                        // so it REUSES this session — explicit forceNew=false.
+                        setPickerForceNew(false);
+                        setIsPickerOpen(true);
+                      }}
+                      onAddWorkflowToNewSession={() => setAddWorkflowConfirmOpen(true)}
+                    />
+                  </div>
+                  <TerminalDock
+                    open={quickDockOpen}
+                    onToggle={() => toggleQuickDock(quickDockKey)}
+                    storageKey="cyboflow.quickSessionDock.height"
+                    defaultOpenHeight={420}
+                  >
+                    {quickPanelSurface}
+                  </TerminalDock>
+                </>
+              ) : (
+                quickPanelSurface
               )}
               {/* Inline permission prompts now render inside ClaudePanel, directly
                   above the input (see PendingApprovalsForRun in ClaudePanel.tsx). */}

@@ -87,20 +87,34 @@ interface TerminalDockProps {
   folderLabel?: string;
   /** @deprecated See {@link folderLabel} — accepted but no longer rendered. */
   branchName?: string;
+  /**
+   * localStorage key for the persisted standard height. Defaults to the run
+   * dock's key. The quick-session host passes its OWN key so its (taller,
+   * chat-primary) standard height persists independently of the run dock.
+   */
+  storageKey?: string;
+  /**
+   * Standard (open) height used when nothing is persisted under {@link storageKey}.
+   * Defaults to {@link DOCK_OPEN_HEIGHT} (the run dock). Quick sessions pass a
+   * taller seed so the chat is usable by default. Clamped like any height.
+   */
+  defaultOpenHeight?: number;
   children: ReactNode;
 }
 
 export function TerminalDock({
   open,
   onToggle,
+  storageKey = DOCK_HEIGHT_KEY,
+  defaultOpenHeight = DOCK_OPEN_HEIGHT,
   children,
 }: TerminalDockProps): ReactElement {
-  // Standard height: seed from localStorage (default DOCK_OPEN_HEIGHT), clamped.
+  // Standard height: seed from localStorage (default defaultOpenHeight), clamped.
   const [height, setHeight] = useState<number>(() => {
     const saved =
-      typeof localStorage !== 'undefined' ? localStorage.getItem(DOCK_HEIGHT_KEY) : null;
+      typeof localStorage !== 'undefined' ? localStorage.getItem(storageKey) : null;
     const parsed = saved !== null ? parseInt(saved, 10) : NaN;
-    return clampDockHeight(Number.isFinite(parsed) ? parsed : DOCK_OPEN_HEIGHT);
+    return clampDockHeight(Number.isFinite(parsed) ? parsed : defaultOpenHeight);
   });
 
   // Standard↔full maximize. Transient (not persisted) and only meaningful while
@@ -126,9 +140,9 @@ export function TerminalDock({
   // Persist the chosen standard height. (Brand-new key — no migrateLocalStorageKey.)
   useEffect(() => {
     if (typeof localStorage !== 'undefined') {
-      localStorage.setItem(DOCK_HEIGHT_KEY, height.toString());
+      localStorage.setItem(storageKey, height.toString());
     }
-  }, [height]);
+  }, [storageKey, height]);
 
   const handleGripMouseMove = useCallback((e: MouseEvent) => {
     const it = interactionRef.current;
