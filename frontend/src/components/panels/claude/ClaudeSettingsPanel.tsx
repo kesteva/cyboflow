@@ -1,3 +1,8 @@
+// @cyboflow-hidden: the quick-session chat display-settings dropdown
+// (Crystal-preserved) — the unified chat surface (`UnifiedChatView`) has no
+// in-view settings affordance (it reads `richOutputSettings` from localStorage),
+// so ClaudePanel no longer mounts this. Re-enable by re-adding a settings gear +
+// <ClaudeSettingsPanel> to the chat host that should expose it.
 import React from 'react';
 import { Wrench, Brain, Terminal, Maximize2, Package } from 'lucide-react';
 import { SwitchSimple } from '../../ui/SwitchSimple';

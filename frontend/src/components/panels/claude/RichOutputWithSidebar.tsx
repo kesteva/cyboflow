@@ -1,3 +1,9 @@
+// @cyboflow-hidden: the legacy quick-session SDK transcript + sliding prompt
+// sidebar (Crystal-preserved) — superseded by the shared `UnifiedChatView`
+// (frontend/src/components/cyboflow/unified/UnifiedChatView.tsx), which the
+// workflow run AND the quick session now both render so the chat can't drift.
+// Re-enable by rendering <RichOutputWithSidebar> in ClaudePanel's SDK branch
+// again (it was the sole consumer).
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { ChevronLeft, ChevronRight, History } from 'lucide-react';
 import { RichOutputView } from '../ai/RichOutputView';
