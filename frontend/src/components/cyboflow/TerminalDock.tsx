@@ -35,7 +35,7 @@ export const DOCK_OPEN_HEIGHT = 188;
 const DOCK_TOGGLE_HEIGHT = 14;
 /** Resize clamp (standard level): never shrink below a usable chat peek. */
 const DOCK_MIN_HEIGHT = 120;
-/** Resize clamp (standard level): cap at an absolute ceiling or ~70% of viewport. */
+/** Fallback height used only when the viewport is unmeasurable (SSR/jsdom edge). */
 const DOCK_MAX_ABS_HEIGHT = 560;
 /** localStorage key for the persisted standard height. Brand-new key — no migration. */
 const DOCK_HEIGHT_KEY = 'cyboflow.terminalDock.height';
@@ -48,13 +48,13 @@ const FAINT = 'var(--color-text-tertiary)';
 const PAGE = 'var(--color-bg-primary)';
 const CHEVRON = 'var(--color-text-secondary)';
 
-/** Upper resize bound (standard): absolute cap, but never more than ~70% viewport. */
+/** Upper resize bound (standard): the FULL viewport height — no artificial cap, so
+ *  the dock can be DRAGGED all the way to full height (the same ceiling the ▴ full
+ *  toggle jumps to). */
 function maxDockHeight(): number {
-  const viewportCap =
-    typeof window !== 'undefined' && window.innerHeight > 0
-      ? Math.round(window.innerHeight * 0.7)
-      : DOCK_MAX_ABS_HEIGHT;
-  return Math.min(DOCK_MAX_ABS_HEIGHT, viewportCap);
+  return typeof window !== 'undefined' && window.innerHeight > 0
+    ? window.innerHeight
+    : DOCK_MAX_ABS_HEIGHT * 2;
 }
 
 /** Clamp a candidate standard height into [min, max]. */

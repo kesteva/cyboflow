@@ -23,7 +23,6 @@ import { TerminalDock, DOCK_OPEN_HEIGHT } from '../TerminalDock';
 
 const HEIGHT_KEY = 'cyboflow.terminalDock.height';
 const DOCK_MIN = 120;
-const DOCK_MAX_ABS = 560;
 const VIEWPORT = 2000; // window.innerHeight set in beforeEach
 
 /** Drag the grip bar by `dy` px from a starting clientY (default 400). */
@@ -105,17 +104,18 @@ describe('TerminalDock — resize affordance', () => {
     expect(localStorage.getItem(HEIGHT_KEY)).toBe(String(DOCK_MIN));
   });
 
-  it('clamps at the maximum on a large upward drag', () => {
+  it('clamps at the maximum (full viewport height) on a large upward drag', () => {
     render(
       <TerminalDock open onToggle={() => {}}>
         <div data-testid="child" />
       </TerminalDock>,
     );
-    // Drag UP by 2000px → would exceed max, clamps to the absolute ceiling
-    // (viewport is 2000 so ~70% = 1400 > 560 → absolute cap wins).
+    // Drag UP by 2000px → would exceed the ceiling; there is NO artificial cap any
+    // more, so it clamps to the full viewport height (the dock can be dragged to
+    // full height, same ceiling as the ▴ full toggle).
     dragGrip(-2000);
-    expect(dockHeight()).toBe(DOCK_MAX_ABS);
-    expect(localStorage.getItem(HEIGHT_KEY)).toBe(String(DOCK_MAX_ABS));
+    expect(dockHeight()).toBe(VIEWPORT);
+    expect(localStorage.getItem(HEIGHT_KEY)).toBe(String(VIEWPORT));
   });
 
   it('seeds the initial open height from a persisted (clamped) value', () => {
@@ -135,7 +135,8 @@ describe('TerminalDock — resize affordance', () => {
         <div data-testid="child" />
       </TerminalDock>,
     );
-    expect(dockHeight()).toBe(DOCK_MAX_ABS);
+    // No artificial cap → clamps to the full viewport height.
+    expect(dockHeight()).toBe(VIEWPORT);
   });
 });
 
