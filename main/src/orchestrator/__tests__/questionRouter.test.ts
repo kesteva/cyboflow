@@ -1234,6 +1234,15 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     return `stage-board-1-default-${position}`;
   }
 
+  function ideaStage(db: Database.Database, ideaId: string): string {
+    return (db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string }).stage_id;
+  }
+
+  function decomposedAt(db: Database.Database, ideaId: string): string | null {
+    return (db.prepare('SELECT decomposed_at FROM ideas WHERE id = ?').get(ideaId) as { decomposed_at: string | null })
+      .decomposed_at;
+  }
+
   function seedPlannerRun(
     db: Database.Database,
     opts: { runId: string; currentStepId: string },
@@ -1329,7 +1338,7 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     await TaskChangeRouter.getInstance()._queueForProject(1).onIdle();
   }
 
-  it('Archive on decompose retires owned ideas to Decomposed (position 12) and completes the run', async () => {
+  it('Archive on decompose retires owned ideas off the board (stamps decomposed_at, keeps stage) and completes the run', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const taskRouter = TaskChangeRouter.initialize(adapter);
@@ -1338,19 +1347,19 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     seedPlannerRun(db, { runId: 'run-d', currentStepId: 'decompose' });
     const ideaA = await seedOwnedIdea(db, taskRouter, 'run-d');
     const ideaB = await seedOwnedIdea(db, taskRouter, 'run-d');
-    // Ideas start at Idea (position 1).
+    // Ideas start at Idea (position 1), not yet retired.
     for (const id of [ideaA, ideaB]) {
-      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(id) as { stage_id: string }).stage_id).toBe(
-        stageId(1),
-      );
+      expect(ideaStage(db, id)).toBe(stageId(1));
+      expect(decomposedAt(db, id)).toBeNull();
     }
 
     await answerDecomposeGate(db, router, 'run-d', 'Archive & finish');
 
+    // Migration-036 retirement is a decomposed_at stamp, NOT a stage move: each
+    // idea keeps its stage (position 1) and the stamp takes it off the board.
     for (const id of [ideaA, ideaB]) {
-      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(id) as { stage_id: string }).stage_id).toBe(
-        stageId(12),
-      );
+      expect(decomposedAt(db, id)).not.toBeNull();
+      expect(ideaStage(db, id)).toBe(stageId(1));
     }
     // The idea retirement is orchestrator-attributed.
     const ev = db

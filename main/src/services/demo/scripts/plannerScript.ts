@@ -36,42 +36,6 @@ function resolveProjectId(ctx: DemoScriptContext): number {
   return row.projectId;
 }
 
-/**
- * Advance the seed idea to the board stage at `position`, mirroring the
- * production planner-step -> idea-stage coupling (PLANNER_STEP_TO_IDEA_POSITION
- * in mcpQueryHandler: 1=Idea, 2=Research, 3=Idea spec). The real coupling fires
- * inside the MCP report-step handler, which the demo's reportStep bypasses —
- * so the demo replays it here. Fail-soft like the original: any unresolved
- * board/stage or chokepoint rejection is swallowed.
- */
-async function advanceIdeaStage(
-  ctx: DemoScriptContext,
-  projectId: number,
-  ideaId: string,
-  position: number,
-): Promise<void> {
-  try {
-    const ideaRow = ctx.db
-      .prepare('SELECT board_id AS boardId, stage_id AS stageId FROM ideas WHERE id = ?')
-      .get(ideaId) as { boardId?: string | null; stageId?: string | null } | undefined;
-    if (!ideaRow?.boardId) return;
-    const stageRow = ctx.db
-      .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
-      .get(ideaRow.boardId, position) as { id?: string } | undefined;
-    if (!stageRow?.id || stageRow.id === ideaRow.stageId) return;
-    await TaskChangeRouter.getInstance().applyChange(projectId, {
-      actor: 'orchestrator',
-      entityType: 'idea',
-      taskId: ideaId,
-      stageId: stageRow.id,
-      runId: ctx.runId,
-      kind: 'seed-idea-stage',
-    });
-  } catch {
-    // Stage advance is presentation polish — never let it break the demo run.
-  }
-}
-
 export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
   const idea = resolveSeedIdea(ctx);
   const ideaTitle = idea?.title ?? 'Add streaks to habits';
@@ -80,7 +44,6 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
 
   // ── Plan phase · context ──────────────────────────────────────────────────
   ctx.reportStep('context', 'running');
-  if (idea) await advanceIdeaStage(ctx, projectId, idea.id, 1); // Idea
   ctx.think(`Selected idea: "${ideaTitle}". I should scan the codebase to ground the spec before asking the user about scope.`);
   await ctx.sleep(1200);
   ctx.say(`Working on the idea **${ideaTitle}**. Let me get oriented in the codebase first.`);
@@ -118,7 +81,6 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
 
   // ── Plan phase · research (optional step) ─────────────────────────────────
   ctx.reportStep('research', 'running');
-  if (idea) await advanceIdeaStage(ctx, projectId, idea.id, 2); // Research
   ctx.tool(
     'WebSearch',
     { query: 'habit tracker streak calculation edge cases' },
@@ -163,7 +125,6 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
       },
       runId: ctx.runId,
     });
-    await advanceIdeaStage(ctx, projectId, idea.id, 3); // Idea spec
   }
   ctx.say(`Here is the idea spec — review it right here, then approve below to continue.\n\n---\n\n${specBody}`);
   const ideaApproval = await ctx.askQuestion([

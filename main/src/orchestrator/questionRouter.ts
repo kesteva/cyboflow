@@ -77,12 +77,13 @@ const READY_FOR_DEVELOPMENT_POSITION = 6;
 
 /**
  * FIX-STAGE-MODEL (decompose): the planner step id whose answer is the separate
- * final gate (Archive vs Keep the decomposed ideas + finish), and the terminal
- * board position retired ideas land on when the user chooses Archive. Verified
- * against database.ts seedDefaultBoard (position 12 = 'Decomposed').
+ * final gate (Archive vs Keep the decomposed ideas + finish). Choosing Archive
+ * retires the run's owned ideas OFF the board by stamping `decomposed_at` (the
+ * gate-driven retire path — TaskChangeRouter.retireIdeaToDecomposed), NOT a
+ * board-position move; a retired idea keeps its stage and is reachable only via
+ * its children.
  */
 const DECOMPOSE_STEP_ID = 'decompose';
-const DECOMPOSED_POSITION = 12;
 
 /**
  * Ship (defense-in-depth): the `ship` workflow concatenates planner → sprint in
@@ -684,9 +685,10 @@ export class QuestionRouter extends EventEmitter {
    * FIX-STAGE-MODEL (decompose): the planner's separate FINAL gate, answered at
    * the `decompose` step. The gate offers two options:
    *  - "Archive & finish": the run's owned ideas (listRunOwnedIdeaIds — seed idea
-   *    UNION run-created ideas) are retired to the terminal Decomposed stage
-   *    (position 12) on each idea's own board, then the run completes.
-   *  - "Keep ideas & finish": the ideas stay where they are; the run completes.
+   *    UNION run-created ideas) are retired OFF the board by stamping
+   *    `decomposed_at` (TaskChangeRouter.retireIdeaToDecomposed — the idea keeps
+   *    its stage), then the run completes.
+   *  - "Keep ideas & finish": the ideas stay on the board; the run completes.
    *
    * In BOTH cases the run then COMPLETES — respond() has already flipped the run
    * back to 'running' (the standard answer transition), so a guarded UPDATE here
@@ -696,10 +698,10 @@ export class QuestionRouter extends EventEmitter {
    *
    * Backend-deterministic + idempotent + fail-soft: reads current_step_id
    * defensively (older DBs lack the column → the SELECT throws → caught → no-op);
-   * idea moves route through TaskChangeRouter.applyChange (a no-op delta when the
-   * idea is already at position 12); the completion UPDATE is guarded by
-   * `status='running'` so a re-answer is a no-op. NEVER throws — respond() is
-   * unaffected.
+   * idea retirement routes through TaskChangeRouter.retireIdeaToDecomposed (a
+   * no-op when the idea is already stamped decomposed_at); the completion UPDATE
+   * is guarded by `status='running'` so a re-answer is a no-op. NEVER throws —
+   * respond() is unaffected.
    */
   private async finalizePlannerRun(runId: string, answer: QuestionAnswer): Promise<void> {
     try {
@@ -733,26 +735,8 @@ export class QuestionRouter extends EventEmitter {
       if (this.isArchiveAnswer(answer)) {
         const router = TaskChangeRouter.getInstance();
         for (const ideaId of listRunOwnedIdeaIds(this.db, runId)) {
-          const ideaRow = this.db
-            .prepare('SELECT board_id AS boardId, stage_id AS stageId FROM ideas WHERE id = ?')
-            .get(ideaId) as { boardId?: unknown; stageId?: unknown } | undefined;
-          const boardId = typeof ideaRow?.boardId === 'string' ? ideaRow.boardId : null;
-          const currentStageId = typeof ideaRow?.stageId === 'string' ? ideaRow.stageId : null;
-          if (!boardId) continue;
-
-          const stageRow = this.db
-            .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
-            .get(boardId, DECOMPOSED_POSITION) as { id?: unknown } | undefined;
-          const targetStageId = typeof stageRow?.id === 'string' ? stageRow.id : null;
-          if (!targetStageId || targetStageId === currentStageId) continue; // unresolved or already there
-
-          await router.applyChange(projectId, {
-            actor: 'orchestrator',
-            entityType: 'idea',
-            taskId: ideaId,
-            stageId: targetStageId,
-            runId,
-            kind: 'decomposed',
+          await router.retireIdeaToDecomposed(projectId, ideaId).catch(() => {
+            /* per-idea best-effort */
           });
         }
       }
