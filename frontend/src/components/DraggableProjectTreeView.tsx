@@ -1242,7 +1242,12 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                         // parentless run rows after the session list.
                         const isLastSession =
                           index === projectSessions.length - 1 && parentlessRunCount === 0;
-                        const relativeTime = session.createdAt ? formatDistanceToNow(session.createdAt) : '';
+                        // Show LAST-ACTIVITY time (DB updated_at → lastActivity), not
+                        // creation time: an actively-used session should read "a few
+                        // minutes ago", not its hours-old creation timestamp. Fall back
+                        // to createdAt when lastActivity is absent (older/unsynced rows).
+                        const lastActivityAt = session.lastActivity ?? session.createdAt;
+                        const relativeTime = lastActivityAt ? formatDistanceToNow(lastActivityAt) : '';
                         const isActive = selectedSessionId === session.id;
 
                         return (
