@@ -252,40 +252,42 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
           );
         })}
         
-        {/* Trailing actions: Add Terminal button + Branch Actions (worktree only) */}
-        {(onAddTerminal || (context === 'worktree' && gitBranchActions && gitBranchActions.length > 0)) && (
-          <div className="ml-auto flex items-center gap-2 pr-2 h-8">
-            {onAddTerminal && (
-              <button
-                type="button"
-                onClick={handleAddTerminal}
-                aria-label="Add terminal panel"
-                title="Add terminal panel"
-                className="inline-flex items-center gap-1 h-7 px-2 rounded text-sm text-text-secondary hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
-              >
-                <Plus className="w-4 h-4" />
-                <Terminal className="w-4 h-4" />
-                <span className="sr-only">Add terminal panel</span>
-              </button>
-            )}
-            {context === 'worktree' && gitBranchActions && gitBranchActions.length > 0 && (
-              <Dropdown
-                trigger={
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="flex items-center gap-2 px-3 py-1 h-7"
-                    disabled={isMerging}
-                  >
-                    <GitBranch className="w-4 h-4" />
-                    <span className="text-sm">Git Branch Actions</span>
-                    <MoreVertical className="w-3 h-3" />
-                  </Button>
-                }
-                items={gitBranchActions}
-                position="bottom-right"
-              />
-            )}
+        {/* Add Terminal — sits right next to the tabs (not pushed to the far edge). */}
+        {onAddTerminal && (
+          <div className="flex items-center h-8">
+            <button
+              type="button"
+              onClick={handleAddTerminal}
+              aria-label="Add terminal panel"
+              title="Add terminal panel"
+              className="inline-flex items-center gap-1 h-7 px-2 rounded text-sm text-text-secondary hover:bg-surface-hover hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus-ring-subtle"
+            >
+              <Plus className="w-4 h-4" />
+              <Terminal className="w-4 h-4" />
+              <span className="sr-only">Add terminal panel</span>
+            </button>
+          </div>
+        )}
+
+        {/* Branch Actions stay at the far right (worktree only). */}
+        {context === 'worktree' && gitBranchActions && gitBranchActions.length > 0 && (
+          <div className="ml-auto flex items-center pr-2 h-8">
+            <Dropdown
+              trigger={
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="flex items-center gap-2 px-3 py-1 h-7"
+                  disabled={isMerging}
+                >
+                  <GitBranch className="w-4 h-4" />
+                  <span className="text-sm">Git Branch Actions</span>
+                  <MoreVertical className="w-3 h-3" />
+                </Button>
+              }
+              items={gitBranchActions}
+              position="bottom-right"
+            />
           </div>
         )}
       </div>

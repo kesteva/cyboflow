@@ -220,9 +220,10 @@ export function RunBottomPane() {
             );
           })}
 
-          {/* ＋terminal — spawn an additional worktree shell (parity with quick). */}
+          {/* ＋terminal — sits right next to the tabs (not pushed to the far edge);
+              spawns an additional worktree shell (parity with quick). */}
           {activeRunId !== null && (
-            <div className="ml-auto flex h-8 items-center pr-1">
+            <div className="flex h-8 items-center">
               <button
                 type="button"
                 onClick={handleAddTerminal}
