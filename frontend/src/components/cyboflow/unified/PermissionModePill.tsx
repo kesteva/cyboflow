@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, ShieldCheck } from 'lucide-react';
 import type { PermissionMode } from '../../../../../shared/types/workflows';
 import { PERMISSION_MODE_OPTIONS } from '../AgentPermissionModeSelector';
@@ -21,6 +21,15 @@ import { cn } from '../../../utils/cn';
  *
  * Single-sources its options from {@link PERMISSION_MODE_OPTIONS} (the same list
  * the launch-time AgentPermissionModeSelector uses), so labels never drift.
+ *
+ * Optimistic local mirror (same pattern as McpTogglePill/PluginTogglePill): the
+ * quick composer feeds `currentMode` from a FETCHED session copy (the
+ * SessionProvider's `effectiveSession`, resolved once by usePanelSurface), NOT
+ * the zustand store our `onModeChange` updates — and usePanelSurface re-syncs the
+ * store→session only for the MAIN-repo session, never the quick session. So a
+ * controlled-only pill would persist the change yet keep showing the stale mode
+ * until a refetch. We mirror the selection locally for instant feedback and
+ * re-sync ONLY when the prop VALUE genuinely changes (reload / session switch).
  */
 const MODE_LABELS = Object.fromEntries(
   PERMISSION_MODE_OPTIONS.map((o) => [o.id, o.label]),
@@ -66,20 +75,40 @@ export function PermissionModePill({
   title = 'Agent permission — applies on your next message',
 }: PermissionModePillProps): React.ReactElement {
   const [open, setOpen] = useState(false);
-  const label = MODE_LABELS[currentMode] ?? currentMode;
+
+  // Optimistic local mirror of the persisted mode (see component doc). Re-sync
+  // only when the prop VALUE genuinely changes, so an external update (reload /
+  // session switch) wins but our own optimistic write is never clobbered by a
+  // re-render that hands back the same stale prop.
+  const [localMode, setLocalMode] = useState<PermissionMode>(currentMode);
+  const lastProp = useRef<PermissionMode>(currentMode);
+  useEffect(() => {
+    if (lastProp.current !== currentMode) {
+      lastProp.current = currentMode;
+      setLocalMode(currentMode);
+    }
+  }, [currentMode]);
+
+  const label = MODE_LABELS[localMode] ?? localMode;
 
   const handleSelect = async (mode: PermissionMode): Promise<void> => {
     setOpen(false);
-    if (mode === currentMode) return;
+    // Guard against the DISPLAYED value, not the (possibly stale) prop — else
+    // re-selecting the value the prop is stuck on would no-op the persist.
+    if (mode === localMode) return;
+    const prev = localMode;
+    setLocalMode(mode); // optimistic
     try {
       const res = await persist(mode);
       if (res.success) {
         onModeChange(mode);
         onApplied?.(mode, appliedMessage ?? `Permission mode set to ${MODE_LABELS[mode] ?? mode}`);
       } else {
+        setLocalMode(prev);
         console.error('Failed to set permission mode:', res.error);
       }
     } catch (err) {
+      setLocalMode(prev);
       console.error('Failed to set permission mode:', err);
     }
   };
@@ -112,7 +141,7 @@ export function PermissionModePill({
     <Dropdown
       trigger={trigger}
       items={items}
-      selectedId={currentMode}
+      selectedId={localMode}
       position="auto"
       onOpenChange={setOpen}
     />

@@ -69,6 +69,41 @@ describe('PermissionModePill', () => {
     expect(onApplied).not.toHaveBeenCalled();
   });
 
+  it('reflects the selection optimistically even when the parent never updates currentMode (stale fetched-session prop)', async () => {
+    // currentMode stays "auto" for the whole test — the quick composer feeds it
+    // from a fetched session copy that usePanelSurface never re-syncs from the
+    // store, so a controlled-only pill would stay stuck on "Auto".
+    render(<PermissionModePill currentMode="auto" persist={persist} onModeChange={vi.fn()} />);
+    fireEvent.click(screen.getByText('Auto')); // open
+    fireEvent.click(await screen.findByText('Allow edits'));
+    await waitFor(() => expect(persist).toHaveBeenCalledWith('acceptEdits'));
+    // Dropdown closed → the only label in the DOM is the trigger, now showing the
+    // optimistic selection rather than the stale "auto" prop.
+    expect(screen.getByText('Allow edits')).toBeInTheDocument();
+    expect(screen.queryByText('Auto')).not.toBeInTheDocument();
+  });
+
+  it('reverts the optimistic label when the persist fails', async () => {
+    persist.mockResolvedValueOnce({ success: false, error: 'nope' });
+    render(<PermissionModePill currentMode="auto" persist={persist} onModeChange={vi.fn()} />);
+    fireEvent.click(screen.getByText('Auto')); // open
+    fireEvent.click(await screen.findByText('Allow edits'));
+    await waitFor(() => expect(persist).toHaveBeenCalledWith('acceptEdits'));
+    // The failed write rolls the displayed mode back to the prior value.
+    await waitFor(() => expect(screen.getByText('Auto')).toBeInTheDocument());
+    expect(screen.queryByText('Allow edits')).not.toBeInTheDocument();
+  });
+
+  it('re-syncs to an externally changed currentMode (reload / session switch)', () => {
+    const { rerender } = render(
+      <PermissionModePill currentMode="auto" persist={persist} onModeChange={vi.fn()} />,
+    );
+    expect(screen.getByText('Auto')).toBeInTheDocument();
+    rerender(<PermissionModePill currentMode="default" persist={persist} onModeChange={vi.fn()} />);
+    expect(screen.getByText('Ask before edits')).toBeInTheDocument();
+    expect(screen.queryByText('Auto')).not.toBeInTheDocument();
+  });
+
   it('uses the supplied title on the trigger', () => {
     render(
       <PermissionModePill
