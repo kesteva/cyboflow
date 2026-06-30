@@ -18,7 +18,7 @@
 import { useReducer } from 'react';
 import { CLI_TOOLS } from './agentEditorTokens';
 import type { CliTool } from './agentEditorTokens';
-import type { AgentEntry } from '../../../../../shared/types/agents';
+import type { AgentEntry, AgentModelAlias } from '../../../../../shared/types/agents';
 
 /** The mutable subset of an agent the editor form binds to. */
 export interface AgentDraft {
@@ -27,6 +27,8 @@ export interface AgentDraft {
   role: string;
   systemPrompt: string;
   enabledTools: CliTool[];
+  /** Pinned model alias, or `null` to inherit the run model. */
+  model: AgentModelAlias | null;
 }
 
 export interface AgentEditorState {
@@ -41,6 +43,7 @@ export type AgentEditorAction =
   | { type: 'SET_NAME'; name: string }
   | { type: 'SET_DESCRIPTION'; description: string }
   | { type: 'SET_SYSTEM_PROMPT'; systemPrompt: string }
+  | { type: 'SET_MODEL'; model: AgentModelAlias | null }
   | { type: 'TOGGLE_TOOL'; tool: CliTool };
 
 /** Build a draft from an effective AgentEntry, preserving CLI_TOOLS order. */
@@ -54,6 +57,7 @@ export function draftFromEntry(entry: AgentEntry): AgentDraft {
     role: entry.role,
     systemPrompt: entry.systemPrompt,
     enabledTools: CLI_TOOLS.filter((t) => enabled.has(t)),
+    model: entry.model,
   };
 }
 
@@ -77,6 +81,9 @@ export function agentEditorReducer(
     case 'SET_SYSTEM_PROMPT':
       return { ...state, draft: { ...state.draft, systemPrompt: action.systemPrompt } };
 
+    case 'SET_MODEL':
+      return { ...state, draft: { ...state.draft, model: action.model } };
+
     case 'TOGGLE_TOOL': {
       const has = state.draft.enabledTools.includes(action.tool);
       const enabledTools = has
@@ -95,7 +102,7 @@ export function agentEditorReducer(
 export function initAgentEditorState(entry: AgentEntry | null): AgentEditorState {
   const draft: AgentDraft = entry
     ? draftFromEntry(entry)
-    : { name: '', description: '', role: '', systemPrompt: '', enabledTools: [] };
+    : { name: '', description: '', role: '', systemPrompt: '', enabledTools: [], model: null };
   return { draft, baseline: structuredClone(draft) };
 }
 

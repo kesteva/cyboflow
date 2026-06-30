@@ -69,6 +69,7 @@ const CUSTOM_AGENT: AgentEntry = {
   description: 'A custom helper agent',
   systemPrompt: '',
   tools: [],
+  model: null,
   source: 'custom',
   isCustom: true,
   isOverridden: false,

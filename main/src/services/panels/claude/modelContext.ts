@@ -126,3 +126,20 @@ export function interactiveModelArg(resolvedId?: string | null): string | undefi
   }
   return resolvedId;
 }
+
+/**
+ * Resolve a model alias to its concrete current snapshot id with ANY `[1m]`
+ * window marker removed — the form a subagent's `model:` frontmatter needs.
+ *
+ * A subagent `.md` is read by the bundled CLI but its `model:` field cannot carry
+ * a context-window beta, and the `[1m]` marker is a cyboflow-internal id form, so
+ * we emit the plain default-window snapshot (`opus` → `claude-opus-4-8`,
+ * `sonnet` → `claude-sonnet-5`, `haiku` → `claude-haiku-4-5`). The agent editor
+ * offers only bare families (no per-window choice), so "Opus" means the current
+ * Opus at its default window — exactly this. `auto`/undefined pass through.
+ */
+export function bareModelId(model?: string | null): string | undefined {
+  const resolved = resolveModelAlias(model);
+  if (!resolved) return resolved ?? undefined;
+  return hasContext1MSuffix(resolved) ? stripContext1MSuffix(resolved) : resolved;
+}

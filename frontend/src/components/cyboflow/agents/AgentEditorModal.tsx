@@ -16,8 +16,9 @@
  *   Reset to default  — shown ONLY for an overridden built-in (isOverridden &&
  *                       !isCustom); agents.resetOverride → re-seed + clear dirty.
  *
- * Agents are MODEL-AGNOSTIC: there is no model picker; the model shows only as a
- * read-only Stats value. The system-prompt textarea has NO {{var}} chips.
+ * The model picker pins this agent's model (or inherits the run model); the
+ * choice is sent through upsertOverride / createCustom. The system-prompt
+ * textarea has NO {{var}} chips.
  *
  * This modal is NOT wired into WorkflowsView here (that is P4).
  */
@@ -30,6 +31,7 @@ import { AgentEditorForm } from './AgentEditorForm';
 import { AgentUsageInspector } from './AgentUsageInspector';
 import { useAgentEditorState } from './useAgentEditorState';
 import { estimateTokens } from './agentEditorTokens';
+import { agentModelLabel } from '../../../../../shared/types/agents';
 import type { AgentEntry } from '../../../../../shared/types/agents';
 
 export interface AgentEditorModalProps {
@@ -137,6 +139,7 @@ export function AgentEditorModal({
 
   const liveTokens = estimateTokens(state.draft.systemPrompt);
   const liveToolsEnabled = state.draft.enabledTools.length;
+  const liveModel = agentModelLabel(state.draft.model);
 
   const canSave =
     dirty &&
@@ -163,6 +166,7 @@ export function AgentEditorModal({
           systemPrompt: state.draft.systemPrompt,
           tools: state.draft.enabledTools,
           role: state.draft.role,
+          model: state.draft.model,
         });
         trackEvent('agent_saved', { custom: true });
         onSaved(created.agentKey);
@@ -177,6 +181,7 @@ export function AgentEditorModal({
         systemPrompt: state.draft.systemPrompt,
         tools: state.draft.enabledTools,
         role: state.draft.role,
+        model: state.draft.model,
       });
       trackEvent('agent_saved', { custom: isCustom });
       setEntry(saved);
@@ -360,6 +365,7 @@ export function AgentEditorModal({
                   entry={entry}
                   liveTokens={liveTokens}
                   liveToolsEnabled={liveToolsEnabled}
+                  liveModel={liveModel}
                 />
               )}
             </>

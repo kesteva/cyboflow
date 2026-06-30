@@ -1,0 +1,29 @@
+-- Migration 036: agent_overrides.model — per-agent model pin (nullable).
+--
+-- Lets a builtin override OR a custom agent pin a specific model instead of
+-- inheriting the run model. The value is one of AGENT_MODEL_ALIASES
+-- (shared/types/agents.ts: 'opus' | 'sonnet' | 'haiku'); NULL — the default and
+-- the migrated state of every existing row — means "inherit the run model".
+--
+-- BYTE-FOR-BYTE BACK-COMPAT: renderAgentMarkdown emits a `model:` frontmatter
+-- line ONLY when this column is set, so an inherit-model agent's `.md` overlay is
+-- unchanged from before this column existed. The spawn seam (agentOverlayWriter)
+-- resolves the alias to the current concrete snapshot before writing.
+--
+-- VALIDATION-IN-CODE, NOT CHECK: the allowed alias set is enforced in
+-- agentValidation (mirrors migrations 016/026/029, which keep enum/shape checks
+-- out of CHECK constraints). The field-for-field row contract lives in
+-- main/src/database/models.ts (AgentOverrideRow); entitySchemaParity.test.ts pins
+-- the two together.
+--
+-- NOTE: runFileBasedMigrations() in database.ts wraps every file in a
+-- this.transaction(...) call, so no explicit BEGIN/COMMIT here. ALTER TABLE ADD
+-- COLUMN is idempotent via the filename-keyed ledger; a re-applied "duplicate
+-- column name" is caught as idempotent-ok in runFileBasedMigrations (same
+-- handling as the nullable ALTERs in migrations 021/031/032/034).
+--
+-- ⚠️ MIGRATION-NUMBER COLLISION: sibling feature branches also introduce a 036
+-- (visual-verify, the kanban collapse, permission-mode redesign, mcp/plugin
+-- toggles). The ledger is filename-keyed, so whichever lands SECOND must renumber.
+
+ALTER TABLE agent_overrides ADD COLUMN model TEXT;

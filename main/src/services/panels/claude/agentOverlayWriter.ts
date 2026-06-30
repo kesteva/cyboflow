@@ -37,6 +37,7 @@ import type { AgentOverrideRow } from '../../../database/models';
 import { loadBuiltInAgents } from '../../../orchestrator/agents/agentCatalogue';
 import { computeEffectiveAgents } from '../../../orchestrator/agents/effectiveAgents';
 import { renderAgentMarkdown } from '../../../orchestrator/agents/agentMarkdown';
+import { bareModelId } from './modelContext';
 
 /** The `.claude/agents` subpath (relative to the worktree) the overlay writes into. */
 const AGENTS_DIR = ['.claude', 'agents'] as const;
@@ -108,8 +109,12 @@ export function installAgentOverlay(
     let written = 0;
     for (const agent of effective) {
       // Unoverridden builtins carry their verbatim `.md` (write byte-for-byte);
-      // overrides + custom agents have no rawContent and are rendered.
-      const content = agent.rawContent ?? renderAgentMarkdown(agent);
+      // overrides + custom agents have no rawContent and are rendered. A pinned
+      // model alias is resolved to its bare concrete snapshot id for the
+      // subagent `model:` frontmatter (null/inherit emits no model line).
+      const content =
+        agent.rawContent ??
+        renderAgentMarkdown({ ...agent, model: bareModelId(agent.model) });
       const target = path.join(dir, `${CYBOFLOW_PREFIX}${agent.agentKey}.md`);
       fs.writeFileSync(target, content, 'utf8');
       written += 1;

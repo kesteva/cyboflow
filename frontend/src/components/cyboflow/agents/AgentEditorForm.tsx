@@ -6,21 +6,27 @@
  *     mode for customs), a colored role chip, and a REQUIRED + always-editable
  *     DESCRIPTION field (client-validated to reject the reserved `cyboflow_`
  *     substring so a description can never name an MCP write tool).
+ *   - Model: a picker to PIN this agent's model (Opus / Sonnet / Haiku) or
+ *     inherit the run model (the default). The spawn-time overlay resolves the
+ *     chosen alias to a concrete snapshot in the subagent `model:` frontmatter;
+ *     "Inherit run model" emits no frontmatter line (byte-identical to before).
  *   - System prompt: a hero textarea. NO {{var}} chips — agents are prose, not
  *     templated; variable interpolation is a workflow-step concern, not an agent
  *     one.
  *   - Tools: a 2-col grid of Switch toggles over the 8 CLI_TOOLS, with a live
  *     "N of 8 enabled" count. The grid never offers a `cyboflow_*` tool (the
  *     single-writer invariant — CLI_TOOLS excludes them by construction).
- *
- * There is intentionally NO model block: agents are model-agnostic and inherit
- * the run's model. The model surfaces only as a read-only Stats key/value in
- * AgentUsageInspector.
  */
 import { useMemo } from 'react';
 import { Switch } from '../../ui/Switch';
 import { CLI_TOOLS, roleColorVar, estimateTokens } from './agentEditorTokens';
 import type { AgentDraft, AgentEditorAction } from './useAgentEditorState';
+import {
+  AGENT_MODEL_ALIASES,
+  AGENT_MODEL_LABELS,
+  INHERIT_RUN_MODEL_LABEL,
+  type AgentModelAlias,
+} from '../../../../../shared/types/agents';
 
 export interface AgentEditorFormProps {
   draft: AgentDraft;
@@ -108,6 +114,38 @@ export function AgentEditorForm({
             {descriptionError}
           </p>
         )}
+      </div>
+
+      {/* ── Model (pin a model, or inherit the run model) ─────────────────── */}
+      <div className="mt-6">
+        <div className="text-[9px] font-bold uppercase tracking-[0.18em] text-text-tertiary mb-3 flex items-center gap-2">
+          <span>Model</span>
+          <span className="flex-1 h-px bg-border-subtle" />
+        </div>
+        <select
+          value={draft.model ?? ''}
+          onChange={(e) =>
+            dispatch({
+              type: 'SET_MODEL',
+              model: e.target.value === '' ? null : (e.target.value as AgentModelAlias),
+            })
+          }
+          aria-label="Agent model"
+          className="w-full max-w-[320px] rounded-input border border-border-subtle bg-surface-primary px-3 py-2 text-sm text-text-primary"
+          data-testid="agent-model-select"
+        >
+          <option value="">{INHERIT_RUN_MODEL_LABEL}</option>
+          {AGENT_MODEL_ALIASES.map((alias) => (
+            <option key={alias} value={alias}>
+              {AGENT_MODEL_LABELS[alias]}
+            </option>
+          ))}
+        </select>
+        <p className="mt-1.5 text-[10px] text-text-tertiary">
+          {draft.model === null
+            ? 'This agent runs with whatever model the run uses.'
+            : `This agent always runs on ${AGENT_MODEL_LABELS[draft.model]}, regardless of the run model.`}
+        </p>
       </div>
 
       {/* ── System prompt — hero (NO {{var}} chips) ──────────────────────── */}

@@ -187,6 +187,7 @@ function buildAgentEntry(over: Partial<AgentGalleryEntry> = {}): AgentGalleryEnt
     isCustom: false,
     isOverride: false,
     tokensEstimate: null,
+    model: 'inherits run model',
     ...over,
   };
 }

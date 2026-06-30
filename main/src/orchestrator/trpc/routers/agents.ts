@@ -42,6 +42,7 @@ import { CLI_TOOLS } from '../../../../../shared/types/cliTools';
 import { resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { AgentOverrideRow } from '../../../database/models';
 import type { AgentEntry, AgentChangedEvent, AgentUsage } from '../../../../../shared/types/agents';
+import { AGENT_MODEL_ALIASES } from '../../../../../shared/types/agents';
 
 // ---------------------------------------------------------------------------
 // Context guard
@@ -87,6 +88,7 @@ function rethrowAsTRPCError(err: unknown): never {
       empty_tools: 'BAD_REQUEST',
       empty_description: 'BAD_REQUEST',
       invalid_key: 'BAD_REQUEST',
+      invalid_model: 'BAD_REQUEST',
       reserved_key: 'CONFLICT',
       duplicate_key: 'CONFLICT',
       frontmatter_in_body: 'BAD_REQUEST',
@@ -176,6 +178,8 @@ function findEffective(ctx: AgentsCtx, projectId: number, agentKey: string): Eff
 const toolsSchema = z.array(z.enum(CLI_TOOLS)).min(1);
 const agentKeySchema = z.string().regex(/^[a-z][a-z0-9]*(-[a-z0-9]+)*$/);
 const projectIdSchema = z.number().int().positive();
+/** Pinned model alias; null/omitted → inherit the run model. */
+const modelSchema = z.enum(AGENT_MODEL_ALIASES).nullable().optional();
 
 // ---------------------------------------------------------------------------
 // Router
@@ -228,6 +232,7 @@ export const agentsRouter = router({
         systemPrompt: z.string(),
         tools: toolsSchema,
         role: z.string().nullable().optional(),
+        model: modelSchema,
       }),
     )
     .mutation(async ({ ctx, input }): Promise<AgentEntry> => {
@@ -240,6 +245,7 @@ export const agentsRouter = router({
           description: input.description,
           systemPrompt: input.systemPrompt,
           tools: input.tools,
+          model: input.model ?? null,
         });
       } catch (err) {
         rethrowAsTRPCError(err);
@@ -309,6 +315,7 @@ export const agentsRouter = router({
         systemPrompt: z.string(),
         tools: toolsSchema,
         role: z.string().nullable().optional(),
+        model: modelSchema,
       }),
     )
     .mutation(async ({ ctx, input }): Promise<AgentEntry> => {
@@ -322,6 +329,7 @@ export const agentsRouter = router({
           description: input.description,
           systemPrompt: input.systemPrompt,
           tools: input.tools,
+          model: input.model ?? null,
         }));
       } catch (err) {
         rethrowAsTRPCError(err);
@@ -368,6 +376,7 @@ export const agentsRouter = router({
           description: source.description,
           systemPrompt: source.systemPrompt,
           tools: source.tools,
+          model: source.model,
         }));
       } catch (err) {
         rethrowAsTRPCError(err);

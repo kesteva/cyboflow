@@ -8,13 +8,14 @@
  *   - "Dispatched by: <names>": a single line for workflows whose PROSE dispatches
  *     this agent without a step binding (entry.usage.dispatchedBy). This is what
  *     keeps a step-unbound prose agent from rendering a bare "0 workflows".
- *   - "Stats": Model (read-only "inherits run model"), Prompt (~N tokens est),
- *     Tools (n of 8), Last edited.
+ *   - "Stats": Model (live echo of the picker — "inherits run model" or the
+ *     pinned model label), Prompt (~N tokens est), Tools (n of 8), Last edited.
  *   - A case note: built-in → "Edits apply to every workflow that references this
  *     agent"; custom → "Available to @-mention, not auto-dispatched by built-in
  *     flows."
  *
- * Model is read-only here and NOWHERE editable — agents inherit the run model.
+ * Model is edited in the form's picker; here it is a live read-only echo
+ * (mirroring liveTokens / liveToolsEnabled), not a separate control.
  */
 import { useMemo } from 'react';
 import type { AgentEntry } from '../../../../../shared/types/agents';
@@ -25,6 +26,8 @@ export interface AgentUsageInspectorProps {
   liveTokens: number;
   /** Live enabled-tool count from the draft (echoes the form's toggles). */
   liveToolsEnabled: number;
+  /** Live model display label from the draft (echoes the form's model picker). */
+  liveModel: string;
 }
 
 /** Format an ISO timestamp into a short, human "last edited" string. */
@@ -39,6 +42,7 @@ export function AgentUsageInspector({
   entry,
   liveTokens,
   liveToolsEnabled,
+  liveModel,
 }: AgentUsageInspectorProps): React.JSX.Element {
   const { usage, stats, isCustom } = entry;
   const boundCount = usage.usedBy.length;
@@ -109,7 +113,7 @@ export function AgentUsageInspector({
         <dl data-testid="agent-stats">
           <div className="flex justify-between py-1.5 border-b border-dotted border-border-subtle text-[11px]">
             <dt className="text-text-secondary">model</dt>
-            <dd className="font-bold text-text-primary">{stats.model}</dd>
+            <dd className="font-bold text-text-primary">{liveModel}</dd>
           </div>
           <div className="flex justify-between py-1.5 border-b border-dotted border-border-subtle text-[11px]">
             <dt className="text-text-secondary">prompt</dt>

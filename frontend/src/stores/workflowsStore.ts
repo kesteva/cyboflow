@@ -80,7 +80,8 @@ export interface WorkflowGalleryEntry {
  *   - `name`         = the entry's display name
  *   - `isOverride`   = `isOverridden`
  *   - `tokensEstimate` = `stats.estPromptTokens`
- * Agents are MODEL-AGNOSTIC, so no model field is carried.
+ *   - `model`        = `stats.model` (display label: "inherits run model" or the
+ *                      pinned model's friendly label)
  */
 export interface AgentGalleryEntry {
   id: string;
@@ -91,6 +92,8 @@ export interface AgentGalleryEntry {
   isCustom: boolean;
   isOverride: boolean;
   tokensEstimate: number | null;
+  /** Display label for the agent's model (inherit sentinel or pinned label). */
+  model: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +128,7 @@ export function toAgentGalleryEntry(entry: AgentEntry): AgentGalleryEntry {
     isCustom: entry.isCustom,
     isOverride: entry.isOverridden,
     tokensEstimate: entry.stats.estPromptTokens,
+    model: entry.stats.model,
   };
 }
 

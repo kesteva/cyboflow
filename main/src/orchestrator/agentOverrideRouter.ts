@@ -26,7 +26,7 @@ import PQueue from 'p-queue';
 import type { DatabaseLike } from './types';
 import type { AgentOverrideRow } from '../database/models';
 import type { CliTool } from '../../../shared/types/cliTools';
-import type { AgentChangedEvent } from '../../../shared/types/agents';
+import type { AgentChangedEvent, AgentModelAlias } from '../../../shared/types/agents';
 import type { WorkflowDefinition, WorkflowStep } from '../../../shared/types/workflows';
 import { CANONICAL_AGENT_KEYS } from '../../../shared/types/agentIdentity';
 import {
@@ -64,6 +64,8 @@ export interface AgentUpsertChange {
   description: string;
   systemPrompt: string;
   tools: CliTool[];
+  /** Pinned model alias, or `null`/omitted to inherit the run model. */
+  model?: AgentModelAlias | null;
   /** Optimistic-concurrency guard; when set must equal the current row version. */
   expectedVersion?: number;
 }
@@ -77,6 +79,8 @@ export interface AgentCreateCustomChange {
   description: string;
   systemPrompt: string;
   tools: CliTool[];
+  /** Pinned model alias, or `null`/omitted to inherit the run model. */
+  model?: AgentModelAlias | null;
 }
 
 /** Reset a builtin override (DELETE its row → builtin shows through again). */
@@ -233,6 +237,7 @@ export class AgentOverrideRouter {
       description: change.description,
       systemPrompt: change.systemPrompt,
       tools: change.tools,
+      model: change.model ?? null,
       isCustom: false,
     };
     validateAgentDraft(draft);
@@ -241,6 +246,7 @@ export class AgentOverrideRouter {
     const now = new Date().toISOString();
     const id = `ago_${randomBytes(10).toString('hex')}`;
     const toolsJson = JSON.stringify(change.tools);
+    const model = change.model ?? null;
 
     const txn = this.db.transaction(() => {
       // Optimistic concurrency: when expectedVersion is supplied, the existing
@@ -260,14 +266,15 @@ export class AgentOverrideRouter {
         .prepare(
           `INSERT INTO agent_overrides
              (id, project_id, agent_key, base_agent_key, name, role, description,
-              system_prompt, tools_json, is_custom, version, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
+              system_prompt, tools_json, is_custom, version, model, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?, ?)
            ON CONFLICT(project_id, agent_key) DO UPDATE SET
              name = excluded.name,
              role = excluded.role,
              description = excluded.description,
              system_prompt = excluded.system_prompt,
              tools_json = excluded.tools_json,
+             model = excluded.model,
              version = agent_overrides.version + 1,
              updated_at = excluded.updated_at`,
         )
@@ -281,6 +288,7 @@ export class AgentOverrideRouter {
           change.description,
           systemPrompt,
           toolsJson,
+          model,
           now,
           now,
         );
@@ -305,9 +313,10 @@ export class AgentOverrideRouter {
       description: change.description,
       systemPrompt: change.systemPrompt,
       tools: change.tools,
+      model: change.model ?? null,
       isCustom: true,
     };
-    // Kebab/forbidden/tool/description shape checks (throws invalid_key for a bad slug).
+    // Kebab/forbidden/tool/description/model shape checks (throws invalid_key for a bad slug).
     validateAgentDraft(draft);
 
     // A custom agent must not collide with a canonical builtin key.
@@ -322,6 +331,7 @@ export class AgentOverrideRouter {
     const now = new Date().toISOString();
     const id = `ago_${randomBytes(10).toString('hex')}`;
     const toolsJson = JSON.stringify(change.tools);
+    const model = change.model ?? null;
 
     const txn = this.db.transaction(() => {
       if (this.getByKey(projectId, agentKey)) {
@@ -335,8 +345,8 @@ export class AgentOverrideRouter {
         .prepare(
           `INSERT INTO agent_overrides
              (id, project_id, agent_key, base_agent_key, name, role, description,
-              system_prompt, tools_json, is_custom, version, created_at, updated_at)
-           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, 1, 1, ?, ?)`,
+              system_prompt, tools_json, is_custom, version, model, created_at, updated_at)
+           VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, 1, 1, ?, ?, ?)`,
         )
         .run(
           id,
@@ -347,6 +357,7 @@ export class AgentOverrideRouter {
           change.description,
           systemPrompt,
           toolsJson,
+          model,
           now,
           now,
         );

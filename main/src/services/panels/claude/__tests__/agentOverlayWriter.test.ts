@@ -55,6 +55,7 @@ function makeDb(): Database.Database {
       tools_json TEXT NOT NULL,
       is_custom INTEGER NOT NULL DEFAULT 0,
       version INTEGER NOT NULL DEFAULT 1,
+      model TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(project_id, agent_key)
@@ -88,13 +89,15 @@ interface OverrideInput {
   systemPrompt: string;
   tools: string[];
   isCustom: boolean;
+  /** Optional pinned model alias (migration 036); omit/null = inherit run model. */
+  model?: string | null;
 }
 
 function insertOverride(db: Database.Database, projectId: number, o: OverrideInput): void {
   db.prepare(
     `INSERT INTO agent_overrides
-       (id, project_id, agent_key, base_agent_key, name, role, description, system_prompt, tools_json, is_custom, version)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
+       (id, project_id, agent_key, base_agent_key, name, role, description, system_prompt, tools_json, is_custom, version, model)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`,
   ).run(
     `ago_${o.agentKey}`,
     projectId,
@@ -106,6 +109,7 @@ function insertOverride(db: Database.Database, projectId: number, o: OverrideInp
     o.systemPrompt,
     JSON.stringify(o.tools),
     o.isCustom ? 1 : 0,
+    o.model ?? null,
   );
 }
 
@@ -134,6 +138,26 @@ describe('agentOverlayWriter — overlay content (AC-P1-8)', () => {
     expect(customMd).toContain('name: cyboflow-foo');
     expect(customMd).toContain('## Result');
     expect(customMd).not.toMatch(/cyboflow_/);
+  });
+
+  it('emits a model: frontmatter line ONLY when a model is pinned (after tools)', () => {
+    const inheritMd = renderAgentMarkdown({
+      agentKey: 'implement',
+      description: 'Inherits the run model.',
+      tools: ['Read', 'Edit'],
+      systemPrompt: ensureResultSection('Do the work.'),
+    });
+    expect(inheritMd).not.toMatch(/^model:/m);
+
+    const pinnedMd = renderAgentMarkdown({
+      agentKey: 'implement',
+      description: 'Pinned to a concrete model.',
+      tools: ['Read', 'Edit'],
+      systemPrompt: ensureResultSection('Do the work.'),
+      model: 'claude-sonnet-5',
+    });
+    // model is rendered last, after tools, inside the frontmatter fence.
+    expect(pinnedMd).toMatch(/tools:[^\n]*\nmodel: claude-sonnet-5\n---/);
   });
 });
 
@@ -210,6 +234,56 @@ describe('agentOverlayWriter — installAgentOverlay integration (AC-P1-6)', () 
 
     const revertedMd = fs.readFileSync(agentFile(worktree, 'implement'), 'utf8');
     expect(revertedMd).toBe(bundled);
+
+    db.close();
+  });
+
+  it('resolves a pinned model alias to its bare concrete id in the written .md', () => {
+    const db = makeDb();
+    const projectId = insertProject(db, 'Acme');
+    insertRun(db, 'run-model', projectId, null);
+
+    // A builtin override pinned to Opus, a custom agent pinned to Sonnet, and an
+    // inherit-model custom (no model) — assert the frontmatter per case.
+    insertOverride(db, projectId, {
+      agentKey: 'implement',
+      baseAgentKey: 'implement',
+      description: 'Opus implement.',
+      systemPrompt: 'Body.\n\n## Result\nstub',
+      tools: ['Read', 'Edit'],
+      isCustom: false,
+      model: 'opus',
+    });
+    insertOverride(db, projectId, {
+      agentKey: 'sonnet-helper',
+      baseAgentKey: null,
+      description: 'Sonnet helper.',
+      systemPrompt: 'Body.\n\n## Result\nstub',
+      tools: ['Read'],
+      isCustom: true,
+      model: 'sonnet',
+    });
+    insertOverride(db, projectId, {
+      agentKey: 'inherit-helper',
+      baseAgentKey: null,
+      description: 'Inherits the run model.',
+      systemPrompt: 'Body.\n\n## Result\nstub',
+      tools: ['Read'],
+      isCustom: true,
+      model: null,
+    });
+
+    installAgentOverlay(db, 'run-model', worktree, makeSpyLogger());
+
+    // Opus pins the bare default-window snapshot (the [1m] marker is stripped).
+    expect(fs.readFileSync(agentFile(worktree, 'implement'), 'utf8')).toContain(
+      'model: claude-opus-4-8\n',
+    );
+    expect(fs.readFileSync(agentFile(worktree, 'sonnet-helper'), 'utf8')).toContain(
+      'model: claude-sonnet-5\n',
+    );
+    // An inherit-model agent emits NO model line.
+    expect(fs.readFileSync(agentFile(worktree, 'inherit-helper'), 'utf8')).not.toMatch(/^model:/m);
 
     db.close();
   });

@@ -81,6 +81,7 @@ function createAgentsTestDb(): Database.Database {
       tools_json     TEXT NOT NULL,
       is_custom      INTEGER NOT NULL DEFAULT 0,
       version        INTEGER NOT NULL DEFAULT 1,
+      model          TEXT,
       created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE (project_id, agent_key),
@@ -224,6 +225,30 @@ describe('cyboflow.agents.upsertOverride / resetOverride', () => {
     await expect(
       caller.cyboflow.agents.resetOverride({ projectId: PROJECT_ID, agentKey: 'implement' }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'NOT_FOUND');
+  });
+
+  it('upsert with a pinned model surfaces it on the entry + stats; reset clears it', async () => {
+    const caller = makeWiredCaller(createAgentsTestDb());
+
+    const pinned = await caller.cyboflow.agents.upsertOverride({
+      projectId: PROJECT_ID,
+      agentKey: 'implement',
+      name: 'cyboflow-implement',
+      description: 'Pin sonnet.',
+      systemPrompt: 'You are my implement.',
+      tools: ['Read', 'Edit'],
+      model: 'sonnet',
+    });
+    expect(pinned.model).toBe('sonnet');
+    expect(pinned.stats.model).toBe('Sonnet 5');
+
+    const reset = await caller.cyboflow.agents.resetOverride({
+      projectId: PROJECT_ID,
+      agentKey: 'implement',
+    });
+    // Reset drops the override → back to inheriting the run model.
+    expect(reset.model).toBeNull();
+    expect(reset.stats.model).toBe('inherits run model');
   });
 });
 

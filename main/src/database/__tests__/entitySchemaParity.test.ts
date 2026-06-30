@@ -59,6 +59,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '029_agent_overrides.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '034_findings_triage.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '036_agent_override_model.sql'), 'utf-8'));
   return db;
 }
 
@@ -184,7 +185,7 @@ describe('entity schema parity (migrations 015 + 024 + 028 + 034)', () => {
     db.close();
   });
 
-  it('AgentOverrideRow field names match the agent_overrides columns exactly (migration 028)', () => {
+  it('AgentOverrideRow field names match the agent_overrides columns exactly (migrations 029 + 036)', () => {
     const db = buildDb();
     const agentOverrideRowKeys: Array<keyof AgentOverrideRow> = [
       'id',
@@ -198,6 +199,7 @@ describe('entity schema parity (migrations 015 + 024 + 028 + 034)', () => {
       'tools_json',
       'is_custom',
       'version',
+      'model',
       'created_at',
       'updated_at',
     ];

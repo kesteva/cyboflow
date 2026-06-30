@@ -13,6 +13,8 @@
  */
 import { isCliTool } from '../../../../shared/types/cliTools';
 import type { CliTool } from '../../../../shared/types/cliTools';
+import { isAgentModelAlias } from '../../../../shared/types/agents';
+import type { AgentModelAlias } from '../../../../shared/types/agents';
 
 /** The discriminated set of validation/conflict failure codes. */
 export type AgentOverrideErrorCode =
@@ -21,6 +23,7 @@ export type AgentOverrideErrorCode =
   | 'empty_tools'
   | 'empty_description'
   | 'invalid_key'
+  | 'invalid_model'
   | 'reserved_key'
   | 'duplicate_key'
   | 'frontmatter_in_body'
@@ -44,6 +47,8 @@ export interface AgentDraft {
   description: string;
   systemPrompt: string;
   tools: CliTool[];
+  /** Pinned model alias, or `null`/omitted to inherit the run model. */
+  model?: AgentModelAlias | null;
   isCustom: boolean;
 }
 
@@ -93,6 +98,15 @@ export function validateAgentDraft(draft: AgentDraft): void {
     if (!isCliTool(tool)) {
       throw new AgentOverrideError('forbidden_tool', `"${tool}" is not a permitted CLI tool.`);
     }
+  }
+
+  // model is optional: null/undefined inherits the run model; any other value
+  // must be a known alias (defense-in-depth — the tRPC zod already constrains it).
+  if (draft.model != null && !isAgentModelAlias(draft.model)) {
+    throw new AgentOverrideError(
+      'invalid_model',
+      `Agent model "${String(draft.model)}" is not a permitted model alias.`,
+    );
   }
 }
 

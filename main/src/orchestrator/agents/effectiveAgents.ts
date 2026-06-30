@@ -15,7 +15,13 @@
 import type { AgentOverrideRow } from '../../database/models';
 import type { CliTool } from '../../../../shared/types/cliTools';
 import { isCliTool, CLI_TOOLS } from '../../../../shared/types/cliTools';
-import type { AgentEntry, AgentSource, AgentUsage } from '../../../../shared/types/agents';
+import type {
+  AgentEntry,
+  AgentModelAlias,
+  AgentSource,
+  AgentUsage,
+} from '../../../../shared/types/agents';
+import { agentModelLabel, isAgentModelAlias } from '../../../../shared/types/agents';
 import type { BuiltInAgent } from './agentCatalogue';
 
 /** The effective (post-override) view of one agent. */
@@ -26,6 +32,8 @@ export interface EffectiveAgent {
   description: string;
   systemPrompt: string;
   tools: CliTool[];
+  /** The agent's pinned model alias, or `null` to inherit the run model. */
+  model: AgentModelAlias | null;
   source: AgentSource;
   /** Present for unoverridden builtins so the overlay can write the `.md` verbatim. */
   rawContent?: string;
@@ -41,6 +49,15 @@ function parseTools(toolsJson: string): CliTool[] {
   }
   if (!Array.isArray(raw)) return [];
   return raw.filter((t): t is CliTool => typeof t === 'string' && isCliTool(t));
+}
+
+/**
+ * Narrow an override row's `model` cell (a free-form `string | null`, or
+ * `undefined` on a DB predating migration 036) to a known {@link AgentModelAlias}
+ * or `null` (inherit). An unrecognized value falls back to inherit.
+ */
+function parseAgentModel(value: string | null | undefined): AgentModelAlias | null {
+  return isAgentModelAlias(value) ? value : null;
 }
 
 /**
@@ -62,6 +79,7 @@ export function mergeAgent(
       description: builtin.description,
       systemPrompt: builtin.systemPrompt,
       tools: builtin.tools,
+      model: null, // an unoverridden builtin always inherits the run model
       source: 'builtin',
       rawContent: builtin.rawContent,
     };
@@ -73,6 +91,7 @@ export function mergeAgent(
     description: override.description,
     systemPrompt: override.system_prompt,
     tools: parseTools(override.tools_json),
+    model: parseAgentModel(override.model),
     source: 'builtin-override',
   };
 }
@@ -86,6 +105,7 @@ function customAgent(override: AgentOverrideRow): EffectiveAgent {
     description: override.description,
     systemPrompt: override.system_prompt,
     tools: parseTools(override.tools_json),
+    model: parseAgentModel(override.model),
     source: 'custom',
   };
 }
@@ -116,8 +136,9 @@ export function computeEffectiveAgents(
  * Assemble the tRPC `AgentEntry` wire shape from an effective agent, its backing
  * override row (for `lastEditedAt`), and its computed usage.
  *
- * `estPromptTokens` is a coarse char/4 estimate; `model` is the literal
- * `'inherits run model'` and `costUsd` is always `null` (no per-agent attribution).
+ * `estPromptTokens` is a coarse char/4 estimate; `model` carries the raw alias (or
+ * null) for the editor while `stats.model` is its display label; `costUsd` is
+ * always `null` (no per-agent attribution).
  */
 export function buildEffectiveEntry(
   effective: EffectiveAgent,
@@ -131,12 +152,13 @@ export function buildEffectiveEntry(
     description: effective.description,
     systemPrompt: effective.systemPrompt,
     tools: effective.tools,
+    model: effective.model,
     source: effective.source,
     isCustom: effective.source === 'custom',
     isOverridden: effective.source === 'builtin-override',
     usage,
     stats: {
-      model: 'inherits run model',
+      model: agentModelLabel(effective.model),
       estPromptTokens: Math.ceil(effective.systemPrompt.length / 4),
       costUsd: null,
       lastEditedAt: override?.updated_at ?? null,

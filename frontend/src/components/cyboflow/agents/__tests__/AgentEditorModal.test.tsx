@@ -40,6 +40,7 @@ const BUILTIN_ENTRY: AgentEntry = {
   description: 'Implements one task at a time.',
   systemPrompt: 'You are the implementer. Make the smallest diff that satisfies the criteria.',
   tools: ['Read', 'Edit', 'Write', 'Bash'],
+  model: null,
   source: 'builtin',
   isCustom: false,
   isOverridden: false,
@@ -294,17 +295,51 @@ describe('AgentEditorModal — tools grid', () => {
 });
 
 describe('AgentEditorModal — absent legacy affordances', () => {
-  it('has NO 3-model picker, NO {{var}} chips, NO retry-loopback block', async () => {
+  it('has NO {{var}} chips and NO retry-loopback block', async () => {
     await renderModal();
     const root = screen.getByTestId('agent-editor-modal');
-    // Model is read-only Stats text only — no clickable model option / picker.
-    expect(screen.queryByTestId('agent-model-picker')).toBeNull();
     expect(root.textContent ?? '').not.toContain('{{');
     // No retry stepper / loopback controls.
     expect(screen.queryByTestId('agent-retry-stepper')).toBeNull();
     expect(screen.queryByTestId('agent-loopback')).toBeNull();
-    // Model surfaces ONLY as a read-only stat.
+  });
+});
+
+describe('AgentEditorModal — model picker', () => {
+  it('seeds the picker from entry.model and the stat shows the inherit sentinel by default', async () => {
+    await renderModal(); // BUILTIN_ENTRY.model === null
+    const select = screen.getByTestId('agent-model-select') as HTMLSelectElement;
+    expect(select.value).toBe(''); // '' = inherit
     expect(screen.getByTestId('agent-stats')).toHaveTextContent('inherits run model');
+  });
+
+  it('seeds a pinned model and echoes its label in the live stat', async () => {
+    const pinned: AgentEntry = {
+      ...BUILTIN_ENTRY,
+      model: 'sonnet',
+      stats: { ...BUILTIN_ENTRY.stats, model: 'Sonnet 5' },
+    };
+    await renderModal({ entry: pinned });
+    expect((screen.getByTestId('agent-model-select') as HTMLSelectElement).value).toBe('sonnet');
+    expect(screen.getByTestId('agent-stats')).toHaveTextContent('Sonnet 5');
+  });
+
+  it('changing the model marks dirty and sends the alias through upsertOverride', async () => {
+    const { onSaved } = await renderModal();
+    const select = screen.getByTestId('agent-model-select');
+    fireEvent.change(select, { target: { value: 'haiku' } });
+
+    const saveBtn = screen.getByTestId('agent-editor-save-button');
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    // The live stat echoes the new draft model before saving.
+    expect(screen.getByTestId('agent-stats')).toHaveTextContent('Haiku 4.5');
+
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+    expect(mockUpsert).toHaveBeenCalledTimes(1);
+    expect(mockUpsert.mock.calls[0][0].model).toBe('haiku');
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith(BUILTIN_KEY));
   });
 });
 

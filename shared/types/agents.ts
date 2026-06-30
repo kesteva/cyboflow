@@ -3,13 +3,44 @@
  *
  * `AgentEntry` is the post-write effective view of one agent (a builtin, a
  * builtin-with-override, or a custom). It is returned by every `agents.*`
- * procedure and consumed by the renderer via `AppRouter` inference. Agents are
- * MODEL-AGNOSTIC: they inherit the run's model, so `AgentStats.model` is the
- * literal string `'inherits run model'` and per-agent `costUsd` is always `null`
+ * procedure and consumed by the renderer via `AppRouter` inference. An agent
+ * inherits the run's model by default (`AgentEntry.model === null`,
+ * `AgentStats.model` shows the {@link INHERIT_RUN_MODEL_LABEL} sentinel) but MAY
+ * pin one of {@link AGENT_MODEL_ALIASES}; per-agent `costUsd` is always `null`
  * (run_usage is run-scoped; no per-agent attribution exists).
  */
 
 import type { CliTool } from './cliTools';
+
+/**
+ * The models a workflow agent may PIN instead of inheriting the run model — the
+ * bare family aliases (resolved to the current concrete snapshot at the spawn
+ * seam, mirroring the quick-session picker). Only families are offered: a
+ * per-subagent context-window variant would not survive markdown frontmatter.
+ * `null` (the default) means "inherit the run model".
+ */
+export const AGENT_MODEL_ALIASES = ['opus', 'sonnet', 'haiku'] as const;
+export type AgentModelAlias = (typeof AGENT_MODEL_ALIASES)[number];
+
+/** Type guard for {@link AgentModelAlias} (the inherit case is represented as null). */
+export function isAgentModelAlias(value: unknown): value is AgentModelAlias {
+  return typeof value === 'string' && (AGENT_MODEL_ALIASES as readonly string[]).includes(value);
+}
+
+/** Human labels for each pinnable model, kept in sync with the picker snapshots. */
+export const AGENT_MODEL_LABELS: Record<AgentModelAlias, string> = {
+  opus: 'Opus 4.8',
+  sonnet: 'Sonnet 5',
+  haiku: 'Haiku 4.5',
+};
+
+/** The sentinel label shown when an agent inherits the run model. */
+export const INHERIT_RUN_MODEL_LABEL = 'inherits run model';
+
+/** Display label for an agent's pinned model, or the inherit sentinel for null. */
+export function agentModelLabel(model: AgentModelAlias | null): string {
+  return model === null ? INHERIT_RUN_MODEL_LABEL : AGENT_MODEL_LABELS[model];
+}
 
 export interface AgentUsageStep {
   workflowName: string;
@@ -31,7 +62,12 @@ export interface AgentUsage {
 }
 
 export interface AgentStats {
-  model: 'inherits run model';
+  /**
+   * Display label for the agent's model: {@link INHERIT_RUN_MODEL_LABEL} when it
+   * inherits the run model, else the pinned model's friendly label
+   * ({@link AGENT_MODEL_LABELS}). Computed server-side from {@link AgentEntry.model}.
+   */
+  model: string;
   estPromptTokens: number;
   costUsd: null;
   lastEditedAt: string | null;
@@ -48,6 +84,12 @@ export interface AgentEntry {
   description: string;
   systemPrompt: string;
   tools: CliTool[];
+  /**
+   * The model this agent pins (one of {@link AGENT_MODEL_ALIASES}), or `null` to
+   * inherit the run model. Seeds the editor's model picker; the spawn-time overlay
+   * resolves it to a concrete snapshot in the subagent `model:` frontmatter.
+   */
+  model: AgentModelAlias | null;
   source: AgentSource;
   isCustom: boolean;
   isOverridden: boolean;

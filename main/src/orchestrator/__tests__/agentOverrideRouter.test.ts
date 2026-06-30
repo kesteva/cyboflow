@@ -60,7 +60,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
 
-  // migration 028 schema (mirrored inline; column order per the contract).
+  // migration 029 + 036 schema (mirrored inline; column order per the contract).
   db.exec(`
     CREATE TABLE IF NOT EXISTS agent_overrides (
       id TEXT PRIMARY KEY,
@@ -74,6 +74,7 @@ function buildDb(): Database.Database {
       tools_json TEXT NOT NULL,
       is_custom INTEGER NOT NULL DEFAULT 0,
       version INTEGER NOT NULL DEFAULT 1,
+      model TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE(project_id, agent_key),
@@ -393,6 +394,87 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       router.applyChange(1, { op: 'deleteCustom', agentKey: 'implement' }),
     ).rejects.toBeInstanceOf(AgentOverrideError);
     expect(router.getByKey(1, 'implement')).not.toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // model pin (migration 036)
+  // -------------------------------------------------------------------------
+
+  it('upsert without a model leaves model NULL (inherit run model)', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'upsert',
+      agentKey: 'implement',
+      role: 'sprint',
+      description: 'x',
+      systemPrompt: 'y',
+      tools: TOOLS,
+    });
+    expect((router.getByKey(1, 'implement') as AgentOverrideRow).model).toBeNull();
+  });
+
+  it('upsert persists a pinned model, and a later upsert can clear it', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'upsert',
+      agentKey: 'implement',
+      role: 'sprint',
+      description: 'x',
+      systemPrompt: 'y',
+      tools: TOOLS,
+      model: 'sonnet',
+    });
+    expect((router.getByKey(1, 'implement') as AgentOverrideRow).model).toBe('sonnet');
+
+    await router.applyChange(1, {
+      op: 'upsert',
+      agentKey: 'implement',
+      role: 'sprint',
+      description: 'x2',
+      systemPrompt: 'y2',
+      tools: TOOLS,
+      model: null,
+    });
+    expect((router.getByKey(1, 'implement') as AgentOverrideRow).model).toBeNull();
+  });
+
+  it('createCustom persists a pinned model', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'createCustom',
+      name: 'Helper',
+      role: null,
+      description: 'x',
+      systemPrompt: 'y',
+      tools: TOOLS,
+      model: 'haiku',
+    });
+    expect((router.getByKey(1, 'helper') as AgentOverrideRow).model).toBe('haiku');
+  });
+
+  it('upsert with an unknown model throws invalid_model', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await expect(
+      router.applyChange(1, {
+        op: 'upsert',
+        agentKey: 'implement',
+        role: 'sprint',
+        description: 'x',
+        systemPrompt: 'y',
+        tools: TOOLS,
+        // Bypass the static type to exercise the runtime guard (the tRPC zod
+        // would normally reject this before it reaches the chokepoint).
+        model: 'gpt-4' as unknown as 'opus',
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_model' });
   });
 
   // -------------------------------------------------------------------------
