@@ -32,7 +32,7 @@ vi.mock('../../../utils/cyboflowApi', () => ({
 // lifecycle, not artifacts — stub the list hook + the renderer so it doesn't
 // reach the (unmocked) artifacts client.
 vi.mock('../../../hooks/useArtifactsList', () => ({
-  useArtifactsList: () => ({ artifacts: [] }),
+  useArtifactsList: () => ({ artifacts: [], loaded: true }),
 }));
 vi.mock('../ArtifactTabRenderer', () => ({
   ArtifactTabRenderer: () => <div data-testid="mock-artifact-tab-renderer" />,

@@ -173,6 +173,24 @@ describe('useArtifactsList', () => {
     expect(result.current.artifacts[0].label).toBe('fresh');
   });
 
+  it('reports loaded=false until the seed resolves, then true', async () => {
+    const { result } = renderHook(() => useArtifactsList(RUN, PROJECT));
+    // Seed query in flight → not yet loaded.
+    expect(result.current.loaded).toBe(false);
+
+    await act(async () => {
+      seedDeferred.resolve([makeArtifact({ id: 'art-1' })]);
+      await seedDeferred.promise;
+    });
+    expect(result.current.loaded).toBe(true);
+  });
+
+  it('reports loaded=false when runId/projectId is null (never seeds)', () => {
+    const { result } = renderHook(() => useArtifactsList(null, PROJECT));
+    expect(result.current.loaded).toBe(false);
+    expect(listQuerySpy).not.toHaveBeenCalled();
+  });
+
   it('upserts subscription events that arrive after the seed (normal path)', async () => {
     const { result } = renderHook(() => useArtifactsList(RUN, PROJECT));
 

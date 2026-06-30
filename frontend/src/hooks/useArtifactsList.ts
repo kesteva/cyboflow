@@ -29,6 +29,15 @@ import type { Artifact } from '../../../shared/types/artifacts';
 
 export interface UseArtifactsListResult {
   artifacts: Artifact[];
+  /**
+   * False until the initial `artifacts.list` seed query has resolved (or failed)
+   * for the current run; true thereafter. Distinguishes "empty because still
+   * loading" from "empty because the run has no artifacts" — the auto-open seed
+   * pass MUST wait for this before deciding which artifacts are pre-existing
+   * (open silently) vs. freshly minted (steal focus). Resets to false on a
+   * run/project change.
+   */
+  loaded: boolean;
 }
 
 /** Upsert by id (replace existing, else append) — keeps created_at ordering stable. */
@@ -61,28 +70,40 @@ export function useArtifactsList(
   projectId: number | null,
 ): UseArtifactsListResult {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     // Nothing to track until both the run and its project are known.
     if (runId === null || projectId === null) {
       setArtifacts([]);
+      setLoaded(false);
       return;
     }
 
     // `cancelled` guards the async seed from landing after a dep change/unmount.
     let cancelled = false;
-    // Reset so a stale list never flashes while the new seed is in flight.
+    // Reset so a stale list never flashes while the new seed is in flight, and
+    // mark the new run's seed as not-yet-loaded.
     setArtifacts([]);
+    setLoaded(false);
 
     void trpc.cyboflow.artifacts.list
       .query({ runId })
       .then((rows) => {
         // Merge (not replace): preserve any artifact the subscription delivered
         // while the seed was in flight (its id is in `prev` but absent here).
-        if (!cancelled) setArtifacts((prev) => mergeSeed(prev, rows));
+        if (!cancelled) {
+          setArtifacts((prev) => mergeSeed(prev, rows));
+          setLoaded(true);
+        }
       })
       .catch((err: unknown) => {
-        if (!cancelled) console.warn('[useArtifactsList] initial list failed:', err);
+        if (!cancelled) {
+          console.warn('[useArtifactsList] initial list failed:', err);
+          // The seed completed (unsuccessfully); unblock consumers waiting on
+          // `loaded` so a fetch error doesn't strand the seed pass forever.
+          setLoaded(true);
+        }
       });
 
     // Project-scoped change stream. Payload type is inferred from AppRouter
@@ -114,5 +135,5 @@ export function useArtifactsList(
     };
   }, [runId, projectId]);
 
-  return { artifacts };
+  return { artifacts, loaded };
 }

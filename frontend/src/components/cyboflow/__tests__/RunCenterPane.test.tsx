@@ -41,8 +41,12 @@ vi.mock('../RunBottomPane', () => ({
 // tests don't drag in the tRPC artifacts client. `mockArtifacts` is mutable so
 // the auto-open / strand tests can drive the list the hook returns.
 let mockArtifacts: Artifact[] = [];
+// `mockLoaded` mirrors useArtifactsList's seed-resolved flag. Default true so the
+// existing synchronous-seed tests behave as "already loaded"; the reopen-race
+// test drives it false→true to reproduce the async seed.
+let mockLoaded = true;
 vi.mock('../../../hooks/useArtifactsList', () => ({
-  useArtifactsList: () => ({ artifacts: mockArtifacts }),
+  useArtifactsList: () => ({ artifacts: mockArtifacts, loaded: mockLoaded }),
 }));
 vi.mock('../ArtifactTabRenderer', () => ({
   ArtifactTabRenderer: () => <div data-testid="mock-artifact-tab-renderer" />,
@@ -100,6 +104,7 @@ describe('RunCenterPane', () => {
   beforeEach(() => {
     useCenterPaneStore.setState({ bySession: {} });
     mockArtifacts = [];
+    mockLoaded = true;
   });
 
   it('renders the tab strip with the pinned Flow tab and the terminal dock', () => {
@@ -191,6 +196,39 @@ describe('RunCenterPane', () => {
     // …but focus stayed on Flow, and the tab carries no client "new" pulse.
     expect(session.activeTabId).toBe('flow');
     expect(session.tabs.find((t) => t.id === 'art:idea-spec')?.isNew).toBe(false);
+  });
+
+  it('reopening a run whose artifacts seed in ASYNC lands on Flow, not the last artifact', () => {
+    // Reproduces the reopen bug: useArtifactsList returns [] while its seed query
+    // is in flight, THEN resolves with the run's pre-existing artifacts. The seed
+    // pass must wait for `loaded` so those artifacts open silently (no focus steal)
+    // instead of being mistaken for fresh mints that yank focus to the last one.
+    mockLoaded = false;
+    mockArtifacts = [];
+    const { rerender } = render(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    // Still loading → on Flow, nothing opened.
+    expect(useCenterPaneStore.getState().bySession['sess-1'].activeTabId).toBe('flow');
+
+    // The seed resolves with two pre-existing artifacts (the real async path).
+    act(() => {
+      mockLoaded = true;
+      mockArtifacts = [
+        makeArtifact({ id: 'a1', atype: 'idea-spec', isNew: true }),
+        makeArtifact({ id: 'a2', atype: 'screenshots', isNew: true }),
+      ];
+    });
+    rerender(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+
+    const session = useCenterPaneStore.getState().bySession['sess-1'];
+    // Both artifact tabs registered…
+    expect(session.tabs.some((t) => t.id === 'art:idea-spec')).toBe(true);
+    expect(session.tabs.some((t) => t.id === 'art:screenshots')).toBe(true);
+    // …but focus stayed on Flow (the bug landed on 'art:screenshots', the last one).
+    expect(session.activeTabId).toBe('flow');
   });
 
   it('FLIPS the center pane to a freshly-created MID-RUN artifact', () => {

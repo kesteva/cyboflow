@@ -76,7 +76,7 @@ const SESSION_KEY = 'sess-1';
 
 beforeEach(() => {
   mockHook.mockReset();
-  mockHook.mockReturnValue({ artifacts: [IDEA, STORIES, PROTO] });
+  mockHook.mockReturnValue({ artifacts: [IDEA, STORIES, PROTO], loaded: true });
   // Reset center-pane state (no open artifact tabs).
   useCenterPaneStore.setState({ bySession: {} });
 });
@@ -168,7 +168,7 @@ describe('ArtifactsPanel', () => {
   });
 
   it('renders an empty state when the run has no artifacts', () => {
-    mockHook.mockReturnValue({ artifacts: [] });
+    mockHook.mockReturnValue({ artifacts: [], loaded: true });
 
     render(<ArtifactsPanel runId="run-1" projectId={7} sessionKey={SESSION_KEY} />);
 

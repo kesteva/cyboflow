@@ -64,7 +64,9 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
   const session = useCenterPaneSession(sessionKey);
 
   // Live artifacts for this run (initial list + ArtifactChanged subscription).
-  const { artifacts } = useArtifactsList(activeRunId, projectId);
+  // `loaded` flips true once the seed query resolves — the auto-open pass waits
+  // for it so the empty pre-load list never poses as "the run has no artifacts".
+  const { artifacts, loaded } = useArtifactsList(activeRunId, projectId);
 
   useEffect(() => {
     ensureSession(sessionKey);
@@ -84,6 +86,13 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
   // already present as already-seen (so it is opened WITHOUT stealing focus), and
   // only ids that appear in a LATER sync count as freshly minted and focus.
   //
+  // The seed pass is GATED on `loaded`: useArtifactsList returns [] while its
+  // seed query is in flight, so without the gate the "initial seed" would be
+  // consumed on that empty pre-load list — then the real artifacts arrive in a
+  // LATER sync and are mistaken for fresh mints, stealing focus to the last one
+  // (the reopen-lands-on-an-artifact bug). Waiting for `loaded` means the initial
+  // seed runs against the actual resolved list.
+  //
   // centerPaneStore.openArtifactTab ALWAYS focuses the tab it opens/touches —
   // there is no no-focus "register" action. To open the initial seed without
   // stealing focus we capture the active tab id before the pass and restore it
@@ -94,6 +103,9 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
   // new run's freshly-minted artifacts focus correctly.
   const seenForKey = useRef<string | null>(null);
   useEffect(() => {
+    // Wait for the seed query to resolve before deciding pre-existing vs. fresh
+    // (an empty list while loading must not consume the initial-seed pass).
+    if (!loaded) return;
     const store = useCenterPaneStore.getState();
     // The active tab the user is currently on — restored after the initial seed
     // so pre-existing artifacts open silently (no focus steal).
@@ -130,13 +142,17 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
     if (isInitialSeed && artifacts.length > 0) {
       useCenterPaneStore.getState().focusTab(sessionKey, activeBeforeSeed);
     }
-  }, [artifacts, sessionKey]);
+  }, [artifacts, sessionKey, loaded]);
 
   // ── Close tabs whose backing artifact row vanished ─────────────────────────
   // A pruned / deleted artifact leaves its center-pane tab stranded on a
   // perpetual "Loading…" state (renderActiveTab can't resolve the row). Close
   // any artifact tab whose id AND atype no longer appear in the live list.
   useEffect(() => {
+    // Only prune against a RESOLVED list: while the seed is loading the list is
+    // [] (unknown, not "deleted"), so closing here would wrongly drop valid tabs
+    // on every reopen and re-open them when the seed lands (flicker).
+    if (!loaded) return;
     const session = useCenterPaneStore.getState().bySession[sessionKey];
     if (!session) return;
     for (const tab of session.tabs) {
@@ -150,7 +166,7 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
         useCenterPaneStore.getState().closeTab(sessionKey, tab.id);
       }
     }
-  }, [artifacts, sessionKey]);
+  }, [artifacts, sessionKey, loaded]);
 
   const activeTab = session.tabs.find((t) => t.id === session.activeTabId) ?? session.tabs[0];
 
