@@ -31,7 +31,7 @@ import type { DatabaseLike } from './types';
 function entityIdsCreatedByRun(
   db: DatabaseLike,
   runId: string,
-  entityType: 'idea' | 'task',
+  entityType: 'idea' | 'task' | 'epic',
 ): string[] {
   try {
     const rows = db
@@ -90,6 +90,18 @@ export function listRunOwnedIdeaIds(db: DatabaseLike, runId: string): string[] {
  */
 export function listRunCreatedTaskIds(db: DatabaseLike, runId: string): string[] {
   return entityIdsCreatedByRun(db, runId, 'task');
+}
+
+/**
+ * The epic ids a run created during execution. Fail-soft — see file header
+ * contract. Mirrors listRunCreatedTaskIds; the approve-plan reveal stamps
+ * approved_at on both the run's created tasks AND its created epics.
+ *
+ * @param db    Narrow DatabaseLike interface.
+ * @param runId The workflow_runs.id whose created epics to resolve.
+ */
+export function listRunCreatedEpicIds(db: DatabaseLike, runId: string): string[] {
+  return entityIdsCreatedByRun(db, runId, 'epic');
 }
 
 /**

@@ -751,6 +751,14 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     db.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
+    // Migration 036 adds the decompose/approval stamps (the columns the router
+    // now reads) AND collapses the board. The board collapse (stage deletes) is
+    // exercised in migration036.test.ts; here we only add the columns so the
+    // 12-stage board's positions stay available for these stage assertions.
+    db.exec('ALTER TABLE ideas ADD COLUMN decomposed_at TEXT;');
+    db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
+    db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
     return db;
   }
 
@@ -787,41 +795,34 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
   });
 
   /**
-   * Append a run-attributed `created` entity_event for an entity so the
-   * created-event projection (listRunCreatedTaskIds / listRunOwnedIdeaIds) links
-   * it to `runId`. The chokepoint already wrote a seq-1 `created` row with
-   * run_id=NULL; this adds a second `created` row (next seq) carrying the run id,
-   * mirroring how the agent would attribute creates during a real run.
+   * Seed an idea + one epic + N tasks UNDER the plan-gated run (every create
+   * carries `runId`). Two effects matter for the Q1 reveal:
+   *  - the chokepoint stamps run_id onto each `created` entity_event, so the
+   *    ownership projection (listRunCreatedTaskIds / listRunCreatedEpicIds)
+   *    resolves them, and
+   *  - the create-side Q1 guard mints the epic + tasks PENDING (approved_at NULL)
+   *    because the planner run's plan is not yet approved — exactly the state the
+   *    approve-plan gate must reveal.
+   * Returns the idea/epic/task ids.
    */
-  function markCreatedByRun(
-    db: Database.Database,
-    entityType: 'idea' | 'task',
-    entityId: string,
-    runId: string,
-  ): void {
-    const maxRow = db
-      .prepare('SELECT MAX(seq) AS maxSeq FROM entity_events WHERE entity_type = ? AND entity_id = ?')
-      .get(entityType, entityId) as { maxSeq: number | null };
-    const seq = (maxRow.maxSeq ?? 0) + 1;
-    db.prepare(
-      `INSERT INTO entity_events (entity_type, entity_id, seq, kind, actor, run_id, changes_json, created_at)
-       VALUES (?, ?, ?, 'created', 'agent:planner', ?, '[]', ?)`,
-    ).run(entityType, entityId, seq, runId, new Date().toISOString());
-  }
-
-  /**
-   * Seed an idea + N tasks originating from it through the chokepoint, then
-   * settle the auto-decompose follow-on. When `runId` is provided, every created
-   * entity is attributed to that run via a `created` entity_event so the
-   * created-event ownership projection resolves them. Returns the idea id + task ids.
-   */
-  async function seedIdeaWithTasks(
-    db: Database.Database,
+  async function seedRunEntities(
     taskRouter: TaskChangeRouter,
     count: number,
-    runId?: string,
-  ): Promise<{ ideaId: string; taskIds: string[] }> {
-    const idea = await taskRouter.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Seed idea' });
+    runId: string,
+  ): Promise<{ ideaId: string; epicId: string; taskIds: string[] }> {
+    const idea = await taskRouter.applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Seed idea',
+      runId,
+    });
+    const epic = await taskRouter.applyChange(1, {
+      actor: 'user',
+      entityType: 'epic',
+      title: 'Seed epic',
+      originatingIdeaId: idea.taskId,
+      runId,
+    });
     const taskIds: string[] = [];
     for (let i = 0; i < count; i++) {
       const t = await taskRouter.applyChange(1, {
@@ -829,15 +830,28 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
         entityType: 'task',
         title: `Task ${i}`,
         originatingIdeaId: idea.taskId,
+        runId,
       });
       taskIds.push(t.taskId);
     }
     await taskRouter._queueForProject(1).onIdle();
-    if (runId) {
-      markCreatedByRun(db, 'idea', idea.taskId, runId);
-      for (const id of taskIds) markCreatedByRun(db, 'task', id, runId);
-    }
-    return { ideaId: idea.taskId, taskIds };
+    return { ideaId: idea.taskId, epicId: epic.taskId, taskIds };
+  }
+
+  function taskApprovedAt(db: Database.Database, taskId: string): string | null {
+    return (db.prepare('SELECT approved_at FROM tasks WHERE id = ?').get(taskId) as { approved_at: string | null })
+      .approved_at;
+  }
+  function epicApprovedAt(db: Database.Database, epicId: string): string | null {
+    return (db.prepare('SELECT approved_at FROM epics WHERE id = ?').get(epicId) as { approved_at: string | null })
+      .approved_at;
+  }
+  function planApprovedAt(db: Database.Database, runId: string): string | null {
+    return (
+      db.prepare('SELECT plan_approved_at FROM workflow_runs WHERE id = ?').get(runId) as {
+        plan_approved_at: string | null;
+      }
+    ).plan_approved_at;
   }
 
   async function answerPlanGate(
@@ -861,7 +875,7 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     await TaskChangeRouter.getInstance()._queueForProject(1).onIdle();
   }
 
-  it('Approve on approve-plan moves all originating tasks to Ready for development (position 6)', async () => {
+  it('Approve on approve-plan stamps plan_approved_at + reveals the run-created epic and tasks (approved_at), keeping tasks at Ready for development', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const taskRouter = TaskChangeRouter.initialize(adapter);
@@ -870,47 +884,45 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     // Seed the run FIRST so the run-attributed `created` entity_events satisfy
     // the entity_events.run_id FK (foreign_keys=ON).
     seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: null });
-    const { taskIds } = await seedIdeaWithTasks(db, taskRouter, 2, 'run-p');
-    // Tasks created at Tasks extracted (position 5).
-    for (const id of taskIds) {
-      expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(id) as { stage_id: string }).stage_id).toBe(
-        stageId(5),
-      );
-    }
+    const { epicId, taskIds } = await seedRunEntities(taskRouter, 2, 'run-p');
+
+    // Pre-approval: the plan-gated run minted its epic + tasks PENDING
+    // (approved_at NULL) and the run is not yet plan-approved.
+    for (const id of taskIds) expect(taskApprovedAt(db, id)).toBeNull();
+    expect(epicApprovedAt(db, epicId)).toBeNull();
+    expect(planApprovedAt(db, 'run-p')).toBeNull();
 
     await answerPlanGate(db, router, 'run-p', 'Approve');
 
+    // The run is plan-approved and every run-created task + epic is revealed.
+    expect(planApprovedAt(db, 'run-p')).not.toBeNull();
+    for (const id of taskIds) expect(taskApprovedAt(db, id)).not.toBeNull();
+    expect(epicApprovedAt(db, epicId)).not.toBeNull();
+
+    // The tasks sit at Ready for development (position 6).
     for (const id of taskIds) {
       expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(id) as { stage_id: string }).stage_id).toBe(
         stageId(6),
       );
     }
-    // The promotion is orchestrator-attributed.
-    const ev = db
-      .prepare("SELECT actor, kind FROM entity_events WHERE entity_type = 'task' AND entity_id = ? ORDER BY seq DESC LIMIT 1")
-      .get(taskIds[0]) as { actor: string; kind: string };
-    expect(ev.actor).toBe('orchestrator');
-    expect(ev.kind).toBe('plan-approved');
   });
 
-  it('Revise on approve-plan does NOT promote the tasks', async () => {
+  it('Revise on approve-plan leaves the entities PENDING and the run un-approved', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const taskRouter = TaskChangeRouter.initialize(adapter);
     const router = QuestionRouter.initialize(adapter);
 
     seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: null });
-    const { taskIds } = await seedIdeaWithTasks(db, taskRouter, 2, 'run-p');
+    const { epicId, taskIds } = await seedRunEntities(taskRouter, 2, 'run-p');
     await answerPlanGate(db, router, 'run-p', 'Revise');
 
-    for (const id of taskIds) {
-      expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(id) as { stage_id: string }).stage_id).toBe(
-        stageId(5),
-      );
-    }
+    for (const id of taskIds) expect(taskApprovedAt(db, id)).toBeNull();
+    expect(epicApprovedAt(db, epicId)).toBeNull();
+    expect(planApprovedAt(db, 'run-p')).toBeNull();
   });
 
-  it('Approve on a NON-approve-plan step does NOT promote the tasks', async () => {
+  it('Approve on a NON-approve-plan step does NOT reveal the entities', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const taskRouter = TaskChangeRouter.initialize(adapter);
@@ -918,36 +930,37 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
 
     // current_step_id is the EARLIER approve-idea gate, not approve-plan.
     seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-idea', seedIdeaId: null });
-    const { taskIds } = await seedIdeaWithTasks(db, taskRouter, 1, 'run-p');
+    const { epicId, taskIds } = await seedRunEntities(taskRouter, 1, 'run-p');
     await answerPlanGate(db, router, 'run-p', 'Approve');
 
-    expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskIds[0]) as { stage_id: string }).stage_id).toBe(
-      stageId(5),
-    );
+    expect(taskApprovedAt(db, taskIds[0])).toBeNull();
+    expect(epicApprovedAt(db, epicId)).toBeNull();
+    expect(planApprovedAt(db, 'run-p')).toBeNull();
   });
 
-  it('is idempotent: a re-answer at approve-plan does not double-bump already-promoted tasks', async () => {
+  it('is idempotent: a re-answer at approve-plan does not re-stamp approved_at / plan_approved_at', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const taskRouter = TaskChangeRouter.initialize(adapter);
     const router = QuestionRouter.initialize(adapter);
 
     seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: null });
-    const { taskIds } = await seedIdeaWithTasks(db, taskRouter, 1, 'run-p');
+    const { epicId, taskIds } = await seedRunEntities(taskRouter, 1, 'run-p');
     await answerPlanGate(db, router, 'run-p', 'Approve');
 
-    const versionAfterFirst = (db.prepare('SELECT version FROM tasks WHERE id = ?').get(taskIds[0]) as { version: number })
-      .version;
+    const taskFirst = taskApprovedAt(db, taskIds[0]);
+    const epicFirst = epicApprovedAt(db, epicId);
+    const planFirst = planApprovedAt(db, 'run-p');
+    expect(taskFirst).not.toBeNull();
+    expect(epicFirst).not.toBeNull();
+    expect(planFirst).not.toBeNull();
 
-    // The run is back to 'running'; answer a second approve-plan gate. The task is
-    // already at position 6, so the chokepoint no-op delta leaves version unchanged.
+    // The run is back to 'running'; answer a second approve-plan gate. The guarded
+    // `IS NULL` stamps are no-ops, so every timestamp is unchanged.
     await answerPlanGate(db, router, 'run-p', 'Approve');
-    const versionAfterSecond = (db.prepare('SELECT version FROM tasks WHERE id = ?').get(taskIds[0]) as { version: number })
-      .version;
-    expect(versionAfterSecond).toBe(versionAfterFirst);
-    expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskIds[0]) as { stage_id: string }).stage_id).toBe(
-      stageId(6),
-    );
+    expect(taskApprovedAt(db, taskIds[0])).toBe(taskFirst);
+    expect(epicApprovedAt(db, epicId)).toBe(epicFirst);
+    expect(planApprovedAt(db, 'run-p')).toBe(planFirst);
   });
 });
 
@@ -989,6 +1002,14 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
     ]) {
       db.exec(readFileSync(join(migDir, f), 'utf-8'));
     }
+    // Migration 036 adds the decompose/approval stamps (the columns the router
+    // now reads) AND collapses the board. The board collapse (stage deletes) is
+    // exercised in migration036.test.ts; here we only add the columns so the
+    // 12-stage board's positions stay available for these stage assertions.
+    db.exec('ALTER TABLE ideas ADD COLUMN decomposed_at TEXT;');
+    db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
+    db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
     return db;
   }
 
@@ -1000,6 +1021,11 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
 
   function ideaStage(db: Database.Database, ideaId: string): string {
     return (db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(ideaId) as { stage_id: string }).stage_id;
+  }
+
+  function decomposedAt(db: Database.Database, ideaId: string): string | null {
+    return (db.prepare('SELECT decomposed_at FROM ideas WHERE id = ?').get(ideaId) as { decomposed_at: string | null })
+      .decomposed_at;
   }
 
   /** Seed a run under a named workflow (ship or planner) at the given step. */
@@ -1091,7 +1117,7 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
     taskChangeEvents.removeAllListeners();
   });
 
-  it('Approve on a SHIP approve-plan gate retires the run-owned idea to Decomposed (position 12)', async () => {
+  it('Approve on a SHIP approve-plan gate retires the run-owned idea (stamps decomposed_at, keeps its stage)', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const taskRouter = TaskChangeRouter.initialize(adapter);
@@ -1099,12 +1125,16 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
 
     seedRunForWorkflow(db, { runId: 'run-ship', workflowName: 'ship', currentStepId: 'approve-plan' });
     const { ideaId } = await seedOwnedIdea(db, taskRouter, 'run-ship', 2);
-    // Precondition: the idea is NOT yet retired (no originatingIdeaId auto-retire).
-    expect(ideaStage(db, ideaId)).not.toBe(stageId(DECOMPOSED_POSITION));
+    const stageBefore = ideaStage(db, ideaId);
+    // Precondition: the idea is NOT yet retired (decomposed_at unstamped).
+    expect(decomposedAt(db, ideaId)).toBeNull();
 
     await answerPlanGate(db, router, 'run-ship', 'Approve');
 
-    expect(ideaStage(db, ideaId)).toBe(stageId(DECOMPOSED_POSITION));
+    // Migration-036 retirement is a decomposed_at stamp, NOT a stage move (the
+    // idea keeps its stage; the stamp takes it off the board).
+    expect(decomposedAt(db, ideaId)).not.toBeNull();
+    expect(ideaStage(db, ideaId)).toBe(stageBefore);
     // The retirement is orchestrator-attributed with the 'decomposed' action.
     const ev = db
       .prepare("SELECT actor, kind FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq DESC LIMIT 1")
@@ -1181,6 +1211,14 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     db.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
+    // Migration 036 adds the decompose/approval stamps (the columns the router
+    // now reads) AND collapses the board. The board collapse (stage deletes) is
+    // exercised in migration036.test.ts; here we only add the columns so the
+    // 12-stage board's positions stay available for these stage assertions.
+    db.exec('ALTER TABLE ideas ADD COLUMN decomposed_at TEXT;');
+    db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
+    db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
     return db;
   }
 

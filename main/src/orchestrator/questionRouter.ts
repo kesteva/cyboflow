@@ -54,7 +54,7 @@ import { emitReviewItemChangedById } from './reviewItemRouter';
 import { runStatusEvents } from './trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
 import { TaskChangeRouter } from './taskChangeRouter';
-import { listRunOwnedIdeaIds, listRunCreatedTaskIds } from './runEntityOwnership';
+import { listRunOwnedIdeaIds, listRunCreatedTaskIds, listRunCreatedEpicIds } from './runEntityOwnership';
 
 export type { QuestionRequest, QuestionAnswer, QuestionPayload };
 
@@ -473,9 +473,13 @@ export class QuestionRouter extends EventEmitter {
   }
 
   /**
-   * FIX-STAGE-MODEL (D): move ALL tasks the run CREATED during execution to
-   * Ready for development (position 6) when the just-answered gate is the
-   * planner's `approve-plan` step and the chosen answer is the Approve option.
+   * Q1 REVEAL + FIX-STAGE-MODEL (D): when the just-answered gate is the planner's
+   * `approve-plan` step and the chosen answer is the Approve option, (a) stamp
+   * workflow_runs.plan_approved_at = now, (b) reveal the run's PENDING entities by
+   * stamping approved_at = now on every task it created (listRunCreatedTaskIds)
+   * AND every epic it created (listRunCreatedEpicIds) — both idempotent (guarded
+   * `IS NULL`), and (c) move ALL tasks the run CREATED to Ready for development
+   * (position 6).
    *
    * Ownership is derived from the entity_events created-event projection
    * (listRunCreatedTaskIds), NOT from seed_idea_id / originating_idea_id — the
@@ -507,10 +511,40 @@ export class QuestionRouter extends EventEmitter {
       if (!this.isApproveAnswer(answer)) return;
 
       const projectId = typeof run.projectId === 'number' ? run.projectId : Number(run.projectId);
+      const now = new Date().toISOString();
 
-      // The tasks this run created during execution (read-only; writes go through
-      // the chokepoint). Resolve the target stage id from each task's own board.
+      // Q1 REVEAL: the plan is approved — stamp the run's plan-approval gate and
+      // reveal the entities it created during planning. A plan-gated run mints its
+      // epics+tasks PENDING (approved_at NULL = backend-invisible + sprint-
+      // ineligible per the create-side Q1 guard in TaskChangeRouter); approval
+      // flips them to approved_at=now. Guarded `IS NULL` so a re-answer (or an
+      // already-visible entity) is an idempotent no-op. plan_approved_at lives on
+      // workflow_runs (not an entity table); the epic/task approved_at reveal is a
+      // visibility stamp carrying no board-state delta, so it does not route
+      // through the TaskChangeRouter chokepoint (which has no approved_at update
+      // path). Fail-soft: a pre-036 DB lacking these columns throws "no such
+      // column" → caught by the method's outer try/catch → no-op (never throws).
+      this.db
+        .prepare(
+          `UPDATE workflow_runs SET plan_approved_at = ?, updated_at = ?
+           WHERE id = ? AND plan_approved_at IS NULL`,
+        )
+        .run(now, now, runId);
+
+      // The tasks this run created during execution (read-only; stage writes go
+      // through the chokepoint). Resolve the target stage id from each task's board.
       const taskIds = listRunCreatedTaskIds(this.db, runId);
+      const epicIds = listRunCreatedEpicIds(this.db, runId);
+
+      const stampTaskApproved = this.db.prepare(
+        `UPDATE tasks SET approved_at = ? WHERE id = ? AND approved_at IS NULL`,
+      );
+      for (const taskId of taskIds) stampTaskApproved.run(now, taskId);
+      const stampEpicApproved = this.db.prepare(
+        `UPDATE epics SET approved_at = ? WHERE id = ? AND approved_at IS NULL`,
+      );
+      for (const epicId of epicIds) stampEpicApproved.run(now, epicId);
+
       if (taskIds.length === 0) return;
 
       const router = TaskChangeRouter.getInstance();
