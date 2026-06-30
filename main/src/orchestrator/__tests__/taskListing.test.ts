@@ -45,6 +45,15 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
+  // Migration 036 adds the visibility stamps (ideas.decomposed_at,
+  // epics/tasks.approved_at) AND collapses the board to four stages. We only
+  // need the columns here — loading the full file would DELETE board_stages at
+  // positions 2,3,4,5,7,8,12, breaking the position-based fixtures below (the
+  // board-collapse test migration lives in a separate change). Apply just the
+  // column ALTERs so the read-side UNION can project the new fields.
+  db.exec('ALTER TABLE ideas ADD COLUMN decomposed_at TEXT');
+  db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT');
+  db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT');
   return db;
 }
 
@@ -187,6 +196,57 @@ describe('taskListing — 3-table UNION', () => {
 
     // Single-row read agrees.
     expect(selectTaskById(dbAdapter(db), ideaId)?.archived_at).toBe(stamp);
+  });
+
+  it('projects decomposed_at (idea-only) and approved_at (epic/task-only), NULL across types', () => {
+    const db = buildDb();
+    const { ideaId, epicId, taskId } = seedFixture(db);
+    const decStamp = '2026-06-05T00:00:00.000Z';
+    const appStamp = '2026-06-06T00:00:00.000Z';
+    db.prepare('UPDATE ideas SET decomposed_at = ? WHERE id = ?').run(decStamp, ideaId);
+    db.prepare('UPDATE epics SET approved_at = ? WHERE id = ?').run(appStamp, epicId);
+    db.prepare('UPDATE tasks SET approved_at = ? WHERE id = ?').run(appStamp, taskId);
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    const idea = backlog.find((t) => t.id === ideaId)!;
+    const epic = backlog.find((t) => t.id === epicId)!;
+    const child = epic.children![0];
+
+    // decomposed_at is an IDEA-only column; epics/tasks read it back as null.
+    expect(idea.decomposed_at).toBe(decStamp);
+    expect(epic.decomposed_at).toBeNull();
+    expect(child.decomposed_at).toBeNull();
+
+    // approved_at is an EPIC/TASK column; ideas read it back as null.
+    expect(idea.approved_at).toBeNull();
+    expect(epic.approved_at).toBe(appStamp);
+    expect(child.approved_at).toBe(appStamp);
+
+    // Single-row + idea-decomposition reads carry the same stamps.
+    expect(selectTaskById(dbAdapter(db), ideaId)?.decomposed_at).toBe(decStamp);
+    expect(selectTaskById(dbAdapter(db), ideaId)?.approved_at).toBeNull();
+    expect(selectTaskById(dbAdapter(db), epicId)?.approved_at).toBe(appStamp);
+    expect(selectTaskById(dbAdapter(db), taskId)?.approved_at).toBe(appStamp);
+
+    const decomp = selectIdeaDecomposition(dbAdapter(db), ideaId)!;
+    expect(decomp.decomposed_at).toBe(decStamp);
+    const decompEpic = decomp.children?.find((e) => e.id === epicId);
+    expect(decompEpic?.approved_at).toBe(appStamp);
+    expect(decompEpic?.decomposed_at).toBeNull();
+    expect(decompEpic?.children?.[0].approved_at).toBe(appStamp);
+  });
+
+  it('decomposed_at/approved_at default to null when unstamped', () => {
+    const db = buildDb();
+    const { ideaId, epicId, taskId } = seedFixture(db);
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    const idea = backlog.find((t) => t.id === ideaId)!;
+    const epic = backlog.find((t) => t.id === epicId)!;
+    expect(idea.decomposed_at).toBeNull();
+    expect(idea.approved_at).toBeNull();
+    expect(epic.approved_at).toBeNull();
+    expect(epic.children![0].approved_at).toBeNull();
+    expect(selectTaskById(dbAdapter(db), taskId)?.approved_at).toBeNull();
   });
 
   it('selectTaskById resolves an entity from any of the three tables', () => {

@@ -122,6 +122,10 @@ interface TaskDbRow {
   board_id: string;
   stage_id: string;
   archived_at: string | null;
+  /** IDEA-only decompose stamp (036); projected as NULL on the epics/tasks branches. */
+  decomposed_at: string | null;
+  /** EPIC/TASK approval stamp (036); projected as NULL on the ideas branch. */
+  approved_at: string | null;
   version: number;
   created_at: string;
   updated_at: string;
@@ -135,7 +139,7 @@ interface TaskDbRow {
  * column ORDER is fixed and shared by every branch (SQLite unions positionally).
  */
 const UNION_COLUMNS =
-  'id, project_id, type, ref, title, summary, body, priority, repo, parent_epic_id, originating_idea_id, scope, board_id, stage_id, archived_at, version, created_at, updated_at';
+  'id, project_id, type, ref, title, summary, body, priority, repo, parent_epic_id, originating_idea_id, scope, board_id, stage_id, archived_at, decomposed_at, approved_at, version, created_at, updated_at';
 
 /**
  * UNION_COLUMNS prefixed with a subquery alias for joined outer SELECTs — the
@@ -161,17 +165,17 @@ function entityUnionSql(filter: EntityUnionFilter): string {
   return `
     SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, repo,
            NULL AS parent_epic_id, NULL AS originating_idea_id, scope,
-           board_id, stage_id, archived_at, version, created_at, updated_at
+           board_id, stage_id, archived_at, decomposed_at, NULL AS approved_at, version, created_at, updated_at
       FROM ideas${where}
     UNION ALL
     SELECT id, project_id, 'epic' AS type, ref, title, summary, body, priority, repo,
            NULL AS parent_epic_id, originating_idea_id, NULL AS scope,
-           board_id, stage_id, archived_at, version, created_at, updated_at
+           board_id, stage_id, archived_at, NULL AS decomposed_at, approved_at, version, created_at, updated_at
       FROM epics${where}
     UNION ALL
     SELECT id, project_id, 'task' AS type, ref, title, summary, body, priority, repo,
            parent_epic_id, originating_idea_id, NULL AS scope,
-           board_id, stage_id, archived_at, version, created_at, updated_at
+           board_id, stage_id, archived_at, NULL AS decomposed_at, approved_at, version, created_at, updated_at
       FROM tasks${where}`;
 }
 
@@ -483,6 +487,8 @@ function projectTaskItem(db: DatabaseLike, row: TaskDbRow): BacklogTaskItem {
     board_id: row.board_id,
     stage_id: row.stage_id,
     archived_at: row.archived_at,
+    decomposed_at: row.decomposed_at,
+    approved_at: row.approved_at,
     version: row.version,
     stage_position: row.stage_position,
     inFlow,
@@ -523,7 +529,7 @@ export function selectTaskById(db: DatabaseLike, taskId: string): BacklogTaskIte
       .prepare(
         `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.repo,
                 t.parent_epic_id, t.originating_idea_id, NULL AS scope,
-                t.board_id, t.stage_id, t.archived_at, t.version, t.created_at, t.updated_at,
+                t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.version, t.created_at, t.updated_at,
                 COALESCE(bs.position, 0) AS stage_position
            FROM tasks t
            LEFT JOIN board_stages bs ON bs.id = t.stage_id
@@ -576,7 +582,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
          FROM (
            SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, repo,
                   NULL AS parent_epic_id, NULL AS originating_idea_id, scope,
-                  board_id, stage_id, archived_at, version, created_at, updated_at
+                  board_id, stage_id, archived_at, decomposed_at, NULL AS approved_at, version, created_at, updated_at
              FROM ideas WHERE id = ?
          ) e
          LEFT JOIN board_stages bs ON bs.id = e.stage_id`,
@@ -591,7 +597,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
     .prepare(
       `SELECT e.id, e.project_id, 'epic' AS type, e.ref, e.title, e.summary, e.body, e.priority, e.repo,
               NULL AS parent_epic_id, e.originating_idea_id, NULL AS scope,
-              e.board_id, e.stage_id, e.archived_at, e.version, e.created_at, e.updated_at,
+              e.board_id, e.stage_id, e.archived_at, NULL AS decomposed_at, e.approved_at, e.version, e.created_at, e.updated_at,
               COALESCE(bs.position, 0) AS stage_position
          FROM epics e
          LEFT JOIN board_stages bs ON bs.id = e.stage_id
@@ -609,7 +615,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
       .prepare(
         `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.repo,
                 t.parent_epic_id, t.originating_idea_id, NULL AS scope,
-                t.board_id, t.stage_id, t.archived_at, t.version, t.created_at, t.updated_at,
+                t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.version, t.created_at, t.updated_at,
                 COALESCE(bs.position, 0) AS stage_position
            FROM tasks t
            LEFT JOIN board_stages bs ON bs.id = t.stage_id
@@ -640,7 +646,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
     .prepare(
       `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.repo,
               t.parent_epic_id, t.originating_idea_id, NULL AS scope,
-              t.board_id, t.stage_id, t.archived_at, t.version, t.created_at, t.updated_at,
+              t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.version, t.created_at, t.updated_at,
               COALESCE(bs.position, 0) AS stage_position
          FROM tasks t
          LEFT JOIN board_stages bs ON bs.id = t.stage_id
