@@ -311,6 +311,38 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     );
   });
 
+  it('shows the model picker for a workflow launch (default Opus, no fast mode) and threads model', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    // The model picker is now shown for WORKFLOW launches too, defaulting to Opus;
+    // fast mode stays QUICK-only so it must NOT appear here.
+    const modelSelect = screen.getByLabelText('Select Claude model') as HTMLSelectElement;
+    expect(modelSelect.value).toBe('opus');
+    expect(screen.queryByTestId('wizard-fast-mode-row')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    // The default model rides runs.start as `model` (migration 037).
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ model: 'opus' }));
+  });
+
+  it('threads an explicit per-run model override into a workflow launch', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select Claude model'), { target: { value: 'sonnet' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ model: 'sonnet' }));
+  });
+
   it('always forces a NEW session — never absorbs the selected quick session', async () => {
     // Regression: the wizard IS the explicit "Start a new session" surface, so it
     // must call ensureSessionForLaunch with forceNew:true. Without this it silently

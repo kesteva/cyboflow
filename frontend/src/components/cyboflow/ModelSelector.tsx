@@ -18,6 +18,15 @@ import { MODEL_OPTIONS } from './unified/ModelPill';
 /** The quick-session default model — Opus, per product direction. */
 export const DEFAULT_QUICK_MODEL = 'opus';
 
+/**
+ * The workflow-launch default model — Opus, matching quick sessions (per product
+ * direction). Threaded into runs.start.mutate({ model }) from the Configure surface
+ * and stamped onto workflow_runs.model (migration 037). A run launched without a
+ * picker (legacy / programmatic callers) still pins nothing and falls to the SDK
+ * default; this constant only seeds the user-facing pickers.
+ */
+export const DEFAULT_WORKFLOW_MODEL = 'opus';
+
 interface ModelSelectorProps {
   value: string;
   onChange: (model: string) => void;

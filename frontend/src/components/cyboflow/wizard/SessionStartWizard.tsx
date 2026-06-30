@@ -21,10 +21,12 @@
  * which only sets selection state and NEVER auto-advances.
  *
  * Step ③ (Configure) is the launch surface and adapts to the selection:
- *   - workflow: agent-permission override + CLI substrate (+ caveats) + workflow
+ *   - workflow: agent-permission override + CLI substrate (+ caveats) + model
+ *     pin (default Opus, threaded into runs.start → workflow_runs.model) + workflow
  *     blueprint editor access + a launch summary.
- *   - quick: agent-permission override + CLI substrate (+ caveats) + launch
- *     summary (there is no workflow to edit, so the blueprint editor is omitted).
+ *   - quick: agent-permission override + CLI substrate (+ caveats) + model pin
+ *     (+ the Opus-only fast-mode toggle) + launch summary (there is no workflow to
+ *     edit, so the blueprint editor is omitted).
  *
  * Launch paths (all fire from step ③):
  *   - workflow: `trpc.cyboflow.runs.start.mutate` (threading substrate +
@@ -196,10 +198,12 @@ export default function SessionStartWizard(): React.JSX.Element {
   // (→ sessions.substrate) for quick launches.
   const { mode: permissionMode, setMode: setPermissionMode } = useAgentPermissionMode();
   const [substrate, setSubstrate] = useState<CliSubstrate>(DEFAULT_SUBSTRATE);
-  // Per-launch Claude model for the QUICK session (Configure ③). Defaults to
-  // Opus; pinned to a concrete snapshot at the spawn seam. Fast mode is the
-  // premium Opus-only research preview — a separate opt-in, default OFF, surfaced
-  // only while Opus is selected (it has no effect on other models).
+  // Per-launch Claude model for the QUICK session AND workflow runs (Configure ③).
+  // Defaults to Opus (DEFAULT_QUICK_MODEL === DEFAULT_WORKFLOW_MODEL); pinned to a
+  // concrete snapshot at the spawn seam. Quick threads it into useQuickSession;
+  // workflow threads it into runs.start ({ model }) → workflow_runs.model
+  // (migration 037). Fast mode is the premium Opus-only research preview — a
+  // separate opt-in, default OFF, QUICK-only, surfaced only while Opus is selected.
   const [model, setModel] = useState<string>(DEFAULT_QUICK_MODEL);
   const [fastMode, setFastMode] = useState<boolean>(false);
   // Blueprint editor (workflow path only) — 'edit' (selected flow) or 'create'.
@@ -419,6 +423,8 @@ export default function SessionStartWizard(): React.JSX.Element {
           sessionId,
           substrate,
           permissionMode,
+          // Per-run model pin (migration 037) — the Configure picker, default Opus.
+          model,
           ...(ideaId !== undefined ? { ideaId } : {}),
           ...(selectedFindingIds?.length && meta?.name === 'compound'
             ? { findingIds: selectedFindingIds }
@@ -449,7 +455,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, selectedFindingIds],
+    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, selectedFindingIds],
   );
 
   // Sprint launch — ONE session-hosted run seeded with the multi-selected task
@@ -474,6 +480,8 @@ export default function SessionStartWizard(): React.JSX.Element {
           sessionId,
           substrate,
           permissionMode,
+          // Per-run model pin (migration 037) — the Configure picker, default Opus.
+          model,
           taskIds,
         });
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
@@ -491,7 +499,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode],
+    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model],
   );
 
   const handleStart = useCallback(() => {
@@ -722,40 +730,40 @@ export default function SessionStartWizard(): React.JSX.Element {
             {/* Agent permission — shown for BOTH workflow and quick launches. */}
             <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
 
-            {/* Model + fast mode — QUICK session only. Workflow and ultracode
-                launches keep their own model resolution, so the dropdown is
-                scoped to the quick card (the user's "quick flow" request). */}
-            {selection.kind === 'quick' && (
-              <>
-                <ModelSelector
-                  value={model}
-                  onChange={(m) => {
-                    setModel(m);
-                    // Fast mode is Opus-only; drop it when leaving Opus.
-                    if (!isOpusModel(m)) setFastMode(false);
-                  }}
-                  id="wizard-model"
+            {/* Model picker — shown for QUICK and WORKFLOW launches. Quick threads
+                it into useQuickSession (→ the claude panel); workflow threads it
+                into runs.start ({ model }) → workflow_runs.model (migration 037).
+                Hidden for Ultracode, which pins its own interactive model. Fast mode
+                (Opus-only premium research preview) stays QUICK-only. */}
+            {(selection.kind === 'quick' || selection.kind === 'workflow') && (
+              <ModelSelector
+                value={model}
+                onChange={(m) => {
+                  setModel(m);
+                  // Fast mode is Opus-only; drop it when leaving Opus.
+                  if (!isOpusModel(m)) setFastMode(false);
+                }}
+                id="wizard-model"
+              />
+            )}
+            {selection.kind === 'quick' && isOpusModel(model) && (
+              <div
+                data-testid="wizard-fast-mode-row"
+                className="flex items-center justify-between gap-3 rounded-button border border-border-secondary bg-surface-secondary px-3 py-2"
+              >
+                <div className="flex flex-col">
+                  <span className="text-sm font-medium text-text-primary">Fast mode</span>
+                  <span className="text-xs text-text-tertiary">
+                    Faster Opus output · premium · default off
+                  </span>
+                </div>
+                <Switch
+                  id="wizard-fast-mode"
+                  checked={fastMode}
+                  onCheckedChange={(v) => setFastMode(v === true)}
+                  aria-label="Fast mode"
                 />
-                {isOpusModel(model) && (
-                  <div
-                    data-testid="wizard-fast-mode-row"
-                    className="flex items-center justify-between gap-3 rounded-button border border-border-secondary bg-surface-secondary px-3 py-2"
-                  >
-                    <div className="flex flex-col">
-                      <span className="text-sm font-medium text-text-primary">Fast mode</span>
-                      <span className="text-xs text-text-tertiary">
-                        Faster Opus output · premium · default off
-                      </span>
-                    </div>
-                    <Switch
-                      id="wizard-fast-mode"
-                      checked={fastMode}
-                      onCheckedChange={(v) => setFastMode(v === true)}
-                      aria-label="Fast mode"
-                    />
-                  </div>
-                )}
-              </>
+              </div>
             )}
 
             {/* CLI substrate — shown for workflow + quick launches (workflow:
@@ -822,13 +830,11 @@ export default function SessionStartWizard(): React.JSX.Element {
                     : 'SDK'
                 }
               />
-              {selection.kind === 'quick' && (
-                <>
-                  <SummaryRow label="Model" value={modelDisplayLabel(model)} />
-                  {isOpusModel(model) && (
-                    <SummaryRow label="Fast mode" value={fastMode ? 'On' : 'Off'} />
-                  )}
-                </>
+              {(selection.kind === 'quick' || selection.kind === 'workflow') && (
+                <SummaryRow label="Model" value={modelDisplayLabel(model)} />
+              )}
+              {selection.kind === 'quick' && isOpusModel(model) && (
+                <SummaryRow label="Fast mode" value={fastMode ? 'On' : 'Off'} />
               )}
               {selection.kind === 'ultracode' && (
                 <SummaryRow label="Effort" value="ultracode (xhigh + auto workflows)" />
