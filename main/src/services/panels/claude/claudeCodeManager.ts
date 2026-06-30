@@ -1362,14 +1362,21 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * (no re-spawn) fully gated.
    *
    * It mirrors routePreToolUseThroughApprovalRouter (the hook's router path),
-   * mapping an ApprovalDecision → PermissionResult:
+   * mapping an ApprovalDecision → PermissionResult. `updatedInput` is MANDATORY on
+   * the allow branch: the native CLI Zod-validates our can_use_tool control-response
+   * and its allow schema requires `updatedInput` to be a record — a bare
+   * `{ behavior: 'allow' }` fails as `invalid_union` ("expected record, received
+   * undefined") and reaches the model as an is_error "Tool permission request
+   * failed: ZodError …" tool_result (NOT a denial; the agent then loops, retrying
+   * the tool). So echo the reviewer's modified input when present, else the original
+   * tool `input` unchanged:
    *   - allowlist short-circuit (defense-in-depth: honor user/project grants even on
-   *     the auto path) → { behavior: 'allow' };
-   *   - allow → { behavior: 'allow', updatedInput? };
+   *     the auto path) → { behavior: 'allow', updatedInput: input };
+   *   - allow → { behavior: 'allow', updatedInput: decision.updatedInput ?? input };
    *   - deny  → { behavior: 'deny', message } (message is MANDATORY on deny);
    *   - RunNotRunningError → { behavior: 'deny', message: 'Run not active' };
-   *   - any other error → rethrow (matches the hook's fail-soft boundary living one
-   *     layer up; only the run-not-running case is a benign deny).
+   *   - any other error → rethrow (only the run-not-running case is a benign deny;
+   *     the surrounding hook/SDK boundary renders an unexpected throw as is_error).
    * `interrupt` is deliberately NOT set — let the agent retry, matching the hook
    * deny path. deriveLaneFromTaskDispatch is NOT here: it lives in the always-firing
    * hook (the classifier auto-allows a benign Task dispatch, so canUseTool would
@@ -1381,8 +1388,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
   private makeCanUseTool(gateRunId: string, allowRules: MergedPermissionRules): CanUseTool {
     return async (toolName, input, _opts): Promise<PermissionResult> => {
       // Defense-in-depth: honor the user/project allowlist even on the auto path.
+      // `updatedInput: input` echoes the original tool input unchanged — MANDATORY
+      // on the allow branch (the CLI's can_use_tool response schema requires a
+      // record; a bare `{ behavior: 'allow' }` ZodErrors → see makeCanUseTool doc).
       if (isToolAllowed(toolName, input, allowRules)) {
-        return { behavior: 'allow' };
+        return { behavior: 'allow', updatedInput: input };
       }
       try {
         const decision = await ApprovalRouter.getInstance().requestApproval(
@@ -1392,7 +1402,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
           () => {}, // socketReply is a no-op on the SDK path (the decision arrives via the gate)
         );
         return decision.behavior === 'allow'
-          ? { behavior: 'allow', ...(decision.updatedInput ? { updatedInput: decision.updatedInput } : {}) }
+          ? { behavior: 'allow', updatedInput: decision.updatedInput ?? input }
           : { behavior: 'deny', message: decision.message ?? 'Denied by reviewer' };
       } catch (err) {
         if (err instanceof RunNotRunningError) {

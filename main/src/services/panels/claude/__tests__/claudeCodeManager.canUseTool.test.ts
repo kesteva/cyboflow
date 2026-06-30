@@ -11,8 +11,11 @@
  * classifier, so canUseTool is INERT (never reached) there.
  *
  * Coverage (Slice 7 test plan, §10):
- *   - mapping: allowlisted tool short-circuits → { behavior: 'allow' } (no router);
- *   - mapping: ApprovalRouter allow → { behavior: 'allow' }, allow+updatedInput passes through;
+ *   - mapping: allowlisted tool short-circuits → { behavior: 'allow', updatedInput } (no router);
+ *   - mapping: ApprovalRouter allow → { behavior: 'allow', updatedInput }, echoing the
+ *     reviewer's updatedInput when present, else the original tool input unchanged;
+ *   - REGRESSION: the allow branch ALWAYS carries updatedInput as a record — the CLI
+ *     Zod-rejects a bare { behavior: 'allow' } ("Tool permission request failed: ZodError");
  *   - mapping: ApprovalRouter deny → { behavior: 'deny', message }, default message when absent;
  *   - RunNotRunningError → { behavior: 'deny', message: 'Run not active' };
  *   - any other error is RETHROWN (only the run-not-running case is a benign deny);
@@ -221,7 +224,7 @@ describe('ClaudeCodeManager canUseTool — auto-mode prompting (ApprovalDecision
     });
   }
 
-  it('classifier ask → ApprovalRouter allow → { behavior: "allow" }', async () => {
+  it('classifier ask → ApprovalRouter allow (no updatedInput) → echoes the original input as updatedInput', async () => {
     requestApproval.mockResolvedValueOnce({ behavior: 'allow' as const });
     const opts = await autoOpts('run-allow', 'sess-allow');
 
@@ -232,7 +235,9 @@ describe('ClaudeCodeManager canUseTool — auto-mode prompting (ApprovalDecision
     expect(requestApproval).toHaveBeenCalledWith(
       'run-allow', 'Bash', { command: 'ls' }, expect.any(Function),
     );
-    expect(res).toEqual({ behavior: 'allow' });
+    // updatedInput is MANDATORY on allow (the CLI ZodErrors on a bare allow). When
+    // the reviewer didn't modify the input, echo the original tool input unchanged.
+    expect(res).toEqual({ behavior: 'allow', updatedInput: { command: 'ls' } });
   });
 
   it('classifier ask → ApprovalRouter allow WITH updatedInput → passes updatedInput through', async () => {
@@ -293,7 +298,7 @@ describe('ClaudeCodeManager canUseTool — auto-mode prompting (ApprovalDecision
     await expect(callCanUseTool(opts, 'Bash', { command: 'ls' })).rejects.toThrow('db exploded');
   });
 
-  it('allowlisted tool short-circuits → { behavior: "allow" } WITHOUT touching ApprovalRouter', async () => {
+  it('allowlisted tool short-circuits → { behavior: "allow", updatedInput } WITHOUT touching ApprovalRouter', async () => {
     // composeHookOptions loads the rules ONCE at spawn (shared by the hook AND
     // canUseTool); mockReturnValueOnce applies to exactly that single load.
     vi.mocked(loadMergedPermissionRules).mockReturnValueOnce({ allow: ['Bash(git status:*)'], deny: [] });
@@ -301,8 +306,38 @@ describe('ClaudeCodeManager canUseTool — auto-mode prompting (ApprovalDecision
 
     const res = await callCanUseTool(opts, 'Bash', { command: 'git status -s' });
 
-    expect(res).toEqual({ behavior: 'allow' });
+    // The short-circuit must STILL carry updatedInput — this is the exact path that
+    // shipped the production ZodError (an allowlisted Bash command returned a bare
+    // allow, which the CLI rejected as "Tool permission request failed: ZodError").
+    expect(res).toEqual({ behavior: 'allow', updatedInput: { command: 'git status -s' } });
     expect(requestApproval).not.toHaveBeenCalled();
+  });
+
+  // REGRESSION (live-smoke 2026-06-30): every allow PermissionResult canUseTool can
+  // emit MUST carry `updatedInput` as a record. The native CLI Zod-validates the
+  // can_use_tool control-response; its allow branch requires `updatedInput`, so a
+  // bare `{ behavior: 'allow' }` fails `invalid_union` ("expected record, received
+  // undefined") and surfaces to the model as an is_error "Tool permission request
+  // failed: ZodError …" tool_result (the agent then loops). This asserts the
+  // invariant across BOTH allow producers — the allowlist short-circuit and the
+  // ApprovalRouter allow with no reviewer-modified input.
+  it('REGRESSION: the allow branch ALWAYS carries updatedInput as a record (never a bare allow)', async () => {
+    const isRecord = (v: unknown): v is Record<string, unknown> =>
+      typeof v === 'object' && v !== null && !Array.isArray(v);
+
+    // Producer 1: ApprovalRouter allow, reviewer did NOT modify the input.
+    requestApproval.mockResolvedValueOnce({ behavior: 'allow' as const });
+    const optsA = await autoOpts('run-reg-a', 'sess-reg-a');
+    const resA = (await callCanUseTool(optsA, 'Edit', { file_path: '/tmp/f', content: 'x' })) as PermissionResult;
+    expect(resA.behavior).toBe('allow');
+    expect(isRecord((resA as { updatedInput?: unknown }).updatedInput)).toBe(true);
+
+    // Producer 2: allowlist short-circuit (never reaches ApprovalRouter).
+    vi.mocked(loadMergedPermissionRules).mockReturnValueOnce({ allow: ['Bash(ls:*)'], deny: [] });
+    const optsB = await autoOpts('run-reg-b', 'sess-reg-b');
+    const resB = (await callCanUseTool(optsB, 'Bash', { command: 'ls -la' })) as PermissionResult;
+    expect(resB.behavior).toBe('allow');
+    expect(isRecord((resB as { updatedInput?: unknown }).updatedInput)).toBe(true);
   });
 });
 
