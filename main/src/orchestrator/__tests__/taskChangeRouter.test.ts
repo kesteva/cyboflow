@@ -16,7 +16,8 @@
  *    originating_idea_id must reference a real idea; cycle rejected.
  *  - decomposition: moving an idea to Decomposed (position 12) emits action
  *    'decomposed' and leaves children unchanged.
- *  - recomputeTaskExecutionStage aggregation over runs (done / indev / merge / revert).
+ *  - recomputeTaskExecutionStage aggregation over runs (merged -> done; every other
+ *    non-merged run-state -> entry stage, Ready-for-development fallback).
  *  - taskChangeEvents emits on BOTH 'task-project-<id>' AND the cross-project
  *    TASK_ALL_CHANNEL; the emitted item carries the body/scope/lineage fields
  *    plus archived_at + stage_position.
@@ -266,14 +267,16 @@ describe('TaskChangeRouter (3-table entity model)', () => {
     const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
     seedRunForTask(db, { taskId, runId: 'run-1', status: 'running' });
 
-    await expect(router.applyChange(1, { actor: 'user', taskId, stageId: stageId(6) })).rejects.toMatchObject({
+    // The task already lands at its create default (Ready for development,
+    // position 6), so assert a DIFFERENT asserted stage to exercise an actual move.
+    await expect(router.applyChange(1, { actor: 'user', taskId, stageId: stageId(1) })).rejects.toMatchObject({
       code: 'active_runs',
     });
 
     db.prepare("UPDATE workflow_runs SET status = 'completed' WHERE id = 'run-1'").run();
-    await router.applyChange(1, { actor: 'user', taskId, stageId: stageId(6) });
+    await router.applyChange(1, { actor: 'user', taskId, stageId: stageId(1) });
     const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
-    expect(task.stage_id).toBe(stageId(6));
+    expect(task.stage_id).toBe(stageId(1));
   });
 
   it('optimistic concurrency: stale expectedVersion is rejected', async () => {
@@ -460,9 +463,9 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(ev.actor).toBe('orchestrator');
       expect(ev.kind).toBe('decomposed');
 
-      // The epic child keeps its create stage (Epics extracted, position 4).
+      // The epic child keeps its create stage (Ready for development, position 6).
       expect((db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epic.taskId) as { stage_id: string }).stage_id).toBe(
-        stageId(4),
+        stageId(6),
       );
     });
 
@@ -522,9 +525,9 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
         stageId(12),
       );
-      // Task child keeps its create stage (Tasks extracted, position 5).
+      // Task child keeps its create stage (Ready for development, position 6).
       expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(task.taskId) as { stage_id: string }).stage_id).toBe(
-        stageId(5),
+        stageId(6),
       );
     });
 
@@ -574,21 +577,21 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       );
     });
 
-    it('epic defaults to Epics extracted (position 4) when no explicit stage is given', async () => {
+    it('epic defaults to Ready for development (position 6) when no explicit stage is given', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
       const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'epic', title: 'E' });
       expect((db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(taskId) as { stage_id: string }).stage_id).toBe(
-        stageId(4),
+        stageId(6),
       );
     });
 
-    it('task defaults to Tasks extracted (position 5) when no explicit stage is given', async () => {
+    it('task defaults to Ready for development (position 6) when no explicit stage is given', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
       const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
       expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string }).stage_id).toBe(
-        stageId(5),
+        stageId(6),
       );
     });
 
@@ -596,7 +599,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
       // A task explicitly created at Research (position 2) lands there, not the
-      // type-default Tasks-extracted (position 5).
+      // type-default Ready for development (position 6).
       const { taskId } = await router.applyChange(1, {
         actor: 'user',
         entityType: 'task',
@@ -664,7 +667,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
         .prepare('SELECT archived_at, stage_id, version FROM tasks WHERE id = ?')
         .get(taskId) as { archived_at: string | null; stage_id: string; version: number };
       expect(row.archived_at).not.toBeNull();
-      expect(row.stage_id).toBe(stageId(5)); // NOT a stage move — the column is untouched
+      expect(row.stage_id).toBe(stageId(6)); // NOT a stage move — the column is untouched
       expect(row.version).toBe(2);
       expect(actions).toEqual(['updated']);
 
@@ -994,29 +997,29 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
       await router.recomputeTaskExecutionStage(taskId);
       const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
-      // The task's create stage (Tasks extracted, position 5 per the FIX-STAGE
+      // The task's create stage (Ready for development, position 6 per the
       // type-default) is left untouched when there are no runs to aggregate.
-      expect(task.stage_id).toBe(stageId(5));
+      expect(task.stage_id).toBe(stageId(6));
     });
 
-    it('any running run -> indev (position 7)', async () => {
+    it('any running run -> entry stage (no in-development stage; position 6)', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
       const taskId = await makeTaskWithEntry(db, router);
       seedRunForTask(db, { taskId, runId: 'r1', status: 'running' });
       await router.recomputeTaskExecutionStage(taskId);
       const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
-      expect(task.stage_id).toBe(stageId(7));
+      expect(task.stage_id).toBe(stageId(6)); // entry_stage_id
     });
 
-    it('awaiting_review run -> merge (position 8)', async () => {
+    it('awaiting_review run -> entry stage (no ready-to-merge stage; position 6)', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
       const taskId = await makeTaskWithEntry(db, router);
       seedRunForTask(db, { taskId, runId: 'r1', status: 'awaiting_review' });
       await router.recomputeTaskExecutionStage(taskId);
       const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
-      expect(task.stage_id).toBe(stageId(8));
+      expect(task.stage_id).toBe(stageId(6)); // entry_stage_id
     });
 
     it('merged outcome -> done (position 9)', async () => {
@@ -1029,18 +1032,19 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(task.stage_id).toBe(stageId(9));
     });
 
-    it("integrated outcome on a completed run -> merge (position 8), NOT a revert", async () => {
+    it("integrated outcome on a completed run -> entry stage (collapsed, no ready-to-merge stage)", async () => {
       // Parallel-sprint per-task close-out: the run is terminal ('completed') but
       // its outcome='integrated' (merged into the integration branch, not main).
-      // It must HOLD the task at stage 8 (Ready to merge), the same as pr_open —
-      // NOT fall through to the terminal-without-merge revert branch.
+      // With the board collapsed there is no ready-to-merge stage, so — like every
+      // other non-merged run-state — it holds the task at its entry stage until a
+      // run actually merges into main.
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
       const taskId = await makeTaskWithEntry(db, router);
       seedRunForTask(db, { taskId, runId: 'r1', status: 'completed', outcome: 'integrated' });
       await router.recomputeTaskExecutionStage(taskId);
       const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
-      expect(task.stage_id).toBe(stageId(8));
+      expect(task.stage_id).toBe(stageId(6)); // entry_stage_id
     });
 
     it('all runs terminal-without-merge -> revert to entry_stage_id', async () => {

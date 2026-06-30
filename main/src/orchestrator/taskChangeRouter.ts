@@ -289,12 +289,12 @@ const DONE_POSITION = 9;
  * NO explicit stage (initialStageId/stageId both undefined), the entity lands at
  * its type's natural starting stage. An explicit stage STILL wins (the agent can
  * override). Positions are verified against database.ts seedDefaultBoard:
- *   idea -> 1 (Idea), epic -> 4 (Epics extracted), task -> 5 (Tasks extracted).
+ *   idea -> 1 (Idea), epic -> 6 (Ready for development), task -> 6 (Ready for development).
  */
 const CREATE_DEFAULT_POSITION: Record<TaskType, number> = {
   idea: 1,
-  epic: 4,
-  task: 5,
+  epic: 6,
+  task: 6,
 };
 
 // ---------------------------------------------------------------------------
@@ -1229,16 +1229,15 @@ export class TaskChangeRouter {
    * with actor='orchestrator' + entityType='task'.
    *
    * Aggregation (first match wins):
-   *   any outcome='merged'                                                       -> done
-   *   else any status='running'                                                  -> indev
-   *   else any (awaiting_review | outcome='pr_open' | outcome='integrated' | pending appr.) -> merge
-   *   else (runs nonempty && all terminal-without-merge)                         -> entry_stage_id (fallback 'ready')
-   *   else (no runs)                                                             -> no-op
+   *   any outcome='merged'             -> done (position 9)
+   *   else (runs nonempty, no merge)   -> entry_stage_id (fallback Ready-for-dev, position 6)
+   *   else (no runs)                   -> no-op
    *
-   * `outcome='integrated'` (feat/parallel-sprint) is the per-task close-out for a
-   * batch run whose branch merged into the integration branch but NOT yet into
-   * main — it must hold the task at stage 8 (Ready to merge), exactly like
-   * `pr_open`, until the finalize merge-to-main stamps `outcome='merged'`.
+   * The board collapsed to four kept stages (Idea / Ready for development / Done /
+   * Won't do), so there is no longer an in-development or ready-to-merge stage to
+   * derive: EVERY non-merged run-state (running, awaiting_review, pr_open,
+   * integrated, pending approval, or all-terminal-without-merge) holds the task at
+   * its entry stage until a run actually merges into main.
    */
   async recomputeTaskExecutionStage(taskId: string): Promise<void> {
     const task = this.db
@@ -1262,24 +1261,14 @@ export class TaskChangeRouter {
     let targetStageId: string | null = null;
 
     const anyMerged = runs.some((r) => r.outcome === 'merged');
-    const anyRunning = runs.some((r) => r.status === 'running');
 
     if (anyMerged) {
       targetStageId = this.stageIdForPosition(task.board_id, DONE_POSITION); // done
-    } else if (anyRunning) {
-      targetStageId = this.stageIdForPosition(task.board_id, 7); // indev
     } else {
-      const runIds = runs.map((r) => r.id);
-      const anyAwaitingReview = runs.some(
-        (r) => r.status === 'awaiting_review' || r.outcome === 'pr_open' || r.outcome === 'integrated',
-      );
-      const pendingApprovals = this.hasPendingApprovals(runIds);
-      if (anyAwaitingReview || pendingApprovals) {
-        targetStageId = this.stageIdForPosition(task.board_id, 8); // merge
-      } else {
-        // All runs terminal-without-merge -> revert to entry_stage_id (fallback 'ready').
-        targetStageId = task.entry_stage_id ?? this.stageIdForPosition(task.board_id, 6); // ready
-      }
+      // Every non-merged aggregate (running, awaiting_review, pr_open, integrated,
+      // pending approval, or all-terminal-without-merge) holds the task at its
+      // entry stage (fallback Ready for development, position 6).
+      targetStageId = task.entry_stage_id ?? this.stageIdForPosition(task.board_id, 6);
     }
 
     if (!targetStageId || targetStageId === task.stage_id) {
