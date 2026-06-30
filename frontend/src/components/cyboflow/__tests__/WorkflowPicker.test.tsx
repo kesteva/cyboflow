@@ -211,6 +211,9 @@ describe('WorkflowPicker — Quick Session button', () => {
       projectId: 1,
       agentPermissionMode: 'default',
       substrate: 'sdk',
+      // The Quick Session button now threads the picker model (default Opus), which
+      // rides as claudeConfig for the interactive eager spawn.
+      claudeConfig: { model: 'opus', fastMode: false },
     });
   });
 
@@ -380,6 +383,8 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
       substrate: 'sdk',
       sessionId: 'session-quick-001',
       permissionMode: 'default',
+      // Per-run model pin (migration 037) — the Configure picker defaults to Opus.
+      model: 'opus',
     });
   });
 
@@ -403,7 +408,24 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
       substrate: 'interactive',
       sessionId: 'session-quick-001',
       permissionMode: 'default',
+      model: 'opus',
     });
+  });
+
+  it('threads an explicit per-run model override (migration 037) into the mutate payload', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const modelSelect = await screen.findByLabelText('Select Claude model');
+    await act(async () => {
+      fireEvent.change(modelSelect, { target: { value: 'sonnet' } });
+    });
+
+    const startRunBtn = screen.getByRole('button', { name: /^Start Run$/ });
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ model: 'sonnet' }));
   });
 
   it("does NOT render the interactive caveats while 'sdk' is selected", async () => {
@@ -612,6 +634,7 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
       substrate: 'sdk',
       sessionId: 'session-quick-001',
       permissionMode: 'default',
+      model: 'opus',
       ideaId: 'IDEA-9',
     });
   });
@@ -663,6 +686,7 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
       substrate: 'sdk',
       sessionId: 'session-quick-001',
       permissionMode: 'default',
+      model: 'opus',
     });
 
     // setActiveRun nested the run under its parent session: BOTH ids are set.
@@ -696,6 +720,7 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
       substrate: 'sdk',
       sessionId: 'session-existing-007',
       permissionMode: 'default',
+      model: 'opus',
     });
 
     await waitFor(() => {
@@ -763,6 +788,7 @@ describe('WorkflowPicker — Ship idea-selection gate (feat/ship-workflow)', () 
       substrate: 'sdk',
       sessionId: 'session-quick-001',
       permissionMode: 'default',
+      model: 'opus',
       ideaId: 'IDEA-9',
     });
   });
@@ -831,6 +857,7 @@ describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)',
       substrate: 'sdk',
       sessionId: 'session-quick-001',
       permissionMode: 'default',
+      model: 'opus',
       taskIds: ['TASK-1'],
     });
     // Post-launch flow mirrors launchRun: run nested under its session +

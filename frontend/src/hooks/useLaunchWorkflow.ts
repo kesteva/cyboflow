@@ -25,6 +25,7 @@ import { useConfigStore } from '../stores/configStore';
 import { ensureSessionForLaunch } from '../utils/ensureSessionForLaunch';
 import { useForcedSubstrate } from './useForcedSubstrate';
 import { DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
+import { DEFAULT_WORKFLOW_MODEL } from '../components/cyboflow/ModelSelector';
 import { trackEvent } from '../utils/telemetry';
 
 /** Pre-launch seed — at most one of ideaId (planner) / taskIds (sprint). */
@@ -76,6 +77,10 @@ export function useLaunchWorkflow(
           substrate: forced ?? DEFAULT_SUBSTRATE,
           sessionId,
           permissionMode: globalPermissionMode,
+          // This one-click lane has no Configure screen, so it pins the same
+          // default the wizard/picker default to (Opus) → workflow_runs.model
+          // (migration 037), keeping every UI-initiated launch consistent.
+          model: DEFAULT_WORKFLOW_MODEL,
         };
         const result = await trpc.cyboflow.runs.start.mutate(
           seed?.ideaId !== undefined

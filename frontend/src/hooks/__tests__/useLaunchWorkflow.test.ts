@@ -59,6 +59,9 @@ describe('useLaunchWorkflow', () => {
       substrate: 'sdk',
       sessionId: 'session-1',
       permissionMode: 'default',
+      // This one-click lane pins the same default the wizard/picker default to
+      // (Opus) → workflow_runs.model (migration 037).
+      model: 'opus',
     });
     expect(useCyboflowStore.getState().activeRunId).toBe('run-9');
     expect(useCyboflowStore.getState().selectedSessionId).toBe('session-1');

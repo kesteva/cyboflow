@@ -21,6 +21,7 @@ import { WorkflowEditorModal } from './WorkflowEditorModal';
 import { IdeaPickerModal } from './IdeaPickerModal';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { SubstrateSelector } from './SubstrateSelector';
+import { ModelSelector, DEFAULT_WORKFLOW_MODEL } from './ModelSelector';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
 import { type WorkflowRow, CYBOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
@@ -56,6 +57,14 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
    * shared type, never re-declared here.
    */
   const [substrate, setSubstrate] = useState<CliSubstrate>(DEFAULT_SUBSTRATE);
+
+  /**
+   * The per-run Claude model choice (Configure model dropdown). Defaults to Opus
+   * (DEFAULT_WORKFLOW_MODEL) like the Session Start Wizard; threaded into
+   * runs.start.mutate as `model` → workflow_runs.model (migration 037) for workflow
+   * launches, and into useQuickSession.start for the Quick Session button.
+   */
+  const [model, setModel] = useState<string>(DEFAULT_WORKFLOW_MODEL);
 
   /**
    * The per-run agent permission choice — seeded from the global default and
@@ -173,8 +182,8 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         const sessionId = await ensureSessionForLaunch(projectId, { forceNew: forceNewSession });
         const result = await trpc.cyboflow.runs.start.mutate(
           ideaId === undefined
-            ? { workflowId, projectId, substrate, sessionId, permissionMode }
-            : { workflowId, projectId, substrate, sessionId, permissionMode, ideaId },
+            ? { workflowId, projectId, substrate, sessionId, permissionMode, model }
+            : { workflowId, projectId, substrate, sessionId, permissionMode, model, ideaId },
         );
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
         trackEvent('workflow_run_started', {
@@ -192,7 +201,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projectId, substrate, permissionMode, onWorkflowStarted, forceNewSession, workflows],
+    [projectId, substrate, permissionMode, model, onWorkflowStarted, forceNewSession, workflows],
   );
 
   /**
@@ -219,6 +228,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           substrate,
           sessionId,
           permissionMode,
+          model,
           taskIds,
         });
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
@@ -237,7 +247,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projectId, substrate, permissionMode, onWorkflowStarted, forceNewSession, workflows],
+    [projectId, substrate, permissionMode, model, onWorkflowStarted, forceNewSession, workflows],
   );
 
   const handleStartRun = async () => {
@@ -321,6 +331,11 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           this run only (highest-precedence `requestedMode` rung). */}
       <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
 
+      {/* Per-run model selector — pins the model a workflow run (or quick session)
+          spawns with (default Opus). Workflow: threaded into runs.start as `model`
+          → workflow_runs.model (migration 037). Quick: into useQuickSession. */}
+      <ModelSelector value={model} onChange={setModel} id="workflow-picker-model" />
+
       {combinedError && (
         <p className="text-xs text-status-error" role="alert">
           {combinedError}
@@ -386,7 +401,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       <div className="mt-2 flex flex-col gap-2 border-t border-border-primary pt-3">
         <p className="text-xs text-text-secondary">Or start without a workflow:</p>
         <button
-          onClick={() => void startQuickSession(permissionMode, substrate)}
+          onClick={() => void startQuickSession(permissionMode, substrate, undefined, model)}
           disabled={isQuickStarting || isStarting}
           className="rounded-button border border-interactive bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="quick-session-button"
