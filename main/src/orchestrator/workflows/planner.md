@@ -56,24 +56,40 @@ The pattern for every phase:
 
 ### Phase 2 — Refine
 
-4. **epics** (large ideas only) → delegate to `cyboflow-epics`; create each returned
-   epic and link it to the originating idea via `cyboflow_*`. A `small` idea skips
-   straight to tasks.
-5. **tasks** → delegate to `cyboflow-tasks`; create each returned task with
-   `cyboflow_create_task` (title, body, acceptance criteria, file/dependency hints,
-   parent epic/idea linkage). The tasks carry the flow forward; the idea is retired
-   to Decomposed later, at the `decompose` gate (step 7).
+**Materialization is deferred to plan approval.** The `cyboflow-epics` /
+`cyboflow-tasks` subagents return their proposals and you **hold** that
+decomposition in context — you do **not** call any `cyboflow_create_*` tool until
+the `approve-plan` gate returns **Approve**. Nothing lands on the board before the
+human approves the plan.
+
+4. **epics** (large ideas only) → delegate to `cyboflow-epics`; **hold** the returned
+   epics in context — do **not** create them yet. A `small` idea skips straight to
+   tasks.
+5. **tasks** → delegate to `cyboflow-tasks`; **hold** the returned task list in
+   context (title, body, acceptance criteria, file/dependency hints, parent
+   epic/idea linkage) — do **not** call `cyboflow_create_task` yet. You now hold the
+   full decomposition and no `cyboflow_create_*` has run.
 6. **approve-plan** → **human gate, inline.** Use **AskUserQuestion** (header
    `Approve plan`, options Approve / Revise; put scope, ordering, and acceptance
    criteria in the option markdown preview). Do **not** proceed until the user
-   answers Approve — on approval the tasks become ready for a Sprint run.
-7. **decompose** → **final human gate, inline.** After the plan is approved, report
-   the `decompose` step, then present the gate with **AskUserQuestion** (header
-   `Archive idea`, options `Archive & finish` / `Keep ideas & finish`; list the
-   idea(s) you planned — by ref/title — in the option markdown preview). The backend
-   handles the outcome: `Archive & finish` moves the idea(s) to **Decomposed** and
-   ends the run; `Keep ideas & finish` ends the run leaving the idea(s) at Idea spec.
-   Do **not** call any further tools after this gate — the run is ending.
+   answers:
+   - **Approve** → **only now** create each held epic and task via the `cyboflow_*`
+     tools (`cyboflow_create_task` for tasks, linked to their parent epic/idea).
+     Approving the plan locks it, so the entities you create land directly at
+     **Ready for development** and are immediately visible — you do **not** drive any
+     board-stage moves by hand.
+   - **Revise** → re-delegate to `cyboflow-epics` / `cyboflow-tasks` with the
+     feedback and re-hold the revised decomposition; create nothing until the next
+     Approve.
+7. **decompose** → **final human gate, inline.** After the plan is approved and the
+   tasks created, report the `decompose` step, then present the gate with
+   **AskUserQuestion** (header `Archive idea`, options `Archive & finish` /
+   `Keep ideas & finish`; list the idea(s) you planned — by ref/title — in the option
+   markdown preview). The backend handles the outcome: `Archive & finish` removes the
+   idea(s) from the board by stamping `decomposed_at` (the idea keeps its stage but
+   leaves the board, reachable only via its children) and ends the run;
+   `Keep ideas & finish` leaves the idea(s) on the board at **Idea** and ends the
+   run. Do **not** call any further tools after this gate — the run is ending.
 
 ## Hard rules
 
@@ -85,9 +101,9 @@ The pattern for every phase:
   `cyboflow_report_step` is observational only and never substitutes for a gate.
 - Report every step transition via `cyboflow_report_step` from this main session —
   including the steps whose work you delegated to a subagent.
-- Board stages advance as the run progresses — reporting steps moves the idea(s)
-  through Idea / Research / Idea spec, and approving the plan flips the tasks to
-  Ready for development. The idea(s) retire to **Decomposed** only via the final
-  `decompose` gate (no longer automatically on decomposition). You MAY still call
-  `cyboflow_set_task_stage` to assert a finer planning stage (e.g. Research or Idea
-  spec) when it helps, but you do not need to drive these stage moves by hand.
+- **The board has no intermediate planning stages.** The idea stays at **Idea** for
+  the whole plan — there are no Research / Idea-spec stages to step it through (those
+  positions were removed). The tasks you create at the approved plan land directly at
+  **Ready for development**, so you never drive task board-stage moves by hand. The
+  idea(s) leave the board only via the final `decompose` gate — `Archive & finish`
+  stamps `decomposed_at` (the idea is reachable thereafter only through its children).
