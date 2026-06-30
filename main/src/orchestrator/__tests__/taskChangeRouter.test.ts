@@ -1367,6 +1367,84 @@ describe('TaskChangeRouter (3-table entity model)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // recomputeEpicStage — the ROLLUP over an epic's child tasks
+  // -------------------------------------------------------------------------
+
+  describe('recomputeEpicStage', () => {
+    /** Create an epic (lands at Ready for development, position 6) + N child tasks. */
+    async function makeEpicWithChildren(
+      db: Database.Database,
+      router: TaskChangeRouter,
+      n: number,
+    ): Promise<{ epicId: string; childIds: string[] }> {
+      const { taskId: epicId } = await router.applyChange(1, { actor: 'user', entityType: 'epic', title: 'E' });
+      const childIds: string[] = [];
+      for (let i = 0; i < n; i++) {
+        const { taskId } = await router.applyChange(1, {
+          actor: 'user',
+          entityType: 'task',
+          title: `T${i}`,
+          parentEpicId: epicId,
+        });
+        childIds.push(taskId);
+      }
+      return { epicId, childIds };
+    }
+
+    /** Force a child task onto a board position (direct stage_id set — bypasses the rollup). */
+    function setChildStage(db: Database.Database, taskId: string, position: number): void {
+      db.prepare('UPDATE tasks SET stage_id = ? WHERE id = ?').run(stageId(position), taskId);
+    }
+
+    it('all non-archived children at Done (position 9) -> epic rolls up to Done (9)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { epicId, childIds } = await makeEpicWithChildren(db, router, 2);
+      childIds.forEach((id) => setChildStage(db, id, 9));
+      await router.recomputeEpicStage(epicId);
+      const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(9));
+    });
+
+    it('one child not-done -> epic holds at Ready for development (6)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { epicId, childIds } = await makeEpicWithChildren(db, router, 2);
+      // Pre-stamp the epic at Done to prove the rollup MOVES it back to 6.
+      db.prepare('UPDATE epics SET stage_id = ? WHERE id = ?').run(stageId(9), epicId);
+      setChildStage(db, childIds[0], 9); // done
+      // childIds[1] left at its create stage (position 6) -> not done.
+      await router.recomputeEpicStage(epicId);
+      const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(6));
+    });
+
+    it('no (non-archived) children -> unchanged (early-return leaves stage untouched)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { epicId } = await makeEpicWithChildren(db, router, 0);
+      // Park the epic somewhere non-default to prove the no-children path is a no-op.
+      db.prepare('UPDATE epics SET stage_id = ? WHERE id = ?').run(stageId(9), epicId);
+      await router.recomputeEpicStage(epicId);
+      const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(9));
+    });
+
+    it('an archived child is ignored: only non-archived children count toward the rollup', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { epicId, childIds } = await makeEpicWithChildren(db, router, 2);
+      setChildStage(db, childIds[0], 9); // done, non-archived
+      // childIds[1] is NOT done (position 6) but ARCHIVED -> excluded from the rollup,
+      // so the only counted child is Done -> epic rolls up to Done (9).
+      db.prepare('UPDATE tasks SET archived_at = ? WHERE id = ?').run(new Date().toISOString(), childIds[1]);
+      await router.recomputeEpicStage(epicId);
+      const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(9));
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // add-dependency path (task_dependencies write + cycle detection)
   // -------------------------------------------------------------------------
 

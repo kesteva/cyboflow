@@ -1494,6 +1494,68 @@ export class TaskChangeRouter {
   }
 
   // --------------------------------------------------------------------------
+  // recomputeEpicStage — the ROLLUP over an epic's child tasks.
+  // --------------------------------------------------------------------------
+
+  /**
+   * Recompute and write the DERIVED stage for an EPIC by aggregating over its
+   * (non-archived) child tasks. Epics never carry runs, so — unlike a task — the
+   * epic stage is a pure rollup of where its children sit on the board:
+   *   all children at Done (position 9)  -> Done (position 9)
+   *   any child not yet Done             -> Ready for development (position 6)
+   *   no non-archived children           -> no-op (stays at its create stage 6)
+   *
+   * Writes via applyChange with actor='orchestrator' + entityType='epic', so the
+   * orchestrator clears assertStageAuthority and the (epic-irrelevant) active-run
+   * guard. The write is an epic UPDATE — never a task create/stage-move — so it
+   * cannot recurse back into this rollup. Idempotent: a target equal to the epic's
+   * current stage (or an unresolvable target) is a no-op.
+   */
+  async recomputeEpicStage(epicId: string): Promise<void> {
+    const epic = this.db
+      .prepare('SELECT id, project_id, board_id, stage_id FROM epics WHERE id = ?')
+      .get(epicId) as
+      | { id: string; project_id: number; board_id: string; stage_id: string }
+      | undefined;
+    if (!epic) {
+      throw new TaskChangeError('not_found', `epic ${epicId} not found`);
+    }
+
+    // Child task board positions (mirrors the epic-children query shape in
+    // taskListing.selectTaskById). Only non-archived children count toward the
+    // rollup; an archived child is off the board.
+    const children = this.db
+      .prepare(
+        `SELECT bs.position AS position
+           FROM tasks t
+           JOIN board_stages bs ON bs.id = t.stage_id
+          WHERE t.parent_epic_id = ? AND t.archived_at IS NULL`,
+      )
+      .all(epicId) as Array<{ position: number }>;
+
+    if (children.length === 0) {
+      // No (non-archived) children: leave the epic at its create stage.
+      return;
+    }
+
+    const allDone = children.every((c) => c.position === DONE_POSITION);
+    // allDone -> Done (9); otherwise hold at Ready for development (position 6).
+    const targetStageId = this.stageIdForPosition(epic.board_id, allDone ? DONE_POSITION : 6);
+
+    if (!targetStageId || targetStageId === epic.stage_id) {
+      return; // already there, or no resolvable target
+    }
+
+    await this.applyChange(epic.project_id, {
+      actor: 'orchestrator',
+      entityType: 'epic',
+      taskId: epicId,
+      stageId: targetStageId,
+      kind: 'execution-stage',
+    });
+  }
+
+  // --------------------------------------------------------------------------
   // Validation / authority helpers
   // --------------------------------------------------------------------------
 
