@@ -563,6 +563,31 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         session.id,
       );
 
+      // Persist the per-session MCP deny-list / plugin allow-list chosen at
+      // session start (the launch wizard's Advanced section; migration 037). Read
+      // at SDK spawn — composeMcpServers deletes disabled servers and
+      // buildSdkOptions enforces the deny via strictMcpConfig + disallowedTools.
+      // Only stamped when non-empty so a deny-free session leaves the columns NULL
+      // (inherit all servers / the user's file plugins), byte-identical to before.
+      const requestedDisabledMcps = Array.isArray(request.disabledMcpServers)
+        ? request.disabledMcpServers.filter((s): s is string => typeof s === 'string')
+        : [];
+      if (requestedDisabledMcps.length > 0) {
+        db.prepare(`UPDATE sessions SET disabled_mcp_servers_json = ? WHERE id = ?`).run(
+          JSON.stringify(requestedDisabledMcps),
+          session.id,
+        );
+      }
+      const requestedEnabledPlugins = Array.isArray(request.enabledPlugins)
+        ? request.enabledPlugins.filter((s): s is string => typeof s === 'string')
+        : [];
+      if (requestedEnabledPlugins.length > 0) {
+        db.prepare(`UPDATE sessions SET enabled_plugins_json = ? WHERE id = ?`).run(
+          JSON.stringify(requestedEnabledPlugins),
+          session.id,
+        );
+      }
+
       // EAGER PTY SPAWN (interactive substrate only): create the claude panel
       // server-side (same pattern sessions:input uses) and boot the persistent
       // REPL now, with the cyboflow context briefing as its first prompt, so the

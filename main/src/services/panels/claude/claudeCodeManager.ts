@@ -85,6 +85,32 @@ export function modelSupportsAutoMode(model?: string): boolean {
   return true;
 }
 
+/**
+ * SDK option guards that ENFORCE a per-session MCP deny-list at spawn.
+ *
+ * composeMcpServers already deletes disabled servers from the explicit
+ * `mcpServers`, but `settingSources: ['user','project']` makes the CLI ALSO
+ * auto-load MCP servers from ~/.claude.json / .mcp.json and merge them back,
+ * silently re-adding a "disabled" server. These guards close that gap:
+ *   - strictMcpConfig: the CLI uses ONLY the explicit (already-filtered)
+ *     mcpServers and ignores config-file MCP discovery → the server never
+ *     connects;
+ *   - disallowedTools (`mcp__<server>`): removes the server's tools from the
+ *     model's context as defense-in-depth (never re-surfaced via ToolSearch).
+ *
+ * Returns an EMPTY object when nothing is disabled (the deny-free path must stay
+ * byte-identical). 'cyboflow' is never disable-able (orchestrator socket) and is
+ * always filtered out. Kept module-level (pure, no `this`) for unit-testing.
+ */
+export function mcpDenyListSdkGuards(disabledMcps: readonly string[]): {
+  strictMcpConfig?: true;
+  disallowedTools?: string[];
+} {
+  const denied = disabledMcps.filter((name) => name !== 'cyboflow');
+  if (denied.length === 0) return {};
+  return { strictMcpConfig: true, disallowedTools: denied.map((name) => `mcp__${name}`) };
+}
+
 interface ClaudeSpawnOptions {
   panelId: string;
   sessionId: string;
@@ -949,6 +975,33 @@ export class ClaudeCodeManager extends AbstractCliManager {
       },
       ...this.composeHookOptions(options),
     };
+
+    // Per-session MCP deny-list ENFORCEMENT (sessions.disabled_mcp_servers_json).
+    // composeMcpServers already deletes disabled servers from the explicit
+    // `mcpServers`, but `settingSources: ['user','project']` makes the CLI ALSO
+    // auto-load MCP servers from ~/.claude.json / .mcp.json and MERGE them back —
+    // silently re-adding a "disabled" server (the fal-ai report). Two guards,
+    // applied ONLY when something is disabled so a deny-free session stays
+    // byte-identical:
+    //   1. strictMcpConfig — the CLI uses ONLY the explicit (already-filtered)
+    //      mcpServers and ignores config-file MCP discovery, so the disabled
+    //      server never connects. composeMcpServers re-reads .mcp.json +
+    //      ~/.claude.json (and injects 'cyboflow'), so non-disabled servers are
+    //      preserved.
+    //   2. disallowedTools — removes the server's tools from the model's context
+    //      as defense-in-depth (never re-surfaced via ToolSearch). 'cyboflow' is
+    //      never disable-able (orchestrator socket) and is excluded.
+    const denyGuards = mcpDenyListSdkGuards(this.resolveSessionDisabledMcps(options.sessionId));
+    if (denyGuards.strictMcpConfig) {
+      sdkOptions.strictMcpConfig = true;
+      sdkOptions.disallowedTools = [
+        ...(sdkOptions.disallowedTools ?? []),
+        ...(denyGuards.disallowedTools ?? []),
+      ];
+      this.logger?.info(
+        `[MCP] Enforcing deny-list for session ${options.sessionId} (strictMcpConfig + disallow): ${(denyGuards.disallowedTools ?? []).join(', ')}`,
+      );
+    }
 
     // Packaging fix: in a packaged app the SDK resolves its native `claude`
     // binary via require.resolve() from inside the asar'd sdk.mjs, yielding an

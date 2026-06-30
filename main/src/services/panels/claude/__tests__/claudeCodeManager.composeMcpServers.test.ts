@@ -25,7 +25,7 @@ import type Database from 'better-sqlite3';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
-import { ClaudeCodeManager } from '../claudeCodeManager';
+import { ClaudeCodeManager, mcpDenyListSdkGuards } from '../claudeCodeManager';
 import type { SessionManager } from '../../../sessionManager';
 import type { Logger } from '../../../../utils/logger';
 import type { McpServerConfig } from '@anthropic-ai/claude-agent-sdk';
@@ -352,5 +352,39 @@ describe('ClaudeCodeManager.composeMcpServers — per-session MCP deny-list', ()
     const result = await mgr.publicComposeMcpServers('s1');
 
     expect(result).toEqual({ peekaboo: { command: 'p' } });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mcpDenyListSdkGuards — the spawn-time ENFORCEMENT guards. composeMcpServers'
+// deletion alone is defeated by settingSources re-loading the server from
+// ~/.claude.json; these guards (strictMcpConfig + disallowedTools) close the gap.
+// ---------------------------------------------------------------------------
+
+describe('mcpDenyListSdkGuards — deny-list spawn enforcement', () => {
+  it('empty deny-list → no guards (deny-free spawn stays byte-identical)', () => {
+    expect(mcpDenyListSdkGuards([])).toEqual({});
+  });
+
+  it('a disabled server → strictMcpConfig + disallow its mcp__ tools', () => {
+    expect(mcpDenyListSdkGuards(['fal-ai'])).toEqual({
+      strictMcpConfig: true,
+      disallowedTools: ['mcp__fal-ai'],
+    });
+  });
+
+  it('multiple disabled servers → one disallow entry each', () => {
+    expect(mcpDenyListSdkGuards(['fal-ai', 'peekaboo'])).toEqual({
+      strictMcpConfig: true,
+      disallowedTools: ['mcp__fal-ai', 'mcp__peekaboo'],
+    });
+  });
+
+  it("never enforces against 'cyboflow' (orchestrator socket); a cyboflow-only list is a no-op", () => {
+    expect(mcpDenyListSdkGuards(['cyboflow'])).toEqual({});
+    expect(mcpDenyListSdkGuards(['cyboflow', 'fal-ai'])).toEqual({
+      strictMcpConfig: true,
+      disallowedTools: ['mcp__fal-ai'],
+    });
   });
 });

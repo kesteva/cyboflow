@@ -133,6 +133,22 @@ export interface CreateSessionRequest {
    * the frontend twin in frontend/src/types/session.ts (request-parity rule).
    */
   effort?: 'ultracode';
+  /**
+   * Per-session MCP DENY list chosen at session start (the launch wizard's
+   * Advanced section). Server names the session must NOT load; persisted to
+   * sessions.disabled_mcp_servers_json by create-quick and enforced at SDK spawn
+   * (composeMcpServers delete + strictMcpConfig + disallowedTools). Omitted/empty
+   * → inherit all configured servers. KEEP IN SYNC with the frontend twin in
+   * frontend/src/types/session.ts (request-parity rule).
+   */
+  disabledMcpServers?: string[];
+  /**
+   * Per-session plugin ALLOW list chosen at session start (Advanced section).
+   * Persisted to sessions.enabled_plugins_json by create-quick. Omitted/empty →
+   * inherit the user's file plugins. KEEP IN SYNC with the frontend twin in
+   * frontend/src/types/session.ts (request-parity rule).
+   */
+  enabledPlugins?: string[];
   projectId?: number;
   folderId?: string;
   baseBranch?: string;
