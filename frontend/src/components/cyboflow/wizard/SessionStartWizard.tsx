@@ -68,6 +68,10 @@ import { AgentPermissionModeSelector, PERMISSION_MODE_OPTIONS } from '../AgentPe
 import { SubstrateSelector } from '../SubstrateSelector';
 import { ModelSelector, DEFAULT_QUICK_MODEL } from '../ModelSelector';
 import { isOpusModel, modelDisplayLabel } from '../unified/ModelPill';
+import { McpTogglePill } from '../unified/McpTogglePill';
+import { PluginTogglePill } from '../unified/PluginTogglePill';
+import { ChevronDown } from 'lucide-react';
+import { cn } from '../../../utils/cn';
 import { Switch } from '../../ui/Switch';
 import { WorkflowEditorModal } from '../WorkflowEditorModal';
 import { WizardStepHeader } from './WizardStepHeader';
@@ -206,6 +210,13 @@ export default function SessionStartWizard(): React.JSX.Element {
   // separate opt-in, default OFF, QUICK-only, surfaced only while Opus is selected.
   const [model, setModel] = useState<string>(DEFAULT_QUICK_MODEL);
   const [fastMode, setFastMode] = useState<boolean>(false);
+  // Advanced (Configure ③, quick only): per-session MCP DENY set + plugin ALLOW
+  // set, chosen at session start (NOT a mid-conversation toggle — the deny is
+  // enforced at the first SDK spawn). Threaded into createQuick; collapsed by
+  // default behind the Advanced disclosure.
+  const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
+  const [disabledMcpServers, setDisabledMcpServers] = useState<string[]>([]);
+  const [enabledPlugins, setEnabledPlugins] = useState<string[]>([]);
   // Blueprint editor (workflow path only) — 'edit' (selected flow) or 'create'.
   const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
 
@@ -508,7 +519,15 @@ export default function SessionStartWizard(): React.JSX.Element {
     if (selection.kind === 'quick') {
       // Fast mode is Opus-only; never request it for another model even if the
       // toggle was left on before the model was switched.
-      void startQuickSession(permissionMode, substrate, undefined, model, isOpusModel(model) && fastMode);
+      void startQuickSession(
+        permissionMode,
+        substrate,
+        undefined,
+        model,
+        isOpusModel(model) && fastMode,
+        disabledMcpServers,
+        enabledPlugins,
+      );
       return;
     }
 
@@ -541,7 +560,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       return;
     }
     void launchRun(selection.workflowId);
-  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, substrate, model, fastMode]);
+  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, substrate, model, fastMode, disabledMcpServers, enabledPlugins]);
 
   const handleIdeaPicked = useCallback(
     (ideaId: string) => {
@@ -779,6 +798,58 @@ export default function SessionStartWizard(): React.JSX.Element {
                 id="wizard-substrate"
                 caveatsTestId="wizard-substrate-caveats"
               />
+            )}
+
+            {/* Advanced (QUICK only): MCP / plugin selection. These are a
+                session-START decision — the deny-list is enforced at the first SDK
+                spawn (composeMcpServers delete + strictMcpConfig + disallowedTools),
+                so toggling mid-conversation was confusing and could leak a disabled
+                server back via the CLI's settingSources auto-load. Collapsed by
+                default; the pills are controlled (no sessionId yet → wizard owns the
+                state and threads it into createQuick). */}
+            {selection.kind === 'quick' && (
+              <div className="rounded-button border border-border-secondary bg-surface-secondary">
+                <button
+                  type="button"
+                  onClick={() => setShowAdvanced((v) => !v)}
+                  data-testid="wizard-advanced-toggle"
+                  aria-expanded={showAdvanced}
+                  className="flex w-full items-center justify-between px-3 py-2 text-sm font-medium text-text-primary"
+                >
+                  <span>Advanced</span>
+                  <ChevronDown
+                    className={cn(
+                      'h-4 w-4 text-text-tertiary transition-transform',
+                      showAdvanced && 'rotate-180',
+                    )}
+                  />
+                </button>
+                {showAdvanced && (
+                  <div
+                    className="flex flex-col gap-3 border-t border-border-secondary px-3 py-3"
+                    data-testid="wizard-advanced-body"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex flex-col">
+                        <span className="text-sm font-medium text-text-primary">MCP servers</span>
+                        <span className="text-xs text-text-tertiary">
+                          Disable servers this session should not load
+                        </span>
+                      </div>
+                      <McpTogglePill disabled={disabledMcpServers} onChange={setDisabledMcpServers} />
+                    </div>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex flex-col">
+                        <span className="text-sm font-medium text-text-primary">Plugins</span>
+                        <span className="text-xs text-text-tertiary">
+                          Force-enable plugins for this session
+                        </span>
+                      </div>
+                      <PluginTogglePill selected={enabledPlugins} onChange={setEnabledPlugins} />
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
 
             {/* Workflow-only control: blueprint-editor access (there is no

@@ -54,6 +54,8 @@ interface UseQuickSessionReturn {
     effort?: 'ultracode',
     model?: string,
     fastMode?: boolean,
+    disabledMcpServers?: string[],
+    enabledPlugins?: string[],
   ) => Promise<void>;
   isStarting: boolean;
   error: string | null;
@@ -70,6 +72,8 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       effort?: 'ultracode',
       model?: string,
       fastMode?: boolean,
+      disabledMcpServers?: string[],
+      enabledPlugins?: string[],
     ): Promise<void> => {
       if (opts.projectId === null || isStarting) return;
 
@@ -93,6 +97,11 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           ...(substrate ? { substrate } : {}),
           ...(effort ? { effort } : {}),
           ...(claudeConfig ? { claudeConfig } : {}),
+          // Per-session MCP deny / plugin allow chosen in the wizard's Advanced
+          // section. Only sent when non-empty (create-quick leaves the column NULL
+          // otherwise). Persisted before the first spawn so the deny is enforced.
+          ...(disabledMcpServers && disabledMcpServers.length > 0 ? { disabledMcpServers } : {}),
+          ...(enabledPlugins && enabledPlugins.length > 0 ? { enabledPlugins } : {}),
         });
 
         if (!result.success || !result.data) {

@@ -27,10 +27,16 @@ import type { McpEntry } from '../../../../../shared/types/integrations';
  * marks one row, which is wrong for a multi-select).
  */
 interface McpTogglePillProps {
-  sessionId: string;
-  /** The persisted DENY set — MCP server names currently disabled for the session. */
+  /**
+   * The owning session id. When set (live session), a toggle persists to
+   * sessions.disabled_mcp_servers_json immediately. When OMITTED (the launch
+   * wizard — no session exists yet), the pill is purely controlled: a toggle just
+   * calls onChange and the parent owns the value + persistence at creation.
+   */
+  sessionId?: string;
+  /** The DENY set — MCP server names currently disabled. */
   disabled: string[];
-  /** Invoked after the deny set is persisted so the host mirrors it into the store. */
+  /** Invoked with the next deny set on each toggle (after persist when sessionId set). */
   onChange: (disabled: string[]) => void;
 }
 
@@ -101,6 +107,11 @@ export function McpTogglePill({
     const next = checked ? [...localDisabled, name] : localDisabled.filter((x) => x !== name);
     const prev = localDisabled;
     setLocalDisabled(next);
+    // Wizard (no sessionId yet): parent owns state + persists at session creation.
+    if (!sessionId) {
+      onChange(next);
+      return;
+    }
     try {
       const res = await API.sessions.updateSessionMcps(sessionId, next);
       if (res.success) onChange(next);

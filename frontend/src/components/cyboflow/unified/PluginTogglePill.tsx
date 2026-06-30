@@ -25,10 +25,16 @@ import type { PluginEntry } from '../../../../../shared/types/integrations';
  * checked marker.
  */
 interface PluginTogglePillProps {
-  sessionId: string;
-  /** The persisted ALLOW set — plugin ids currently force-enabled for the session. */
+  /**
+   * The owning session id. When set (live session), a toggle persists to
+   * sessions.enabled_plugins_json immediately. When OMITTED (the launch wizard —
+   * no session exists yet), the pill is purely controlled: a toggle just calls
+   * onChange and the parent owns the value + persistence at creation.
+   */
+  sessionId?: string;
+  /** The ALLOW set — plugin ids currently force-enabled. */
   selected: string[];
-  /** Invoked after the allow set is persisted so the host mirrors it into the store. */
+  /** Invoked with the next allow set on each toggle (after persist when sessionId set). */
   onChange: (selected: string[]) => void;
 }
 
@@ -95,6 +101,11 @@ export function PluginTogglePill({
       : [...localSelected, id];
     const prev = localSelected;
     setLocalSelected(next);
+    // Wizard (no sessionId yet): parent owns state + persists at session creation.
+    if (!sessionId) {
+      onChange(next);
+      return;
+    }
     try {
       const res = await API.sessions.updateSessionPlugins(sessionId, next);
       if (res.success) onChange(next);

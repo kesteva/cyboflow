@@ -163,14 +163,12 @@ describe('QuickSessionComposer — Opus-only fast-mode pill', () => {
   });
 });
 
-describe('QuickSessionComposer — MCP / plugin toggle pills', () => {
-  it('renders both toggle pills for an idle SDK session', async () => {
-    render(<Harness session={makeSession({ status: 'ready' })} interactive={false} />);
-    expect(await screen.findByText('MCP')).toBeInTheDocument();
-    expect(screen.getByText('Plugins')).toBeInTheDocument();
-  });
-
-  it('reflects the session row deny-set / allow-set in the pill labels', async () => {
+describe('QuickSessionComposer — no MCP / plugin pills (moved to session start)', () => {
+  // MCP / plugin selection is now a session-START decision (the launch wizard's
+  // Advanced section), not a mid-conversation toggle — the deny-list is enforced
+  // at the first SDK spawn and a mid-turn pill could leak a disabled server back
+  // in via the CLI's settingSources auto-load. The composer must not render them.
+  it('does NOT render the MCP or plugin pill, even for an idle SDK session with a deny-set', async () => {
     render(
       <Harness
         session={makeSession({
@@ -181,15 +179,12 @@ describe('QuickSessionComposer — MCP / plugin toggle pills', () => {
         interactive={false}
       />,
     );
-    expect(await screen.findByText('MCP · 1 off')).toBeInTheDocument();
-    expect(screen.getByText('Plugins · 1')).toBeInTheDocument();
-  });
-
-  it('hides the toggle pills while the SDK session is running', async () => {
-    render(<Harness session={makeSession({ status: 'running' })} interactive={false} />);
+    // Flush the model fetch so the idle composer is fully settled before asserting.
+    await waitFor(() => expect(mockGetModel).toHaveBeenCalled());
     expect(screen.queryByText('MCP')).toBeNull();
+    expect(screen.queryByText('MCP · 1 off')).toBeNull();
     expect(screen.queryByText('Plugins')).toBeNull();
-    await waitFor(() => expect(mockGetModel).toHaveBeenCalled()); // flush the model fetch
+    expect(screen.queryByText('Plugins · 1')).toBeNull();
   });
 });
 
