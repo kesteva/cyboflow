@@ -1723,45 +1723,36 @@ export class DatabaseService {
     if (!project) {
       throw new Error('Failed to create project');
     }
-    // Seed the default board + 11 stages for the new project (migrations 014 + 015,
-    // minus the position-11 'Archived' stage removed by migration 024).
+    // Seed the default board + 4 stages for the new project (migrations 014 + 015,
+    // collapsed to positions 1/6/9/10 by migration 036).
     this.seedDefaultBoard(project.id);
     return project;
   }
 
   /**
-   * Seed the default board and its 11 canonical stages for a project
-   * (positions 1..10 + 12 — NO position 11).
+   * Seed the default board and its 4 canonical stages for a project
+   * (positions 1, 6, 9, 10 — the collapsed board).
    *
-   * Mirrors the seed blocks in migration 014_native_tasks.sql (stages 1..11) +
-   * migration 015_entity_model_rebuild.sql (position 12 'Decomposed') MINUS the
-   * position-11 'Archived' stage that migration 024 removed (archive-in-place:
-   * archiving stamps `archived_at` on the entity row instead of moving it to a
-   * stage). The migrations seed + migrate all EXISTING projects; this seeds
-   * each NEW project on creation. Uses deterministic ids + INSERT OR IGNORE so
-   * it is idempotent and safe to call more than once. Wrapped in a single
-   * transaction.
+   * Mirrors the post-036 migrated board: migration 036_collapse_board.sql
+   * narrows the 12-stage board (014 stages 1..11; 015 position-12 'Decomposed';
+   * 024 removed position-11 'Archived') down to the FOUR kept stages at their
+   * existing positions — removing positions 2,3,4,5,7,8,12. The migrations
+   * seed + migrate all EXISTING projects; this seeds each NEW project on
+   * creation. Uses deterministic ids + INSERT OR IGNORE so it is idempotent and
+   * safe to call more than once. Wrapped in a single transaction.
    *
    * Source of truth for the stage table: the spec's BACKLOG_STAGES seed; this
-   * MUST stay field-for-field in sync with the post-024 migrated board state.
-   * The cross-check test asserts seedDefaultBoard === the migrated 11-stage seed.
+   * MUST stay field-for-field in sync with the post-036 migrated board state.
+   * The cross-check test asserts seedDefaultBoard === the migrated 4-stage seed.
    */
   seedDefaultBoard(projectId: number): void {
     const boardId = `board-${projectId}-default`;
     // [position, label, color_oklch, hint, write_policy, is_terminal, hidden_by_default]
     const stages: Array<[number, string, string, string, 'asserted' | 'derived', 0 | 1, 0 | 1]> = [
       [1, 'Idea', 'oklch(0.58 0.15 262)', 'Raw input captured', 'asserted', 0, 0],
-      [2, 'Research', 'oklch(0.58 0.15 284)', 'Optional · prior art', 'asserted', 0, 0],
-      [3, 'Idea spec', 'oklch(0.58 0.15 306)', 'Spec drafted', 'asserted', 0, 0],
-      [4, 'Epics extracted', 'oklch(0.58 0.16 330)', 'Grouped into epics', 'asserted', 0, 0],
-      [5, 'Tasks extracted', 'oklch(0.59 0.16 354)', 'Tasks written', 'asserted', 0, 0],
       [6, 'Ready for development', 'oklch(0.64 0.15 28)', 'Approved · queued', 'asserted', 0, 0],
-      [7, 'In development', 'oklch(0.63 0.16 45)', 'Executor verifier loop', 'derived', 0, 0],
-      [8, 'Ready to merge', 'oklch(0.64 0.13 120)', 'Checks green · awaiting merge', 'derived', 0, 0],
       [9, 'Done', 'oklch(0.56 0.13 152)', 'Merged & archived', 'asserted', 1, 0],
       [10, "Won't do", 'oklch(0.55 0.02 30)', 'Decided not to pursue', 'asserted', 1, 1],
-      // position 11 ('Archived') intentionally absent — removed by migration 024.
-      [12, 'Decomposed', 'oklch(0.52 0.04 300)', 'Idea retired · children carry the flow', 'asserted', 1, 0],
     ];
 
     const insertBoard = this.db.prepare(`
