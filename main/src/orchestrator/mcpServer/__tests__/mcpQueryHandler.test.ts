@@ -646,13 +646,16 @@ describe('McpQueryHandler', () => {
       // Production order: 006 (workflow_runs base) -> 011 (current_step_id) ->
       // 014 (unified tasks + run->task columns + seed) -> 015 (entity-model
       // rebuild: ideas/epics/tasks + entity_events + 12th stage) -> 024
-      // (archived_at columns + position-11 stage removal).
+      // (archived_at columns + position-11 stage removal) -> 036 (board collapse
+      // to 4 stages 1/6/9/10 + decomposed_at/approved_at/plan_approved_at stamps;
+      // readEntity SELECTs decomposed_at, so this column MUST exist).
       taskDb.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
+      taskDb.exec(readFileSync(join(migDir, '036_collapse_board.sql'), 'utf-8'));
       return taskDb;
     }
 
@@ -1077,7 +1080,10 @@ describe('McpQueryHandler', () => {
     // -----------------------------------------------------------------------
 
     describe('mcp-set-task-stage', () => {
-      it('moves an idea to an asserted stage (position 3) -> ok:true', async () => {
+      it('moves an idea to an asserted stage (position 6, Ready for development) -> ok:true', async () => {
+        // 036 collapsed the board to 1/6/9/10; position 6 ('Ready for
+        // development') is the kept non-terminal asserted stage (old position 3
+        // 'Idea spec' was removed).
         seedTaskRun(taskDb, {
           runId: 'run-1',
           currentStepId: 'plan',
@@ -1098,7 +1104,7 @@ describe('McpQueryHandler', () => {
             requestId: 'ss-1',
             runId: 'run-1',
             taskId,
-            stageId: stage(3),
+            stageId: stage(6),
           },
           socket,
         );
@@ -1107,101 +1113,19 @@ describe('McpQueryHandler', () => {
         expect(response.ok).toBe(true);
         const data = response.data as { task_id: string; stage_id?: string; version?: number };
         expect(data.task_id).toBe(taskId);
-        expect(data.stage_id).toBe(stage(3));
+        expect(data.stage_id).toBe(stage(6));
 
         const task = taskDb
           .prepare('SELECT stage_id FROM ideas WHERE id = ?')
           .get(taskId) as { stage_id: string };
-        expect(task.stage_id).toBe(stage(3));
+        expect(task.stage_id).toBe(stage(6));
       });
 
-      it('moves an idea to the terminal Decomposed stage (position 12) for an AGENT actor -> ok:true', async () => {
-        // Decomposed (position 12) is write_policy='asserted', terminal=1 — an
-        // agent retiring an idea on decomposition is an ALLOWED assert (only the
-        // DERIVED execution stages are orchestrator-only). This is the P3
-        // Decomposed-agent-path assertion: assertStageAuthority must NOT reject it.
-        seedTaskRun(taskDb, {
-          runId: 'run-1',
-          currentStepId: 'plan',
-          stepsSnapshot: { plan: 'planner' },
-        });
-
-        const created = makeSocketDouble();
-        await taskHandler.handleMessage(
-          { type: 'mcp-create-task', requestId: 'ct-seed-dec', runId: 'run-1', title: 'To decompose' },
-          created.socket,
-        );
-        const taskId = (parseLastWrite(created.writes).data as { task_id: string }).task_id;
-
-        const { socket, writes } = makeSocketDouble();
-        await taskHandler.handleMessage(
-          {
-            type: 'mcp-set-task-stage',
-            requestId: 'ss-dec',
-            runId: 'run-1',
-            taskId,
-            stageId: stage(12),
-          },
-          socket,
-        );
-
-        const response = parseLastWrite(writes);
-        expect(response.ok).toBe(true);
-        const data = response.data as { task_id: string; stage_id?: string };
-        expect(data.stage_id).toBe(stage(12));
-
-        const task = taskDb
-          .prepare('SELECT stage_id FROM ideas WHERE id = ?')
-          .get(taskId) as { stage_id: string };
-        expect(task.stage_id).toBe(stage(12));
-
-        // The decomposition delta is recorded against the idea in the audit log.
-        const ev = taskDb
-          .prepare(
-            "SELECT actor, kind FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
-          )
-          .get(taskId) as { actor: string; kind: string };
-        expect(ev.actor).toBe('agent:planner');
-        expect(ev.kind).toBe('decomposed');
-      });
-
-      it('rejects a DERIVED stage (position 7, In development) with error "forbidden_stage"', async () => {
-        // An agent actor cannot assert an orchestrator-owned derived stage.
-        seedTaskRun(taskDb, {
-          runId: 'run-1',
-          currentStepId: 'plan',
-          stepsSnapshot: { plan: 'planner' },
-        });
-
-        const created = makeSocketDouble();
-        await taskHandler.handleMessage(
-          { type: 'mcp-create-task', requestId: 'ct-seed4', runId: 'run-1', title: 'NoDerived' },
-          created.socket,
-        );
-        const taskId = (parseLastWrite(created.writes).data as { task_id: string }).task_id;
-
-        const { socket, writes } = makeSocketDouble();
-        await taskHandler.handleMessage(
-          {
-            type: 'mcp-set-task-stage',
-            requestId: 'ss-2',
-            runId: 'run-1',
-            taskId,
-            stageId: stage(7),
-          },
-          socket,
-        );
-
-        const response = parseLastWrite(writes);
-        expect(response.ok).toBe(false);
-        expect(response.error).toBe('forbidden_stage');
-
-        // Stage is unchanged (still at the idea stage).
-        const task = taskDb
-          .prepare('SELECT stage_id FROM ideas WHERE id = ?')
-          .get(taskId) as { stage_id: string };
-        expect(task.stage_id).toBe(stage(1));
-      });
+      // Removed (036 board collapse): the position-12 'Decomposed' agent-move
+      // test and the position-7 'derived stage forbidden' test no longer have a
+      // premise — positions 7/8 (the only derived stages) and position 12 are
+      // gone, so no seeded stage is derived. Decomposition is now a gate-only
+      // decomposed_at stamp covered by the questionRouter gate tests.
 
       it('rejects asserting a stage on a task with a non-terminal run with error "active_runs"', async () => {
         // The calling run plans the task; a SEPARATE non-terminal run is linked

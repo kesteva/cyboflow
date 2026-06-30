@@ -52,8 +52,10 @@ import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
 // ---------------------------------------------------------------------------
 // Test DB builder: projects + 006 + 011 + 014 + 015 + 016 + 017 + 022 + 024 +
-// 028 + 035 (022 brings sprint_batches/sprint_batch_tasks + workflow_runs.batch_id
-// for the standalone-sprint batch->idea resolution path).
+// 028 + 035 + 036 (022 brings sprint_batches/sprint_batch_tasks +
+// workflow_runs.batch_id for the standalone-sprint batch->idea resolution path;
+// 036 collapses the board to 4 stages and adds ideas.decomposed_at, which
+// readEntity now SELECTs).
 // ---------------------------------------------------------------------------
 
 function buildDb(): Database.Database {
@@ -83,6 +85,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '035_artifacts.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '036_collapse_board.sql'), 'utf-8'));
   return db;
 }
 

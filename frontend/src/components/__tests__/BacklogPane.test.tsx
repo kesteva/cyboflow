@@ -101,17 +101,15 @@ function stage(position: number, id: string, label: string, opts: Partial<BoardS
   };
 }
 
-// Archive-in-place: the board has NO Archived stage (migration 024 removed
-// position 11) — archived items keep their column and carry `archived_at`.
+// Migration 036 collapsed the board to FOUR stages: 1 Idea, 6 Ready for
+// development, 9 Done, 10 Won't do. "Won't do" carries `hidden_by_default`
+// (the archived toggle reveals it). Decomposition is now a `decomposed_at`
+// STAMP that filters an idea OFF the board — there is no Decomposed column.
 const STAGES: BoardStage[] = [
   stage(1, 's-idea', 'Idea', { hint: 'Raw input captured' }),
   stage(6, 's-ready', 'Ready for development', { hint: 'Approved · queued' }),
-  stage(7, 's-indev', 'In development', { write_policy: 'derived', hint: 'Executor verifier loop' }),
-  stage(8, 's-merge', 'Ready to merge', { write_policy: 'derived' }),
   stage(9, 's-done', 'Done', { is_terminal: true }),
   stage(10, 's-wont', "Won't do", { is_terminal: true, hidden_by_default: true }),
-  // Idea-only terminal column (migration 015 position 12) — visible by default.
-  stage(12, 's-decomposed', 'Decomposed', { is_terminal: true }),
 ];
 
 const POSITION_BY_STAGE_ID: Record<string, number> = Object.fromEntries(
@@ -157,6 +155,11 @@ function task(overrides: Partial<BacklogTaskItem> & { id: string; stage_id: stri
     board_id: overrides.board_id ?? 'board-1-default',
     stage_id: overrides.stage_id,
     archived_at: overrides.archived_at ?? null,
+    // Migration 036: non-decomposed ideas must carry `decomposed_at: null` —
+    // `undefined` reads as decomposed (isDecomposed: decomposed_at !== null) and
+    // vanishes. Epics/tasks leave `approved_at` undefined (reads as approved/visible).
+    decomposed_at: overrides.decomposed_at ?? null,
+    approved_at: overrides.approved_at,
     version: 1,
     stage_position: overrides.stage_position ?? POSITION_BY_STAGE_ID[overrides.stage_id] ?? 0,
     inFlow: overrides.inFlow ?? [],
@@ -232,42 +235,42 @@ describe('BacklogPane', () => {
   it('renders one Kanban column per visible unified stage (hidden stages excluded)', () => {
     render(<BacklogPane projectId={1} />);
     const columns = screen.getAllByTestId('kanban-column');
-    // 6 visible stages (positions 1,6,7,8,9,12); 10 is hidden_by_default and
-    // the Archived stage no longer exists. Position 12 (Decomposed) is
-    // terminal but visible by default.
-    expect(columns).toHaveLength(6);
+    // 3 visible stages (positions 1, 6, 9); position 10 ("Won't do") is
+    // hidden_by_default and excluded until the archived toggle is on. There is
+    // no Decomposed column post-collapse.
+    expect(columns).toHaveLength(3);
     expect(screen.queryByText("Won't do")).not.toBeInTheDocument();
-    expect(screen.getByText('Decomposed')).toBeInTheDocument();
+    expect(screen.queryByText('Decomposed')).not.toBeInTheDocument();
   });
 
   it('reveals hidden stages when the show-archived toggle is on', () => {
     mockShowArchived = true;
     render(<BacklogPane projectId={1} />);
-    // 7 stages: the 6 visible + Won't do (Archived is no longer a stage).
-    expect(screen.getAllByTestId('kanban-column')).toHaveLength(7);
+    // 4 stages: the 3 visible + "Won't do" (hidden_by_default, now revealed).
+    expect(screen.getAllByTestId('kanban-column')).toHaveLength(4);
     expect(screen.getByText("Won't do")).toBeInTheDocument();
   });
 
-  it('buckets the UNION of ideas/epics/tasks across the shared board incl Decomposed', () => {
+  it('buckets the UNION of ideas/epics/tasks across the shared board and drops decomposed ideas', () => {
     mockTasks = [
       task({ id: 'i-cap', type: 'idea', stage_id: 's-idea', ref: 'IDEA-001', title: 'Captured idea' }),
       task({ id: 'e-ready', type: 'epic', stage_id: 's-ready', ref: 'EPIC-001', title: 'Extracted epic', childCount: 0 }),
       task({ id: 't-ready', type: 'task', stage_id: 's-ready', ref: 'TASK-010', title: 'Solo task' }),
-      // A retired idea sits in the idea-only terminal Decomposed column.
-      task({ id: 'i-dec', type: 'idea', stage_id: 's-decomposed', ref: 'IDEA-002', title: 'Retired idea' }),
+      // A decomposed idea (decomposed_at stamped) lives on only via its children
+      // and is filtered OFF the board — there is no longer a Decomposed column.
+      task({ id: 'i-dec', type: 'idea', stage_id: 's-idea', ref: 'IDEA-002', title: 'Retired idea', decomposed_at: '2026-01-03T00:00:00.000Z' }),
     ];
     render(<BacklogPane projectId={1} />);
-    // All four top-level union items render as cards across their stages.
+    // The three LIVE union items render as cards across their stages.
     expect(screen.getByText('Captured idea')).toBeInTheDocument();
     expect(screen.getByText('Extracted epic')).toBeInTheDocument();
     expect(screen.getByText('Solo task')).toBeInTheDocument();
-    // The decomposed idea lands in the Decomposed column (not dropped).
-    const decomposedCol = screen.getByText('Decomposed').closest('[data-testid="kanban-column"]');
-    expect(decomposedCol).not.toBeNull();
-    expect(within(decomposedCol as HTMLElement).getByText('Retired idea')).toBeInTheDocument();
-    // Header counts derive from the union: 4 items, 1 epic, 1 solo, 2 ideas.
+    // The decomposed idea is gone from the board; no Decomposed column exists.
+    expect(screen.queryByText('Retired idea')).not.toBeInTheDocument();
+    expect(screen.queryByText('Decomposed')).not.toBeInTheDocument();
+    // Header counts derive from the LIVE union: 3 items, 1 epic, 1 solo, 1 idea.
     const counts = screen.getByTestId('backlog-counts');
-    expect(counts).toHaveTextContent('4');
+    expect(counts).toHaveTextContent('3');
     expect(counts).toHaveTextContent('epics');
     expect(counts).toHaveTextContent('ideas');
   });
@@ -367,7 +370,7 @@ describe('BacklogPane', () => {
     mockTasks = [
       task({
         id: 't1',
-        stage_id: 's-indev',
+        stage_id: 's-ready',
         inFlow: [
           { agent: 'executor', runId: 'run-aaaaaaaa', stepId: null },
           { agent: 'verifier', runId: 'run-bbbbbbbb', stepId: null },
@@ -380,7 +383,7 @@ describe('BacklogPane', () => {
 
   it('renders the ReviewMarker and DoneFlag overlays', () => {
     mockTasks = [
-      task({ id: 'r1', stage_id: 's-merge', awaitingReview: true }),
+      task({ id: 'r1', stage_id: 's-ready', awaitingReview: true }),
       task({ id: 'd1', stage_id: 's-done', isDone: true }),
     ];
     render(<BacklogPane projectId={1} />);
@@ -457,8 +460,8 @@ describe('BacklogPane', () => {
 
   it('shows the in-flow and awaiting-review chips when present', () => {
     mockTasks = [
-      task({ id: 't1', stage_id: 's-indev', inFlow: [{ agent: 'executor', runId: 'run-xxxxxxxx', stepId: null }] }),
-      task({ id: 't2', stage_id: 's-merge', awaitingReview: true }),
+      task({ id: 't1', stage_id: 's-ready', inFlow: [{ agent: 'executor', runId: 'run-xxxxxxxx', stepId: null }] }),
+      task({ id: 't2', stage_id: 's-ready', awaitingReview: true }),
     ];
     render(<BacklogPane projectId={1} />);
     const inFlow = screen.getByTestId('in-flow-chip');
