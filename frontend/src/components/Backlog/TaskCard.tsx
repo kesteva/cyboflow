@@ -21,14 +21,16 @@
  * nested epic children also reflect their own in-flight launch correctly.
  */
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Play, Loader2, Pencil } from 'lucide-react';
+import { ChevronDown, ChevronRight, Play, Loader2, Pencil, Lightbulb } from 'lucide-react';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
+import { trpc } from '../../trpc/client';
 import { useBacklogStore } from '../../stores/backlogStore';
 import { TypeTag, PriorityTag, ArchivedChip, ProjectChip, FlowMarker, ReviewMarker, DoneFlag } from './markers';
 import { compactAgo, isArchived } from './backlogSelectors';
 import { CardActionsMenu } from './CardActionsMenu';
 import { IdeaDetailEditor } from '../IdeaDetailEditor';
 import { EpicDetailEditor } from '../EpicDetailEditor';
+import { TaskDetailModal } from '../cyboflow/TaskDetailModal';
 
 interface TaskBodyProps {
   task: BacklogTaskItem;
@@ -55,20 +57,48 @@ function MarkerRow({ task }: { task: BacklogTaskItem }): React.JSX.Element | nul
   );
 }
 
-/** Footer: repo · time · Edit · Run. */
+/** Footer: repo · time · root-idea back-link · Edit · Run. */
 function CardFooter({
   task,
   onRun,
   onEdit,
+  onOpenRootIdea,
+  loadingRootIdea,
   launchingTaskId,
   now,
-}: TaskBodyProps & { onEdit: (e: React.MouseEvent) => void }): React.JSX.Element {
+}: TaskBodyProps & {
+  onEdit: (e: React.MouseEvent) => void;
+  /** Open the originating idea's detail; rendered only when the card has one. */
+  onOpenRootIdea: (e: React.MouseEvent) => void;
+  /** True while the root-idea fetch is in flight (spins the back-link icon). */
+  loadingRootIdea: boolean;
+}): React.JSX.Element {
   const isLaunching = launchingTaskId === task.id;
   return (
     <div className="flex items-center justify-between gap-2 pt-1.5">
       <div className="flex min-w-0 items-center gap-2 text-[10.5px] text-text-tertiary">
         {task.repo && <span className="truncate font-medium">{task.repo}</span>}
         <span className="flex-shrink-0">{compactAgo(task.created_at, now)}</span>
+        {/* Back-link to the originating idea — a decomposed idea is off the board
+            but still inspectable via its children (epics carry originating_idea_id;
+            solo tasks too). Hidden on ideas (originating_idea_id === null). */}
+        {task.originating_idea_id !== null && (
+          <button
+            type="button"
+            onClick={onOpenRootIdea}
+            disabled={loadingRootIdea}
+            data-testid="open-root-idea"
+            aria-label={`Open originating idea of ${task.ref}`}
+            className="inline-flex flex-shrink-0 items-center gap-1 font-medium text-text-tertiary transition-colors hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {loadingRootIdea ? (
+              <Loader2 className="h-3 w-3 animate-spin motion-reduce:animate-none" />
+            ) : (
+              <Lightbulb className="h-3 w-3" />
+            )}
+            Idea
+          </button>
+        )}
       </div>
       <div className="flex flex-shrink-0 items-center gap-1.5">
         {/* Dedicated Edit affordance — opens the type-appropriate detail editor.
@@ -132,6 +162,10 @@ function DetailEditor({
 export function TaskBody({ task, onRun, launchingTaskId, now }: TaskBodyProps): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
+  // Root-idea back-link: the fetched originating idea (with its decomposition
+  // children) shown in a read-only detail modal; null = closed.
+  const [rootIdea, setRootIdea] = useState<BacklogTaskItem | null>(null);
+  const [loadingRootIdea, setLoadingRootIdea] = useState(false);
   const isEpic = task.type === 'epic';
   const childCount = task.childCount ?? task.children?.length ?? 0;
   // Archive-in-place: archived items only render while the header Archived
@@ -151,6 +185,25 @@ export function TaskBody({ task, onRun, launchingTaskId, now }: TaskBodyProps): 
   const handleEdit = (e: React.MouseEvent): void => {
     e.stopPropagation();
     setEditorOpen(true);
+  };
+
+  // Open the originating idea's detail. Fetch via the dedicated decomposition
+  // read (selectIdeaDecomposition) so the idea arrives WITH its spawned epics +
+  // direct tasks nested — a decomposed idea is off the board but stays
+  // inspectable + navigable. Soft-fail: a fetch error just leaves it closed.
+  const handleOpenRootIdea = async (e: React.MouseEvent): Promise<void> => {
+    e.stopPropagation();
+    const ideaId = task.originating_idea_id;
+    if (ideaId === null || loadingRootIdea) return;
+    setLoadingRootIdea(true);
+    try {
+      const idea = await trpc.cyboflow.tasks.ideaDecomposition.query({ ideaId });
+      setRootIdea(idea);
+    } catch {
+      // Convenience affordance — swallow and leave the modal closed.
+    } finally {
+      setLoadingRootIdea(false);
+    }
   };
 
   return (
@@ -183,10 +236,21 @@ export function TaskBody({ task, onRun, launchingTaskId, now }: TaskBodyProps): 
         <p className="line-clamp-3 text-[11.5px] leading-snug text-text-secondary">{task.summary}</p>
       )}
 
-      <CardFooter task={task} onRun={onRun} onEdit={handleEdit} launchingTaskId={launchingTaskId} now={now} />
+      <CardFooter
+        task={task}
+        onRun={onRun}
+        onEdit={handleEdit}
+        onOpenRootIdea={(e) => void handleOpenRootIdea(e)}
+        loadingRootIdea={loadingRootIdea}
+        launchingTaskId={launchingTaskId}
+        now={now}
+      />
 
       {/* Type-appropriate detail editor — opened by the dedicated Edit affordance. */}
       <DetailEditor task={task} isOpen={editorOpen} onClose={() => setEditorOpen(false)} />
+
+      {/* Root-idea detail — opened by the back-link; lists the idea's children. */}
+      <TaskDetailModal task={rootIdea} onClose={() => setRootIdea(null)} />
 
       {/* Epic expand → nested children */}
       {isEpic && childCount > 0 && (

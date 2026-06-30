@@ -87,4 +87,43 @@ describe('TaskDetailModal', () => {
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(onClose).toHaveBeenCalledTimes(2);
   });
+
+  it('does not list decomposition children for a non-idea task', () => {
+    render(<TaskDetailModal task={makeTask()} onClose={vi.fn()} />);
+    expect(screen.queryByTestId('task-detail-children')).not.toBeInTheDocument();
+  });
+
+  it("lists an idea's decomposition children (epics + direct tasks) and drills in + back", () => {
+    const idea = makeTask({
+      id: 'IDEA-018',
+      type: 'idea',
+      ref: 'IDEA-018',
+      title: 'Tab strip idea',
+      parent_epic_id: null,
+      originating_idea_id: null,
+      // selectIdeaDecomposition nests epics FOLLOWED BY direct tasks under children.
+      children: [
+        makeTask({ id: 'ep1', type: 'epic', ref: 'EPIC-002', title: 'Strip epic', parent_epic_id: null, originating_idea_id: 'IDEA-018' }),
+        makeTask({ id: 'tk1', type: 'task', ref: 'TASK-099', title: 'Direct task', parent_epic_id: null, originating_idea_id: 'IDEA-018' }),
+      ],
+    });
+    render(<TaskDetailModal task={idea} onClose={vi.fn()} />);
+
+    // The idea lists both spawned children.
+    expect(screen.getByTestId('task-detail-children')).toBeInTheDocument();
+    expect(screen.getAllByTestId('task-detail-child')).toHaveLength(2);
+    expect(screen.getByText('EPIC-002')).toBeInTheDocument();
+    expect(screen.getByText('TASK-099')).toBeInTheDocument();
+
+    // Drill into the epic — the modal swaps to the epic detail + offers a back-link.
+    fireEvent.click(screen.getByText('Strip epic'));
+    expect(screen.getByTestId('task-detail-title')).toHaveTextContent('Strip epic');
+    expect(screen.getByTestId('task-detail-back')).toHaveTextContent('IDEA-018');
+    expect(screen.queryByTestId('task-detail-children')).not.toBeInTheDocument();
+
+    // Back returns to the idea (the children list reappears).
+    fireEvent.click(screen.getByTestId('task-detail-back'));
+    expect(screen.getByTestId('task-detail-title')).toHaveTextContent('Tab strip idea');
+    expect(screen.getByTestId('task-detail-children')).toBeInTheDocument();
+  });
 });

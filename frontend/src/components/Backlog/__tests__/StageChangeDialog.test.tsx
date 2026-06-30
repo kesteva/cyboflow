@@ -1,10 +1,10 @@
 /**
  * Component tests for StageChangeDialog — the manual "Change stage…" picker.
  *
- * Covers: the warning is always shown; the picker excludes the current / derived
- * / Decomposed stages; confirming forwards the full setStage payload (incl.
- * expectedVersion) and closes; a rejecting move surfaces the friendly error and
- * keeps the dialog open.
+ * Covers: the warning is always shown; the four-stage board picker excludes the
+ * current stage and keeps the terminal "Won't do" as a manual target; confirming
+ * forwards the full setStage payload (incl. expectedVersion) and closes; a
+ * rejecting move surfaces the friendly error and keeps the dialog open.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
@@ -41,13 +41,13 @@ function board(): Board {
     name: 'Default',
     kind: 'default',
     is_default: true,
+    // Four-stage board (migration 036): Idea, Ready for development, Done,
+    // Won't do (terminal, hidden_by_default). All four are asserted.
     stages: [
       stage(1, 'Idea'),
-      stage(5, 'Tasks extracted'),
       stage(6, 'Ready for development'),
-      stage(7, 'In development', { write_policy: 'derived' }),
-      stage(11, 'Archived', { is_terminal: true, hidden_by_default: true }),
-      stage(12, 'Decomposed', { is_terminal: true }),
+      stage(9, 'Done', { is_terminal: true }),
+      stage(10, "Won't do", { is_terminal: true, hidden_by_default: true }),
     ],
   };
 }
@@ -67,10 +67,10 @@ function makeTask(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     originating_idea_id: null,
     scope: null,
     board_id: 'board-1',
-    stage_id: 's-5',
+    stage_id: 's-1',
     archived_at: null,
     version: 4,
-    stage_position: 5,
+    stage_position: 1,
     inFlow: [],
     awaitingReview: false,
     isDone: false,
@@ -94,7 +94,8 @@ describe('StageChangeDialog', () => {
   it('always shows the manual-move warning and the current stage', () => {
     render(<StageChangeDialog task={makeTask()} board={board()} isOpen onClose={vi.fn()} />);
     expect(screen.getByTestId('stage-change-warning')).toBeInTheDocument();
-    expect(screen.getByText('Tasks extracted')).toBeInTheDocument();
+    // The task sits at Idea (s-1); the dialog names its current stage.
+    expect(screen.getByText('Idea')).toBeInTheDocument();
   });
 
   it('reflects the selected target stage in the warning', () => {
@@ -105,17 +106,16 @@ describe('StageChangeDialog', () => {
     expect(screen.getByTestId('stage-change-warning')).toHaveTextContent('Ready for development');
   });
 
-  it('offers only user-settable stages (no current / derived / Decomposed)', () => {
+  it('offers user-settable stages, excludes the current stage, keeps terminal Won\'t do', () => {
     render(<StageChangeDialog task={makeTask()} board={board()} isOpen onClose={vi.fn()} />);
     const select = screen.getByTestId('stage-change-select') as HTMLSelectElement;
     const optionLabels = Array.from(select.options).map((o) => o.textContent);
-    expect(optionLabels).toContain('Idea');
     expect(optionLabels).toContain('Ready for development');
-    expect(optionLabels).toContain('Archived');
-    // current (Tasks extracted), derived (In development), Decomposed excluded
-    expect(optionLabels).not.toContain('Tasks extracted');
-    expect(optionLabels).not.toContain('In development');
-    expect(optionLabels).not.toContain('Decomposed');
+    expect(optionLabels).toContain('Done');
+    // The terminal "Won't do" stays a valid manual target.
+    expect(optionLabels).toContain("Won't do");
+    // The item's current stage (Idea) is excluded — moving to it is a no-op.
+    expect(optionLabels).not.toContain('Idea');
   });
 
   it('forwards the setStage payload with expectedVersion and closes on success', async () => {
