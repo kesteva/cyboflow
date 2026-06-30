@@ -1211,6 +1211,15 @@ async function initializeServices() {
     db: databaseService.getDb(),
     workflowRegistry,
     logger: cyboflowLogger,
+    // On first mint the sentinel is written via a raw UPDATE (bypassing
+    // sessionManager), so the frontend's session copy keeps chatRunId=null and the
+    // inline approval strip (keyed on it) stays blank until a manual re-fetch
+    // (tab-away/back). Push a fresh snapshot so the reactive store resolves the
+    // gate runId immediately. getSession re-reads the DB → chatRunId is populated.
+    onMint: (sessionId: string) => {
+      const updated = sessionManager.getSession(sessionId);
+      if (updated) sessionManager.emit('session-updated', updated);
+    },
   });
   if (defaultCliManager instanceof ClaudeCodeManager) {
     defaultCliManager.setOrchSocketPath(socketPath);

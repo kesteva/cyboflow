@@ -320,4 +320,61 @@ describe('chatSentinelProvider', () => {
   it('throws a clear error when the session row is missing', () => {
     expect(() => provider('no-such-session')).toThrow(/session no-such-session not found/);
   });
+
+  describe('onMint notification (frontend chat_run_id push)', () => {
+    it('fires onMint(sessionId) exactly once when a fresh sentinel is minted', () => {
+      const onMint = vi.fn();
+      const p = makeChatSentinelProvider({
+        db: dbAdapter(db),
+        workflowRegistry: registry,
+        logger: makeSpyLogger(),
+        onMint,
+      });
+      seedSession(db, { id: 'sess-notify', chatRunId: null });
+
+      p('sess-notify');
+      expect(onMint).toHaveBeenCalledTimes(1);
+      expect(onMint).toHaveBeenCalledWith('sess-notify');
+    });
+
+    it('does NOT fire onMint when an existing chat_run_id is reused (no new id to push)', () => {
+      const onMint = vi.fn();
+      const p = makeChatSentinelProvider({
+        db: dbAdapter(db),
+        workflowRegistry: registry,
+        logger: makeSpyLogger(),
+        onMint,
+      });
+      seedQuickSentinel(db, 'chat-reuse', 'running');
+      seedSession(db, { id: 'sess-reuse', runId: 'chat-reuse', chatRunId: 'chat-reuse' });
+
+      const gateRunId = p('sess-reuse');
+      expect(gateRunId).toBe('chat-reuse');
+      expect(onMint).not.toHaveBeenCalled();
+    });
+
+    it('swallows a throwing onMint — the sentinel is still minted + persisted (best-effort notify)', () => {
+      const onMint = vi.fn(() => {
+        throw new Error('emit boom');
+      });
+      const p = makeChatSentinelProvider({
+        db: dbAdapter(db),
+        workflowRegistry: registry,
+        logger: makeSpyLogger(),
+        onMint,
+      });
+      seedSession(db, { id: 'sess-throw', chatRunId: null });
+
+      let gateRunId = '';
+      expect(() => {
+        gateRunId = p('sess-throw');
+      }).not.toThrow();
+      expect(onMint).toHaveBeenCalledTimes(1);
+      // The mint completed despite the notify failure.
+      const sess = db
+        .prepare('SELECT chat_run_id FROM sessions WHERE id = ?')
+        .get('sess-throw') as { chat_run_id: string | null };
+      expect(sess.chat_run_id).toBe(gateRunId);
+    });
+  });
 });

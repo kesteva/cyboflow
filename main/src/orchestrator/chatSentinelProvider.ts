@@ -68,6 +68,18 @@ export interface ChatSentinelProviderDeps {
   db: DatabaseLike;
   workflowRegistry: WorkflowRegistry;
   logger?: LoggerLike;
+  /**
+   * Invoked once, AFTER a fresh chat sentinel is minted + persisted, with the
+   * session id. The mint writes `sessions.chat_run_id` via a raw UPDATE that
+   * bypasses sessionManager, so the frontend never learns the new id until the
+   * session is re-fetched — leaving the inline approval strip (keyed on
+   * `session.chatRunId`) blank for the rest of the turn even though the approval
+   * is already in the review queue. The electron layer wires this to emit
+   * `session-updated` so the reactive session store resolves the gate runId
+   * immediately. NOT called on reuse (the id is unchanged). Best-effort: a throw
+   * here must never corrupt the gate, so the impl + caller swallow errors.
+   */
+  onMint?: (sessionId: string) => void;
 }
 
 /**
@@ -79,7 +91,7 @@ export interface ChatSentinelProviderDeps {
  * double-mint within one turn.
  */
 export function makeChatSentinelProvider(deps: ChatSentinelProviderDeps): ChatSentinelProvider {
-  const { db, workflowRegistry, logger } = deps;
+  const { db, workflowRegistry, logger, onMint } = deps;
 
   const selectSession = db.prepare(
     `SELECT id, project_id, substrate, worktree_path, agent_permission_mode, run_id, chat_run_id
@@ -141,6 +153,14 @@ export function makeChatSentinelProvider(deps: ChatSentinelProviderDeps): ChatSe
     logger?.info(
       `chatSentinelProvider: minted __quick__ chat sentinel ${runId} for session ${sessionId}`,
     );
+    // Push the new chat_run_id to the frontend (emit 'session-updated') so the
+    // inline approval gate resolves without a manual re-fetch. Best-effort — the
+    // sentinel is already minted + persisted, so a notify failure must not throw.
+    try {
+      onMint?.(sessionId);
+    } catch (err) {
+      logger?.warn(`chatSentinelProvider: onMint notify failed for ${sessionId}: ${String(err)}`);
+    }
     return runId;
   };
 }
