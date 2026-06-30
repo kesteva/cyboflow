@@ -93,12 +93,14 @@ interface EntityTableDescriptor {
   hasAttachments: boolean;
   /** This entity may carry a decomposed_at retire stamp (only ideas, migration 036). */
   hasDecomposed: boolean;
+  /** This entity may carry an approved_at plan-gate stamp (epics + tasks, migration 036). */
+  hasApproval: boolean;
 }
 
 const ENTITY_TABLES: Record<TaskType, EntityTableDescriptor> = {
-  idea: { table: 'ideas', idPrefix: 'ide', hasParentEpic: false, hasOriginatingIdea: false, hasEntryStage: false, hasScope: true, hasAttachments: true, hasDecomposed: true },
-  epic: { table: 'epics', idPrefix: 'epc', hasParentEpic: false, hasOriginatingIdea: true, hasEntryStage: false, hasScope: false, hasAttachments: false, hasDecomposed: false },
-  task: { table: 'tasks', idPrefix: 'tsk', hasParentEpic: true, hasOriginatingIdea: true, hasEntryStage: true, hasScope: false, hasAttachments: false, hasDecomposed: false },
+  idea: { table: 'ideas', idPrefix: 'ide', hasParentEpic: false, hasOriginatingIdea: false, hasEntryStage: false, hasScope: true, hasAttachments: true, hasDecomposed: true, hasApproval: false },
+  epic: { table: 'epics', idPrefix: 'epc', hasParentEpic: false, hasOriginatingIdea: true, hasEntryStage: false, hasScope: false, hasAttachments: false, hasDecomposed: false, hasApproval: true },
+  task: { table: 'tasks', idPrefix: 'tsk', hasParentEpic: true, hasOriginatingIdea: true, hasEntryStage: true, hasScope: false, hasAttachments: false, hasDecomposed: false, hasApproval: true },
 };
 
 /** Resolve a descriptor for an entity type. */
@@ -308,6 +310,25 @@ const CREATE_DEFAULT_POSITION: Record<TaskType, number> = {
   task: 6,
 };
 
+/**
+ * Q1 GUARD — the workflow step id of the planner/ship human "approve plan" gate.
+ * A run whose frozen step set (steps_snapshot_json) includes this id is
+ * PLAN-GATED: the epics+tasks it creates DURING planning stay PENDING
+ * (approved_at NULL = backend-invisible + sprint-INELIGIBLE) until the gate is
+ * approved (stamping workflow_runs.plan_approved_at). Mirrors
+ * questionRouter.ts's APPROVE_PLAN_STEP_ID — kept LOCAL to preserve this file's
+ * standalone-typecheck invariant (importing it from questionRouter would re-enter
+ * the TaskChangeRouter ⇄ questionRouter module cycle).
+ */
+const APPROVE_PLAN_STEP_ID = 'approve-plan';
+
+/**
+ * Plan-gated built-in workflow names — the FALLBACK plan-gated signal used only
+ * when a run's steps_snapshot_json is absent/unparseable (both built-ins carry an
+ * approve-plan gate). The primary signal is the snapshot itself.
+ */
+const PLAN_GATED_WORKFLOW_NAMES = new Set(['planner', 'ship']);
+
 // ---------------------------------------------------------------------------
 // TaskChangeRouter
 // ---------------------------------------------------------------------------
@@ -317,6 +338,9 @@ export class TaskChangeRouter {
 
   /** Per-project serialization queues (ref minting + version bumps are project-scoped). */
   private projectQueues = new Map<number, PQueue>();
+
+  /** Cached `${table}.${column}` existence (backward-compat shim for pre-036 / partial test DBs). */
+  private columnExistsCache = new Map<string, boolean>();
 
   constructor(private readonly db: DatabaseLike) {}
 
@@ -561,6 +585,13 @@ export class TaskChangeRouter {
       const attachments =
         attachmentsArr && attachmentsArr.length > 0 ? JSON.stringify(attachmentsArr) : null;
 
+      // Q1 GUARD: an epic/task created during an UNAPPROVED plan-gated run lands
+      // PENDING (approved_at NULL = backend-invisible + sprint-ineligible) until
+      // the approve-plan gate flips the run's plan_approved_at; every other create
+      // is VISIBLE (approved_at = now). Ideas never carry approved_at (always
+      // visible — hasApproval=false).
+      const approvedAt = desc.hasApproval ? this.computeCreateApprovedAt(change, now) : null;
+
       this.insertEntity(desc, {
         id: taskId,
         projectId,
@@ -574,6 +605,7 @@ export class TaskChangeRouter {
         stageId,
         scope,
         attachments,
+        approvedAt,
         parentEpicId,
         originatingIdeaId,
         now,
@@ -616,6 +648,8 @@ export class TaskChangeRouter {
       scope: IdeaScope | null;
       /** Pre-serialized JSON IdeaAttachment[] (ideas-only) or null. */
       attachments: string | null;
+      /** Q1 plan-gate stamp (epics/tasks only); null = PENDING, non-null = VISIBLE. */
+      approvedAt: string | null;
       parentEpicId: string | null;
       originatingIdeaId: string | null;
       now: string;
@@ -631,6 +665,13 @@ export class TaskChangeRouter {
     if (desc.hasAttachments) {
       cols.push('attachments');
       vals.push(v.attachments);
+    }
+    // Q1 plan-gate stamp (epics/tasks). Gated on the column actually existing so
+    // pre-036 schemas / partial-migration test DBs (which omit approved_at) keep
+    // inserting without 'no such column'; production (post-036) always has it.
+    if (desc.hasApproval && this.columnExists(desc.table, 'approved_at')) {
+      cols.push('approved_at');
+      vals.push(v.approvedAt);
     }
     if (desc.hasEntryStage) {
       cols.push('entry_stage_id');
@@ -662,6 +703,90 @@ export class TaskChangeRouter {
       )
       .get(projectId, type) as { next_seq: number };
     return `${type.toUpperCase()}-${String(counter.next_seq).padStart(3, '0')}`;
+  }
+
+  /**
+   * Q1 GUARD — compute the approved_at stamp for a CREATED epic/task.
+   *
+   * NULL = PENDING (backend-invisible + sprint-INELIGIBLE) until the creating
+   * run's approve-plan gate is approved; a non-null stamp = VISIBLE. A planner/
+   * ship run mints its epics+tasks DURING the plan, BEFORE the human approves it
+   * at the approve-plan gate — those entities must stay pending until approval
+   * stamps workflow_runs.plan_approved_at (and the promote step settles them).
+   * Every other create lands VISIBLE: a user/manual create (no runId), a
+   * non-plan-gated flow (e.g. sprint), or a run whose plan is already approved.
+   *
+   * Fail-soft: a missing/unreadable run row, or a pre-036 schema with no
+   * plan_approved_at column, degrades to VISIBLE (the prior, no-guard behaviour).
+   * Only consulted for epics/tasks (desc.hasApproval); ideas never call this.
+   */
+  private computeCreateApprovedAt(change: TaskChange, now: string): string | null {
+    if (!change.runId) return now; // user/manual create or no creating run -> visible
+    let run:
+      | { planApprovedAt?: unknown; stepsSnapshotJson?: unknown; workflowName?: unknown }
+      | undefined;
+    try {
+      run = this.db
+        .prepare(
+          `SELECT r.plan_approved_at AS planApprovedAt,
+                  r.steps_snapshot_json AS stepsSnapshotJson,
+                  w.name AS workflowName
+             FROM workflow_runs r
+             LEFT JOIN workflows w ON w.id = r.workflow_id
+            WHERE r.id = ?`,
+        )
+        .get(change.runId) as
+        | { planApprovedAt?: unknown; stepsSnapshotJson?: unknown; workflowName?: unknown }
+        | undefined;
+    } catch {
+      return now; // pre-036 DB (no plan_approved_at column) / older schema -> visible
+    }
+    if (!run) return now; // run vanished -> visible (fail-soft)
+    // Plan already approved -> children are visible immediately.
+    if (typeof run.planApprovedAt === 'string' && run.planApprovedAt.length > 0) return now;
+    // Plan-gated AND still-unapproved -> PENDING.
+    if (this.runIsPlanGated(run.stepsSnapshotJson, run.workflowName)) return null;
+    return now; // non-plan-gated run -> visible
+  }
+
+  /**
+   * Whether the creating run is PLAN-GATED. PRIMARY signal: its frozen step set
+   * (steps_snapshot_json = { [stepId]: agent }) includes the approve-plan gate —
+   * trusted definitively when present + parseable. FALLBACK (snapshot absent or
+   * unparseable): a planner/ship built-in is treated as plan-gated.
+   */
+  private runIsPlanGated(stepsSnapshotJson: unknown, workflowName: unknown): boolean {
+    if (typeof stepsSnapshotJson === 'string' && stepsSnapshotJson.length > 0) {
+      try {
+        const snapshot = JSON.parse(stepsSnapshotJson) as Record<string, unknown>;
+        return Object.prototype.hasOwnProperty.call(snapshot, APPROVE_PLAN_STEP_ID);
+      } catch {
+        // malformed snapshot — fall through to the workflow-name fallback
+      }
+    }
+    return typeof workflowName === 'string' && PLAN_GATED_WORKFLOW_NAMES.has(workflowName);
+  }
+
+  /**
+   * Whether `table` carries `column`, cached per `${table}.${column}`. Backward-
+   * compat shim: pre-036 schemas (and the partial-migration in-memory DBs used by
+   * sibling unit suites) lack approved_at, so the create-path INSERT must SKIP the
+   * column there instead of throwing 'no such column'. Mirrors the PRAGMA
+   * table_info probe used across database.ts. Fail-soft: a PRAGMA error -> absent.
+   */
+  private columnExists(table: string, column: string): boolean {
+    const key = `${table}.${column}`;
+    const cached = this.columnExistsCache.get(key);
+    if (cached !== undefined) return cached;
+    let present = false;
+    try {
+      const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: unknown }>;
+      present = rows.some((r) => r.name === column);
+    } catch {
+      present = false;
+    }
+    this.columnExistsCache.set(key, present);
+    return present;
   }
 
   // --------------------------------------------------------------------------

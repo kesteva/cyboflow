@@ -77,11 +77,16 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
   // Migration 036 replaces the position-12 'Decomposed' stage with the
-  // ideas.decomposed_at retire stamp. The board collapse itself (removing
-  // positions 2,3,4,5,7,8,12) is exercised by migration036.test.ts; here we only
-  // add the decomposed_at column the router now reads/writes, keeping the
-  // 12-stage board intact for this file's stage-authority/create-default cases.
+  // ideas.decomposed_at retire stamp AND adds the plan-gate approval stamps
+  // (epics/tasks.approved_at + workflow_runs.plan_approved_at). The board
+  // collapse itself (removing positions 2,3,4,5,7,8,12) is exercised by
+  // migration036.test.ts; here we only add the columns the router now
+  // reads/writes, keeping the 12-stage board intact for this file's
+  // stage-authority/create-default cases.
   db.exec('ALTER TABLE ideas ADD COLUMN decomposed_at TEXT;');
+  db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
+  db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
   return db;
 }
 
@@ -622,6 +627,177 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string }).stage_id).toBe(
         stageId(2),
       );
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Q1 GUARD: approved_at stamped PENDING at create for plan-gated runs
+  // -------------------------------------------------------------------------
+
+  describe('Q1 plan-gate (approved_at on create)', () => {
+    /**
+     * Seed a workflow_run (workflow id `wf-<name>`) with an optional
+     * steps_snapshot_json + plan_approved_at, so the create path can read the
+     * creating run's plan-gate status. current_step_id='epics' (a mid-plan step)
+     * matches when epics/tasks are minted.
+     */
+    function seedRun(
+      db: Database.Database,
+      opts: {
+        runId: string;
+        workflowName: string;
+        stepsSnapshot?: Record<string, string> | null;
+        planApprovedAt?: string | null;
+      },
+    ): void {
+      const wfId = `wf-${opts.workflowName}`;
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, '{}')`,
+      ).run(wfId, opts.workflowName);
+      db.prepare(
+        `INSERT INTO workflow_runs
+           (id, workflow_id, project_id, status, permission_mode_snapshot, current_step_id, steps_snapshot_json, plan_approved_at)
+         VALUES (?, ?, 1, 'running', 'default', 'epics', ?, ?)`,
+      ).run(
+        opts.runId,
+        wfId,
+        opts.stepsSnapshot ? JSON.stringify(opts.stepsSnapshot) : null,
+        opts.planApprovedAt ?? null,
+      );
+    }
+
+    /** The frozen step->agent map a planner/ship run carries (includes the approve-plan gate). */
+    const PLAN_GATED_SNAPSHOT = {
+      context: 'planner',
+      epics: 'planner',
+      tasks: 'planner',
+      'approve-plan': 'planner',
+    } as const;
+
+    function approvedAtOf(db: Database.Database, table: 'epics' | 'tasks', id: string): string | null {
+      return (
+        db.prepare(`SELECT approved_at FROM ${table} WHERE id = ?`).get(id) as {
+          approved_at: string | null;
+        }
+      ).approved_at;
+    }
+
+    it('a TASK created under a plan-gated run with plan_approved_at NULL is PENDING (approved_at NULL)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      seedRun(db, { runId: 'run-plan', workflowName: 'planner', stepsSnapshot: PLAN_GATED_SNAPSHOT });
+
+      const { taskId } = await router.applyChange(1, {
+        actor: 'agent:cyboflow-tasks',
+        entityType: 'task',
+        title: 'Planned task',
+        runId: 'run-plan',
+      });
+
+      expect(approvedAtOf(db, 'tasks', taskId)).toBeNull();
+    });
+
+    it('an EPIC created under a plan-gated run with plan_approved_at NULL is PENDING (approved_at NULL)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      seedRun(db, { runId: 'run-plan', workflowName: 'ship', stepsSnapshot: PLAN_GATED_SNAPSHOT });
+
+      const { taskId } = await router.applyChange(1, {
+        actor: 'agent:cyboflow-epics',
+        entityType: 'epic',
+        title: 'Planned epic',
+        runId: 'run-plan',
+      });
+
+      expect(approvedAtOf(db, 'epics', taskId)).toBeNull();
+    });
+
+    it('a user/manual create (no runId) is VISIBLE (approved_at stamped now)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+
+      const { taskId } = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Manual task',
+      });
+
+      expect(approvedAtOf(db, 'tasks', taskId)).not.toBeNull();
+    });
+
+    it('a NON-plan-gated run (sprint snapshot without approve-plan) is VISIBLE', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      seedRun(db, {
+        runId: 'run-sprint',
+        workflowName: 'sprint',
+        stepsSnapshot: { plan: 'sprint', execute: 'sprint' },
+      });
+
+      const { taskId } = await router.applyChange(1, {
+        actor: 'agent:cyboflow-sprint',
+        entityType: 'task',
+        title: 'Sprint task',
+        runId: 'run-sprint',
+      });
+
+      expect(approvedAtOf(db, 'tasks', taskId)).not.toBeNull();
+    });
+
+    it('a plan-gated run whose plan is ALREADY approved (plan_approved_at set) is VISIBLE', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      seedRun(db, {
+        runId: 'run-approved',
+        workflowName: 'planner',
+        stepsSnapshot: PLAN_GATED_SNAPSHOT,
+        planApprovedAt: '2026-06-30T00:00:00.000Z',
+      });
+
+      const { taskId } = await router.applyChange(1, {
+        actor: 'agent:cyboflow-tasks',
+        entityType: 'task',
+        title: 'Post-approval task',
+        runId: 'run-approved',
+      });
+
+      expect(approvedAtOf(db, 'tasks', taskId)).not.toBeNull();
+    });
+
+    it('FALLBACK: a planner run with NO steps_snapshot but plan_approved_at NULL is PENDING', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      seedRun(db, { runId: 'run-nosnap', workflowName: 'planner', stepsSnapshot: null });
+
+      const { taskId } = await router.applyChange(1, {
+        actor: 'agent:cyboflow-tasks',
+        entityType: 'task',
+        title: 'Snapshotless planned task',
+        runId: 'run-nosnap',
+      });
+
+      expect(approvedAtOf(db, 'tasks', taskId)).toBeNull();
+    });
+
+    it('an IDEA is unaffected by the guard (no approved_at column; always on-board)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      seedRun(db, { runId: 'run-plan', workflowName: 'planner', stepsSnapshot: PLAN_GATED_SNAPSHOT });
+
+      // Creating an idea under a plan-gated run still works (ideas carry no
+      // approved_at) and lands on the board (decomposed_at NULL).
+      const { taskId } = await router.applyChange(1, {
+        actor: 'agent:cyboflow-context',
+        entityType: 'idea',
+        title: 'Planned idea',
+        runId: 'run-plan',
+      });
+
+      const idea = db
+        .prepare('SELECT stage_id, decomposed_at FROM ideas WHERE id = ?')
+        .get(taskId) as { stage_id: string; decomposed_at: string | null };
+      expect(idea.decomposed_at).toBeNull();
+      expect(idea.stage_id).toBe(stageId(1));
     });
   });
 
