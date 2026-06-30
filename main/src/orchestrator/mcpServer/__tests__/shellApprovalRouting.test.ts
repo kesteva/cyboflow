@@ -249,7 +249,7 @@ describe('shell-approval-request handler branch', () => {
     }
   });
 
-  it('(a3) acceptEdits does NOT fast-path a non-edit tool — it routes through the normal gate (one pending approval)', async () => {
+  it('(a3) acceptEdits does NOT fast-path a MUTATING non-edit tool — it routes through the normal gate (one pending approval)', async () => {
     seedRunWithMode('run-ae-bash', 'acceptEdits');
     const { socket, writes } = makeEmitterSocketDouble();
 
@@ -265,9 +265,30 @@ describe('shell-approval-request handler branch', () => {
     );
     await flush();
 
-    // Non-edit tool under acceptEdits: held open, one pending approval row.
+    // Mutating non-edit tool under acceptEdits: held open, one pending approval row.
     expect(writes).toHaveLength(0);
     expect(pendingApprovalCount('run-ae-bash')).toBe(1);
+  });
+
+  it('(a3b) acceptEdits fast-paths the widened read-only surface (safe read-only git) with ZERO approvals rows', async () => {
+    seedRunWithMode('run-ae-safe', 'acceptEdits');
+    const { socket, writes } = makeSocketDouble();
+
+    await handler.handleMessage(
+      {
+        type: 'shell-approval-request',
+        requestId: 'req-ae-safe',
+        runId: 'run-ae-safe',
+        toolName: 'Bash',
+        toolInput: { command: 'git status -s' },
+      },
+      socket,
+    );
+    await flush();
+
+    // Read-only git under acceptEdits: auto-allowed, no held-open gate, no row.
+    expect(decisionOf(writes)).toBe('allow');
+    expect(pendingApprovalCount('run-ae-safe')).toBe(0);
   });
 
   it('(a4) under "default" mode an Edit is NOT fast-pathed — it routes through the normal gate', async () => {

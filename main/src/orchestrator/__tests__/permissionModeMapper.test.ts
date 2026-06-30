@@ -6,8 +6,9 @@
  * 1. 'dontAsk' mode returns undefined (no hook installed).
  * 2. 'default' mode routes Edit, Bash, Read through ApprovalRouter (3 calls,
  *    decisions threaded back through hookSpecificOutput).
- * 3. 'acceptEdits' mode auto-approves Edit/Write/MultiEdit (0 router calls)
- *    and defers Bash/Read to ApprovalRouter.
+ * 3. 'acceptEdits' mode auto-approves Edit/Write/MultiEdit AND the widened
+ *    read-only surface (safe read-only tools, provably read-only Bash/git) with
+ *    0 router calls, and defers mutating tools (e.g. `rm -rf`) to ApprovalRouter.
  * 4. ApprovalRouter deny decision is translated to permissionDecision:'deny'
  *    with permissionDecisionReason populated when ApprovalDecision.message is set.
  * 5. ApprovalRouter throwing an error yields permissionDecision:'deny' with
@@ -33,11 +34,14 @@ import {
  * Cast via `as unknown as PreToolUseHookInput` to avoid runtime-shape drift
  * from BaseHookInput required fields (session_id, transcript_path, cwd).
  */
-function makePreToolInput(toolName: string): PreToolUseHookInput {
+function makePreToolInput(
+  toolName: string,
+  toolInput: Record<string, unknown> = {},
+): PreToolUseHookInput {
   return {
     hook_event_name: 'PreToolUse',
     tool_name: toolName,
-    tool_input: {},
+    tool_input: toolInput,
     tool_use_id: 'test-tool-use-id',
     session_id: 'test-session',
     transcript_path: '/tmp/test.jsonl',
@@ -97,9 +101,9 @@ describe('buildPreToolUseHook', () => {
     expect(requestApproval).toHaveBeenCalledWith(RUN_ID, 'Read', {}, expect.any(Function));
   });
 
-  // ─── Test 3: acceptEdits auto-approves edit tools, defers others ─────────
+  // ─── Test 3: acceptEdits auto-approves edits + the read-only surface ─────
 
-  it('acceptEdits auto-approves Edit/Write/MultiEdit and defers others', async () => {
+  it('acceptEdits auto-approves edits + safe reads + read-only git, defers mutating tools', async () => {
     const requestApproval = vi
       .fn()
       .mockResolvedValue({ behavior: 'allow' as const });
@@ -111,28 +115,25 @@ describe('buildPreToolUseHook', () => {
     const hook = buildPreToolUseHook('acceptEdits', RUN_ID);
     expect(hook).toBeDefined();
 
-    // Edit, Write, MultiEdit should be auto-approved without ApprovalRouter
-    for (const toolName of ACCEPT_EDITS_AUTO_APPROVE_TOOLS) {
-      const result = await hook!(makePreToolInput(toolName), 'tool-use-id', {} as Parameters<HookCallback>[2]);
+    const expectAllow = async (input: PreToolUseHookInput): Promise<void> => {
+      const result = await hook!(input, 'tool-use-id', {} as Parameters<HookCallback>[2]);
       expect(result).toMatchObject({
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'allow',
-        },
+        hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' },
       });
+    };
+
+    // Edit tools + the widened read-only surface (read-only tool, read-only git)
+    // are auto-approved WITHOUT ApprovalRouter.
+    for (const toolName of ACCEPT_EDITS_AUTO_APPROVE_TOOLS) {
+      await expectAllow(makePreToolInput(toolName));
     }
+    await expectAllow(makePreToolInput('Read', { file_path: '/tmp/f' }));
+    await expectAllow(makePreToolInput('Bash', { command: 'git status -s' }));
     expect(requestApproval).toHaveBeenCalledTimes(0);
 
-    // Bash and Read should go through ApprovalRouter
-    for (const toolName of ['Bash', 'Read']) {
-      const result = await hook!(makePreToolInput(toolName), 'tool-use-id', {} as Parameters<HookCallback>[2]);
-      expect(result).toMatchObject({
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'allow',
-        },
-      });
-    }
+    // A mutating Bash (and a Bash with no command) still defer to ApprovalRouter.
+    await hook!(makePreToolInput('Bash', { command: 'rm -rf /' }), 'tool-use-id', {} as Parameters<HookCallback>[2]);
+    await hook!(makePreToolInput('Bash'), 'tool-use-id', {} as Parameters<HookCallback>[2]);
     expect(requestApproval).toHaveBeenCalledTimes(2);
   });
 

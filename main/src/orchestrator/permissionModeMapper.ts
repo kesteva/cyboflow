@@ -4,8 +4,10 @@
  * Centralizes the permission policy for workflow runs:
  *  - 'dontAsk'     → no hook (SDK runs unrestricted, equivalent to --dangerously-skip-permissions)
  *  - 'default'     → every PreToolUse is routed through ApprovalRouter
- *  - 'acceptEdits' → Edit/Write/MultiEdit are auto-approved; all other tools
- *                    are routed through ApprovalRouter (same as 'default')
+ *  - 'acceptEdits' → Edit/Write/MultiEdit AND the widened read-only surface
+ *                    (safe read-only tools + provably read-only Bash/git, via
+ *                    isAcceptEditsAutoApprovable) are auto-approved; all other
+ *                    tools are routed through ApprovalRouter (same as 'default')
  *  - 'auto'        → no hook here (native Claude auto-mode owns gating via the
  *                    model classifier). The real auto wiring lives in
  *                    buildSdkOptions (`sdkOptions.permissionMode = 'auto'`) and
@@ -21,19 +23,35 @@ import type { HookCallback, PreToolUseHookInput } from '@anthropic-ai/claude-age
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { LoggerLike } from './types';
 import { routePreToolUseThroughApprovalRouter } from './preToolUseHookHelper';
+import { isSafeReadOnlyToolCall } from './safeCommandClassifier';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 /**
- * The set of tool names that 'acceptEdits' mode auto-approves without
+ * The set of EDIT tool names that 'acceptEdits' mode auto-approves without
  * routing through ApprovalRouter. Exported so callers (tests, UI) can import
- * this canonical list without hardcoding strings.
+ * this canonical list without hardcoding strings. The full acceptEdits
+ * auto-approve surface is this set UNION the widened read-only surface —
+ * see {@link isAcceptEditsAutoApprovable}.
  */
 export const ACCEPT_EDITS_AUTO_APPROVE_TOOLS = ['Edit', 'Write', 'MultiEdit'] as const;
 
-type AcceptEditsTool = (typeof ACCEPT_EDITS_AUTO_APPROVE_TOOLS)[number];
+/**
+ * True if a tool call should be auto-approved under 'acceptEdits' mode: an edit
+ * tool (Edit/Write/MultiEdit), OR a member of the widened read-only surface
+ * (safe read-only tools + provably read-only Bash/git — {@link isSafeReadOnlyToolCall}).
+ *
+ * Single source of truth shared by all three acceptEdits consumers — the SDK
+ * mapper (this module), the SDK ClaudeCodeManager PreToolUse hook, and the
+ * interactive shell-hook handler — so the auto-approve surface never drifts
+ * across substrates.
+ */
+export function isAcceptEditsAutoApprovable(toolName: string, toolInput: unknown): boolean {
+  if ((ACCEPT_EDITS_AUTO_APPROVE_TOOLS as readonly string[]).includes(toolName)) return true;
+  return isSafeReadOnlyToolCall(toolName, toolInput);
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -73,9 +91,7 @@ export function buildPreToolUseHook(
       return async (input, _toolUseId, _ctx) => {
         const pretool = input as PreToolUseHookInput;
 
-        if (
-          ACCEPT_EDITS_AUTO_APPROVE_TOOLS.includes(pretool.tool_name as AcceptEditsTool)
-        ) {
+        if (isAcceptEditsAutoApprovable(pretool.tool_name, pretool.tool_input)) {
           return {
             hookSpecificOutput: {
               hookEventName: 'PreToolUse' as const,

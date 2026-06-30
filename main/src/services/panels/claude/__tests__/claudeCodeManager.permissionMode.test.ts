@@ -381,18 +381,30 @@ describe('ClaudeCodeManager dynamic PreToolUse hook — live per-call mode', () 
     expect(requestApproval).toHaveBeenCalledOnce();
   });
 
-  it('acceptEdits → auto-allows Edit/Write/MultiEdit, routes the rest through ApprovalRouter', async () => {
+  it('acceptEdits → auto-allows edits + safe reads + read-only git, routes unsafe Bash through ApprovalRouter', async () => {
     seedRunSession(db, 'run-ae', 'sess-ae', 'acceptEdits');
     const hook = await installedHook({ runId: 'run-ae', sessionId: 'sess-ae' });
 
+    // Edit tools fast-allow.
     for (const tool of ['Edit', 'Write', 'MultiEdit']) {
       const out = (await fire(hook, tool, { file_path: '/tmp/f' }, `tu-${tool}`)) as {
         hookSpecificOutput: { permissionDecision: string };
       };
       expect(out.hookSpecificOutput.permissionDecision).toBe('allow');
     }
+    // Widened read-only surface: a read-only tool and a read-only git command
+    // fast-allow too (no router round-trip).
+    const readOut = (await fire(hook, 'Read', { file_path: '/tmp/f' }, 'tu-read')) as {
+      hookSpecificOutput: { permissionDecision: string };
+    };
+    expect(readOut.hookSpecificOutput.permissionDecision).toBe('allow');
+    const gitOut = (await fire(hook, 'Bash', { command: 'git status -s' }, 'tu-git')) as {
+      hookSpecificOutput: { permissionDecision: string };
+    };
+    expect(gitOut.hookSpecificOutput.permissionDecision).toBe('allow');
     expect(requestApproval).not.toHaveBeenCalled();
 
+    // A mutating Bash still routes to the human gate.
     await fire(hook, 'Bash', { command: 'rm -rf /' }, 'tu-bash');
     expect(requestApproval).toHaveBeenCalledOnce();
   });

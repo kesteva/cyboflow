@@ -20,7 +20,7 @@ import { routePreToolUseThroughApprovalRouter } from '../../../orchestrator/preT
 import { SprintLaneStore } from '../../../orchestrator/sprintLaneStore';
 import { loadMergedPermissionRules, isToolAllowed } from '../../../orchestrator/permissionRules';
 import type { MergedPermissionRules } from '../../../orchestrator/permissionRules';
-import { ACCEPT_EDITS_AUTO_APPROVE_TOOLS } from '../../../orchestrator/permissionModeMapper';
+import { isAcceptEditsAutoApprovable } from '../../../orchestrator/permissionModeMapper';
 import { ReviewItemRouter, ReviewItemError } from '../../../orchestrator/reviewItemRouter';
 import type { ReviewItemCreate } from '../../../orchestrator/reviewItemRouter';
 import { DynamicWorkflowTracker } from '../../../orchestrator/dynamicWorkflows';
@@ -1422,10 +1422,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * user-question gate, not a permission gate, and its answer flows back via
    * `updatedInput: { questions, answers }` rather than allow/deny.
    *
-   * When `mode === 'acceptEdits'`, tool names in ACCEPT_EDITS_AUTO_APPROVE_TOOLS
-   * (Edit/Write/MultiEdit) are auto-allowed BEFORE the user/project allowlist
-   * check; all other tools follow the same allowlist → ApprovalRouter path as
-   * 'default'. `mode === 'default'` keeps the pre-step behavior exactly.
+   * When `mode === 'acceptEdits'`, the acceptEdits auto-approve surface
+   * (Edit/Write/MultiEdit PLUS the widened read-only surface — safe read-only
+   * tools and provably read-only Bash/git, via isAcceptEditsAutoApprovable) is
+   * auto-allowed BEFORE the user/project allowlist check; all other tools follow
+   * the same allowlist → ApprovalRouter path as 'default'. `mode === 'default'`
+   * keeps the pre-step behavior exactly.
    *
    * All non-auto-allowed tools delegate to routePreToolUseThroughApprovalRouter
    * so the allow/deny/error semantics are maintained in a single place
@@ -1450,11 +1452,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
       if (pretool.tool_name === 'AskUserQuestion') {
         return this.routeAskUserQuestion(pretool, runId, loggerLike);
       }
-      // acceptEdits: auto-allow the edit tools BEFORE the allowlist check.
-      if (
-        mode === 'acceptEdits' &&
-        (ACCEPT_EDITS_AUTO_APPROVE_TOOLS as readonly string[]).includes(pretool.tool_name)
-      ) {
+      // acceptEdits: auto-allow the edit tools + the widened read-only surface
+      // (safe reads + provably read-only Bash/git) BEFORE the allowlist check.
+      if (mode === 'acceptEdits' && isAcceptEditsAutoApprovable(pretool.tool_name, pretool.tool_input)) {
         return {
           hookSpecificOutput: {
             hookEventName: 'PreToolUse' as const,

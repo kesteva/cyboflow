@@ -125,7 +125,7 @@ export function splitShellSegments(command: string): string[] {
 }
 
 /** True if a command segment contains command substitution we refuse to trust. */
-function hasCommandSubstitution(segment: string): boolean {
+export function hasCommandSubstitution(segment: string): boolean {
   return segment.includes('$(') || segment.includes('`');
 }
 

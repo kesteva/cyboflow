@@ -53,7 +53,7 @@ import { listRunOwnedIdeaIds, listRunCreatedTaskIds } from '../runEntityOwnershi
 import { ApprovalRouter, RunNotRunningError } from '../approvalRouter';
 import type { ApprovalDecision } from '../../../../shared/types/approval';
 import { isToolAllowed, loadMergedPermissionRules } from '../permissionRules';
-import { ACCEPT_EDITS_AUTO_APPROVE_TOOLS } from '../permissionModeMapper';
+import { isAcceptEditsAutoApprovable } from '../permissionModeMapper';
 import { TaskChangeRouter, TaskChangeError } from '../taskChangeRouter';
 import type { TaskChange, TaskActor, TaskDependencyKind } from '../taskChangeRouter';
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
@@ -1915,10 +1915,11 @@ export class McpQueryHandler {
    *   (a) reject the 'orchestrator' sentinel runId (parity with the checkpoint /
    *       report-step guards) — a deny with no approvals row;
    *   (a2) acceptEdits fast-path (Step F): when the run's effective mode (from
-   *       permission_mode_snapshot) is 'acceptEdits' and the tool is in
-   *       ACCEPT_EDITS_AUTO_APPROVE_TOOLS (Edit/Write/MultiEdit), AUTO-ALLOW with
-   *       ZERO approvals row and NO folded review_item — SDK-mapper parity, applied
-   *       BEFORE the allow-list check;
+   *       permission_mode_snapshot) is 'acceptEdits' and the tool is in the
+   *       acceptEdits auto-approve surface (Edit/Write/MultiEdit + the widened
+   *       read-only surface — safe reads + provably read-only Bash/git, via
+   *       isAcceptEditsAutoApprovable), AUTO-ALLOW with ZERO approvals row and NO
+   *       folded review_item — SDK-mapper parity, applied BEFORE the allow-list check;
    *   (b) apply isToolAllowed(loadMergedPermissionRules(worktree)) and
    *       short-circuit ALLOW with ZERO approvals row (no double-prompt);
    *   (c) otherwise route through ApprovalRouter.requestApproval, writing the
@@ -1973,11 +1974,12 @@ export class McpQueryHandler {
     }
 
     // (a2) acceptEdits fast-path (Step F): when the run's effective 4-mode is
-    // 'acceptEdits' and the tool is in the Edit/Write/MultiEdit set, AUTO-ALLOW
-    // with ZERO approvals row and NO folded review_item — parity with the SDK
-    // mapper's acceptEdits branch (permissionModeMapper.ts auto-approves the same
-    // ACCEPT_EDITS_AUTO_APPROVE_TOOLS set). This runs BEFORE the allow-list check
-    // so an edit never needs a permissions.allow entry under acceptEdits.
+    // 'acceptEdits' and the tool is in the acceptEdits auto-approve surface
+    // (Edit/Write/MultiEdit + the widened read-only surface), AUTO-ALLOW with
+    // ZERO approvals row and NO folded review_item — parity with the SDK mapper's
+    // acceptEdits branch (permissionModeMapper.ts shares the SAME
+    // isAcceptEditsAutoApprovable predicate). This runs BEFORE the allow-list
+    // check so a safe edit/read never needs a permissions.allow entry.
     //
     // The 'auto'/'dontAsk' modes never install the wildcard shell hook (the
     // settingsWriter opt-out — interactiveClaudeManager.ts), so the hook does not
@@ -1986,7 +1988,7 @@ export class McpQueryHandler {
     const effectiveMode = this.resolveRunPermissionMode(msg.runId);
     if (
       effectiveMode === 'acceptEdits' &&
-      (ACCEPT_EDITS_AUTO_APPROVE_TOOLS as readonly string[]).includes(msg.toolName)
+      isAcceptEditsAutoApprovable(msg.toolName, msg.toolInput)
     ) {
       this.writeShellVerdict(client, msg.requestId, { behavior: 'allow' });
       return;

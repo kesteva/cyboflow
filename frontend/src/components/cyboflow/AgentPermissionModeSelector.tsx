@@ -18,7 +18,7 @@ import type { PermissionMode } from '../../../../shared/types/workflows';
  */
 export const PERMISSION_MODE_OPTIONS: ReadonlyArray<{ id: PermissionMode; label: string; hint: string }> = [
   { id: 'default', label: 'Ask before edits', hint: 'Prompt for each edit' },
-  { id: 'acceptEdits', label: 'Allow edits', hint: 'Auto-allow file edits' },
+  { id: 'acceptEdits', label: 'Allow edits', hint: 'Auto-allow edits, safe reads & git' },
   { id: 'auto', label: 'Auto', hint: 'Native Claude classifier' },
   { id: 'dontAsk', label: "Don't ask", hint: 'No prompts · skip permissions' },
 ];
