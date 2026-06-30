@@ -356,12 +356,47 @@ carries an `entityType`; boundary callers (tRPC / MCP) SHOULD pass it, but on th
 is optional and resolved by id lookup across the three tables. Lineage edits (`parent_epic_id`
 task→epic, `originating_idea_id` epic/task→idea) are FK-enforced AND validated + cycle-checked
 in the router. The single `ENTITY_TABLES` descriptor map is the ONLY place that knows table
-identity, id prefix, and which lineage/`scope`/`entry_stage_id` columns each table carries — add
-a new per-type column there, not via scattered `if (type === 'idea')` branches. Decomposing an
-idea (moving it to the `Decomposed` terminal stage) is an allowed asserted move with NO cascade.
+identity, id prefix, and which lineage/`scope`/`entry_stage_id`/`decomposed_at`/`approved_at`
+columns each table carries — add a new per-type column there, not via scattered
+`if (type === 'idea')` branches.
+
+**Off-board buckets (migration 036).** Decomposing an idea stamps `ideas.decomposed_at` (the idea
+leaves the 4-stage board, reachable only via children) with NO cascade — retirement is
+exclusively gate-driven (the approve-plan gate retires the planner's root idea). The CREATE seam
+is the Q1 visibility gate: a plan-gated run's epics/tasks are created PENDING
+(`approved_at IS NULL` = backend-invisible + sprint-ineligible) and stay so until the approve-plan
+gate stamps `workflow_runs.plan_approved_at` and REVEALS them (`approved_at = now`); every
+non-plan-gated create is visible immediately. The reveal-on-approve and the
+delete-on-decline/cancel/dismiss draft cleanup both self-gate on `plan_approved_at IS NULL`, and
+`SprintLaneStore.createForRun` re-applies the `approved_at IS NOT NULL` eligibility filter as the
+single sprint-materialization chokepoint.
 
 - **Canonical example:** `main/src/orchestrator/taskChangeRouter.ts`;
   `main/src/orchestrator/__tests__/taskChangeRouter.test.ts`.
+
+### Derived-stage recompute follow-ons (`recomputeTaskExecutionStage` + `recomputeEpicStage`)
+
+Stages 7/8 (In-development / Ready-to-merge) collapsed away in migration 036, so the board's
+two `derived` stages are now computed by recompute follow-ons that re-enter the chokepoint as
+`actor='orchestrator'` UPDATEs (never raw table writes). BOTH are idempotent (a target equal to
+the current stage is a no-op) and best-effort at the follow-on seam:
+
+- **`recomputeTaskExecutionStage(taskId)`** — the AGGREGATE over a task's runs (supports
+  parallel runs). `any outcome='merged' → Done (9)`; otherwise the task HOLDS at its
+  `entry_stage_id` (fallback Ready for development, 6) — there is no longer an in-development or
+  ready-to-merge stage to derive. Driven from the run-lifecycle follow-on seams (`runExecutor`,
+  `runLauncher`, the `runs.*` tRPC router, and the `git.ts` merge close-out, which mirrors the
+  `outcome='merged'` arm inline for sprint lanes).
+- **`recomputeEpicStage(epicId)`** — the ROLLUP over an epic's non-archived child tasks (epics
+  carry no runs). `all children at Done (9) → Done (9)`; `any child not yet Done → Ready for
+  development (6)`; `no non-archived children → no-op`. Wired as a POST-COMMIT follow-on INSIDE
+  `applyChange` itself: after a child-task create or stage-move settles on the per-project queue,
+  the router re-enters via `recomputeEpicStage(parentEpicId)`. The rollup write is an EPIC UPDATE
+  (never a task create/stage-move), so it cannot recurse back through the same hooks.
+
+- **Canonical example:** `main/src/orchestrator/taskChangeRouter.ts`
+  (`recomputeTaskExecutionStage`, `recomputeEpicStage`, and the post-commit follow-on block in
+  `applyChange`).
 
 ### review_items write pattern (`ReviewItemRouter.applyReviewItem`)
 
@@ -421,7 +456,7 @@ in application order.
 ENTITY writes are the exception that proves the rule: they do not go through ad-hoc `database.ts`
 methods but through the `TaskChangeRouter` / `ReviewItemRouter` chokepoints above. `database.ts`
 still owns `seedDefaultBoard(projectId)`, which MUST stay field-for-field in sync with the
-12-stage seed in migrations 014 + 015 (cross-check test pins this).
+post-036 4-stage board seed (cross-check test pins this).
 
 ### Schema reconciliation
 
@@ -626,11 +661,15 @@ are pinned field-for-field against the TypeScript row interfaces in `main/src/da
 of these tables, update the migration, `schema.sql`, the `*Row` interface, and the shared type in
 the same commit — `entitySchemaParity` is the tripwire.
 
-**The 12-stage board seed is triple-sourced.** The default board stages live in migration 014
-(stages 1..11), migration 015 (stage 12 `Decomposed`), AND `database.ts` `seedDefaultBoard`
-(for new projects). All three MUST be field-for-field identical; the cross-check test asserts
-`seedDefaultBoard` === the migration 015 12-stage seed. Stages 7/8 are `derived` (orchestrator-
-written only); the rest are `asserted`.
+**The 4-stage board seed is dual-sourced.** Migration `036_collapse_board` narrowed the board
+to the FOUR kept stages (1 Idea / 6 Ready for development / 9 Done / 10 Won't do, hidden) at
+their original positions; `database.ts` `seedDefaultBoard` seeds the same four for NEW projects.
+Both MUST be field-for-field identical; the cross-check test asserts `seedDefaultBoard` === the
+migrated 4-stage seed. The `derived` In-development / Ready-to-merge stages collapsed away — all
+four kept stages are `asserted`, and the derived execution/rollup stages are now computed by the
+`recomputeTaskExecutionStage` / `recomputeEpicStage` follow-ons (see the chokepoint pattern
+above). The off-board buckets (`ideas.decomposed_at`, `epics`+`tasks.approved_at`,
+`workflow_runs.plan_approved_at`) carry the dropped intermediate stages as nullable stamps.
 
 A CI guard (`pnpm run verify:schema`, wired into `pnpm run test:unit`) opens an in-memory SQLite,
 applies the schema.sql + migrations path side-by-side with the migrations-only path, and asserts

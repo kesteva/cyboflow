@@ -15,7 +15,7 @@ differentiator.
 
 Planner and Sprint write the app's own DB-canonical **3-table entity model** (`ideas` / `epics`
 / `tasks`) via the `cyboflow_*` MCP tools — never `.soloflow/IDEA-NNN.md` or `TASK-NNN.md`
-files. All entities share a single 12-stage board (see "Data Model"). The `__quick__` sentinel
+files. All entities share a single 4-stage board (see "Data Model"). The `__quick__` sentinel
 flow remains an internal, picker-hidden lightweight path.
 
 This codebase is forked from `stravu/crystal` at tag `0.3.5` (commit `1e18e0b`). Crystal
@@ -97,8 +97,12 @@ injected, no `electron` / `better-sqlite3` / `services/*` imports):
   commit. It is **entity-aware**: table identity is the discriminator, so the change carries an
   `entityType` (optional on the update path — resolved by id lookup across the three tables when
   omitted). Lineage (`parent_epic_id` task→epic, `originating_idea_id` epic/task→idea) is both
-  FK-enforced and validated/cycle-checked in the router. Moving an idea to the `Decomposed`
-  terminal stage is an allowed asserted move with **no cascade** — children carry the flow.
+  FK-enforced and validated/cycle-checked in the router. Decomposing an idea stamps
+  `ideas.decomposed_at` (taking it OFF the board, reachable only via children) with **no
+  cascade** — children carry the flow. The create seam stamps `epics`/`tasks.approved_at`
+  PENDING (`NULL` = backend-invisible + sprint-ineligible) for plan-gated runs and visible
+  (`now`) otherwise; after a child-task write settles it re-enters the queue to roll a parent
+  epic's stage up via `recomputeEpicStage` (migration 036 — see "Data Model").
 - **`reviewItemRouter.ts` (`ReviewItemRouter.applyReviewItem`)** — the SINGLE write chokepoint for
   `review_items`. Every write (Sprint-agent findings via MCP, the folded PreToolUse/approval path,
   approve-idea/approve-plan decision gates, manual human tasks, triage resolve/dismiss) routes
@@ -255,10 +259,10 @@ data loss. The `dualSubstrateIntegration.test.ts` rollback case locks this.
 - **`worktreeManager.ts`** — `git worktree add -b ...` lifecycle; collision-safe naming;
   background cleanup.
 - **`database.ts`** — `better-sqlite3` wrapper, WAL mode, hand-rolled migration runner.
-  Also owns `seedDefaultBoard(projectId)`, which seeds the default board + its 12 canonical
-  stages for each NEW project. It MUST stay field-for-field in sync with the seed blocks in
-  migrations 014 (stages 1..11) + 015 (stage 12 `Decomposed`); a cross-check test asserts
-  `seedDefaultBoard` === the migration 015 12-stage seed.
+  Also owns `seedDefaultBoard(projectId)`, which seeds the default board + its **4 canonical
+  stages** (1 Idea / 6 Ready for development / 9 Done / 10 Won't do, hidden) for each NEW
+  project after migration `036_collapse_board`. It MUST stay field-for-field in sync with the
+  post-036 board; a cross-check test asserts `seedDefaultBoard` === the migrated 4-stage seed.
 - **`sessionManager.ts`** — Coordinates session state across services.
 
 In-repo workflow prompt bodies live in `main/src/orchestrator/workflows/` (`planner.md`,
@@ -483,32 +487,48 @@ the type discriminator (no `type` column):
 
 Each table carries its own columns plus a single markdown `body` column, a `priority`, a
 `version` (optimistic concurrency), and a `(board_id, stage_id)` placement onto **one shared
-board**. The board's 12 canonical stages (seeded by migrations 014 + 015 and
-`seedDefaultBoard`) form a union view across all three entity types:
+board**. Migration `036_collapse_board` narrowed the board to **4 canonical stages** kept at
+their original positions (seeded by migration 036 and `seedDefaultBoard`); they form a union
+view across all three entity types:
 
 | # | Stage | Owner | Notes |
 |---|-------|-------|-------|
-| 1 | Idea | idea | Raw input captured |
-| 2 | Research | idea | Optional · prior art |
-| 3 | Idea spec | idea | Spec drafted — the BRANCH point |
-| 4 | Epics extracted | epic | LARGE-idea branch only |
-| 5 | Tasks extracted | task | |
-| 6 | Ready for development | task | Approved · queued (after the human approve-plan gate) |
-| 7 | In development | task | Executor/verifier loop — orchestrator-`derived` |
-| 8 | Ready to merge | task | Checks green · awaiting merge — orchestrator-`derived` |
-| 9 | Done | task | Merged & archived — terminal |
+| 1 | Idea | idea | Raw input captured · decomposed ideas leave the board (see `decomposed_at`) |
+| 6 | Ready for development | epic / task | Approved · queued — entities are CREATED here on plan approval |
+| 9 | Done | epic / task | Merged & archived — terminal; an epic rolls up here once all its children are Done |
 | 10 | Won't do | any | terminal · hidden by default |
-| 12 | Decomposed | idea | Idea-only terminal: idea RETIRES here on decomposition; children carry the flow |
 
-> The board has **11 stages**. The former position-11 `Archived` stage was removed by
-> migration `024_archive_in_place`: archiving is now an in-place `archived_at` flag rather
-> than a board stage. `Decomposed` retains its canonical position 12.
+> **Removed positions: 2,3,4,5,7,8,12.** The former intermediate planning stages
+> (Research / Idea spec / Epics extracted / Tasks extracted) and the `derived`
+> In-development / Ready-to-merge stages are now invisible app state rather than board
+> columns; the old position-12 `Decomposed` terminal is now the `ideas.decomposed_at` stamp,
+> and position-11 `Archived` was already removed by `024_archive_in_place` (in-place
+> `archived_at` flag). Stages are DATA rows in `board_stages` (no enum/CHECK); the entity
+> `stage_id` FK is `ON DELETE RESTRICT`, so 036 RELOCATES every occupant of a removed
+> position to a kept stage on the same board BEFORE deleting the row (mirrors 024).
 
-**Branch:** a small idea moves `3 → 5` (skipping epics); a large idea moves `3 → 4 → 5`. On
-decomposition the idea retires to `Decomposed` and its children carry the flow. The
-post-extraction source of truth for small-vs-large is the presence of epics; the `ideas.scope`
-hint is the pre-extraction signal. Stages 7 and 8 are `derived` (written only by the
-orchestrator from run lifecycle); the rest are `asserted`.
+**Off-board buckets (036).** Three nullable TEXT stamps replace the dropped intermediate
+stages and gate backend visibility:
+
+- **`ideas.decomposed_at`** — a stamped idea is OFF the board (decomposed; reachable only via
+  its children, surfaced through the "open root idea" back-link on epic/task cards).
+  Retirement is EXCLUSIVELY gate-driven — the approve-plan gate retires the planner's root
+  idea — and decomposition has NO cascade: children carry the flow.
+- **`epics.approved_at` / `tasks.approved_at`** — `NULL` = PENDING = backend-invisible +
+  sprint-INELIGIBLE until plan approval. This is the deferred-materialization model: the
+  planner CREATES entities pending, and the approve-plan gate REVEALS them (stamps
+  `approved_at = now`); every non-plan-gated create is visible immediately. The eligibility
+  filter at `SprintLaneStore.createForRun` (the single sprint-materialization chokepoint)
+  drops any task whose `approved_at IS NULL`.
+- **`workflow_runs.plan_approved_at`** — stamped when a run's approve-plan gate is approved.
+  The `applyChange` create seam reads it to decide pending-vs-visible; the post-approval
+  reveal and the delete-on-decline/cancel/dismiss draft cleanup both self-gate on it (an
+  already-approved run's revealed entities survive).
+
+The `ideas.scope` hint (`'small' | 'large'`) is the pre-extraction small-vs-large signal; the
+post-extraction source of truth is the presence of epics. All four kept stages are `asserted`
+(the `derived` execution stages collapsed away), so a task holds its entry stage until a run
+actually merges — see `recomputeTaskExecutionStage` / `recomputeEpicStage` in `CODE-PATTERNS.md`.
 
 - **`entity_events`** — polymorphic append-only audit log (`entity_type IN
   ('idea','epic','task','review_item','artifact')`, `entity_id`, per-`(entity_type, entity_id)`
@@ -577,10 +597,13 @@ satellites), `015_entity_model_rebuild.sql` (the 3-table entity model + `entity_
 12th `Decomposed` stage), `016_review_items.sql` (the unified inbox),
 `017_run_seed_idea.sql`, `018_run_claude_session.sql`, `019_workflow_run_session_id.sql`,
 `020_workflow_run_paused_status.sql`, `021_session_agent_permission_mode.sql`,
-`022_sprint_batches.sql` (sprint batches + lanes + `workflow_runs.batch_id`), and
-`023_sprint_lane_step.sql` (lane `current_step_id`). 015 and 016 are
-forward-only with no backfill (no prod data existed); the destructive DROP+recreate in 015 is
-intentional and safe.
+`022_sprint_batches.sql` (sprint batches + lanes + `workflow_runs.batch_id`),
+`023_sprint_lane_step.sql` (lane `current_step_id`), continuing through `024`–`035` and
+`036_collapse_board.sql` (narrows the board to the 4 kept stages + adds the off-board
+`ideas.decomposed_at` / `epics`+`tasks.approved_at` / `workflow_runs.plan_approved_at` stamps
+via a relocate-then-delete that respects the `ON DELETE RESTRICT` stage FK, mirroring 024). 015
+and 016 are forward-only with no backfill (no prod data existed); the destructive DROP+recreate
+in 015 is intentional and safe.
 
 `copy:assets` (in `main/package.json`) copies BOTH `*.sql` migrations and the workflow `*.md`
 prompt bodies into the build output, so new migrations and prompt files ship in packaged builds.
