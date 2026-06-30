@@ -10,7 +10,7 @@
  * the input rate, a cache READ costs 0.1×.
  *
  * This is an estimate for the live session meter, not a billing figure: it uses
- * flat family rates (no long-context premium — Opus 4.8 / Sonnet 4.6 1M context
+ * flat family rates (no long-context premium — Opus 4.8 / Sonnet 5 1M context
  * is at standard pricing) and the 5-minute cache-write tier.
  */
 import type { SessionTokenBreakdown } from '../hooks/useSessionMetrics';

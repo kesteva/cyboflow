@@ -14,15 +14,16 @@ describe('modelContext', () => {
   });
 
   describe('modelSupportsContext1M', () => {
-    it('accepts the bare "sonnet" alias (latest Sonnet 4.x)', () => {
-      expect(modelSupportsContext1M('sonnet')).toBe(true);
-      expect(modelSupportsContext1M('Sonnet')).toBe(true);
-      expect(modelSupportsContext1M(' sonnet ')).toBe(true);
-    });
-
-    it('accepts explicit Sonnet 4.x model ids', () => {
+    it('accepts explicit Sonnet 4.x model ids (the beta is Sonnet-4.x only)', () => {
       expect(modelSupportsContext1M('claude-sonnet-4-5')).toBe(true);
       expect(modelSupportsContext1M('claude-sonnet-4-6')).toBe(true);
+    });
+
+    it('rejects Sonnet 5 — its 1M window is native (no beta)', () => {
+      expect(modelSupportsContext1M('claude-sonnet-5')).toBe(false);
+      // The bare alias resolves to Sonnet 5 before the gate is consulted, so it
+      // too is no longer special-cased as beta-needing.
+      expect(modelSupportsContext1M('sonnet')).toBe(false);
     });
 
     it('rejects non-Sonnet families', () => {
@@ -48,17 +49,18 @@ describe('modelContext', () => {
 
   describe('resolveModelAlias', () => {
     it('pins the bare aliases to current concrete snapshots', () => {
-      // The 1M default variants carry the [1m] window marker; -250k variants don't.
+      // Opus's 1M default carries the [1m] window marker; its -250k variant
+      // doesn't. Sonnet 5 is 1M-native, so neither sonnet alias carries a marker.
       expect(resolveModelAlias('opus')).toBe('claude-opus-4-8[1m]');
       expect(resolveModelAlias('opus-250k')).toBe('claude-opus-4-8');
-      expect(resolveModelAlias('sonnet')).toBe('claude-sonnet-4-6[1m]');
-      expect(resolveModelAlias('sonnet-250k')).toBe('claude-sonnet-4-6');
+      expect(resolveModelAlias('sonnet')).toBe('claude-sonnet-5');
+      expect(resolveModelAlias('sonnet-250k')).toBe('claude-sonnet-5');
       expect(resolveModelAlias('haiku')).toBe('claude-haiku-4-5');
     });
 
     it('matches aliases case/space-insensitively', () => {
       expect(resolveModelAlias('Opus')).toBe('claude-opus-4-8[1m]');
-      expect(resolveModelAlias(' SONNET ')).toBe('claude-sonnet-4-6[1m]');
+      expect(resolveModelAlias(' SONNET ')).toBe('claude-sonnet-5');
     });
 
     it('passes through "auto" (the SDK owns model choice)', () => {
@@ -78,10 +80,10 @@ describe('modelContext', () => {
       expect(resolveModelAlias('some-future-model')).toBe('some-future-model');
     });
 
-    it('the pinned Sonnet id still qualifies for the 1M beta', () => {
-      // The pinning + 1M gate must compose: opus→4.8[1m] keeps no beta (its 1M is
-      // the id suffix), sonnet→4.6[1m] still matches the /sonnet-4/ gate.
-      expect(modelSupportsContext1M(resolveModelAlias('sonnet'))).toBe(true);
+    it('the pinned default aliases need no 1M beta (both windows are native)', () => {
+      // opus→4.8[1m] (1M is the id suffix) and sonnet→claude-sonnet-5 (1M native)
+      // both reach 1M without the Sonnet-4.x beta, so the gate returns false.
+      expect(modelSupportsContext1M(resolveModelAlias('sonnet'))).toBe(false);
       expect(modelSupportsContext1M(resolveModelAlias('opus'))).toBe(false);
     });
   });
@@ -103,8 +105,17 @@ describe('modelContext', () => {
       });
     });
 
-    it('Sonnet 1M strips the marker and rides the context-1m beta', () => {
+    it('Sonnet 5 emits the bare id and no beta (1M is native)', () => {
       expect(sdkModelAndBetas(resolveModelAlias('sonnet'))).toEqual({
+        model: 'claude-sonnet-5',
+        betas: [],
+      });
+    });
+
+    it('a directly-pinned Sonnet 4.x [1m] id still strips the marker and rides the beta', () => {
+      // Back-compat: the Sonnet-4.x 1M-via-beta path is preserved for a caller
+      // that explicitly pins the legacy marked id (the default alias no longer does).
+      expect(sdkModelAndBetas('claude-sonnet-4-6[1m]')).toEqual({
         model: 'claude-sonnet-4-6',
         betas: [CONTEXT_1M_BETA],
       });
@@ -115,9 +126,9 @@ describe('modelContext', () => {
         model: 'claude-opus-4-8',
         betas: [],
       });
-      // Critically, a 250k Sonnet choice must NOT get the 1M beta.
+      // The legacy sonnet-250k alias resolves to Sonnet 5 (1M native) with no beta.
       expect(sdkModelAndBetas(resolveModelAlias('sonnet-250k'))).toEqual({
-        model: 'claude-sonnet-4-6',
+        model: 'claude-sonnet-5',
         betas: [],
       });
     });
@@ -133,9 +144,13 @@ describe('modelContext', () => {
       expect(interactiveModelArg(resolveModelAlias('opus'))).toBe('claude-opus-4-8[1m]');
     });
 
-    it('strips a [1m] Sonnet marker (no CLI 1M-beta path)', () => {
-      expect(interactiveModelArg(resolveModelAlias('sonnet'))).toBe('claude-sonnet-4-6');
-      expect(interactiveModelArg(resolveModelAlias('sonnet-250k'))).toBe('claude-sonnet-4-6');
+    it('passes Sonnet 5 through unchanged (no marker to strip)', () => {
+      expect(interactiveModelArg(resolveModelAlias('sonnet'))).toBe('claude-sonnet-5');
+      expect(interactiveModelArg(resolveModelAlias('sonnet-250k'))).toBe('claude-sonnet-5');
+    });
+
+    it('strips a directly-pinned Sonnet 4.x [1m] marker (no CLI 1M-beta path)', () => {
+      expect(interactiveModelArg('claude-sonnet-4-6[1m]')).toBe('claude-sonnet-4-6');
     });
 
     it('passes auto/undefined through unchanged', () => {

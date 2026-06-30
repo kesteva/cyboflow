@@ -14,28 +14,32 @@ export const CONTEXT_1M_BETA: SdkBeta = 'context-1m-2025-08-07';
  * Concrete, current model ids for cyboflow's bare aliases.
  *
  * The bundled Claude Agent SDK (0.2.x) resolves a bare alias like `'opus'` to a
- * PREVIOUS-generation snapshot (e.g. `opus` → Opus 4.7, `sonnet` → a 250k-window
- * Sonnet), so a user who picks "Opus" silently runs 4.7 and a "Sonnet · 1M"
- * label is contradicted by the actual 250k window. Pinning the alias to the
- * current concrete id at the spawn seam takes the resolution out of the SDK's
- * hands: Opus 4.8 and Sonnet 4.6 are both 1M-context at standard pricing.
+ * PREVIOUS-generation snapshot, so a user who picks "Opus" silently runs an
+ * older Opus. Pinning the alias to the current concrete id at the spawn seam
+ * takes the resolution out of the SDK's hands: Opus 4.8 and Sonnet 5 are both
+ * 1M-context at standard pricing.
  *
- * The `[1m]` model-id suffix is cyboflow's UNIFORM "request the 1M window"
- * marker on a resolved id. The two model families reach 1M differently, so the
- * spawn seam ({@link sdkModelAndBetas} / {@link interactiveModelArg}) translates
- * the marker per-family: Opus's 1M IS the suffixed id (the runtime reports a
- * 1,000,000 window for `claude-opus-4-8[1m]`), whereas Sonnet's 1M rides the
- * Sonnet-only {@link CONTEXT_1M_BETA} applied from the bare `claude-sonnet-4-6`
- * id. The `-250k` variants resolve to the bare id with NO marker → default
- * window, and the seam emits no beta for them.
+ * The two families reach their 1M window differently:
+ *   - Opus carries cyboflow's `[1m]` model-id suffix; the runtime reports a
+ *     1,000,000 window for `claude-opus-4-8[1m]`, so the suffixed id IS the 1M
+ *     model and the seam keeps it (no beta). The bare `claude-opus-4-8`
+ *     (`opus-250k`) is the default-window variant.
+ *   - Sonnet 5 is 1M by DEFAULT — the bare `claude-sonnet-5` id already reports a
+ *     1M window, so it carries NO `[1m]` suffix and needs NO beta. Sonnet 5 has
+ *     no separate 250K mode; the legacy `sonnet-250k` alias maps to the same id
+ *     for back-compat (a stored picker value never strands). The older Sonnet 4.x
+ *     snapshots reached 1M via the Sonnet-only {@link CONTEXT_1M_BETA} on a
+ *     `[1m]`-suffixed id — that path is preserved in {@link sdkModelAndBetas} /
+ *     {@link modelSupportsContext1M} for a caller that explicitly pins
+ *     `claude-sonnet-4-6[1m]`, but the default `sonnet` alias no longer uses it.
  *
  * Keep these in sync with the latest GA snapshots when models roll forward.
  */
 const MODEL_ALIAS_TO_ID: Readonly<Record<string, string>> = {
   opus: 'claude-opus-4-8[1m]',
   'opus-250k': 'claude-opus-4-8',
-  sonnet: 'claude-sonnet-4-6[1m]',
-  'sonnet-250k': 'claude-sonnet-4-6',
+  sonnet: 'claude-sonnet-5',
+  'sonnet-250k': 'claude-sonnet-5',
   haiku: 'claude-haiku-4-5',
 };
 
@@ -56,24 +60,27 @@ export function resolveModelAlias(model?: string | null): string | undefined {
 }
 
 /**
- * Whether a model id/alias supports the 1M-token context window via
- * {@link CONTEXT_1M_BETA}.
+ * Whether a model id needs the {@link CONTEXT_1M_BETA} to unlock its 1M-token
+ * context window.
  *
- * The beta is Sonnet 4/4.5 ONLY, so we gate strictly: cyboflow's bare `'sonnet'`
- * alias (which the SDK resolves to the latest Sonnet 4.x) and explicit
- * `claude-sonnet-4-*` ids qualify. Everything else returns false —
- * `'auto'`/undefined (the resolved model is unknown, so requesting the
- * Sonnet-only beta could land on a non-Sonnet model and be rejected), `'opus'`,
- * `'haiku'`, and Sonnet 3.x ids.
+ * The beta is a Sonnet 4.x ONLY mechanism, so we gate strictly on explicit
+ * `claude-sonnet-4-*` ids. Everything else returns false — including
+ * `claude-sonnet-5`, whose 1M window is NATIVE (no beta), and Opus (whose 1M is
+ * the `[1m]` id suffix, never the beta). `'auto'`/undefined also return false:
+ * the resolved model is unknown, so requesting the Sonnet-only beta could land
+ * on a non-Sonnet model and be rejected.
  *
- * Without this gate, a Sonnet run reports a 200k context window and the chat
- * context meter caps at 200k even though the model is 1M-capable (FIND-2026-06-22).
+ * Note: the bare `'sonnet'` alias is no longer special-cased here — it resolves
+ * (via {@link resolveModelAlias}) to `claude-sonnet-5` before this gate is ever
+ * consulted at the spawn seam, and Sonnet 5 needs no beta. This predicate only
+ * matters for a caller that explicitly pins a `claude-sonnet-4-6[1m]` id, whose
+ * marker {@link sdkModelAndBetas} strips into the beta. (Without it, a Sonnet 4.x
+ * run reported a 200k window and the chat meter capped at 200k — FIND-2026-06-22.)
  */
 export function modelSupportsContext1M(model?: string | null): boolean {
   if (!model) return false;
   const m = model.toLowerCase().trim();
-  if (m === 'sonnet') return true; // bare alias → latest Sonnet (4.x)
-  return /sonnet-4/.test(m); // claude-sonnet-4-5, claude-sonnet-4-6, …
+  return /sonnet-4/.test(m); // claude-sonnet-4-5, claude-sonnet-4-6 — Sonnet 4.x only
 }
 
 /** The `[1m]` marker {@link MODEL_ALIAS_TO_ID} stamps on a resolved id for 1M. */

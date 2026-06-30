@@ -29,13 +29,15 @@ export interface ModelOption {
   description: string;
 }
 
-// Each model that has both windows is listed once per context length; the spawn
-// seam (modelContext.ts) maps `opus`→4.8[1m], `opus-250k`→4.8, etc.
+// Opus is listed once per context window (1M / 250K); the spawn seam
+// (modelContext.ts) maps `opus`→4.8[1m], `opus-250k`→4.8. Sonnet 5 is 1M-native
+// (no context-1m beta, no 250K mode), so it has a single honest 1M row; the
+// `sonnet-250k` alias stays resolvable (→ Sonnet 5) for back-compat but is not
+// offered here.
 export const MODEL_OPTIONS: ReadonlyArray<ModelOption> = [
   { id: 'opus', label: 'Opus 4.8', context: '1M', description: 'Most capable' },
   { id: 'opus-250k', label: 'Opus 4.8', context: '250K', description: 'Most capable' },
-  { id: 'sonnet', label: 'Sonnet 4.6', context: '1M', description: 'Balanced' },
-  { id: 'sonnet-250k', label: 'Sonnet 4.6', context: '250K', description: 'Balanced' },
+  { id: 'sonnet', label: 'Sonnet 5', context: '1M', description: 'Balanced' },
   { id: 'haiku', label: 'Haiku 4.5', context: '200K', description: 'Fastest' },
   { id: 'auto', label: 'Auto', context: null, description: 'Let Claude pick the model' },
 ];

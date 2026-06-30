@@ -7,7 +7,7 @@
  * The chosen model id (a bare alias like 'opus') is threaded into the quick
  * session launch and persisted on the claude panel; the spawn seam
  * (`modelContext.resolveModelAlias`) pins the alias to the current concrete
- * snapshot (Opus 4.8, Sonnet 4.6, …), so "Opus" actually runs Opus 4.8 and the
+ * snapshot (Opus 4.8, Sonnet 5, …), so "Opus" actually runs Opus 4.8 and the
  * "· 1M context" labels are honest.
  *
  * Options + descriptions are single-sourced from {@link MODEL_OPTIONS} (shared
