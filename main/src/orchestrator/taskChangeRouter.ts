@@ -414,6 +414,36 @@ export class TaskChangeRouter {
       return this.runUpdate(projectId, change);
     })) as { taskId: string; dependsOnTaskId?: string; event: { id: number; seq: number } };
 
+    // POST-COMMIT FOLLOW-ON (re-entrant per-project-queue block): roll a parent
+    // epic's DERIVED stage up after a child-task write settles. Each hook re-enters
+    // applyChange via recomputeEpicStage — but that write is an EPIC UPDATE (never a
+    // task create/stage-move), so it cannot recurse back through these hooks:
+    // hook (a) skips non-creates, and hook (b)'s SELECT on the epic id finds no
+    // task row. Both are best-effort (a rollup failure must not fail the change).
+    //
+    // (a) CHILD-CREATE: a NEW task created under a parent epic revives an all-done
+    //     epic from Done (9) back to Ready for development (6) — the new pending
+    //     child means the epic is no longer fully done.
+    if (
+      change.taskId === undefined &&
+      (change.entityType ?? change.type ?? 'idea') === 'task' &&
+      change.parentEpicId
+    ) {
+      await this.recomputeEpicStage(change.parentEpicId).catch(() => {});
+    }
+
+    // (b) STAGE-MOVE: a task stage-move rolls its parent epic up. This single hook
+    //     covers merge->Done(9), sprint close-out->Done(9), AND a user drag off
+    //     Done (the reverse) — all route through the task stage-move branch.
+    if (change.taskId !== undefined && change.stageId !== undefined) {
+      const parent = this.db
+        .prepare('SELECT parent_epic_id AS parentEpicId FROM tasks WHERE id = ?')
+        .get(change.taskId) as { parentEpicId: string | null } | undefined;
+      if (parent && parent.parentEpicId) {
+        await this.recomputeEpicStage(parent.parentEpicId).catch(() => {});
+      }
+    }
+
     // NOTE: creating the first child of an idea NO LONGER auto-retires the idea.
     // Idea retirement is now EXCLUSIVELY gate-driven (the approve-plan gate calls
     // retireIdeaToDecomposed) — required so the Q1 guard's post-approval

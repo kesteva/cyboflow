@@ -1442,6 +1442,32 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
       expect(epic.stage_id).toBe(stageId(9));
     });
+
+    it('post-commit follow-on: merging all child tasks rolls the epic to Done (9); a new child reverts it to 6', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { epicId, childIds } = await makeEpicWithChildren(db, router, 2);
+
+      // STAGE-MOVE hook (b): move each child to Done (9) via the orchestrator
+      // stage-move path (merge / sprint close-out). The post-commit hook rolls the
+      // parent epic up after the LAST child reaches Done -> epic auto-moves to 9.
+      for (const id of childIds) {
+        await router.applyChange(1, { actor: 'orchestrator', taskId: id, stageId: stageId(9) });
+      }
+      let epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(9));
+
+      // CHILD-CREATE hook (a): a NEW child (lands at Ready-for-development, 6)
+      // revives the all-done epic back to 6 — no rollup call from the test itself.
+      await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'T-new',
+        parentEpicId: epicId,
+      });
+      epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(6));
+    });
   });
 
   // -------------------------------------------------------------------------
