@@ -269,9 +269,12 @@ export interface RunLauncherLike {
    * permission ladder falls through to frontmatter → global default → 'default';
    * when projectId is omitted createRun falls back to workflow.project_id (a
    * GLOBAL workflow launched without it throws); when findingIds is omitted the
-   * run is not finding-seeded.
+   * run is not finding-seeded. `requestedModel` (migration 037) carries the user's
+   * per-run model choice (Configure surface) — a user-facing alias stamped onto
+   * workflow_runs.model and resolved to a concrete snapshot at the spawn seam; when
+   * omitted the run pins no model and falls through to the SDK default.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[]): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -808,6 +811,15 @@ export const runsRouter = router({
       // workflow (the launcher enforces this). Mirrors taskIds/ideaId; NO selection
       // cap (OD-7) — a triage tray may seed any number of findings.
       findingIds: z.array(z.string().min(1)).optional(),
+      // Optional per-run model pin (migration 037). A USER-FACING alias from the
+      // Configure surface ('opus' | 'opus-250k' | 'sonnet' | 'haiku' | 'auto'),
+      // forwarded to RunLauncher.launch → WorkflowRegistry.createRun which stamps
+      // workflow_runs.model. Validated only as a non-empty string here — the alias
+      // set is owned by the spawn-seam resolver (modelContext.resolveModelAlias),
+      // which passes any unrecognized value through unchanged (and 'auto'/unknown
+      // resolve to the SDK default), so an over-strict enum here would be a
+      // drift-prone second source of truth. When omitted the run pins no model.
+      model: z.string().min(1).optional(),
     }))
     .mutation(async ({ ctx, input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
@@ -853,8 +865,8 @@ export const runsRouter = router({
       // flow.) Any optional arg may still be undefined, which the launcher treats
       // as "no link / no host / resolver default". baseBranch and
       // requestedExecutionModel are never sent over this IPC path — undefined
-      // placeholders. findingIds is the LAST positional arg, AFTER
-      // requestedExecutionModel.
+      // placeholders. findingIds then requestedModel are the LAST positional args,
+      // AFTER requestedExecutionModel.
       const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
         input.workflowId,
         project.path,
@@ -868,6 +880,7 @@ export const runsRouter = router({
         input.projectId,
         undefined,
         input.findingIds,
+        input.model,
       );
       return { runId, worktreePath, branchName };
     }),

@@ -132,6 +132,10 @@ describe('WorkflowRegistry', () => {
     // getRunById now SELECTs workflow_runs.seed_finding_ids (compound triage seed,
     // migration 032); layer the additive ALTER on top so the projection resolves.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
+    // createRun stamps workflow_runs.model (per-run model pin, migration 037) and
+    // getRunById projects it; the column is provided by the
+    // includeWorkflowRunTaskColumns block above (folded in alongside
+    // execution_model), so no manual ALTER is needed here.
     db.exec(`
       CREATE TABLE workflow_revisions (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -828,6 +832,43 @@ describe('WorkflowRegistry', () => {
         interface ExecRow { execution_model: string }
         const row = db.prepare('SELECT execution_model FROM workflow_runs WHERE id = ?').get(result.runId) as ExecRow;
         expect(row.execution_model).toBe('orchestrated');
+      });
+    });
+
+    // ───── model stamping (migration 037) ─────
+
+    it('stamps a NULL model when no per-run model is requested (no pin → SDK default)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'model-default.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = registry.createRun(workflowId);
+
+        interface ModelRow { model: string | null }
+        const row = db.prepare('SELECT model FROM workflow_runs WHERE id = ?').get(result.runId) as ModelRow;
+        expect(row.model).toBeNull();
+        // getRunById projects the same NULL.
+        expect(registry.getRunById(result.runId)?.model ?? null).toBeNull();
+      });
+    });
+
+    it('stamps the requested per-run model and getRunById projects it', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'model-opus.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = registry.createRun(workflowId, undefined, undefined, undefined, {
+          requestedModel: 'opus',
+        });
+
+        interface ModelRow { model: string | null }
+        const row = db.prepare('SELECT model FROM workflow_runs WHERE id = ?').get(result.runId) as ModelRow;
+        expect(row.model).toBe('opus');
+        expect(registry.getRunById(result.runId)?.model).toBe('opus');
       });
     });
 

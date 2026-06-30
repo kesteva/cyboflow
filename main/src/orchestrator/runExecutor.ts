@@ -165,6 +165,16 @@ export interface ClaudeSpawnerOptions {
    * spawner defaults it to panelId when absent (every non-fan-out path).
    */
   spawnKey?: string;
+  /**
+   * Per-run Claude model pin (migration 037), read FRESH off
+   * `workflow_runs.model` by buildOptionsOverrides on every spawn and threaded to
+   * the spawning manager, which resolves the alias to a concrete snapshot
+   * (modelContext.resolveModelAlias) — so the new value governs the NEXT
+   * nudge/resume/turn spawn (mirrors agentPermissionMode). Undefined when the run
+   * pinned no model: the manager then sets no SDK `model` and the bundled Agent
+   * SDK uses its own default (byte-identical to before migration 037).
+   */
+  model?: string;
 }
 
 /**
@@ -1455,6 +1465,10 @@ export class RunExecutor {
     const overrides: Partial<ClaudeSpawnerOptions> = {
       systemPromptAppend,
       agentPermissionMode: run.permission_mode_snapshot,
+      // Per-run model pin (migration 037), read FRESH off the run row like
+      // agentPermissionMode so it governs the next spawn. NULL/absent → undefined
+      // → the spawner sets no SDK `model` (SDK default; byte-identical to before).
+      model: run.model ?? undefined,
     };
 
     return overrides;

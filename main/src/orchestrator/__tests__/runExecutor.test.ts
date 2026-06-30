@@ -832,6 +832,58 @@ describe('RunExecutor.buildOptionsOverrides — agentPermissionMode threading', 
   });
 });
 
+describe('RunExecutor.buildOptionsOverrides — per-run model threading (migration 037)', () => {
+  it('threads run.model into the spawn options when the run pinned a model', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', model: 'opus' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    let capturedOverrides: Partial<ClaudeSpawnerOptions> | null = null;
+    const spawner = makeSpawner();
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(
+      async (opts: ClaudeSpawnerOptions) => {
+        capturedOverrides = opts;
+      },
+    );
+
+    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger());
+    await executor.execute(run.id);
+
+    expect(capturedOverrides).not.toBeNull();
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(capturedOverrides!.model).toBe('opus');
+  });
+
+  it('leaves model undefined when the run pinned no model (NULL → SDK default)', async () => {
+    // makeWorkflowRunRow omits model (the legacy / no-pin row).
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+
+    let capturedOverrides: Partial<ClaudeSpawnerOptions> | null = null;
+    const spawner = makeSpawner();
+    (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mockImplementation(
+      async (opts: ClaudeSpawnerOptions) => {
+        capturedOverrides = opts;
+      },
+    );
+
+    const executor = new TestableRunExecutor(spawner, registry, makeSpyLogger());
+    await executor.execute(run.id);
+
+    expect(capturedOverrides).not.toBeNull();
+    // undefined (not pinned) — the spawner sets no SDK `model`, SDK default applies.
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+    expect(capturedOverrides!.model).toBeUndefined();
+  });
+});
+
 // ---------------------------------------------------------------------------
 // TASK-661: New tests for WorkflowPromptReaderLike wiring and systemPromptAppend
 // ---------------------------------------------------------------------------

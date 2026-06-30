@@ -240,6 +240,14 @@ export class RunLauncher {
     // RunExecutor.getPrompt reads this column to inject the `## Selected findings`
     // block. OPTIONAL — when omitted the run is not finding-seeded.
     findingIds?: string[],
+    // The user's explicit per-run MODEL choice (Configure surface →
+    // runs.start → here), a user-facing alias ('opus' | 'opus-250k' | 'sonnet' |
+    // 'haiku' | 'auto') threaded into WorkflowRegistry.createRun, which stamps it
+    // onto workflow_runs.model (migration 037). OPTIONAL — when omitted the run
+    // pins no model and RunExecutor falls through to the SDK default. There is no
+    // resolver ladder; the value is resolved to a concrete snapshot at the spawn
+    // seam (modelContext.resolveModelAlias).
+    requestedModel?: string,
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
 
@@ -308,14 +316,15 @@ export class RunLauncher {
     // omitted and createRun falls back to workflow.project_id. The `opts` object
     // is only passed when projectId is defined so the legacy fallback path stays
     // byte-identical for callers that never thread a project.
-    // Pass the opts bag when EITHER an explicit project OR an explicit execution
-    // model is threaded; omit it entirely otherwise so the legacy fallback path
-    // (workflow.project_id + resolver floor) stays byte-identical.
+    // Pass the opts bag when an explicit project, execution model, OR model is
+    // threaded; omit it entirely otherwise so the legacy fallback path
+    // (workflow.project_id + resolver floor, no model pin) stays byte-identical.
     const createOpts =
-      projectId !== undefined || requestedExecutionModel !== undefined
+      projectId !== undefined || requestedExecutionModel !== undefined || requestedModel !== undefined
         ? {
             ...(projectId !== undefined ? { projectId } : {}),
             ...(requestedExecutionModel !== undefined ? { requestedExecutionModel } : {}),
+            ...(requestedModel !== undefined ? { requestedModel } : {}),
           }
         : undefined;
     const { runId, permissionMode, substrate: resolvedSubstrate } = this.workflowRegistry.createRun(

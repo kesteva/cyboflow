@@ -322,7 +322,7 @@ describe('cyboflow.runs.start', () => {
       // undefined EXCEPT the trailing projectId (10th slot), so createRun can stamp
       // workflow_runs.project_id even for a GLOBAL flow (workflow.project_id NULL).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 1, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined, undefined, undefined, undefined, undefined, undefined, undefined, 1, undefined, undefined, undefined);
     } finally {
       // Reset module state regardless of test outcome.
       setStartRunDeps({
@@ -358,7 +358,7 @@ describe('cyboflow.runs.start', () => {
       // slot — so the launcher writes workflow_runs.seed_idea_id directly (no
       // stage derivation).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', undefined, undefined, undefined, undefined, 1, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', undefined, undefined, undefined, undefined, 1, undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -393,7 +393,7 @@ describe('cyboflow.runs.start', () => {
       // launch projectId (migration 030) in the 10th slot — so the launcher hosts
       // the run inside the session's existing worktree.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined, 1, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined, 1, undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -427,7 +427,7 @@ describe('cyboflow.runs.start', () => {
       // 7th slot, baseBranch (8th) + seedTaskIds (9th) undefined, and the explicit
       // launch projectId (migration 030) in the 10th slot.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, undefined, 'auto', undefined, undefined, 1, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, undefined, 'auto', undefined, undefined, 1, undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -511,7 +511,8 @@ describe('cyboflow.runs.start', () => {
         undefined, // taskIds
         1, // projectId (10th)
         undefined, // requestedExecutionModel (11th placeholder)
-        ['rvw_a', 'rvw_b'], // findingIds (12th, LAST)
+        ['rvw_a', 'rvw_b'], // findingIds (12th)
+        undefined, // requestedModel (13th, LAST — not requested)
       );
     } finally {
       setStartRunDeps({
@@ -554,7 +555,52 @@ describe('cyboflow.runs.start', () => {
         undefined, // taskIds
         1, // projectId (10th)
         undefined, // requestedExecutionModel (11th placeholder)
-        undefined, // findingIds (12th, LAST — omitted)
+        undefined, // findingIds (12th — omitted)
+        undefined, // requestedModel (13th, LAST — omitted)
+      );
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a7) model supplied (migration 037) → forwarded into the 13th (LAST) launch
+  // slot as requestedModel, so createRun stamps workflow_runs.model.
+  // -------------------------------------------------------------------------
+  it('(a7) model supplied → forwards the per-run model into the LAST (13th) launch slot', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-model',
+      worktreePath: '/tmp/wt/model',
+      branchName: 'cyboflow/sprint/model12',
+    });
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, model: 'opus' });
+
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock).toHaveBeenCalledWith(
+        'wf-sprint',
+        '/projects/my-project',
+        undefined, // substrate
+        undefined, // taskId
+        undefined, // ideaId
+        undefined, // sessionId
+        undefined, // permissionMode
+        undefined, // baseBranch (position 8 placeholder)
+        undefined, // taskIds
+        1, // projectId (10th)
+        undefined, // requestedExecutionModel (11th placeholder)
+        undefined, // findingIds (12th)
+        'opus', // requestedModel (13th, LAST)
       );
     } finally {
       setStartRunDeps({

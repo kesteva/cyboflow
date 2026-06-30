@@ -633,7 +633,7 @@ export class WorkflowRegistry {
     requestedSubstrate?: CliSubstrate,
     sessionId?: string,
     requestedPermissionMode?: PermissionMode,
-    opts?: { projectId?: number; requestedExecutionModel?: ExecutionModel },
+    opts?: { projectId?: number; requestedExecutionModel?: ExecutionModel; requestedModel?: string },
   ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate; executionModel: ExecutionModel } {
     const workflow = this.getById(workflowId);
     if (!workflow) {
@@ -715,6 +715,16 @@ export class WorkflowRegistry {
       env: process.env,
     });
 
+    // Per-run model pin (migration 037). The explicit launch choice
+    // (opts.requestedModel, from the Configure surface → runs.start →
+    // RunLauncher.launch) is a USER-FACING alias ('opus' | 'sonnet' | 'haiku' |
+    // 'auto' | …) resolved to a concrete snapshot at the spawn seam. There is no
+    // resolver ladder (unlike substrate / permission / execution model): a run
+    // either pins a model or it does not. Stamped ONCE here and immutable for the
+    // run; NULL (no pin) is the legacy/zero-behavior-change floor — RunExecutor
+    // then passes no `model` and the SDK uses its own default.
+    const model = opts?.requestedModel ?? null;
+
     // Freeze the workflow's CURRENT spec onto the run as a content address
     // (migration 026). Like substrate, spec_hash is stamped ONCE at INSERT and
     // is immutable for the run lifetime — there is no UPDATE path. It lets
@@ -723,12 +733,12 @@ export class WorkflowRegistry {
     const specHash = computeSpecHash(workflow.spec_json);
 
     const insert = this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, execution_model, session_id, spec_hash)
-      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?)
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, execution_model, model, session_id, spec_hash)
+      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
     `);
 
     const createTx = this.db.transaction(() => {
-      insert.run(runId, workflowId, runProjectId, permissionMode, substrate, executionModel, sessionId ?? null, specHash);
+      insert.run(runId, workflowId, runProjectId, permissionMode, substrate, executionModel, model, sessionId ?? null, specHash);
       // Ensure the frozen hash is always resolvable to its spec: snapshot a
       // revision for the spec we just stamped. INSERT OR IGNORE keyed on
       // UNIQUE(workflow_id, spec_hash) makes this idempotent, so a workflow that
@@ -749,7 +759,7 @@ export class WorkflowRegistry {
    */
   getRunById(runId: string): WorkflowRunRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, outcome, base_branch, base_sha, steps_snapshot_json, substrate, execution_model, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
+      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, outcome, base_branch, base_sha, steps_snapshot_json, substrate, execution_model, model, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
     );
     const row = stmt.get(runId) as WorkflowRunRow | undefined;
     return row ?? null;

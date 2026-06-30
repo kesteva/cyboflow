@@ -116,6 +116,18 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     );
     executionModelAdded = true;
   };
+  // Migration 037 (per-run model pin): getRunById projects model right beside
+  // execution_model, and createRun stamps it. Both read-model surfaces
+  // (includeSubstrate) and the row-level readers (includeWorkflowRunTaskColumns)
+  // therefore need the column — folded in idempotently exactly like
+  // execution_model so passing both flags never double-ALTERs. Plain nullable TEXT
+  // (no CHECK); additive — never widens GATE_SCHEMA.
+  let modelAdded = false;
+  const addModelColumnOnce = (): void => {
+    if (modelAdded) return;
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN model TEXT');
+    modelAdded = true;
+  };
   if (options?.includeStuckDetectedAt) {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER');
   }
@@ -137,6 +149,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addBatchIdColumnOnce();
     // Migration 031: getRunById projects execution_model beside substrate.
     addExecutionModelColumnOnce();
+    // Migration 037: getRunById projects model beside execution_model.
+    addModelColumnOnce();
   }
   if (options?.includeQuestionsTable) {
     // Migration 010 references stuck_detected_at (added in migration 007) in the
@@ -173,6 +187,9 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     // Migration 031: getRunById projects execution_model (sibling immutable stamp
     // to substrate). Folded in so row-level readers resolve the column.
     addExecutionModelColumnOnce();
+    // Migration 037: getRunById projects model (sibling immutable stamp to
+    // execution_model). Folded in so row-level readers resolve the column.
+    addModelColumnOnce();
   }
   return db;
 }

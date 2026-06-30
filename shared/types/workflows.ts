@@ -128,6 +128,16 @@ export interface WorkflowRunRow {
    * legacy row. Stamped-but-dormant until the programmatic consumer lands.
    */
   execution_model?: ExecutionModel;
+  /**
+   * Per-run Claude model alias pinned at launch ('opus' | 'opus-250k' | 'sonnet' |
+   * 'haiku' | 'auto'), resolved to a concrete snapshot at the spawn seam
+   * (modelContext.resolveModelAlias). Stamped once at createRun, immutable for the
+   * run (migration 037). NULL — and the migrated state of every legacy row — means
+   * "no pin": RunExecutor passes no `model` to the spawner so the bundled Agent SDK
+   * uses its own default. 'auto' resolves identically to NULL at the seam. Read
+   * FRESH per spawn by RunExecutor.buildOptionsOverrides.
+   */
+  model?: string | null;
   started_at?: string | null;
   ended_at?: string | null;
   created_at: string;

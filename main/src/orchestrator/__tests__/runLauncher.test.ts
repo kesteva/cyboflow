@@ -319,6 +319,65 @@ describe('RunLauncher.launch', () => {
     });
   });
 
+  it('threads the per-run model choice into WorkflowRegistry.createRun opts (migration 037)', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = createTestDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const seedWorkflowId = randomUUID();
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+      ).run(seedWorkflowId);
+      interface IdRow { id: string }
+      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const createRunSpy = vi.fn(() => {
+        db.prepare(
+          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
+        ).run(cannedRunId, workflowId, 1);
+        return { runId: cannedRunId, permissionMode: 'default' as const };
+      });
+      const realRegistry = {
+        getById: (id: string) =>
+          db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
+        createRun: createRunSpy,
+      } as unknown as WorkflowRegistry;
+
+      const fakeWorktree = {
+        createDeterministicWorktree: vi.fn().mockResolvedValue({
+          worktreePath: join(tmpDir, 'wt'),
+          branchName: 'cyboflow/sprint/x',
+          baseCommit: 'abc123',
+          baseBranch: 'HEAD',
+        }),
+      } as unknown as WorktreeManager;
+
+      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+
+      // requestedModel is the LAST positional launch arg (after findingIds). All
+      // the intermediate optionals are undefined on this minimal launch.
+      await launcher.launch(
+        workflowId, tmpDir,
+        undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, undefined, undefined,
+        'opus',
+      );
+
+      // The model choice rides into createRun's 5th arg (the opts bag) as
+      // `requestedModel` — never a new positional (substrate/sessionId/permission
+      // stay undefined).
+      expect(createRunSpy).toHaveBeenCalledWith(
+        workflowId,
+        undefined,
+        undefined,
+        undefined,
+        { requestedModel: 'opus' },
+      );
+    });
+  });
+
   it('throws when workflow does not exist', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
       const db = createTestDb();

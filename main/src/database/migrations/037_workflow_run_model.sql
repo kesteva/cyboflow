@@ -1,0 +1,34 @@
+-- Migration 037: workflow_runs.model — per-run Claude model pin (nullable).
+--
+-- Lets a workflow launch pin the model the run's agent spawns with, threaded from
+-- the launch "Configure" surface (SessionStartWizard / WorkflowPicker) down through
+-- runs.start → RunLauncher.launch → WorkflowRegistry.createRun, which stamps it
+-- here. The value is a user-facing alias ('opus' | 'opus-250k' | 'sonnet' | 'haiku'
+-- | 'auto') resolved to a concrete snapshot at the spawn seam by
+-- modelContext.resolveModelAlias. NULL — the default and the migrated state of every
+-- existing row — means "no pin": RunExecutor passes no `model` to the spawner, so
+-- the bundled Agent SDK uses its own default (today's behavior, byte-identical).
+--
+-- 'auto' resolves the SAME as NULL at the spawn seam (resolveModelAlias passes it
+-- through and ClaudeCodeManager skips `sdkOptions.model` for it), so a run stamped
+-- 'auto' and a legacy NULL run both fall to the SDK default. The column is stamped
+-- ONCE at createRun and is immutable for the run lifetime (no UPDATE path), mirroring
+-- substrate (013) / execution_model (032).
+--
+-- VALIDATION-IN-CODE, NOT CHECK: the alias set is validated at the tRPC boundary
+-- (runs.start zod) — the column is a plain TEXT like agent_overrides.model (036),
+-- keeping enum checks out of CHECK constraints (mirrors 016/026/029/036). The
+-- field-for-field row contract lives in shared/types/workflows.ts (WorkflowRunRow);
+-- getRunById projects it.
+--
+-- NOTE: runFileBasedMigrations() in database.ts wraps every file in a
+-- this.transaction(...) call, so no explicit BEGIN/COMMIT here. ALTER TABLE ADD
+-- COLUMN is idempotent via the filename-keyed ledger; a re-applied "duplicate
+-- column name" is caught as idempotent-ok in runFileBasedMigrations (same handling
+-- as the nullable ALTERs in migrations 021/031/032/034/036).
+--
+-- ⚠️ MIGRATION-NUMBER COLLISION: sibling feature branches also introduce a 037
+-- (visual-verify; the permission-mode redesign reaches 036-039). The ledger is
+-- filename-keyed, so whichever lands SECOND must renumber.
+
+ALTER TABLE workflow_runs ADD COLUMN model TEXT;
