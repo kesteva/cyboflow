@@ -6,6 +6,47 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.11] — 2026-06-30
+
+### Added
+
+- **One unified chat surface for quick sessions and workflow runs.** A quick
+  session's chat now renders through the same component as a workflow run, so the
+  two look and behave identically and can't drift apart. The interactive (PTY)
+  experience — live terminal, resume recovery, the Ctrl+G composer toggle — is
+  preserved within it.
+- **Collapse/expand dock for quick sessions.** Quick sessions gain the same
+  ▴▾ collapse/expand dock the run center pane uses, with its own persisted height,
+  sitting over the chat/canvas.
+- **Multiple terminals per run.** A run's terminal tab is now the always-present
+  primary **Terminal**, and a **＋terminal** button spawns additional independent
+  worktree shells (Terminal 2, Terminal 3, …) — each a closeable shell in the
+  run's worktree. Added terminals persist across run switches.
+- **Model picker on workflow launch.** The launch Configure step (and the
+  "Browse all" workflow picker) now let you choose the model for a flow, defaulting
+  to **Opus 4.8 · 1M**. The choice is pinned per run, so the flow's orchestrator
+  agent spawns on the selected model. The one-click "Add a workflow" lane pins the
+  same default.
+- **Per-agent model pin.** A workflow agent's model is now editable in the Agent
+  editor — pin **Opus**, **Sonnet**, or **Haiku**, or keep inheriting the run's
+  model (the default). The gallery card and inspector show the pinned model.
+
+### Changed
+
+- **Sonnet 4.6 → Sonnet 5** in the model picker. Sonnet 5 is 1M-context native, so
+  it appears as a single **Sonnet 5 · 1M** row instead of separate 250K / 1M rows.
+- Run tabs are restyled to the pill format used by quick sessions, the **＋terminal**
+  button sits flush next to the tabs, and the old **＋chat** add-panel button has been
+  removed (quick sessions keep their single primary chat panel plus terminals).
+- The chat dock can now be dragged all the way to full viewport height (the previous
+  ~70%/560px resize cap is gone).
+
+### Fixed
+
+- Added terminals are no longer dropped when switching between runs. Previously the
+  tabs reset on a run switch while their backend shells kept running — leaving an
+  orphaned, unreachable shell (e.g. a dev server) alive until the run closed.
+
 ## [0.1.10] — 2026-06-29
 
 ### Added
