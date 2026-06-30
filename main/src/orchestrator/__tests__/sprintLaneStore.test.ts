@@ -74,6 +74,73 @@ function seedTask(db: Database.Database, id: string, ref: string, title: string)
   ).run(id, ref, title);
 }
 
+/**
+ * Migration-backed in-memory DB carried all the way to the collapsed board
+ * (006 → 011 → 014 → 015 → 022 → 023 → 024 → 025 → 036), so the Q1 eligibility
+ * guard's tasks.approved_at / tasks.archived_at columns + the 4-stage board
+ * (positions 1/6/9/10) exist. The base buildLaneDb stops at 025 (pre-036), where
+ * the guard degrades to permissive — the right substrate for the lane-mechanics
+ * tests, which seed synthetic ids.
+ */
+function buildReadyLaneDb(): Database.Database {
+  const db = new Database(':memory:');
+  db.pragma('foreign_keys = ON');
+  db.exec(`
+    CREATE TABLE projects (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      path TEXT NOT NULL UNIQUE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+  `);
+  db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
+
+  const migDir = join(__dirname, '..', '..', 'database', 'migrations');
+  for (const file of [
+    '006_cyboflow_schema.sql',
+    '011_workflow_step_tracking.sql',
+    '014_native_tasks.sql',
+    '015_entity_model_rebuild.sql',
+    '022_sprint_batches.sql',
+    '023_sprint_lane_step.sql',
+    '024_archive_in_place.sql',
+    '025_sprint_lane_attempts.sql',
+    '036_collapse_board.sql',
+  ]) {
+    db.exec(readFileSync(join(migDir, file), 'utf-8'));
+  }
+  return db;
+}
+
+/**
+ * Seed a real tasks row on the collapsed board (buildReadyLaneDb). Defaults to
+ * an ELIGIBLE task: approved + position 6 ('Ready for development') + not
+ * archived. Override `position` / `approved` / `archived` to exercise the guard.
+ */
+function seedReadyTask(
+  db: Database.Database,
+  id: string,
+  ref: string,
+  title: string,
+  opts: { position?: number; approved?: boolean; archived?: boolean } = {},
+): void {
+  const position = opts.position ?? 6;
+  const approved = opts.approved ?? true;
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id, approved_at, archived_at)
+     VALUES (?, 1, ?, ?, 'board-1-default', ?, ?, ?)`,
+  ).run(
+    id,
+    ref,
+    title,
+    `stage-board-1-default-${position}`,
+    approved ? now : null,
+    opts.archived ? now : null,
+  );
+}
+
 /** Insert a task_dependencies edge (both endpoints must be real tasks rows — FK). */
 function seedDependency(
   db: Database.Database,
@@ -152,6 +219,95 @@ describe('SprintLaneStore', () => {
       } catch (err) {
         expect((err as SprintLaneError).code).toBe('bad_request');
       }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // createForRun — Q1 sprint-eligibility guard (collapsed-board schema)
+  //
+  // Runs against buildReadyLaneDb (through migration 036) so the guard is LIVE:
+  // only approved, non-archived tasks at a ready-or-later, non-terminal stage
+  // seed lanes. The base buildLaneDb (pre-036) degrades the guard to permissive,
+  // which is why the lane-mechanics tests above still seed synthetic ids.
+  // ---------------------------------------------------------------------------
+
+  describe('createForRun — Q1 eligibility guard', () => {
+    let rdb: Database.Database;
+    let rstore: SprintLaneStore;
+
+    beforeEach(() => {
+      rdb = buildReadyLaneDb();
+      rstore = SprintLaneStore.initialize(dbAdapter(rdb));
+    });
+
+    afterEach(() => {
+      rdb.close();
+    });
+
+    function laneTaskIds(batchId: string): string[] {
+      return (
+        rdb
+          .prepare('SELECT task_id FROM sprint_batch_tasks WHERE batch_id = ? ORDER BY id ASC')
+          .all(batchId) as Array<{ task_id: string }>
+      ).map((r) => r.task_id);
+    }
+
+    it('includes an approved position-6 task and excludes a PENDING (approved_at NULL) task', () => {
+      seedReadyTask(rdb, 'tsk_ready', 'TASK-001', 'Ready', { position: 6, approved: true });
+      seedReadyTask(rdb, 'tsk_pending', 'TASK-002', 'Pending', { position: 6, approved: false });
+
+      const { batchId } = rstore.createForRun(1, 'sdk', ['tsk_ready', 'tsk_pending']);
+
+      // Only the approved, ready task seeded a lane; the pending one was dropped.
+      expect(laneTaskIds(batchId)).toEqual(['tsk_ready']);
+    });
+
+    it('excludes archived, done-terminal, and below-position-6 tasks', () => {
+      seedReadyTask(rdb, 'tsk_ready', 'TASK-001', 'Ready', { position: 6 });
+      seedReadyTask(rdb, 'tsk_archived', 'TASK-002', 'Archived', { position: 6, archived: true });
+      seedReadyTask(rdb, 'tsk_done', 'TASK-003', 'Done', { position: 9 }); // terminal 'Done'
+      seedReadyTask(rdb, 'tsk_wontdo', 'TASK-004', "Won't do", { position: 10 }); // terminal
+      seedReadyTask(rdb, 'tsk_idea', 'TASK-005', 'On the Idea column', { position: 1 }); // < 6
+
+      const { batchId } = rstore.createForRun(1, 'sdk', [
+        'tsk_ready',
+        'tsk_archived',
+        'tsk_done',
+        'tsk_wontdo',
+        'tsk_idea',
+      ]);
+
+      expect(laneTaskIds(batchId)).toEqual(['tsk_ready']);
+    });
+
+    it('rejects a selection with zero eligible tasks (bad_request)', () => {
+      seedReadyTask(rdb, 'tsk_pending', 'TASK-001', 'Pending', { approved: false });
+      try {
+        rstore.createForRun(1, 'sdk', ['tsk_pending']);
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(SprintLaneError);
+        expect((err as SprintLaneError).code).toBe('bad_request');
+      }
+      // No batch or lanes were written.
+      expect(rdb.prepare('SELECT COUNT(*) AS n FROM sprint_batches').get()).toEqual({ n: 0 });
+      expect(rdb.prepare('SELECT COUNT(*) AS n FROM sprint_batch_tasks').get()).toEqual({ n: 0 });
+    });
+
+    it('drops a candidate id with no tasks row (inner JOIN)', () => {
+      seedReadyTask(rdb, 'tsk_ready', 'TASK-001', 'Ready');
+      const { batchId } = rstore.createForRun(1, 'sdk', ['tsk_ready', 'tsk_ghost']);
+      expect(laneTaskIds(batchId)).toEqual(['tsk_ready']);
+    });
+
+    it('filterEligibleTaskIds preserves input order and collapses duplicates', () => {
+      seedReadyTask(rdb, 'tsk_a', 'TASK-001', 'A');
+      seedReadyTask(rdb, 'tsk_b', 'TASK-002', 'B', { approved: false });
+      seedReadyTask(rdb, 'tsk_c', 'TASK-003', 'C');
+      expect(rstore.filterEligibleTaskIds(1, ['tsk_c', 'tsk_b', 'tsk_a', 'tsk_c'])).toEqual([
+        'tsk_c',
+        'tsk_a',
+      ]);
     });
   });
 

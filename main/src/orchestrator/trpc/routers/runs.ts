@@ -881,6 +881,30 @@ export const runsRouter = router({
             message: `too many tasks for the ${capSubstrate} substrate: ${input.taskIds.length} > ${max}`,
           });
         }
+        // Q1 eligibility pre-check (fail fast before the launch machinery). A
+        // sprint may only seed APPROVED tasks at a ready-or-later, non-terminal
+        // stage; reject a selection with zero eligible tasks here rather than
+        // letting createForRun reject it deep inside RunLauncher.launch.
+        // SprintLaneStore.filterEligibleTaskIds is the same guard createForRun
+        // uses (it degrades to permissive on a pre-036 schema). Guarded so an
+        // uninitialized store (tests) simply skips the pre-check — createForRun
+        // remains the authoritative gate.
+        let eligibleCount: number | null = null;
+        try {
+          eligibleCount = SprintLaneStore.getInstance().filterEligibleTaskIds(
+            input.projectId,
+            input.taskIds,
+          ).length;
+        } catch {
+          eligibleCount = null;
+        }
+        if (eligibleCount === 0) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message:
+              'no sprint-eligible tasks in selection (each must be approved + at "Ready for development" or later, not archived/done)',
+          });
+        }
       }
       // Forward the per-run substrate choice (IDEA-013), native-task link
       // (migration 014), planner seed idea (migration 017), session host

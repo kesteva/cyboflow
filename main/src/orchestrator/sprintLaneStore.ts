@@ -196,6 +196,22 @@ export class SprintLaneStore {
       throw new SprintLaneError('bad_request', 'createForRun requires at least one task id');
     }
 
+    // Q1 eligibility guard. This is the SINGLE materialization chokepoint that
+    // runs.start AND handleCreateSprintBatch both converge on, so gating here
+    // means neither path can seed a sprint over a pending/unready selection. A
+    // task is kept ONLY when it is approved (approved_at IS NOT NULL — a NULL
+    // approval is PENDING/sprint-ineligible), not archived, and sitting at a
+    // ready-or-later, non-terminal board stage (position >= 6, is_terminal = 0
+    // — which drops both 'Done' and 'Won't do'). Ineligible ids are DROPPED; an
+    // empty result is rejected with a clear SprintLaneError.
+    const eligibleTaskIds = this.filterEligibleTaskIds(projectId, uniqueTaskIds);
+    if (eligibleTaskIds.length === 0) {
+      throw new SprintLaneError(
+        'bad_request',
+        'createForRun: no sprint-eligible tasks in selection (each must be approved + at "Ready for development" or later, not archived/done/won\'t-do)',
+      );
+    }
+
     const batchId = randomUUID().replace(/-/g, '');
 
     const txn = this.db.transaction(() => {
@@ -209,7 +225,7 @@ export class SprintLaneStore {
       const insertLane = this.db.prepare(
         `INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES (?, ?, 'queued')`,
       );
-      for (const taskId of uniqueTaskIds) {
+      for (const taskId of eligibleTaskIds) {
         insertLane.run(batchId, taskId);
       }
     });
@@ -219,9 +235,58 @@ export class SprintLaneStore {
       batchId,
       projectId,
       substrate,
-      tasks: uniqueTaskIds.length,
+      tasks: eligibleTaskIds.length,
+      dropped: uniqueTaskIds.length - eligibleTaskIds.length,
     });
     return { batchId };
+  }
+
+  /**
+   * Q1 sprint-eligibility filter — the single source of truth for which of a
+   * candidate task-id selection may seed a sprint. A task is ELIGIBLE only when
+   * it is APPROVED (tasks.approved_at IS NOT NULL — a NULL approval is PENDING,
+   * backend-invisible + sprint-ineligible until plan approval), NOT archived
+   * (archived_at IS NULL), and sitting at a ready-or-later, NON-terminal board
+   * stage (board_stages.position >= 6 — '>= 6' tolerates in-dev movement per the
+   * ship promote-before-batch ordering — AND is_terminal = 0, which drops both
+   * 'Done' (pos 9) and 'Won't do' (pos 10)). Candidate ids with no tasks row are
+   * dropped (inner JOIN). Input order is preserved; duplicates are collapsed.
+   *
+   * Called by createForRun (the materialization chokepoint) and the runs.start
+   * pre-check. On a pre-036 schema lacking approved_at/archived_at the filter
+   * degrades to PERMISSIVE (returns the unique candidates unchanged), mirroring
+   * the codebase's pre-migration defensive-read precedent — production DBs
+   * always carry the columns, so the guard is fully active there.
+   */
+  filterEligibleTaskIds(projectId: number, taskIds: string[]): string[] {
+    const unique = [...new Set(taskIds)];
+    if (unique.length === 0) return [];
+    try {
+      const placeholders = unique.map(() => '?').join(', ');
+      const rows = this.db
+        .prepare(
+          `SELECT t.id AS id
+             FROM tasks t
+             JOIN board_stages bs ON bs.id = t.stage_id
+            WHERE t.project_id = ?
+              AND t.id IN (${placeholders})
+              AND t.approved_at IS NOT NULL
+              AND t.archived_at IS NULL
+              AND bs.position >= 6
+              AND bs.is_terminal = 0`,
+        )
+        .all(projectId, ...unique) as Array<{ id: string }>;
+      const eligible = new Set(rows.map((r) => r.id));
+      return unique.filter((id) => eligible.has(id));
+    } catch (err) {
+      if (err instanceof Error && /no such column/i.test(err.message)) {
+        this.logger?.debug('[SprintLaneStore] eligibility filter skipped (pre-036 schema)', {
+          error: err.message,
+        });
+        return unique;
+      }
+      throw err;
+    }
   }
 
   // --------------------------------------------------------------------------
