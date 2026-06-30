@@ -14,8 +14,10 @@
  *  - active-run guard; optimistic concurrency conflict.
  *  - lineage: task rejects a non-epic parent + idea-as-parent; epic
  *    originating_idea_id must reference a real idea; cycle rejected.
- *  - decomposition: moving an idea to Decomposed (position 12) emits action
- *    'decomposed' and leaves children unchanged.
+ *  - decomposition: the `decomposed` toggle stamps ideas.decomposed_at (idea-only,
+ *    NOT a stage move), emits action 'decomposed', leaves children unchanged, and
+ *    is rejected on epics/tasks; creating a child NO LONGER auto-retires the idea
+ *    (retirement is gate-only).
  *  - recomputeTaskExecutionStage aggregation over runs (merged -> done; every other
  *    non-merged run-state -> entry stage, Ready-for-development fallback).
  *  - taskChangeEvents emits on BOTH 'task-project-<id>' AND the cross-project
@@ -74,6 +76,12 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
+  // Migration 036 replaces the position-12 'Decomposed' stage with the
+  // ideas.decomposed_at retire stamp. The board collapse itself (removing
+  // positions 2,3,4,5,7,8,12) is exercised by migration036.test.ts; here we only
+  // add the decomposed_at column the router now reads/writes, keeping the
+  // 12-stage board intact for this file's stage-authority/create-default cases.
+  db.exec('ALTER TABLE ideas ADD COLUMN decomposed_at TEXT;');
   return db;
 }
 
@@ -398,26 +406,63 @@ describe('TaskChangeRouter (3-table entity model)', () => {
   // -------------------------------------------------------------------------
 
   describe('decomposition', () => {
-    it('moving an idea to Decomposed (position 12) emits action=decomposed and leaves children unchanged', async () => {
+    it('the decomposed toggle stamps decomposed_at, emits action=decomposed, keeps the stage', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
 
-      // An idea with NO children — an explicit move to Decomposed must surface
-      // 'decomposed'. (Created children would auto-decompose the idea via FIX
-      // (B); this case isolates the explicit-move emit semantics.)
       const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Big idea' });
 
       const actions: string[] = [];
       taskChangeEvents.on(taskProjectChannel(1), (e: TaskChangedEvent) => actions.push(e.action));
 
-      await router.applyChange(1, { actor: 'user', entityType: 'idea', taskId: idea.taskId, stageId: stageId(12) });
+      await router.applyChange(1, { actor: 'user', entityType: 'idea', taskId: idea.taskId, decomposed: true });
 
-      const idea2 = db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string };
-      expect(idea2.stage_id).toBe(stageId(12));
+      const row = db
+        .prepare('SELECT stage_id, decomposed_at FROM ideas WHERE id = ?')
+        .get(idea.taskId) as { stage_id: string; decomposed_at: string | null };
+      // Stamped off the board, but NOT a stage move — the idea keeps position 1.
+      expect(row.decomposed_at).not.toBeNull();
+      expect(row.stage_id).toBe(stageId(1));
       expect(actions).toContain('decomposed');
+      // The stamp is captured as a per-field delta + 'decomposed' event kind.
+      const ev = db
+        .prepare(
+          "SELECT kind, changes_json FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
+        )
+        .get(idea.taskId) as { kind: string; changes_json: string };
+      expect(ev.kind).toBe('decomposed');
+      const deltas = JSON.parse(ev.changes_json) as Array<{ field: string; from: unknown; to: unknown }>;
+      expect(deltas).toHaveLength(1);
+      expect(deltas[0].field).toBe('decomposed_at');
+      expect(deltas[0].from).toBeNull();
+      expect(typeof deltas[0].to).toBe('string');
     });
 
-    it('an ordinary stage move (idea to a non-Decomposed stage) emits stageMoved, not decomposed', async () => {
+    it('the decomposed toggle is rejected on an epic/task (idea-only)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const epic = await router.applyChange(1, { actor: 'user', entityType: 'epic', title: 'E' });
+      const task = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      await expect(
+        router.applyChange(1, { actor: 'user', taskId: epic.taskId, decomposed: true }),
+      ).rejects.toMatchObject({ code: 'invalid_lineage' });
+      await expect(
+        router.applyChange(1, { actor: 'user', taskId: task.taskId, decomposed: true }),
+      ).rejects.toMatchObject({ code: 'invalid_lineage' });
+    });
+
+    it('a no-op decomposed toggle (already in the requested state) writes nothing', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'I' });
+
+      await router.applyChange(1, { actor: 'user', taskId: idea.taskId, decomposed: false }); // already on-board
+      const row = db.prepare('SELECT version FROM ideas WHERE id = ?').get(idea.taskId) as { version: number };
+      expect(row.version).toBe(1);
+      expect(eventCount(db, 'idea', idea.taskId)).toBe(1); // only the create event
+    });
+
+    it('an ordinary stage move (idea to another stage) emits stageMoved, not decomposed', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
       const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'I' });
@@ -428,18 +473,14 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(actions).toEqual(['stageMoved']);
     });
 
-    // FIX-STAGE-MODEL (B): creating the FIRST child (epic OR task) of an idea
-    // retires the originating idea to Decomposed automatically; children keep
-    // their own create stages (they carry the flow).
-    it('creating an epic with originatingIdeaId auto-retires the idea to Decomposed (children unchanged)', async () => {
+    // Idea retirement is now EXCLUSIVELY gate-driven: creating the first child of
+    // an idea NO LONGER auto-retires it (required so the Q1 guard's post-approval
+    // child-create does not prematurely retire the idea before the plan settles).
+    it('creating an epic with originatingIdeaId does NOT auto-retire the idea (gate-only)', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
 
       const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Big idea' });
-      // Idea starts at Idea (position 1) per the type-default.
-      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
-        stageId(1),
-      );
 
       const epic = await router.applyChange(1, {
         actor: 'user',
@@ -447,21 +488,16 @@ describe('TaskChangeRouter (3-table entity model)', () => {
         title: 'E',
         originatingIdeaId: idea.taskId,
       });
-      // Let the follow-on decomposition settle on the project queue.
       await router._queueForProject(1).onIdle();
 
-      // The idea retired to Decomposed (position 12)...
-      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
-        stageId(12),
-      );
-      // ...via an orchestrator-attributed 'decomposed' entity_event.
-      const ev = db
-        .prepare(
-          "SELECT actor, kind FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
-        )
-        .get(idea.taskId) as { actor: string; kind: string };
-      expect(ev.actor).toBe('orchestrator');
-      expect(ev.kind).toBe('decomposed');
+      // The idea stays on the board — decomposed_at NULL, stage unchanged, and no
+      // 'decomposed' event was written (only its 'created' row).
+      const ideaRow = db
+        .prepare('SELECT stage_id, decomposed_at FROM ideas WHERE id = ?')
+        .get(idea.taskId) as { stage_id: string; decomposed_at: string | null };
+      expect(ideaRow.decomposed_at).toBeNull();
+      expect(ideaRow.stage_id).toBe(stageId(1));
+      expect(eventCount(db, 'idea', idea.taskId)).toBe(1);
 
       // The epic child keeps its create stage (Ready for development, position 6).
       expect((db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epic.taskId) as { stage_id: string }).stage_id).toBe(
@@ -469,47 +505,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       );
     });
 
-    // The ship materialize-batch seam has no planner-style human Archive gate, so
-    // it calls this public method directly to retire a shipped run's seed idea
-    // once the approved plan is materialized into sprint lanes (see
-    // mcpQueryHandler.retireRunOwnedIdeas). Lock its contract: retire to
-    // Decomposed (position 12), idempotent, and a safe no-op for a missing idea.
-    it('retireIdeaToDecomposed retires an idea to Decomposed, idempotently and fail-soft', async () => {
-      const db = buildDb();
-      const router = TaskChangeRouter.initialize(dbAdapter(db));
-
-      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Shipped idea' });
-      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
-        stageId(1),
-      );
-
-      // First retire: idea moves to Decomposed via an orchestrator 'decomposed' event.
-      await router.retireIdeaToDecomposed(1, idea.taskId);
-      await router._queueForProject(1).onIdle();
-      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
-        stageId(12),
-      );
-      const ev = db
-        .prepare(
-          "SELECT actor, kind FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
-        )
-        .get(idea.taskId) as { actor: string; kind: string };
-      expect(ev).toMatchObject({ actor: 'orchestrator', kind: 'decomposed' });
-      const eventsAfterFirst = eventCount(db, 'idea', idea.taskId);
-
-      // Second retire: already at Decomposed -> idempotent no-op, no new event.
-      await router.retireIdeaToDecomposed(1, idea.taskId);
-      await router._queueForProject(1).onIdle();
-      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
-        stageId(12),
-      );
-      expect(eventCount(db, 'idea', idea.taskId)).toBe(eventsAfterFirst);
-
-      // A missing idea is a safe no-op (best-effort housekeeping must never throw).
-      await expect(router.retireIdeaToDecomposed(1, 'ide_missing')).resolves.toBeUndefined();
-    });
-
-    it('creating a task with originatingIdeaId auto-retires the idea to Decomposed', async () => {
+    it('creating a task with originatingIdeaId does NOT auto-retire the idea (gate-only)', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
 
@@ -522,44 +518,61 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       });
       await router._queueForProject(1).onIdle();
 
-      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
-        stageId(12),
-      );
+      const ideaRow = db
+        .prepare('SELECT stage_id, decomposed_at FROM ideas WHERE id = ?')
+        .get(idea.taskId) as { stage_id: string; decomposed_at: string | null };
+      expect(ideaRow.decomposed_at).toBeNull();
+      expect(ideaRow.stage_id).toBe(stageId(1));
+      expect(eventCount(db, 'idea', idea.taskId)).toBe(1);
       // Task child keeps its create stage (Ready for development, position 6).
       expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(task.taskId) as { stage_id: string }).stage_id).toBe(
         stageId(6),
       );
     });
 
-    it('auto-decompose is idempotent: a SECOND child does not double-write the idea decomposition', async () => {
+    // The ship materialize-batch seam has no planner-style human Archive gate, so
+    // it calls this public method directly to retire a shipped run's seed idea
+    // once the approved plan is materialized into sprint lanes (see
+    // mcpQueryHandler.retireRunOwnedIdeas). Lock its contract: stamp decomposed_at
+    // (NOT a stage move), idempotent, and a safe no-op for a missing idea.
+    it('retireIdeaToDecomposed stamps decomposed_at, idempotently and fail-soft', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
 
-      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Big idea' });
-      const epic = await router.applyChange(1, {
-        actor: 'user',
-        entityType: 'epic',
-        title: 'E',
-        originatingIdeaId: idea.taskId,
-      });
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Shipped idea' });
+      expect(
+        (db.prepare('SELECT decomposed_at FROM ideas WHERE id = ?').get(idea.taskId) as { decomposed_at: string | null })
+          .decomposed_at,
+      ).toBeNull();
+
+      // First retire: stamps decomposed_at via an orchestrator 'decomposed' event;
+      // the idea keeps its stage (NOT a stage move).
+      await router.retireIdeaToDecomposed(1, idea.taskId);
       await router._queueForProject(1).onIdle();
+      const retired = db
+        .prepare('SELECT stage_id, decomposed_at FROM ideas WHERE id = ?')
+        .get(idea.taskId) as { stage_id: string; decomposed_at: string | null };
+      expect(retired.decomposed_at).not.toBeNull();
+      expect(retired.stage_id).toBe(stageId(1));
+      const ev = db
+        .prepare(
+          "SELECT actor, kind FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
+        )
+        .get(idea.taskId) as { actor: string; kind: string };
+      expect(ev).toMatchObject({ actor: 'orchestrator', kind: 'decomposed' });
       const eventsAfterFirst = eventCount(db, 'idea', idea.taskId);
 
-      // A second child (task under the epic, same originating idea) must NOT
-      // re-write the decomposition — the idea is already terminal.
-      await router.applyChange(1, {
-        actor: 'user',
-        entityType: 'task',
-        title: 'T',
-        parentEpicId: epic.taskId,
-        originatingIdeaId: idea.taskId,
-      });
+      // Second retire: already stamped -> idempotent no-op, no new event.
+      await router.retireIdeaToDecomposed(1, idea.taskId);
       await router._queueForProject(1).onIdle();
-
+      expect(
+        (db.prepare('SELECT decomposed_at FROM ideas WHERE id = ?').get(idea.taskId) as { decomposed_at: string | null })
+          .decomposed_at,
+      ).not.toBeNull();
       expect(eventCount(db, 'idea', idea.taskId)).toBe(eventsAfterFirst);
-      expect((db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get(idea.taskId) as { stage_id: string }).stage_id).toBe(
-        stageId(12),
-      );
+
+      // A missing idea is a safe no-op (best-effort housekeeping must never throw).
+      await expect(router.retireIdeaToDecomposed(1, 'ide_missing')).resolves.toBeUndefined();
     });
   });
 
@@ -761,8 +774,8 @@ describe('TaskChangeRouter (3-table entity model)', () => {
     /**
      * Seed an idea family: the idea, one epic originating from it, one task
      * under that epic (ALSO carrying originating_idea_id — exercises dedup),
-     * and one direct task on the idea. The follow-on auto-decompose of the
-     * idea is allowed to settle before returning.
+     * and one direct task on the idea. Any project-queue follow-ons are allowed
+     * to settle before returning (the idea is NOT auto-retired — gate-only).
      */
     async function seedFamily(router: TaskChangeRouter): Promise<{
       ideaId: string;
@@ -821,7 +834,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(rowCount(db, 'tasks', directTaskId)).toBe(0);
 
       // entity_events purged for EVERY deleted entity (incl. the idea's
-      // create + auto-decompose rows).
+      // 'created' row).
       expect(eventCount(db, 'idea', ideaId)).toBe(0);
       expect(eventCount(db, 'epic', epicId)).toBe(0);
       expect(eventCount(db, 'task', epicTaskId)).toBe(0);
@@ -883,7 +896,7 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       const ideaEvent = events.find((e) => e.taskId === ideaId);
       expect(ideaEvent?.task.title).toBe('Idea');
       expect(ideaEvent?.task.type).toBe('idea');
-      expect(ideaEvent?.task.stage_position).toBe(12); // auto-decomposed before delete
+      expect(ideaEvent?.task.stage_position).toBe(1); // idea stays on the board (no auto-retire)
       const taskEvent = events.find((e) => e.taskId === epicTaskId);
       expect(taskEvent?.task.parent_epic_id).toBe(epicId);
 

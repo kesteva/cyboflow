@@ -24,8 +24,9 @@
  * the id up across all three tables. Lineage:
  *   - parent_epic_id     — only type='task', FK->epics, validated + cycle-checked.
  *   - originating_idea_id — type='epic' | 'task', FK->ideas, validated.
- * Decomposition: moving an IDEA to the Decomposed terminal stage is an allowed
- * asserted move; children are left UNCHANGED (no cascade) — they carry the flow.
+ * Decomposition: an IDEA is retired off the board by stamping `decomposed_at`
+ * (the `decomposed` toggle); children are left UNCHANGED (no cascade) — they
+ * carry the flow. Idea retirement is EXCLUSIVELY gate-driven (no auto-retire).
  *
  * Mirrors the per-run PQueue serialization pattern in approvalRouter.ts, but
  * keys the queue PER PROJECT (entity refs + version bumps are project-scoped).
@@ -90,12 +91,14 @@ interface EntityTableDescriptor {
   hasScope: boolean;
   /** This entity may carry image attachments (only ideas, migration 028). */
   hasAttachments: boolean;
+  /** This entity may carry a decomposed_at retire stamp (only ideas, migration 036). */
+  hasDecomposed: boolean;
 }
 
 const ENTITY_TABLES: Record<TaskType, EntityTableDescriptor> = {
-  idea: { table: 'ideas', idPrefix: 'ide', hasParentEpic: false, hasOriginatingIdea: false, hasEntryStage: false, hasScope: true, hasAttachments: true },
-  epic: { table: 'epics', idPrefix: 'epc', hasParentEpic: false, hasOriginatingIdea: true, hasEntryStage: false, hasScope: false, hasAttachments: false },
-  task: { table: 'tasks', idPrefix: 'tsk', hasParentEpic: true, hasOriginatingIdea: true, hasEntryStage: true, hasScope: false, hasAttachments: false },
+  idea: { table: 'ideas', idPrefix: 'ide', hasParentEpic: false, hasOriginatingIdea: false, hasEntryStage: false, hasScope: true, hasAttachments: true, hasDecomposed: true },
+  epic: { table: 'epics', idPrefix: 'epc', hasParentEpic: false, hasOriginatingIdea: true, hasEntryStage: false, hasScope: false, hasAttachments: false, hasDecomposed: false },
+  task: { table: 'tasks', idPrefix: 'tsk', hasParentEpic: true, hasOriginatingIdea: true, hasEntryStage: true, hasScope: false, hasAttachments: false, hasDecomposed: false },
 };
 
 /** Resolve a descriptor for an entity type. */
@@ -185,6 +188,14 @@ export interface TaskChange {
    * non-orchestrator actors; UNarchiving is never guarded.
    */
   archived?: boolean;
+  /**
+   * Decomposed toggle (idea-only, migration 036): true stamps `decomposed_at =
+   * now`, false clears it. A stamped idea is OFF the board (retired; reachable
+   * only via its children). NOT a stage move — the idea keeps its stage/column.
+   * Rejected ('invalid_lineage') for epics/tasks. Idea retirement is now
+   * EXCLUSIVELY gate-driven (no auto-retire on first child).
+   */
+  decomposed?: boolean;
   /** Optimistic-concurrency guard. If provided and != current version -> concurrency conflict. */
   expectedVersion?: number;
   /** The run that triggered this change, recorded on the entity_events row. */
@@ -249,6 +260,8 @@ interface EntityDbRow {
   priority: Priority;
   repo: string | null;
   archived_at: string | null;
+  /** Retire stamp (ideas-only, migration 036); NULL on epics/tasks + when on-board. */
+  decomposed_at: string | null;
   /** JSON IdeaAttachment[] (ideas-only, migration 028); NULL on epics/tasks + when unset. */
   attachments: string | null;
   version: number;
@@ -279,8 +292,6 @@ interface FieldDelta {
   to: unknown;
 }
 
-/** The board stage position at which an idea is considered "decomposed" (idea-only terminal). */
-const DECOMPOSED_POSITION = 12;
 /** The board stage position considered "done" (merged & archived). */
 const DONE_POSITION = 9;
 
@@ -378,35 +389,21 @@ export class TaskChangeRouter {
       return this.runUpdate(projectId, change);
     })) as { taskId: string; dependsOnTaskId?: string; event: { id: number; seq: number } };
 
-    // FIX-STAGE-MODEL (B): when a CREATE introduces the FIRST child of an idea
-    // (an epic OR task carrying originatingIdeaId), the originating idea retires
-    // to the Decomposed terminal stage — the children carry the flow forward.
-    // Done as a FOLLOW-ON orchestrator applyChange AFTER the child create commits
-    // (NOT a re-entrant nested applyChange inside the create txn, which would
-    // self-deadlock the per-project PQueue). Idempotent: a no-op when the idea is
-    // already terminal/Decomposed. Failures are swallowed (the child create has
-    // already committed; retiring the idea is best-effort housekeeping).
-    if (change.taskId === undefined && change.originatingIdeaId) {
-      const isChildType = (change.entityType ?? change.type ?? 'idea') !== 'idea';
-      if (isChildType) {
-        await this.retireIdeaToDecomposed(projectId, change.originatingIdeaId).catch(() => {
-          // Best-effort: the child already exists; a failure here must not bubble
-          // up and fail the create the caller already observed as successful.
-        });
-      }
-    }
-
+    // NOTE: creating the first child of an idea NO LONGER auto-retires the idea.
+    // Idea retirement is now EXCLUSIVELY gate-driven (the approve-plan gate calls
+    // retireIdeaToDecomposed) — required so the Q1 guard's post-approval
+    // child-create does not prematurely retire the idea before the plan settles.
     return result;
   }
 
   /**
-   * Retire an idea to the Decomposed terminal stage (FIX-STAGE-MODEL B).
-   * Idempotent: reads the idea's current stage position and no-ops when it is
-   * already at the Decomposed position (or the idea / Decomposed stage cannot be
-   * resolved). Routes through applyChange with actor='orchestrator' so the move
-   * mints an entity_event and emits the 'decomposed' action like any other
-   * idea->Decomposed transition. Called as a FOLLOW-ON (post-commit), never
-   * nested inside another applyChange transaction.
+   * Retire an idea off the board by stamping `decomposed_at` (migration 036).
+   * Idempotent: reads the idea's current decomposed_at and no-ops when it is
+   * already stamped (or the idea cannot be resolved). Routes through applyChange
+   * with actor='orchestrator' + the `decomposed` toggle so the stamp mints an
+   * entity_event and emits the 'decomposed' action. The idea keeps its stage
+   * (the stamp, not a stage move, takes it off the board) and its children are
+   * left UNCHANGED — they carry the flow.
    *
    * Public so the ship materialize-batch seam (which has no planner-style human
    * Archive gate) can retire a shipped run's seed idea once its plan is approved
@@ -414,20 +411,16 @@ export class TaskChangeRouter {
    */
   async retireIdeaToDecomposed(projectId: number, ideaId: string): Promise<void> {
     const idea = this.db
-      .prepare('SELECT board_id, stage_id FROM ideas WHERE id = ? AND project_id = ?')
-      .get(ideaId, projectId) as { board_id: string; stage_id: string } | undefined;
+      .prepare('SELECT decomposed_at FROM ideas WHERE id = ? AND project_id = ?')
+      .get(ideaId, projectId) as { decomposed_at: string | null } | undefined;
     if (!idea) return; // idea vanished or wrong project — nothing to retire
-
-    const decomposedStageId = this.stageIdForPosition(idea.board_id, DECOMPOSED_POSITION);
-    if (!decomposedStageId || decomposedStageId === idea.stage_id) {
-      return; // Decomposed stage missing, or idea already retired — idempotent no-op
-    }
+    if (idea.decomposed_at !== null) return; // already retired — idempotent no-op
 
     await this.applyChange(projectId, {
       actor: 'orchestrator',
       entityType: 'idea',
       taskId: ideaId,
-      stageId: decomposedStageId,
+      decomposed: true,
       kind: 'decomposed',
     });
   }
@@ -728,11 +721,28 @@ export class TaskChangeRouter {
         sets.push('stage_id = ?');
         params.push(change.stageId);
         deltas.push({ field: 'stage_id', from: current.stage_id, to: change.stageId });
-        // Decomposition: an IDEA moving to the Decomposed terminal stage retires.
-        // Children are intentionally LEFT UNCHANGED here (no cascade) — they carry
-        // the flow. Surface the distinct 'decomposed' action so the UI can react.
-        action =
-          type === 'idea' && targetStage.position === DECOMPOSED_POSITION ? 'decomposed' : 'stageMoved';
+        action = 'stageMoved';
+      }
+
+      // ----- decomposed toggle (idea retire stamp, migration 036) -----
+      // Mirrors the archive toggle: idea-only, NOT a stage move. Stamping
+      // decomposed_at takes the idea OFF the board (reachable only via children,
+      // which are LEFT UNCHANGED). Surface the distinct 'decomposed' action so the
+      // UI can react — the prior position-12 'Decomposed' stage's meaning.
+      if (change.decomposed !== undefined) {
+        if (!desc.hasDecomposed) {
+          throw new TaskChangeError(
+            'invalid_lineage',
+            `only type='idea' may be decomposed (got '${type}')`,
+          );
+        }
+        if (change.decomposed !== (current.decomposed_at !== null)) {
+          const decomposedAt = change.decomposed ? now : null;
+          sets.push('decomposed_at = ?');
+          params.push(decomposedAt);
+          deltas.push({ field: 'decomposed_at', from: current.decomposed_at, to: decomposedAt });
+          action = 'decomposed';
+        }
       }
 
       // ----- archive toggle (archive-in-place, migration 024) -----
@@ -1208,10 +1218,11 @@ export class TaskChangeRouter {
     const entryStage = desc.hasEntryStage ? 'entry_stage_id' : 'NULL AS entry_stage_id';
     const scope = desc.hasScope ? 'scope' : 'NULL AS scope';
     const attachments = desc.hasAttachments ? 'attachments' : 'NULL AS attachments';
+    const decomposedAt = desc.hasDecomposed ? 'decomposed_at' : 'NULL AS decomposed_at';
     const row = this.db
       .prepare(
         `SELECT id, project_id, ref, title, summary, body, priority, repo, board_id, stage_id, archived_at,
-                version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
+                ${decomposedAt}, version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
            FROM ${desc.table} WHERE id = ? AND project_id = ?`,
       )
       .get(id, projectId) as EntityDbRow | undefined;
