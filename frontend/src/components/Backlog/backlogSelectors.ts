@@ -28,9 +28,10 @@ export function pickDefaultBoard(boards: Board[]): Board | null {
 }
 
 /**
- * Stages visible in the board, sorted by position. Hidden-by-default stages
- * (won't-do only — the Archived stage no longer exists; archiving stamps
- * `archived_at` in place) are excluded unless `showArchived` is on.
+ * Stages visible in the board, sorted by position. The board carries four
+ * stages — 1 Idea, 6 Ready for development, 9 Done, 10 Won't do. The terminal
+ * "Won't do" stage is hidden by default (archiving stamps `archived_at` in
+ * place rather than moving an item) and excluded unless `showArchived` is on.
  */
 export function visibleStages(board: Board, showArchived: boolean): BoardStage[] {
   return board.stages
@@ -49,12 +50,33 @@ export function isArchived(t: BacklogTaskItem): boolean {
 }
 
 /**
+ * Whether an idea has been decomposed OFF the board: it lives on only through
+ * its epics/tasks and is never rendered as a board citizen. Independent of the
+ * archived toggle — a decomposed idea is gone from the board regardless.
+ */
+export function isDecomposed(t: BacklogTaskItem): boolean {
+  return t.type === 'idea' && t.decomposed_at !== null;
+}
+
+/**
+ * Whether an epic/task plan is still PENDING approval (`approved_at === null`).
+ * Pending entities are backend-invisible and sprint-ineligible until their plan
+ * is approved, so the board hides them independent of the archived toggle.
+ */
+export function isPending(t: BacklogTaskItem): boolean {
+  return (t.type === 'epic' || t.type === 'task') && t.approved_at === null;
+}
+
+/**
  * Narrow the full cross-project task list to what the board should render:
  *  - drop items belonging to other projects when `filterProjectId` is set
  *    (children share their epic's project, so the top-level check covers them);
+ *  - drop decomposed ideas + PENDING (unapproved) epics/tasks UNCONDITIONALLY —
+ *    they are off the board independent of `showArchived`;
  *  - drop archived top-level items unless `showArchived` — an archived EPIC is
  *    dropped together with its whole subtree;
- *  - epics whose `children` include archived items get a SHALLOW COPY with the
+ *  - epics whose `children` include any hidden child (pending/decomposed always,
+ *    archived only while `showArchived` is off) get a SHALLOW COPY with the
  *    children filtered and `childCount` / `pendingTasks` recomputed on the copy.
  * Store objects are never mutated; untouched items keep their original
  * reference (cheap referential stability for memoized renders).
@@ -64,12 +86,17 @@ export function filterTasks(
   filterProjectId: number | null,
   showArchived: boolean,
 ): BacklogTaskItem[] {
+  // A child the board must hide: pending/decomposed always, archived only while
+  // the archived toggle is off.
+  const hideChild = (c: BacklogTaskItem): boolean =>
+    isPending(c) || isDecomposed(c) || (!showArchived && isArchived(c));
   const result: BacklogTaskItem[] = [];
   for (const t of tasks) {
     if (filterProjectId !== null && t.project_id !== filterProjectId) continue;
+    if (isDecomposed(t) || isPending(t)) continue;
     if (!showArchived && isArchived(t)) continue;
-    if (!showArchived && t.children !== undefined && t.children.some(isArchived)) {
-      const children = t.children.filter((c) => !isArchived(c));
+    if (t.children !== undefined && t.children.some(hideChild)) {
+      const children = t.children.filter((c) => !hideChild(c));
       result.push({
         ...t,
         children,
@@ -135,24 +162,19 @@ export function unifiedStages(
 // Stage helpers for the per-card actions menu (manual stage move)
 // ---------------------------------------------------------------------------
 
-/**
- * Board position of the idea-only terminal "Decomposed" stage. It is reached
- * automatically when an idea's first child is created — never a manual target —
- * so it is excluded from the change-stage picker.
- */
-export const DECOMPOSED_POSITION = 12;
-
-// Board stage positions (seedDefaultBoard / migration 014). Position 6
-// ("Ready for development") is the planning→execution boundary; 6–8 are the
-// non-terminal execution stages (6 ready, 7 in development, 8 ready to merge),
-// 9+ are terminal. An entity at a position < 6 is still in planning.
+// Board stage positions (seedDefaultBoard). The board carries four stages —
+// 1 Idea, 6 Ready for development, 9 Done, 10 Won't do. Position 6 ("Ready for
+// development") is the single non-terminal execution stage and the
+// planning→execution boundary; an entity at position 1 is still in planning,
+// 9/10 are terminal.
 export const READY_FOR_DEV_POSITION = 6;
-export const LAST_EXECUTION_POSITION = 8;
+export const LAST_EXECUTION_POSITION = 6;
 
 /**
- * True when a stage position is a non-terminal EXECUTION stage (6–8). The
- * backlog "Run" action routes an epic at an execution stage to Sprint (execute
- * its ready tasks) rather than Planner (re-plan it).
+ * True when a stage position is a non-terminal EXECUTION stage — only position 6
+ * ("Ready for development"). The backlog "Run" action routes an epic at an
+ * execution stage to Sprint (execute its ready tasks) rather than Planner
+ * (re-plan it).
  */
 export function isExecutionStage(position: number): boolean {
   return position >= READY_FOR_DEV_POSITION && position <= LAST_EXECUTION_POSITION;
@@ -185,22 +207,17 @@ export function findStageById(board: Board, stageId: string): BoardStage | null 
 
 /**
  * The stages a USER may manually move an item to, sorted by position. Excludes:
- *  - DERIVED execution stages (write_policy === 'derived', positions 7/8) — the
- *    chokepoint rejects user asserts on those (code 'forbidden_stage').
+ *  - DERIVED stages (write_policy === 'derived') — the chokepoint rejects user
+ *    asserts on those (code 'forbidden_stage').
  *  - the item's CURRENT stage (a no-op move).
- *  - the auto-only "Decomposed" terminal (idea retirement is never hand-set).
- * Terminal planning stages (Done / Won't do) ARE offered so the user can mark
- * an item done / parked by hand. Archiving is no longer a stage move — it
- * stamps `archived_at` in place via the dedicated Archive action.
+ * Across the four-stage board this offers positions 1 / 6 / 9 / 10 (minus the
+ * current one): the terminal "Won't do" (10) stays a valid manual target so the
+ * user can park an item by hand. Archiving is no longer a stage move — it stamps
+ * `archived_at` in place via the dedicated Archive action.
  */
 export function selectableStages(board: Board, currentStageId: string): BoardStage[] {
   return board.stages
-    .filter(
-      (s) =>
-        s.write_policy === 'asserted' &&
-        s.id !== currentStageId &&
-        s.position !== DECOMPOSED_POSITION,
-    )
+    .filter((s) => s.write_policy === 'asserted' && s.id !== currentStageId)
     .slice()
     .sort((a, b) => a.position - b.position);
 }
@@ -231,12 +248,16 @@ export function friendlyStageError(err: unknown): string {
  * nested under their parent, never as their own column/row entry.
  *
  * The 3-table model has no `type` column on the row; `type` is computed on read
- * from the source table. We deliberately do NOT filter by `type` here — every
- * idea / epic / solo task with `parent_epic_id === null` is a top-level board
- * citizen and shares the single stage board (entity-model rebuild).
+ * from the source table. We do NOT filter by `type` here — every idea / epic /
+ * solo task with `parent_epic_id === null` is a top-level board citizen sharing
+ * the single stage board — but we DO drop off-board items unconditionally:
+ * decomposed ideas (reachable only via their children) and PENDING (unapproved)
+ * epics/tasks (backend-invisible until plan approval).
  */
 export function topLevelTasks(tasks: BacklogTaskItem[]): BacklogTaskItem[] {
-  return tasks.filter((t) => t.parent_epic_id === null);
+  return tasks.filter(
+    (t) => t.parent_epic_id === null && !isDecomposed(t) && !isPending(t),
+  );
 }
 
 /**
@@ -246,17 +267,14 @@ export function topLevelTasks(tasks: BacklogTaskItem[]): BacklogTaskItem[] {
  * cross-project view each project has its own stage rows, but every board
  * seeds identical positions, so position is the shared bucketing key.
  *
- * The stages span the full lineage:
- *   1 Captured · 2 Researching · 3 Idea spec · 4 Epics extracted ·
- *   5 Tasks extracted · 6 Plan review · 7 Ready for dev · 8 In development ·
- *   9 Ready to merge · 10 Done · (Won't do terminal, hidden by default) ·
- *   12 Decomposed (idea-only terminal — visible by default).
+ * The board carries four stages:
+ *   1 Idea · 6 Ready for development · 9 Done · 10 Won't do
+ *   (terminal, hidden by default).
  *
- * All three entity types funnel into the same bucket map, so an idea sitting in
- * position 12 (Decomposed) lands in that terminal column right alongside
- * epics/tasks in their own stages. An item whose position is not in the
- * visible set (e.g. a Won't-do item while showArchived is off, since that
- * stage carries `hidden_by_default`) is dropped — never an orphaned entry.
+ * All three entity types funnel into the same bucket map. An item whose position
+ * is not in the visible set (e.g. a Won't-do item while showArchived is off,
+ * since that stage carries `hidden_by_default`) is dropped — never an orphaned
+ * entry.
  */
 export function bucketByStage(
   tasks: BacklogTaskItem[],

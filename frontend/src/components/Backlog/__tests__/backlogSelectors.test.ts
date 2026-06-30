@@ -1,14 +1,16 @@
 /**
  * Unit tests for the backlog selectors: archive-in-place filtering
- * (isArchived / filterTasks / countArchived), cross-project stage unification
- * (unifiedStages), position-keyed bucketing (bucketByStage), and the stage
- * helpers backing the per-card actions menu (selectableStages / findStageById /
- * friendlyStageError).
+ * (isArchived / filterTasks / countArchived), off-board filtering of decomposed
+ * ideas + PENDING entities (isDecomposed / isPending), cross-project stage
+ * unification (unifiedStages), position-keyed bucketing (bucketByStage), and the
+ * stage helpers backing the per-card actions menu (selectableStages /
+ * findStageById / friendlyStageError).
  */
 import { describe, it, expect } from 'vitest';
 import {
-  DECOMPOSED_POSITION,
   isArchived,
+  isDecomposed,
+  isPending,
   filterTasks,
   countArchived,
   unifiedStages,
@@ -37,9 +39,9 @@ function stage(position: number, label: string, opts: Partial<BoardStage> = {}):
 }
 
 /**
- * The canonical default board after migration 024 (matches database.ts
- * seedDefaultBoard): positions 1–10 + 12 — the terminal "Archived" stage
- * (position 11) no longer exists.
+ * The canonical default board (matches database.ts seedDefaultBoard): the
+ * four-stage model — 1 Idea, 6 Ready for development, 9 Done (terminal),
+ * 10 Won't do (terminal, hidden by default). All four stages are user-assertable.
  */
 function defaultBoard(over: Partial<Board> = {}): Board {
   const idPrefix = over.id ?? 'board-1';
@@ -51,16 +53,9 @@ function defaultBoard(over: Partial<Board> = {}): Board {
     is_default: true,
     stages: [
       stage(1, 'Idea', { id: `${idPrefix}-s1` }),
-      stage(2, 'Research', { id: `${idPrefix}-s2` }),
-      stage(3, 'Idea spec', { id: `${idPrefix}-s3` }),
-      stage(4, 'Epics extracted', { id: `${idPrefix}-s4` }),
-      stage(5, 'Tasks extracted', { id: `${idPrefix}-s5` }),
       stage(6, 'Ready for development', { id: `${idPrefix}-s6` }),
-      stage(7, 'In development', { id: `${idPrefix}-s7`, write_policy: 'derived' }),
-      stage(8, 'Ready to merge', { id: `${idPrefix}-s8`, write_policy: 'derived' }),
       stage(9, 'Done', { id: `${idPrefix}-s9`, is_terminal: true }),
       stage(10, "Won't do", { id: `${idPrefix}-s10`, is_terminal: true, hidden_by_default: true }),
-      stage(12, 'Decomposed', { id: `${idPrefix}-s12`, is_terminal: true }),
     ],
     ...over,
   };
@@ -81,10 +76,13 @@ function item(over: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     originating_idea_id: null,
     scope: null,
     board_id: 'board-1',
-    stage_id: 'board-1-s5',
+    stage_id: 'board-1-s6',
     archived_at: null,
+    // Default to ON the board: ideas not decomposed; epics/tasks left without an
+    // explicit approved_at read as approved (a pending fixture sets it to null).
+    decomposed_at: null,
     version: 1,
-    stage_position: 5,
+    stage_position: 6,
     inFlow: [],
     awaitingReview: false,
     isDone: false,
@@ -98,6 +96,24 @@ describe('isArchived', () => {
   it('is true only when archived_at is stamped', () => {
     expect(isArchived(item())).toBe(false);
     expect(isArchived(item({ archived_at: '2026-06-10T00:00:00Z' }))).toBe(true);
+  });
+});
+
+describe('isDecomposed', () => {
+  it('is true only for an idea with decomposed_at stamped', () => {
+    expect(isDecomposed(item({ type: 'idea', decomposed_at: null }))).toBe(false);
+    expect(isDecomposed(item({ type: 'idea', decomposed_at: '2026-06-10T00:00:00Z' }))).toBe(true);
+    // A decomposed_at stamp on a non-idea (shouldn't happen) is ignored.
+    expect(isDecomposed(item({ type: 'task', decomposed_at: '2026-06-10T00:00:00Z' }))).toBe(false);
+  });
+});
+
+describe('isPending', () => {
+  it('is true for an epic/task with approved_at === null; never for an idea', () => {
+    expect(isPending(item({ type: 'task', approved_at: null }))).toBe(true);
+    expect(isPending(item({ type: 'epic', approved_at: null }))).toBe(true);
+    expect(isPending(item({ type: 'task', approved_at: '2026-06-10T00:00:00Z' }))).toBe(false);
+    expect(isPending(item({ type: 'idea', approved_at: null }))).toBe(false);
   });
 });
 
@@ -118,6 +134,25 @@ describe('filterTasks', () => {
     ];
     expect(filterTasks(tasks, null, false).map((t) => t.id)).toEqual(['TASK-1']);
     expect(filterTasks(tasks, null, true).map((t) => t.id)).toEqual(['TASK-1', 'TASK-2']);
+  });
+
+  it('drops a decomposed idea UNCONDITIONALLY — even with showArchived on', () => {
+    const live = item({ id: 'IDEA-1', type: 'idea', decomposed_at: null });
+    const gone = item({ id: 'IDEA-2', type: 'idea', decomposed_at: '2026-06-10T00:00:00Z' });
+    expect(filterTasks([live, gone], null, false).map((t) => t.id)).toEqual(['IDEA-1']);
+    expect(filterTasks([live, gone], null, true).map((t) => t.id)).toEqual(['IDEA-1']);
+  });
+
+  it('drops a PENDING (unapproved) epic/task UNCONDITIONALLY — even with showArchived on', () => {
+    const approved = item({ id: 'TASK-1', approved_at: '2026-06-10T00:00:00Z' });
+    const pendingTask = item({ id: 'TASK-2', approved_at: null });
+    const pendingEpic = item({ id: 'EPIC-1', type: 'epic', approved_at: null });
+    expect(filterTasks([approved, pendingTask, pendingEpic], null, false).map((t) => t.id)).toEqual([
+      'TASK-1',
+    ]);
+    expect(filterTasks([approved, pendingTask, pendingEpic], null, true).map((t) => t.id)).toEqual([
+      'TASK-1',
+    ]);
   });
 
   it('drops an archived epic together with its whole subtree unless showArchived', () => {
@@ -155,6 +190,21 @@ describe('filterTasks', () => {
     expect(epic.children).toHaveLength(3);
     expect(epic.childCount).toBe(3);
     expect(epic.pendingTasks).toBe(2);
+  });
+
+  it('filters PENDING children out of an epic even with showArchived on; rollups recomputed on the copy', () => {
+    const children = [
+      item({ id: 'TASK-c1', parent_epic_id: 'EPIC-1', approved_at: '2026-06-10T00:00:00Z' }),
+      item({ id: 'TASK-c2', parent_epic_id: 'EPIC-1', approved_at: null }), // pending → hidden
+    ];
+    const epic = item({ id: 'EPIC-1', type: 'epic', children, childCount: 2, pendingTasks: 2 });
+    const [filtered] = filterTasks([epic], null, true);
+    expect(filtered).not.toBe(epic);
+    expect(filtered.children?.map((c) => c.id)).toEqual(['TASK-c1']);
+    expect(filtered.childCount).toBe(1);
+    expect(filtered.pendingTasks).toBe(1);
+    // store object untouched
+    expect(epic.children).toHaveLength(2);
   });
 
   it('keeps original references when nothing needs filtering (incl. showArchived on)', () => {
@@ -200,10 +250,10 @@ describe('unifiedStages', () => {
   it('collapses two boards with identical positions into one column set, first board representative', () => {
     const a = defaultBoard({ id: 'board-1', project_id: 1 });
     const b = defaultBoard({ id: 'board-2', project_id: 2 });
-    // Project 2 renamed a stage — the first board's label must front the column.
-    b.stages[0] = { ...b.stages[0], label: 'Captured (custom)' };
+    // Project 2 renamed its Idea stage — the first board's label must front the column.
+    b.stages[0] = { ...b.stages[0], label: 'Idea (custom)' };
     const stages = unifiedStages([a, b], null, false);
-    expect(stages.map((s) => s.position)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 12]);
+    expect(stages.map((s) => s.position)).toEqual([1, 6, 9]);
     expect(stages[0].label).toBe('Idea');
     expect(stages[0].id).toBe('board-1-s1'); // representative comes from board-1
   });
@@ -229,12 +279,8 @@ describe('unifiedStages', () => {
 describe('visibleStages', () => {
   it("hides the won't-do stage unless showArchived; sorts by position", () => {
     const board = defaultBoard();
-    expect(visibleStages(board, false).map((s) => s.position)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 12,
-    ]);
-    expect(visibleStages(board, true).map((s) => s.position)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12,
-    ]);
+    expect(visibleStages(board, false).map((s) => s.position)).toEqual([1, 6, 9]);
+    expect(visibleStages(board, true).map((s) => s.position)).toEqual([1, 6, 9, 10]);
   });
 });
 
@@ -246,24 +292,30 @@ describe('bucketByStage', () => {
       false,
     );
     const tasks = [
-      item({ id: 'TASK-1', project_id: 1, stage_id: 'board-1-s5', stage_position: 5 }),
-      item({ id: 'TASK-2', project_id: 2, stage_id: 'board-2-s5', stage_position: 5 }),
+      item({ id: 'TASK-1', project_id: 1, stage_id: 'board-1-s6', stage_position: 6 }),
+      item({ id: 'TASK-2', project_id: 2, stage_id: 'board-2-s6', stage_position: 6 }),
       item({ id: 'IDEA-1', project_id: 2, type: 'idea', stage_id: 'board-2-s1', stage_position: 1 }),
     ];
     const buckets = bucketByStage(tasks, stages);
     const at = (pos: number) => buckets.find((b) => b.stage.position === pos);
-    // Both projects' position-5 items share one column despite different stage_ids.
-    expect(at(5)?.tasks.map((t) => t.id)).toEqual(['TASK-1', 'TASK-2']);
+    // Both projects' position-6 items share one column despite different stage_ids.
+    expect(at(6)?.tasks.map((t) => t.id)).toEqual(['TASK-1', 'TASK-2']);
     expect(at(1)?.tasks.map((t) => t.id)).toEqual(['IDEA-1']);
   });
 
-  it('drops items whose stage position is not in the visible set; ignores epic children', () => {
+  it("a Won't-do (position 10) item lands on the board only when showArchived reveals stage 10", () => {
+    const wontDo = item({ id: 'TASK-1', stage_id: 'board-1-s10', stage_position: 10 });
+    // showArchived off → stage 10 not in the visible set → item dropped.
+    const hidden = bucketByStage([wontDo], unifiedStages([defaultBoard()], null, false));
+    expect(hidden.flatMap((b) => b.tasks)).toEqual([]);
+    // showArchived on → stage 10 present → item bucketed there.
+    const shown = bucketByStage([wontDo], unifiedStages([defaultBoard()], null, true));
+    expect(shown.find((b) => b.stage.position === 10)?.tasks.map((t) => t.id)).toEqual(['TASK-1']);
+  });
+
+  it('ignores epic children (only top-level items are bucketed)', () => {
     const stages = unifiedStages([defaultBoard()], null, false);
-    const tasks = [
-      // Won't-do (position 10) is hidden while showArchived is off.
-      item({ id: 'TASK-1', stage_id: 'board-1-s10', stage_position: 10 }),
-      item({ id: 'TASK-c1', parent_epic_id: 'EPIC-1', stage_position: 5 }),
-    ];
+    const tasks = [item({ id: 'TASK-c1', parent_epic_id: 'EPIC-1', stage_position: 6 })];
     const buckets = bucketByStage(tasks, stages);
     expect(buckets.flatMap((b) => b.tasks)).toEqual([]);
   });
@@ -271,7 +323,7 @@ describe('bucketByStage', () => {
   it('preserves the StageBucket shape with one bucket per stage in order', () => {
     const stages = unifiedStages([defaultBoard()], null, true);
     const buckets = bucketByStage([], stages);
-    expect(buckets.map((b) => b.stage.position)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12]);
+    expect(buckets.map((b) => b.stage.position)).toEqual([1, 6, 9, 10]);
     expect(buckets.every((b) => Array.isArray(b.tasks))).toBe(true);
   });
 });
@@ -311,16 +363,11 @@ describe('findStageById', () => {
 });
 
 describe('selectableStages', () => {
-  it('excludes derived stages, the current stage, and Decomposed; keeps terminals; sorts by position', () => {
-    const result = selectableStages(defaultBoard(), 'board-1-s6');
-    const positions = result.map((s) => s.position);
-    // No derived (7, 8), not the current (6), not Decomposed (12).
-    expect(positions).not.toContain(7);
-    expect(positions).not.toContain(8);
-    expect(positions).not.toContain(6);
-    expect(positions).not.toContain(DECOMPOSED_POSITION);
-    // Planning + terminal planning stages (Done / Won't do) remain, ascending.
-    expect(positions).toEqual([1, 2, 3, 4, 5, 9, 10]);
+  it("offers the four board positions minus the current one; Won't do (10) stays a manual target", () => {
+    // From Done (9): may move to Idea (1), Ready for development (6), or Won't do (10).
+    expect(selectableStages(defaultBoard(), 'board-1-s9').map((s) => s.position)).toEqual([1, 6, 10]);
+    // From Ready for development (6): the current stage is excluded.
+    expect(selectableStages(defaultBoard(), 'board-1-s6').map((s) => s.position)).toEqual([1, 9, 10]);
   });
 });
 
@@ -352,13 +399,13 @@ describe('friendlyStageError', () => {
 });
 
 describe('isExecutionStage', () => {
-  it('is true only for non-terminal execution positions 6–8 (Ready for dev → Ready to merge)', () => {
-    // Planning (1–5): false.
-    for (const p of [1, 2, 3, 4, 5]) expect(isExecutionStage(p)).toBe(false);
-    // Execution (6–8): true.
-    for (const p of [6, 7, 8]) expect(isExecutionStage(p)).toBe(true);
-    // Terminal (9, 10, 12): false.
-    for (const p of [9, 10, 12]) expect(isExecutionStage(p)).toBe(false);
+  it('is true only for position 6 (Ready for development)', () => {
+    // Planning (1): false.
+    expect(isExecutionStage(1)).toBe(false);
+    // Execution boundary (6): true.
+    expect(isExecutionStage(6)).toBe(true);
+    // Everything past the boundary + terminals (7, 9, 10): false.
+    for (const p of [7, 9, 10]) expect(isExecutionStage(p)).toBe(false);
   });
 });
 
@@ -371,7 +418,7 @@ describe('readyForDevChildTaskIds', () => {
       children: [
         item({ id: 'TASK-a', stage_position: 6 }), // ✓ ready
         item({ id: 'TASK-b', stage_position: 6 }), // ✓ ready
-        item({ id: 'TASK-c', stage_position: 5 }), // ✗ still in planning
+        item({ id: 'TASK-c', stage_position: 1 }), // ✗ still in planning
         item({ id: 'TASK-d', stage_position: 6, isDone: true }), // ✗ done
         item({ id: 'TASK-e', stage_position: 6, archived_at: '2026-06-10T00:00:00Z' }), // ✗ archived
         item({ id: 'TASK-f', stage_position: 6, inFlow: [{ agent: 'sprint', runId: 'r1', stepId: null }] }), // ✗ in flight
@@ -384,7 +431,7 @@ describe('readyForDevChildTaskIds', () => {
     expect(readyForDevChildTaskIds(item({ id: 'EPIC-2', type: 'epic' }))).toEqual([]);
     expect(
       readyForDevChildTaskIds(
-        item({ id: 'EPIC-3', type: 'epic', children: [item({ id: 'TASK-x', stage_position: 5 })] }),
+        item({ id: 'EPIC-3', type: 'epic', children: [item({ id: 'TASK-x', stage_position: 1 })] }),
       ),
     ).toEqual([]);
   });
