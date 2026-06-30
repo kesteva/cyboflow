@@ -1170,6 +1170,125 @@ describe('TaskChangeRouter (3-table entity model)', () => {
   });
 
   // -------------------------------------------------------------------------
+  // deleteRunCreatedEntities — Q1 guard: decline/cancel/dismiss draft cleanup
+  // -------------------------------------------------------------------------
+
+  describe('deleteRunCreatedEntities (Q1 guard — decline/cancel/dismiss draft cleanup)', () => {
+    function rowCount(db: Database.Database, table: string, id: string): number {
+      return (db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE id = ?`).get(id) as { n: number }).n;
+    }
+
+    /** Seed a workflow_run (FK target for entity_events.run_id) with an optional plan_approved_at. */
+    function seedRun(db: Database.Database, opts: { runId: string; planApprovedAt?: string | null }): void {
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-q1', 1, 'planner', '{}')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, plan_approved_at)
+         VALUES (?, 'wf-q1', 1, 'running', 'default', ?)`,
+      ).run(opts.runId, opts.planApprovedAt ?? null);
+    }
+
+    /**
+     * Seed an idea + one epic (under it) + one ORPHAN task (direct off the idea)
+     * + one EPIC-CHILD task (under the epic), ALL created under `runId` (each
+     * carries run_id on its 'created' entity_event). Returns their ids.
+     */
+    async function seedRunDrafts(
+      router: TaskChangeRouter,
+      runId: string,
+    ): Promise<{ ideaId: string; epicId: string; orphanTaskId: string; epicTaskId: string }> {
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Idea', runId });
+      const epic = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'epic',
+        title: 'Epic',
+        originatingIdeaId: idea.taskId,
+        runId,
+      });
+      const orphanTask = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Orphan task',
+        originatingIdeaId: idea.taskId,
+        runId,
+      });
+      const epicTask = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Epic task',
+        parentEpicId: epic.taskId,
+        originatingIdeaId: idea.taskId,
+        runId,
+      });
+      await router._queueForProject(1).onIdle();
+      return {
+        ideaId: idea.taskId,
+        epicId: epic.taskId,
+        orphanTaskId: orphanTask.taskId,
+        epicTaskId: epicTask.taskId,
+      };
+    }
+
+    it('deletes the run-created epic (with its child tasks) + orphan tasks, but NEVER the seed idea', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      seedRun(db, { runId: 'run-q1' });
+      const { ideaId, epicId, orphanTaskId, epicTaskId } = await seedRunDrafts(router, 'run-q1');
+
+      await router.deleteRunCreatedEntities(1, 'run-q1');
+      await router._queueForProject(1).onIdle();
+
+      expect(rowCount(db, 'epics', epicId)).toBe(0);
+      expect(rowCount(db, 'tasks', epicTaskId)).toBe(0); // taken by the epic cascade
+      expect(rowCount(db, 'tasks', orphanTaskId)).toBe(0); // orphan-task pass
+      // The seed idea is never in the created-epic/task projection — left intact.
+      expect(rowCount(db, 'ideas', ideaId)).toBe(1);
+      // entity_events for the deleted entities are purged with them.
+      expect(eventCount(db, 'epic', epicId)).toBe(0);
+      expect(eventCount(db, 'task', orphanTaskId)).toBe(0);
+    });
+
+    it("keyed on run_id: a SIBLING run's created entities are untouched", async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      seedRun(db, { runId: 'run-a' });
+      seedRun(db, { runId: 'run-b' });
+      const a = await seedRunDrafts(router, 'run-a');
+      const b = await seedRunDrafts(router, 'run-b');
+
+      await router.deleteRunCreatedEntities(1, 'run-a');
+      await router._queueForProject(1).onIdle();
+
+      // run-a's drafts are gone...
+      expect(rowCount(db, 'epics', a.epicId)).toBe(0);
+      expect(rowCount(db, 'tasks', a.orphanTaskId)).toBe(0);
+      expect(rowCount(db, 'tasks', a.epicTaskId)).toBe(0);
+      // ...but run-b's are fully intact (different run_id).
+      expect(rowCount(db, 'epics', b.epicId)).toBe(1);
+      expect(rowCount(db, 'tasks', b.orphanTaskId)).toBe(1);
+      expect(rowCount(db, 'tasks', b.epicTaskId)).toBe(1);
+      expect(rowCount(db, 'ideas', b.ideaId)).toBe(1);
+    });
+
+    it('no-op when the run is already plan-approved (an approved run survives cancel)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      seedRun(db, { runId: 'run-approved', planApprovedAt: '2026-06-30T00:00:00.000Z' });
+      const { ideaId, epicId, orphanTaskId, epicTaskId } = await seedRunDrafts(router, 'run-approved');
+
+      await router.deleteRunCreatedEntities(1, 'run-approved');
+      await router._queueForProject(1).onIdle();
+
+      // Nothing deleted — the approved run's revealed entities survive.
+      expect(rowCount(db, 'epics', epicId)).toBe(1);
+      expect(rowCount(db, 'tasks', orphanTaskId)).toBe(1);
+      expect(rowCount(db, 'tasks', epicTaskId)).toBe(1);
+      expect(rowCount(db, 'ideas', ideaId)).toBe(1);
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // recomputeTaskExecutionStage
   // -------------------------------------------------------------------------
 

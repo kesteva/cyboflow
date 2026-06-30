@@ -31,6 +31,7 @@ import { sprintLaneEvents, sprintLaneChannel, SprintLaneStore } from '../../spri
 import { countPendingBlockingReviewItems } from '../../reviewItemListing';
 import { ApprovalRouter } from '../../approvalRouter';
 import { QuestionRouter } from '../../questionRouter';
+import { TaskChangeRouter } from '../../taskChangeRouter';
 import {
   cancelAndRestartHandler,
   type CancelAndRestartDeps,
@@ -1793,6 +1794,23 @@ export const runsRouter = router({
       // stage: the chokepoint aggregate sees all runs terminal-without-merge and
       // restores entry_stage_id (fallback Ready for development).
       await stampOutcomeAndDeriveTask(ctx.db, input.runId, 'dismissed');
+      // Q1 GUARD (interrupt = no tasks): a dismissed plan-gated run discards the
+      // PENDING draft entities it created pre-approval (epics + orphan tasks) so
+      // the abandoned run leaves no orphans on the board. deleteRunCreatedEntities
+      // self-gates on plan_approved_at IS NULL (an approved run's revealed tasks
+      // survive) and keys on run_id (a non-planner run created nothing run-keyed ->
+      // no-op). Fail-soft: an uninitialized router (unit tests) or any throw is
+      // swallowed — the worktree is already removed and the run row is canonical.
+      try {
+        const pr = ctx.db
+          .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
+          .get(input.runId) as { projectId?: number } | undefined;
+        if (pr && typeof pr.projectId === 'number') {
+          await TaskChangeRouter.getInstance().deleteRunCreatedEntities(pr.projectId, input.runId);
+        }
+      } catch {
+        // Best-effort draft cleanup — never block the dismiss.
+      }
       return { success: true };
     }),
 

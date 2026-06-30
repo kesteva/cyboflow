@@ -853,6 +853,9 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
       }
     ).plan_approved_at;
   }
+  function rowCount(db: Database.Database, table: string, id: string): number {
+    return (db.prepare(`SELECT COUNT(*) AS n FROM ${table} WHERE id = ?`).get(id) as { n: number }).n;
+  }
 
   async function answerPlanGate(
     db: Database.Database,
@@ -907,18 +910,23 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     }
   });
 
-  it('Revise on approve-plan leaves the entities PENDING and the run un-approved', async () => {
+  it('Revise on approve-plan DELETES the run-created epic + tasks but keeps the seed idea (run stays un-approved)', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const taskRouter = TaskChangeRouter.initialize(adapter);
     const router = QuestionRouter.initialize(adapter);
 
     seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: null });
-    const { epicId, taskIds } = await seedRunEntities(taskRouter, 2, 'run-p');
+    const { ideaId, epicId, taskIds } = await seedRunEntities(taskRouter, 2, 'run-p');
+
     await answerPlanGate(db, router, 'run-p', 'Revise');
 
-    for (const id of taskIds) expect(taskApprovedAt(db, id)).toBeNull();
-    expect(epicApprovedAt(db, epicId)).toBeNull();
+    // Q1 GUARD (decline = no tasks): the run's PENDING draft entities are gone...
+    expect(rowCount(db, 'epics', epicId)).toBe(0);
+    for (const id of taskIds) expect(rowCount(db, 'tasks', id)).toBe(0);
+    // ...but the seed idea survives (reachable for the replan)...
+    expect(rowCount(db, 'ideas', ideaId)).toBe(1);
+    // ...and the run is NOT plan-approved.
     expect(planApprovedAt(db, 'run-p')).toBeNull();
   });
 

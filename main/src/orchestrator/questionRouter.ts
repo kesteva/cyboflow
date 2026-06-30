@@ -468,6 +468,7 @@ export class QuestionRouter extends EventEmitter {
       // runs AFTER the resume so a stage hiccup never delays the agent.
       await this.promoteTasksOnPlanApproval(request.runId, effectiveAnswer);
       await this.retireShipIdeasOnPlanApproval(request.runId, effectiveAnswer);
+      await this.deletePendingDraftsOnPlanDecline(request.runId, effectiveAnswer);
       await this.finalizePlannerRun(request.runId, effectiveAnswer);
     });
   }
@@ -634,6 +635,47 @@ export class QuestionRouter extends EventEmitter {
     } catch (err) {
       console.warn(
         `[QuestionRouter] retireShipIdeasOnPlanApproval skipped for run ${runId} (fail-soft): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Q1 GUARD (decline = no tasks): when the just-answered gate is the planner's
+   * `approve-plan` step and the human chose Revise/Reject (NOT Approve), hard-
+   * delete the PENDING draft entities this run created during planning — its
+   * epics (cascade takes their child tasks) and its orphan tasks — so a declined
+   * plan leaves no orphaned drafts behind. The agent will re-mint fresh drafts
+   * under the SAME run_id when it revises, which the next approve-plan answer
+   * reveals.
+   *
+   * Routes through TaskChangeRouter.deleteRunCreatedEntities, which keys on
+   * run_id (NEVER the seed idea — that survives for the replan) and self-gates on
+   * plan_approved_at IS NULL (a decline never stamps it, so this proceeds; an
+   * Approve already stamped it in promoteTasksOnPlanApproval AND is filtered out
+   * here, so it can never reach the delete).
+   *
+   * Backend-deterministic + fail-soft: reads current_step_id defensively (older
+   * test DBs lack the column -> the SELECT throws -> caught -> no-op). NEVER
+   * throws — respond() is unaffected.
+   */
+  private async deletePendingDraftsOnPlanDecline(runId: string, answer: QuestionAnswer): Promise<void> {
+    try {
+      const run = this.db
+        .prepare(
+          'SELECT project_id AS projectId, current_step_id AS currentStepId FROM workflow_runs WHERE id = ?',
+        )
+        .get(runId) as { projectId?: unknown; currentStepId?: unknown } | undefined;
+      if (!run) return;
+      if (run.currentStepId !== APPROVE_PLAN_STEP_ID) return;
+      // Approve -> reveal (promoteTasksOnPlanApproval), NOT delete. Only a decline
+      // (Revise / Reject) falls through to the draft deletion.
+      if (this.isApproveAnswer(answer)) return;
+
+      const projectId = typeof run.projectId === 'number' ? run.projectId : Number(run.projectId);
+      await TaskChangeRouter.getInstance().deleteRunCreatedEntities(projectId, runId);
+    } catch (err) {
+      console.warn(
+        `[QuestionRouter] deletePendingDraftsOnPlanDecline skipped for run ${runId} (fail-soft): ${err instanceof Error ? err.message : String(err)}`,
       );
     }
   }

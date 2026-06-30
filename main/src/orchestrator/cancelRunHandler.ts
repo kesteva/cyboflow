@@ -89,6 +89,19 @@ export interface CancelRunDeps {
    */
   markBatchTerminal?: (batchId: string, status: 'canceled') => void;
   /**
+   * Q1 GUARD (interrupt = no tasks): delete the canceled run's PENDING draft
+   * entities (the epics + orphan tasks it created during planning) AFTER the
+   * cancel write commits, so cancelling a plan-gated run BEFORE approval leaves
+   * no orphaned drafts on the board. Backed by
+   * TaskChangeRouter.deleteRunCreatedEntities, which self-gates on
+   * plan_approved_at IS NULL (an already-approved run's revealed tasks survive)
+   * and is keyed on run_id (a non-planner run created nothing run-keyed -> a
+   * no-op). Optional + fail-soft: a missing dep or a throw never blocks the cancel
+   * (the run row is canonical; draft cleanup is secondary). Awaited so it
+   * completes before the handler returns.
+   */
+  deletePendingDraftsForRun?: (runId: string) => void | Promise<unknown>;
+  /**
    * Optional structured logger. When provided, a rejection from `stopLiveRun` is
    * logged as a `[cancelRun]` entry before the handler proceeds to the DB write
    * (the run is conceptually canceled regardless of kill success). When omitted,
@@ -157,6 +170,7 @@ export async function cancelRunHandler(
     clearPendingHumanGatesForRun,
     emitRunStatusChanged,
     markBatchTerminal,
+    deletePendingDraftsForRun,
     logger,
   } = deps;
 
@@ -265,6 +279,22 @@ export async function cancelRunHandler(
       logger?.error('[cancelRun] markBatchTerminal failed — batch row left as-is', {
         runId,
         batchId: row.batch_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Q1 GUARD draft cleanup — only after the cancel write SUCCEEDED, so we never
+  // delete drafts for a run that lost the terminal-flip race. Fail-soft + awaited:
+  // deletePendingDraftsForRun self-gates on plan_approved_at IS NULL (an approved
+  // run's revealed tasks survive) and keys on run_id (a non-planner run created
+  // nothing run-keyed -> no-op); a throw never un-does the cancel.
+  if ('success' in settled) {
+    try {
+      await deletePendingDraftsForRun?.(runId);
+    } catch (err: unknown) {
+      logger?.error('[cancelRun] deletePendingDraftsForRun failed — drafts left as-is', {
+        runId,
         error: err instanceof Error ? err.message : String(err),
       });
     }

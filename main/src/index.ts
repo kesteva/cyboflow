@@ -1593,6 +1593,18 @@ app.whenReady().then(async () => {
       // never strands non-terminal.
       markBatchTerminal: (batchId: string, status: 'canceled') =>
         SprintLaneStore.getInstance().markBatchTerminal(batchId, status),
+      // Q1 GUARD: after a successful cancel, drop the run's PENDING draft entities
+      // (epics + orphan tasks it created pre-approval) so a torn-down plan leaves
+      // no orphans. deleteRunCreatedEntities self-gates on plan_approved_at IS NULL
+      // + keys on run_id, so an approved run's revealed tasks (and any non-planner
+      // run) are untouched. Resolve the run's project_id here (the helper needs it).
+      deletePendingDraftsForRun: async (runId: string) => {
+        const r = db
+          .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
+          .get(runId) as { projectId?: number } | undefined;
+        if (!r || typeof r.projectId !== 'number') return;
+        await TaskChangeRouter.getInstance().deleteRunCreatedEntities(r.projectId, runId);
+      },
       logger: loggerLike,
     };
     setCancelRunDeps(cancelRunDepsBag);

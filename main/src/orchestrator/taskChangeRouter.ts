@@ -51,6 +51,7 @@ import type {
   TaskType,
 } from '../../../shared/types/tasks';
 import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
+import { listRunCreatedEpicIds, listRunCreatedTaskIds } from './runEntityOwnership';
 
 // ---------------------------------------------------------------------------
 // Public event emitter — exported HERE (NOT trpc/routers/events.ts) per the
@@ -478,6 +479,78 @@ export class TaskChangeRouter {
       taskId: string;
       deletedIds: string[];
     };
+  }
+
+  /**
+   * Q1 GUARD (decline/interrupt = no tasks): hard-delete the PENDING draft
+   * entities a run CREATED during planning — the EPICS it minted (each epic's
+   * applyDelete cascade takes its child tasks) and the ORPHAN tasks it minted
+   * straight off the idea (no parent epic) — when its plan is DECLINED or the run
+   * is torn down (cancel / dismiss) BEFORE approval.
+   *
+   * KEYED ON run_id (the entity_events created-event projection —
+   * listRunCreatedEpicIds / listRunCreatedTaskIds), NOT the seed idea: a
+   * decline -> replan re-mints fresh drafts under the SAME run_id, so keying on
+   * run_id deletes exactly THIS attempt's drafts (and re-reveals the next
+   * attempt's). The seed/owned idea is NEVER in the created-epic/task projection,
+   * so it is structurally left intact — reachable for the replan.
+   *
+   * Self-gated on workflow_runs.plan_approved_at IS NULL: an APPROVED run's
+   * entities were revealed (approved_at-stamped) and accepted by the human, so a
+   * later cancel/dismiss must NOT delete them — the helper no-ops. (A run with no
+   * plan-approval lifecycle created nothing run-keyed, so the projection is empty
+   * and this is a no-op regardless.) Fail-soft: a pre-036 DB lacking the column,
+   * or a vanished run, degrades to no-op.
+   *
+   * actor='orchestrator' on each applyDelete — EXEMPT from the active-run guard
+   * (the run being torn down IS the active run). Per-entity best-effort: a task
+   * already removed by its parent epic's cascade throws not_found, swallowed so
+   * the rest proceed. Routes through applyDelete so each delete mints the proper
+   * 'deleted' broadcast + review-item cleanup.
+   */
+  async deleteRunCreatedEntities(projectId: number, runId: string): Promise<void> {
+    // Gate: never delete an ALREADY-APPROVED run's revealed entities. Fail-soft —
+    // a pre-036 DB lacking plan_approved_at (or a vanished run) means no-op.
+    try {
+      const row = this.db
+        .prepare('SELECT plan_approved_at AS planApprovedAt FROM workflow_runs WHERE id = ?')
+        .get(runId) as { planApprovedAt?: unknown } | undefined;
+      if (!row) return;
+      if (row.planApprovedAt !== null && row.planApprovedAt !== undefined) return;
+    } catch {
+      return;
+    }
+
+    // The run's created EPICS first — each epic's cascade takes its child tasks
+    // (collectDeleteCascade for an epic deletes tasks WHERE parent_epic_id).
+    for (const epicId of listRunCreatedEpicIds(this.db, runId)) {
+      try {
+        await this.applyDelete(projectId, {
+          actor: 'orchestrator',
+          entityType: 'epic',
+          taskId: epicId,
+          runId,
+        });
+      } catch {
+        // Best-effort: the epic may already be gone (concurrent teardown).
+      }
+    }
+
+    // Then the run's ORPHAN tasks (minted straight off the idea, no parent epic).
+    // Read AFTER the epic deletions so cascade-claimed tasks are already gone; a
+    // straggler that still throws not_found here is swallowed.
+    for (const taskId of listRunCreatedTaskIds(this.db, runId)) {
+      try {
+        await this.applyDelete(projectId, {
+          actor: 'orchestrator',
+          entityType: 'task',
+          taskId,
+          runId,
+        });
+      } catch {
+        // Best-effort: cascade-deleted or vanished — nothing left to delete.
+      }
+    }
   }
 
   // --------------------------------------------------------------------------
