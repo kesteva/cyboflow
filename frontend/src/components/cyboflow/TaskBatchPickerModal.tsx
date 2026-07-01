@@ -11,8 +11,20 @@
  * SPRINT_BATCH_MAX_TASKS), and onPicked hands the task ids back to the caller
  * which threads them into runs.start as `taskIds`.
  *
- * Eligibility (rendered + selectable):
- *   - type==='task' && !isDone && inFlow.length===0
+ * Eligibility (rendered + selectable) — this MIRRORS the strict runs.start
+ * pre-check (SprintLaneStore.filterEligibleTaskIds). runs.start hard-fails a
+ * launch (BAD_REQUEST) if the selection contains ANY sprint-ineligible task, so
+ * the picker must not OFFER one. A task is eligible only when it is:
+ *   - type==='task'
+ *   - APPROVED (approved_at !== null — a NULL approval is a PENDING draft:
+ *     backend-invisible + sprint-ineligible until plan approval)
+ *   - NOT archived (archived_at === null, archive-in-place migration 024)
+ *   - at a ready-or-later, NON-terminal board stage (stage_position >= 6 AND the
+ *     stage is not terminal — which drops both 'Done' (pos 9) and hand-parked
+ *     'Won't do' (pos 10), as well as anything hand-moved below position 6 such
+ *     as the Idea column).
+ * The terminal-stage set is resolved from boardsForProject (the same board the
+ * Backlog renders columns from), keyed by the task's stage_id.
  *   - readyToWork===false tasks are STILL selectable (the dependency analyzer +
  *     DAG order them) but carry a 'blocked' indicator + their blockedBy refs.
  * In-flight tasks (inFlow.length>0) are rendered DISABLED — a task already
@@ -26,7 +38,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';
 import { trpc } from '../../trpc/client';
-import type { BacklogTaskItem } from '../../../../shared/types/tasks';
+import type { BacklogTaskItem, Board } from '../../../../shared/types/tasks';
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../shared/types/sprintBatch';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 
@@ -74,23 +86,43 @@ export function TaskBatchPickerModal({
    */
   const [effectiveSubstrate, setEffectiveSubstrate] = useState<CliSubstrate>(substrate);
 
-  // Load the project's tasks whenever the modal opens.
+  // Load the project's tasks AND its boards whenever the modal opens. The board
+  // stages supply the terminal-stage set the eligibility predicate needs (to
+  // drop 'Done' and 'Won't do'); the two queries resolve together so tasks are
+  // never filtered against a stale/empty board.
   useEffect(() => {
     if (!isOpen) return;
     setIsLoading(true);
     setError(null);
-    trpc.cyboflow.tasks.list
-      .query({ projectId })
-      .then((rows) => {
+    Promise.all([
+      trpc.cyboflow.tasks.list.query({ projectId }),
+      trpc.cyboflow.tasks.boardsForProject.query({ projectId }),
+    ])
+      .then(([rows, boards]) => {
+        // Terminal board-stage ids across this project's boards (Done + Won't
+        // do). Mirrors the backend's `bs.is_terminal = 0` clause via stage_id.
+        const terminalStageIds = new Set<string>(
+          boards.flatMap((b: Board) => b.stages.filter((s) => s.is_terminal).map((s) => s.id)),
+        );
         // The list returns ALL entities NESTED — tasks with a parent epic live
         // under that epic's `children`, not at the top level. Flatten epics
-        // first so epic-owned tasks are batchable too, then keep only NON-done,
-        // NON-archived tasks (archive-in-place, migration 024). In-flight tasks
-        // are kept (rendered disabled) so the user sees why they can't be
-        // batched; done/archived tasks / ideas / epics are dropped.
+        // first so epic-owned tasks are batchable too, then keep ONLY tasks the
+        // strict runs.start pre-check would accept (SprintLaneStore.filterEligibleTaskIds):
+        // approved (approved_at !== null — pending drafts excluded), NOT archived
+        // (migration 024), and at a ready-or-later NON-terminal stage
+        // (stage_position >= 6 && stage not terminal — drops Idea-column,
+        // hand-moved-below-6, Done, and Won't-do tasks). In-flight tasks that are
+        // otherwise eligible are kept (rendered disabled) so the user sees why
+        // they can't be batched; every other row (ideas / epics / ineligible
+        // tasks) is dropped so a check can never abort the whole launch.
         const flattened = rows.flatMap((r) => (r.type === 'epic' ? (r.children ?? []) : [r]));
         const batchable = flattened.filter(
-          (r) => r.type === 'task' && !r.isDone && r.archived_at === null,
+          (r) =>
+            r.type === 'task' &&
+            r.approved_at !== null &&
+            r.archived_at === null &&
+            r.stage_position >= 6 &&
+            !terminalStageIds.has(r.stage_id),
         );
         setTasks(batchable);
         // On open, seed the selection from the caller's pre-selection (e.g. an
@@ -222,7 +254,9 @@ export function TaskBatchPickerModal({
 
           {!isLoading && tasks.length === 0 && (
             <p className="text-xs text-text-secondary">
-              No eligible tasks in the backlog. Decompose an idea into tasks first.
+              No sprint-eligible tasks in the backlog. Each task must be approved and
+              at "Ready for development" or later (not archived, done, or won't-do).
+              Decompose and approve an idea's tasks first.
             </p>
           )}
 

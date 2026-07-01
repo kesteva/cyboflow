@@ -52,6 +52,20 @@ vi.mock('../../../trpc/client', () => ({
       },
       tasks: {
         list: { query: vi.fn().mockResolvedValue([]) },
+        // The batch picker resolves terminal stages via boardsForProject; the
+        // stage ids here match the task fixtures below ('idea' pos 1, 'ready'
+        // pos 6) so eligibility filtering behaves as on the real board.
+        boardsForProject: {
+          query: vi.fn().mockResolvedValue([
+            {
+              id: 'b', project_id: 1, name: 'Default', kind: 'default', is_default: true,
+              stages: [
+                { id: 'idea', label: 'Idea', color_oklch: '', hint: null, position: 1, write_policy: 'asserted', is_terminal: false, hidden_by_default: false },
+                { id: 'ready', label: 'Ready for development', color_oklch: '', hint: null, position: 6, write_policy: 'asserted', is_terminal: false, hidden_by_default: false },
+              ],
+            },
+          ]),
+        },
         create: { mutate: vi.fn().mockResolvedValue({ taskId: 'IDEA-NEW' }) },
       },
       health: {

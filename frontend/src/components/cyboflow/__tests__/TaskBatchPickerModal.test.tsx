@@ -3,9 +3,13 @@
  * selector for a parallel sprint batch).
  *
  * Behaviors verified:
- *   1. Filter correctness: lists NON-done tasks only; ideas/epics/done are excluded;
- *      readyToWork===false tasks carry a 'blocked' indicator (still selectable);
- *      in-flight tasks (inFlow.length>0) render disabled.
+ *   1. Filter correctness: mirrors the strict runs.start pre-check — lists only
+ *      approved, non-archived tasks at a ready-or-later NON-terminal stage
+ *      (stage_position >= 6, is_terminal=0). Ideas/epics, done (terminal),
+ *      won't-do (terminal), Idea-column (pos 1), and pending drafts
+ *      (approved_at NULL) are all excluded so no offered task can abort the
+ *      launch; readyToWork===false tasks carry a 'blocked' indicator (still
+ *      selectable); in-flight tasks (inFlow.length>0) render disabled.
  *   2. Multi-select accumulation: toggling several checkboxes accumulates ids;
  *      onPicked receives every selected id.
  *   3. Cap enforcement: caps at 10 for interactive and 15 for sdk, keyed by the
@@ -20,12 +24,35 @@
 import '@testing-library/jest-dom';
 import { render, screen, act, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { BacklogTaskItem } from '../../../../../shared/types/tasks';
+import type { BacklogTaskItem, Board } from '../../../../../shared/types/tasks';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
+
+/**
+ * The collapsed 4-stage board (migration 042). The eligibility predicate mirrors
+ * runs.start: approved + stage_position >= 6 + NON-terminal stage. Only 'Ready
+ * for development' (pos 6) qualifies here; Idea (pos 1) is below 6, Done (pos 9)
+ * and Won't do (pos 10) are terminal.
+ */
+function makeBoard(overrides: Partial<Board> = {}): Board {
+  return {
+    id: 'board-1',
+    project_id: 1,
+    name: 'Default',
+    kind: 'default',
+    is_default: true,
+    stages: [
+      { id: 'idea', label: 'Idea', color_oklch: '', hint: null, position: 1, write_policy: 'asserted', is_terminal: false, hidden_by_default: false },
+      { id: 'ready', label: 'Ready for development', color_oklch: '', hint: null, position: 6, write_policy: 'asserted', is_terminal: false, hidden_by_default: false },
+      { id: 'done', label: 'Done', color_oklch: '', hint: null, position: 9, write_policy: 'derived', is_terminal: true, hidden_by_default: false },
+      { id: 'wontdo', label: "Won't do", color_oklch: '', hint: null, position: 10, write_policy: 'asserted', is_terminal: true, hidden_by_default: true },
+    ],
+    ...overrides,
+  };
+}
 
 function makeItem(overrides: Partial<BacklogTaskItem>): BacklogTaskItem {
   return {
@@ -67,6 +94,7 @@ vi.mock('../../../trpc/client', () => ({
     cyboflow: {
       tasks: {
         list: { query: vi.fn() },
+        boardsForProject: { query: vi.fn() },
       },
       substrates: {
         resolveEffective: { query: vi.fn() },
@@ -80,6 +108,7 @@ import { TaskBatchPickerModal } from '../TaskBatchPickerModal';
 import { trpc } from '../../../trpc/client';
 
 const mockList = vi.mocked(trpc.cyboflow.tasks.list.query);
+const mockBoards = vi.mocked(trpc.cyboflow.tasks.boardsForProject.query);
 const mockResolve = vi.mocked(trpc.cyboflow.substrates.resolveEffective.query);
 
 function setSubstrate(s: CliSubstrate): void {
@@ -89,6 +118,7 @@ function setSubstrate(s: CliSubstrate): void {
 beforeEach(() => {
   vi.clearAllMocks();
   setSubstrate('sdk');
+  mockBoards.mockResolvedValue([makeBoard()]);
 });
 
 async function renderOpen(
@@ -120,9 +150,9 @@ describe('TaskBatchPickerModal — filter correctness', () => {
   it('excludes done tasks, ideas, and epics; marks blocked + disables in-flight', async () => {
     await renderOpen([
       makeItem({ id: 'TASK-1', ref: 'TASK-1' }),
-      makeItem({ id: 'TASK-DONE', ref: 'TASK-DONE', isDone: true }),
+      makeItem({ id: 'TASK-DONE', ref: 'TASK-DONE', isDone: true, stage_id: 'done', stage_position: 9 }),
       makeItem({ id: 'TASK-ARCHIVED', ref: 'TASK-ARCHIVED', archived_at: '2026-06-11T20:43:34Z' }),
-      makeItem({ id: 'IDEA-1', ref: 'IDEA-1', type: 'idea' }),
+      makeItem({ id: 'IDEA-1', ref: 'IDEA-1', type: 'idea', stage_id: 'idea', stage_position: 1 }),
       makeItem({ id: 'EPIC-1', ref: 'EPIC-1', type: 'epic' }),
       makeItem({
         id: 'TASK-BLOCKED',
@@ -171,6 +201,8 @@ describe('TaskBatchPickerModal — filter correctness', () => {
             ref: 'TASK-CHILD-DONE',
             parent_epic_id: 'EPIC-1',
             isDone: true,
+            stage_id: 'done',
+            stage_position: 9,
           }),
         ],
       }),
@@ -183,6 +215,28 @@ describe('TaskBatchPickerModal — filter correctness', () => {
     expect(screen.queryByTestId('task-batch-picker-item-EPIC-1')).toBeNull();
     expect(screen.queryByTestId('task-batch-picker-item-TASK-CHILD-DONE')).toBeNull();
     expect(screen.getByLabelText('Select TASK-CHILD')).not.toBeDisabled();
+  });
+
+  it('excludes sprint-ineligible tasks the strict runs.start pre-check would reject (F6)', async () => {
+    await renderOpen([
+      // Eligible: approved, ready-for-development (pos 6), non-terminal.
+      makeItem({ id: 'TASK-READY', ref: 'TASK-READY', stage_id: 'ready', stage_position: 6 }),
+      // Won't do — terminal stage (pos 10). isDone stays false (position-9-only),
+      // so ONLY the terminal-stage check catches it.
+      makeItem({ id: 'TASK-WONTDO', ref: 'TASK-WONTDO', stage_id: 'wontdo', stage_position: 10 }),
+      // Hand-moved back to the Idea column (pos 1) — below the ready threshold.
+      makeItem({ id: 'TASK-IDEA', ref: 'TASK-IDEA', stage_id: 'idea', stage_position: 1 }),
+      // Pending draft: approved_at NULL (backend-invisible + sprint-ineligible).
+      // Sits at 'ready' so ONLY the approval check excludes it.
+      makeItem({ id: 'TASK-PENDING', ref: 'TASK-PENDING', approved_at: null }),
+    ]);
+
+    expect(screen.getByTestId('task-batch-picker-item-TASK-READY')).toBeInTheDocument();
+    expect(screen.getByLabelText('Select TASK-READY')).not.toBeDisabled();
+
+    expect(screen.queryByTestId('task-batch-picker-item-TASK-WONTDO')).toBeNull();
+    expect(screen.queryByTestId('task-batch-picker-item-TASK-IDEA')).toBeNull();
+    expect(screen.queryByTestId('task-batch-picker-item-TASK-PENDING')).toBeNull();
   });
 });
 
