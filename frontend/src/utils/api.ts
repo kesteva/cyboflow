@@ -3,7 +3,7 @@ import type { CreateSessionRequest } from '../types/session';
 import type { Project } from '../types/project';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
 import type { PermissionMode } from '../../../shared/types/workflows';
-import type { ModelAvailabilityMap } from '../../../shared/types/modelAvailability';
+import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
 
 // Type for IPC response.
 // T defaults to `unknown` (not `any`) so callers must narrow before reading .data.
@@ -574,6 +574,11 @@ export class API {
     onAvailabilityChanged(callback: (map: ModelAvailabilityMap) => void): () => void {
       if (!isElectron() || !window.electronAPI.models) return () => {};
       return window.electronAPI.models.onAvailabilityChanged(callback);
+    },
+    /** Subscribe to mid-call model fallbacks (guarded model pulled → retried on Opus). */
+    onModelFallback(callback: (notice: ModelFallbackNotice) => void): () => void {
+      if (!isElectron() || !window.electronAPI.models) return () => {};
+      return window.electronAPI.models.onModelFallback(callback);
     },
   };
 

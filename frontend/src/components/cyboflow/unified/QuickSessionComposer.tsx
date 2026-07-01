@@ -3,7 +3,7 @@ import type { Session } from '../../../types/session';
 import { API } from '../../../utils/api';
 import type { IPCResponse } from '../../../utils/api';
 import { CommitModePill } from '../../CommitModeToggle';
-import { ModelPill, isOpusModel, modelDisplayLabel } from './ModelPill';
+import { ModelPill, isOpusModel, modelDisplayLabel, MODEL_OPTIONS } from './ModelPill';
 import { FastModePill } from './FastModePill';
 import { PermissionModePill } from './PermissionModePill';
 import { useSessionStore } from '../../../stores/sessionStore';
@@ -52,6 +52,11 @@ export interface QuickSessionComposerProps {
    * message, interactive PTY applies when the terminal restarts).
    */
   onPermissionApplied?: (message: string) => void;
+  /**
+   * Surface a notice when this session's turn fell back off a pulled model (e.g.
+   * Fable 5 → Opus) mid-call. The host shows it in the same toast slot.
+   */
+  onModelFallback?: (message: string) => void;
 }
 
 export function QuickSessionComposer(props: QuickSessionComposerProps): React.ReactElement {
@@ -70,6 +75,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     ptyOpen = false,
     onTogglePtyOpen,
     onPermissionApplied,
+    onModelFallback,
   } = props;
 
   const transport = interactive ? 'interactive' : 'sdk';
@@ -122,6 +128,25 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     },
     [fastMode, panelId],
   );
+
+  // A turn that discovered its pinned model was pulled mid-call (e.g. Fable 5)
+  // retries transparently on the fallback family (Opus). Reflect that swap in the
+  // pill — persist the fallback alias so it sticks past a remount, update the
+  // local display, and raise a one-off toast. Filtered to THIS panel's runs.
+  useEffect(() => {
+    if (interactive || !panelId) return;
+    const unsubscribe = API.models.onModelFallback((notice) => {
+      if (notice.panelId !== panelId) return;
+      void API.claudePanels.setModel(panelId, notice.fallbackAlias);
+      handleModelChange(notice.fallbackAlias);
+      const fallbackLabel =
+        MODEL_OPTIONS.find((o) => o.id === notice.fallbackAlias)?.label ?? notice.fallbackAlias;
+      onModelFallback?.(
+        `${notice.unavailableLabel} is unavailable — switched to ${fallbackLabel} for this run.`,
+      );
+    });
+    return unsubscribe;
+  }, [interactive, panelId, handleModelChange, onModelFallback]);
 
   const visibility = resolveChatVisibility({
     transport,

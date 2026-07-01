@@ -10,7 +10,7 @@ import type { ExecutionDiff, GitDiffResult } from './diff';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/updater';
-import type { ModelAvailabilityMap } from '../../../shared/types/modelAvailability';
+import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
 
 interface LogEntry {
   timestamp: string;
@@ -381,6 +381,7 @@ interface ElectronAPI {
   models: {
     getAvailability: () => Promise<IPCResponse<ModelAvailabilityMap>>;
     onAvailabilityChanged: (callback: (map: ModelAvailabilityMap) => void) => () => void;
+    onModelFallback: (callback: (notice: ModelFallbackNotice) => void) => () => void;
   };
 
   // Logs panel operations

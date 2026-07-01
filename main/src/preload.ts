@@ -6,7 +6,7 @@ import type { AppConfig, UpdateConfigRequest } from './types/config';
 import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../frontend/src/types/project';
 import type { ToolPanel } from '../../shared/types/panels';
 import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
-import type { ModelAvailabilityMap } from '../../shared/types/modelAvailability';
+import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
 
 interface LogEntry {
   timestamp: string;
@@ -416,6 +416,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const subscription = (_event: Electron.IpcRendererEvent, map: ModelAvailabilityMap) => callback(map);
       ipcRenderer.on('model-availability-changed', subscription);
       return () => ipcRenderer.removeListener('model-availability-changed', subscription);
+    },
+    onModelFallback: (callback: (notice: ModelFallbackNotice) => void) => {
+      const subscription = (_event: Electron.IpcRendererEvent, notice: ModelFallbackNotice) => callback(notice);
+      ipcRenderer.on('model-fallback', subscription);
+      return () => ipcRenderer.removeListener('model-fallback', subscription);
     },
   },
 

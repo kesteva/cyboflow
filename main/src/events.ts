@@ -14,7 +14,7 @@ import {
 } from './utils/sessionValidation';
 import type { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { ModelAvailabilityService } from './services/modelAvailabilityService';
-import type { ModelAvailabilityMap } from '../../shared/types/modelAvailability';
+import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
 import type { GitCommit } from './services/gitDiffManager';
 import type { Project } from './database/models';
 import { DEFAULT_PERMISSION_MODE } from '../../shared/types/permissionMode';
@@ -835,6 +835,20 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     const mw = getMainWindow();
     if (mw && !mw.isDestroyed()) {
       mw.webContents.send('project:updated', project);
+    }
+  });
+
+  // Guarded-model mid-call fallback (Fable 5 pulled): a run's turn discovered its
+  // pinned model was unavailable and transparently retried on Opus. Forward to the
+  // renderer so the quick-session composer swaps its model pill + shows a toast.
+  claudeCodeManager.on('model-fallback', (payload: ModelFallbackNotice) => {
+    const mw = getMainWindow();
+    if (mw && !mw.isDestroyed()) {
+      try {
+        mw.webContents.send('model-fallback', payload);
+      } catch {
+        /* window torn down mid-send — ignore */
+      }
     }
   });
 

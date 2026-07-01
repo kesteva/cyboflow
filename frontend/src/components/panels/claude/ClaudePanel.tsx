@@ -294,6 +294,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
             ptyOpen={composerOpen}
             onTogglePtyOpen={() => setComposerOpen((v) => !v)}
             onPermissionApplied={setPermissionToast}
+            onModelFallback={setPermissionToast}
           />
         ))}
 

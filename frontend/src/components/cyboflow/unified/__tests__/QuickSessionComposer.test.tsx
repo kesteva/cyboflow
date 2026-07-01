@@ -12,6 +12,8 @@ const mockSetFastMode = vi.fn();
 const mockUpdatePermission = vi.fn();
 const mockUpdateSessionMcps = vi.fn();
 const mockUpdateSessionPlugins = vi.fn();
+const mockSetModel = vi.fn();
+const mockOnModelFallback = vi.fn(() => () => {});
 vi.mock('../../../../utils/api', () => ({
   API: {
     sessions: {
@@ -24,6 +26,10 @@ vi.mock('../../../../utils/api', () => ({
       getModel: (id: string) => mockGetModel(id),
       getFastMode: (id: string) => mockGetFastMode(id),
       setFastMode: (id: string, v: boolean) => mockSetFastMode(id, v),
+      setModel: (id: string, model: string) => mockSetModel(id, model),
+    },
+    models: {
+      onModelFallback: (cb: (notice: unknown) => void) => mockOnModelFallback(cb),
     },
   },
 }));
@@ -94,6 +100,7 @@ function Harness(props: {
   handleSendInput?: ReturnType<typeof vi.fn>;
   handleContinueConversation?: ReturnType<typeof vi.fn>;
   onPermissionApplied?: (message: string) => void;
+  onModelFallback?: (message: string) => void;
 }) {
   const [input, setInput] = useState('');
   const [ptyOpen, setPtyOpen] = useState(false);
@@ -111,6 +118,7 @@ function Harness(props: {
       ptyOpen={ptyOpen}
       onTogglePtyOpen={() => setPtyOpen((v) => !v)}
       onPermissionApplied={props.onPermissionApplied}
+      onModelFallback={props.onModelFallback}
     />
   );
 }
@@ -125,6 +133,8 @@ beforeEach(() => {
   mockUpdateSessionPlugins.mockReset().mockResolvedValue({ success: true });
   mockMcpsList.mockReset().mockResolvedValue([]);
   mockPluginsList.mockReset().mockResolvedValue([]);
+  mockSetModel.mockReset().mockResolvedValue({ success: true });
+  mockOnModelFallback.mockReset().mockReturnValue(() => {});
 });
 
 describe('QuickSessionComposer — SDK', () => {
@@ -160,6 +170,59 @@ describe('QuickSessionComposer — Opus-only fast-mode pill', () => {
     // The model pill confirms the composer toolbar has rendered…
     await waitFor(() => expect(mockGetModel).toHaveBeenCalled());
     expect(screen.queryByTestId('composer-fast-mode-pill')).toBeNull();
+  });
+});
+
+describe('QuickSessionComposer — mid-call model fallback', () => {
+  it('swaps the pill + persists + toasts when THIS panel falls back off Fable', async () => {
+    mockGetModel.mockResolvedValue({ success: true, data: 'fable' });
+    const onModelFallback = vi.fn();
+    render(
+      <Harness session={makeSession({ status: 'running' })} interactive={false} onModelFallback={onModelFallback} />,
+    );
+    // The composer subscribed on mount; grab the registered push callback.
+    await waitFor(() => expect(mockOnModelFallback).toHaveBeenCalled());
+    const notify = mockOnModelFallback.mock.calls[0][0] as (n: unknown) => void;
+
+    act(() => {
+      notify({
+        panelId: 'panel-1',
+        sessionId: 's1',
+        unavailableAlias: 'fable',
+        unavailableLabel: 'Fable 5',
+        fallbackAlias: 'opus',
+      });
+    });
+
+    // Persisted the fallback alias so it survives a remount…
+    await waitFor(() => expect(mockSetModel).toHaveBeenCalledWith('panel-1', 'opus'));
+    // …and raised a human toast naming the swap.
+    expect(onModelFallback).toHaveBeenCalledTimes(1);
+    expect(onModelFallback.mock.calls[0][0]).toContain('Fable 5 is unavailable');
+    expect(onModelFallback.mock.calls[0][0]).toContain('Opus 4.8');
+  });
+
+  it('ignores a fallback notice addressed to a DIFFERENT panel', async () => {
+    mockGetModel.mockResolvedValue({ success: true, data: 'fable' });
+    const onModelFallback = vi.fn();
+    render(
+      <Harness session={makeSession({ status: 'running' })} interactive={false} onModelFallback={onModelFallback} />,
+    );
+    await waitFor(() => expect(mockOnModelFallback).toHaveBeenCalled());
+    const notify = mockOnModelFallback.mock.calls[0][0] as (n: unknown) => void;
+
+    act(() => {
+      notify({
+        panelId: 'someone-else',
+        sessionId: 's9',
+        unavailableAlias: 'fable',
+        unavailableLabel: 'Fable 5',
+        fallbackAlias: 'opus',
+      });
+    });
+
+    expect(mockSetModel).not.toHaveBeenCalled();
+    expect(onModelFallback).not.toHaveBeenCalled();
   });
 });
 

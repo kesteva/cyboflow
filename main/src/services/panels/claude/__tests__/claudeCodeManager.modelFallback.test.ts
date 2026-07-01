@@ -155,8 +155,10 @@ describe('ClaudeCodeManager — mid-call model fallback', () => {
   it('retries a mid-call Fable-unavailable turn on Opus and suppresses the error result', async () => {
     const outputs: OutputEvent[] = [];
     const errors: unknown[] = [];
+    const fallbacks: Array<Record<string, unknown>> = [];
     mgr.on('output', (e: OutputEvent) => outputs.push(e));
     mgr.on('error', (e: unknown) => errors.push(e));
+    mgr.on('model-fallback', (e: Record<string, unknown>) => fallbacks.push(e));
 
     // spawnCliProcess resolves once the iterator drains (mock generators are
     // finite — no AbortController parking), so awaiting is safe here.
@@ -190,6 +192,17 @@ describe('ClaudeCodeManager — mid-call model fallback', () => {
       (o) => o.data?.type === 'result' && o.data?.result === 'ok',
     );
     expect(successResults).toHaveLength(1);
+
+    // A single 'model-fallback' event fired for the renderer (toast + pill swap),
+    // carrying the panel/session identity and the guarded → fallback aliases.
+    expect(fallbacks).toHaveLength(1);
+    expect(fallbacks[0]).toMatchObject({
+      panelId: 'p-fallback',
+      sessionId: 'p-fallback',
+      unavailableAlias: 'fable',
+      unavailableLabel: 'Fable 5',
+      fallbackAlias: 'opus',
+    });
   });
 
   // -------------------------------------------------------------------------

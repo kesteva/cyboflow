@@ -54,6 +54,26 @@ export interface ModelAvailabilityEntry {
 /** concreteId → entry. Only guarded models appear; the IPC snapshot shape. */
 export type ModelAvailabilityMap = Record<string, ModelAvailabilityEntry>;
 
+/**
+ * Renderer push emitted when a run's turn DISCOVERED its pinned guarded model was
+ * unavailable mid-call and transparently retried on the fallback family. The
+ * picker/composer uses it to swap the visible model pill and show a one-off toast
+ * (distinct from {@link ModelAvailabilityMap}, which drives the persistent
+ * grey-out). Scoped to a single panel/session so only that composer reacts.
+ */
+export interface ModelFallbackNotice {
+  /** The run/panel that fell back (a quick session's claude panel id). */
+  readonly panelId: string;
+  /** The cyboflow session id owning the panel. */
+  readonly sessionId: string;
+  /** The guarded picker alias that was unavailable (e.g. 'fable'). */
+  readonly unavailableAlias: string;
+  /** Human label of the unavailable model (e.g. 'Fable 5'). */
+  readonly unavailableLabel: string;
+  /** The picker alias the turn ran on instead (e.g. 'opus'). */
+  readonly fallbackAlias: string;
+}
+
 /** Strip a `[1m]` window marker and normalize for comparison. */
 function normalizeId(id: string): string {
   return id.toLowerCase().replace(/\[1m\]\s*$/i, '').trim();

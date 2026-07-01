@@ -12,7 +12,7 @@ import {
   isModelUsable,
   isModelUnavailableError,
 } from '../../modelAvailabilityService';
-import { guardedModelByConcreteId } from '../../../../../shared/types/modelAvailability';
+import { guardedModelByConcreteId, type GuardedModelSpec } from '../../../../../shared/types/modelAvailability';
 import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig, CanUseTool, PermissionResult, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
 import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
 import type Database from 'better-sqlite3';
@@ -782,6 +782,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
               this.logger?.warn(
                 `[ClaudeCodeManager] model '${activeOptions.model}' unavailable mid-call; retrying panel ${displayPanelId} with '${fb.model}'.`,
               );
+              // Tell the renderer this run swapped models mid-turn so the composer
+              // can update its model pill and show a one-off toast (the persistent
+              // grey-out is driven separately by the availability 'changed' push).
+              this.emit('model-fallback', {
+                panelId: displayPanelId,
+                sessionId,
+                unavailableAlias: fb.guarded.alias,
+                unavailableLabel: fb.guarded.label,
+                fallbackAlias: fb.guarded.fallbackAlias,
+              });
               activeOptions = { ...activeOptions, model: fb.model, betas: fb.betas.length > 0 ? fb.betas : undefined };
               runClaudeSessionCaptured = false;
               continue retry;
@@ -1034,7 +1044,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
   private modelUnavailableFallback(
     pinnedModel: string | undefined,
     event: unknown,
-  ): { model: string; betas: SdkBeta[] } | null {
+  ): { model: string; betas: SdkBeta[]; guarded: GuardedModelSpec } | null {
     const text = resultErrorText(event);
     if (text === null) return null; // not an is_error result event
     if (!this.noteModelUnavailabilityFromError(pinnedModel, text)) return null;
@@ -1042,7 +1052,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     if (!guarded) return null; // unreachable after the note above, but narrows the type
     const { model, betas } = sdkModelAndBetas(resolveModelAlias(guarded.fallbackAlias));
     if (!model || model === 'auto') return null;
-    return { model, betas };
+    return { model, betas, guarded };
   }
 
   // ---------------------------------------------------------------------------
