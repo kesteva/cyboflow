@@ -1557,6 +1557,81 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(epic.stage_id).toBe(stageId(9));
     });
 
+    it("a Won't-do (position 10) child neither blocks Done nor demotes: done + won't-do children -> epic Done", async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { epicId, childIds } = await makeEpicWithChildren(db, router, 3);
+      setChildStage(db, childIds[0], 9);
+      setChildStage(db, childIds[1], 9);
+      setChildStage(db, childIds[2], 10); // explicit human retirement
+      await router.recomputeEpicStage(epicId);
+      const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(9));
+    });
+
+    it("ALL children at Won't-do -> no countable children -> epic stage untouched", async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { epicId, childIds } = await makeEpicWithChildren(db, router, 2);
+      childIds.forEach((id) => setChildStage(db, id, 10));
+      await router.recomputeEpicStage(epicId);
+      const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(6)); // create stage — not rewritten
+    });
+
+    it("an epic the human parked at Won't-do is NEVER resurrected by the rollup", async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { epicId, childIds } = await makeEpicWithChildren(db, router, 1);
+      db.prepare('UPDATE epics SET stage_id = ? WHERE id = ?').run(stageId(10), epicId);
+      // Child stage-move fires hook (b) -> recompute -> must respect the parking.
+      await router.applyChange(1, { actor: 'orchestrator', taskId: childIds[0], stageId: stageId(9) });
+      const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(10));
+    });
+
+    it('a PENDING draft child (approved_at NULL) is invisible to the rollup', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { epicId, childIds } = await makeEpicWithChildren(db, router, 2);
+      childIds.forEach((id) => setChildStage(db, id, 9));
+      db.prepare('UPDATE epics SET stage_id = ? WHERE id = ?').run(stageId(9), epicId);
+      // A plan-gated run mints a pending draft under the visible all-Done epic:
+      // board-invisible, so it must NOT drag the epic back to 6.
+      const draft = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'pending draft',
+        parentEpicId: epicId,
+      });
+      db.prepare('UPDATE tasks SET approved_at = NULL WHERE id = ?').run(draft.taskId);
+      await router.recomputeEpicStage(epicId);
+      const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(9));
+    });
+
+    it('ARCHIVE-TOGGLE hook: archiving the last not-Done child rolls the epic to Done', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { epicId, childIds } = await makeEpicWithChildren(db, router, 2);
+      setChildStage(db, childIds[0], 9);
+      // childIds[1] not done — archive it THROUGH the chokepoint; the follow-on
+      // hook must re-derive the epic without an explicit recompute call.
+      await router.applyChange(1, { actor: 'user', taskId: childIds[1], archived: true });
+      const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(9));
+    });
+
+    it('DELETE hook: deleting the last not-Done child rolls the surviving epic to Done', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { epicId, childIds } = await makeEpicWithChildren(db, router, 2);
+      setChildStage(db, childIds[0], 9);
+      await router.applyDelete(1, { actor: 'user', taskId: childIds[1], entityType: 'task' });
+      const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(9));
+    });
+
     it('post-commit follow-on: merging all child tasks rolls the epic to Done (9); a new child reverts it to 6', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));

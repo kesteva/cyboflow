@@ -309,6 +309,8 @@ interface FieldDelta {
 
 /** The board stage position considered "done" (merged & archived). */
 const DONE_POSITION = 9;
+/** Terminal hidden 'Won't do' stage — an explicit human parking, never derived. */
+const WONT_DO_POSITION = 10;
 
 /**
  * CREATE TYPE-DEFAULT (hybrid model, FIX-STAGE-MODEL A): when a create carries
@@ -444,10 +446,18 @@ export class TaskChangeRouter {
       await this.recomputeEpicStage(change.parentEpicId).catch(() => {});
     }
 
-    // (b) STAGE-MOVE: a task stage-move rolls its parent epic up. This single hook
-    //     covers merge->Done(9), sprint close-out->Done(9), AND a user drag off
-    //     Done (the reverse) — all route through the task stage-move branch.
-    if (change.taskId !== undefined && change.stageId !== undefined) {
+    // (b) STAGE-MOVE / ARCHIVE-TOGGLE / REVEAL: any update that changes which
+    //     children COUNT toward the rollup re-derives the parent epic. Covers
+    //     merge->Done(9), sprint close-out->Done(9), a user drag off Done, the
+    //     archive/unarchive toggle (an archived child leaves the countable set —
+    //     archiving the last not-Done child must roll the epic to Done), and the
+    //     Q1 approved reveal (a pending child entering the countable set).
+    //     The SELECT on tasks finds no row for epic/idea ids, so non-task
+    //     updates fall through untouched.
+    if (
+      change.taskId !== undefined &&
+      (change.stageId !== undefined || change.archived !== undefined || change.approved !== undefined)
+    ) {
       const parent = this.db
         .prepare('SELECT parent_epic_id AS parentEpicId FROM tasks WHERE id = ?')
         .get(change.taskId) as { parentEpicId: string | null } | undefined;
@@ -517,10 +527,22 @@ export class TaskChangeRouter {
     projectId: number,
     opts: { actor: TaskActor; taskId: string; entityType?: TaskType; runId?: string },
   ): Promise<{ taskId: string; deletedIds: string[] }> {
-    return (await this.getProjectQueue(projectId).add(() => this.runDelete(projectId, opts))) as {
+    const result = (await this.getProjectQueue(projectId).add(() =>
+      this.runDelete(projectId, opts),
+    )) as {
       taskId: string;
       deletedIds: string[];
+      survivingParentEpicIds: string[];
     };
+
+    // POST-COMMIT FOLLOW-ON (outside the queue task — see the applyChange seam):
+    // deleting a child task changes its parent epic's rollup inputs; re-derive
+    // each SURVIVING parent. Best-effort, mirrors the archive-toggle hook.
+    for (const epicId of result.survivingParentEpicIds) {
+      await this.recomputeEpicStage(epicId).catch(() => {});
+    }
+
+    return { taskId: result.taskId, deletedIds: result.deletedIds };
   }
 
   /**
@@ -1183,7 +1205,7 @@ export class TaskChangeRouter {
   private async runDelete(
     projectId: number,
     opts: { actor: TaskActor; taskId: string; entityType?: TaskType; runId?: string },
-  ): Promise<{ taskId: string; deletedIds: string[] }> {
+  ): Promise<{ taskId: string; deletedIds: string[]; survivingParentEpicIds: string[] }> {
     const located = this.locateEntity(projectId, opts.taskId, opts.entityType);
     if (!located) {
       throw new TaskChangeError('not_found', `entity ${opts.taskId} not found for project ${projectId}`);
@@ -1210,6 +1232,22 @@ export class TaskChangeRouter {
       snapshot: this.buildBacklogTaskItem(entity.type, entity.id),
     }));
 
+    // Parent epics whose rollup inputs this delete changes: read BEFORE the
+    // rows vanish, keep only parents that SURVIVE the cascade (a deleted parent
+    // needs no re-derive). Deleting the last not-Done child must roll the
+    // surviving epic to Done — mirrors the archive-toggle hook.
+    const cascadeIds = new Set(cascade.map((e) => e.id));
+    const survivingParentEpicIds = new Set<string>();
+    for (const entity of cascade) {
+      if (entity.type !== 'task') continue;
+      const parent = this.db
+        .prepare('SELECT parent_epic_id AS parentEpicId FROM tasks WHERE id = ?')
+        .get(entity.id) as { parentEpicId: string | null } | undefined;
+      if (parent?.parentEpicId && !cascadeIds.has(parent.parentEpicId)) {
+        survivingParentEpicIds.add(parent.parentEpicId);
+      }
+    }
+
     const txn = this.db.transaction(() => {
       for (const entity of cascade) {
         this.db
@@ -1230,7 +1268,14 @@ export class TaskChangeRouter {
       this.broadcast(projectId, { projectId, taskId: id, action: 'deleted', task: snapshot });
     }
 
-    return { taskId: opts.taskId, deletedIds: cascade.map((e) => e.id) };
+    // NOTE: the rollup re-derive happens in applyDelete AFTER this queue task
+    // settles — recomputeEpicStage re-enters applyChange, and enqueueing onto
+    // the same per-project queue from INSIDE a queue task would deadlock.
+    return {
+      taskId: opts.taskId,
+      deletedIds: cascade.map((e) => e.id),
+      survivingParentEpicIds: [...survivingParentEpicIds],
+    };
   }
 
   /**
@@ -1601,11 +1646,25 @@ export class TaskChangeRouter {
 
   /**
    * Recompute and write the DERIVED stage for an EPIC by aggregating over its
-   * (non-archived) child tasks. Epics never carry runs, so — unlike a task — the
-   * epic stage is a pure rollup of where its children sit on the board:
-   *   all children at Done (position 9)  -> Done (position 9)
-   *   any child not yet Done             -> Ready for development (position 6)
-   *   no non-archived children           -> no-op (stays at its create stage 6)
+   * COUNTABLE child tasks. Epics never carry runs, so — unlike a task — the
+   * epic stage is a pure rollup of where its children sit on the board.
+   *
+   * A child COUNTS toward the rollup only when it is on the visible board and
+   * still in play:
+   *   - not archived (archived_at IS NULL — off the board),
+   *   - not parked at 'Won't do' (position 10 — an explicit human retirement
+   *     must neither block the epic's Done nor demote an all-Done epic),
+   *   - not a PENDING draft (approved_at IS NULL — backend-invisible; an
+   *     invisible draft must not move a visible epic).
+   *
+   * Aggregation over the countable set:
+   *   all countable children at Done (9) -> Done (9)
+   *   any countable child not yet Done   -> Ready for development (6)
+   *   no countable children              -> no-op (epic keeps its stage)
+   *
+   * NEVER rewrites an epic the human parked at 'Won't do' — that terminal stage
+   * is an explicit decision, not a derived one; a child stage-move must not
+   * resurrect it.
    *
    * Writes via applyChange with actor='orchestrator' + entityType='epic', so the
    * orchestrator clears assertStageAuthority and the (epic-irrelevant) active-run
@@ -1623,20 +1682,30 @@ export class TaskChangeRouter {
       throw new TaskChangeError('not_found', `epic ${epicId} not found`);
     }
 
-    // Child task board positions (mirrors the epic-children query shape in
-    // taskListing.selectTaskById). Only non-archived children count toward the
-    // rollup; an archived child is off the board.
+    // A human-parked Won't-do epic is terminal: the rollup never resurrects it.
+    const epicStage = this.lookupStage(epic.stage_id);
+    if (epicStage && epicStage.position === WONT_DO_POSITION) {
+      return;
+    }
+
+    // Countable children (mirrors the epic-children query shape in
+    // taskListing.selectTaskById): non-archived, not Won't-do, not pending.
+    // approved_at gated behind the columnExists shim for pre-042 test DBs.
+    const approvedFilter = this.columnExists('tasks', 'approved_at')
+      ? 'AND t.approved_at IS NOT NULL'
+      : '';
     const children = this.db
       .prepare(
         `SELECT bs.position AS position
            FROM tasks t
            JOIN board_stages bs ON bs.id = t.stage_id
-          WHERE t.parent_epic_id = ? AND t.archived_at IS NULL`,
+          WHERE t.parent_epic_id = ? AND t.archived_at IS NULL
+            AND bs.position != ${WONT_DO_POSITION} ${approvedFilter}`,
       )
       .all(epicId) as Array<{ position: number }>;
 
     if (children.length === 0) {
-      // No (non-archived) children: leave the epic at its create stage.
+      // No countable children: leave the epic where it is.
       return;
     }
 
