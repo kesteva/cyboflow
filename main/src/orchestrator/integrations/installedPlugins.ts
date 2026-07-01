@@ -62,3 +62,41 @@ export function readPluginEntries(): PluginEntry[] {
 export function readInstalledPluginIds(): string[] {
   return Array.from(new Set(readPluginEntries().map((p) => p.id)));
 }
+
+/**
+ * Build the DETERMINISTIC (EXCLUSIVE) `enabledPlugins` map for a session from its
+ * raw `enabled_plugins_json` allow-list and the installed plugin universe.
+ *
+ * Every SELECTED plugin → `true`; every OTHER installed plugin → `false`. Cyboflow
+ * injects this at the `flag` precedence tier (user < project < local < flag <
+ * policy), so a `false` here overrides a file-enabled `true` and the session runs
+ * EXACTLY the selected set. Verified on BOTH substrates: the SDK Settings schema
+ * types the value `boolean` and documents `false` = disable, and the interactive
+ * `--settings` CLI was confirmed empirically to drop a plugin's contributions when
+ * passed `{ id: false }` at the flag tier.
+ *
+ * Returns `undefined` when the allow-list is missing/empty/malformed (→ no
+ * enabledPlugins key emitted; inherited plugins untouched). When `installedIds` is
+ * empty it degrades to additive (only the selected `true` entries — nothing to
+ * disable). A selected id absent from `installedIds` is still force-enabled.
+ */
+export function buildExclusiveEnabledPluginsMap(
+  raw: string | null | undefined,
+  installedIds: readonly string[],
+): Record<string, boolean> | undefined {
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed)) return undefined;
+  const selected = parsed.filter((x): x is string => typeof x === 'string');
+  if (selected.length === 0) return undefined;
+  const selectedSet = new Set(selected);
+  const map: Record<string, boolean> = {};
+  for (const id of installedIds) map[id] = selectedSet.has(id);
+  for (const id of selected) map[id] = true;
+  return map;
+}

@@ -9,6 +9,7 @@ import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
+import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../../orchestrator/integrations/installedPlugins';
 import { resolveModelAlias, interactiveModelArg, applyModelAvailabilityFallback } from './modelContext';
 import { isModelUsable } from '../../modelAvailabilityService';
 import { ApprovalRouter } from '../../../orchestrator/approvalRouter';
@@ -572,12 +573,13 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       args.push('--disallowed-tools', ...disabledMcps.map((n) => `mcp__${n}`));
     }
 
-    // Per-session plugin ALLOW enforcement — mirrors the SDK buildSdkOptions
-    // `settings.enabledPlugins` merge (plugin ALLOW parity). `claude --settings`
-    // supports an inline `enabledPlugins` map; the interactive REPL loads it on top
-    // of the file-loaded user/project plugins. `undefined` when the allow-list is
-    // empty, so the default path emits no enabledPlugins key and inherited plugins
-    // are untouched. Set BEFORE the JSON.stringify so it rides the single flag.
+    // Per-session plugin enforcement — mirrors the SDK buildSdkOptions
+    // `settings.enabledPlugins` merge. `claude --settings` carries the inline
+    // `enabledPlugins` map at the flag precedence tier; the DETERMINISTIC exclusive
+    // map (selected→true, other installed→false) makes the session run exactly the
+    // selected set (verified: the CLI honors `{id:false}` at the flag tier).
+    // `undefined` when the allow-list is empty → no enabledPlugins key and inherited
+    // plugins are untouched. Set BEFORE the JSON.stringify so it rides the single flag.
     const enabledPlugins = this.resolveSessionEnabledPlugins(options.sessionId);
     if (enabledPlugins) {
       sessionSettings.enabledPlugins = enabledPlugins;
@@ -1645,34 +1647,31 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   }
 
   /**
-   * Per-session plugin ALLOW list — read at spawn from sessions.enabled_plugins_json
-   * (migration 039, session_mcp_plugins). Returns a `{ id: true }` map for
-   * buildCommandArgs to merge into the inline `--settings` `enabledPlugins`, or
-   * `undefined` when the column is missing/empty/malformed — so no enabledPlugins
-   * key is emitted and file-loaded plugins are untouched (byte-identical default).
+   * The installed plugin universe (`"<name>@<marketplace>"` ids). Split out as a
+   * `protected` seam so tests can stub it hermetically (the production read hits
+   * the user's `~/.claude/plugins/installed_plugins.json`).
+   */
+  protected getInstalledPluginIds(): string[] {
+    return readInstalledPluginIds();
+  }
+
+  /**
+   * Per-session plugin selection → the DETERMINISTIC (EXCLUSIVE) enabledPlugins
+   * map, read at spawn from sessions.enabled_plugins_json (migration 039) and
+   * merged into the inline `--settings` `enabledPlugins`. Selected plugins →
+   * true, every other installed plugin → false.
    *
-   * ADDITIVE (force-enable) only — INTENTIONALLY diverges from the SDK twin,
-   * which now emits the deterministic EXCLUSIVE map (selected→true, other
-   * installed→false). The exclusive form relies on `enabledPlugins: { id: false }`
-   * disabling an inherited plugin; that is documented+typed on the SDK Settings
-   * schema but UNDOCUMENTED for the interactive `--settings` CLI path. This stays
-   * additive until an empirical test confirms the CLI honors `false` at the flag
-   * tier — then switch this to the shared exclusive builder for parity.
+   * Emits the SAME map as the SDK twin (shared `buildExclusiveEnabledPluginsMap`).
+   * The interactive `--settings` CLI was verified empirically to honor
+   * `enabledPlugins:{id:false}` at the flag tier (it drops the plugin's
+   * contributions), so this reached parity with the SDK. Returns `undefined` when
+   * the column is missing/empty/malformed (no key emitted; inherited plugins
+   * untouched).
    */
   private resolveSessionEnabledPlugins(sessionId: string): Record<string, boolean> | undefined {
     const raw = this.sessionManager.getDbSession(sessionId)?.enabled_plugins_json;
     if (!raw) return undefined;
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return undefined;
-      const ids = parsed.filter((x): x is string => typeof x === 'string');
-      if (ids.length === 0) return undefined;
-      const map: Record<string, boolean> = {};
-      for (const id of ids) map[id] = true;
-      return map;
-    } catch {
-      return undefined;
-    }
+    return buildExclusiveEnabledPluginsMap(raw, this.getInstalledPluginIds());
   }
 
   async stopPanel(panelId: string): Promise<void> {

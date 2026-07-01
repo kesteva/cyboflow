@@ -11,7 +11,8 @@
  *  (i)   disabled_mcp_servers_json → `--disallowed-tools mcp__<srv>` BEFORE `--settings`;
  *  (ii)  a denied list that includes 'cyboflow' never emits `mcp__cyboflow`;
  *  (iii) no deny column → no `--disallowed-tools`;
- *  (iv)  enabled_plugins_json → the `--settings` JSON's enabledPlugins map;
+ *  (iv)  enabled_plugins_json → the `--settings` JSON's enabledPlugins map
+ *        (additive fallback with no catalogue; EXCLUSIVE map when installed set known);
  *  (v)   no plugins column → the `--settings` JSON has no enabledPlugins key.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -25,6 +26,12 @@ import type { ConfigManager } from '../../../configManager';
 // Testable subclass — exposes the protected buildCommandArgs for direct calls.
 // ---------------------------------------------------------------------------
 class TestableInteractiveClaudeManager extends InteractiveClaudeManager {
+  /** Test-controlled installed-plugin universe for the exclusive enabledPlugins map. */
+  public installedPluginIdsStub: string[] = [];
+  protected override getInstalledPluginIds(): string[] {
+    return this.installedPluginIdsStub;
+  }
+
   callBuildCommandArgs(options: Record<string, unknown>): string[] {
     return (this as unknown as { buildCommandArgs(o: Record<string, unknown>): string[] }).buildCommandArgs(options);
   }
@@ -57,13 +64,15 @@ function createLoggerSpy(): { verbose: ReturnType<typeof vi.fn>; info: ReturnTyp
   return { verbose: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 }
 
-function makeManager(row?: FakeSessionRow, db?: Database.Database): TestableInteractiveClaudeManager {
-  return new TestableInteractiveClaudeManager(
+function makeManager(row?: FakeSessionRow, db?: Database.Database, installed: string[] = []): TestableInteractiveClaudeManager {
+  const mgr = new TestableInteractiveClaudeManager(
     createMockSessionManager(row),
     createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
     createMockConfigManager(),
     db as Database.Database,
   );
+  mgr.installedPluginIdsStub = installed;
+  return mgr;
 }
 
 const baseOpts = { panelId: 'p1', sessionId: 's1', worktreePath: '/tmp/wt', prompt: 'hi' };
@@ -131,7 +140,7 @@ describe('InteractiveClaudeManager — per-session MCP deny / plugin allow in bu
     expect(args).not.toContain('--disallowed-tools');
   });
 
-  // (iv)
+  // (iv) additive fallback — no installed catalogue → only the selected → true.
   it('threads enabled_plugins_json into the --settings JSON as an enabledPlugins map', () => {
     const mgr = makeManager({ enabled_plugins_json: JSON.stringify(['formatter@acme']) }, db);
     const args = mgr.callBuildCommandArgs(baseOpts);
@@ -140,6 +149,26 @@ describe('InteractiveClaudeManager — per-session MCP deny / plugin allow in bu
     expect(settingsIdx).toBeGreaterThanOrEqual(0);
     const parsed = JSON.parse(args[settingsIdx + 1]) as { enabledPlugins?: Record<string, boolean> };
     expect(parsed.enabledPlugins).toEqual({ 'formatter@acme': true });
+  });
+
+  // (iv-exclusive) selected → true, every OTHER installed plugin → false, so the
+  // interactive session deterministically runs only the selected set (CLI honors
+  // `{id:false}` at the flag tier — verified empirically).
+  it('emits the EXCLUSIVE enabledPlugins map (other installed plugins → false)', () => {
+    const mgr = makeManager(
+      { enabled_plugins_json: JSON.stringify(['formatter@acme']) },
+      db,
+      ['formatter@acme', 'context7@official', 'warp@wm'],
+    );
+    const args = mgr.callBuildCommandArgs(baseOpts);
+
+    const settingsIdx = args.indexOf('--settings');
+    const parsed = JSON.parse(args[settingsIdx + 1]) as { enabledPlugins?: Record<string, boolean> };
+    expect(parsed.enabledPlugins).toEqual({
+      'formatter@acme': true,
+      'context7@official': false,
+      'warp@wm': false,
+    });
   });
 
   // (v)

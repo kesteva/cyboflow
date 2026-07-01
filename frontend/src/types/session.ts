@@ -139,8 +139,9 @@ export interface Session {
    */
   disabledMcpServers?: string[];
   /**
-   * Per-session plugin ALLOW list (migration 039) — the plugin ids force-enabled
-   * for this session. Persisted to sessions.enabled_plugins_json; read at spawn on
+   * Per-session plugin selection (migration 039) — the plugin ids selected for
+   * this session. Persisted to sessions.enabled_plugins_json; enforced
+   * DETERMINISTICALLY (exclusive: selected on, other installed off) at spawn on
    * BOTH substrates (SDK inline settings.enabledPlugins; interactive enabledPlugins
    * via `--settings`). Edited from the composer PluginTogglePill. undefined/[] →
    * inherit file settings. Mirror of main/src/types/session.ts.
@@ -210,12 +211,12 @@ export interface CreateSessionRequest {
    */
   disabledMcpServers?: string[];
   /**
-   * Per-session plugin ALLOW list chosen at session start (Advanced section).
-   * Persisted to sessions.enabled_plugins_json by create-quick and force-enabled
-   * on BOTH substrates (SDK inline settings.enabledPlugins; interactive
-   * enabledPlugins via `--settings`). Omitted/empty → inherit the user's file
-   * plugins. KEEP IN SYNC with the main twin in main/src/types/session.ts
-   * (request-parity rule).
+   * Per-session plugin selection chosen at session start (Advanced section).
+   * Persisted to sessions.enabled_plugins_json by create-quick and enforced
+   * DETERMINISTICALLY (exclusive: selected on, other installed off) on BOTH
+   * substrates (SDK inline settings.enabledPlugins; interactive enabledPlugins via
+   * `--settings`). Omitted/empty → inherit the user's file plugins. KEEP IN SYNC
+   * with the main twin in main/src/types/session.ts (request-parity rule).
    */
   enabledPlugins?: string[];
   projectId?: number;

@@ -75,10 +75,11 @@ export interface Session {
   disabledMcpServers?: string[];
   /**
    * Per-session plugin ALLOW list (migration 039) — parsed from
-   * sessions.enabled_plugins_json: the plugin ids force-enabled for this session.
-   * Read at spawn on BOTH substrates (SDK resolveSessionEnabledPlugins → inline
-   * settings.enabledPlugins; interactive → enabledPlugins via `--settings`).
-   * undefined/[] → inherit the user's file settings. Mirror of
+   * sessions.enabled_plugins_json: the plugin ids selected for this session.
+   * Enforced DETERMINISTICALLY (exclusive) at spawn on BOTH substrates — selected
+   * plugins on, every other installed plugin off, at the flag precedence tier
+   * (SDK inline settings.enabledPlugins; interactive enabledPlugins via
+   * `--settings`). undefined/[] → inherit the user's file settings. Mirror of
    * frontend/src/types/session.ts Session.
    */
   enabledPlugins?: string[];
@@ -149,12 +150,12 @@ export interface CreateSessionRequest {
    */
   disabledMcpServers?: string[];
   /**
-   * Per-session plugin ALLOW list chosen at session start (Advanced section).
-   * Persisted to sessions.enabled_plugins_json by create-quick and force-enabled
-   * on BOTH substrates (SDK inline settings.enabledPlugins; interactive
-   * enabledPlugins via `--settings`). Omitted/empty → inherit the user's file
-   * plugins. KEEP IN SYNC with the frontend twin in frontend/src/types/session.ts
-   * (request-parity rule).
+   * Per-session plugin selection chosen at session start (Advanced section).
+   * Persisted to sessions.enabled_plugins_json by create-quick and enforced
+   * DETERMINISTICALLY (exclusive: selected on, other installed off) on BOTH
+   * substrates (SDK inline settings.enabledPlugins; interactive enabledPlugins via
+   * `--settings`). Omitted/empty → inherit the user's file plugins. KEEP IN SYNC
+   * with the frontend twin in frontend/src/types/session.ts (request-parity rule).
    */
   enabledPlugins?: string[];
   projectId?: number;

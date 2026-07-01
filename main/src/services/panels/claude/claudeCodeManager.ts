@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
-import { readInstalledPluginIds } from '../../../orchestrator/integrations/installedPlugins';
+import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../../orchestrator/integrations/installedPlugins';
 import { resolveClaudeExecutablePath } from './claudeExecutablePath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
@@ -2006,10 +2006,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * false. Our overlay lands at the `flag` precedence tier (user < project <
    * local < flag < policy), so a `false` here overrides a file-enabled `true` —
    * the session runs EXACTLY the selected set (only a managed `policy` can win).
-   * The SDK `Settings.enabledPlugins` value type is `boolean`, and its docstring
-   * documents `false` = disable, so this is contract behavior (not the
-   * undocumented interactive-CLI `false` — the PTY sibling stays additive for
-   * now; see interactiveClaudeManager.resolveSessionEnabledPlugins).
+   * The map itself is built by the shared `buildExclusiveEnabledPluginsMap`
+   * helper — the interactive PTY sibling now emits the SAME exclusive map (the
+   * CLI's honoring of `enabledPlugins:{id:false}` at the flag tier was confirmed
+   * empirically), so the logic lives in one place to prevent drift.
    *
    * Returns `undefined` when the column is missing/empty/malformed — no
    * enabledPlugins key is emitted and file-loaded plugins are untouched
@@ -2020,21 +2020,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
   private resolveSessionEnabledPlugins(sessionId: string): Record<string, boolean> | undefined {
     const raw = this.sessionManager.getDbSession(sessionId)?.enabled_plugins_json;
     if (!raw) return undefined;
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return undefined;
-      const selected = parsed.filter((x): x is string => typeof x === 'string');
-      if (selected.length === 0) return undefined;
-      const selectedSet = new Set(selected);
-      // Universe = every installed plugin ∪ the selection (a selected plugin not
-      // in the installed catalogue is still force-enabled, matching legacy).
-      const map: Record<string, boolean> = {};
-      for (const id of this.getInstalledPluginIds()) map[id] = selectedSet.has(id);
-      for (const id of selected) map[id] = true;
-      return map;
-    } catch {
-      return undefined;
-    }
+    return buildExclusiveEnabledPluginsMap(raw, this.getInstalledPluginIds());
   }
 
   // ---------------------------------------------------------------------------
