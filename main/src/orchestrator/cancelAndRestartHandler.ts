@@ -41,6 +41,16 @@ export interface CancelAndRestartDeps {
    */
   claudeManagerStop: (sessionId: string) => Promise<void>;
   /**
+   * Q1 GUARD (F5): drop the OLD run's PENDING draft entities after it is flipped
+   * terminal.  The SAME sweep index.ts wires into cancelRunHandler
+   * (`deletePendingDraftsForRun` → TaskChangeRouter.deleteRunCreatedEntities,
+   * self-gated on plan_approved_at IS NULL + keyed on run_id).  Without it, a
+   * cancel-and-restart of an unapproved plan-gated run left the old run's drafts
+   * orphaned while the restarted run re-minted a duplicate set.  Optional +
+   * failure-isolated in the handler: a sweep error must never break the restart.
+   */
+  deletePendingDraftsForRun?: (runId: string) => Promise<void>;
+  /**
    * Optional structured logger.  When provided, errors from `claudeManagerStop`
    * are logged as `[cancelAndRestart]` entries before the handler proceeds to
    * the DB writes (the run is conceptually canceled regardless of PTY teardown
@@ -106,7 +116,7 @@ export async function cancelAndRestartHandler(
   runId: string,
   deps: CancelAndRestartDeps,
 ): Promise<CancelAndRestartResult> {
-  const { db, approvalRouter, questionRouter, runQueues, claudeManagerStop, logger } = deps;
+  const { db, approvalRouter, questionRouter, runQueues, claudeManagerStop, deletePendingDraftsForRun, logger } = deps;
 
   // Execute everything inside the per-run PQueue to serialize with any
   // concurrent status changes for this run.
@@ -199,6 +209,21 @@ export async function cancelAndRestartHandler(
     });
 
     cancelAndInsertTx();
+
+    // Step 5b (F5): the OLD run is now terminal ('canceled') — sweep its PENDING
+    // draft entities so a torn-down unapproved plan leaves no orphans while the
+    // restarted run mints a fresh set. Failure-isolated: a sweep error must never
+    // fail the restart (the old run is already canceled + the new run inserted).
+    if (deletePendingDraftsForRun) {
+      try {
+        await deletePendingDraftsForRun(runId);
+      } catch (err: unknown) {
+        logger?.error('[cancelAndRestart] deletePendingDraftsForRun rejected — restart already committed', {
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     // Step 6: Return the new run ID.
     return { newRunId };

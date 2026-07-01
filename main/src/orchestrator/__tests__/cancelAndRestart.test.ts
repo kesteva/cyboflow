@@ -70,6 +70,7 @@ interface OrderSpy {
   clearQuestionsForRun: ReturnType<typeof vi.fn>;     // questionRouter
   claudeManagerStop: ReturnType<typeof vi.fn>;
   worktreeRemove: ReturnType<typeof vi.fn>;
+  deletePendingDraftsForRun: ReturnType<typeof vi.fn>; // F5 sweep
 }
 
 function makeOrderSpy(): OrderSpy {
@@ -91,7 +92,11 @@ function makeOrderSpy(): OrderSpy {
     calls.push('worktreeRemove');
   });
 
-  return { calls, clearPendingForRun, clearQuestionsForRun, claudeManagerStop, worktreeRemove };
+  const deletePendingDraftsForRun = vi.fn(async (_runId: string) => {
+    calls.push('deletePendingDraftsForRun');
+  });
+
+  return { calls, clearPendingForRun, clearQuestionsForRun, claudeManagerStop, worktreeRemove, deletePendingDraftsForRun };
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +115,7 @@ function makeDeps(
     questionRouter: { clearPendingForRun: spy.clearQuestionsForRun },
     runQueues: registry,
     claudeManagerStop: spy.claudeManagerStop,
+    deletePendingDraftsForRun: spy.deletePendingDraftsForRun,
   };
 }
 
@@ -173,6 +179,66 @@ describe('cancelAndRestartHandler', () => {
     const result = await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
     expect('noOp' in result && result.noOp).toBe(true);
     expect(spy.clearQuestionsForRun).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // F5: sweep the OLD run's PENDING drafts after it flips terminal, so a
+  // cancel-and-restart of an unapproved plan-gated run does not leak a duplicate
+  // draft set while the restarted run mints a fresh one.
+  // -------------------------------------------------------------------------
+  it('F5: sweeps the OLD run\'s pending drafts with the OLD runId AFTER it is canceled', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+
+    await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
+
+    // Called with the OLD run's id (not the new run) — the new run mints its own set.
+    expect(spy.deletePendingDraftsForRun).toHaveBeenCalledWith(runId);
+    // The sweep runs AFTER the cancel/insert (kill first, then flip terminal, then sweep).
+    expect(spy.calls.indexOf('deletePendingDraftsForRun')).toBeGreaterThan(
+      spy.calls.indexOf('claudeManagerStop'),
+    );
+    const oldRun = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(oldRun.status).toBe('canceled');
+  });
+
+  it('F5: does NOT sweep on the noOp path (already-terminal run)', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'completed');
+
+    await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
+    expect(spy.deletePendingDraftsForRun).not.toHaveBeenCalled();
+  });
+
+  it('F5: a sweep rejection does NOT break the restart (run still canceled, new run inserted)', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+
+    const deps = makeDeps(db, spy, runQueues);
+    deps.deletePendingDraftsForRun = vi.fn(async () => {
+      throw new Error('sweep boom');
+    });
+
+    const result = await cancelAndRestartHandler(runId, deps);
+    if ('noOp' in result) throw new Error('Expected a real result, got noOp');
+
+    // Restart committed despite the sweep failure.
+    const oldRun = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(oldRun.status).toBe('canceled');
+    const newRun = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(result.newRunId) as { status: string };
+    expect(newRun.status).toBe('queued');
+  });
+
+  it('F5: works without the sweep dep wired (optional — backward compat)', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+
+    const deps = makeDeps(db, spy, runQueues);
+    delete deps.deletePendingDraftsForRun;
+
+    const result = await cancelAndRestartHandler(runId, deps);
+    if ('noOp' in result) throw new Error('Expected a real result, got noOp');
+    expect(result.newRunId).toBeTruthy();
   });
 
   // -------------------------------------------------------------------------

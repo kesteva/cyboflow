@@ -807,6 +807,19 @@ async function initializeServices() {
   const emitRunStatus = (event: RunStatusChangedEvent): void => {
     runStatusEvents.emit('changed', event);
   };
+  // Q1 GUARD (shared sweep): drop a torn-down run's PENDING draft entities (epics +
+  // orphan tasks created pre-approval). deleteRunCreatedEntities self-gates on
+  // plan_approved_at IS NULL + keys on run_id, so an approved run's revealed tasks
+  // (and any non-planner run) are untouched. Resolves the run's project_id here.
+  // Defined in the OUTER setup scope so BOTH the lifecycle 'failed' seam below and
+  // the app.whenReady() cancel / cancel-and-restart dep-bags can share it.
+  const deletePendingDraftsForRun = async (runId: string): Promise<void> => {
+    const r = rawDb
+      .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
+      .get(runId) as { projectId?: number } | undefined;
+    if (!r || typeof r.projectId !== 'number') return;
+    await TaskChangeRouter.getInstance().deleteRunCreatedEntities(r.projectId, runId);
+  };
   const lifecycleTransitions: LifecycleTransitionsLike = {
     running: (runId) => {
       transitionToRunning(rawDb, { runId });
@@ -819,6 +832,16 @@ async function initializeServices() {
     failed: (runId, fromStatus, errorMessage) => {
       transitionToFailed(rawDb, { runId, fromStatus, errorMessage });
       emitRunStatus({ runId, status: 'failed' });
+      // F5: the run reached a FAILED terminal — sweep its pending drafts so a
+      // plan-gated run that errored before approval leaves no orphaned drafts.
+      // Fire-and-forget + fail-isolated: transitionToFailed already committed +
+      // emitted, so a sweep error must never surface out of this void adapter.
+      void deletePendingDraftsForRun(runId).catch((err: unknown) => {
+        cyboflowLogger.error('[Main] failed-seam pending-draft sweep rejected', {
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
     },
     canceled: (runId) => {
       transitionToCanceled(rawDb, { runId });
@@ -1545,12 +1568,27 @@ app.whenReady().then(async () => {
     // until TASK-304 lands. The Cancel-and-restart button therefore stops the Claude
     // SDK run and updates DB rows, but does not yet send deny-replies on the
     // permission socket. See approvalRouter.ts:328–337.
+    // Q1 GUARD sweep (this scope): the initializeServices-scope twin backs the
+    // lifecycle 'failed' seam; the two cannot share a closure (sibling scopes), so
+    // the cancel / cancel-and-restart dep-bags close over this local copy. Drops a
+    // torn-down run's PENDING draft entities — deleteRunCreatedEntities self-gates
+    // on plan_approved_at IS NULL + keys on run_id.
+    const deletePendingDraftsForRun = async (runId: string): Promise<void> => {
+      const r = db
+        .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
+        .get(runId) as { projectId?: number } | undefined;
+      if (!r || typeof r.projectId !== 'number') return;
+      await TaskChangeRouter.getInstance().deleteRunCreatedEntities(r.projectId, runId);
+    };
+
     setCancelAndRestartDeps({
       db,
       approvalRouter: ApprovalRouter.getInstance(),
       questionRouter: QuestionRouter.getInstance(),
       runQueues,
       claudeManagerStop: (sessionId: string) => defaultCliManager.stopPanel(sessionId),
+      // F5: sweep the OLD run's pending drafts after it flips 'canceled'.
+      deletePendingDraftsForRun,
       logger: loggerLike,
     });
     console.log('[Main] cancelAndRestart deps wired');
@@ -1595,16 +1633,9 @@ app.whenReady().then(async () => {
         SprintLaneStore.getInstance().markBatchTerminal(batchId, status),
       // Q1 GUARD: after a successful cancel, drop the run's PENDING draft entities
       // (epics + orphan tasks it created pre-approval) so a torn-down plan leaves
-      // no orphans. deleteRunCreatedEntities self-gates on plan_approved_at IS NULL
-      // + keys on run_id, so an approved run's revealed tasks (and any non-planner
-      // run) are untouched. Resolve the run's project_id here (the helper needs it).
-      deletePendingDraftsForRun: async (runId: string) => {
-        const r = db
-          .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
-          .get(runId) as { projectId?: number } | undefined;
-        if (!r || typeof r.projectId !== 'number') return;
-        await TaskChangeRouter.getInstance().deleteRunCreatedEntities(r.projectId, runId);
-      },
+      // no orphans. Shares the single deletePendingDraftsForRun sweep defined at the
+      // cancelAndRestart wiring above (self-gated on plan_approved_at IS NULL).
+      deletePendingDraftsForRun,
       logger: loggerLike,
     };
     setCancelRunDeps(cancelRunDepsBag);

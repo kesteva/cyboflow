@@ -1050,6 +1050,21 @@ export const runsRouter = router({
       } catch {
         // Routers not initialized (tests) — nothing to clear.
       }
+      // F3 — fail-soft completion reveal. The run ran to COMPLETION; if it was
+      // plan-gated but plan_approved_at is still NULL (a user-edited workflow that
+      // kept the approve-plan step id but used gate labels isApproveAnswer never
+      // matched, or a free-text approval), its draft entities are still PENDING and
+      // would be silently lost on a later dismiss. Reveal them now — visible-but-
+      // unwanted beats invisible-then-deleted. The entry point self-gates on
+      // plan-gated + unapproved and is naturally a no-op when the run's drafts were
+      // already swept (cancel/dismiss/fail/reject deleted the rows). Fail-soft +
+      // awaited AFTER the terminal UPDATE so a reveal error can never un-complete
+      // the run.
+      try {
+        await QuestionRouter.getInstance().promotePendingDraftsForRun(input.runId);
+      } catch {
+        // Router not initialized (tests) / reveal already fail-soft — never block end.
+      }
       // Sprint batch close-out: a batch-bearing run going terminal must flip its
       // sprint_batches row terminal too (mirrors cancel's markBatchTerminal).
       if (run.batchId) {
