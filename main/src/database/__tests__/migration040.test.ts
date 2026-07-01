@@ -1,5 +1,5 @@
 /**
- * Integration tests for migration 038_session_chat_run_id.sql
+ * Integration tests for migration 040_session_chat_run_id.sql
  * (the pure gate vehicle — permission-mode redesign §6, Slice 3).
  *
  * Applies 006_cyboflow_schema.sql (workflows + workflow_runs) → a minimal inline
@@ -57,10 +57,10 @@ function applyBase(): Database.Database {
   return db;
 }
 
-describe('Migration 038: sessions.chat_run_id gate vehicle', () => {
+describe('Migration 040: sessions.chat_run_id gate vehicle', () => {
   it('adds the chat_run_id column (nullable, default NULL)', () => {
     const db = applyBase();
-    db.exec(readMigration('038_session_chat_run_id.sql'));
+    db.exec(readMigration('040_session_chat_run_id.sql'));
 
     const cols = db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>;
     expect(cols.some((c) => c.name === 'chat_run_id')).toBe(true);
@@ -73,7 +73,7 @@ describe('Migration 038: sessions.chat_run_id gate vehicle', () => {
     seedRun(db, 'quick-run-1', 'wf-quick');
     db.prepare(`INSERT INTO sessions (id, run_id) VALUES ('sess-quick', 'quick-run-1')`).run();
 
-    db.exec(readMigration('038_session_chat_run_id.sql'));
+    db.exec(readMigration('040_session_chat_run_id.sql'));
 
     const row = db
       .prepare('SELECT chat_run_id FROM sessions WHERE id = ?')
@@ -88,7 +88,7 @@ describe('Migration 038: sessions.chat_run_id gate vehicle', () => {
     seedRun(db, 'flow-run-1', 'wf-flow');
     db.prepare(`INSERT INTO sessions (id, run_id) VALUES ('sess-flow', 'flow-run-1')`).run();
 
-    db.exec(readMigration('038_session_chat_run_id.sql'));
+    db.exec(readMigration('040_session_chat_run_id.sql'));
 
     const row = db
       .prepare('SELECT chat_run_id FROM sessions WHERE id = ?')
@@ -101,7 +101,7 @@ describe('Migration 038: sessions.chat_run_id gate vehicle', () => {
     const db = applyBase();
     db.prepare(`INSERT INTO sessions (id, run_id) VALUES ('sess-none', NULL)`).run();
 
-    db.exec(readMigration('038_session_chat_run_id.sql'));
+    db.exec(readMigration('040_session_chat_run_id.sql'));
 
     const row = db
       .prepare('SELECT chat_run_id FROM sessions WHERE id = ?')

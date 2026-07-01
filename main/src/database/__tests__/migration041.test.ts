@@ -1,12 +1,12 @@
 /**
- * Integration tests for migration 039_backfill_run_session_id.sql
+ * Integration tests for migration 041_backfill_run_session_id.sql
  * (session-invariant history cleanup — re-run 019's recovery for runs that became
  * NULL after 019, e.g. SDK quick sentinels created post-019).
  *
  * Applies 006_cyboflow_schema.sql → 011_workflow_step_tracking.sql → a minimal
  * inline `sessions` table (006 does not create one, but the backfill UPDATE reads
  * sessions.id / sessions.run_id) → 019_workflow_run_session_id.sql (which adds the
- * session_id column) → 039_backfill_run_session_id.sql against an in-memory SQLite
+ * session_id column) → 041_backfill_run_session_id.sql against an in-memory SQLite
  * instance. This proves the SQL file itself is correct — not a hard-coded inline
  * string — and that, unlike 019's ALTER, 039 is a pure UPDATE that is STRICTLY
  * idempotent (re-running it never throws and is data-stable).
@@ -63,7 +63,7 @@ function applyBase(): Database.Database {
   return db;
 }
 
-describe('Migration 039: backfill workflow_runs.session_id (idempotent)', () => {
+describe('Migration 041: backfill workflow_runs.session_id (idempotent)', () => {
   it('backfills a post-019 NULL session_id from an existing sessions.run_id back-reference', () => {
     const db = applyBase();
     seedWorkflow(db);
@@ -76,7 +76,7 @@ describe('Migration 039: backfill workflow_runs.session_id (idempotent)', () => 
     ).run();
     db.prepare(`INSERT INTO sessions (id, run_id) VALUES ('sess-1', 'wr-x')`).run();
 
-    db.exec(readMigration('039_backfill_run_session_id.sql'));
+    db.exec(readMigration('041_backfill_run_session_id.sql'));
 
     const row = db
       .prepare('SELECT session_id FROM workflow_runs WHERE id = ?')
@@ -98,13 +98,13 @@ describe('Migration 039: backfill workflow_runs.session_id (idempotent)', () => 
     db.prepare(`INSERT INTO sessions (id, run_id) VALUES ('sess-1', 'wr-x')`).run();
 
     // First run backfills.
-    db.exec(readMigration('039_backfill_run_session_id.sql'));
+    db.exec(readMigration('041_backfill_run_session_id.sql'));
 
     // Re-running the pure UPDATE must NOT throw (contrast 019's ALTER) and must
     // leave the value unchanged.
     expect(() => {
-      db.exec(readMigration('039_backfill_run_session_id.sql'));
-      db.exec(readMigration('039_backfill_run_session_id.sql'));
+      db.exec(readMigration('041_backfill_run_session_id.sql'));
+      db.exec(readMigration('041_backfill_run_session_id.sql'));
     }).not.toThrow();
 
     const row = db
@@ -128,7 +128,7 @@ describe('Migration 039: backfill workflow_runs.session_id (idempotent)', () => 
     ).run();
     db.prepare(`INSERT INTO sessions (id, run_id) VALUES ('sess-other', 'wr-y')`).run();
 
-    db.exec(readMigration('039_backfill_run_session_id.sql'));
+    db.exec(readMigration('041_backfill_run_session_id.sql'));
 
     const row = db
       .prepare('SELECT session_id FROM workflow_runs WHERE id = ?')
@@ -149,7 +149,7 @@ describe('Migration 039: backfill workflow_runs.session_id (idempotent)', () => 
        VALUES ('wr-orphan', 'wf-1', 1, 'queued', 'default')`,
     ).run();
 
-    db.exec(readMigration('039_backfill_run_session_id.sql'));
+    db.exec(readMigration('041_backfill_run_session_id.sql'));
 
     const row = db
       .prepare('SELECT session_id FROM workflow_runs WHERE id = ?')

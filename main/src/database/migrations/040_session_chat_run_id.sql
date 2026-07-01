@@ -1,4 +1,4 @@
--- 038_session_chat_run_id.sql
+-- 040_session_chat_run_id.sql
 -- Persistent chat-sentinel gate vehicle. Independent of sessions.run_id (which
 -- keeps pointing at the latest FLOW run for display/diff/close-out). Chat turns
 -- gate on chat_run_id; flow steps gate on the flow run itself.
