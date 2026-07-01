@@ -520,20 +520,19 @@ export default function SessionStartWizard(): React.JSX.Element {
       // Fast mode is Opus-only; never request it for another model even if the
       // toggle was left on before the model was switched.
       //
-      // The MCP deny / plugin allow selection is SDK-only (enforced at the SDK
-      // spawn; the PTY substrate has no equivalent guard). The Advanced controls
-      // are hidden for an interactive launch, but a selection made under SDK and
-      // then switched to Interactive would still linger in state — drop it here so
-      // an inert deny-set is never persisted onto a PTY session.
-      const sdkLaunch = substrate === 'sdk';
+      // The MCP deny / plugin allow selection is enforced on BOTH substrates now:
+      // SDK spawn (composeMcpServers delete + strictMcpConfig + disallowedTools) and
+      // interactive spawn (--disallowed-tools mcp__<srv> + disabledMcpjsonServers +
+      // enabledPlugins via --settings). Pass the selection unconditionally so a PTY
+      // session honors the same deny-set / plugin-allow as an SDK one.
       void startQuickSession(
         permissionMode,
         substrate,
         undefined,
         model,
         isOpusModel(model) && fastMode,
-        sdkLaunch ? disabledMcpServers : [],
-        sdkLaunch ? enabledPlugins : [],
+        disabledMcpServers,
+        enabledPlugins,
       );
       return;
     }
@@ -807,17 +806,17 @@ export default function SessionStartWizard(): React.JSX.Element {
               />
             )}
 
-            {/* Advanced (QUICK + SDK only): MCP / plugin selection. These are a
-                session-START decision — the deny-list is enforced at the first SDK
-                spawn (composeMcpServers delete + strictMcpConfig + disallowedTools),
-                so toggling mid-conversation was confusing and could leak a disabled
-                server back via the CLI's settingSources auto-load. The enforcement
-                path is SDK-only — the interactive PTY substrate has no equivalent
-                spawn-time guard yet — so the controls are hidden when Interactive is
-                selected (handleStart also drops any stale selection for a PTY
-                launch). Collapsed by default; the pills are controlled (no sessionId
-                yet → wizard owns the state and threads it into createQuick). */}
-            {selection.kind === 'quick' && substrate === 'sdk' && (
+            {/* Advanced (QUICK, both substrates): MCP / plugin selection. These are
+                a session-START decision — the deny-list is enforced at the first
+                spawn, so toggling mid-conversation was confusing and could leak a
+                disabled server back via the CLI's settingSources auto-load. Both
+                substrates now enforce the selection: SDK (composeMcpServers delete +
+                strictMcpConfig + disallowedTools) and interactive PTY
+                (--disallowed-tools mcp__<srv> + disabledMcpjsonServers +
+                enabledPlugins via --settings), so the controls show for BOTH quick
+                substrates. Collapsed by default; the pills are controlled (no
+                sessionId yet → wizard owns the state and threads it into createQuick). */}
+            {selection.kind === 'quick' && (
               <div className="rounded-button border border-border-secondary bg-surface-secondary">
                 <button
                   type="button"
