@@ -106,6 +106,17 @@ function makeConfigManager(
 
 /** Exposes the private buildSdkOptions + makeAutoModePreToolUseHook for tests. */
 class TestableClaudeCodeManager extends ClaudeCodeManager {
+  /**
+   * Test-controlled installed-plugin universe for the deterministic exclusive
+   * enabledPlugins map. Defaults to [] (no installed plugins → the resolver
+   * degrades to additive: only the selected `true` entries, nothing to disable),
+   * which keeps every non-plugin test hermetic without touching ~/.claude.
+   */
+  public installedPluginIdsStub: string[] = [];
+  protected override getInstalledPluginIds(): string[] {
+    return this.installedPluginIdsStub;
+  }
+
   publicBuildSdkOptions(options: {
     panelId: string;
     sessionId: string;
@@ -821,10 +832,14 @@ describe('ClaudeCodeManager.maybeFoldAutoDenyVisibility — native-auto deny vis
 });
 
 // ---------------------------------------------------------------------------
-// Per-session plugin enablement (migration 036 / Slice 4 — read-at-spawn).
-// buildSdkOptions reads sessions.enabled_plugins_json and merges a {id:true} map
-// into the SAME inline `settings` overlay that holds the fastMode pins. An empty
-// or missing allow-list emits NO enabledPlugins key; settingSources is untouched.
+// Per-session plugin enablement (migration 039 — read-at-spawn, DETERMINISTIC).
+// buildSdkOptions reads sessions.enabled_plugins_json and merges an EXCLUSIVE
+// enabledPlugins map into the SAME inline `settings` overlay that holds the
+// fastMode pins: every SELECTED plugin → true, every OTHER installed plugin →
+// false (so a file-enabled plugin is deterministically disabled at the flag
+// tier). An empty or missing allow-list emits NO enabledPlugins key; when no
+// plugins are installed it degrades to additive (selected `true` only).
+// settingSources is untouched.
 // ---------------------------------------------------------------------------
 
 describe('ClaudeCodeManager.buildSdkOptions — per-session enabledPlugins overlay', () => {
@@ -845,7 +860,8 @@ describe('ClaudeCodeManager.buildSdkOptions — per-session enabledPlugins overl
   });
 
   // Manager whose getDbSession returns the given enabled_plugins_json (or none).
-  function makeManager(enabledPluginsJson?: string): TestableClaudeCodeManager {
+  // `installed` seeds the deterministic exclusive map's installed universe.
+  function makeManager(enabledPluginsJson?: string, installed: string[] = []): TestableClaudeCodeManager {
     const sessionManager = {
       getDbSession: vi.fn(() =>
         enabledPluginsJson === undefined
@@ -856,13 +872,17 @@ describe('ClaudeCodeManager.buildSdkOptions — per-session enabledPlugins overl
       getProjectById: vi.fn(() => undefined),
       updateSession: vi.fn(),
     } as unknown as SessionManager;
-    return new TestableClaudeCodeManager(sessionManager, logger as unknown as Logger, makeConfigManager(), db);
+    const mgr = new TestableClaudeCodeManager(sessionManager, logger as unknown as Logger, makeConfigManager(), db);
+    mgr.installedPluginIdsStub = installed;
+    return mgr;
   }
 
   // dontAsk → no PreToolUse hook / no FS, so buildSdkOptions stays hermetic.
   const baseOpts = { panelId: 'p', sessionId: 's', worktreePath: '/tmp/w', prompt: 'go', agentPermissionMode: 'dontAsk' as const };
 
-  it('enabled_plugins_json → settings.enabledPlugins {id:true}, settingSources untouched', async () => {
+  it('additive fallback: with NO installed catalogue, only the selected plugins → true', async () => {
+    // Empty installed universe (nothing to disable) → the map holds only the
+    // selected `true` entries (matches the legacy additive overlay).
     const mgr = makeManager(JSON.stringify(['acme@market', 'foo@bar']));
     const opts = await mgr.publicBuildSdkOptions(baseOpts);
 
@@ -873,6 +893,33 @@ describe('ClaudeCodeManager.buildSdkOptions — per-session enabledPlugins overl
     expect(settings.fastModePerSessionOptIn).toBe(true);
     // settingSources is NOT touched by the plugin overlay.
     expect(opts.settingSources).toEqual(['user', 'project']);
+  });
+
+  it('EXCLUSIVE map: selected plugins → true, every OTHER installed plugin → false', async () => {
+    const mgr = makeManager(
+      JSON.stringify(['acme@market']),
+      ['acme@market', 'foo@bar', 'other@mkt', 'third@mkt'],
+    );
+    const opts = await mgr.publicBuildSdkOptions(baseOpts);
+
+    const settings = opts.settings as Record<string, unknown>;
+    // acme selected → true; the three unselected-but-installed → false, so the
+    // session deterministically runs ONLY acme regardless of file-enabled state.
+    expect(settings.enabledPlugins).toEqual({
+      'acme@market': true,
+      'foo@bar': false,
+      'other@mkt': false,
+      'third@mkt': false,
+    });
+    expect(opts.settingSources).toEqual(['user', 'project']);
+  });
+
+  it('a SELECTED plugin absent from the installed catalogue is still force-enabled (true)', async () => {
+    const mgr = makeManager(JSON.stringify(['ghost@mkt']), ['foo@bar']);
+    const opts = await mgr.publicBuildSdkOptions(baseOpts);
+
+    const settings = opts.settings as Record<string, unknown>;
+    expect(settings.enabledPlugins).toEqual({ 'ghost@mkt': true, 'foo@bar': false });
   });
 
   it('empty [] allow-list → no enabledPlugins key emitted', async () => {

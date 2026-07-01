@@ -1651,8 +1651,13 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * `undefined` when the column is missing/empty/malformed — so no enabledPlugins
    * key is emitted and file-loaded plugins are untouched (byte-identical default).
    *
-   * MIRRORS ClaudeCodeManager.resolveSessionEnabledPlugins (the SDK twin) VERBATIM —
-   * keep the two in sync (SDK parity).
+   * ADDITIVE (force-enable) only — INTENTIONALLY diverges from the SDK twin,
+   * which now emits the deterministic EXCLUSIVE map (selected→true, other
+   * installed→false). The exclusive form relies on `enabledPlugins: { id: false }`
+   * disabling an inherited plugin; that is documented+typed on the SDK Settings
+   * schema but UNDOCUMENTED for the interactive `--settings` CLI path. This stays
+   * additive until an empirical test confirms the CLI honors `false` at the flag
+   * tier — then switch this to the shared exclusive builder for parity.
    */
   private resolveSessionEnabledPlugins(sessionId: string): Record<string, boolean> | undefined {
     const raw = this.sessionManager.getDbSession(sessionId)?.enabled_plugins_json;
