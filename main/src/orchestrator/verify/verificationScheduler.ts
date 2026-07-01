@@ -434,6 +434,18 @@ export type OnVerdict = (args: {
 export const DEFAULT_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
+ * How long a backend's `healthCheck()` result is memoized (R2 #2). The health probe
+ * is the SECOND selection gate (after registry presence): an unregistered OR
+ * unhealthy backend is treated identically (dropped from the candidate chain). To
+ * avoid re-probing every backend on every drain — a peekaboo TCC probe or a chromium
+ * install check is not free — the scheduler caches each backend's result for this
+ * TTL, keyed by backend id. A later-granted TCC / freshly-installed chromium is
+ * picked up once the TTL expires and the next drain re-probes. Exported so the
+ * regression test can drive the memo boundary with an injected clock.
+ */
+export const HEALTH_CHECK_MEMO_TTL_MS = 60 * 1000;
+
+/**
  * The default SSIM baseline-match threshold (S5). A captured PNG scoring at or above
  * this against its accepted baseline is a cheap deterministic PASS that SKIPS the
  * paid VLM (verdictSource:'ssim_match'); below it the request falls through to the
@@ -513,6 +525,13 @@ export interface VerificationSchedulerDeps {
    * scheduler stamps the threshold-derived PASS, so it owns the gate.)
    */
   baselineMatchThreshold?: number;
+  /**
+   * Injectable monotonic clock (ms) for the healthCheck memo TTL (R2 #2). Defaults
+   * to `Date.now`. Tests pass a controllable clock to exercise the memo boundary
+   * (two drains within the TTL probe once; after expiry the next drain re-probes)
+   * without a real 60s wait.
+   */
+  now?: () => number;
 }
 
 // ---------------------------------------------------------------------------
@@ -552,6 +571,15 @@ export class VerificationScheduler {
   private readonly devServerContextResolver?: DevServerContextResolver;
   private readonly baselinePreDiff?: BaselinePreDiffResolver;
   private readonly baselineMatchThreshold: number;
+  private readonly now: () => number;
+
+  /**
+   * Per-backend healthCheck memo (R2 #2): backend id → { ok, at } where `at` is the
+   * `now()` timestamp the probe ran. A hit within HEALTH_CHECK_MEMO_TTL_MS is reused;
+   * a miss (or an expired entry) re-probes. This is the second selection gate that
+   * makes an unhealthy backend behave exactly like an unregistered one.
+   */
+  private readonly healthMemo = new Map<VisualBackendId, { ok: boolean; at: number }>();
 
   /** True while a drain pass is in flight — coalesces concurrent nudges into one loop. */
   private draining = false;
@@ -581,6 +609,7 @@ export class VerificationScheduler {
     this.devServerContextResolver = deps.devServerContextResolver;
     this.baselinePreDiff = deps.baselinePreDiff;
     this.baselineMatchThreshold = deps.baselineMatchThreshold ?? DEFAULT_SSIM_MATCH_THRESHOLD;
+    this.now = deps.now ?? (() => Date.now());
   }
 
   // --------------------------------------------------------------------------
@@ -843,19 +872,19 @@ export class VerificationScheduler {
     const input = this.hydrateInput(parsed, resolved?.deliverable);
 
     const chain = this.parseChain(row.chain_json);
-    // Live, present, capability-ordered backends for this request, cheapest first.
-    const usable = chain
-      .map((id) => this.backends[id])
-      .filter((b): b is VisualBackend => b !== undefined)
-      .sort((a, b) => a.rung - b.rung);
-
-    if (usable.length === 0) {
-      // Empty chain OR every listed backend absent from the registry — missing
-      // precondition. SKIP, never fail (a missing TCC grant must not wedge a sprint).
+    // Select the candidate backends through the three ordered gates (registry →
+    // health → dev-server-need), cheapest rung first. An empty result is a MISSING
+    // PRECONDITION and resolves 'skipped' (never a fabricated FAIL) with a reason.
+    const { candidates, skipReason } = await this.selectCandidates(chain, input);
+    if (candidates.length === 0) {
+      // Empty/absent/unhealthy chain OR a dev-server input with no port-capable
+      // backend — a missing precondition. SKIP, never fail (a missing TCC grant /
+      // uninstalled chromium / static-only chain for a startable deliverable must
+      // not wedge a sprint with a blocking finding + merge-gate loopbacks).
       await this.markTerminalAndDeliver(
         row,
         'skipped',
-        { error: chain.length === 0 ? 'empty chain' : 'no listed backend available' },
+        { error: skipReason ?? 'no usable backend' },
         undefined,
         [],
         input,
@@ -866,7 +895,7 @@ export class VerificationScheduler {
     // Pick the cheapest backend whose required lease is currently free.
     let chosen: VisualBackend | null = null;
     let lease: LeaseHandle | null = null;
-    for (const backend of usable) {
+    for (const backend of candidates) {
       const acquired = await this.acquireLeaseFor(backend, input);
       if (acquired) {
         chosen = backend;
@@ -880,7 +909,7 @@ export class VerificationScheduler {
       // block; we retry on the next drain.
       this.logger?.debug('[VerificationScheduler] no free lease; leaving queued', {
         requestId: row.id,
-        chain: usable.map((b) => b.id),
+        chain: candidates.map((b) => b.id),
       });
       return { work: null };
     }
@@ -906,6 +935,120 @@ export class VerificationScheduler {
     }
     this.markRunning(row.id, chosen.id);
     return { work: this.runChosen(row, type, input, chosen, lease, resolved) };
+  }
+
+  /**
+   * R2 — the pure, ordered backend-selection guard. Given the request's stamped
+   * chain + its HYDRATED input, return the candidate backends (cheapest rung first)
+   * the scheduler may lease, applying three gates IN ORDER:
+   *
+   *  (1) REGISTRY — only backends present in the injected registry survive (a
+   *      host-dep-unavailable backend is simply absent). Cheapest rung first.
+   *  (2) HEALTH (R2 #2) — only backends whose memoized `healthCheck()` currently
+   *      reports healthy survive. This is the documented SECOND gate: an unhealthy
+   *      backend (declined peekaboo TCC / uninstalled chromium) is treated EXACTLY
+   *      like an unregistered one, so its capture is never attempted (a blocking
+   *      FAIL for an environment problem is turned into a clean SKIP instead).
+   *  (3) DEV-SERVER (R2 #1) — when the hydrated input declares a dev server
+   *      (non-empty `start`), the request CANNOT be satisfied by a backend that
+   *      cannot host one: restrict to backends whose `requiredLease(input)` is a
+   *      port lease (the Rung-1 Playwright path that pairs with the scheduler-owned
+   *      dev server). Otherwise capturePage (rung 0, null lease — first in the
+   *      static/responsive chains) would capture the deliverable's `url` against a
+   *      port NOTHING listens on → ERR_CONNECTION_REFUSED → a false FAIL. For a
+   *      STATIC input (no `start`) the chain is left untouched, so capturePage stays
+   *      first and the fast path is byte-identical.
+   *
+   * When a gate empties the chain, `candidates` is `[]` and `skipReason` explains
+   * which precondition is missing — the caller resolves the request 'skipped'
+   * (never 'failed'), matching the existing empty-chain SKIP semantics.
+   */
+  private async selectCandidates(
+    chain: VisualBackendId[],
+    input: VerificationRequestInput,
+  ): Promise<{ candidates: VisualBackend[]; skipReason: string | null }> {
+    if (chain.length === 0) {
+      return { candidates: [], skipReason: 'empty chain' };
+    }
+    // (1) REGISTRY — present backends, cheapest rung first.
+    const registered = chain
+      .map((id) => this.backends[id])
+      .filter((b): b is VisualBackend => b !== undefined)
+      .sort((a, b) => a.rung - b.rung);
+    if (registered.length === 0) {
+      return { candidates: [], skipReason: 'no listed backend available' };
+    }
+    // (2) HEALTH — drop any backend whose memoized probe is unhealthy.
+    const healthy: VisualBackend[] = [];
+    for (const backend of registered) {
+      if (await this.isBackendHealthy(backend)) {
+        healthy.push(backend);
+      }
+    }
+    if (healthy.length === 0) {
+      return { candidates: [], skipReason: 'no healthy backend available' };
+    }
+    // (3) DEV-SERVER — a startable deliverable needs a port-capable backend.
+    if (this.inputDeclaresDevServer(input)) {
+      const portCapable = healthy.filter((b) => this.leaseIsPort(b.requiredLease(input)));
+      if (portCapable.length === 0) {
+        return {
+          candidates: [],
+          skipReason: 'dev server required but no port-capable backend available',
+        };
+      }
+      return { candidates: portCapable, skipReason: null };
+    }
+    return { candidates: healthy, skipReason: null };
+  }
+
+  /**
+   * R2 #2 — memoized health probe. Returns the backend's cached healthCheck result
+   * when it is within HEALTH_CHECK_MEMO_TTL_MS of the last probe, else re-probes and
+   * caches. Fail-soft: a `healthCheck()` that THROWS/rejects counts as UNHEALTHY (the
+   * backend is dropped from selection, exactly like an unregistered one) and is logged
+   * at debug — a transient probe failure must never surface as a request FAIL.
+   */
+  private async isBackendHealthy(backend: VisualBackend): Promise<boolean> {
+    const nowMs = this.now();
+    const cached = this.healthMemo.get(backend.id);
+    if (cached && nowMs - cached.at < HEALTH_CHECK_MEMO_TTL_MS) {
+      return cached.ok;
+    }
+    let ok: boolean;
+    try {
+      ok = await backend.healthCheck();
+    } catch (err) {
+      this.logger?.debug('[VerificationScheduler] backend healthCheck threw; treating as unhealthy', {
+        backend: backend.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      ok = false;
+    }
+    this.healthMemo.set(backend.id, { ok, at: nowMs });
+    return ok;
+  }
+
+  /**
+   * True when the request's hydrated input declares a scheduler-owned dev server —
+   * i.e. carries a non-empty `start` command. This is the SAME signal the Rung-1
+   * Playwright backend's requiredLease reads; the scheduler mirrors it (it cannot
+   * import the service-side helper — standalone-typecheck invariant) so backend
+   * selection and lease acquisition agree.
+   */
+  private inputDeclaresDevServer(input: VerificationRequestInput): boolean {
+    return typeof input.start === 'string' && input.start.trim().length > 0;
+  }
+
+  /**
+   * True when a backend's requiredLease name is a dev-server PORT lease — either the
+   * VERIFY_PORT_ANY sentinel ("any free pooled port") or a concrete 'verify:port:<p>'.
+   * A port lease is the only kind that can host the scheduler-owned dev server, so it
+   * is the discriminator the dev-server selection gate keys off. A null lease (rung 0)
+   * or the 'verify:screen'/'verify:sim:' leases are NOT port leases.
+   */
+  private leaseIsPort(lease: string | null): boolean {
+    return lease === VERIFY_PORT_ANY || (lease !== null && lease.startsWith('verify:port:'));
   }
 
   /**
@@ -948,14 +1091,21 @@ export class VerificationScheduler {
    * (referentially identical), so a non-dev-server request is byte-identical to
    * before this layer.
    *
-   * Only the fields that exist on VerificationRequestInput are hydrated:
+   * Every deliverable field with a VerificationRequestInput counterpart is hydrated
+   * (each only when the agent left it absent/empty):
    *   - `start` — the SOLE signal the Rung-1 Playwright backend's requiredLease(input)
-   *     reads to ask for a `verify:port` lease (the whole point of this slice). The
+   *     reads to ask for a `verify:port` lease (and the dev-server selection gate). The
    *     deliverable's build/readyWhen stay on the `deliverable` (the provider reads
-   *     them off its `config` arg in maybeSpawnDevServer) — they are NOT input fields,
-   *     so no shared-type change is needed.
-   *   - `assertions` — explicit deterministic checks (decision #3). Filled only when
-   *     the agent passed none, so an inline assertion list is never clobbered.
+   *     them off its `config` arg in maybeSpawnDevServer) — they are NOT input fields.
+   *   - `assertions` — explicit deterministic checks (decision #3).
+   *   - `interactions` — the ordered DOM steps for interactive-web-behavior. WITHOUT
+   *     this the Playwright backend screenshots the PRE-interaction page while the VLM
+   *     judges against the post-interaction intent → false FAILs + loopbacks.
+   *   - `viewports` — the responsive widths for responsive-multi-viewport.
+   *   - `baselineKey` — the golden-baseline selector for the SSIM pre-diff, falling
+   *     back to the deliverable `id` (the STABLE cross-run key that makes
+   *     accept-as-baseline round-trippable). Without hydration a verify.json baseline
+   *     never engages the SSIM pre-diff.
    */
   private hydrateInput(
     input: VerificationRequestInput,
@@ -978,6 +1128,35 @@ export class VerificationScheduler {
     ) {
       hydrated.assertions = deliverable.assertions;
       changed = true;
+    }
+    // `interactions` — ordered DOM steps for interactive-web-behavior. Only fill when
+    // the agent passed none, so an inline interaction list is never clobbered.
+    if (
+      (hydrated.interactions === undefined || hydrated.interactions.length === 0) &&
+      deliverable.interactions &&
+      deliverable.interactions.length > 0
+    ) {
+      hydrated.interactions = deliverable.interactions;
+      changed = true;
+    }
+    // `viewports` — responsive widths. Only fill when the agent passed none.
+    if (
+      (hydrated.viewports === undefined || hydrated.viewports.length === 0) &&
+      deliverable.viewports &&
+      deliverable.viewports.length > 0
+    ) {
+      hydrated.viewports = deliverable.viewports;
+      changed = true;
+    }
+    // `baselineKey` — golden-baseline selector for the SSIM pre-diff. Fill only when
+    // the agent left it absent; fall back to the deliverable id (the STABLE cross-run
+    // key that makes accept-as-baseline round-trippable — R7 builds on this).
+    if (hydrated.baselineKey === undefined || hydrated.baselineKey.trim().length === 0) {
+      const key = deliverable.baselineKey ?? deliverable.id;
+      if (typeof key === 'string' && key.trim().length > 0) {
+        hydrated.baselineKey = key;
+        changed = true;
+      }
     }
     return changed ? hydrated : input;
   }

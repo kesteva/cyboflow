@@ -24,6 +24,7 @@ import {
   verifyPortLease,
   sprintVerifyBatchLease,
   BATCH_MUTEX_MAX_QUEUED_HOLDERS,
+  HEALTH_CHECK_MEMO_TTL_MS,
   verificationEvents,
   verificationChannel,
   type DevServerProvider,
@@ -352,7 +353,13 @@ describe('VerificationScheduler — dev-server seam (S2)', () => {
     expect(sink.ctx?.input.url).toBe('http://placeholder');
   });
 
-  it('does NOT spawn a dev server for a rung-0 (null) lease backend', async () => {
+  it('a STARTABLE deliverable routed to a rung-0 (null lease) chain resolves SKIPPED, not a static capture (R2 #1)', async () => {
+    // R2 #1: a deliverable with a `start` command needs a port-capable backend (the
+    // scheduler-owned dev server binds a leased port). capturePage (rung 0, null
+    // lease) cannot host one — pre-fix it captured the deliverable's url against a
+    // port NOTHING listens on → connection refused → a false FAIL. The dev-server
+    // selection gate now restricts the chain to port-capable backends; a chain with
+    // none resolves 'skipped' (missing precondition), and capture is never attempted.
     const spawnSpy = vi.fn();
     const provider: DevServerProvider = {
       spawn: async (args): Promise<DevServerHandle> => {
@@ -377,11 +384,16 @@ describe('VerificationScheduler — dev-server seam (S2)', () => {
       }),
     });
 
-    enqueueRow(db, { chain: ['capturePage'], url: 'http://placeholder' });
+    const id = enqueueRow(db, { chain: ['capturePage'], url: 'http://placeholder' });
     await sched.drain();
 
     expect(spawnSpy).not.toHaveBeenCalled();
-    expect(sink.ctx?.input.url).toBe('http://placeholder');
+    // No capture ran (the static url was NEVER captured against a dead port)...
+    expect(sink.ctx).toBeUndefined();
+    // ...the request is a clean SKIP with the dev-server precondition detail.
+    const { status, error } = rowStatus(db, id);
+    expect(status).toBe('skipped');
+    expect(error).toMatch(/dev server required but no port-capable backend/);
   });
 
   it('does NOT spawn when no devServerProvider is injected (static-capture deployment)', async () => {
@@ -1853,5 +1865,366 @@ describe('VerificationScheduler — R1 reliability: cancel-safe transitions (fin
     expect(rowStatus(db, id).status).toBe('timeout'); // NOT overwritten with passed
     expect(delivered).toBe(0); // NO onVerdict delivery (no finding / lane write)
     expect(events.length).toBe(0); // NO terminal event emitted
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R2 — dev-server-aware selection + healthCheck gate + full hydration.
+//
+// Finding #1: capturePage (rung 0, null lease) is first in the static/responsive
+//   chains, so a startable deliverable was captured by capturePage against a dead
+//   port → false FAIL. The dev-server gate restricts a startable request to
+//   port-capable backends (or SKIPs when none).
+// Finding #2: healthCheck() is now the SECOND selection gate (memoized) — an
+//   unhealthy backend is dropped like an unregistered one; an emptied chain SKIPs.
+// Finding #3: hydrateInput fills interactions/viewports/baselineKey too (agent
+//   values win; baselineKey falls back to the deliverable id).
+// ---------------------------------------------------------------------------
+
+/** Insert one queued request with an arbitrary agent input object. */
+function enqueueRowRaw(
+  dbX: Database.Database,
+  opts: { chain: VisualBackendId[]; input: Record<string, unknown>; type?: string },
+): string {
+  const id = `vr_${Math.random().toString(36).slice(2)}`;
+  dbX.prepare(
+    `INSERT INTO verification_requests
+       (id, run_id, project_id, status, verify_type, deliverable_json, chain_json, attempt)
+     VALUES (?, 'run-1', 1, 'queued', ?, ?, ?, 0)`,
+  ).run(
+    id,
+    opts.type ?? 'static-render-snapshot',
+    JSON.stringify({ intent: 'looks right', ...opts.input }),
+    JSON.stringify(opts.chain),
+  );
+  return id;
+}
+
+describe('VerificationScheduler — dev-server-aware selection (R2 #1)', () => {
+  it('a hydrated start makes the scheduler choose the port-capable playwright over a registered+healthy capturePage', async () => {
+    const mutex = new Mutex();
+    const leasePool = new ResourceLeasePool(mutex);
+    let spawnPort: number | undefined;
+    const provider: DevServerProvider = {
+      spawn: async (args): Promise<DevServerHandle> => {
+        spawnPort = args.port;
+        return { baseUrl: `http://localhost:${args.port}`, release: async () => {} };
+      },
+    };
+
+    // capturePage: rung 0, null lease — registered AND healthy, first in the chain.
+    const capSink: { ctx?: CaptureContext } = {};
+    const capturePage = fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink: capSink });
+    // playwright: rung 1, port lease — the ONLY backend that can host the dev server.
+    const pwSink: { ctx?: CaptureContext } = {};
+    const playwright = fakeBackend({ id: 'playwright', rung: 1, lease: 'verify:port:5173', sink: pwSink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage, playwright },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      leasePool,
+      devServerProvider: provider,
+      devServerContextResolver: async () => ({
+        cwd: '/tmp/wt',
+        deliverable: { id: 'web', start: 'npm run dev -- --port ${PORT}' },
+      }),
+    });
+
+    const id = enqueueRowRaw(db, { chain: ['capturePage', 'playwright'], input: { url: 'http://placeholder' } });
+    await sched.drain();
+
+    // The dev server spawned on the leased port; playwright captured, capturePage did NOT.
+    expect(spawnPort).toBe(5173);
+    expect(pwSink.ctx).toBeDefined();
+    expect(capSink.ctx).toBeUndefined();
+    expect(rowStatus(db, id).status).toBe('passed');
+  });
+
+  it('a startable request whose only port-capable backend is UNREGISTERED resolves skipped (not failed), no capture', async () => {
+    // chain lists playwright but only capturePage is registered → after the dev-server
+    // restriction there is no port-capable backend → SKIP with a precondition detail.
+    const capSink: { ctx?: CaptureContext } = {};
+    const capturePage = fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink: capSink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage }, // playwright NOT registered
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      devServerProvider: { spawn: async () => ({ baseUrl: 'x', release: async () => {} }) },
+      devServerContextResolver: async () => ({
+        cwd: '/tmp/wt',
+        deliverable: { id: 'web', start: 'serve' },
+      }),
+    });
+
+    const id = enqueueRowRaw(db, { chain: ['capturePage', 'playwright'], input: { url: 'http://placeholder' } });
+    await sched.drain();
+
+    expect(capSink.ctx).toBeUndefined(); // no capture attempted
+    const { status, error } = rowStatus(db, id);
+    expect(status).toBe('skipped');
+    expect(error).toMatch(/dev server required but no port-capable backend/);
+  });
+
+  it('a STATIC input (no start) still chooses capturePage first (unchanged fast path)', async () => {
+    const capSink: { ctx?: CaptureContext } = {};
+    const capturePage = fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink: capSink });
+    const pwSink: { ctx?: CaptureContext } = {};
+    const playwright = fakeBackend({ id: 'playwright', rung: 1, lease: 'verify:port:5173', sink: pwSink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage, playwright },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      // No devServerContextResolver → no hydration → input stays static (no start).
+    });
+
+    const id = enqueueRowRaw(db, { chain: ['capturePage', 'playwright'], input: { url: 'http://placeholder' } });
+    await sched.drain();
+
+    expect(capSink.ctx).toBeDefined(); // cheapest rung chosen
+    expect(pwSink.ctx).toBeUndefined();
+    expect(rowStatus(db, id).status).toBe('passed');
+  });
+});
+
+describe('VerificationScheduler — healthCheck as the second selection gate (R2 #2)', () => {
+  it('an UNHEALTHY sole-chain backend is dropped from selection → the request resolves skipped, no capture', async () => {
+    let captured = false;
+    const unhealthy: VisualBackend = {
+      id: 'peekaboo',
+      rung: 2,
+      requiredLease: () => 'verify:screen',
+      healthCheck: async () => false, // declined TCC / missing binary
+      capture: async (): Promise<CaptureResult> => {
+        captured = true;
+        return { ok: true, fileNames: ['default.png'] };
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { peekaboo: unhealthy },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const id = enqueueRowRaw(db, { chain: ['peekaboo'], input: { url: 'http://placeholder' }, type: 'native-desktop' });
+    await sched.drain();
+
+    expect(captured).toBe(false); // an environment problem is a SKIP, never a blocking FAIL
+    const { status, error } = rowStatus(db, id);
+    expect(status).toBe('skipped');
+    expect(error).toMatch(/no healthy backend available/);
+  });
+
+  it('an unhealthy backend is skipped but a healthy sibling in the same chain is still chosen', async () => {
+    const unhealthy: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => false,
+      capture: async (): Promise<CaptureResult> => ({ ok: true, fileNames: ['cap.png'] }),
+    };
+    const healthySink: { ctx?: CaptureContext } = {};
+    const healthy = fakeBackend({ id: 'peekaboo', rung: 2, lease: 'verify:screen', sink: healthySink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: unhealthy, peekaboo: healthy },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const id = enqueueRowRaw(db, { chain: ['capturePage', 'peekaboo'], input: { url: 'http://placeholder' } });
+    await sched.drain();
+
+    expect(healthySink.ctx).toBeDefined(); // the healthy rung-2 backend captured
+    expect(rowStatus(db, id).status).toBe('passed');
+  });
+
+  it('a healthCheck that THROWS counts as unhealthy (fail-soft) → sole-chain request skips', async () => {
+    let captured = false;
+    const throwing: VisualBackend = {
+      id: 'peekaboo',
+      rung: 2,
+      requiredLease: () => 'verify:screen',
+      healthCheck: async () => {
+        throw new Error('TCC probe boom');
+      },
+      capture: async (): Promise<CaptureResult> => {
+        captured = true;
+        return { ok: true, fileNames: ['default.png'] };
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { peekaboo: throwing },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+
+    const id = enqueueRowRaw(db, { chain: ['peekaboo'], input: { url: 'http://placeholder' }, type: 'native-desktop' });
+    await sched.drain();
+
+    expect(captured).toBe(false);
+    expect(rowStatus(db, id).status).toBe('skipped');
+  });
+
+  it('memoizes healthCheck within the TTL and re-probes after it expires (injected clock)', async () => {
+    let probes = 0;
+    const backend: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => {
+        probes += 1;
+        return true;
+      },
+      capture: async (): Promise<CaptureResult> => ({ ok: true, fileNames: ['default.png'] }),
+    };
+
+    // A controllable clock: two drains at t=0 probe ONCE (memo hit); a drain past the
+    // TTL re-probes.
+    let clock = 1_000_000;
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      now: () => clock,
+    });
+
+    const id1 = enqueueRowRaw(db, { chain: ['capturePage'], input: { url: 'http://a' } });
+    await sched.drain();
+    expect(probes).toBe(1);
+
+    // Second drain within the TTL — memo hit, no re-probe.
+    clock += HEALTH_CHECK_MEMO_TTL_MS - 1;
+    const id2 = enqueueRowRaw(db, { chain: ['capturePage'], input: { url: 'http://b' } });
+    await sched.drain();
+    expect(probes).toBe(1);
+
+    // Advance PAST the TTL — the next drain re-probes.
+    clock += 2;
+    const id3 = enqueueRowRaw(db, { chain: ['capturePage'], input: { url: 'http://c' } });
+    await sched.drain();
+    expect(probes).toBe(2);
+
+    expect(rowStatus(db, id1).status).toBe('passed');
+    expect(rowStatus(db, id2).status).toBe('passed');
+    expect(rowStatus(db, id3).status).toBe('passed');
+  });
+});
+
+describe('VerificationScheduler — full hydration of interactions/viewports/baselineKey (R2 #3)', () => {
+  it('fills interactions, viewports, and baselineKey from the deliverable when the agent left them absent', async () => {
+    const sink: { ctx?: CaptureContext } = {};
+    // rung-0 null-lease backend so the dev-server gate never restricts (deliverable has
+    // NO start here — we are exercising the OTHER hydrated fields).
+    const backend = fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      devServerContextResolver: async () => ({
+        cwd: '/tmp/wt',
+        deliverable: {
+          id: 'home',
+          interactions: [{ action: 'click', target: '#open' }, { action: 'wait', target: '#modal' }],
+          viewports: [{ width: 375, height: 812, label: 'mobile' }],
+          // NO baselineKey on the deliverable → falls back to the deliverable id.
+        },
+      }),
+    });
+
+    const id = enqueueRowRaw(db, { chain: ['capturePage'], input: { url: 'http://placeholder' } });
+    await sched.drain();
+
+    expect(rowStatus(db, id).status).toBe('passed');
+    const input = sink.ctx?.input;
+    expect(input?.interactions).toEqual([
+      { action: 'click', target: '#open' },
+      { action: 'wait', target: '#modal' },
+    ]);
+    expect(input?.viewports).toEqual([{ width: 375, height: 812, label: 'mobile' }]);
+    // baselineKey fell back to the deliverable id (stable cross-run key).
+    expect(input?.baselineKey).toBe('home');
+  });
+
+  it('prefers the deliverable baselineKey over the id fallback when the deliverable declares one', async () => {
+    const sink: { ctx?: CaptureContext } = {};
+    const backend = fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      devServerContextResolver: async () => ({
+        cwd: '/tmp/wt',
+        deliverable: { id: 'home', baselineKey: 'home-golden' },
+      }),
+    });
+
+    enqueueRowRaw(db, { chain: ['capturePage'], input: { url: 'http://placeholder' } });
+    await sched.drain();
+
+    expect(sink.ctx?.input.baselineKey).toBe('home-golden');
+  });
+
+  it('does NOT overwrite agent-provided interactions/viewports/baselineKey', async () => {
+    const sink: { ctx?: CaptureContext } = {};
+    const backend = fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      devServerContextResolver: async () => ({
+        cwd: '/tmp/wt',
+        deliverable: {
+          id: 'home',
+          interactions: [{ action: 'click', target: '#deliverable' }],
+          viewports: [{ width: 1920, height: 1080 }],
+          baselineKey: 'deliverable-key',
+        },
+      }),
+    });
+
+    enqueueRowRaw(db, {
+      chain: ['capturePage'],
+      input: {
+        url: 'http://placeholder',
+        interactions: [{ action: 'click', target: '#agent' }],
+        viewports: [{ width: 375, height: 667, label: 'agent' }],
+        baselineKey: 'agent-key',
+      },
+    });
+    await sched.drain();
+
+    const input = sink.ctx?.input;
+    // The agent's values survived hydration untouched.
+    expect(input?.interactions).toEqual([{ action: 'click', target: '#agent' }]);
+    expect(input?.viewports).toEqual([{ width: 375, height: 667, label: 'agent' }]);
+    expect(input?.baselineKey).toBe('agent-key');
   });
 });
