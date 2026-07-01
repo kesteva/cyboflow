@@ -342,6 +342,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                   >
                     <WorkflowSummaryPanel
                       runId={activeRunId}
+                      projectId={projectId}
                       status={activeRun?.status}
                       substrate={activeRun?.substrate}
                       workflowLabel={activeRun?.workflowName ?? activeRunId}
