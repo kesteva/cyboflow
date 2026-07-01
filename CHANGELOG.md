@@ -6,6 +6,49 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.12] — 2026-07-01
+
+### Added
+
+- **Live permission mode you can change mid-session.** Permission mode is now
+  owned by the session and can be switched on the fly — the next tool call honors
+  the new mode with no re-spawn. **Auto** mode routes tool approvals through
+  Claude's native classifier and auto-prompts only when a call genuinely needs it;
+  **Accept edits** now also auto-approves safe reads and read-only git/shell
+  commands so you're not prompted for harmless inspection. Inline approval prompts
+  surface directly in the chat, including for quick sessions reopened after a
+  restart.
+- **Fable 5 in the model pickers.** Fable 5 (1M-context native) is selectable
+  everywhere a model is, guarded by an availability check: if it's pulled from
+  release, the pickers grey it out and any run pinned to it falls back gracefully
+  to Opus — including a mid-run retry on Opus if Fable becomes unavailable while a
+  turn is in flight.
+- **Per-agent and per-session MCP / plugin control.** A workflow agent can now be
+  scoped to a subset of MCP servers in the Agent editor, and a session can deny
+  specific MCP servers or enable specific plugins from the session-start
+  **Advanced** panel. The Workflows page shows read-only MCPs and Plugins sections.
+  Controls apply on both the SDK and interactive (PTY) substrates.
+- **Custom-agent model pin.** A custom agent's pinned model is now threaded through
+  its save path, so the choice sticks.
+
+### Changed
+
+- The workflow-run composer shows a **read-only model pill**; when a run falls back
+  off a pulled model, a toast fires and the pill swaps to show the model actually
+  in use.
+- MCP / plugin controls moved from the chat bar to the session-start **Advanced**
+  panel (hidden for the PTY substrate where they don't apply).
+- The left rail now shows each session's **last-activity** time instead of its
+  creation time.
+
+### Fixed
+
+- Reopening a session with a running flow now lands on the main **Flow** page
+  instead of the last artifact. Newly *created* artifacts still take focus as
+  before.
+- Diff files now open as center-pane tabs in quick sessions (runless), matching
+  the workflow-run behavior.
+
 ## [0.1.11] — 2026-06-30
 
 ### Added
