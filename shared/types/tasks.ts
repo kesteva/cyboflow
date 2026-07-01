@@ -134,18 +134,19 @@ export interface BacklogTaskItem {
   /**
    * IDEA-only retire stamp (migration 042): ISO timestamp when the idea was
    * decomposed OFF the board (reachable only via its children), else null. Read
-   * back as null on epics/tasks (no `decomposed_at` column). Optional for
-   * cross-process shape parity — `undefined` where a constructor does not yet
-   * surface it (e.g. the chokepoint emit path); read-side items always carry it.
+   * back as null on epics/tasks (no `decomposed_at` column). REQUIRED on every
+   * constructor: the frontend visibility selectors compare `!== null`, so an
+   * `undefined` from an emit path silently flips visibility (the silent-drop
+   * class — see CLAUDE.md IPC/type-parity rules).
    */
-  decomposed_at?: string | null;
+  decomposed_at: string | null;
   /**
    * EPIC/TASK plan-approval stamp (migration 042): ISO timestamp when the plan
    * was approved; null = PENDING (backend-invisible + sprint-ineligible until
-   * approval). Read back as null on ideas (no `approved_at` column). Optional for
-   * cross-process shape parity (same rationale as `decomposed_at`).
+   * approval). Read back as null on ideas (no `approved_at` column). REQUIRED —
+   * same silent-drop rationale as `decomposed_at`.
    */
-  approved_at?: string | null;
+  approved_at: string | null;
   version: number;
   // derived overlays (computed on read):
   /** The position of the item's current stage on its board (cross-project bucketing key). */

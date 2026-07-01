@@ -265,6 +265,8 @@ interface EntityDbRow {
   archived_at: string | null;
   /** Retire stamp (ideas-only, migration 042); NULL on epics/tasks + when on-board. */
   decomposed_at: string | null;
+  /** Plan-approval stamp (epics/tasks-only, migration 042); NULL on ideas + when PENDING. */
+  approved_at: string | null;
   /** JSON IdeaAttachment[] (ideas-only, migration 028); NULL on epics/tasks + when unset. */
   attachments: string | null;
   version: number;
@@ -1447,10 +1449,14 @@ export class TaskChangeRouter {
     const scope = desc.hasScope ? 'scope' : 'NULL AS scope';
     const attachments = desc.hasAttachments ? 'attachments' : 'NULL AS attachments';
     const decomposedAt = desc.hasDecomposed ? 'decomposed_at' : 'NULL AS decomposed_at';
+    const approvedAt =
+      desc.hasApproval && this.columnExists(desc.table, 'approved_at')
+        ? 'approved_at'
+        : 'NULL AS approved_at';
     const row = this.db
       .prepare(
         `SELECT id, project_id, ref, title, summary, body, priority, repo, board_id, stage_id, archived_at,
-                ${decomposedAt}, version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
+                ${decomposedAt}, ${approvedAt}, version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
            FROM ${desc.table} WHERE id = ? AND project_id = ?`,
       )
       .get(id, projectId) as EntityDbRow | undefined;
@@ -1817,6 +1823,11 @@ export class TaskChangeRouter {
       board_id: row.board_id,
       stage_id: row.stage_id,
       archived_at: row.archived_at,
+      // Visibility stamps (migration 042). MUST be projected on the emit path:
+      // the frontend selectors compare `!== null`, so an omitted (undefined)
+      // stamp silently flips board visibility on every live event.
+      decomposed_at: row.decomposed_at,
+      approved_at: row.approved_at,
       version: row.version,
       stage_position: stage?.position ?? 0,
       inFlow,

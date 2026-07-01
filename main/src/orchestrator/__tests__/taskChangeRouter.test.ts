@@ -831,10 +831,29 @@ describe('TaskChangeRouter (3-table entity model)', () => {
     // Archive-in-place + cross-project bucketing fields on the projection.
     expect(events[0].task.archived_at).toBeNull();
     expect(events[0].task.stage_position).toBe(1); // idea type-default stage
+    // Visibility stamps (migration 042) MUST ride the emit snapshot as explicit
+    // null (never undefined): the frontend selectors compare `!== null`, so an
+    // omitted stamp hides live-created ideas / reveals pending drafts.
+    expect(events[0].task.decomposed_at).toBeNull();
+    expect(events[0].task.approved_at).toBeNull();
 
     // The SAME event object also went out on the cross-project channel.
     expect(allEvents).toHaveLength(1);
     expect(allEvents[0]).toBe(events[0]);
+  });
+
+  it('emit snapshot carries approved_at for epics/tasks (visible create -> stamped, not undefined)', async () => {
+    const db = buildDb();
+    const router = TaskChangeRouter.initialize(dbAdapter(db));
+
+    const events: TaskChangedEvent[] = [];
+    taskChangeEvents.on(taskProjectChannel(1), (e: TaskChangedEvent) => events.push(e));
+
+    // User create (no runId) -> approved_at = now (visible) and present on the emit.
+    await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+    expect(events).toHaveLength(1);
+    expect(typeof events[0].task.approved_at).toBe('string');
+    expect(events[0].task.decomposed_at).toBeNull(); // NULL-pattern on non-ideas
   });
 
   // -------------------------------------------------------------------------

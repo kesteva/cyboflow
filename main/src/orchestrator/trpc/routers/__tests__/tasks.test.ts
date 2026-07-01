@@ -113,6 +113,8 @@ function fakeItem(taskId: string, projectId: number): BacklogTaskItem {
     board_id: `board-${projectId}-default`,
     stage_id: `stage-board-${projectId}-default-1`,
     archived_at: null,
+    decomposed_at: null,
+    approved_at: null,
     version: 1,
     stage_position: 1,
     inFlow: [],
