@@ -199,6 +199,16 @@ export interface TaskChange {
    * EXCLUSIVELY gate-driven (no auto-retire on first child).
    */
   decomposed?: boolean;
+  /**
+   * Approved toggle (epics/tasks-only, migration 042 — the Q1 REVEAL): true
+   * stamps `approved_at = now` (pending draft -> visible + sprint-eligible),
+   * false clears it. ORCHESTRATOR-ONLY ('forbidden' for user/agent actors — an
+   * agent must never self-approve its plan-gated drafts). Rejected
+   * ('invalid_lineage') for ideas. Routing the reveal through the chokepoint
+   * mints the entity_event + version bump + TaskChangedEvent broadcast that a
+   * raw UPDATE would silently skip.
+   */
+  approved?: boolean;
   /** Optimistic-concurrency guard. If provided and != current version -> concurrency conflict. */
   expectedVersion?: number;
   /** The run that triggered this change, recorded on the entity_events row. */
@@ -1005,6 +1015,29 @@ export class TaskChangeRouter {
           params.push(decomposedAt);
           deltas.push({ field: 'decomposed_at', from: current.decomposed_at, to: decomposedAt });
           action = 'decomposed';
+        }
+      }
+
+      // ----- approved toggle (Q1 reveal stamp, migration 042) -----
+      // Mirrors the decomposed toggle: epics/tasks-only, NOT a stage move.
+      // Stamping approved_at reveals a PENDING draft (board-visible +
+      // sprint-eligible). Orchestrator-only: the reveal belongs to the
+      // approve-plan gate — an agent must never self-approve its drafts.
+      if (change.approved !== undefined) {
+        if (!desc.hasApproval) {
+          throw new TaskChangeError(
+            'invalid_lineage',
+            `only epics/tasks carry approved_at (got '${type}')`,
+          );
+        }
+        if (change.actor !== 'orchestrator') {
+          throw new TaskChangeError('forbidden_stage', 'approved_at is orchestrator-derived');
+        }
+        if (change.approved !== (current.approved_at !== null)) {
+          const approvedAt = change.approved ? now : null;
+          sets.push('approved_at = ?');
+          params.push(approvedAt);
+          deltas.push({ field: 'approved_at', from: current.approved_at, to: approvedAt });
         }
       }
 

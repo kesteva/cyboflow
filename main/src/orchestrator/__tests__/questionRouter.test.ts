@@ -30,7 +30,8 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { QuestionRouter, RunNotRunningError, type QuestionAnswer } from '../questionRouter';
-import { TaskChangeRouter, taskChangeEvents } from '../taskChangeRouter';
+import { TaskChangeRouter, taskChangeEvents, taskProjectChannel } from '../taskChangeRouter';
+import type { TaskChangedEvent } from '../../../../shared/types/tasks';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun } from '../__test_fixtures__/orchestratorTestDb';
 import type { QuestionPayload } from '../../../../shared/types/questions';
@@ -895,12 +896,24 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     expect(epicApprovedAt(db, epicId)).toBeNull();
     expect(planApprovedAt(db, 'run-p')).toBeNull();
 
+    // The reveal must be OBSERVABLE on a mounted board: each approved_at flip
+    // routes through the chokepoint and broadcasts a TaskChangedEvent (the tasks
+    // are already at position 6, so the reveal event is the ONLY live signal).
+    const revealEvents: TaskChangedEvent[] = [];
+    taskChangeEvents.on(taskProjectChannel(1), (e: TaskChangedEvent) => revealEvents.push(e));
+
     await answerPlanGate(db, router, 'run-p', 'Approve');
 
     // The run is plan-approved and every run-created task + epic is revealed.
     expect(planApprovedAt(db, 'run-p')).not.toBeNull();
     for (const id of taskIds) expect(taskApprovedAt(db, id)).not.toBeNull();
     expect(epicApprovedAt(db, epicId)).not.toBeNull();
+
+    // One reveal broadcast per revealed entity, snapshot carrying the stamp.
+    const revealedIds = revealEvents
+      .filter((e) => e.task.approved_at !== null && e.task.approved_at !== undefined)
+      .map((e) => e.taskId);
+    expect(revealedIds).toEqual(expect.arrayContaining([epicId, ...taskIds]));
 
     // The tasks sit at Ready for development (position 6).
     for (const id of taskIds) {

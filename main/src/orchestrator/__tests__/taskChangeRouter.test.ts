@@ -842,6 +842,46 @@ describe('TaskChangeRouter (3-table entity model)', () => {
     expect(allEvents[0]).toBe(events[0]);
   });
 
+  it('approved toggle is orchestrator-only (agents must not self-approve their drafts)', async () => {
+    const db = buildDb();
+    const router = TaskChangeRouter.initialize(dbAdapter(db));
+    const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+
+    await expect(
+      router.applyChange(1, { actor: 'agent:cyboflow-tasks', taskId, entityType: 'task', approved: true }),
+    ).rejects.toMatchObject({ code: 'forbidden_stage' });
+    await expect(
+      router.applyChange(1, { actor: 'user', taskId, entityType: 'task', approved: true }),
+    ).rejects.toMatchObject({ code: 'forbidden_stage' });
+  });
+
+  it('approved toggle rejects ideas (invalid_lineage) and stamps epics via the chokepoint', async () => {
+    const db = buildDb();
+    const router = TaskChangeRouter.initialize(dbAdapter(db));
+    const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'I' });
+    const epic = await router.applyChange(1, { actor: 'user', entityType: 'epic', title: 'E' });
+
+    await expect(
+      router.applyChange(1, { actor: 'orchestrator', taskId: idea.taskId, entityType: 'idea', approved: true }),
+    ).rejects.toMatchObject({ code: 'invalid_lineage' });
+
+    // Orchestrator reveal: stamps approved_at + mints an entity_event.
+    db.prepare('UPDATE epics SET approved_at = NULL WHERE id = ?').run(epic.taskId);
+    await router.applyChange(1, {
+      actor: 'orchestrator',
+      taskId: epic.taskId,
+      entityType: 'epic',
+      approved: true,
+      kind: 'plan-approved',
+    });
+    const row = db.prepare('SELECT approved_at, version FROM epics WHERE id = ?').get(epic.taskId) as {
+      approved_at: string | null;
+      version: number;
+    };
+    expect(row.approved_at).not.toBeNull();
+    expect(row.version).toBe(2); // version bumped — a real chokepoint write, not a raw UPDATE
+  });
+
   it('emit snapshot carries approved_at for epics/tasks (visible create -> stamped, not undefined)', async () => {
     const db = buildDb();
     const router = TaskChangeRouter.initialize(dbAdapter(db));

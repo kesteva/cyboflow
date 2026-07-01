@@ -519,13 +519,16 @@ export class QuestionRouter extends EventEmitter {
       // reveal the entities it created during planning. A plan-gated run mints its
       // epics+tasks PENDING (approved_at NULL = backend-invisible + sprint-
       // ineligible per the create-side Q1 guard in TaskChangeRouter); approval
-      // flips them to approved_at=now. Guarded `IS NULL` so a re-answer (or an
-      // already-visible entity) is an idempotent no-op. plan_approved_at lives on
-      // workflow_runs (not an entity table); the epic/task approved_at reveal is a
-      // visibility stamp carrying no board-state delta, so it does not route
-      // through the TaskChangeRouter chokepoint (which has no approved_at update
-      // path). Fail-soft: a pre-036 DB lacking these columns throws "no such
-      // column" → caught by the method's outer try/catch → no-op (never throws).
+      // flips them to approved_at=now. plan_approved_at lives on workflow_runs
+      // (not an entity table), so the run-level stamp is a direct guarded UPDATE;
+      // the per-entity approved_at reveal routes through the TaskChangeRouter
+      // chokepoint (`approved` toggle, orchestrator-only) so each reveal mints an
+      // entity_event + version bump + TaskChangedEvent broadcast — a mounted
+      // board sees the drafts appear the moment the plan is approved (the tasks
+      // are typically ALREADY at position 6, so the stage-move loop below is a
+      // no-op delta and the reveal event is the ONLY signal the frontend gets).
+      // Fail-soft: a pre-042 DB lacking these columns throws "no such column" →
+      // caught by the method's outer try/catch → no-op (never throws).
       this.db
         .prepare(
           `UPDATE workflow_runs SET plan_approved_at = ?, updated_at = ?
@@ -533,23 +536,42 @@ export class QuestionRouter extends EventEmitter {
         )
         .run(now, now, runId);
 
-      // The tasks this run created during execution (read-only; stage writes go
-      // through the chokepoint). Resolve the target stage id from each task's board.
       const taskIds = listRunCreatedTaskIds(this.db, runId);
       const epicIds = listRunCreatedEpicIds(this.db, runId);
 
-      const stampTaskApproved = this.db.prepare(
-        `UPDATE tasks SET approved_at = ? WHERE id = ? AND approved_at IS NULL`,
-      );
-      for (const taskId of taskIds) stampTaskApproved.run(now, taskId);
-      const stampEpicApproved = this.db.prepare(
-        `UPDATE epics SET approved_at = ? WHERE id = ? AND approved_at IS NULL`,
-      );
-      for (const epicId of epicIds) stampEpicApproved.run(now, epicId);
+      const router = TaskChangeRouter.getInstance();
+      // Per-entity best-effort: a vanished row (concurrent teardown) must not
+      // abort the remaining reveals.
+      for (const epicId of epicIds) {
+        try {
+          await router.applyChange(projectId, {
+            actor: 'orchestrator',
+            entityType: 'epic',
+            taskId: epicId,
+            approved: true,
+            runId,
+            kind: 'plan-approved',
+          });
+        } catch {
+          // gone or unrevealable — reveal the rest
+        }
+      }
+      for (const taskId of taskIds) {
+        try {
+          await router.applyChange(projectId, {
+            actor: 'orchestrator',
+            entityType: 'task',
+            taskId,
+            approved: true,
+            runId,
+            kind: 'plan-approved',
+          });
+        } catch {
+          // gone or unrevealable — reveal the rest
+        }
+      }
 
       if (taskIds.length === 0) return;
-
-      const router = TaskChangeRouter.getInstance();
       for (const taskId of taskIds) {
         const taskRow = this.db
           .prepare('SELECT board_id AS boardId, stage_id AS stageId FROM tasks WHERE id = ?')
