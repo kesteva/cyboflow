@@ -463,6 +463,48 @@ export interface RunUsageRow {
 }
 
 /**
+ * `run_evals` row (migration 043) — one durable LLM-judge evaluation rollup per
+ * (workflow_run, rubric_version). The EvalWorker snapshots the frozen diff + run
+ * provenance AT TRIGGER (the sprint/ship "human-review begins" step transition),
+ * then writes the K-sample verdict back onto the same row. Composite PRIMARY KEY
+ * (run_id, rubric_version) + INSERT OR IGNORE gives re-fire dedup; hard-FK
+ * run_id -> workflow_runs ON DELETE CASCADE (the rollup dies with its run). All
+ * verdict columns stay NULL until eval_status = 'complete'.
+ */
+export interface RunEvalRow {
+  run_id: string;
+  rubric_version: string;
+  eval_status: 'pending' | 'running' | 'complete' | 'failed';
+  base_sha: string | null;
+  diff_text: string | null;
+  diff_stats_json: string | null;
+  gate_results_json: string | null;
+  human_influenced: number; // 0 at first trigger; 1 if human-review re-fires
+  snapshot_at: string; // ISO timestamp of the trigger capture
+  overall_score: number | null; // 0-100; NULL until complete
+  band: string | null; // Excellent / Good / Fair / Poor
+  ci_low: number | null;
+  ci_high: number | null;
+  gated: number; // deterministic-gate-failure sentinel
+  security_flag: number; // confirmed high/critical security soft-cap fired
+  dimensions_json: string | null;
+  per_sample_json: string | null;
+  judge_model: string | null; // concrete id, e.g. 'claude-opus-4-8'
+  sample_count: number | null; // K actually completed
+  prompt_hash: string | null; // sha256 of judge prompt (computeSpecHash precedent)
+  judge_build_id: string | null; // app version string from package.json
+  workflow_id: string;
+  workflow_name: string; // denormalized at trigger
+  spec_hash: string | null;
+  run_model: string | null; // NULL/'auto' = SDK default
+  subagent_models_json: string | null;
+  difficulty_proxy_prerun: number | null; // reserved; NULL in v1
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
  * `workflow_revisions` row (migration 026) — append-only snapshot of every
  * distinct spec_json a workflow has carried, keyed by (workflow_id, spec_hash).
  * Lets a run's frozen workflow_runs.spec_hash always resolve to the spec text

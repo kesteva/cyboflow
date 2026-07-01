@@ -17,7 +17,7 @@ import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { IdeaRow, EpicRow, TaskRow, EntityEventRow, ReviewItemRow, AgentOverrideRow } from '../models';
+import type { IdeaRow, EpicRow, TaskRow, EntityEventRow, ReviewItemRow, AgentOverrideRow, RunEvalRow } from '../models';
 
 interface TableInfoRow {
   cid: number;
@@ -61,6 +61,8 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '034_findings_triage.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '036_agent_override_model.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '038_agent_mcp_access.sql'), 'utf-8'));
+  // run_evals (LLM-judge rollup) — FK -> workflow_runs(id) from 006 (loaded above).
+  db.exec(readFileSync(join(migDir, '043_run_evals.sql'), 'utf-8'));
   return db;
 }
 
@@ -206,6 +208,44 @@ describe('entity schema parity (migrations 015 + 024 + 028 + 034)', () => {
       'updated_at',
     ];
     expect([...agentOverrideRowKeys].sort()).toEqual(columnsOf(db, 'agent_overrides'));
+    db.close();
+  });
+
+  it('RunEvalRow field names match the run_evals columns exactly (migration 043)', () => {
+    const db = buildDb();
+    const runEvalRowKeys: Array<keyof RunEvalRow> = [
+      'run_id',
+      'rubric_version',
+      'eval_status',
+      'base_sha',
+      'diff_text',
+      'diff_stats_json',
+      'gate_results_json',
+      'human_influenced',
+      'snapshot_at',
+      'overall_score',
+      'band',
+      'ci_low',
+      'ci_high',
+      'gated',
+      'security_flag',
+      'dimensions_json',
+      'per_sample_json',
+      'judge_model',
+      'sample_count',
+      'prompt_hash',
+      'judge_build_id',
+      'workflow_id',
+      'workflow_name',
+      'spec_hash',
+      'run_model',
+      'subagent_models_json',
+      'difficulty_proxy_prerun',
+      'error',
+      'created_at',
+      'updated_at',
+    ];
+    expect([...runEvalRowKeys].sort()).toEqual(columnsOf(db, 'run_evals'));
     db.close();
   });
 
