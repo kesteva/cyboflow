@@ -108,7 +108,7 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
               )}
             </h3>
             <p className="text-sm text-text-secondary">
-              Multi-Session AI Code Assistant Manager
+              A human-first agentic development environment
             </p>
             <p className="text-xs text-text-tertiary">
               Built by Cyboflow
