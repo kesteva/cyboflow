@@ -13,6 +13,8 @@ import {
   logValidationFailure
 } from './utils/sessionValidation';
 import type { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
+import { ModelAvailabilityService } from './services/modelAvailabilityService';
+import type { ModelAvailabilityMap } from '../../shared/types/modelAvailability';
 import type { GitCommit } from './services/gitDiffManager';
 import type { Project } from './database/models';
 import { DEFAULT_PERMISSION_MODE } from '../../shared/types/permissionMode';
@@ -46,6 +48,20 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     databaseService,
     logger
   } = services;
+
+  // Guarded-model availability (Fable 5): forward status flips to the renderer so
+  // the model pickers can grey out a pulled model live (no reload needed). The
+  // service is initialized before this runs (see main/src/index.ts).
+  ModelAvailabilityService.tryGetInstance()?.on('changed', (map: ModelAvailabilityMap) => {
+    const mw = getMainWindow();
+    if (mw && !mw.isDestroyed()) {
+      try {
+        mw.webContents.send('model-availability-changed', map);
+      } catch {
+        /* window torn down mid-send — ignore */
+      }
+    }
+  });
 
   let cachedClaudePanelManager: ClaudePanelManager | undefined;
   let attemptedClaudeManagerResolve = false;

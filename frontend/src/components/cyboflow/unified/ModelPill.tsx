@@ -4,6 +4,7 @@ import { API } from '../../../utils/api';
 import { Dropdown, type DropdownItem } from '../../ui/Dropdown';
 import { Pill } from '../../ui/Pill';
 import { cn } from '../../../utils/cn';
+import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 
 /**
  * ModelPill — interactive model selector for a quick SDK session's composer.
@@ -71,6 +72,7 @@ interface ModelPillProps {
 
 export function ModelPill({ panelId, currentModel, onModelChange }: ModelPillProps): React.ReactElement {
   const [open, setOpen] = useState(false);
+  const { isAliasUsable, unavailableReason } = useModelAvailability();
   const active = currentModel ?? 'auto';
   const label = modelDisplayLabel(active);
 
@@ -86,15 +88,26 @@ export function ModelPill({ panelId, currentModel, onModelChange }: ModelPillPro
     }
   };
 
-  const items: DropdownItem[] = MODEL_OPTIONS.map((o) => ({
-    id: o.id,
-    label: o.context ? `${o.label} · ${o.context}` : o.label,
-    description: o.context ? `${o.description} · ${o.context} context` : o.description,
-    icon: Cpu,
-    iconColor: 'text-text-secondary',
-    onClick: () => void handleSelect(o.id),
-    variant: 'default',
-  }));
+  const items: DropdownItem[] = MODEL_OPTIONS.map((o) => {
+    const usable = isAliasUsable(o.id);
+    const baseLabel = o.context ? `${o.label} · ${o.context}` : o.label;
+    return {
+      id: o.id,
+      label: usable ? baseLabel : `${baseLabel} — unavailable`,
+      description: usable
+        ? o.context
+          ? `${o.description} · ${o.context} context`
+          : o.description
+        : (unavailableReason(o.id) ?? 'Currently unavailable — runs use Opus'),
+      icon: Cpu,
+      iconColor: 'text-text-secondary',
+      onClick: () => {
+        if (usable) void handleSelect(o.id);
+      },
+      disabled: !usable,
+      variant: 'default',
+    };
+  });
 
   const trigger = (
     <Pill

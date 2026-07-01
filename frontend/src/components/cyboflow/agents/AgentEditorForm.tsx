@@ -29,6 +29,7 @@ import {
   type AgentModelAlias,
 } from '../../../../../shared/types/agents';
 import type { McpEntry } from '../../../../../shared/types/integrations';
+import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 
 export interface AgentEditorFormProps {
   draft: AgentDraft;
@@ -51,6 +52,8 @@ export function AgentEditorForm({
   // Name is editable ONLY for a brand-new custom (create mode). Built-ins and
   // existing customs render the name read-only.
   const nameEditable = mode === 'create' && isCustom;
+  // Guarded-model availability (Fable 5): grey out a pinnable model that's pulled.
+  const { isAliasUsable } = useModelAvailability();
   // The READ-ONLY name field shows the BARE key — strip the load-bearing
   // `cyboflow-` prefix the server persists on `name` — so it matches the
   // de-prefixed modal title and gallery card. The EDITABLE create-mode input
@@ -170,11 +173,15 @@ export function AgentEditorForm({
           data-testid="agent-model-select"
         >
           <option value="">{INHERIT_RUN_MODEL_LABEL}</option>
-          {AGENT_MODEL_ALIASES.map((alias) => (
-            <option key={alias} value={alias}>
-              {AGENT_MODEL_LABELS[alias]}
-            </option>
-          ))}
+          {AGENT_MODEL_ALIASES.map((alias) => {
+            const disabled = !isAliasUsable(alias);
+            return (
+              <option key={alias} value={alias} disabled={disabled}>
+                {AGENT_MODEL_LABELS[alias]}
+                {disabled ? ' (unavailable)' : ''}
+              </option>
+            );
+          })}
         </select>
         <p className="mt-1.5 text-[10px] text-text-tertiary">
           {draft.model === null

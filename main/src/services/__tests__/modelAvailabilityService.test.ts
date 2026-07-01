@@ -4,6 +4,12 @@ import {
   isModelUsable,
   isModelUnavailableError,
 } from '../modelAvailabilityService';
+import {
+  isAliasUsable,
+  guardedModelByAlias,
+  guardedModelByConcreteId,
+  type ModelAvailabilityMap,
+} from '../../../../shared/types/modelAvailability';
 
 const FABLE = 'claude-fable-5';
 
@@ -170,5 +176,38 @@ describe('isModelUnavailableError', () => {
     expect(isModelUnavailableError('tool execution failed: ENOENT')).toBe(false);
     expect(isModelUnavailableError('the model responded slowly')).toBe(false); // "model" but no unavailability signal
     expect(isModelUnavailableError('connection reset')).toBe(false);
+  });
+});
+
+describe('shared guarded-model helpers (frontend picker grey-out logic)', () => {
+  it('guardedModelByAlias matches case/space-insensitively; undefined otherwise', () => {
+    expect(guardedModelByAlias('fable')?.concreteId).toBe(FABLE);
+    expect(guardedModelByAlias(' Fable ')?.concreteId).toBe(FABLE);
+    expect(guardedModelByAlias('opus')).toBeUndefined();
+    expect(guardedModelByAlias(null)).toBeUndefined();
+  });
+
+  it('guardedModelByConcreteId strips a [1m] marker before matching', () => {
+    expect(guardedModelByConcreteId('claude-fable-5')?.alias).toBe('fable');
+    expect(guardedModelByConcreteId('claude-fable-5[1m]')?.alias).toBe('fable');
+    expect(guardedModelByConcreteId('claude-opus-4-8[1m]')).toBeUndefined();
+  });
+
+  it('isAliasUsable: non-guarded aliases always usable; guarded reflects the map', () => {
+    const usableMap: ModelAvailabilityMap = {};
+    expect(isAliasUsable('fable', usableMap)).toBe(true); // unknown → optimistic
+    expect(isAliasUsable('opus', usableMap)).toBe(true);
+    expect(isAliasUsable('auto', usableMap)).toBe(true);
+
+    const goneMap: ModelAvailabilityMap = {
+      [FABLE]: { concreteId: FABLE, status: 'unavailable', reason: '404', checkedAt: 1 },
+    };
+    expect(isAliasUsable('fable', goneMap)).toBe(false);
+    expect(isAliasUsable('opus', goneMap)).toBe(true); // non-guarded unaffected
+
+    const backMap: ModelAvailabilityMap = {
+      [FABLE]: { concreteId: FABLE, status: 'available', reason: null, checkedAt: 2 },
+    };
+    expect(isAliasUsable('fable', backMap)).toBe(true);
   });
 });

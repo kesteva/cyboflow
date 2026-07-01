@@ -3,6 +3,7 @@ import type { CreateSessionRequest } from '../types/session';
 import type { Project } from '../types/project';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import type { ModelAvailabilityMap } from '../../../shared/types/modelAvailability';
 
 // Type for IPC response.
 // T defaults to `unknown` (not `any`) so callers must narrow before reading .data.
@@ -560,7 +561,22 @@ export class API {
       return window.electronAPI.claudePanels.getFastMode(panelId);
     },
   };
-  
+
+  static models = {
+    /** Snapshot of guarded-model (Fable 5) availability. Empty map = all usable. */
+    async getAvailability() {
+      // Guard the `models` surface too: a preload version skew (older bridge)
+      // should degrade to optimistic, not crash the picker.
+      if (!isElectron() || !window.electronAPI.models) throw new Error('Electron API not available');
+      return window.electronAPI.models.getAvailability();
+    },
+    /** Subscribe to live availability flips; returns an unsubscribe fn. No-op off Electron. */
+    onAvailabilityChanged(callback: (map: ModelAvailabilityMap) => void): () => void {
+      if (!isElectron() || !window.electronAPI.models) return () => {};
+      return window.electronAPI.models.onAvailabilityChanged(callback);
+    },
+  };
+
 }
 
 // Legacy support - removed as migration is complete

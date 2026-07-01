@@ -10,6 +10,7 @@ import type { ExecutionDiff, GitDiffResult } from './diff';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/updater';
+import type { ModelAvailabilityMap } from '../../../shared/types/modelAvailability';
 
 interface LogEntry {
   timestamp: string;
@@ -374,6 +375,12 @@ interface ElectronAPI {
     setModel: (panelId: string, model: string) => Promise<IPCResponse<void>>;
     setFastMode: (panelId: string, fastMode: boolean) => Promise<IPCResponse<void>>;
     getFastMode: (panelId: string) => Promise<IPCResponse<boolean>>;
+  };
+
+  // Model availability (guarded models, e.g. Fable 5)
+  models: {
+    getAvailability: () => Promise<IPCResponse<ModelAvailabilityMap>>;
+    onAvailabilityChanged: (callback: (map: ModelAvailabilityMap) => void) => () => void;
   };
 
   // Logs panel operations

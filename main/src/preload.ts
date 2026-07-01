@@ -6,6 +6,7 @@ import type { AppConfig, UpdateConfigRequest } from './types/config';
 import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../frontend/src/types/project';
 import type { ToolPanel } from '../../shared/types/panels';
 import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
+import type { ModelAvailabilityMap } from '../../shared/types/modelAvailability';
 
 interface LogEntry {
   timestamp: string;
@@ -404,6 +405,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const subscription = (_event: Electron.IpcRendererEvent, data: DashboardUpdateData) => callback(data);
       ipcRenderer.on('dashboard:session-update', subscription);
       return () => ipcRenderer.removeListener('dashboard:session-update', subscription);
+    },
+  },
+
+  // Model availability (guarded models, e.g. Fable 5)
+  models: {
+    getAvailability: (): Promise<IPCResponse<ModelAvailabilityMap>> =>
+      ipcRenderer.invoke('models:get-availability'),
+    onAvailabilityChanged: (callback: (map: ModelAvailabilityMap) => void) => {
+      const subscription = (_event: Electron.IpcRendererEvent, map: ModelAvailabilityMap) => callback(map);
+      ipcRenderer.on('model-availability-changed', subscription);
+      return () => ipcRenderer.removeListener('model-availability-changed', subscription);
     },
   },
 

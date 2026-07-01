@@ -14,6 +14,7 @@
  * with the in-composer ModelPill) so the two surfaces never drift.
  */
 import { MODEL_OPTIONS } from './unified/ModelPill';
+import { useModelAvailability } from '../../stores/modelAvailabilityStore';
 
 /** The quick-session default model — Opus, per product direction. */
 export const DEFAULT_QUICK_MODEL = 'opus';
@@ -43,6 +44,8 @@ export function ModelSelector({
   label = 'Model',
 }: ModelSelectorProps): React.JSX.Element {
   const active = MODEL_OPTIONS.find((o) => o.id === value);
+  const { isAliasUsable, unavailableReason } = useModelAvailability();
+  const activeReason = unavailableReason(value);
 
   return (
     <div className="flex flex-col gap-1">
@@ -56,15 +59,23 @@ export function ModelSelector({
         className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
         aria-label="Select Claude model"
       >
-        {MODEL_OPTIONS.map((o) => (
-          <option key={o.id} value={o.id}>
-            {o.context ? `${o.label} · ${o.context}` : o.label} — {o.description}
-          </option>
-        ))}
+        {MODEL_OPTIONS.map((o) => {
+          const disabled = !isAliasUsable(o.id);
+          return (
+            <option key={o.id} value={o.id} disabled={disabled}>
+              {o.context ? `${o.label} · ${o.context}` : o.label} — {o.description}
+              {disabled ? ' (unavailable)' : ''}
+            </option>
+          );
+        })}
       </select>
       {active !== undefined && (
         <p className="text-xs text-text-tertiary">
-          {active.context ? `${active.description} · ${active.context} context` : active.description}
+          {activeReason
+            ? `${active.label} is currently unavailable — runs will use Opus.`
+            : active.context
+              ? `${active.description} · ${active.context} context`
+              : active.description}
         </p>
       )}
     </div>
