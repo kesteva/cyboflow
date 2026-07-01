@@ -1,4 +1,4 @@
-# Code-Review Eval — Full Evaluation Checklist (rubric v1.0)
+# Code-Review Eval — Full Evaluation Checklist (rubric v1.1)
 
 > Draft for review. This is the concrete per-dimension checklist an **independent, out-of-loop judge** runs against the frozen pre-human diff snapshot a workflow produced. It measures how workflow variants perform. Output = overall /100 + per-dimension sub-scores.
 
@@ -19,6 +19,11 @@
 - **Deterministic gate** (build · test · typecheck · lint) is the only hard stop — a failure maps to the GATED sentinel and is excluded from quality means. Security high/critical is an **advisory soft-cap** at the Fair ceiling + a blocking human review item, *not* a hard zero (no SAST exists to trust).
 - **Grader (v1):** a pluggable jury that **defaults to Claude-only** (K=3–5 samples, temp 0, mean-aggregated). A non-Claude juror is optional/future config and is **not** required to ship. Claude self-preference is an accepted, documented v1 limitation — scores are advisory-only.
 - The judge has the **full frozen repo snapshot** (not just the diff) and must grep/open it before marking UNKNOWN for a 'not visible' reason.
+- **Aggregation floor:** every dimension enters the geometric mean **floored at 1** — a forced/gated 0 (e.g. the Test gate-dodge) drags the overall hard without zeroing it. Calibration point: an otherwise-85 run with zero tests lands ≈60 (Fair).
+- **Catastrophic-cap tier (uniform rule):** any CONFIRMED catastrophic-class finding soft-caps the **OVERALL** score at Fair (≤69) and emits a **blocking** review item. The classes: high/critical security vuln (SEC gate), destructive/irreversible migration (ROB-3), off-chokepoint direct entity write (ROB-5), migration-number collision (ROB-4), and an unimplemented required acceptance criterion (SCP-1, flagged `requirements_unmet`).
+- **Applicability vs UNKNOWN:** if a sub-check's *Applies* condition does not hold, the sub-check is **excluded from the denominator entirely** — it is never marked UNKNOWN. UNKNOWN is reserved for *applicable* checks the judge genuinely cannot settle from the snapshot; an *Unknown* clause never restates the *Applies* negation.
+- **Thin-evidence dimensions:** a dimension with fewer than 2 applicable non-UNKNOWN sub-checks is marked **INACTIVE** (excluded from the weighted mean; weights renormalize over the active set) and logged. An inert diff is skipped, not penalized — and never earns a score from no evidence.
+- **K-sample mechanics:** each of the K samples marks every applicable sub-check pass/fail/unknown; a sub-check's value is the pass share of its non-unknown samples, and the dimension score is the mean pass-fraction. Any single sample asserting a catastrophic-cap trigger is **surfaced for reconciliation** — cap triggers are never averaged away.
 
 ## Dimensions & weights (sum 100)
 
@@ -40,7 +45,7 @@
 
 **Ownership (de-dup).** Owns whether the changed code COMPUTES THE RIGHT ANSWER for intended, edge, and error inputs per the task/entity body as reference spec; whether an in-repo caller now reads a dropped/renamed field and produces a WRONG RESULT; hallucinated/non-existent API detection (advisory); and gross algorithmic-cost regressions (COR-9). Does NOT own: declared-T-vs-runtime-shape drift or one-sided IPC interface edits as a CONTRACT defect (ROB-1 is sole owner — charge here only the resulting wrong output at a specific caller); migration destructiveness/idempotency/collision (ROB-3/ROB-4 — here only code↔schema column consistency, COR-7); whether tests are meaningful (Test) or whether build/typecheck/lint/vitest pass (deterministic gate); off-chokepoint direct-entity-UPDATE (Robustness ROB-5); wrong abstraction level (Design); verbose-but-correct expression (Maintainability); unrequested features (Scope). When a defect is both 'wrong result' and 'wrong design', charge here only if the OUTPUT is wrong.
 
-**Gate / cap behavior.** Sets the Correctness CONFIDENCE FLAG (advisory) whenever a risky changed path is corroborated ONLY by self-authored-green tests or is judge-UNKNOWN. SOFT CAP: if the primary behavioral change is corroborated solely by tests added in this same diff with no independent signal (pre-existing test, explicit reference-spec statement in the body, or judge line-by-line verification that the logic is demonstrably STRAIGHT-LINE), this dimension cannot exceed the Good ceiling (0.89) — the Excellent band requires at least one independent corroboration on the primary path, and judge self-verification counts as independent ONLY for demonstrably straight-line logic. DENOMINATOR FLOOR: if fewer than 2 sub-checks resolve non-UNKNOWN, cap at 0.89 and flag low-confidence. No hard gate on overall score; UNKNOWN sub-checks leave the denominator and are logged.
+**Gate / cap behavior.** Sets the Correctness CONFIDENCE FLAG (advisory) whenever a risky changed path is corroborated ONLY by self-authored-green tests or is judge-UNKNOWN. SOFT CAP: if the primary behavioral change is corroborated solely by tests added in this same diff with no independent signal (pre-existing test, explicit reference-spec statement in the body, or judge line-by-line verification that the logic is demonstrably STRAIGHT-LINE), this dimension cannot exceed the Good ceiling (0.89) — the Excellent band requires at least one independent corroboration on the primary path, and judge self-verification counts as independent ONLY for demonstrably straight-line logic. THIN-EVIDENCE: if fewer than 2 sub-checks resolve non-UNKNOWN, mark the dimension INACTIVE (excluded from the weighted mean, weights renormalize) and flag low-confidence. No hard gate on overall score; UNKNOWN sub-checks leave the denominator and are logged.
 
 **Sub-checks:**
 
@@ -68,7 +73,7 @@
 #### COR-4 · Error and failure inputs are handled per spec — invalid arguments, rejected promises, thrown exceptions, and failed lookups do not corrupt state or get silently swallowed.
 - **Pass** — Error paths propagate, surface, or recover as the body/pattern requires; no bare catch drops a needed error; async rejections are awaited/handled.
 - **Fail** — An error path is swallowed, mis-typed, left unawaited, or leaves partial/corrupt state that later code reads.
-- **Unknown** — The diff does not touch error handling and no error path is introduced by the change.
+- **Unknown** — An error path exists but whether it can corrupt state or must propagate depends on runtime conditions not derivable from the snapshot.
 - **Evidence** — Cite the try/catch, await, or rejection site and the swallowed/mishandled condition.
 - **Applies** — only when the diff introduces or modifies error handling, async/promise flow, or external calls that can fail
 
@@ -111,7 +116,7 @@
 
 ## 2. Security & Safety — weight 18
 
-**Activation.** EVIDENCE RULE: the judge has the full frozen snapshot and must trace tainted-value origins and sink definitions through it before falling to UNKNOWN. ALWAYS active. When the diff is provably inert on all attack surfaces (pure docs/markdown, comment-only, or test-fixture edits with zero runtime code, no new deps, no IPC/SQL/shell/DOM/fs/secret touch), the dimension collapses to the supply-chain (SEC-8) + secret (SEC-5) sub-checks; all attack-surface sub-checks go UNKNOWN and drop from the denominator rather than auto-passing. If literally nothing is checkable, report the dimension inactive so the geometric mean skips it (do not score zero sub-checks). DENOMINATOR FLOOR: with fewer than 2 non-UNKNOWN sub-checks, cap at 0.89 and flag low-confidence.
+**Activation.** EVIDENCE RULE: the judge has the full frozen snapshot and must trace tainted-value origins and sink definitions through it before falling to UNKNOWN. Active unless nothing is checkable. When the diff is provably inert on all attack surfaces (pure docs/markdown, comment-only, or test-fixture edits with zero runtime code, no new deps, no IPC/SQL/shell/DOM/fs/secret touch), the dimension collapses to the supply-chain (SEC-8) + secret (SEC-5) sub-checks via their Applies scopes; the attack-surface sub-checks are excluded as non-applicable rather than auto-passing. THIN-EVIDENCE: with fewer than 2 applicable non-UNKNOWN sub-checks, mark the dimension INACTIVE (excluded, weights renormalize) — an inert diff is skipped, not penalized.
 
 **Ownership (de-dup).** Owns ISO 25010 Security + Safety of CHANGED runtime code: injection/XSS sinks, unsafe deserialization/eval, path traversal, secret handling, trust-boundary/authz at IPC & spawn seams, least-privilege of granted capabilities (MCP allow/deny, tool allowlists, permission modes, spawn args), and unjustified NEW runtime dependencies. Owns the SECURITY facet of IPC typing — an `any`/`unknown`-passthrough payload that lets attacker-controlled fields REACH A SINK. Does NOT own: declared-T-vs-runtime parity with no security impact (ROB-1); off-chokepoint direct UPDATE (ROB-5); migration idempotency/collision (ROB-3/4) EXCEPT SQL-injection interpolation, charged here; @cyboflow-hidden/AbstractCliManager (Design DES-2); speculative over-generality (Design). Evidence is the judge's line-cited reasoning ONLY — there is NO SAST/secret-scanner/dependency-auditor.
 
@@ -122,63 +127,63 @@
 #### SEC-1 · No command/shell injection: child_process/PTY/CLI spawns built from static args or a safe argv array, never string-concatenated with user- or agent-controlled input.
 - **Pass** — Every new/changed spawn, exec, execSync, shell:true, or PTY command uses a fixed argv array or values traced through the snapshot to be non-attacker-influenced; interpolated fragments are validated/escaped or a trusted constant.
 - **Fail** — The diff introduces exec/execSync/shell:true/template-string command built with a session name, branch, path, prompt, model id, or other user/agent value reaching the shell without escaping.
-- **Unknown** — The diff touches no process-spawn/shell surface, OR the origin of an interpolated value cannot be traced through the snapshot to confirm/deny attacker control.
+- **Unknown** — The origin of an interpolated value cannot be traced through the snapshot to confirm/deny attacker control.
 - **Evidence** — Cite the spawn/exec line and the tainted variable + traced source, or state no spawn/shell sink is present.
 - **Applies** — only when the diff touches child_process, node-pty, spawn/exec helpers, or command-string construction
 
 #### SEC-2 · No SQL injection: all new/changed better-sqlite3 queries and migration DML use parameterized bindings, not string-interpolated runtime values.
 - **Pass** — Every changed query interpolates only static SQL identifiers and passes runtime values via ?/named bindings; any dynamic identifier comes from a fixed allowlist visible in the snapshot.
 - **Fail** — A changed query or migration concatenates/template-interpolates a runtime value (id, ref, body, filter) directly into the SQL string.
-- **Unknown** — The diff contains no SQL/migration DML changes, OR an interpolated identifier's allowlist-safety can't be judged from the snapshot.
+- **Unknown** — An interpolated identifier's allowlist-safety can't be judged from the snapshot.
 - **Evidence** — Cite the query/migration line showing parameterization vs interpolation, or state no SQL surface changed.
 - **Applies** — only when the diff touches SQL query strings, prepared statements, or migration DML
 
 #### SEC-3 · No XSS / unsafe DOM injection in changed renderer code: no new dangerouslySetInnerHTML/innerHTML/equivalent fed by non-constant/agent/user content.
 - **Pass** — The diff adds no raw-HTML sink, OR any such sink is fed only sanitized or provably-constant content; agent/session-derived strings render as text.
 - **Fail** — The diff introduces dangerouslySetInnerHTML/innerHTML/outerHTML/insertAdjacentHTML (or markdown-to-HTML without sanitization) fed by message/body/agent/user data.
-- **Unknown** — No renderer/DOM code changed, OR the sink's input provenance/sanitization cannot be determined from the snapshot.
+- **Unknown** — The sink's input provenance/sanitization cannot be determined from the snapshot.
 - **Evidence** — Cite the JSX/DOM sink line and its data source, or state no raw-HTML sink was added.
 - **Applies** — only when the diff touches frontend renderer/React/DOM code or a markdown/HTML rendering path
 
 #### SEC-4 · No unsafe deserialization/dynamic execution: no eval/new Function/vm on dynamic input, and JSON.parse of untrusted input is guarded (try/catch + shape validation).
 - **Pass** — The diff adds no eval/new Function/vm on dynamic input; every new parse of external/agent/IPC data is error-wrapped and validated (e.g. zod) before fields are used.
 - **Fail** — The diff adds eval/new Function/dynamic require of non-constant input, or parses attacker/agent-reachable JSON and consumes fields without validation.
-- **Unknown** — No deserialization/dynamic-exec surface changed, OR the parsed data's trust level can't be inferred from the snapshot.
+- **Unknown** — The parsed data's trust level can't be inferred from the snapshot.
 - **Evidence** — Cite the eval/parse line, its guard (or absence), and data source, or state no such surface changed.
 - **Applies** — only when the diff adds eval/Function/vm or parses external/IPC/agent-supplied serialized data
 
 #### SEC-5 · Secret handling is clean: no hardcoded credentials/tokens/keys committed, and secrets/env values are not written to logs, debug files, or error payloads.
 - **Pass** — The diff introduces no literal API key/token/password/private-key, and any handled secret/env var is not passed into logger/console/debug-log/telemetry/error strings.
 - **Fail** — The diff commits a real-looking secret literal, OR logs/serializes an env-derived credential (incl. into cyboflow-*-debug.log, telemetry scrub-bypass, or IPC error text).
-- **Unknown** — The diff touches no credential/env/secret-adjacent code, OR a suspicious literal cannot be confirmed as a live secret vs placeholder/fixture.
+- **Unknown** — A suspicious literal cannot be confirmed as a live secret vs placeholder/fixture.
 - **Evidence** — Cite the literal or the log/serialize line handling the secret, or state no secret-handling surface changed.
 - **Applies** — always (a committed secret can appear in any file), with attention to env access, logging, telemetry, config
 
 #### SEC-6 · Least-privilege preserved: changes to capability grants (MCP allow/deny lists, tool allowlists, permission modes, sandbox/spawn flags) do not silently widen what an agent/run can do beyond the task's requirement.
 - **Pass** — Any changed grant is equal-or-narrower, or a widening is explicitly required by the task spec; MCP deny/allow, disallowedTools, strictMcpConfig, permission-mode, and env-flag semantics are not weakened.
 - **Fail** — The diff broadens agent/run privilege without task justification — removes a deny/disallowedTools entry, flips permission-mode to auto/bypass by default, disables strictMcpConfig, adds a dangerous auto-approve, or leaks a force-persistence/bypass env flag.
-- **Unknown** — No capability/permission/MCP/spawn-flag surface changed, OR whether the widening is task-required can't be judged from the spec.
+- **Unknown** — Whether the widening is task-required can't be judged from the spec.
 - **Evidence** — Cite the grant/flag line and its before→after privilege delta plus the task requirement, or state no capability surface changed.
 - **Applies** — only when the diff touches MCP config, tool allow/deny lists, permission modes, sandbox flags, or spawn env/argv privilege
 
 #### SEC-7 · Trust-boundary typing: new/changed IPC/tRPC payloads carrying attacker- or agent-controlled data are typed end-to-end (no `any`, no `unknown`-passthrough) so untrusted fields cannot REACH A SINK unvalidated.
 - **Pass** — Changed handlers and their request/response interfaces are concretely typed and validated at the boundary; no `any`, and any `unknown` is narrowed via guard/zod before use at a security-relevant sink.
 - **Fail** — A changed cross-boundary payload uses `any`, or forwards `unknown`/loosely-typed attacker-controlled fields straight into a query/spawn/DOM/fs sink without validation.
-- **Unknown** — The diff touches no boundary payload, OR the field provably does NOT reach any security-relevant sink (then it is Correctness/Robustness parity, not here).
+- **Unknown** — The field provably does NOT reach any security-relevant sink (then it is Correctness/Robustness parity, not here).
 - **Evidence** — Cite the handler/interface line showing the type + the sink the field reaches, or state no security-relevant boundary payload changed. Do NOT re-charge a pure shape-drift already owned by ROB-1.
 - **Applies** — only when the diff touches an IPC/tRPC handler, its request/response interface, or a boundary DTO carrying untrusted data that reaches a sink
 
 #### SEC-8 · New runtime dependency is justified and minimal (supply-chain): any added production dependency is necessary, reputable, and not replaceable by existing utilities.
 - **Pass** — The diff adds no new runtime dependency, OR each added dependency is directly required by the task, has no trivial in-repo/std-lib equivalent, and is mainstream/well-maintained.
 - **Fail** — The diff adds a runtime dependency that is unnecessary (duplicates existing util), obscure/unmaintained/typosquat-risk, or pulls a broad transitive surface for a trivial need.
-- **Unknown** — No package.json/lockfile runtime-dependency change is present, OR the package's provenance can't be assessed from the snapshot.
+- **Unknown** — The package's provenance can't be assessed from the snapshot.
 - **Evidence** — Cite the package.json/lockfile addition and the justification or the existing equivalent it duplicates, or state no runtime dep was added.
 - **Applies** — only when the diff adds/changes a production (non-dev) dependency in package.json or the lockfile
 
 #### SEC-9 · No path traversal / arbitrary file access: fs read/write/delete (or worktree/debug-log/artifact path construction) built from agent/session/user-controlled input (worktree path, session name, branch, log filename) is normalized and contained to an allowed root.
 - **Pass** — Every new/changed fs.readFile/writeFile/unlink/mkdir/rename (or path.join into a filesystem op) either uses a trusted constant/derived-safe path or normalizes and validates the input path stays within an allowed base directory (no `..` escape).
 - **Fail** — The diff builds a filesystem path from agent/session/user input and passes it to an fs op without normalization/containment, allowing `../` traversal or writing outside the intended worktree/root.
-- **Unknown** — The diff touches no fs path construction, OR the path variable's origin cannot be traced through the snapshot to confirm attacker control.
+- **Unknown** — The path variable's origin cannot be traced through the snapshot to confirm attacker control.
 - **Evidence** — Cite the fs op line and the tainted path variable + its traced source, or state no fs-path sink was added.
 - **Applies** — only when the diff touches fs read/write/delete or constructs a filesystem path from dynamic input
 
@@ -186,11 +191,11 @@
 
 ## 3. Robustness & Contract Safety — weight 14
 
-**Activation.** EVIDENCE RULE: the judge has the full frozen snapshot and MUST resolve counterpart interfaces, caller sets, the migrations directory listing, and helper bodies from it before marking UNKNOWN — 'not visible in the diff' is NOT grounds for UNKNOWN when the file exists in the snapshot. ACTIVE whenever the diff touches runtime code that crosses a contract or persistence boundary: an IPC/tRPC channel or its request/response interface, a shared/exported signature with downstream callers, a SQL migration or schema, an entity/review/artifact write path, async/concurrent code, an error/logging path, a localStorage key rename, or a resource that must be released. DROPPED (whole dimension excluded, activation vector logged) only when the diff is exclusively non-runtime surface — pure docs/markdown prose, comments, static asset/style tweaks, or test-only files with no boundary/migration/concurrency touch. Each sub-check self-activates by its own scope. DENOMINATOR FLOOR: fewer than 2 non-UNKNOWN sub-checks caps at 0.89 and flags low-confidence.
+**Activation.** EVIDENCE RULE: the judge has the full frozen snapshot and MUST resolve counterpart interfaces, caller sets, the migrations directory listing, and helper bodies from it before marking UNKNOWN — 'not visible in the diff' is NOT grounds for UNKNOWN when the file exists in the snapshot. ACTIVE whenever the diff touches runtime code that crosses a contract or persistence boundary: an IPC/tRPC channel or its request/response interface, a shared/exported signature with downstream callers, a SQL migration or schema, an entity/review/artifact write path, async/concurrent code, an error/logging path, a localStorage key rename, or a resource that must be released. DROPPED (whole dimension excluded, activation vector logged) only when the diff is exclusively non-runtime surface — pure docs/markdown prose, comments, static asset/style tweaks, or test-only files with no boundary/migration/concurrency touch. Each sub-check self-activates by its own scope. THIN-EVIDENCE: fewer than 2 applicable non-UNKNOWN sub-checks marks the dimension INACTIVE (excluded, weights renormalize) and flags low-confidence.
 
 **Ownership (de-dup).** Owns CONTRACT INTEGRITY and RUNTIME SAFETY: declared-T-vs-runtime-shape parity and one-sided IPC interface drift (ROB-1 is the SOLE owner of the silent-drop CONTRACT defect), backward-compat of changed shared signatures on untouched callers, migration idempotency/destructiveness/collision/schema-parity, off-chokepoint direct entity UPDATE (ROB-5 owns the chokepoint-bypass defect, NOT Design), observability/error-swallowing incl. dropped optional logger (ROB-6 is the SOLE owner of logger-omission), resource cleanup, and hand-rolled localStorage key renames (ROB-8). Does NOT own: wrong abstraction level / speculative generality (Design); verbose expression (Maintainability); unrequested functionality (Scope); whether the happy-path logic is CORRECT (Correctness); @cyboflow-hidden/AbstractCliManager preservation (Design DES-2); test meaningfulness (Test) or gate pass/fail. The `any`-type ban is charged here ONLY as an IPC/tRPC parity smell masking a boundary shape; a stray `any` elsewhere is Maintainability.
 
-**Gate / cap behavior.** (1) A CONFIRMED destructive/irreversible migration op on an existing table (dropped/renamed column, non-idempotent bare CREATE, NOT NULL without default/backfill) SOFT-CAPS this dimension at Poor (<0.40) and raises a confidence flag. (2) A CONFIRMED off-chokepoint direct UPDATE to ideas/epics/tasks/review_items/artifacts (raw SQL bypassing the routers) likewise soft-caps at Poor. (3) A CONFIRMED migration number collision with an existing/main migration soft-caps at Poor (MEMORY documents live 035-039 collisions across sibling branches). (4) A CONFIRMED IPC/tRPC silent-drop is a confidence-flag finding even if isolated. When boundary-dense and the judge cannot resolve a shape even from the snapshot, prefer UNKNOWN and log low-confidence rather than guess PASS.
+**Gate / cap behavior.** The first three classes below are CATASTROPHIC-CLASS: each soft-caps this dimension at Poor (<0.40) AND soft-caps the OVERALL score at Fair (≤0.69) AND emits a BLOCKING review_item (see the uniform catastrophic-cap tier in "How scoring works") — destroying data or bypassing the write chokepoint is at least as severe as a high security finding and must not hide inside a 14%-weight dimension. (1) A CONFIRMED destructive/irreversible migration op on an existing table (dropped/renamed column, non-idempotent bare CREATE, NOT NULL without default/backfill). (2) A CONFIRMED off-chokepoint direct UPDATE to ideas/epics/tasks/review_items/artifacts (raw SQL bypassing the routers). (3) A CONFIRMED migration number collision with an existing/main migration (live 035-042 collisions across sibling branches are documented). (4) A CONFIRMED IPC/tRPC silent-drop is a confidence-flag finding even if isolated (no overall cap). When boundary-dense and the judge cannot resolve a shape even from the snapshot, prefer UNKNOWN and log low-confidence rather than guess PASS.
 
 **Sub-checks:**
 
@@ -254,7 +259,7 @@
 
 ## 4. Design & Architecture Fit — weight 14
 
-**Activation.** EVIDENCE RULE: the judge has the full snapshot and must inspect the surrounding class structure / call graph / seam definitions before marking UNKNOWN. ACTIVE whenever the diff adds or changes production code that participates in the architecture — new modules, services, routers, IPC/tRPC handlers, spawn/facade seams, data-flow wiring, or edits to entity/review/artifact write paths, CLI-manager classes, or @cyboflow-hidden regions. DROPPED (whole dimension excluded) only when the diff is exclusively docs/markdown, comments, test-only files, pure copy/string changes, config/version bumps, or asset changes with zero production-logic wiring. DENOMINATOR FLOOR: fewer than 2 non-UNKNOWN sub-checks caps at 0.89 and flags low-confidence.
+**Activation.** EVIDENCE RULE: the judge has the full snapshot and must inspect the surrounding class structure / call graph / seam definitions before marking UNKNOWN. ACTIVE whenever the diff adds or changes production code that participates in the architecture — new modules, services, routers, IPC/tRPC handlers, spawn/facade seams, data-flow wiring, or edits to entity/review/artifact write paths, CLI-manager classes, or @cyboflow-hidden regions. DROPPED (whole dimension excluded) only when the diff is exclusively docs/markdown, comments, test-only files, pure copy/string changes, config/version bumps, or asset changes with zero production-logic wiring. THIN-EVIDENCE: fewer than 2 applicable non-UNKNOWN sub-checks marks the dimension INACTIVE (excluded, weights renormalize) and flags low-confidence.
 
 **Ownership (de-dup).** Owns whether the change fits the EXISTING architecture at the RIGHT abstraction level: module-boundary placement, reuse of the sanctioned seam vs a parallel bespoke path, honoring preserved extension points (DES-2 is the SOLE OWNER of AbstractCliManager-collapse and @cyboflow-hidden deletion/mislabel across all dimensions), WRONG-ABSTRACTION over-engineering (speculative generality, needless indirection, single-caller factories/interfaces), and IPC boundary PLACEMENT (DES-5, distinct from ROB-1's shape-drift). Does NOT own: verbose-but-correct expression (Maintainability); UNREQUESTED features/scope creep (Scope); off-chokepoint direct entity UPDATE (Robustness ROB-5); correctness/logic bugs (Correctness); test meaningfulness (Test); declared-T-vs-runtime shape-drift as a runtime defect (ROB-1) — DES-5 judges only boundary type PLACEMENT and must not re-charge a drift ROB-1 already failed.
 
@@ -319,7 +324,7 @@
 
 **Ownership (de-dup).** Owns VERBOSE EXPRESSION of in-scope code (needless length, over-commenting, redundant local abstraction, dead-weight wrappers), naming clarity, and comment intent. Does NOT own: WRONG ABSTRACTION LEVEL / speculative generality reaching beyond the task (Design); UNREQUESTED functionality (Scope); off-chokepoint UPDATE or dropped-logger as a correctness/robustness fault (Robustness — the same code may still be judged here purely for readability); lint/formatting conformance (deterministic lint gate — never rewarded/penalized here); test meaningfulness (Test) or gate pass/fail. When a construct is both over-abstracted-beyond-scope AND verbose, charge the beyond-scope aspect to Design and only the in-scope verbosity here.
 
-**Gate / cap behavior.** No hard gate (advisory, weighted below Security). SOFT-CAP: if MTN-2 (naming) AND MTN-4 (function/file size) both FAIL, cap this dimension at Fair (<=0.69). CONFIDENCE-FLAG (not a score change) raised when >40% of sub-checks resolve UNKNOWN. The `any`-type observation (MTN-6) is a readability signal here only; its authoritative penalty lives in the lint gate, so a FAIL here must NOT also be double-charged as a gate failure. DENOMINATOR FLOOR: fewer than 2 non-UNKNOWN sub-checks caps at 0.89.
+**Gate / cap behavior.** No hard gate (advisory, weighted below Security). SOFT-CAP: if MTN-2 (naming) AND MTN-4 (function/file size) both FAIL, cap this dimension at Fair (<=0.69). CONFIDENCE-FLAG (not a score change) raised when >40% of sub-checks resolve UNKNOWN. The `any`-type observation (MTN-6) is a readability signal here only; its authoritative penalty lives in the lint gate, so a FAIL here must NOT also be double-charged as a gate failure. THIN-EVIDENCE: fewer than 2 applicable non-UNKNOWN sub-checks marks the dimension INACTIVE (excluded, weights renormalize).
 
 **Sub-checks:**
 
@@ -361,14 +366,14 @@
 #### MTN-6 · Type annotations aid readability without `any`: added TS uses `unknown`+guards or precise types, keeping call sites self-documenting (readability lens only; lint gate owns the hard penalty).
 - **Pass** — No new `any` (explicit or via `as any`) is introduced in authored TS; added types make boundary shapes legible.
 - **Fail** — The diff introduces `any`/`as any` or an untyped catch-all that obscures the real shape and hurts a reader's ability to know what flows through.
-- **Unknown** — The change touches no TypeScript, or the annotation is generated/inferred and not visible in the hunk.
+- **Unknown** — The annotation is generated/inferred and not visible in the hunk.
 - **Evidence** — Cite the `any` occurrence or opaque annotation with file:line.
 - **Applies** — only when the diff adds or edits TypeScript type annotations
 
 #### MTN-7 · Migration SQL and workflow-prompt markdown, when touched, are readable: migration has a clear intent (comment/name) and is not a wall of unexplained ALTERs; prompt edits stay coherent, not bloated with contradictory instructions.
 - **Pass** — A touched migration is self-describing (clear filename/leading comment) and each statement's purpose is evident; touched prompt markdown reads cleanly without redundant/conflicting stanzas.
 - **Fail** — A migration is an opaque batch of ALTERs with no intent comment/name, or prompt markdown is padded with duplicated/contradictory instruction blocks that would confuse a future editor.
-- **Unknown** — The diff touches no migration or workflow-prompt markdown.
+- **Unknown** — The touched file's full text cannot be read from the snapshot to judge its clarity in context.
 - **Evidence** — Cite the migration/prompt file with file:line and describe the clarity defect or its absence.
 - **Applies** — only when the diff touches a SQL migration or a workflow-prompt .md file
 
@@ -387,7 +392,7 @@
 
 **Ownership (de-dup).** Owns ONLY the MEANINGFULNESS of tests: whether assertions pin intended behavior, cover edge/error paths, would fail on regression, and whether an existing assertion was silently weakened. Does NOT own whether tests/build/typecheck/lint pass (deterministic gate + Correctness corroboration signal), whether production code is correct (Correctness) or well-designed (Design), or migration correctness itself (Robustness) — only whether a migration/schema-parity change carries a MEANINGFUL test. A missing test for a behavior change is charged HERE (poor coverage); the resulting untested-correctness risk is flagged to Correctness via the confidence flag, not double-scored.
 
-**Gate / cap behavior.** GATE-DODGE: if the diff is behavior-changing and ships ZERO runnable tests reaching the changed path, force this dimension to Poor (score 0), raise the Correctness confidence flag, and mark the run low-confidence. SOFT-CAP: if tests exist but are all always-green/tautological/pure implementation snapshots (no behavioral assertion that could fail on regression), cap at Fair (<=0.69). No gate when the dimension is legitimately DROPPED (non-behavioral diff).
+**Gate / cap behavior.** GATE-DODGE: if the diff is behavior-changing and NO runnable test — new **or pre-existing** — reaches the changed path, force this dimension to Poor (score 0; it enters the geometric mean floored at 1 per "How scoring works", dragging an otherwise-85 run to ≈60 Fair), raise the Correctness confidence flag, and mark the run low-confidence. SOFT-CAP: if tests exist but are all always-green/tautological/pure implementation snapshots (no behavioral assertion that could fail on regression), cap at Fair (<=0.69). No gate when the dimension is legitimately DROPPED (non-behavioral diff).
 
 **Sub-checks:**
 
@@ -422,21 +427,21 @@
 #### TST-5 · Migration / schema-parity changes carry the expected cyboflow-tier test.
 - **Pass** — A migration/DB-schema change is accompanied by a migration test (applies migration + asserts resulting shape/data) and, where a shared type mirrors the schema, the schema-parity test row is updated so drift fails the build.
 - **Fail** — A migration or schema-mirroring type changes but no migration test asserts the new shape and/or the schema-parity test is left stale.
-- **Unknown** — The diff touches no migration and no schema-parity-guarded type — exclude from denominator.
+- **Unknown** — A parity-guarded type may be implicated but the parity suite cannot be located in the snapshot.
 - **Evidence** — Cite the migration file + the migration/parity test (or its absence), naming the schema-parity suite if present.
 - **Applies** — only when the diff adds/edits a migration or a type that a schema-parity test guards
 
 #### TST-6 · IPC/tRPC contract changes are covered by a test asserting the full runtime payload shape.
 - **Pass** — A changed IPC/tRPC handler or request/response interface has a test asserting the handler returns the declared T's fields at runtime (or a parity test comparing frontend↔main shapes), catching silent-drop drift.
 - **Fail** — An IPC/tRPC handler or its request/response interface changes with no test pinning the returned payload shape.
-- **Unknown** — The diff touches no IPC/tRPC boundary or handler contract — exclude from denominator.
+- **Unknown** — The payload shape is asserted only indirectly (e.g. through a consumer test) and equivalence to the declared T cannot be established from the snapshot.
 - **Evidence** — Cite the handler/interface change and the test asserting its payload fields, or note the absence.
 - **Applies** — only when the diff modifies an IPC/tRPC handler, channel, or a request/response interface crossing that boundary
 
 #### TST-7 · Chokepoint/router writes are verified through the router, not bypassed in the test.
 - **Pass** — Tests for entity/review/artifact behavior drive writes through the real TaskChangeRouter/ReviewItemRouter/ArtifactRouter path (or assert the router was the write path) rather than seeding rows via direct UPDATE that masks a bypass.
 - **Fail** — The test sets up expected state via direct table UPDATE/INSERT that sidesteps the chokepoint, unable to catch a production bypass or router regression.
-- **Unknown** — The changed behavior does not involve entity/review/artifact writes — exclude from denominator.
+- **Unknown** — The test's setup helper's write path cannot be resolved from the snapshot to confirm router vs raw SQL.
 - **Evidence** — Cite the test's setup path (router call vs raw SQL) relative to the changed chokepoint.
 - **Applies** — only when the diff changes entity/review/artifact write logic routed through a chokepoint
 
@@ -462,7 +467,7 @@
 
 **Ownership (de-dup).** Owns the MATCH between requirement set and delivered change in BOTH directions: (1) UNREQUESTED functionality/features/files/flags (excess), and (2) MISSING required behavior/dropped acceptance criteria (under-coverage — anti-gaming so shrinking blast radius by omission does not score well). Also owns silent assumptions and out-of-scope refactors that inflate blast radius. Does NOT own: WRONG ABSTRACTION LEVEL / speculative generality (Design owns 'over-engineering' even when out of scope — charge excess to Design if the defect is fundamentally 'too abstract', to Scope if 'unasked-for capability'); VERBOSE EXPRESSION (Maintainability); off-chokepoint UPDATE (Robustness); test meaningfulness (Test) or gate pass/fail; migration renumber/collision correctness (Robustness). Scope only flags a migration whose EXISTENCE is unrequested creep. The @cyboflow-hidden/AbstractCliManager INVARIANT itself is owned by DES-2; SCP-7 charges only the UNREQUESTED-ness of such a change.
 
-**Gate / cap behavior.** No hard gate of its own. SOFT-CAP: if any required acceptance criterion (derived from spec prose if needed) is provably UNIMPLEMENTED (SCP-1 FAIL), cap this dimension at Fair (<=0.69) regardless of pass fraction — under-scoping must not net a high score by being 'clean'. CONFIDENCE-FLAG (advisory): raise when >40% of sub-checks resolve UNKNOWN due to an ambiguous/missing spec. Excess-only violations (SCP-2/3/4 FAIL with full coverage) do NOT trigger the soft-cap but lower the pass fraction. DENOMINATOR FLOOR: fewer than 2 non-UNKNOWN sub-checks caps at 0.89.
+**Gate / cap behavior.** SOFT-CAP (CATASTROPHIC-CLASS): if any required acceptance criterion (derived from spec prose if needed) is provably UNIMPLEMENTED (SCP-1 FAIL), cap this dimension at Fair (<=0.69) AND soft-cap the OVERALL score at Fair (≤0.69) with the `requirements_unmet` flag and a BLOCKING review_item. Rationale: at 8% weight a dimension-only cap costs ~2 overall points in the geometric mean — no deterrent — and Correctness cannot catch code that simply doesn't exist (it grades changed hunks); a variant that ships 80% of the asks "cleanly" must not outscore one that ships 100%. CONFIDENCE-FLAG (advisory): raise when >40% of sub-checks resolve UNKNOWN due to an ambiguous/missing spec. Excess-only violations (SCP-2/3/4 FAIL with full coverage) do NOT trigger the soft-cap but lower the pass fraction. THIN-EVIDENCE: fewer than 2 applicable non-UNKNOWN sub-checks marks the dimension INACTIVE (excluded, weights renormalize).
 
 **Sub-checks:**
 
@@ -470,7 +475,7 @@
 - **Pass** — Each named or reasonably-derived requirement traces to a concrete code/config/migration hunk that fulfills it.
 - **Fail** — One or more required behaviors (explicit or clearly implied by the prose goal) have no implementing hunk, OR a requirement is only stubbed/TODO'd without functioning code.
 - **Unknown** — The spec is so vague that no discrete requirement can be responsibly derived even from the prose — reserve UNKNOWN for genuinely contentless goals, not merely un-bulleted ones.
-- **Evidence** — Cite each derived spec requirement and the file:line hunk satisfying it (or note the absent one). Anti-under-scoping check; a FAIL triggers the Fair soft-cap.
+- **Evidence** — Cite each derived spec requirement and the file:line hunk satisfying it (or note the absent one). Anti-under-scoping check; a FAIL triggers the dimension AND overall Fair soft-caps (`requirements_unmet`) plus a blocking review_item.
 - **Applies** — always
 
 #### SCP-2 · No user-facing feature, command, flag, endpoint, or UI surface is added that the task did not request.
@@ -497,28 +502,28 @@
 #### SCP-5 · A newly-added DB migration exists only because the task's data-model change requires it (no speculative/unrequested schema).
 - **Pass** — Each added migration column/table/view directly backs a required behavior in the spec.
 - **Fail** — A migration adds columns/tables/entities the task never asked for (schema scope creep), e.g. speculative future-use fields.
-- **Unknown** — The diff touches no migration files, OR the spec explicitly delegates schema shape to implementer discretion.
+- **Unknown** — The spec explicitly delegates schema shape to implementer discretion.
 - **Evidence** — Cite the migration file:line and map (or fail to map) each schema element to a requirement. Numbering/idempotency/collision is Robustness's concern.
 - **Applies** — only when the diff adds or edits files under a migrations directory
 
 #### SCP-6 · Added tests / fixtures / scripts are scoped to the task and do not smuggle in unrequested product behavior.
 - **Pass** — New test/tooling files exercise only the requested change; any helper added is used by those tests.
 - **Fail** — Test/tooling additions introduce or depend on product features outside the task, or add large unused scaffolding presented as 'test support'.
-- **Unknown** — The diff adds no test/script/fixture files.
+- **Unknown** — Whether an added helper is genuinely exercised by the task's tests cannot be established from the snapshot.
 - **Evidence** — Cite the added test/tooling hunk and the out-of-scope behavior it introduces. Meaningfulness is Test's concern; this flags scope leakage.
 - **Applies** — only when the diff adds or edits test, fixture, or build/script files
 
 #### SCP-7 · Preserved/guarded assets are not touched WITHOUT a task mandate: no unrequested deletion/mislabel of @cyboflow-hidden code and no unrequested collapse of AbstractCliManager.
 - **Pass** — Either these preserved surfaces are untouched, OR any change to them is explicitly mandated by the spec.
 - **Fail** — The diff deletes/guts @cyboflow-hidden code, stamps the marker onto live code, or collapses the preserved extension point AND the spec did not request it.
-- **Unknown** — The diff touches none of these preserved surfaces.
+- **Unknown** — Whether the spec's prose mandates the touch is genuinely ambiguous.
 - **Evidence** — Cite the touched hunk (file:line) and the absence of a spec instruction authorizing it. Charge HERE only the UNREQUESTED-ness; the invariant violation itself is owned by DES-2 (mutually exclusive: if the spec mandated the change, SCP-7 PASSes and DES-2 judges the invariant).
 - **Applies** — only when the diff touches @cyboflow-hidden-annotated code or AbstractCliManager/ClaudeCodeManager AND the change is not spec-mandated
 
 #### SCP-8 · The change does not silently widen an IPC/tRPC contract with fields/channels nobody requested.
 - **Pass** — Any added request/response field or new IPC channel corresponds to a spec requirement and is threaded for a requested reason.
 - **Fail** — The diff enlarges an IPC/tRPC payload interface or adds channels beyond the task's need (unrequested boundary surface growth).
-- **Unknown** — The diff touches no IPC/tRPC/shared-types boundary.
+- **Unknown** — Whether the added field serves a requested behavior cannot be traced from the spec prose.
 - **Evidence** — Cite the widened interface (file:line) and note no requirement backs the added field/channel. Type-PARITY correctness is ROB-1's; this judges only whether the ADDITION was in scope.
 - **Applies** — only when the diff edits IPC/tRPC handlers, shared/types/ipc.ts, or request/response interfaces
 
@@ -542,6 +547,19 @@ The draft (7 dimensions generated independently) was run through a coherence cri
 - Decoupled TST-4 from author commit-type labels: appliesWhen now keys on whether the CODE corrects a defect (guard added, condition inverted-back, off-by-one/null-deref fixed), closing the 'mislabel a fix as feat' regression-test dodge.
 - Added TST-9: charges silent weakening/deletion of a pre-existing real assertion to make the suite pass (previously only newly-added tests were graded for always-green-ness).
 - Fixed SCP-1 prose-spec self-disabling: the judge must DERIVE discrete requirements from cyboflow's prose entity bodies and judge against them; UNKNOWN reserved for genuinely contentless goals, restoring the anti-under-scoping Fair soft-cap where cyboflow specs actually live.
-- Added a DENOMINATOR FLOOR to every dimension's gateBehavior: a dimension with fewer than 2 non-UNKNOWN sub-checks is capped at Good (0.89) and flagged low-confidence, so thin-evidence dimensions cannot enter the geometric mean at a full 1.0.
+- Added a DENOMINATOR FLOOR to every dimension's gateBehavior: a dimension with fewer than 2 non-UNKNOWN sub-checks is capped at Good (0.89) and flagged low-confidence, so thin-evidence dimensions cannot enter the geometric mean at a full 1.0. *(Superseded in v1.1: thin-evidence dimensions are now marked INACTIVE and excluded instead of capped.)*
 - Rewrote COR-6 to require grepping the snapshot for symbol/column/tool existence before PASS/UNKNOWN, replacing the gameable 'plausibly resolvable' passWhen that let plausible-but-nonexistent APIs earn PASS.
 - Tightened TST-1 unknownWhen so a behavioral change with no test present is FAIL (never UNKNOWN), and TST-2/TST-8 UNKNOWN now requires the test body to be genuinely absent from the snapshot, closing the truncated-diff stub-dodge.
+
+## Revision history
+
+### v1.1 (review pass)
+
+- **Under-delivery escalated to catastrophic-class:** an unimplemented required acceptance criterion (SCP-1 FAIL) now soft-caps the OVERALL score at Fair (≤69) with a `requirements_unmet` flag + blocking review_item — previously it capped only the 8%-weight Scope dimension, costing ~2 overall points in the geometric mean (no deterrent), and Correctness cannot catch code that doesn't exist.
+- **Aggregation floor made explicit:** dimensions enter the geometric mean floored at 1; the Test gate-dodge "score 0" no longer implies overall = 0 (an otherwise-85 run with zero tests lands ≈60 Fair — a chosen, visible penalty).
+- **Severity parity for Robustness catastrophic classes:** confirmed destructive migration, off-chokepoint entity write, and migration-number collision now cap the OVERALL at Fair (like a high security finding) instead of only the 14%-weight dimension (which still allowed ~76 Good overall).
+- **Uniform catastrophic-cap tier** added to "How scoring works" listing all five overall-cap classes in one rule.
+- **Thin-evidence dimensions are INACTIVE, not capped:** the v1.0 denominator floor (cap at 0.89 when <2 resolvable sub-checks) systematically penalized inert, safe diffs — an untouched attack surface could never score Excellent on Security while a riskier diff could. Now the dimension is excluded and weights renormalize.
+- **Applicability vs UNKNOWN disambiguated globally:** a failed *Applies* condition excludes the sub-check outright; *Unknown* clauses no longer restate *Applies* negations (stripped/replaced across COR-4, SEC-1–9, MTN-6/7, TST-5/6/7, SCP-5/6/7/8) — removing a judge-noise source where the same diff could legitimately be marked PASS or UNKNOWN, changing the denominator.
+- **Test gate wording fixed:** "ships zero runnable tests" → "no runnable test — new or pre-existing — reaches the changed path," aligning the gate with TST-1's pre-existing-coverage exoneration.
+- **Security activation self-contradiction fixed** ("ALWAYS active" vs "report inactive") and **K-sample mechanics stated** (per-sub-check pass-share across K samples, mean pass-fraction per dimension, cap triggers surfaced never averaged away).
