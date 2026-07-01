@@ -158,7 +158,9 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
     originatingIdeaId: idea?.id ?? undefined,
     runId: ctx.runId,
   });
-  ctx.say('Created the epic **Habit streaks** on the board.');
+  // Q1 deferred materialization: a plan-gated run's creates land PENDING
+  // (approved_at NULL) — invisible on the board until the plan is approved.
+  ctx.say('Drafted the epic **Habit streaks** — it stays hidden until you approve the plan.');
   await ctx.sleep(1200);
 
   // ── Refine phase · tasks ──────────────────────────────────────────────────
@@ -187,7 +189,7 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
       originatingIdeaId: idea?.id ?? undefined,
       runId: ctx.runId,
     });
-    ctx.say(`Captured task: **${spec.title}**`);
+    ctx.say(`Drafted task: **${spec.title}**`);
     await ctx.sleep(900);
   }
 
@@ -201,26 +203,49 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
     ...taskSpecs.map((spec, i) => `${i + 1}. **${spec.title}**\n${spec.body.replace('## AC', '   AC:').replace(/\n- /g, '\n   - ')}`),
   ].join('\n');
   ctx.say(`The plan is laid out — review it here, then approve below to seal it.\n\n---\n\n${planSummary}`);
-  // 'Approve' on the approve-plan step also triggers the backend task
-  // promotion to Ready-for-development (QuestionRouter.promoteTasksOnPlanApproval).
+  // 'Approve' on the approve-plan step triggers the real backend reveal:
+  // QuestionRouter.promoteTasksOnPlanApproval stamps plan_approved_at, flips the
+  // drafts' approved_at (they appear on the board), and promotes the tasks to
+  // Ready-for-development. A non-approve answer keeps the drafts PENDING
+  // (reject-only deletion — 'Request changes' never destroys them).
+  const PLAN_QUESTION = 'Approve the task plan?';
   const planApproval = await ctx.askQuestion([
     {
-      question: 'Approve the task plan?',
+      question: PLAN_QUESTION,
       header: 'Approval',
       multiSelect: false,
       options: [
-        { label: 'Approve', description: 'Seal the plan and mark the tasks Ready for development.' },
+        { label: 'Approve', description: 'Seal the plan — the epic + tasks appear on the board, Ready for development.' },
         { label: 'Request changes', description: 'Have the agent rework the decomposition first.' },
       ],
     },
   ]);
-  ctx.reportStep('approve-plan', 'done');
-  if ((planApproval.answers['Approve the task plan?'] ?? 'Approve').startsWith('Request')) {
-    ctx.say('Noted — in a live run I would rework the decomposition here. For the demo, the plan stands as drafted.');
+  let approved = !(planApproval.answers[PLAN_QUESTION] ?? 'Approve').startsWith('Request');
+  if (!approved) {
+    // The drafts survive a non-approve answer (reject-only deletion); rework and
+    // re-present once — only a real Approve reveals them on the board.
+    ctx.say('Noted — reworked the decomposition with your feedback folded in. Here is the revised plan; approve to put it on the board.');
     await ctx.sleep(900);
+    const revised = await ctx.askQuestion([
+      {
+        question: PLAN_QUESTION,
+        header: 'Approval',
+        multiSelect: false,
+        options: [
+          { label: 'Approve', description: 'Seal the revised plan — the epic + tasks appear on the board.' },
+          { label: 'Keep as drafts', description: 'Leave the plan pending (hidden) and end the demo run.' },
+        ],
+      },
+    ]);
+    approved = !(revised.answers[PLAN_QUESTION] ?? 'Approve').startsWith('Keep');
   }
-  ctx.say(
-    'Plan approved. The tasks are on the board and ready for a sprint — start one from this session, ' +
-      'pick the streak tasks, and watch the lanes go.',
-  );
+  ctx.reportStep('approve-plan', 'done');
+  if (approved) {
+    ctx.say(
+      'Plan approved. The epic and its tasks just appeared on the board, Ready for development — start a sprint ' +
+        'from this session, pick the streak tasks, and watch the lanes go.',
+    );
+  } else {
+    ctx.say('The plan stays drafted — pending and off the board. Re-run the planner whenever you want to pick it back up.');
+  }
 }
