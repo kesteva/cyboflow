@@ -233,11 +233,14 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
         multiSelect: false,
         options: [
           { label: 'Approve', description: 'Seal the revised plan — the epic + tasks appear on the board.' },
-          { label: 'Keep as drafts', description: 'Leave the plan pending (hidden) and end the demo run.' },
+          { label: 'Reject', description: 'Discard the plan — the draft epic + tasks are deleted and the run ends.' },
         ],
       },
     ]);
-    approved = !(revised.answers[PLAN_QUESTION] ?? 'Approve').startsWith('Keep');
+    // Reject is the ONLY option that tears the drafts down (exact reject-option
+    // match in QuestionRouter.deletePendingDraftsOnPlanDecline). Selecting it here
+    // hard-deletes the run's PENDING epic + tasks via the REAL backend.
+    approved = !(revised.answers[PLAN_QUESTION] ?? 'Approve').startsWith('Reject');
   }
   ctx.reportStep('approve-plan', 'done');
   if (approved) {
@@ -246,6 +249,6 @@ export async function plannerScript(ctx: DemoScriptContext): Promise<void> {
         'from this session, pick the streak tasks, and watch the lanes go.',
     );
   } else {
-    ctx.say('The plan stays drafted — pending and off the board. Re-run the planner whenever you want to pick it back up.');
+    ctx.say('Plan rejected — the draft epic and tasks were discarded. Re-run the planner to decompose the idea again.');
   }
 }

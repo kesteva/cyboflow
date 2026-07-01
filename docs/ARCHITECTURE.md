@@ -529,6 +529,18 @@ stages and gate backend visibility:
   plan-gated run + `plan_approved_at IS NULL` + per-entity `approved_at IS NULL`), so an
   approved run's revealed entities — and every non-plan-gated run's visible creates — survive.
 
+**Pending-draft terminal lifecycle.** A plan-gated run's PENDING drafts land in exactly one
+bucket at every terminal state — zero permanent zombies:
+
+| Terminal state | Draft outcome | Seam |
+| --- | --- | --- |
+| Reject option chosen at approve-plan | DELETED | `deletePendingDraftsOnPlanDecline` (exact reject-option match) |
+| Plan approved | REVEALED + seed idea retired | `promoteTasksOnPlanApproval` (reveal awaited before agent resume) |
+| `runs.cancel` / `runs.dismiss` of an unapproved run | DELETED | `deletePendingDraftsForRun` sweep |
+| Run FAILS terminal | DELETED | shared sweep on the lifecycle `failed` seam |
+| Cancel-and-restart | OLD run's drafts DELETED | shared sweep after the old run flips `canceled` |
+| Run COMPLETES with `plan_approved_at` still NULL | REVEALED fail-soft | `promotePendingDraftsForRun` at `runs.end` (visible-but-unwanted beats invisible-then-deleted) |
+
 The `ideas.scope` hint (`'small' | 'large'`) is the pre-extraction small-vs-large signal; the
 post-extraction source of truth is the presence of epics. All four kept stages are `asserted`
 (the `derived` execution stages collapsed away), so a task holds its entry stage until a run
