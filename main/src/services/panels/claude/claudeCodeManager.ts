@@ -13,7 +13,7 @@ import {
   isModelUnavailableError,
 } from '../../modelAvailabilityService';
 import { guardedModelByConcreteId } from '../../../../../shared/types/modelAvailability';
-import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig, CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
+import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig, CanUseTool, PermissionResult, SdkBeta } from '@anthropic-ai/claude-agent-sdk';
 import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
 import type Database from 'better-sqlite3';
 import type { Logger } from '../../../utils/logger';
@@ -89,6 +89,21 @@ export function modelSupportsAutoMode(model?: string): boolean {
 
   // Unknown / newer pinned id (e.g. a 4.6+ stamp) — assume classifier-capable.
   return true;
+}
+
+/**
+ * Extract the error text from a Claude Code `result` event whose `is_error` is
+ * true, else null. The CLI reports a failed turn (including an unusable `--model`)
+ * as a terminal result message rather than a thrown error, so the model-guard
+ * path inspects the event stream via this. Structural narrowing (no `any`), same
+ * shape the streamParser result schemas validate. Returns '' for an is_error
+ * result with no `result` string (still an error, just no message).
+ */
+function resultErrorText(event: unknown): string | null {
+  if (typeof event !== 'object' || event === null) return null;
+  const e = event as { type?: unknown; is_error?: unknown; result?: unknown };
+  if (e.type !== 'result' || e.is_error !== true) return null;
+  return typeof e.result === 'string' ? e.result : '';
 }
 
 /**
@@ -743,42 +758,69 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // Local latch avoids a DB hit on every subsequent event (the guarded UPDATE
     // is itself idempotent via `claude_session_id IS NULL`).
     let runClaudeSessionCaptured = false;
+    // Per-attempt SDK options so a mid-call model-unavailability (Fable 5 pulled)
+    // can retry the turn ONCE on the fallback family (Opus) instead of surfacing a
+    // hard Session Error. `attempt` caps the retry at one; only the FIRST attempt
+    // is eligible so an Opus error can never loop.
+    let activeOptions: Options = sdkOptions;
+    let attempt = 0;
     try {
-      const q = query({ prompt, options: { ...sdkOptions, abortController } });
-      for await (const event of q) {
-        if (abortController.signal.aborted) break;
+      retry: while (true) {
+        attempt++;
+        const q = query({ prompt, options: { ...activeOptions, abortController } });
+        for await (const event of q) {
+          if (abortController.signal.aborted) break;
 
-        // Forward to EventRouter / RawEventsSink pipeline via validated narrowing.
-        const typed = this.narrowing.narrow(event);
+          // Mid-call graceful fallback: the CLI reports an unusable `--model` as an
+          // is_error RESULT event (never a throw), so it lands here, not in the
+          // catch. On the FIRST attempt only, mark the guarded model unavailable
+          // (greys the pickers) and retry THIS turn with the fallback model,
+          // DISCARDING the error result so the user sees the fallback's answer.
+          if (attempt === 1) {
+            const fb = this.modelUnavailableFallback(activeOptions.model, event);
+            if (fb) {
+              this.logger?.warn(
+                `[ClaudeCodeManager] model '${activeOptions.model}' unavailable mid-call; retrying panel ${displayPanelId} with '${fb.model}'.`,
+              );
+              activeOptions = { ...activeOptions, model: fb.model, betas: fb.betas.length > 0 ? fb.betas : undefined };
+              runClaudeSessionCaptured = false;
+              continue retry;
+            }
+          }
 
-        // Persist the run's SDK session_id from its first system/init event.
-        if (!runClaudeSessionCaptured) {
-          const captured = this.captureRunClaudeSessionId(runId, event);
-          if (captured) runClaudeSessionCaptured = true;
+          // Forward to EventRouter / RawEventsSink pipeline via validated narrowing.
+          const typed = this.narrowing.narrow(event);
+
+          // Persist the run's SDK session_id from its first system/init event.
+          if (!runClaudeSessionCaptured) {
+            const captured = this.captureRunClaudeSessionId(runId, event);
+            if (captured) runClaudeSessionCaptured = true;
+          }
+
+          // Step G — native auto-mode visibility. When the auto classifier (or any
+          // non-interactive deny) short-circuits a tool call, the SDK emits a
+          // system/permission_denied message. Fold it into the review inbox as a
+          // NON-BLOCKING row so the user can SEE what auto denied. The run is never
+          // paused on this — fire-and-forget, errors are swallowed.
+          this.maybeFoldAutoDenyVisibility(runId, event);
+
+          try {
+            router.emitForRun(runId, typed);
+          } catch (routerErr) {
+            this.logger?.warn(`[ClaudeCodeManager] EventRouter emit error: ${routerErr instanceof Error ? routerErr.message : String(routerErr)}`);
+          }
+
+          // Forward to AbstractAIPanelManager via 'output' event. Re-attributed to
+          // displayPanelId so a fan-out lane's output lands under the run panel.
+          this.emit('output', {
+            panelId: displayPanelId,
+            sessionId,
+            type: 'json',
+            data: event,
+            timestamp: new Date()
+          });
         }
-
-        // Step G — native auto-mode visibility. When the auto classifier (or any
-        // non-interactive deny) short-circuits a tool call, the SDK emits a
-        // system/permission_denied message. Fold it into the review inbox as a
-        // NON-BLOCKING row so the user can SEE what auto denied. The run is never
-        // paused on this — fire-and-forget, errors are swallowed.
-        this.maybeFoldAutoDenyVisibility(runId, event);
-
-        try {
-          router.emitForRun(runId, typed);
-        } catch (routerErr) {
-          this.logger?.warn(`[ClaudeCodeManager] EventRouter emit error: ${routerErr instanceof Error ? routerErr.message : String(routerErr)}`);
-        }
-
-        // Forward to AbstractAIPanelManager via 'output' event. Re-attributed to
-        // displayPanelId so a fan-out lane's output lands under the run panel.
-        this.emit('output', {
-          panelId: displayPanelId,
-          sessionId,
-          type: 'json',
-          data: event,
-          timestamp: new Date()
-        });
+        break; // iterator drained without triggering a fallback retry
       }
     } catch (err) {
       if (abortController.signal.aborted) {
@@ -792,10 +834,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
         // Reactive availability detection: if the failure names the pinned MODEL
         // (not found / no access), and that model is one we guard (Fable 5), record
         // it so every later spawn falls back to Opus and the pickers grey it out.
-        // `sdkOptions.model` is exactly what was sent — undefined/'auto'/Opus (a
-        // prior fallback) never match a guarded id, so this only fires when a
-        // guarded model was actually attempted and rejected.
-        this.noteModelUnavailabilityFromError(sdkOptions.model, errMsg);
+        // `activeOptions.model` is exactly what was sent this attempt — undefined/
+        // 'auto'/Opus (a prior fallback) never match a guarded id, so this only
+        // fires when a guarded model was actually attempted and rejected.
+        this.noteModelUnavailabilityFromError(activeOptions.model, errMsg);
       }
     } finally {
       this.cleanupPipeline(spawnKey);
@@ -965,16 +1007,42 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * unavailable and — if it was a guarded model (Fable 5) — record it on the
    * ModelAvailabilityService so subsequent spawns fall back to Opus and the pickers
    * grey it out. Best-effort and fail-soft: a non-guarded model, a non-model error,
-   * or an uninitialized service are all no-ops.
+   * or an uninitialized service are all no-ops. Returns true iff it marked a guarded
+   * model unavailable (so the mid-call result-event path can decide to retry).
    */
-  private noteModelUnavailabilityFromError(sdkModel: string | undefined, errMsg: string): void {
+  private noteModelUnavailabilityFromError(sdkModel: string | undefined, errMsg: string): boolean {
     const guarded = guardedModelByConcreteId(sdkModel);
-    if (!guarded) return;
-    if (!isModelUnavailableError(errMsg)) return;
+    if (!guarded) return false;
+    if (!isModelUnavailableError(errMsg)) return false;
     ModelAvailabilityService.tryGetInstance()?.markUnavailable(guarded.concreteId, errMsg.slice(0, 200));
     this.logger?.warn(
       `[ClaudeCodeManager] ${guarded.label} appears unavailable (${errMsg}); future spawns will fall back to ${guarded.fallbackAlias}.`,
     );
+    return true;
+  }
+
+  /**
+   * Mid-call graceful fallback. The Claude Code CLI reports an unusable `--model`
+   * (Fable 5 pulled from release) as an `is_error` RESULT event — NOT a thrown
+   * error — so it arrives inside the runSdkQuery iterator, never its catch. When
+   * such a result names a guarded model, mark it unavailable (greys the pickers
+   * and pre-falls-back later spawns) and return the fallback family's SDK
+   * model+betas so the CURRENT turn can be retried on Opus instead of surfacing a
+   * hard Session Error. Returns null for any non-result event, a non-model error,
+   * a non-guarded pinned model, or when the fallback can't be resolved.
+   */
+  private modelUnavailableFallback(
+    pinnedModel: string | undefined,
+    event: unknown,
+  ): { model: string; betas: SdkBeta[] } | null {
+    const text = resultErrorText(event);
+    if (text === null) return null; // not an is_error result event
+    if (!this.noteModelUnavailabilityFromError(pinnedModel, text)) return null;
+    const guarded = guardedModelByConcreteId(pinnedModel);
+    if (!guarded) return null; // unreachable after the note above, but narrows the type
+    const { model, betas } = sdkModelAndBetas(resolveModelAlias(guarded.fallbackAlias));
+    if (!model || model === 'auto') return null;
+    return { model, betas };
   }
 
   // ---------------------------------------------------------------------------
