@@ -852,7 +852,8 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        const result = registry.createRun(workflowId);
+        // sessionId (3rd arg) is required — a run can never be session-less.
+        const result = registry.createRun(workflowId, undefined, 'sess-model');
 
         interface ModelRow { model: string | null }
         const row = db.prepare('SELECT model FROM workflow_runs WHERE id = ?').get(result.runId) as ModelRow;
@@ -869,7 +870,7 @@ describe('WorkflowRegistry', () => {
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        const result = registry.createRun(workflowId, undefined, undefined, undefined, {
+        const result = registry.createRun(workflowId, undefined, 'sess-model', undefined, {
           requestedModel: 'opus',
         });
 

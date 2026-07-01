@@ -425,7 +425,7 @@ describe('RunLauncher.launch', () => {
 
   it('threads the per-run model choice into WorkflowRegistry.createRun opts (migration 037)', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
-      const db = createTestDb();
+      const db = sessionHostedDb();
       const adapter = dbAdapter(db);
       const logger = makeSpyLogger();
 
@@ -436,12 +436,16 @@ describe('RunLauncher.launch', () => {
       interface IdRow { id: string }
       const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
 
+      // A run can NEVER be session-less (slice 1b invariant), so host it in a
+      // real session and thread sessionId at the 6th launch slot.
+      seedSession(db, 'sess-1', join(tmpDir, 'wt'));
+
       const cannedRunId = randomUUID().replace(/-/g, '');
-      const createRunSpy = vi.fn(() => {
+      const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
         db.prepare(
-          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot) VALUES (?, ?, ?, 'queued', 'default')",
-        ).run(cannedRunId, workflowId, 1);
-        return { runId: cannedRunId, permissionMode: 'default' as const };
+          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+        ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+        return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
       });
       const realRegistry = {
         getById: (id: string) =>
@@ -449,33 +453,31 @@ describe('RunLauncher.launch', () => {
         createRun: createRunSpy,
       } as unknown as WorkflowRegistry;
 
-      const fakeWorktree = {
-        createDeterministicWorktree: vi.fn().mockResolvedValue({
-          worktreePath: join(tmpDir, 'wt'),
-          branchName: 'cyboflow/sprint/x',
-          baseCommit: 'abc123',
-          baseBranch: 'HEAD',
-        }),
-      } as unknown as WorktreeManager;
+      const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
+      const { deps } = makeFakeSessionPermDeps();
 
-      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+      const launcher = new RunLauncher(
+        adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider,
+        fakeBridgeScriptResolver, fakeNodeResolver,
+        undefined, undefined, undefined, undefined, undefined, deps,
+      );
 
-      // requestedModel is the LAST positional launch arg (after findingIds). All
-      // the intermediate optionals are undefined on this minimal launch.
+      // requestedModel is the LAST positional launch arg (after findingIds); the
+      // now-required sessionId rides the 6th slot. All other optionals undefined.
       await launcher.launch(
         workflowId, tmpDir,
-        undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, 'sess-1', undefined,
         undefined, undefined, undefined, undefined, undefined,
         'opus',
       );
 
       // The model choice rides into createRun's 5th arg (the opts bag) as
-      // `requestedModel` — never a new positional (substrate/sessionId/permission
-      // stay undefined).
+      // `requestedModel` — never a new positional (substrate/permission stay
+      // undefined; sessionId is the 3rd).
       expect(createRunSpy).toHaveBeenCalledWith(
         workflowId,
         undefined,
-        undefined,
+        'sess-1',
         undefined,
         { requestedModel: 'opus' },
       );
