@@ -279,6 +279,29 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     expect(screen.getByLabelText('Permission mode: Auto')).toBeInTheDocument();
     expect(screen.getByTestId('wizard-launch-summary')).toBeInTheDocument();
   });
+
+  it('shows the Advanced (MCP/plugin) disclosure for a QUICK + SDK selection', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    // Default substrate is SDK — the MCP deny-list is enforced at the SDK spawn,
+    // so the Advanced controls are offered.
+    expect(screen.getByTestId('wizard-advanced-toggle')).toBeInTheDocument();
+  });
+
+  it('HIDES the Advanced disclosure once the QUICK substrate is switched to Interactive', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    expect(screen.getByTestId('wizard-advanced-toggle')).toBeInTheDocument();
+
+    // The interactive PTY substrate has no spawn-time deny-list guard yet, so the
+    // MCP/plugin controls must disappear when Interactive is selected.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select CLI substrate'), {
+        target: { value: 'interactive' },
+      });
+    });
+    expect(screen.queryByTestId('wizard-advanced-toggle')).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
