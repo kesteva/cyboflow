@@ -115,6 +115,25 @@ vi.mock('../../ReviewQueue/PendingApprovalsForRun', () => ({
   ),
 }));
 
+// Capture the model-fallback push callback RunChatView subscribes with, so a test
+// can fire a notice and assert the toast. Only the `models` surface is used here.
+const apiMock = vi.hoisted(() => {
+  const state: { fallbackCb: ((notice: unknown) => void) | null } = { fallbackCb: null };
+  return { state };
+});
+vi.mock('../../../utils/api', () => ({
+  API: {
+    models: {
+      onModelFallback: (cb: (notice: unknown) => void) => {
+        apiMock.state.fallbackCb = cb;
+        return () => {
+          apiMock.state.fallbackCb = null;
+        };
+      },
+    },
+  },
+}));
+
 // ---------------------------------------------------------------------------
 // Imports after mocks
 // ---------------------------------------------------------------------------
@@ -139,6 +158,7 @@ beforeEach(() => {
     useQuestionStore.setState({ queue: [], connectionStatus: 'idle', otherText: {} });
     useCenterPaneStore.setState({ bySession: {} });
   });
+  apiMock.state.fallbackCb = null;
   mockListUnifiedMessages.mockClear();
   mockListUnifiedMessages.mockImplementation(async () => []);
   mockArtifactsList.mockClear();
@@ -446,5 +466,49 @@ describe('RunChatView — question-card artifact wiring', () => {
     // No artifact → card keeps the inline "Show preview" toggle, no "in pane" CTAs.
     expect(await screen.findByText('Show preview')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /in pane/i })).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tests — mid-call model fallback toast
+// ---------------------------------------------------------------------------
+
+describe('RunChatView — model fallback toast', () => {
+  it('raises a toast when THIS run falls back off a pulled model', async () => {
+    seedRun('run-fb', 'sdk');
+    render(<RunChatView runId="run-fb" />);
+    await waitFor(() => expect(apiMock.state.fallbackCb).not.toBeNull());
+
+    act(() => {
+      apiMock.state.fallbackCb!({
+        panelId: 'run-fb',
+        sessionId: 'run-fb',
+        unavailableAlias: 'fable',
+        unavailableLabel: 'Fable 5',
+        fallbackAlias: 'opus',
+      });
+    });
+
+    expect(await screen.findByTestId('session-action-toast')).toHaveTextContent(
+      'Fable 5 is unavailable — switched to Opus 4.8 for this run.',
+    );
+  });
+
+  it('ignores a fallback notice addressed to a DIFFERENT run', async () => {
+    seedRun('run-fb', 'sdk');
+    render(<RunChatView runId="run-fb" />);
+    await waitFor(() => expect(apiMock.state.fallbackCb).not.toBeNull());
+
+    act(() => {
+      apiMock.state.fallbackCb!({
+        panelId: 'other-run',
+        sessionId: 'other-run',
+        unavailableAlias: 'fable',
+        unavailableLabel: 'Fable 5',
+        fallbackAlias: 'opus',
+      });
+    });
+
+    expect(screen.queryByTestId('session-action-toast')).toBeNull();
   });
 });

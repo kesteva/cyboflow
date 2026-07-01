@@ -19,9 +19,11 @@
  *  - runId null + selectedSessionId non-null: quick-session placeholder
  *  - runId null + selectedSessionId null: "No active run" placeholder
  */
-import { useMemo, useState, useCallback, type ReactElement, type ReactNode } from 'react';
+import { useMemo, useState, useEffect, useCallback, type ReactElement, type ReactNode } from 'react';
 import { ChatInput } from './ChatInput';
 import { SessionActionToast } from './SessionActionToast';
+import { MODEL_OPTIONS } from './unified/ModelPill';
+import { API } from '../../utils/api';
 import { InteractiveTerminalView } from './InteractiveTerminalView';
 import { UnifiedChatView } from './unified/UnifiedChatView';
 import { deriveRunContextUsage } from './unified/runContextUsage';
@@ -109,8 +111,27 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   }, [primaryArtifact, sessionKey, openArtifactTab]);
 
   // Confirmation toast for a run permission-mode change (ISSUE #2). ChatInput
-  // (the composer adapter) raises onPermissionApplied; this host renders it.
+  // (the composer adapter) raises onPermissionApplied; this host renders it. The
+  // SAME slot also surfaces a mid-call model fallback (below).
   const [permissionToast, setPermissionToast] = useState<string | null>(null);
+
+  // Mid-call model fallback (Fable 5 pulled → Opus): the run's turn discovered its
+  // pinned model was unavailable and retried on the fallback. The read-only model
+  // pill already swaps reactively (availability store); this raises a one-off toast
+  // so the swap isn't silent — mirroring the quick-session composer. Filtered to
+  // THIS run (flow runs: notice.panelId === notice.sessionId === runId).
+  useEffect(() => {
+    if (runId === null) return;
+    const unsubscribe = API.models.onModelFallback((notice) => {
+      if (notice.panelId !== runId && notice.sessionId !== runId) return;
+      const fallbackLabel =
+        MODEL_OPTIONS.find((o) => o.id === notice.fallbackAlias)?.label ?? notice.fallbackAlias;
+      setPermissionToast(
+        `${notice.unavailableLabel} is unavailable — switched to ${fallbackLabel} for this run.`,
+      );
+    });
+    return unsubscribe;
+  }, [runId]);
 
   // -------------------------------------------------------------------------
   // Inline AskUserQuestionCard injection at the AskUserQuestion tool_use position.

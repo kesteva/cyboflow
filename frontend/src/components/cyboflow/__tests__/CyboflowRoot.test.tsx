@@ -178,6 +178,11 @@ vi.mock('../../../utils/api', () => ({
         data: { remoteUrl: 'https://github.com/o/r.git', branchName: 'b' },
       }),
     },
+    // RunChatView subscribes to guarded-model fallbacks for its toast; return a
+    // no-op unsubscribe so the run pane mounts without a real IPC bridge.
+    models: {
+      onModelFallback: vi.fn(() => () => {}),
+    },
   },
 }));
 
