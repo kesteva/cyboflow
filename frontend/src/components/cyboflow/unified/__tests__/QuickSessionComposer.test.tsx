@@ -13,7 +13,7 @@ const mockUpdatePermission = vi.fn();
 const mockUpdateSessionMcps = vi.fn();
 const mockUpdateSessionPlugins = vi.fn();
 const mockSetModel = vi.fn();
-const mockOnModelFallback = vi.fn(() => () => {});
+const mockOnModelFallback = vi.fn((_cb: (notice: unknown) => void) => () => {});
 vi.mock('../../../../utils/api', () => ({
   API: {
     sessions: {
