@@ -99,6 +99,17 @@ vi.mock('../../../utils/api', () => ({
   },
 }));
 
+// Guarded-model availability — mutable per-test so the read-only model pill's
+// fallback-display (a pinned but unavailable model shows its Opus fallback) can be
+// driven. Defaults to all-usable (the optimistic default).
+let mockIsAliasUsable: (alias: string | null | undefined) => boolean = () => true;
+vi.mock('../../../stores/modelAvailabilityStore', () => ({
+  useModelAvailability: () => ({
+    isAliasUsable: (alias: string | null | undefined) => mockIsAliasUsable(alias),
+    unavailableReason: () => null,
+  }),
+}));
+
 // ---------------------------------------------------------------------------
 // Imports after mocks (vi.mock hoisting safety)
 // ---------------------------------------------------------------------------
@@ -119,6 +130,7 @@ import type { PermissionMode } from '../../../../../shared/types/workflows';
 // ---------------------------------------------------------------------------
 
 beforeEach(() => {
+  mockIsAliasUsable = () => true;
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
     useCyboflowStore.getState().clearActiveQuickSession();
@@ -458,6 +470,38 @@ describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
     });
     render(<ChatInput runId={RUN_ID} />);
     expect(screen.queryByText(/·\s*(1M|250K|200K)/)).toBeNull();
+  });
+
+  // When the pinned model is a guarded model the availability guard reports
+  // UNAVAILABLE (Fable 5 pulled), the pill shows the fallback the run uses (Opus),
+  // NOT the dead pin — with an explanatory tooltip.
+  it('shows the fallback model (not the dead pin) when the pinned model is unavailable', () => {
+    mockIsAliasUsable = (alias) => alias !== 'fable';
+    act(() => {
+      useActiveRunsStore.setState({
+        runsByProject: { [PROJECT_ID]: [{ ...makeAwaitingRow(), model: 'fable' }] },
+      });
+    });
+    render(<ChatInput runId={RUN_ID} />);
+    // The pill reflects the fallback family…
+    expect(screen.getByText('Opus 4.8 · 1M')).toBeInTheDocument();
+    // …never the pulled model, and a tooltip explains the swap.
+    expect(screen.queryByText('Fable 5 · 1M')).toBeNull();
+    expect(screen.getByText('Opus 4.8 · 1M').closest('span')).toHaveAttribute(
+      'title',
+      'Fable 5 · 1M is unavailable — this run uses Opus 4.8 · 1M.',
+    );
+  });
+
+  it('shows the pinned model as-is while it remains available', () => {
+    mockIsAliasUsable = () => true;
+    act(() => {
+      useActiveRunsStore.setState({
+        runsByProject: { [PROJECT_ID]: [{ ...makeAwaitingRow(), model: 'fable' }] },
+      });
+    });
+    render(<ChatInput runId={RUN_ID} />);
+    expect(screen.getByText('Fable 5 · 1M')).toBeInTheDocument();
   });
 });
 

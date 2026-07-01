@@ -52,6 +52,8 @@ import { trpc } from '../../trpc/client';
 import { UnifiedComposer } from './unified/UnifiedComposer';
 import { PermissionModePill } from './unified/PermissionModePill';
 import { modelDisplayLabel } from './unified/ModelPill';
+import { useModelAvailability } from '../../stores/modelAvailabilityStore';
+import { guardedModelByAlias } from '../../../../shared/types/modelAvailability';
 import { resolveChatVisibility } from './unified/useChatVisibility';
 
 /**
@@ -134,6 +136,7 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
   const sessions = useSessionStore((s) => s.sessions);
   const activeMainRepoSession = useSessionStore((s) => s.activeMainRepoSession);
   const updateSession = useSessionStore((s) => s.updateSession);
+  const { isAliasUsable } = useModelAvailability();
 
   const activeQuestion = useQuestionStore((s) =>
     s.queue.find((q) => q.runId === runId && q.status === 'pending'),
@@ -468,6 +471,25 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
       />
     ) : undefined;
 
+  // Read-only (untoggleable) model pill for the run. The per-run model is pinned
+  // at launch (workflow_runs.model, migration 037) and never changes mid-run, so
+  // it renders as a locked ReadonlyPill via UnifiedComposer's modelLabel path.
+  // BUT when that pinned alias is a guarded model the availability guard now
+  // reports UNAVAILABLE (e.g. Fable 5 pulled), show the fallback family the run
+  // actually falls back to (Opus) — reactive via useModelAvailability, so the
+  // pill stops showing a dead model the moment it's marked unavailable, with a
+  // tooltip explaining the swap. NULL/'auto' (no pin → SDK default) omits the
+  // pill; interactive runs never reach here (showModelEffort is SDK-only).
+  const pinnedModel = activeRun?.model && activeRun.model !== 'auto' ? activeRun.model : null;
+  const modelUnavailable = pinnedModel != null && !isAliasUsable(pinnedModel);
+  const effectiveModel = modelUnavailable
+    ? guardedModelByAlias(pinnedModel)?.fallbackAlias ?? pinnedModel
+    : pinnedModel;
+  const modelLabel = effectiveModel ? modelDisplayLabel(effectiveModel) : null;
+  const modelLabelTitle = modelUnavailable
+    ? `${modelDisplayLabel(pinnedModel)} is unavailable — this run uses ${modelDisplayLabel(effectiveModel)}.`
+    : undefined;
+
   return (
     <UnifiedComposer
       visibility={visibility}
@@ -483,13 +505,9 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
       primaryLabel={isSdkRunning ? 'Queue' : 'Send'}
       onSubmit={() => handleSend()}
       onTogglePtyOpen={isInteractive ? () => setPtyOpen((v) => !v) : undefined}
-      // Read-only (untoggleable) model pill for the run — the per-run model is
-      // pinned at launch (workflow_runs.model, migration 037) and never changes
-      // mid-run, so it renders as a ReadonlyPill via UnifiedComposer's modelLabel
-      // path. NULL/'auto' (no pin → SDK default) omits the pill.
-      modelLabel={
-        activeRun?.model && activeRun.model !== 'auto' ? modelDisplayLabel(activeRun.model) : null
-      }
+      // Read-only (untoggleable) model pill for the run (see modelLabel above).
+      modelLabel={modelLabel}
+      modelLabelTitle={modelLabelTitle}
       permissionSlot={permissionSlot}
       sendError={sendError}
     />

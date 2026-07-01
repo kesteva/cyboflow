@@ -64,6 +64,9 @@ export interface UnifiedComposerProps {
   /** read-only model label (e.g. "Sonnet 4.5"), SDK only. Used only when
    *  `modelSlot` is absent (e.g. a flow run, or a running quick turn). */
   modelLabel?: string | null;
+  /** optional tooltip override for the read-only model pill (e.g. "Fable 5 is
+   *  unavailable — this run uses Opus 4.8"); defaults to the generic lock hint. */
+  modelLabelTitle?: string;
   /** interactive model selector (quick SDK, idle) — host supplies the node;
    *  when present it replaces the read-only model pill. */
   modelSlot?: React.ReactNode;
@@ -108,6 +111,7 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
     onTogglePtyOpen,
     supportsAttachments = false,
     modelLabel,
+    modelLabelTitle,
     modelSlot,
     permissionSlot,
     effortLabel,
@@ -349,7 +353,7 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
             effort pill is decoupled from the SDK-gated model pill and renders
             whenever the session carries one (session config; edit deferred). */}
         {visibility.showModelEffort &&
-          (modelSlot ?? (modelLabel ? <ReadonlyPill label={modelLabel} /> : null))}
+          (modelSlot ?? (modelLabel ? <ReadonlyPill label={modelLabel} title={modelLabelTitle} /> : null))}
         {permissionSlot}
         {effortLabel && <ReadonlyPill label={`effort: ${effortLabel}`} />}
 
@@ -405,10 +409,10 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
 }
 
 /** Read-only control pill with a lock affordance (model / effort are session config in v1). */
-function ReadonlyPill({ label }: { label: string }): React.ReactElement {
+function ReadonlyPill({ label, title = READONLY_HINT }: { label: string; title?: string }): React.ReactElement {
   return (
     <span
-      title={READONLY_HINT}
+      title={title}
       className="inline-flex items-center gap-1.5 border border-border-primary bg-surface-secondary px-2.5 py-1.5 text-[10px] text-text-secondary"
     >
       {label}
