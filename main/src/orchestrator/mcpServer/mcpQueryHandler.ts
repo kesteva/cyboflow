@@ -2240,7 +2240,17 @@ export class McpQueryHandler {
     if (typeof msg.baselineKey === 'string') input.baselineKey = msg.baselineKey;
     // taskRef threads the lane attribution into deliverable_json so the async
     // merge-gate verdict can be driven onto the right lane (multi-lane batches).
-    if (typeof msg.taskRef === 'string' && msg.taskRef.length > 0) input.taskRef = msg.taskRef;
+    // When the agent OMITS it, best-effort default it from the lane context WHEN
+    // unambiguous (a single-lane batch) — a belt-and-suspenders mitigation for the
+    // gate's strict attribution (locked decision #2). A multi-lane batch CANNOT be
+    // defaulted here (the wire carries no itemId), so it stays absent and the
+    // gate's single-lane-only rule for a taskRef-less event is the invariant.
+    if (typeof msg.taskRef === 'string' && msg.taskRef.length > 0) {
+      input.taskRef = msg.taskRef;
+    } else {
+      const defaulted = this.defaultTaskRefForRun(msg.runId);
+      if (defaulted !== undefined) input.taskRef = defaulted;
+    }
     const viewports = this.parseViewports(msg.viewports);
     if (viewports !== undefined) input.viewports = viewports;
 
@@ -2273,6 +2283,32 @@ export class McpQueryHandler {
         ok: false,
         error: 'verification_enqueue_failed',
       });
+    }
+  }
+
+  /**
+   * Best-effort default for an OMITTED task_ref (locked decision #2 mitigation):
+   * the sole lane's display ref (or opaque task id) when the calling run is a
+   * batched sprint run with EXACTLY ONE lane — the only case a taskRef-less
+   * request is unambiguous. A non-batch run, a run whose batch has zero or 2+
+   * lanes, or any read failure returns undefined (the request stays taskRef-less
+   * and the gate's strict attribution applies). Fully fail-soft — a defaulting
+   * hiccup never fails a fire-and-continue request.
+   */
+  private defaultTaskRefForRun(runId: string): string | undefined {
+    try {
+      const runRow = this.db
+        .prepare('SELECT batch_id AS batchId FROM workflow_runs WHERE id = ?')
+        .get(runId) as { batchId?: unknown } | undefined;
+      const batchId =
+        typeof runRow?.batchId === 'string' && runRow.batchId.length > 0 ? runRow.batchId : null;
+      if (!batchId) return undefined;
+      const lanes = SprintLaneStore.getInstance().listLanes(batchId);
+      if (lanes.length !== 1) return undefined; // multi-lane cannot be defaulted; non-lane run has none
+      const only = lanes[0];
+      return typeof only.ref === 'string' && only.ref.length > 0 ? only.ref : only.taskId;
+    } catch {
+      return undefined;
     }
   }
 

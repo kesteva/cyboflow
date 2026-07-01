@@ -13,23 +13,32 @@
  *      state, so a verdict that lands between check and await cannot slip through.
  *   3. RACE-CLOSER: the request is fire-and-continue and the scheduler drains
  *      async, so the verdict may have ALREADY landed. Read the lane's request
- *      state now:
- *        - no request fired (subagent found no deliverable / disabled) → 'advance'
- *          (nothing to wait for — never park a lane with no request).
- *        - already terminal → resolve the outcome from the lane immediately.
+ *      state now — attributed STRICTLY (taskRef match, or the single-lane case):
+ *        - no request ATTRIBUTABLE to the lane (subagent SKIPPED in-band, or a
+ *          sibling lane's request in a multi-lane batch) → 'advance' (nothing to
+ *          wait for — never park a lane with no request of its own; finding #3).
+ *        - already terminal → resolve the outcome from the terminal STATUS.
  *        - non-terminal (queued/leased/running) → await the terminal event.
- *   4. On the matching terminal event, resolve the outcome from the lane state the
- *      merge-gate driver already wrote (the event fires AFTER onVerdict delivery).
+ *   4. On the matching terminal event, resolve the outcome from the terminal
+ *      request STATUS (the verdict category the event carries), NOT from the
+ *      lane's mutable step id — a concurrent controller park write can clobber
+ *      `currentStepId` back to `awaiting-verify` after the merge-gate wrote
+ *      `implement`, so keying the outcome on the step id silently turned a FAIL
+ *      into an 'advance' (finding #1). The lane is read ONLY for the attempt count
+ *      + the cap-fail signal (lane.status, lane.attempts — neither of which the
+ *      park write touches).
  *   5. On the run's abort signal, resolve 'aborted' and remove listeners (a
  *      canceled run never hangs here; VerificationScheduler.cancelForRun also
  *      sweeps the request rows + emits, so the event path is belt-and-suspenders).
  *
- * Outcome mapping (from the lane state AFTER applyMergeGateVerdict):
- *   lane failed                              → 'failed'
- *   lane running + currentStep 'implement'   → 'loopback' (attempt = lane.attempts)
- *   lane integrated                          → 'advance'
- *   lane still parked (skipped/timeout noop) → 'advance' (a missing precondition
- *                                              must never wedge the lane)
+ * Outcome mapping (from the terminal STATUS + the clobber-immune lane fields):
+ *   passed / low_confidence / skipped / timeout → 'advance' (mirrors the merge-gate:
+ *                                              PASS/advisory advance-integrated, or
+ *                                              a skipped/timeout no-op that must
+ *                                              never wedge the lane)
+ *   failed + lane marked 'failed' (3× cap hit) → 'failed'
+ *   failed + lane still running (looped back)  → 'loopback' (attempt = the
+ *                                              lane.attempts the merge-gate wrote)
  *
  * Standalone-typecheck invariant: imports ONLY node:events, the electron-free
  * SprintLaneStore + the scheduler's event types + the narrow DatabaseLike /
@@ -42,7 +51,6 @@ import type { VisualGateOutcome, VisualVerifyGate } from './types';
 import type { VerificationTerminalEvent } from '../verify/verificationScheduler';
 import type { RequestStatus } from '../../../../shared/types/visualVerification';
 import type { SprintLaneRow } from '../../../../shared/types/sprintBatch';
-import { SPRINT_IMPLEMENT_STEP } from '../../../../shared/types/sprintBatch';
 
 /** Terminal request statuses — a request in any of these has settled. */
 const TERMINAL_REQUEST_STATUSES: ReadonlySet<string> = new Set<RequestStatus>([
@@ -123,7 +131,9 @@ export class SchedulerVisualVerifyGate implements VisualVerifyGate {
         // lane (by opaque id or display ref); a taskRef-less event is accepted
         // only for a single-lane batch (unambiguous — mirrors the merge-gate).
         if (!this.eventMatchesLane(payload, runId, itemId)) return;
-        finish(this.outcomeFromLane(runId, itemId));
+        // Resolve from the STATUS the event carries — never from a re-read of the
+        // mutable step id a concurrent park write can clobber (finding #1).
+        finish(this.outcomeForTerminalStatus(runId, itemId, payload.status));
       };
       const onAbort = signal
         ? (): void => {
@@ -140,12 +150,15 @@ export class SchedulerVisualVerifyGate implements VisualVerifyGate {
       // ever fired). Resolve immediately in those cases; otherwise await the event.
       const reqStatus = this.requestStatusForLane(runId, itemId);
       if (reqStatus === null) {
-        // No request fired for this lane — nothing to verify/wait for → advance.
+        // No request ATTRIBUTABLE to this lane — the subagent declared SKIPPED
+        // in-band (or a sibling lane owns the run's sole request). Nothing to wait
+        // for → advance immediately; a missing precondition never parks (finding #3).
+        this.logger?.debug('[visualVerifyGate] no request attributable to lane; advancing', { runId, itemId });
         finish({ kind: 'advance' });
         return;
       }
       if (TERMINAL_REQUEST_STATUSES.has(reqStatus)) {
-        finish(this.outcomeFromLane(runId, itemId));
+        finish(this.outcomeForTerminalStatus(runId, itemId, reqStatus as RequestStatus));
         return;
       }
       // queued / leased / running → wait for the terminal event (already subscribed).
@@ -157,36 +170,53 @@ export class SchedulerVisualVerifyGate implements VisualVerifyGate {
   // Lane + request resolution (read-only, fail-soft)
   // --------------------------------------------------------------------------
 
-  /** Resolve the lane this gate is waiting on (run → batch → lane by ref/id/single). */
-  private resolveLane(runId: string, itemId: string): SprintLaneRow | null {
+  /**
+   * All lanes for the run's batch (run → batch_id → listLanes), or [] for a
+   * non-sprint run / read failure. The single source both resolveLane and the
+   * lane-count attribution guards read, so "how many lanes does this run have"
+   * has exactly one answer. Fail-soft → [].
+   */
+  private lanesForRun(runId: string): SprintLaneRow[] {
     try {
       const runRow = this.db
         .prepare('SELECT batch_id AS batchId FROM workflow_runs WHERE id = ?')
         .get(runId) as { batchId?: unknown } | undefined;
       const batchId =
         typeof runRow?.batchId === 'string' && runRow.batchId.length > 0 ? runRow.batchId : null;
-      if (!batchId) return null;
-      const lanes = SprintLaneStore.getInstance().listLanes(batchId);
-      if (lanes.length === 0) return null;
-      const match = lanes.find((l) => l.taskId === itemId || l.ref === itemId);
-      if (match) return match;
-      if (lanes.length === 1) return lanes[0];
-      return null;
+      if (!batchId) return [];
+      return SprintLaneStore.getInstance().listLanes(batchId);
     } catch (err) {
       this.logger?.warn('[visualVerifyGate] lane resolution failed (fail-soft)', {
         runId,
-        itemId,
         error: err instanceof Error ? err.message : String(err),
       });
-      return null;
+      return [];
     }
   }
 
+  /** Number of lanes on the run's batch (0 for a non-sprint run). */
+  private laneCountForRun(runId: string): number {
+    return this.lanesForRun(runId).length;
+  }
+
+  /** Resolve the lane this gate is waiting on (run → batch → lane by ref/id/single). */
+  private resolveLane(runId: string, itemId: string): SprintLaneRow | null {
+    const lanes = this.lanesForRun(runId);
+    if (lanes.length === 0) return null;
+    const match = lanes.find((l) => l.taskId === itemId || l.ref === itemId);
+    if (match) return match;
+    if (lanes.length === 1) return lanes[0];
+    return null;
+  }
+
   /**
-   * The status of the LATEST verification request attributed to this lane, or null
-   * when none was fired. Matches deliverable_json.taskRef against the lane's opaque
-   * id OR display ref; falls back to the sole request when the run has exactly one
-   * (single-lane unambiguous). Fail-soft → null (the caller treats null as advance).
+   * The status of the LATEST verification request attributed to this lane by
+   * STRICT attribution, or null when none is attributable. Matches
+   * deliverable_json.taskRef against the lane's opaque id OR display ref; falls
+   * back to the run's sole request ONLY when the run is single-lane (genuinely
+   * unambiguous). A multi-lane run REQUIRES a taskRef match — a lane that fired no
+   * request of its own (its subagent declared SKIPPED in-band) must NOT bind a
+   * sibling lane's request (finding #3). Fail-soft → null (caller advances).
    */
   private requestStatusForLane(runId: string, itemId: string): RequestStatus | null {
     try {
@@ -207,8 +237,10 @@ export class SchedulerVisualVerifyGate implements VisualVerifyGate {
           return row.status as RequestStatus;
         }
       }
-      // No taskRef match: a sole request for the run is unambiguous.
-      if (rows.length === 1) return rows[0].status as RequestStatus;
+      // No taskRef match: the sole-request fallback is unambiguous ONLY for a
+      // single-lane run. For a multi-lane run a lane with no attributable request
+      // returns null (the caller advances — never binds a sibling's request).
+      if (rows.length === 1 && this.laneCountForRun(runId) === 1) return rows[0].status as RequestStatus;
       return null;
     } catch (err) {
       this.logger?.warn('[visualVerifyGate] request lookup failed (fail-soft)', {
@@ -220,35 +252,67 @@ export class SchedulerVisualVerifyGate implements VisualVerifyGate {
     }
   }
 
-  /** True when a terminal event belongs to this lane (taskRef match or single-lane). */
+  /**
+   * True when a terminal event belongs to this lane. An explicit taskRef must
+   * match the lane (opaque id or display ref). A taskRef-LESS event is accepted
+   * ONLY for a single-lane run (genuinely unambiguous); in a multi-lane run it
+   * matches NO gate — one agent omitting task_ref must never fan a single verdict
+   * (FAIL included) out to every parked lane (finding #2). The omission is logged
+   * at WARN naming the requestId + run so it is visible.
+   */
   private eventMatchesLane(event: VerificationTerminalEvent, runId: string, itemId: string): boolean {
-    const lane = this.resolveLane(runId, itemId);
     if (event.taskRef !== undefined) {
+      const lane = this.resolveLane(runId, itemId);
       if (!lane) return false;
       return event.taskRef === lane.taskId || event.taskRef === lane.ref;
     }
-    // A taskRef-less event is unambiguous only for a single-lane batch — which is
-    // exactly the case resolveLane returns the sole lane for.
-    return lane !== null;
+    // taskRef-less: unambiguous only for a single-lane run.
+    if (this.laneCountForRun(runId) === 1) {
+      return this.resolveLane(runId, itemId) !== null;
+    }
+    this.logger?.warn(
+      '[visualVerifyGate] taskRef-less terminal event in a multi-lane run; not attributing to any lane',
+      { runId, requestId: event.requestId, lanes: this.laneCountForRun(runId) },
+    );
+    return false;
   }
 
-  /** Map the lane state the merge-gate produced to the controller outcome. */
-  private outcomeFromLane(runId: string, itemId: string): VisualGateOutcome {
+  /**
+   * The controller outcome for a TERMINAL verification, derived from the terminal
+   * request STATUS (the verdict category) — NEVER from the lane's mutable step id,
+   * which a concurrent controller park write can clobber back to `awaiting-verify`
+   * after the merge-gate wrote `implement` (finding #1). The lane is read ONLY for
+   * the attempt count + the cap-fail signal (lane.status / lane.attempts — fields
+   * the park write does not touch). Mirrors the merge-gate policy exactly:
+   *   passed / low_confidence / skipped / timeout → 'advance'
+   *   failed + lane marked 'failed' (3× cap hit)  → 'failed'
+   *   failed + lane still running (looped back)   → 'loopback' (attempt =
+   *     lane.attempts, the value the merge-gate wrote; clamped ≥ 2)
+   * An unresolvable/absent lane (non-sprint run) never wedges → 'advance'.
+   */
+  private outcomeForTerminalStatus(
+    runId: string,
+    itemId: string,
+    status: RequestStatus,
+  ): VisualGateOutcome {
+    // Only a FAIL can loop back or terminal-fail a lane; every other terminal
+    // status advances (PASS/advisory-low-confidence integrate; skipped/timeout are
+    // a missing precondition that must never wedge the lane).
+    if (status !== 'failed') return { kind: 'advance' };
+
     const lane = this.resolveLane(runId, itemId);
-    if (!lane) {
-      // Unresolvable lane (non-sprint run / read failure) — never wedge: advance.
-      return { kind: 'advance' };
-    }
+    if (!lane) return { kind: 'advance' };
+    // The merge-gate hit the 3× cap and marked the lane failed (survives the park
+    // clobber, which only rewrites currentStepId).
     if (lane.status === 'failed') return { kind: 'failed' };
-    if (lane.status === 'running' && lane.currentStepId === SPRINT_IMPLEMENT_STEP) {
-      // The merge-gate looped the lane back to implement with a bumped attempt.
-      const attempt = Number.isInteger(lane.attempts) && lane.attempts >= 1 ? lane.attempts : 2;
-      return { kind: 'loopback', attempt };
-    }
+    // Already integrated (defensive: a FAIL should not have integrated it, but a
+    // resurrected read must not fail an integrated lane) — advance.
     if (lane.status === 'integrated') return { kind: 'advance' };
-    // Still parked (skipped/timeout noop, or an advisory pass-through that did not
-    // move it) — proceed; a missing precondition must never wedge the lane.
-    return { kind: 'advance' };
+    // FAIL under the cap: the merge-gate looped the lane back to implement with a
+    // bumped attempt. Report that attempt (the merge-gate is the sole writer of
+    // lane.attempts, so its written value IS the loopback attempt).
+    const attempt = Number.isInteger(lane.attempts) && lane.attempts >= 2 ? lane.attempts : 2;
+    return { kind: 'loopback', attempt };
   }
 
   /** Parse deliverable_json → its taskRef (the lane attribution), or null. */

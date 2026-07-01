@@ -246,4 +246,140 @@ describe('SchedulerVisualVerifyGate', () => {
 
     await expect(pendingA).resolves.toEqual({ kind: 'advance' });
   });
+
+  // --------------------------------------------------------------------------
+  // R3 gate-integrity regressions
+  // --------------------------------------------------------------------------
+
+  it('finding #1: a FAIL whose loopback lane write was CLOBBERED by the park still resolves loopback (not advance)', async () => {
+    const { batchId } = singleLaneParked('run-1');
+    seedRequest(db, { id: 'vr1', runId: 'run-1', status: 'failed', taskRef: 'TASK-001' });
+    // The merge-gate looped the lane back to implement (attempt 2) — then the
+    // controller's later park write CLOBBERED currentStepId back to awaiting-verify
+    // (status='running' + attempts=2 survive; only the step id is overwritten).
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'implement', attempt: 2 });
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', currentStepId: 'awaiting-verify' });
+    // Old code keyed the outcome on currentStepId (=awaiting-verify → 'advance', a
+    // silent gate bypass); the fix keys on the terminal STATUS (=failed → loopback).
+    await expect(gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' })).resolves.toEqual({
+      kind: 'loopback',
+      attempt: 2,
+    });
+  });
+
+  it('finding #1 (event path): a FAIL event whose loopback write was clobbered still resolves loopback', async () => {
+    const { batchId } = singleLaneParked('run-1');
+    seedRequest(db, { id: 'vr1', runId: 'run-1', status: 'running', taskRef: 'TASK-001' });
+    const pending = gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' });
+
+    // Merge-gate loops the lane back, park clobbers the step id, THEN the event fires.
+    db.prepare(`UPDATE verification_requests SET status = 'failed' WHERE id = 'vr1'`).run();
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'implement', attempt: 2 });
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', currentStepId: 'awaiting-verify' });
+    verificationEvents.emit(verificationChannel('run-1'), {
+      runId: 'run-1',
+      requestId: 'vr1',
+      projectId: 1,
+      status: 'failed',
+      type: 'static-render-snapshot',
+      taskRef: 'TASK-001',
+    } satisfies VerificationTerminalEvent);
+
+    await expect(pending).resolves.toEqual({ kind: 'loopback', attempt: 2 });
+  });
+
+  it('PASS verdict before the park → advance (unchanged happy path)', async () => {
+    const { batchId } = singleLaneParked('run-1');
+    seedRequest(db, { id: 'vr1', runId: 'run-1', status: 'passed', taskRef: 'TASK-001' });
+    // PASS integrated the lane; a stray park clobber cannot turn it into a loopback.
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'integrated', currentStepId: 'visual-verify' });
+    await expect(gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' })).resolves.toEqual({ kind: 'advance' });
+  });
+
+  /** Park a 2-lane batch at awaiting-verify; return the batchId. */
+  function twoLanesParked(runId: string): { batchId: string } {
+    seedTask(db, 'tsk_a', 'TASK-001', 'A');
+    seedTask(db, 'tsk_b', 'TASK-002', 'B');
+    const { batchId } = store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b']);
+    seedRun(db, runId, batchId, true);
+    store.updateLane({ runId, batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'awaiting-verify' });
+    store.updateLane({ runId, batchId, taskId: 'tsk_b', status: 'running', currentStepId: 'awaiting-verify' });
+    return { batchId };
+  }
+
+  it('finding #2: a taskRef-less terminal event in a multi-lane run matches NO gate', async () => {
+    const { batchId } = twoLanesParked('run-1');
+    seedRequest(db, { id: 'vr_a', runId: 'run-1', status: 'running', taskRef: 'TASK-001' });
+    seedRequest(db, { id: 'vr_b', runId: 'run-1', status: 'running', taskRef: 'TASK-002' });
+
+    const pendingA = gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' });
+    const pendingB = gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_b' });
+
+    // A taskRef-LESS FAIL event (an agent omitted task_ref) must NOT resolve any lane.
+    verificationEvents.emit(verificationChannel('run-1'), {
+      runId: 'run-1',
+      requestId: 'vr_x',
+      projectId: 1,
+      status: 'failed',
+      type: 'static-render-snapshot',
+    } satisfies VerificationTerminalEvent);
+
+    const stillPending = new Promise((r) => setTimeout(() => r('still-pending'), 15));
+    await expect(Promise.race([pendingA, pendingB, stillPending])).resolves.toBe('still-pending');
+
+    // Each lane still resolves off ITS OWN taskRef'd event.
+    db.prepare(`UPDATE verification_requests SET status = 'passed' WHERE id IN ('vr_a','vr_b')`).run();
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'integrated', currentStepId: 'visual-verify' });
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_b', status: 'integrated', currentStepId: 'visual-verify' });
+    for (const [rid, ref] of [['vr_a', 'TASK-001'], ['vr_b', 'TASK-002']] as const) {
+      verificationEvents.emit(verificationChannel('run-1'), {
+        runId: 'run-1',
+        requestId: rid,
+        projectId: 1,
+        status: 'passed',
+        type: 'static-render-snapshot',
+        taskRef: ref,
+      } satisfies VerificationTerminalEvent);
+    }
+    await expect(pendingA).resolves.toEqual({ kind: 'advance' });
+    await expect(pendingB).resolves.toEqual({ kind: 'advance' });
+  });
+
+  it('single-lane run: a taskRef-less terminal event still matches (backward compatible)', async () => {
+    const { batchId } = singleLaneParked('run-1');
+    seedRequest(db, { id: 'vr1', runId: 'run-1', status: 'running' /* no taskRef */ });
+    const pending = gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' });
+
+    db.prepare(`UPDATE verification_requests SET status = 'passed' WHERE id = 'vr1'`).run();
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'integrated', currentStepId: 'visual-verify' });
+    verificationEvents.emit(verificationChannel('run-1'), {
+      runId: 'run-1',
+      requestId: 'vr1',
+      projectId: 1,
+      status: 'passed',
+      type: 'static-render-snapshot',
+    } satisfies VerificationTerminalEvent);
+
+    await expect(pending).resolves.toEqual({ kind: 'advance' });
+  });
+
+  it('finding #3: a lane with no attributable request in a multi-lane run advances immediately (no park, no hang)', async () => {
+    twoLanesParked('run-1');
+    // Only lane A fired a request; lane B's subagent declared SKIPPED in-band.
+    seedRequest(db, { id: 'vr_a', runId: 'run-1', status: 'running', taskRef: 'TASK-001' });
+    // Old code bound the run's sole request to lane B (rows.length===1 fallback) and
+    // parked B forever; the fix requires a strict taskRef match in a multi-lane run,
+    // so B has NO attributable request → advance immediately.
+    await expect(gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_b' })).resolves.toEqual({ kind: 'advance' });
+  });
+
+  it('finding #3: the sole-request fallback no longer binds a sibling in a multi-lane run', async () => {
+    const { batchId } = twoLanesParked('run-1');
+    // A single terminal FAIL request exists (taskRef=A). Lane B must not inherit it.
+    seedRequest(db, { id: 'vr_a', runId: 'run-1', status: 'failed', taskRef: 'TASK-001' });
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'implement', attempt: 2 });
+    await expect(gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_b' })).resolves.toEqual({ kind: 'advance' });
+    // Lane A itself still resolves the FAIL to a loopback.
+    await expect(gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' })).resolves.toEqual({ kind: 'loopback', attempt: 2 });
+  });
 });

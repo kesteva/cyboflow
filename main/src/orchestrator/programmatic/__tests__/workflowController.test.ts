@@ -1081,6 +1081,37 @@ describe('WorkflowController', () => {
         expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
       });
 
+      it('finding #1: the lane is PARKED at awaiting-verify BEFORE the gate is awaited, and a loopback re-walks implement at the bumped attempt', async () => {
+        const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
+        const driver = makeFanOutDriver(['t1']);
+        const host = makeFanHost(driver);
+        // Capture the lane's current step as the driver has it at each awaitVerdict
+        // call — proving the park write already landed. THIS is the exact window a
+        // fast verdict's merge-gate lane write (→ implement) gets clobbered back to
+        // awaiting-verify by this park; the gate must still resolve the FAIL as a
+        // loopback (it keys on the terminal STATUS, not the clobbered step id).
+        const parkedStepAtAwait: Array<string | null | undefined> = [];
+        const outcomes: VisualGateOutcome[] = [{ kind: 'loopback', attempt: 2 }, { kind: 'advance' }];
+        const gate: VisualVerifyGate = {
+          isActive: () => true,
+          async awaitVerdict() {
+            parkedStepAtAwait.push(driver.lanes.filter((l) => l.itemId === 't1').pop()?.currentStepId);
+            return outcomes.shift() ?? { kind: 'advance' };
+          },
+        };
+        host.visualGate = gate;
+        const runner = makeRunner();
+
+        const result = await new WorkflowController(runner, host).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        // Both awaits observed the lane parked at awaiting-verify (park precedes await).
+        expect(parkedStepAtAwait).toEqual(['awaiting-verify', 'awaiting-verify']);
+        // The loopback re-walked implement at the bumped attempt, then integrated.
+        expect(runner.calls.filter((c) => c.id === 'implement').map((c) => c.attempt)).toEqual([1, 2]);
+        expect(driver.lanes.filter((l) => l.itemId === 't1').pop()?.status).toBe('integrated');
+      });
+
       it('fails the lane when the merge-gate returns failed (cap reached)', async () => {
         const d = def([phase('p1', [fanStep('execute', ['implement', 'visual-verify'])])]);
         const driver = makeFanOutDriver(['t1']);
