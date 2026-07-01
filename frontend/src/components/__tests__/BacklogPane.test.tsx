@@ -101,7 +101,7 @@ function stage(position: number, id: string, label: string, opts: Partial<BoardS
   };
 }
 
-// Migration 036 collapsed the board to FOUR stages: 1 Idea, 6 Ready for
+// Migration 042 collapsed the board to FOUR stages: 1 Idea, 6 Ready for
 // development, 9 Done, 10 Won't do. "Won't do" carries `hidden_by_default`
 // (the archived toggle reveals it). Decomposition is now a `decomposed_at`
 // STAMP that filters an idea OFF the board — there is no Decomposed column.
@@ -155,7 +155,7 @@ function task(overrides: Partial<BacklogTaskItem> & { id: string; stage_id: stri
     board_id: overrides.board_id ?? 'board-1-default',
     stage_id: overrides.stage_id,
     archived_at: overrides.archived_at ?? null,
-    // Migration 036: non-decomposed ideas must carry `decomposed_at: null` —
+    // Migration 042: non-decomposed ideas must carry `decomposed_at: null` —
     // `undefined` reads as decomposed (isDecomposed: decomposed_at !== null) and
     // vanishes. Epics/tasks leave `approved_at` undefined (reads as approved/visible).
     decomposed_at: overrides.decomposed_at ?? null,

@@ -102,7 +102,7 @@ injected, no `electron` / `better-sqlite3` / `services/*` imports):
   cascade** — children carry the flow. The create seam stamps `epics`/`tasks.approved_at`
   PENDING (`NULL` = backend-invisible + sprint-ineligible) for plan-gated runs and visible
   (`now`) otherwise; after a child-task write settles it re-enters the queue to roll a parent
-  epic's stage up via `recomputeEpicStage` (migration 036 — see "Data Model").
+  epic's stage up via `recomputeEpicStage` (migration 042 — see "Data Model").
 - **`reviewItemRouter.ts` (`ReviewItemRouter.applyReviewItem`)** — the SINGLE write chokepoint for
   `review_items`. Every write (Sprint-agent findings via MCP, the folded PreToolUse/approval path,
   approve-idea/approve-plan decision gates, manual human tasks, triage resolve/dismiss) routes
@@ -261,8 +261,8 @@ data loss. The `dualSubstrateIntegration.test.ts` rollback case locks this.
 - **`database.ts`** — `better-sqlite3` wrapper, WAL mode, hand-rolled migration runner.
   Also owns `seedDefaultBoard(projectId)`, which seeds the default board + its **4 canonical
   stages** (1 Idea / 6 Ready for development / 9 Done / 10 Won't do, hidden) for each NEW
-  project after migration `036_collapse_board`. It MUST stay field-for-field in sync with the
-  post-036 board; a cross-check test asserts `seedDefaultBoard` === the migrated 4-stage seed.
+  project after migration `042_collapse_board`. It MUST stay field-for-field in sync with the
+  post-042 board; a cross-check test asserts `seedDefaultBoard` === the migrated 4-stage seed.
 - **`sessionManager.ts`** — Coordinates session state across services.
 
 In-repo workflow prompt bodies live in `main/src/orchestrator/workflows/` (`planner.md`,
@@ -487,8 +487,8 @@ the type discriminator (no `type` column):
 
 Each table carries its own columns plus a single markdown `body` column, a `priority`, a
 `version` (optimistic concurrency), and a `(board_id, stage_id)` placement onto **one shared
-board**. Migration `036_collapse_board` narrowed the board to **4 canonical stages** kept at
-their original positions (seeded by migration 036 and `seedDefaultBoard`); they form a union
+board**. Migration `042_collapse_board` narrowed the board to **4 canonical stages** kept at
+their original positions (seeded by migration 042 and `seedDefaultBoard`); they form a union
 view across all three entity types:
 
 | # | Stage | Owner | Notes |
@@ -504,10 +504,10 @@ view across all three entity types:
 > columns; the old position-12 `Decomposed` terminal is now the `ideas.decomposed_at` stamp,
 > and position-11 `Archived` was already removed by `024_archive_in_place` (in-place
 > `archived_at` flag). Stages are DATA rows in `board_stages` (no enum/CHECK); the entity
-> `stage_id` FK is `ON DELETE RESTRICT`, so 036 RELOCATES every occupant of a removed
+> `stage_id` FK is `ON DELETE RESTRICT`, so 042 RELOCATES every occupant of a removed
 > position to a kept stage on the same board BEFORE deleting the row (mirrors 024).
 
-**Off-board buckets (036).** Three nullable TEXT stamps replace the dropped intermediate
+**Off-board buckets (042).** Three nullable TEXT stamps replace the dropped intermediate
 stages and gate backend visibility:
 
 - **`ideas.decomposed_at`** — a stamped idea is OFF the board (decomposed; reachable only via
@@ -599,7 +599,7 @@ satellites), `015_entity_model_rebuild.sql` (the 3-table entity model + `entity_
 `020_workflow_run_paused_status.sql`, `021_session_agent_permission_mode.sql`,
 `022_sprint_batches.sql` (sprint batches + lanes + `workflow_runs.batch_id`),
 `023_sprint_lane_step.sql` (lane `current_step_id`), continuing through `024`–`035` and
-`036_collapse_board.sql` (narrows the board to the 4 kept stages + adds the off-board
+`042_collapse_board.sql` (narrows the board to the 4 kept stages + adds the off-board
 `ideas.decomposed_at` / `epics`+`tasks.approved_at` / `workflow_runs.plan_approved_at` stamps
 via a relocate-then-delete that respects the `ON DELETE RESTRICT` stage FK, mirroring 024). 015
 and 016 are forward-only with no backfill (no prod data existed); the destructive DROP+recreate

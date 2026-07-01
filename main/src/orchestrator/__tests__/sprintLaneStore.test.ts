@@ -76,9 +76,9 @@ function seedTask(db: Database.Database, id: string, ref: string, title: string)
 
 /**
  * Migration-backed in-memory DB carried all the way to the collapsed board
- * (006 → 011 → 014 → 015 → 022 → 023 → 024 → 025 → 036), so the Q1 eligibility
+ * (006 → 011 → 014 → 015 → 022 → 023 → 024 → 025 → 042), so the Q1 eligibility
  * guard's tasks.approved_at / tasks.archived_at columns + the 4-stage board
- * (positions 1/6/9/10) exist. The base buildLaneDb stops at 025 (pre-036), where
+ * (positions 1/6/9/10) exist. The base buildLaneDb stops at 025 (pre-042), where
  * the guard degrades to permissive — the right substrate for the lane-mechanics
  * tests, which seed synthetic ids.
  */
@@ -106,7 +106,7 @@ function buildReadyLaneDb(): Database.Database {
     '023_sprint_lane_step.sql',
     '024_archive_in_place.sql',
     '025_sprint_lane_attempts.sql',
-    '036_collapse_board.sql',
+    '042_collapse_board.sql',
   ]) {
     db.exec(readFileSync(join(migDir, file), 'utf-8'));
   }
@@ -225,9 +225,9 @@ describe('SprintLaneStore', () => {
   // ---------------------------------------------------------------------------
   // createForRun — Q1 sprint-eligibility guard (collapsed-board schema)
   //
-  // Runs against buildReadyLaneDb (through migration 036) so the guard is LIVE:
+  // Runs against buildReadyLaneDb (through migration 042) so the guard is LIVE:
   // only approved, non-archived tasks at a ready-or-later, non-terminal stage
-  // seed lanes. The base buildLaneDb (pre-036) degrades the guard to permissive,
+  // seed lanes. The base buildLaneDb (pre-042) degrades the guard to permissive,
   // which is why the lane-mechanics tests above still seed synthetic ids.
   // ---------------------------------------------------------------------------
 

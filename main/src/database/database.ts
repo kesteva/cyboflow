@@ -1724,7 +1724,7 @@ export class DatabaseService {
       throw new Error('Failed to create project');
     }
     // Seed the default board + 4 stages for the new project (migrations 014 + 015,
-    // collapsed to positions 1/6/9/10 by migration 036).
+    // collapsed to positions 1/6/9/10 by migration 042).
     this.seedDefaultBoard(project.id);
     return project;
   }
@@ -1733,7 +1733,7 @@ export class DatabaseService {
    * Seed the default board and its 4 canonical stages for a project
    * (positions 1, 6, 9, 10 — the collapsed board).
    *
-   * Mirrors the post-036 migrated board: migration 036_collapse_board.sql
+   * Mirrors the post-042 migrated board: migration 042_collapse_board.sql
    * narrows the 12-stage board (014 stages 1..11; 015 position-12 'Decomposed';
    * 024 removed position-11 'Archived') down to the FOUR kept stages at their
    * existing positions — removing positions 2,3,4,5,7,8,12. The migrations
@@ -1742,7 +1742,7 @@ export class DatabaseService {
    * safe to call more than once. Wrapped in a single transaction.
    *
    * Source of truth for the stage table: the spec's BACKLOG_STAGES seed; this
-   * MUST stay field-for-field in sync with the post-036 migrated board state.
+   * MUST stay field-for-field in sync with the post-042 migrated board state.
    * The cross-check test asserts seedDefaultBoard === the migrated 4-stage seed.
    */
   seedDefaultBoard(projectId: number): void {

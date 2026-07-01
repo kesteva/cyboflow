@@ -1,4 +1,4 @@
--- Migration 036: collapse the board to 4 stages + add approval/decompose stamps.
+-- Migration 042: collapse the board to 4 stages + add approval/decompose stamps.
 --
 -- The 12-stage planning board (014 seeded 1..11; 015 added 12 'Decomposed';
 -- 024 removed 11 'Archived') is narrowed to the FOUR kept stages at their
@@ -34,7 +34,7 @@
 -- with 'duplicate column name: decomposed_at', which runFileBasedMigrations()
 -- treats as the idempotency signal (same mechanism as 013/017/018/024); because
 -- the runner wraps the file in a transaction, the later UPDATE/DELETE statements
--- never re-execute and the post-036 state is left intact.
+-- never re-execute and the post-042 state is left intact.
 --
 -- NOTE: No explicit BEGIN/COMMIT here — runFileBasedMigrations() in database.ts
 -- wraps every file in a this.transaction(...) call, so an inner BEGIN would nest.

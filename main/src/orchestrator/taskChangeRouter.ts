@@ -92,9 +92,9 @@ interface EntityTableDescriptor {
   hasScope: boolean;
   /** This entity may carry image attachments (only ideas, migration 028). */
   hasAttachments: boolean;
-  /** This entity may carry a decomposed_at retire stamp (only ideas, migration 036). */
+  /** This entity may carry a decomposed_at retire stamp (only ideas, migration 042). */
   hasDecomposed: boolean;
-  /** This entity may carry an approved_at plan-gate stamp (epics + tasks, migration 036). */
+  /** This entity may carry an approved_at plan-gate stamp (epics + tasks, migration 042). */
   hasApproval: boolean;
 }
 
@@ -192,7 +192,7 @@ export interface TaskChange {
    */
   archived?: boolean;
   /**
-   * Decomposed toggle (idea-only, migration 036): true stamps `decomposed_at =
+   * Decomposed toggle (idea-only, migration 042): true stamps `decomposed_at =
    * now`, false clears it. A stamped idea is OFF the board (retired; reachable
    * only via its children). NOT a stage move — the idea keeps its stage/column.
    * Rejected ('invalid_lineage') for epics/tasks. Idea retirement is now
@@ -263,7 +263,7 @@ interface EntityDbRow {
   priority: Priority;
   repo: string | null;
   archived_at: string | null;
-  /** Retire stamp (ideas-only, migration 036); NULL on epics/tasks + when on-board. */
+  /** Retire stamp (ideas-only, migration 042); NULL on epics/tasks + when on-board. */
   decomposed_at: string | null;
   /** JSON IdeaAttachment[] (ideas-only, migration 028); NULL on epics/tasks + when unset. */
   attachments: string | null;
@@ -340,7 +340,7 @@ export class TaskChangeRouter {
   /** Per-project serialization queues (ref minting + version bumps are project-scoped). */
   private projectQueues = new Map<number, PQueue>();
 
-  /** Cached `${table}.${column}` existence (backward-compat shim for pre-036 / partial test DBs). */
+  /** Cached `${table}.${column}` existence (backward-compat shim for pre-042 / partial test DBs). */
   private columnExistsCache = new Map<string, boolean>();
 
   constructor(private readonly db: DatabaseLike) {}
@@ -452,7 +452,7 @@ export class TaskChangeRouter {
   }
 
   /**
-   * Retire an idea off the board by stamping `decomposed_at` (migration 036).
+   * Retire an idea off the board by stamping `decomposed_at` (migration 042).
    * Idempotent: reads the idea's current decomposed_at and no-ops when it is
    * already stamped (or the idea cannot be resolved). Routes through applyChange
    * with actor='orchestrator' + the `decomposed` toggle so the stamp mints an
@@ -529,7 +529,7 @@ export class TaskChangeRouter {
    * entities were revealed (approved_at-stamped) and accepted by the human, so a
    * later cancel/dismiss must NOT delete them — the helper no-ops. (A run with no
    * plan-approval lifecycle created nothing run-keyed, so the projection is empty
-   * and this is a no-op regardless.) Fail-soft: a pre-036 DB lacking the column,
+   * and this is a no-op regardless.) Fail-soft: a pre-042 DB lacking the column,
    * or a vanished run, degrades to no-op.
    *
    * actor='orchestrator' on each applyDelete — EXEMPT from the active-run guard
@@ -540,7 +540,7 @@ export class TaskChangeRouter {
    */
   async deleteRunCreatedEntities(projectId: number, runId: string): Promise<void> {
     // Gate: never delete an ALREADY-APPROVED run's revealed entities. Fail-soft —
-    // a pre-036 DB lacking plan_approved_at (or a vanished run) means no-op.
+    // a pre-042 DB lacking plan_approved_at (or a vanished run) means no-op.
     try {
       const row = this.db
         .prepare('SELECT plan_approved_at AS planApprovedAt FROM workflow_runs WHERE id = ?')
@@ -770,8 +770,8 @@ export class TaskChangeRouter {
       vals.push(v.attachments);
     }
     // Q1 plan-gate stamp (epics/tasks). Gated on the column actually existing so
-    // pre-036 schemas / partial-migration test DBs (which omit approved_at) keep
-    // inserting without 'no such column'; production (post-036) always has it.
+    // pre-042 schemas / partial-migration test DBs (which omit approved_at) keep
+    // inserting without 'no such column'; production (post-042) always has it.
     if (desc.hasApproval && this.columnExists(desc.table, 'approved_at')) {
       cols.push('approved_at');
       vals.push(v.approvedAt);
@@ -819,7 +819,7 @@ export class TaskChangeRouter {
    * Every other create lands VISIBLE: a user/manual create (no runId), a
    * non-plan-gated flow (e.g. sprint), or a run whose plan is already approved.
    *
-   * Fail-soft: a missing/unreadable run row, or a pre-036 schema with no
+   * Fail-soft: a missing/unreadable run row, or a pre-042 schema with no
    * plan_approved_at column, degrades to VISIBLE (the prior, no-guard behaviour).
    * Only consulted for epics/tasks (desc.hasApproval); ideas never call this.
    */
@@ -842,7 +842,7 @@ export class TaskChangeRouter {
         | { planApprovedAt?: unknown; stepsSnapshotJson?: unknown; workflowName?: unknown }
         | undefined;
     } catch {
-      return now; // pre-036 DB (no plan_approved_at column) / older schema -> visible
+      return now; // pre-042 DB (no plan_approved_at column) / older schema -> visible
     }
     if (!run) return now; // run vanished -> visible (fail-soft)
     // Plan already approved -> children are visible immediately.
@@ -872,7 +872,7 @@ export class TaskChangeRouter {
 
   /**
    * Whether `table` carries `column`, cached per `${table}.${column}`. Backward-
-   * compat shim: pre-036 schemas (and the partial-migration in-memory DBs used by
+   * compat shim: pre-042 schemas (and the partial-migration in-memory DBs used by
    * sibling unit suites) lack approved_at, so the create-path INSERT must SKIP the
    * column there instead of throwing 'no such column'. Mirrors the PRAGMA
    * table_info probe used across database.ts. Fail-soft: a PRAGMA error -> absent.
@@ -952,7 +952,7 @@ export class TaskChangeRouter {
         action = 'stageMoved';
       }
 
-      // ----- decomposed toggle (idea retire stamp, migration 036) -----
+      // ----- decomposed toggle (idea retire stamp, migration 042) -----
       // Mirrors the archive toggle: idea-only, NOT a stage move. Stamping
       // decomposed_at takes the idea OFF the board (reachable only via children,
       // which are LEFT UNCHANGED). Surface the distinct 'decomposed' action so the

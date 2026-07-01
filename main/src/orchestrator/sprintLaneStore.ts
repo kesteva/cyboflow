@@ -253,7 +253,7 @@ export class SprintLaneStore {
    * dropped (inner JOIN). Input order is preserved; duplicates are collapsed.
    *
    * Called by createForRun (the materialization chokepoint) and the runs.start
-   * pre-check. On a pre-036 schema lacking approved_at/archived_at the filter
+   * pre-check. On a pre-042 schema lacking approved_at/archived_at the filter
    * degrades to PERMISSIVE (returns the unique candidates unchanged), mirroring
    * the codebase's pre-migration defensive-read precedent — production DBs
    * always carry the columns, so the guard is fully active there.
@@ -280,7 +280,7 @@ export class SprintLaneStore {
       return unique.filter((id) => eligible.has(id));
     } catch (err) {
       if (err instanceof Error && /no such column/i.test(err.message)) {
-        this.logger?.debug('[SprintLaneStore] eligibility filter skipped (pre-036 schema)', {
+        this.logger?.debug('[SprintLaneStore] eligibility filter skipped (pre-042 schema)', {
           error: err.message,
         });
         return unique;

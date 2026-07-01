@@ -4,7 +4,7 @@
  * Asserts that database.ts seedDefaultBoard (invoked via createProject) produces
  * a board whose 4 stages are FIELD-FOR-FIELD identical to the migration-driven
  * seed (014 stages 1..11 + 015 position-12 'Decomposed' MINUS the position-11
- * 'Archived' stage removed by 024, collapsed to positions 1/6/9/10 by 036). If
+ * 'Archived' stage removed by 024, collapsed to positions 1/6/9/10 by 042). If
  * the two ever drift, createProject() would seed a different board than a
  * migrated DB and brick boot — this test is the guard that keeps them locked
  * together.
@@ -35,7 +35,7 @@ function stageRows(db: Database.Database, boardId: string): StageRow[] {
     .all(boardId) as StageRow[];
 }
 
-/** Build a migration-only DB (006 -> 011 -> 014 -> 015 -> 024 -> 036) with project 1 seeded. */
+/** Build a migration-only DB (006 -> 011 -> 014 -> 015 -> 024 -> 042) with project 1 seeded. */
 function buildMigrationDb(): Database.Database {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
@@ -56,22 +56,22 @@ function buildMigrationDb(): Database.Database {
     '014_native_tasks.sql',
     '015_entity_model_rebuild.sql',
     '024_archive_in_place.sql',
-    '036_collapse_board.sql',
+    '042_collapse_board.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
   return db;
 }
 
-describe('seedDefaultBoard <-> migrated (014+015+024+036) seed parity', () => {
+describe('seedDefaultBoard <-> migrated (014+015+024+042) seed parity', () => {
   let tmpDbDir: string;
 
   afterEach(() => {
     if (tmpDbDir) rmSync(tmpDbDir, { recursive: true, force: true });
   });
 
-  it('createProject seeds the SAME 4 stages as the 014+015+024+036 migration seed', () => {
-    // (1) Migration-driven board for project 1 (036 collapses to positions 1/6/9/10).
+  it('createProject seeds the SAME 4 stages as the 014+015+024+042 migration seed', () => {
+    // (1) Migration-driven board for project 1 (042 collapses to positions 1/6/9/10).
     const migDb = buildMigrationDb();
     const migStages = stageRows(migDb, 'board-1-default');
     migDb.close();

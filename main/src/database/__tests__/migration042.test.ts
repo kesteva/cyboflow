@@ -1,7 +1,7 @@
 /**
- * Integration tests for migration 036_collapse_board.sql.
+ * Integration tests for migration 042_collapse_board.sql.
  *
- * Migration 036 collapses the planning board from 12 stages (014 seeded 1..11;
+ * Migration 042 collapses the planning board from 12 stages (014 seeded 1..11;
  * 015 added 12 'Decomposed'; 024 removed 11 'Archived') down to the FOUR kept
  * stages at their existing positions — 1 'Idea', 6 'Ready for development',
  * 9 'Done', 10 "Won't do" — removing positions 2,3,4,5,7,8,12. It adds the
@@ -15,7 +15,7 @@
  *
  * Applies 006 -> 011 -> 014 -> 015 -> 024 against an in-memory SQLite instance
  * (mirrors migration024.test.ts), seeds entities across TWO project boards, then
- * applies the real 036 SQL via the production transaction wrapper.
+ * applies the real 042 SQL via the production transaction wrapper.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -29,7 +29,7 @@ function readMigration(name: string): string {
 
 /**
  * Apply a migration the way the production runner does — wrapped in a single
- * transaction (mirrors runFileBasedMigrations() / migration024.test.ts). 036
+ * transaction (mirrors runFileBasedMigrations() / migration024.test.ts). 042
  * contains no FK-pragma toggle, so only the transaction wrapper matters: a
  * mid-file failure rolls the WHOLE file back.
  */
@@ -40,7 +40,7 @@ function runMigrationViaProductionPath(db: Database.Database, sql: string): void
   txn();
 }
 
-/** Build the pre-036 chain (006 -> 011 -> 014 -> 015 -> 024) with 2 projects seeded. */
+/** Build the pre-042 chain (006 -> 011 -> 014 -> 015 -> 024) with 2 projects seeded. */
 function buildDbThrough024(): Database.Database {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
@@ -156,10 +156,10 @@ function seedEntities(db: Database.Database): void {
   ).run(B2, stageId(B2, 8));
 }
 
-describe('Migration 036: collapse board to 4 stages + approval/decompose stamps', () => {
+describe('Migration 042: collapse board to 4 stages + approval/decompose stamps', () => {
   it('adds decomposed_at / approved_at / plan_approved_at TEXT columns', () => {
     const db = buildDbThrough024();
-    runMigrationViaProductionPath(db, readMigration('036_collapse_board.sql'));
+    runMigrationViaProductionPath(db, readMigration('042_collapse_board.sql'));
 
     interface ColRow {
       name: string;
@@ -185,7 +185,7 @@ describe('Migration 036: collapse board to 4 stages + approval/decompose stamps'
   it('removes positions 2,3,4,5,7,8,12 from EVERY board while keeping 1/6/9/10', () => {
     const db = buildDbThrough024();
     seedEntities(db);
-    runMigrationViaProductionPath(db, readMigration('036_collapse_board.sql'));
+    runMigrationViaProductionPath(db, readMigration('042_collapse_board.sql'));
 
     for (const removed of [2, 3, 4, 5, 7, 8, 12]) {
       const row = db
@@ -207,7 +207,7 @@ describe('Migration 036: collapse board to 4 stages + approval/decompose stamps'
   it('relocates removed-position occupants to their mapped kept position', () => {
     const db = buildDbThrough024();
     seedEntities(db);
-    runMigrationViaProductionPath(db, readMigration('036_collapse_board.sql'));
+    runMigrationViaProductionPath(db, readMigration('042_collapse_board.sql'));
 
     // ideas -> position 1 (on their own board).
     const idePlan = db.prepare('SELECT stage_id FROM ideas WHERE id = ?').get('ide_plan') as {
@@ -236,7 +236,7 @@ describe('Migration 036: collapse board to 4 stages + approval/decompose stamps'
   it('stamps decomposed_at on position-12 ideas only', () => {
     const db = buildDbThrough024();
     seedEntities(db);
-    runMigrationViaProductionPath(db, readMigration('036_collapse_board.sql'));
+    runMigrationViaProductionPath(db, readMigration('042_collapse_board.sql'));
 
     const decomp = db
       .prepare('SELECT stage_id, decomposed_at, updated_at FROM ideas WHERE id = ?')
@@ -256,7 +256,7 @@ describe('Migration 036: collapse board to 4 stages + approval/decompose stamps'
   it('backfills approved_at = updated_at on existing epics and tasks', () => {
     const db = buildDbThrough024();
     seedEntities(db);
-    runMigrationViaProductionPath(db, readMigration('036_collapse_board.sql'));
+    runMigrationViaProductionPath(db, readMigration('042_collapse_board.sql'));
 
     const epc = db
       .prepare('SELECT approved_at, updated_at FROM epics WHERE id = ?')
@@ -273,7 +273,7 @@ describe('Migration 036: collapse board to 4 stages + approval/decompose stamps'
   it('nulls task entry_stage_id references to a removed stage, keeps kept ones', () => {
     const db = buildDbThrough024();
     seedEntities(db);
-    runMigrationViaProductionPath(db, readMigration('036_collapse_board.sql'));
+    runMigrationViaProductionPath(db, readMigration('042_collapse_board.sql'));
 
     const planned = db
       .prepare('SELECT entry_stage_id FROM tasks WHERE id = ?')
@@ -290,7 +290,7 @@ describe('Migration 036: collapse board to 4 stages + approval/decompose stamps'
   it('rolls a fully-done epic up to position 9 but leaves a mixed epic at 6', () => {
     const db = buildDbThrough024();
     seedEntities(db);
-    runMigrationViaProductionPath(db, readMigration('036_collapse_board.sql'));
+    runMigrationViaProductionPath(db, readMigration('042_collapse_board.sql'));
 
     const done = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get('epc_done') as {
       stage_id: string;
@@ -307,7 +307,7 @@ describe('Migration 036: collapse board to 4 stages + approval/decompose stamps'
   it('keeps foreign_keys ON throughout (no RESTRICT FK fired)', () => {
     const db = buildDbThrough024();
     seedEntities(db);
-    runMigrationViaProductionPath(db, readMigration('036_collapse_board.sql'));
+    runMigrationViaProductionPath(db, readMigration('042_collapse_board.sql'));
 
     const fk = db.pragma('foreign_keys', { simple: true });
     expect(fk).toBe(1);

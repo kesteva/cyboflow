@@ -45,7 +45,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
-  // Migration 036 adds the visibility stamps (ideas.decomposed_at,
+  // Migration 042 adds the visibility stamps (ideas.decomposed_at,
   // epics/tasks.approved_at) AND collapses the board to four stages. We only
   // need the columns here — loading the full file would DELETE board_stages at
   // positions 2,3,4,5,7,8,12, breaking the position-based fixtures below (the

@@ -360,7 +360,7 @@ identity, id prefix, and which lineage/`scope`/`entry_stage_id`/`decomposed_at`/
 columns each table carries — add a new per-type column there, not via scattered
 `if (type === 'idea')` branches.
 
-**Off-board buckets (migration 036).** Decomposing an idea stamps `ideas.decomposed_at` (the idea
+**Off-board buckets (migration 042).** Decomposing an idea stamps `ideas.decomposed_at` (the idea
 leaves the 4-stage board, reachable only via children) with NO cascade — retirement is
 exclusively gate-driven (the approve-plan gate retires the planner's root idea). The CREATE seam
 is the Q1 visibility gate: a plan-gated run's epics/tasks are created PENDING
@@ -376,7 +376,7 @@ single sprint-materialization chokepoint.
 
 ### Derived-stage recompute follow-ons (`recomputeTaskExecutionStage` + `recomputeEpicStage`)
 
-Stages 7/8 (In-development / Ready-to-merge) collapsed away in migration 036, so the board's
+Stages 7/8 (In-development / Ready-to-merge) collapsed away in migration 042, so the board's
 two `derived` stages are now computed by recompute follow-ons that re-enter the chokepoint as
 `actor='orchestrator'` UPDATEs (never raw table writes). BOTH are idempotent (a target equal to
 the current stage is a no-op) and best-effort at the follow-on seam:
@@ -456,7 +456,7 @@ in application order.
 ENTITY writes are the exception that proves the rule: they do not go through ad-hoc `database.ts`
 methods but through the `TaskChangeRouter` / `ReviewItemRouter` chokepoints above. `database.ts`
 still owns `seedDefaultBoard(projectId)`, which MUST stay field-for-field in sync with the
-post-036 4-stage board seed (cross-check test pins this).
+post-042 4-stage board seed (cross-check test pins this).
 
 ### Schema reconciliation
 
@@ -661,7 +661,7 @@ are pinned field-for-field against the TypeScript row interfaces in `main/src/da
 of these tables, update the migration, `schema.sql`, the `*Row` interface, and the shared type in
 the same commit — `entitySchemaParity` is the tripwire.
 
-**The 4-stage board seed is dual-sourced.** Migration `036_collapse_board` narrowed the board
+**The 4-stage board seed is dual-sourced.** Migration `042_collapse_board` narrowed the board
 to the FOUR kept stages (1 Idea / 6 Ready for development / 9 Done / 10 Won't do, hidden) at
 their original positions; `database.ts` `seedDefaultBoard` seeds the same four for NEW projects.
 Both MUST be field-for-field identical; the cross-check test asserts `seedDefaultBoard` === the

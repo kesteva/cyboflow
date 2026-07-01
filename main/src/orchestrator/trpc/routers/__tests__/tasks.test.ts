@@ -60,7 +60,7 @@ function buildDb(): Database.Database {
   const migDir = join(__dirname, '..', '..', '..', '..', 'database', 'migrations');
   // 006 (workflow_runs base) -> 011 (current_step_id) -> 014 (unified tasks) ->
   // 015 (entity-model rebuild) -> 016 (review_items) -> 024 (archive-in-place) ->
-  // 028 (idea attachments) -> 036 (board collapse: adds ideas.decomposed_at etc.
+  // 028 (idea attachments) -> 042 (board collapse: adds ideas.decomposed_at etc.
   // that readEntity now SELECTs, plus the 4-stage board).
   db.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
@@ -69,7 +69,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
-  db.exec(readFileSync(join(migDir, '036_collapse_board.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '042_collapse_board.sql'), 'utf-8'));
   return db;
 }
 

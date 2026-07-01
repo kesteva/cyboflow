@@ -122,9 +122,9 @@ interface TaskDbRow {
   board_id: string;
   stage_id: string;
   archived_at: string | null;
-  /** IDEA-only decompose stamp (036); projected as NULL on the epics/tasks branches. */
+  /** IDEA-only decompose stamp (042); projected as NULL on the epics/tasks branches. */
   decomposed_at: string | null;
-  /** EPIC/TASK approval stamp (036); projected as NULL on the ideas branch. */
+  /** EPIC/TASK approval stamp (042); projected as NULL on the ideas branch. */
   approved_at: string | null;
   version: number;
   created_at: string;

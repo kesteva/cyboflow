@@ -751,7 +751,7 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     db.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
-    // Migration 036 adds the decompose/approval stamps (the columns the router
+    // Migration 042 adds the decompose/approval stamps (the columns the router
     // now reads) AND collapses the board. The board collapse (stage deletes) is
     // exercised in migration036.test.ts; here we only add the columns so the
     // 12-stage board's positions stay available for these stage assertions.
@@ -1010,7 +1010,7 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
     ]) {
       db.exec(readFileSync(join(migDir, f), 'utf-8'));
     }
-    // Migration 036 adds the decompose/approval stamps (the columns the router
+    // Migration 042 adds the decompose/approval stamps (the columns the router
     // now reads) AND collapses the board. The board collapse (stage deletes) is
     // exercised in migration036.test.ts; here we only add the columns so the
     // 12-stage board's positions stay available for these stage assertions.
@@ -1139,7 +1139,7 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
 
     await answerPlanGate(db, router, 'run-ship', 'Approve');
 
-    // Migration-036 retirement is a decomposed_at stamp, NOT a stage move (the
+    // Migration-042 retirement is a decomposed_at stamp, NOT a stage move (the
     // idea keeps its stage; the stamp takes it off the board).
     expect(decomposedAt(db, ideaId)).not.toBeNull();
     expect(ideaStage(db, ideaId)).toBe(stageBefore);
@@ -1219,7 +1219,7 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     db.exec(readFileSync(join(migDir, '017_run_seed_idea.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
-    // Migration 036 adds the decompose/approval stamps (the columns the router
+    // Migration 042 adds the decompose/approval stamps (the columns the router
     // now reads) AND collapses the board. The board collapse (stage deletes) is
     // exercised in migration036.test.ts; here we only add the columns so the
     // 12-stage board's positions stay available for these stage assertions.
@@ -1355,7 +1355,7 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
 
     await answerDecomposeGate(db, router, 'run-d', 'Archive & finish');
 
-    // Migration-036 retirement is a decomposed_at stamp, NOT a stage move: each
+    // Migration-042 retirement is a decomposed_at stamp, NOT a stage move: each
     // idea keeps its stage (position 1) and the stamp takes it off the board.
     for (const id of [ideaA, ideaB]) {
       expect(decomposedAt(db, id)).not.toBeNull();

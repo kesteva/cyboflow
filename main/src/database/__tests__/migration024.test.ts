@@ -266,7 +266,7 @@ describe('Migration 024: archive-in-place + Archived stage removal', () => {
         expect(cols, `${table} should have archived_at`).toContain('archived_at');
       }
 
-      // The fresh DB now runs through 036_collapse_board.sql, which removes
+      // The fresh DB now runs through 042_collapse_board.sql, which removes
       // positions 2,3,4,5,7,8,12 and keeps the 4 collapsed stages 1/6/9/10
       // (still no position-11 stage).
       const positions = (

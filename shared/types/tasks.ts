@@ -132,7 +132,7 @@ export interface BacklogTaskItem {
   /** ISO timestamp when the item was archived in place; null = not archived. */
   archived_at: string | null;
   /**
-   * IDEA-only retire stamp (migration 036): ISO timestamp when the idea was
+   * IDEA-only retire stamp (migration 042): ISO timestamp when the idea was
    * decomposed OFF the board (reachable only via its children), else null. Read
    * back as null on epics/tasks (no `decomposed_at` column). Optional for
    * cross-process shape parity — `undefined` where a constructor does not yet
@@ -140,7 +140,7 @@ export interface BacklogTaskItem {
    */
   decomposed_at?: string | null;
   /**
-   * EPIC/TASK plan-approval stamp (migration 036): ISO timestamp when the plan
+   * EPIC/TASK plan-approval stamp (migration 042): ISO timestamp when the plan
    * was approved; null = PENDING (backend-invisible + sprint-ineligible until
    * approval). Read back as null on ideas (no `approved_at` column). Optional for
    * cross-process shape parity (same rationale as `decomposed_at`).

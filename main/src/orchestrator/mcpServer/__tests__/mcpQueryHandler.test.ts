@@ -646,7 +646,7 @@ describe('McpQueryHandler', () => {
       // Production order: 006 (workflow_runs base) -> 011 (current_step_id) ->
       // 014 (unified tasks + run->task columns + seed) -> 015 (entity-model
       // rebuild: ideas/epics/tasks + entity_events + 12th stage) -> 024
-      // (archived_at columns + position-11 stage removal) -> 036 (board collapse
+      // (archived_at columns + position-11 stage removal) -> 042 (board collapse
       // to 4 stages 1/6/9/10 + decomposed_at/approved_at/plan_approved_at stamps;
       // readEntity SELECTs decomposed_at, so this column MUST exist).
       taskDb.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
@@ -655,7 +655,7 @@ describe('McpQueryHandler', () => {
       taskDb.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
-      taskDb.exec(readFileSync(join(migDir, '036_collapse_board.sql'), 'utf-8'));
+      taskDb.exec(readFileSync(join(migDir, '042_collapse_board.sql'), 'utf-8'));
       return taskDb;
     }
 
@@ -1081,7 +1081,7 @@ describe('McpQueryHandler', () => {
 
     describe('mcp-set-task-stage', () => {
       it('moves an idea to an asserted stage (position 6, Ready for development) -> ok:true', async () => {
-        // 036 collapsed the board to 1/6/9/10; position 6 ('Ready for
+        // 042 collapsed the board to 1/6/9/10; position 6 ('Ready for
         // development') is the kept non-terminal asserted stage (old position 3
         // 'Idea spec' was removed).
         seedTaskRun(taskDb, {
@@ -1121,7 +1121,7 @@ describe('McpQueryHandler', () => {
         expect(task.stage_id).toBe(stage(6));
       });
 
-      // Removed (036 board collapse): the position-12 'Decomposed' agent-move
+      // Removed (042 board collapse): the position-12 'Decomposed' agent-move
       // test and the position-7 'derived stage forbidden' test no longer have a
       // premise — positions 7/8 (the only derived stages) and position 12 are
       // gone, so no seeded stage is derived. Decomposition is now a gate-only

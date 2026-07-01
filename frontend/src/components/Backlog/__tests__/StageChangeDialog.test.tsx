@@ -41,7 +41,7 @@ function board(): Board {
     name: 'Default',
     kind: 'default',
     is_default: true,
-    // Four-stage board (migration 036): Idea, Ready for development, Done,
+    // Four-stage board (migration 042): Idea, Ready for development, Done,
     // Won't do (terminal, hidden_by_default). All four are asserted.
     stages: [
       stage(1, 'Idea'),
