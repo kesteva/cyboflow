@@ -31,6 +31,8 @@ const ROLLUP: RunUsageRollup = {
   costUsd: 3.95,
   numTurns: 173,
   assistantMessageCount: 173,
+  startedAt: null,
+  endedAt: null,
 };
 
 beforeEach(() => {

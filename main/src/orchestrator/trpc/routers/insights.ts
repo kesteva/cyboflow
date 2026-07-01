@@ -5,7 +5,8 @@
  * usage rollups, the review-queue summary counters, and the code-quality buckets):
  *   - workflowStats    : query -> WorkflowRunStats[]   (per-workflow run outcomes)
  *   - workflowUsage    : query -> WorkflowUsageStats[]  (per-workflow token/cost aggregate)
- *   - runUsage         : query -> RunUsageRollup        (single-run token/cost rollup)
+ *   - runUsage         : query -> RunUsageRollup        (single-run token/cost rollup + runtime)
+ *   - runEval          : query -> RunEval | null        (single-run code-review eval)
  *   - reviewSummary    : query -> ReviewItemSummary     (inbox counters)
  *   - qualityFindings  : query -> QualityFinding[]      (kind='finding' rows joined to runs)
  *   - stepTokens       : query -> StepTokenBucket[]     (tokens attributed per workflow step)
@@ -44,6 +45,7 @@ import type {
   UsageTrendPoint,
   WorkflowRevisionStats,
   DailyModelUsagePoint,
+  RunEval,
 } from '../../../../../shared/types/insights';
 import {
   selectWorkflowRunStats,
@@ -55,6 +57,7 @@ import {
   selectUsageTrend,
   selectWorkflowRevisionStats,
   selectDailyModelUsage,
+  getRunEval,
 } from '../../insightsQueries';
 
 // ---------------------------------------------------------------------------
@@ -107,6 +110,9 @@ function zeroedRunUsageRollup(runId: string): RunUsageRollup {
     costUsd: null,
     numTurns: null,
     assistantMessageCount: 0,
+    // No run row (or none matched) → no runtime timestamps to report.
+    startedAt: null,
+    endedAt: null,
   };
 }
 
@@ -153,6 +159,21 @@ export const insightsRouter = router({
     .query(({ ctx, input }): RunUsageRollup => {
       const db = requireDb(ctx.db, 'runUsage');
       return selectRunUsageRollups(db, [input.runId])[0] ?? zeroedRunUsageRollup(input.runId);
+    }),
+
+  /**
+   * The canonical code-review evaluation for a single run (migration-043
+   * `run_evals`), or `null` when no eval exists yet. Unlike runUsage's zeroed
+   * fallback, a missing eval is genuinely absent (the worker may not have fired,
+   * or the run is not a built-in flow) — the panel treats null as "no eval" and
+   * a `pending`/`running` status as "in progress", so we hand the null straight
+   * through rather than fabricating a placeholder row.
+   */
+  runEval: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .query(({ ctx, input }): RunEval | null => {
+      const db = requireDb(ctx.db, 'runEval');
+      return getRunEval(db, input.runId);
     }),
 
   /**

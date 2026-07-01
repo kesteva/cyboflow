@@ -66,6 +66,19 @@ export interface RunUsageRollup {
   numTurns: number | null;
   /** Count of `assistant` payloads that carried a usage object. */
   assistantMessageCount: number;
+  /**
+   * `workflow_runs.started_at` as an ISO-8601 string; null when the run has not
+   * started yet (or the run row is absent). Carried alongside the token rollup so
+   * the summary panel can show total runtime without a second round-trip; the
+   * token aggregation itself never reads it (folded in by selectRunUsageRollups).
+   */
+  startedAt: string | null;
+  /**
+   * `workflow_runs.ended_at` as an ISO-8601 string; null while the run is still in
+   * flight (at the human-review gate / awaiting_review it is typically still null,
+   * so the panel renders elapsed = now - startedAt until close-out stamps it).
+   */
+  endedAt: string | null;
 }
 
 /** Per-workflow usage aggregate over the runs that have usage data. */
@@ -256,4 +269,114 @@ export function parseSourceStep(source: string | null): string | null {
   if (source === null) return null;
   const match = /^agent:(.+)$/.exec(source);
   return match === null ? null : match[1];
+}
+
+// ---------------------------------------------------------------------------
+// Run evaluation (code-review eval rubric — migration 043 `run_evals`)
+// ---------------------------------------------------------------------------
+
+/**
+ * Worker state machine for one `run_evals` row:
+ *   - pending  : row created at the human-review trigger; judge not yet dispatched.
+ *   - running  : the K-sample jury is in flight.
+ *   - complete : scores/dimensions/CI persisted.
+ *   - failed   : the worker gave up (see RunEval.error).
+ * Mirrors the DB CHECK on `run_evals.eval_status`.
+ */
+export type RunEvalStatus = 'pending' | 'running' | 'complete' | 'failed';
+
+/** Quality band derived from the overall score; null until eval_status='complete'. */
+export type RunEvalBand = 'Excellent' | 'Good' | 'Fair' | 'Poor';
+
+/**
+ * One rubric dimension's scored result (parsed from `run_evals.dimensions_json`).
+ * `active` is false when the dimension did not apply to this run's diff (it is
+ * then excluded from the weighted overall). Counts are over the K jury samples.
+ */
+export interface RunEvalDimension {
+  /** Stable dimension key (e.g. 'correctness'). */
+  key: string;
+  /** Human-readable dimension label. */
+  name: string;
+  /** Weight in the overall score (0..1). */
+  weight: number;
+  /** 0-100 integer; null until the dimension is scored. */
+  score: number | null;
+  /** Whether the dimension applied to this run (inactive ones are excluded). */
+  active: boolean;
+  passCount: number;
+  failCount: number;
+  unknownCount: number;
+}
+
+/**
+ * One jury sample's raw structured verdict, kept verbatim (parsed from
+ * `run_evals.per_sample_json`). The judge's output schema is owned by the eval
+ * worker (sibling module), so this stays an opaque-but-typed record here — the
+ * read path never interprets its interior, only surfaces it for drill-down.
+ */
+export type RunEvalSample = Record<string, unknown>;
+
+/**
+ * The canonical evaluation for one workflow run, mirroring the migration-043
+ * `run_evals` columns in camelCase. JSON columns are parsed defensively by the
+ * query layer: malformed JSON yields a null field rather than throwing.
+ *
+ * Score/band/CI/dimensions/perSample are null until `evalStatus === 'complete'`.
+ * All timestamps are ISO-8601 strings per this file's boundary convention.
+ */
+export interface RunEval {
+  runId: string;
+  /** Rubric version (composite PK half); e.g. '1.1'. */
+  rubricVersion: string;
+  evalStatus: RunEvalStatus;
+  /** Copied from workflow_runs.base_sha; null on legacy/unmaterialized runs. */
+  baseSha: string | null;
+  /** Frozen unified diff captured at the trigger (worktree may be gone later). */
+  diffText: string | null;
+  /** Parsed `diff_stats_json` aggregate; null when absent or malformed. */
+  diffStats: Record<string, unknown> | null;
+  /** Parsed `gate_results_json` (folded step_results when present); null otherwise. */
+  gateResults: Record<string, unknown> | null;
+  /** True once a human-review re-fire touched this row (request-changes loop). */
+  humanInfluenced: boolean;
+  /** ISO timestamp of the trigger capture. */
+  snapshotAt: string;
+  /** 0-100 overall; null until complete. */
+  overallScore: number | null;
+  band: RunEvalBand | null;
+  /** Confidence interval across the K samples; null until complete. */
+  ciLow: number | null;
+  ciHigh: number | null;
+  /** Deterministic-gate-failure sentinel. */
+  gated: boolean;
+  /** Confirmed high/critical security soft-cap fired. */
+  securityFlag: boolean;
+  /** Per-dimension scored results; null until complete or when malformed. */
+  dimensions: RunEvalDimension[] | null;
+  /** Raw K jury structured outputs; null until complete or when malformed. */
+  perSample: RunEvalSample[] | null;
+  /** Concrete judge model id; null until running. */
+  judgeModel: string | null;
+  /** K actually completed; null until running. */
+  sampleCount: number | null;
+  /** sha256 of the judge prompt; null until running. */
+  promptHash: string | null;
+  /** App version string of the build that produced the eval; null until running. */
+  judgeBuildId: string | null;
+  workflowId: string;
+  /** Denormalized at trigger (workflows are user-editable/deletable). */
+  workflowName: string;
+  /** workflow_runs.spec_hash; null on pre-migration-026 runs. */
+  specHash: string | null;
+  /** workflow_runs.model; null/'auto' = SDK default. */
+  runModel: string | null;
+  /** Parsed `subagent_models_json` (step→model map); null when absent/malformed. */
+  subagentModels: Record<string, unknown> | null;
+  /** Reserved pre-run difficulty signal; NULL in v1 (not yet derivable). */
+  difficultyProxyPrerun: number | null;
+  /** Populated when evalStatus='failed'. */
+  error: string | null;
+  createdAt: string;
+  updatedAt: string;
 }

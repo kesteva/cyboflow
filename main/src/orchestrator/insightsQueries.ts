@@ -44,6 +44,11 @@ import type {
   UsageTrendPoint,
   WorkflowRevisionStats,
   DailyModelUsagePoint,
+  RunEval,
+  RunEvalStatus,
+  RunEvalBand,
+  RunEvalDimension,
+  RunEvalSample,
 } from '../../../shared/types/insights';
 import { parseSourceStep } from '../../../shared/types/insights';
 // computeSpecHash is the SAME content address workflow_runs.spec_hash was frozen
@@ -269,6 +274,10 @@ function zeroRollup(runId: string): RunUsageRollup {
     costUsd: null,
     numTurns: null,
     assistantMessageCount: 0,
+    // Runtime timestamps are folded in by selectRunUsageRollups from a single
+    // workflow_runs read; the token-only aggregation paths leave them null.
+    startedAt: null,
+    endedAt: null,
   };
 }
 
@@ -293,6 +302,9 @@ function rollupFromMaterializedRow(row: RunUsageMaterializedRow): RunUsageRollup
     costUsd: typeof row.cost_usd === 'number' && Number.isFinite(row.cost_usd) ? row.cost_usd : null,
     numTurns: typeof row.num_turns === 'number' && Number.isFinite(row.num_turns) ? row.num_turns : null,
     assistantMessageCount: asNumber(row.assistant_message_count),
+    // run_usage carries no timestamps; selectRunUsageRollups stamps them.
+    startedAt: null,
+    endedAt: null,
   };
 }
 
@@ -400,6 +412,40 @@ function scanRawEventRollups(
   return acc;
 }
 
+/** Raw `workflow_runs` runtime-timestamp row (SELECT alias names). */
+interface RunTimestampRow {
+  runId: string;
+  startedAt: string | null;
+  endedAt: string | null;
+}
+
+/**
+ * Bulk-fetch `started_at` / `ended_at` for `runIds`, returned as a runId→{ISO,
+ * ISO} map. One indexed IN() lookup per chunk over `workflow_runs`; runs with no
+ * row are simply absent (the caller leaves their rollup timestamps null). Both
+ * columns are normalized to ISO-8601 via `toIso`.
+ */
+function fetchRunTimestamps(
+  db: DatabaseLike,
+  runIds: readonly string[],
+): Map<string, { startedAt: string | null; endedAt: string | null }> {
+  const out = new Map<string, { startedAt: string | null; endedAt: string | null }>();
+  if (runIds.length === 0) return out;
+  for (const ids of chunk(runIds, RUN_ID_CHUNK_SIZE)) {
+    const rows = db
+      .prepare(
+        `SELECT id AS runId, started_at AS startedAt, ended_at AS endedAt
+         FROM workflow_runs
+         WHERE id IN (${placeholders(ids.length)})`,
+      )
+      .all(...ids) as RunTimestampRow[];
+    for (const row of rows) {
+      out.set(row.runId, { startedAt: toIso(row.startedAt), endedAt: toIso(row.endedAt) });
+    }
+  }
+  return out;
+}
+
 /**
  * Token/cost rollup per run, via a TWO-TIER read (migration 026):
  *   1. Bulk-fetch the materialized `run_usage` rows for all requested ids.
@@ -431,10 +477,20 @@ export function selectRunUsageRollups(
       ? new Map<string, RunUsageRollup>()
       : scanRawEventRollups(db, fallbackIds);
 
+  // Fold in runtime timestamps from a single workflow_runs read (the token tiers
+  // carry none). Stamped last so both the materialized and scanned paths get them.
+  const timestamps = fetchRunTimestamps(db, runIds);
+
   // Emit in the caller's requested order; zeroRollup covers ids in neither tier.
-  return runIds.map(
-    (id) => materialized.get(id) ?? scanned.get(id) ?? zeroRollup(id),
-  );
+  return runIds.map((id) => {
+    const rollup = materialized.get(id) ?? scanned.get(id) ?? zeroRollup(id);
+    const ts = timestamps.get(id);
+    if (ts !== undefined) {
+      rollup.startedAt = ts.startedAt;
+      rollup.endedAt = ts.endedAt;
+    }
+    return rollup;
+  });
 }
 
 /** Per-category token totals across every workflow run hosted by a session. */
@@ -1464,4 +1520,194 @@ export function selectDailyModelUsage(
               ? 1
               : 0,
     );
+}
+
+// ---------------------------------------------------------------------------
+// getRunEval (migration 043 `run_evals` — the code-review eval read path)
+// ---------------------------------------------------------------------------
+
+/** Raw `run_evals` row (SELECT * column names), all snake_case. */
+interface RunEvalRawRow {
+  run_id: string;
+  rubric_version: string;
+  eval_status: string;
+  base_sha: string | null;
+  diff_text: string | null;
+  diff_stats_json: string | null;
+  gate_results_json: string | null;
+  human_influenced: number;
+  snapshot_at: string;
+  overall_score: number | null;
+  band: string | null;
+  ci_low: number | null;
+  ci_high: number | null;
+  gated: number;
+  security_flag: number;
+  dimensions_json: string | null;
+  per_sample_json: string | null;
+  judge_model: string | null;
+  sample_count: number | null;
+  prompt_hash: string | null;
+  judge_build_id: string | null;
+  workflow_id: string;
+  workflow_name: string;
+  spec_hash: string | null;
+  run_model: string | null;
+  subagent_models_json: string | null;
+  difficulty_proxy_prerun: number | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+const RUN_EVAL_STATUSES: readonly RunEvalStatus[] = ['pending', 'running', 'complete', 'failed'];
+const RUN_EVAL_BANDS: readonly RunEvalBand[] = ['Excellent', 'Good', 'Fair', 'Poor'];
+
+/** SQLite INTEGER boolean → JS boolean (any non-zero is true). */
+function asBool(value: number): boolean {
+  return value !== 0;
+}
+
+/** Finite-number-or-null guard for the nullable numeric eval columns. */
+function asNullableNumber(value: number | null): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+/**
+ * Parse a JSON text column to a plain object, defensively: malformed JSON or a
+ * non-object (array/primitive/null) yields null rather than throwing — the
+ * contract's "bad JSON → null field, never throw" rule.
+ */
+function parseJsonRecord(text: string | null): Record<string, unknown> | null {
+  if (text === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  return isRecord(parsed) ? parsed : null;
+}
+
+/**
+ * Parse `dimensions_json` into a typed dimension array, defensively. Any element
+ * that is not a well-formed object is skipped; malformed JSON or a non-array
+ * yields null. Numeric fields fall back to 0 (counts/weight) or null (score).
+ */
+function parseDimensions(text: string | null): RunEvalDimension[] | null {
+  if (text === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const out: RunEvalDimension[] = [];
+  for (const entry of parsed) {
+    if (!isRecord(entry)) continue;
+    out.push({
+      key: typeof entry.key === 'string' ? entry.key : '',
+      name: typeof entry.name === 'string' ? entry.name : '',
+      weight: asNumber(entry.weight),
+      score:
+        typeof entry.score === 'number' && Number.isFinite(entry.score) ? entry.score : null,
+      active: entry.active === true,
+      passCount: asNumber(entry.passCount),
+      failCount: asNumber(entry.failCount),
+      unknownCount: asNumber(entry.unknownCount),
+    });
+  }
+  return out;
+}
+
+/**
+ * Parse `per_sample_json` into an array of raw sample records, defensively.
+ * Non-object elements are skipped; malformed JSON or a non-array yields null.
+ */
+function parseSamples(text: string | null): RunEvalSample[] | null {
+  if (text === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  return parsed.filter((entry): entry is RunEvalSample => isRecord(entry));
+}
+
+/** Map a raw `run_evals` row to the shared `RunEval`, parsing JSON defensively. */
+function mapRunEvalRow(row: RunEvalRawRow): RunEval {
+  const evalStatus: RunEvalStatus = RUN_EVAL_STATUSES.includes(row.eval_status as RunEvalStatus)
+    ? (row.eval_status as RunEvalStatus)
+    : 'pending';
+  const band: RunEvalBand | null =
+    row.band !== null && RUN_EVAL_BANDS.includes(row.band as RunEvalBand)
+      ? (row.band as RunEvalBand)
+      : null;
+  return {
+    runId: row.run_id,
+    rubricVersion: row.rubric_version,
+    evalStatus,
+    baseSha: row.base_sha,
+    diffText: row.diff_text,
+    diffStats: parseJsonRecord(row.diff_stats_json),
+    gateResults: parseJsonRecord(row.gate_results_json),
+    humanInfluenced: asBool(row.human_influenced),
+    snapshotAt: row.snapshot_at,
+    overallScore: asNullableNumber(row.overall_score),
+    band,
+    ciLow: asNullableNumber(row.ci_low),
+    ciHigh: asNullableNumber(row.ci_high),
+    gated: asBool(row.gated),
+    securityFlag: asBool(row.security_flag),
+    dimensions: parseDimensions(row.dimensions_json),
+    perSample: parseSamples(row.per_sample_json),
+    judgeModel: row.judge_model,
+    sampleCount: asNullableNumber(row.sample_count),
+    promptHash: row.prompt_hash,
+    judgeBuildId: row.judge_build_id,
+    workflowId: row.workflow_id,
+    workflowName: row.workflow_name,
+    specHash: row.spec_hash,
+    runModel: row.run_model,
+    subagentModels: parseJsonRecord(row.subagent_models_json),
+    difficultyProxyPrerun: asNullableNumber(row.difficulty_proxy_prerun),
+    error: row.error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+/**
+ * The canonical evaluation for one run, or null when none exists yet.
+ *
+ * A run can carry several `run_evals` rows (one per rubric_version), and a row's
+ * `human_influenced` flag flips to 1 once a request-changes loop re-fires the
+ * human-review gate. The canonical row is the FIRST non-human-influenced snapshot
+ * (the pristine, pre-human evaluation): we order `human_influenced ASC` so a
+ * 0-flagged row wins over any 1-flagged one, then `snapshot_at ASC` to take the
+ * earliest, falling back to the earliest influenced row only when every row is
+ * influenced. JSON columns are parsed defensively (bad JSON → null field).
+ *
+ * @param db    - Narrow DatabaseLike surface.
+ * @param runId - The run to read the evaluation for.
+ */
+export function getRunEval(db: DatabaseLike, runId: string): RunEval | null {
+  const row = db
+    .prepare(
+      `SELECT run_id, rubric_version, eval_status, base_sha, diff_text, diff_stats_json,
+              gate_results_json, human_influenced, snapshot_at, overall_score, band,
+              ci_low, ci_high, gated, security_flag, dimensions_json, per_sample_json,
+              judge_model, sample_count, prompt_hash, judge_build_id, workflow_id,
+              workflow_name, spec_hash, run_model, subagent_models_json,
+              difficulty_proxy_prerun, error, created_at, updated_at
+       FROM run_evals
+       WHERE run_id = ?
+       ORDER BY human_influenced ASC, snapshot_at ASC
+       LIMIT 1`,
+    )
+    .get(runId) as RunEvalRawRow | undefined;
+  return row === undefined ? null : mapRunEvalRow(row);
 }

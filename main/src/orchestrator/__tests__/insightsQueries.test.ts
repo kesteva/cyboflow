@@ -55,6 +55,7 @@ import {
   selectWorkflowRevisionStats,
   selectDailyModelUsage,
   selectSessionRunTokenTotals,
+  getRunEval,
 } from '../insightsQueries';
 import { computeSpecHash } from '../specHash';
 
@@ -135,6 +136,41 @@ function createInsightsDb(): Database.Database {
       spec_json TEXT NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       UNIQUE (workflow_id, spec_hash)
+    );
+    -- migration-043 run_evals (created here by the sibling migration task; the
+    -- getRunEval read path is tested against this hand-rolled twin).
+    CREATE TABLE run_evals (
+      run_id TEXT NOT NULL,
+      rubric_version TEXT NOT NULL,
+      eval_status TEXT NOT NULL DEFAULT 'pending',
+      base_sha TEXT,
+      diff_text TEXT,
+      diff_stats_json TEXT,
+      gate_results_json TEXT,
+      human_influenced INTEGER NOT NULL DEFAULT 0,
+      snapshot_at TEXT NOT NULL,
+      overall_score INTEGER,
+      band TEXT,
+      ci_low REAL,
+      ci_high REAL,
+      gated INTEGER NOT NULL DEFAULT 0,
+      security_flag INTEGER NOT NULL DEFAULT 0,
+      dimensions_json TEXT,
+      per_sample_json TEXT,
+      judge_model TEXT,
+      sample_count INTEGER,
+      prompt_hash TEXT,
+      judge_build_id TEXT,
+      workflow_id TEXT NOT NULL,
+      workflow_name TEXT NOT NULL,
+      spec_hash TEXT,
+      run_model TEXT,
+      subagent_models_json TEXT,
+      difficulty_proxy_prerun REAL,
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+      updated_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+      PRIMARY KEY (run_id, rubric_version)
     );
   `);
   return db;
@@ -258,6 +294,53 @@ function seedRunUsage(db: Database.Database, opts: SeedRunUsageOpts): void {
     opts.costUsd === undefined ? null : opts.costUsd,
     opts.numTurns === undefined ? null : opts.numTurns,
     opts.assistantMessageCount ?? 0,
+  );
+}
+
+interface SeedRunEvalOpts {
+  runId: string;
+  rubricVersion?: string;
+  evalStatus?: string;
+  humanInfluenced?: number;
+  snapshotAt?: string;
+  overallScore?: number | null;
+  band?: string | null;
+  gated?: number;
+  securityFlag?: number;
+  dimensionsJson?: string | null;
+  perSampleJson?: string | null;
+  diffStatsJson?: string | null;
+  subagentModelsJson?: string | null;
+  workflowId?: string;
+  workflowName?: string;
+  error?: string | null;
+}
+
+/** Insert a migration-043 `run_evals` row (the code-review eval read fixture). */
+function seedRunEval(db: Database.Database, opts: SeedRunEvalOpts): void {
+  db.prepare(
+    `INSERT INTO run_evals
+       (run_id, rubric_version, eval_status, human_influenced, snapshot_at,
+        overall_score, band, gated, security_flag, dimensions_json, per_sample_json,
+        diff_stats_json, subagent_models_json, workflow_id, workflow_name, error)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    opts.runId,
+    opts.rubricVersion ?? '1.1',
+    opts.evalStatus ?? 'complete',
+    opts.humanInfluenced ?? 0,
+    opts.snapshotAt ?? '2026-07-01T10:00:00.000Z',
+    opts.overallScore === undefined ? 82 : opts.overallScore,
+    opts.band === undefined ? 'Good' : opts.band,
+    opts.gated ?? 0,
+    opts.securityFlag ?? 0,
+    opts.dimensionsJson === undefined ? null : opts.dimensionsJson,
+    opts.perSampleJson === undefined ? null : opts.perSampleJson,
+    opts.diffStatsJson === undefined ? null : opts.diffStatsJson,
+    opts.subagentModelsJson === undefined ? null : opts.subagentModelsJson,
+    opts.workflowId ?? 'wf-1',
+    opts.workflowName ?? 'Sprint',
+    opts.error === undefined ? null : opts.error,
   );
 }
 
@@ -1644,5 +1727,208 @@ describe('selectDailyModelUsage', () => {
     expect(points).toHaveLength(1);
     expect(points[0].totalTokens).toBe(6);
     expect(points[0].assistantMessageCount).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// selectRunUsageRollups — runtime timestamps (migration-020 started_at/ended_at)
+// ---------------------------------------------------------------------------
+
+describe('selectRunUsageRollups runtime timestamps', () => {
+  let db: Database.Database;
+  beforeEach(() => {
+    db = createInsightsDb();
+  });
+
+  it('folds started_at / ended_at from workflow_runs into the rollup (ISO-normalized)', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, {
+      id: 'r1',
+      workflowId: 'wf-1',
+      startedAt: '2026-07-01 10:00:00',
+      endedAt: '2026-07-01 10:05:00',
+    });
+    seedEvent(db, 'r1', 'assistant', { message: { usage: { input_tokens: 3, output_tokens: 1 } } });
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    expect(rollup.startedAt).toBe('2026-07-01T10:00:00.000Z');
+    expect(rollup.endedAt).toBe('2026-07-01T10:05:00.000Z');
+    // Token aggregation is unaffected by the timestamp fold.
+    expect(rollup.totalTokens).toBe(4);
+  });
+
+  it('leaves endedAt null while the run is still in flight', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1', startedAt: '2026-07-01 10:00:00', endedAt: null });
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    expect(rollup.startedAt).toBe('2026-07-01T10:00:00.000Z');
+    expect(rollup.endedAt).toBeNull();
+  });
+
+  it('leaves both timestamps null when the run row is absent', () => {
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['ghost']);
+    expect(rollup.startedAt).toBeNull();
+    expect(rollup.endedAt).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// getRunEval (migration-043 run_evals read path)
+// ---------------------------------------------------------------------------
+
+describe('getRunEval', () => {
+  let db: Database.Database;
+  beforeEach(() => {
+    db = createInsightsDb();
+  });
+
+  it('returns null when the run has no eval row', () => {
+    expect(getRunEval(dbAdapter(db), 'nope')).toBeNull();
+  });
+
+  it('maps snake_case columns to the camelCase RunEval shape', () => {
+    seedRunEval(db, {
+      runId: 'r1',
+      rubricVersion: '1.1',
+      evalStatus: 'complete',
+      overallScore: 91,
+      band: 'Excellent',
+      gated: 1,
+      securityFlag: 0,
+      workflowId: 'wf-9',
+      workflowName: 'Ship',
+    });
+
+    const evalRow = getRunEval(dbAdapter(db), 'r1');
+    expect(evalRow).not.toBeNull();
+    expect(evalRow).toMatchObject({
+      runId: 'r1',
+      rubricVersion: '1.1',
+      evalStatus: 'complete',
+      overallScore: 91,
+      band: 'Excellent',
+      gated: true, // INTEGER 1 → boolean
+      securityFlag: false, // INTEGER 0 → boolean
+      humanInfluenced: false,
+      workflowId: 'wf-9',
+      workflowName: 'Ship',
+    });
+  });
+
+  it('parses dimensions_json into a typed dimension array', () => {
+    seedRunEval(db, {
+      runId: 'r1',
+      dimensionsJson: JSON.stringify([
+        {
+          key: 'correctness',
+          name: 'Correctness',
+          weight: 0.4,
+          score: 88,
+          active: true,
+          passCount: 2,
+          failCount: 1,
+          unknownCount: 0,
+        },
+        'garbage-non-object', // skipped defensively
+      ]),
+    });
+
+    const evalRow = getRunEval(dbAdapter(db), 'r1');
+    expect(evalRow?.dimensions).toEqual([
+      {
+        key: 'correctness',
+        name: 'Correctness',
+        weight: 0.4,
+        score: 88,
+        active: true,
+        passCount: 2,
+        failCount: 1,
+        unknownCount: 0,
+      },
+    ]);
+  });
+
+  it('parses per_sample_json into an array of raw sample records', () => {
+    seedRunEval(db, {
+      runId: 'r1',
+      perSampleJson: JSON.stringify([{ verdict: 'pass', score: 90 }, 42]),
+    });
+    const evalRow = getRunEval(dbAdapter(db), 'r1');
+    expect(evalRow?.perSample).toEqual([{ verdict: 'pass', score: 90 }]);
+  });
+
+  it('yields null JSON fields on malformed JSON rather than throwing', () => {
+    seedRunEval(db, {
+      runId: 'r1',
+      dimensionsJson: '{ not json',
+      perSampleJson: 'also bad',
+      diffStatsJson: '[not an object array', // parseJsonRecord → null
+      subagentModelsJson: '{ broken',
+    });
+    const evalRow = getRunEval(dbAdapter(db), 'r1');
+    expect(evalRow?.dimensions).toBeNull();
+    expect(evalRow?.perSample).toBeNull();
+    expect(evalRow?.diffStats).toBeNull();
+    expect(evalRow?.subagentModels).toBeNull();
+  });
+
+  it('prefers the first non-human_influenced snapshot when several rows exist', () => {
+    // A later, human-influenced re-fire of the same run (different rubric_version)
+    // must not win over the pristine pre-human snapshot.
+    seedRunEval(db, {
+      runId: 'r1',
+      rubricVersion: '1.0',
+      humanInfluenced: 1,
+      snapshotAt: '2026-07-01T09:00:00.000Z',
+      overallScore: 60,
+    });
+    seedRunEval(db, {
+      runId: 'r1',
+      rubricVersion: '1.1',
+      humanInfluenced: 0,
+      snapshotAt: '2026-07-01T10:00:00.000Z',
+      overallScore: 85,
+    });
+
+    const evalRow = getRunEval(dbAdapter(db), 'r1');
+    expect(evalRow?.rubricVersion).toBe('1.1');
+    expect(evalRow?.humanInfluenced).toBe(false);
+    expect(evalRow?.overallScore).toBe(85);
+  });
+
+  it('falls back to the earliest influenced row when every row is human_influenced', () => {
+    seedRunEval(db, {
+      runId: 'r1',
+      rubricVersion: '1.1',
+      humanInfluenced: 1,
+      snapshotAt: '2026-07-01T11:00:00.000Z',
+      overallScore: 70,
+    });
+    seedRunEval(db, {
+      runId: 'r1',
+      rubricVersion: '1.0',
+      humanInfluenced: 1,
+      snapshotAt: '2026-07-01T09:00:00.000Z',
+      overallScore: 55,
+    });
+
+    const evalRow = getRunEval(dbAdapter(db), 'r1');
+    expect(evalRow?.rubricVersion).toBe('1.0');
+    expect(evalRow?.humanInfluenced).toBe(true);
+    expect(evalRow?.overallScore).toBe(55);
+  });
+
+  it('carries null score/band while pending', () => {
+    seedRunEval(db, {
+      runId: 'r1',
+      evalStatus: 'pending',
+      overallScore: null,
+      band: null,
+    });
+    const evalRow = getRunEval(dbAdapter(db), 'r1');
+    expect(evalRow?.evalStatus).toBe('pending');
+    expect(evalRow?.overallScore).toBeNull();
+    expect(evalRow?.band).toBeNull();
   });
 });

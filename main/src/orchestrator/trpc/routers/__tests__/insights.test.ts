@@ -27,6 +27,7 @@ import type {
   StepTokenBucket,
   UsageTrendPoint,
   WorkflowRevisionStats,
+  RunEval,
 } from '../../../../../../shared/types/insights';
 
 // ---------------------------------------------------------------------------
@@ -47,6 +48,7 @@ vi.mock('../../../insightsQueries', () => ({
   selectStepTokenBuckets: vi.fn(),
   selectUsageTrend: vi.fn(),
   selectWorkflowRevisionStats: vi.fn(),
+  getRunEval: vi.fn(),
 }));
 
 // Imported AFTER vi.mock is hoisted so the router (and these handles) bind to the
@@ -217,6 +219,8 @@ describe('cyboflow.insights.runUsage', () => {
     costUsd: 0.01,
     numTurns: 3,
     assistantMessageCount: 4,
+    startedAt: '2026-07-01T10:00:00.000Z',
+    endedAt: '2026-07-01T10:05:00.000Z',
   };
 
   it('returns the single rollup when the helper produces one (wrapped in a single-element array)', async () => {
@@ -245,6 +249,8 @@ describe('cyboflow.insights.runUsage', () => {
       costUsd: null,
       numTurns: null,
       assistantMessageCount: 0,
+      startedAt: null,
+      endedAt: null,
     });
   });
 
@@ -255,6 +261,30 @@ describe('cyboflow.insights.runUsage', () => {
       caller.cyboflow.insights.runUsage({ runId: '' }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
     expect(insightsQueries.selectRunUsageRollups).not.toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
+  // runEval — pass-through of the helper's row-or-null
+  // -------------------------------------------------------------------------
+
+  it('runEval returns the helper row verbatim and forwards the runId', async () => {
+    const evalRow = { runId: 'run-1', evalStatus: 'complete' } as unknown as RunEval;
+    mocked('getRunEval').mockReturnValue(evalRow);
+    const caller = appRouter.createCaller(createContext({ db: fakeDb }));
+
+    const result = await caller.cyboflow.insights.runEval({ runId: 'run-1' });
+
+    expect(result).toBe(evalRow);
+    expect(insightsQueries.getRunEval).toHaveBeenCalledWith(fakeDb, 'run-1');
+  });
+
+  it('runEval hands null straight through when no eval exists', async () => {
+    mocked('getRunEval').mockReturnValue(null);
+    const caller = appRouter.createCaller(createContext({ db: fakeDb }));
+
+    const result = await caller.cyboflow.insights.runEval({ runId: 'run-x' });
+
+    expect(result).toBeNull();
   });
 
   it('throws PRECONDITION_FAILED when ctx.db is missing', async () => {
