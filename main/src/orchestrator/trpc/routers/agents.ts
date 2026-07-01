@@ -368,6 +368,7 @@ export const agentsRouter = router({
         tools: toolsSchema,
         enabledMcps: enabledMcpsSchema,
         role: z.string().nullable().optional(),
+        model: modelSchema,
       }),
     )
     .mutation(async ({ ctx, input }): Promise<AgentEntry> => {
@@ -388,6 +389,7 @@ export const agentsRouter = router({
           systemPrompt: input.systemPrompt,
           tools: input.tools,
           enabledMcps: input.enabledMcps,
+          model: input.model ?? null,
         });
       } catch (err) {
         rethrowAsTRPCError(err);

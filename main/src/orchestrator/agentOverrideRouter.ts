@@ -92,7 +92,7 @@ export interface AgentCreateCustomChange {
  * IMMUTABLE — it was derived from the name at creation and is load-bearing for
  * workflow-step bindings, so an edit never renames it (the editor's name field
  * is read-only outside create mode). Total-replaces role / description / system
- * prompt / tools / enabledMcps on the existing row.
+ * prompt / tools / enabledMcps / model on the existing row.
  */
 export interface AgentUpdateCustomChange {
   op: 'updateCustom';
@@ -103,6 +103,8 @@ export interface AgentUpdateCustomChange {
   tools: CliTool[];
   /** MCP server names this agent may call (rendered as `mcp__<server>__*`). */
   enabledMcps: string[];
+  /** Pinned model alias, or `null`/omitted to inherit the run model. */
+  model?: AgentModelAlias | null;
 }
 
 /** Reset a builtin override (DELETE its row → builtin shows through again). */
@@ -417,15 +419,17 @@ export class AgentOverrideRouter {
       systemPrompt: change.systemPrompt,
       tools: change.tools,
       enabledMcps: change.enabledMcps,
+      model: change.model ?? null,
       isCustom: true,
     };
-    // Kebab/forbidden/tool/description/MCP shape checks (mirrors createCustom).
+    // Kebab/forbidden/tool/description/MCP/model shape checks (mirrors createCustom).
     validateAgentDraft(draft);
     const systemPrompt = ensureResultSection(draft.systemPrompt);
 
     const now = new Date().toISOString();
     const toolsJson = JSON.stringify(change.tools);
     const enabledMcpsJson = JSON.stringify(change.enabledMcps);
+    const model = change.model ?? null;
 
     const txn = this.db.transaction(() => {
       const existing = this.getByKey(projectId, agentKey);
@@ -450,6 +454,7 @@ export class AgentOverrideRouter {
              system_prompt = ?,
              tools_json = ?,
              enabled_mcps_json = ?,
+             model = ?,
              version = version + 1,
              updated_at = ?
            WHERE project_id = ? AND agent_key = ?`,
@@ -460,6 +465,7 @@ export class AgentOverrideRouter {
           systemPrompt,
           toolsJson,
           enabledMcpsJson,
+          model,
           now,
           projectId,
           agentKey,

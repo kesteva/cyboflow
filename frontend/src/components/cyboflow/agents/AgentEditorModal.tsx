@@ -177,7 +177,8 @@ export function AgentEditorModal({
       // Edit mode splits by kind: a CUSTOM agent has no builtin to shadow, so it
       // updates its own row in place via updateCustom (the agentKey is immutable —
       // the name field is read-only outside create mode); a builtin edits through
-      // the override upsert, which rejects a non-builtin key.
+      // the override upsert, which rejects a non-builtin key. Both carry the pinned
+      // model so the picker persists for a custom agent too.
       const saved = isCustom
         ? await trpc.cyboflow.agents.updateCustom.mutate({
             projectId,
@@ -187,6 +188,7 @@ export function AgentEditorModal({
             tools: state.draft.enabledTools,
             enabledMcps: state.draft.enabledMcps,
             role: state.draft.role,
+            model: state.draft.model,
           })
         : await trpc.cyboflow.agents.upsertOverride.mutate({
             projectId,
