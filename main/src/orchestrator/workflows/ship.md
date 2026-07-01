@@ -88,18 +88,23 @@ them between phases.
    - Present the **FULL list** of tasks the run created — by ref/title — in the
      option markdown preview, with scope, ordering, and acceptance criteria. You
      HOLD their ids in context; there is no list-tasks tool.
-   - Ask the human to **Approve AND say which tasks to execute now**. Offer at
-     least Approve / Revise. When the human wants only a subset, capture exactly
-     which task ids they chose; when they approve all, the subset is every created
-     task.
+   - Ask the human to **Approve AND say which tasks to execute now**. Offer the
+     options **Approve / Revise / Reject** (a dedicated Reject option is required —
+     it is the ONLY thing that tears the drafts down; see below). When the human
+     wants only a subset, capture exactly which task ids they chose; when they
+     approve all, the subset is every created task.
    - **Cap.** The sprint can run at most **15** tasks on the `sdk` substrate, **10**
      on `interactive`. If the approved subset exceeds the cap, ask the human to
      trim it to the cap before continuing — do not silently truncate.
    - **Revise rounds keep your drafts.** A Revise / trim / free-text answer does
      NOT delete the created tasks — adjust them in place (`cyboflow_update_task`,
      or `cyboflow_create_task` for additions) and re-present the updated list at
-     the next ask. Only an answer starting with **"Reject"** tears the drafts
-     down and ends the plan — treat a Reject as terminal.
+     the next ask. **Only selecting the Reject option tears the drafts down; free-text
+     replies never delete** — even a free-text reply that starts with the word
+     "reject" (e.g. "Reject TASK-4 but keep the rest", which is a draft-preserving
+     negotiation, not a decline) keeps every draft. The backend deletes the drafts
+     ONLY when the answer exactly matches a presented option label that starts with
+     "Reject"; treat choosing Reject as terminal.
    - The final answer the user gives **must start with "Approve"** so the backend
      promotes the created tasks to Ready-for-development **and removes the
      originating idea(s) from the board by stamping `decomposed_at`** (approving the

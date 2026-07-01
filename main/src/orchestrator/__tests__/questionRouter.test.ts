@@ -1005,6 +1005,216 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     expect(epicApprovedAt(db, epicId)).toBe(epicFirst);
     expect(planApprovedAt(db, 'run-p')).toBe(planFirst);
   });
+
+  // -------------------------------------------------------------------------
+  // F1: a decline (draft teardown) fires ONLY when the user SELECTED an explicit
+  // reject OPTION — an exact match on a presented option label that starts with
+  // 'reject', never a prefix match on free text. A draft-preserving negotiation
+  // reply that merely starts with 'reject' must keep the drafts.
+  // -------------------------------------------------------------------------
+  const REJECTABLE_QUESTIONS: QuestionPayload[] = [
+    {
+      question: 'Approve the plan?',
+      header: 'Approve plan',
+      multiSelect: false,
+      options: [{ label: 'Approve' }, { label: 'Revise' }, { label: 'Reject plan' }],
+    },
+  ];
+
+  async function answerWith(
+    db: Database.Database,
+    router: QuestionRouter,
+    runId: string,
+    questions: QuestionPayload[],
+    answerValue: string,
+  ): Promise<void> {
+    const questionPromise = router.requestQuestion(
+      runId,
+      `tu-${runId}-${Math.random().toString(36).slice(2)}`,
+      questions,
+      vi.fn(),
+    );
+    await router['getQuestionQueue'](runId).onIdle();
+    const questionId = (
+      db
+        .prepare("SELECT id FROM questions WHERE run_id = ? AND status = 'pending' ORDER BY created_at DESC, rowid DESC LIMIT 1")
+        .get(runId) as { id: string }
+    ).id;
+    await router.respond(questionId, { answers: { 'Approve the plan?': answerValue } });
+    await questionPromise;
+    await TaskChangeRouter.getInstance()._queueForProject(1).onIdle();
+  }
+
+  it('F1: selecting the explicit "Reject plan" OPTION deletes the run-created drafts', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: null });
+    const { epicId, taskIds } = await seedRunEntities(taskRouter, 2, 'run-p');
+
+    await answerWith(db, router, 'run-p', REJECTABLE_QUESTIONS, 'Reject plan');
+
+    expect(rowCount(db, 'epics', epicId)).toBe(0);
+    for (const id of taskIds) expect(rowCount(db, 'tasks', id)).toBe(0);
+  });
+
+  it('F1: free-text "Reject TASK-4 but keep the rest" KEEPS the drafts (not a selected reject option)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: null });
+    const { epicId, taskIds } = await seedRunEntities(taskRouter, 2, 'run-p');
+
+    // Free text that STARTS WITH 'reject' but is a draft-preserving negotiation
+    // reply — must NOT match the presented 'Reject plan' option label (fail-safe).
+    await answerWith(db, router, 'run-p', REJECTABLE_QUESTIONS, 'Reject TASK-4 but keep the rest');
+
+    expect(rowCount(db, 'epics', epicId)).toBe(1);
+    for (const id of taskIds) expect(rowCount(db, 'tasks', id)).toBe(1);
+  });
+
+  it('F1: "Request changes" KEEPS the drafts', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: null });
+    const { epicId, taskIds } = await seedRunEntities(taskRouter, 1, 'run-p');
+
+    await answerWith(db, router, 'run-p', REJECTABLE_QUESTIONS, 'Request changes');
+
+    expect(rowCount(db, 'epics', epicId)).toBe(1);
+    for (const id of taskIds) expect(rowCount(db, 'tasks', id)).toBe(1);
+  });
+
+  // -------------------------------------------------------------------------
+  // F10: the approve-plan reveal COMPLETES before the agent resumes. socketReply
+  // (which closes the agent's tool-call wait) must observe approved_at already
+  // stamped on every run-created task — the reveal is awaited before resolve/
+  // socketReply so a post-approval cyboflow_create_sprint_batch never races it.
+  // -------------------------------------------------------------------------
+  it('F10: the reveal completes before the agent resumes (socketReply sees approved_at already stamped)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: null });
+    const { taskIds } = await seedRunEntities(taskRouter, 2, 'run-p');
+
+    // Capture each task's approved_at AT THE MOMENT socketReply fires (the resume).
+    let approvedAtResumeTime: (string | null)[] = [];
+    const socketReply = vi.fn<(a: QuestionAnswer) => void>(() => {
+      approvedAtResumeTime = taskIds.map((id) => taskApprovedAt(db, id));
+    });
+
+    const questionPromise = router.requestQuestion('run-p', 'tu-f10', PLAN_QUESTIONS, socketReply);
+    await router['getQuestionQueue']('run-p').onIdle();
+    const questionId = (
+      db
+        .prepare("SELECT id FROM questions WHERE run_id = ? AND status = 'pending' ORDER BY created_at DESC, rowid DESC LIMIT 1")
+        .get('run-p') as { id: string }
+    ).id;
+    await router.respond(questionId, { answers: { 'Approve the plan?': 'Approve' } });
+    await questionPromise;
+
+    // The reveal ran BEFORE the resume: every task was already approved_at-stamped
+    // by the time the agent's tool-call wait was closed.
+    expect(socketReply).toHaveBeenCalledOnce();
+    expect(approvedAtResumeTime).toHaveLength(2);
+    for (const at of approvedAtResumeTime) expect(at).not.toBeNull();
+  });
+
+  // -------------------------------------------------------------------------
+  // F3: fail-soft completion reveal. A plan-gated run that COMPLETES with
+  // plan_approved_at still NULL (e.g. gate labels isApproveAnswer never matched)
+  // must have its PENDING drafts REVEALED — not left hidden then silently lost on
+  // a later dismiss. promotePendingDraftsForRun is the answer-less entry point.
+  // -------------------------------------------------------------------------
+  it('F3: promotePendingDraftsForRun reveals a plan-gated run\'s PENDING drafts when plan_approved_at is NULL', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    // The step id is deliberately NOT approve-plan and no answer is supplied — the
+    // completion entry point ignores both. The run is plan-gated by its 'planner'
+    // workflow name (steps_snapshot_json is NULL → name fallback).
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'execute', seedIdeaId: null });
+    const { epicId, taskIds } = await seedRunEntities(taskRouter, 2, 'run-p');
+
+    // Pre-completion: minted PENDING, run un-approved.
+    for (const id of taskIds) expect(taskApprovedAt(db, id)).toBeNull();
+    expect(epicApprovedAt(db, epicId)).toBeNull();
+    expect(planApprovedAt(db, 'run-p')).toBeNull();
+
+    await router.promotePendingDraftsForRun('run-p');
+    await TaskChangeRouter.getInstance()._queueForProject(1).onIdle();
+
+    // Drafts revealed + the run stamped plan-approved (visible-but-unwanted beats
+    // invisible-then-deleted).
+    expect(planApprovedAt(db, 'run-p')).not.toBeNull();
+    for (const id of taskIds) expect(taskApprovedAt(db, id)).not.toBeNull();
+    expect(epicApprovedAt(db, epicId)).not.toBeNull();
+  });
+
+  it('F3: promotePendingDraftsForRun is a no-op for an ALREADY-approved run (idempotent)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: null });
+    const { epicId, taskIds } = await seedRunEntities(taskRouter, 1, 'run-p');
+    await answerPlanGate(db, router, 'run-p', 'Approve');
+
+    const planFirst = planApprovedAt(db, 'run-p');
+    const taskFirst = taskApprovedAt(db, taskIds[0]);
+    const epicFirst = epicApprovedAt(db, epicId);
+    expect(planFirst).not.toBeNull();
+
+    // The completion reveal fires on an already-approved run — every stamp is
+    // unchanged (the plan_approved_at guard returns early before any write).
+    await router.promotePendingDraftsForRun('run-p');
+    await TaskChangeRouter.getInstance()._queueForProject(1).onIdle();
+
+    expect(planApprovedAt(db, 'run-p')).toBe(planFirst);
+    expect(taskApprovedAt(db, taskIds[0])).toBe(taskFirst);
+    expect(epicApprovedAt(db, epicId)).toBe(epicFirst);
+  });
+
+  it('F3: promotePendingDraftsForRun is a no-op for a NON-plan-gated run (sprint — never stamps plan_approved_at)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    // A sprint run is NOT plan-gated: its entities are created VISIBLE and it has
+    // no plan to approve. The completion reveal must skip it (never stamp
+    // plan_approved_at).
+    db.prepare(
+      `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-s', 1, 'sprint', '{}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, current_step_id, seed_idea_id)
+       VALUES ('run-s', 'wf-s', 1, 'awaiting_review', 'execute', NULL)`,
+    ).run();
+    const { epicId } = await seedRunEntities(taskRouter, 1, 'run-s');
+
+    // Non-plan-gated create lands VISIBLE immediately.
+    expect(epicApprovedAt(db, epicId)).not.toBeNull();
+
+    await router.promotePendingDraftsForRun('run-s');
+    await TaskChangeRouter.getInstance()._queueForProject(1).onIdle();
+
+    // The sprint run was NEVER stamped plan-approved (the guard skipped it).
+    expect(planApprovedAt(db, 'run-s')).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1202,21 +1412,33 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
     expect(ideaStage(db, ideaId)).not.toBe(stageId(DECOMPOSED_POSITION));
   });
 
-  it('Approve on a PLANNER approve-plan gate does NOT retire the idea here (planner retires at its own decompose gate)', async () => {
+  it('Approve on a PLANNER approve-plan gate retires the run-owned idea (F8 — reveal retires the seed idea)', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const taskRouter = TaskChangeRouter.initialize(adapter);
     const router = QuestionRouter.initialize(adapter);
 
-    // Same shape, but the workflow is planner — the ship-scoped retirement must skip it.
+    // The workflow is planner. Retirement here is F8's promoteTasksOnPlanApproval
+    // reveal-retire (NOT the ship-scoped retireShipIdeasOnPlanApproval): approving
+    // the plan decomposes the idea, so it leaves the board immediately rather than
+    // stranding on the board until the later decompose gate.
     seedRunForWorkflow(db, { runId: 'run-plan', workflowName: 'planner', currentStepId: 'approve-plan' });
     const { ideaId } = await seedOwnedIdea(db, taskRouter, 'run-plan', 1);
     const before = ideaStage(db, ideaId);
+    expect(decomposedAt(db, ideaId)).toBeNull();
 
     await answerPlanGate(db, router, 'run-plan', 'Approve');
 
+    // Migration-042 retirement is a decomposed_at stamp, NOT a stage move — the idea
+    // keeps its stage; the stamp takes it off the board.
+    expect(decomposedAt(db, ideaId)).not.toBeNull();
     expect(ideaStage(db, ideaId)).toBe(before);
-    expect(ideaStage(db, ideaId)).not.toBe(stageId(DECOMPOSED_POSITION));
+    // The retirement is orchestrator-attributed with the 'decomposed' action.
+    const ev = db
+      .prepare("SELECT actor, kind FROM entity_events WHERE entity_type = 'idea' AND entity_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(ideaId) as { actor: string; kind: string };
+    expect(ev.actor).toBe('orchestrator');
+    expect(ev.kind).toBe('decomposed');
   });
 });
 

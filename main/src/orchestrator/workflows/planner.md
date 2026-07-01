@@ -77,19 +77,22 @@ human approves the plan.
      tools (`cyboflow_create_task` for tasks, linked to their parent epic/idea).
      Approving the plan locks it, so the entities you create land directly at
      **Ready for development** and are immediately visible — you do **not** drive any
-     board-stage moves by hand.
+     board-stage moves by hand. **Approving also takes the originating idea(s) off
+     the board** — the backend stamps `decomposed_at` the moment the plan is approved
+     (approving the plan IS the decomposition; the idea's tasks now carry the flow),
+     so the idea does not linger on the board next to its revealed tasks.
    - **Revise** → re-delegate to `cyboflow-epics` / `cyboflow-tasks` with the
      feedback and re-hold the revised decomposition; create nothing until the next
      Approve.
-7. **decompose** → **final human gate, inline.** After the plan is approved and the
-   tasks created, report the `decompose` step, then present the gate with
-   **AskUserQuestion** (header `Archive idea`, options `Archive & finish` /
-   `Keep ideas & finish`; list the idea(s) you planned — by ref/title — in the option
-   markdown preview). The backend handles the outcome: `Archive & finish` removes the
-   idea(s) from the board by stamping `decomposed_at` (the idea keeps its stage but
-   leaves the board, reachable only via its children) and ends the run;
-   `Keep ideas & finish` leaves the idea(s) on the board at **Idea** and ends the
-   run. Do **not** call any further tools after this gate — the run is ending.
+7. **decompose** → **final human gate, inline — this is the run-completion gate.**
+   After the plan is approved and the tasks created, report the `decompose` step,
+   then present the gate with **AskUserQuestion** (header `Archive idea`, options
+   `Archive & finish` / `Keep ideas & finish`; list the idea(s) you planned — by
+   ref/title — in the option markdown preview). The idea(s) already left the board at
+   `approve-plan` (above), so this gate's job is to **finalize the run**: either choice
+   ends it. `Archive & finish` re-asserts the `decomposed_at` retirement (a no-op if
+   the idea was already retired at approval); `Keep ideas & finish` simply completes
+   the run. Do **not** call any further tools after this gate — the run is ending.
 
 ## Hard rules
 
@@ -105,5 +108,6 @@ human approves the plan.
   the whole plan — there are no Research / Idea-spec stages to step it through (those
   positions were removed). The tasks you create at the approved plan land directly at
   **Ready for development**, so you never drive task board-stage moves by hand. The
-  idea(s) leave the board only via the final `decompose` gate — `Archive & finish`
-  stamps `decomposed_at` (the idea is reachable thereafter only through its children).
+  idea(s) leave the board when the **plan is approved** at `approve-plan` — the backend
+  stamps `decomposed_at` at that moment (the idea is reachable thereafter only through
+  its children). The final `decompose` gate then only finalizes the run.

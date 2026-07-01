@@ -76,6 +76,15 @@ const APPROVE_PLAN_STEP_ID = 'approve-plan';
 const READY_FOR_DEVELOPMENT_POSITION = 6;
 
 /**
+ * Built-in workflows that carry the approve-plan gate. Mirrors the same-named set
+ * in TaskChangeRouter — the FALLBACK signal for "plan-gated" when a run's frozen
+ * step snapshot is absent/unparseable (the PRIMARY signal is the snapshot itself
+ * containing APPROVE_PLAN_STEP_ID). Used by the F3 completion reveal to avoid
+ * stamping plan_approved_at on a non-plan-gated run (e.g. a completed sprint).
+ */
+const PLAN_GATED_WORKFLOW_NAMES = new Set(['planner', 'ship']);
+
+/**
  * FIX-STAGE-MODEL (decompose): the planner step id whose answer is the separate
  * final gate (Archive vs Keep the decomposed ideas + finish). Choosing Archive
  * retires the run's owned ideas OFF the board by stamping `decomposed_at` (the
@@ -458,18 +467,28 @@ export class QuestionRouter extends EventEmitter {
       }
       runStatusEvents.emit('changed', { runId: request.runId, status: 'running' } satisfies RunStatusChangedEvent);
 
+      // FIX-STAGE-MODEL (D) / Q1 REVEAL (F10): the approve-plan reveal MUST complete
+      // BEFORE the agent resumes. promoteTasksOnPlanApproval stamps approved_at on
+      // every draft entity via the async TaskChangeRouter chokepoint (per-project
+      // PQueue), and a ship agent's post-approval cyboflow_create_sprint_batch filters
+      // on approved_at (SprintLaneStore.createForRun.filterEligibleTaskIds). Resolving
+      // first raced the reveal: the batch arrived while tasks were still PENDING
+      // (approved_at NULL) and materialize dropped every id, failing the run despite an
+      // approved plan. So await the reveal here, before resolve/socketReply, so the
+      // agent only resumes once approved_at is stamped on every revealed entity. The
+      // method is internally fail-soft (its own try/catch, never throws), so awaiting
+      // it can never block the reply/resume.
+      await this.promoteTasksOnPlanApproval(request.runId, effectiveAnswer);
+
       resolve(effectiveAnswer);
       socketReply(effectiveAnswer);
       this.emit('questionAnswered', { questionId, status: 'answered' });
 
-      // FIX-STAGE-MODEL (D): if this answered gate is the planner's final
-      // approve-plan gate AND the user chose the Approve option, deterministically
-      // flip the run's tasks to Ready for development — backend-driven (does NOT
-      // rely on the agent calling cyboflow_set_task_stage). Fail-soft + idempotent;
-      // runs AFTER the resume so a stage hiccup never delays the agent.
-      await this.promoteTasksOnPlanApproval(request.runId, effectiveAnswer);
+      // These follow-ons run AFTER the resume — none gates the agent's ability to
+      // proceed on an approved plan (they retire the ship seed idea, tear down
+      // rejected drafts, or finalize the planner run). All are fail-soft + idempotent.
       await this.retireShipIdeasOnPlanApproval(request.runId, effectiveAnswer);
-      await this.deletePendingDraftsOnPlanDecline(request.runId, effectiveAnswer);
+      await this.deletePendingDraftsOnPlanDecline(request.runId, effectiveAnswer, request.questions);
       await this.finalizePlannerRun(request.runId, effectiveAnswer);
     });
   }
@@ -513,7 +532,103 @@ export class QuestionRouter extends EventEmitter {
       if (!this.isApproveAnswer(answer)) return;
 
       const projectId = typeof run.projectId === 'number' ? run.projectId : Number(run.projectId);
-      const now = new Date().toISOString();
+      await this.revealRunDrafts(runId, projectId);
+    } catch (err) {
+      console.warn(
+        `[QuestionRouter] promoteTasksOnPlanApproval skipped for run ${runId} (fail-soft): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * F3 — fail-soft completion reveal. Public entry point that reveals a run's
+   * PENDING draft entities WITHOUT the answer/step gate of
+   * promoteTasksOnPlanApproval. Called at the run-COMPLETED terminal transition
+   * (runs.end) for a plan-gated run whose plan_approved_at is still NULL: e.g. a
+   * user-edited workflow that kept the `approve-plan` step id but used gate labels
+   * isApproveAnswer never matched, or a free-text approval. The run ran to
+   * completion, so hiding its output would be silent data loss on a later dismiss;
+   * visible-but-unwanted beats invisible-then-deleted.
+   *
+   * Reuses the SAME reveal core as the approve path (stamp plan_approved_at, flip
+   * approved_at on every run-created epic+task, retire owned ideas, move tasks to
+   * Ready for development). Naturally a no-op when the run's drafts were already
+   * swept (cancel/dismiss/fail/reject deleted the rows → the per-entity reveals hit
+   * vanished rows and are caught), or when the plan was already approved (every
+   * stamp is IS NULL-guarded / idempotent). NEVER throws — the completion
+   * transition is unaffected.
+   */
+  async promotePendingDraftsForRun(runId: string): Promise<void> {
+    try {
+      // Read plan_approved_at + the plan-gated signals in one shot. Defensive: a
+      // pre-042 DB lacks plan_approved_at / steps_snapshot_json → the SELECT throws
+      // → caught → no-op.
+      const run = this.db
+        .prepare(
+          `SELECT r.project_id AS projectId,
+                  r.plan_approved_at AS planApprovedAt,
+                  r.steps_snapshot_json AS stepsSnapshotJson,
+                  w.name AS workflowName
+             FROM workflow_runs r
+             LEFT JOIN workflows w ON w.id = r.workflow_id
+            WHERE r.id = ?`,
+        )
+        .get(runId) as
+        | { projectId?: unknown; planApprovedAt?: unknown; stepsSnapshotJson?: unknown; workflowName?: unknown }
+        | undefined;
+      if (!run) return;
+      // Already approved → the approve gate already revealed; nothing to do.
+      if (typeof run.planApprovedAt === 'string' && run.planApprovedAt.length > 0) return;
+      // Non-plan-gated (e.g. a completed sprint) → it never minted PENDING drafts,
+      // so a reveal would only wrongly stamp plan_approved_at. Skip.
+      if (!this.runIsPlanGated(run.stepsSnapshotJson, run.workflowName)) return;
+      const projectId = typeof run.projectId === 'number' ? run.projectId : Number(run.projectId);
+      await this.revealRunDrafts(runId, projectId);
+    } catch (err) {
+      console.warn(
+        `[QuestionRouter] promotePendingDraftsForRun skipped for run ${runId} (fail-soft): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * Whether a run is PLAN-GATED. PRIMARY signal: its frozen step set
+   * (steps_snapshot_json) includes the approve-plan gate. FALLBACK (snapshot
+   * absent/unparseable): a planner/ship built-in. Mirrors the same-named guard in
+   * TaskChangeRouter.
+   */
+  private runIsPlanGated(stepsSnapshotJson: unknown, workflowName: unknown): boolean {
+    if (typeof stepsSnapshotJson === 'string' && stepsSnapshotJson.length > 0) {
+      try {
+        const snapshot = JSON.parse(stepsSnapshotJson) as Record<string, unknown>;
+        return Object.prototype.hasOwnProperty.call(snapshot, APPROVE_PLAN_STEP_ID);
+      } catch {
+        // malformed snapshot — fall through to the workflow-name fallback
+      }
+    }
+    return typeof workflowName === 'string' && PLAN_GATED_WORKFLOW_NAMES.has(workflowName);
+  }
+
+  /**
+   * Reveal core shared by promoteTasksOnPlanApproval (approve gate) and
+   * promotePendingDraftsForRun (F3 completion fallback): (a) stamp
+   * workflow_runs.plan_approved_at = now, (b) reveal the run's PENDING entities by
+   * stamping approved_at = now on every task it created (listRunCreatedTaskIds)
+   * AND every epic it created (listRunCreatedEpicIds) — both idempotent (guarded
+   * `IS NULL`), (c) retire the run's owned idea(s) OFF the board, and (d) move ALL
+   * tasks the run CREATED to Ready for development (position 6).
+   *
+   * Ownership is derived from the entity_events created-event projection
+   * (listRunCreatedTaskIds), NOT from seed_idea_id / originating_idea_id — the
+   * planner agent never stamps those run→entity link columns, so a seed-idea
+   * lineage read would always come up empty in practice.
+   *
+   * May throw on a pre-042 DB (plan_approved_at UPDATE hits "no such column") — the
+   * two callers each wrap this in their own fail-soft try/catch. Per-entity work is
+   * best-effort (a vanished row must not abort the remaining reveals).
+   */
+  private async revealRunDrafts(runId: string, projectId: number): Promise<void> {
+    const now = new Date().toISOString();
 
       // Q1 REVEAL: the plan is approved — stamp the run's plan-approval gate and
       // reveal the entities it created during planning. A plan-gated run mints its
@@ -571,6 +686,23 @@ export class QuestionRouter extends EventEmitter {
         }
       }
 
+      // F8: the plan is approved — the run's owned idea(s) are now decomposed into
+      // the revealed plan (its epics + tasks carry the flow), so retire them OFF the
+      // board HERE (stamp decomposed_at) rather than only at a later gate. Previously
+      // idea retirement was exclusively gate-driven (planner's final decompose gate /
+      // ship's approve-plan), so a planner run interrupted after plan approval but
+      // before its decompose gate stranded the seed idea on the board forever next to
+      // its revealed children. Owned = seed_idea_id UNION run-created ideas
+      // (listRunOwnedIdeaIds, the same resolver finalizePlannerRun uses). Idempotent
+      // (retireIdeaToDecomposed no-ops once decomposed_at is stamped, so the later
+      // decompose gate / ship materialize re-assert harmlessly) + failure-isolated
+      // per-idea — the reveal already happened; retirement must never undo it or throw.
+      for (const ideaId of listRunOwnedIdeaIds(this.db, runId)) {
+        await router.retireIdeaToDecomposed(projectId, ideaId).catch(() => {
+          /* per-idea best-effort */
+        });
+      }
+
       if (taskIds.length === 0) return;
       for (const taskId of taskIds) {
         const taskRow = this.db
@@ -595,11 +727,6 @@ export class QuestionRouter extends EventEmitter {
           kind: 'plan-approved',
         });
       }
-    } catch (err) {
-      console.warn(
-        `[QuestionRouter] promoteTasksOnPlanApproval skipped for run ${runId} (fail-soft): ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
   }
 
   /**
@@ -688,7 +815,11 @@ export class QuestionRouter extends EventEmitter {
    * test DBs lack the column -> the SELECT throws -> caught -> no-op). NEVER
    * throws — respond() is unaffected.
    */
-  private async deletePendingDraftsOnPlanDecline(runId: string, answer: QuestionAnswer): Promise<void> {
+  private async deletePendingDraftsOnPlanDecline(
+    runId: string,
+    answer: QuestionAnswer,
+    questions?: ReadonlyArray<QuestionPayload>,
+  ): Promise<void> {
     try {
       const run = this.db
         .prepare(
@@ -697,9 +828,12 @@ export class QuestionRouter extends EventEmitter {
         .get(runId) as { projectId?: unknown; currentStepId?: unknown } | undefined;
       if (!run) return;
       if (run.currentStepId !== APPROVE_PLAN_STEP_ID) return;
-      // ONLY an explicit Reject deletes. Approve -> reveal; Revise / trim / free
-      // text -> drafts persist for the agent to adjust and re-present.
-      if (!this.isRejectAnswer(answer)) return;
+      // ONLY an explicit Reject OPTION deletes (see isRejectAnswer). Approve ->
+      // reveal; Revise / trim / free text (even free text that starts with 'reject',
+      // e.g. "Reject TASK-4 but keep the rest") -> drafts persist for the agent to
+      // adjust and re-present. The presented gate's option labels are threaded in so
+      // the check keys on a selected option, never a prefix match on free text.
+      if (!this.isRejectAnswer(answer, questions)) return;
 
       const projectId = typeof run.projectId === 'number' ? run.projectId : Number(run.projectId);
       await TaskChangeRouter.getInstance().deleteRunCreatedEntities(projectId, runId);
@@ -807,14 +941,43 @@ export class QuestionRouter extends EventEmitter {
 
   /**
    * Decide whether a gate answer is an EXPLICIT Reject (terminal decline).
-   * Case-insensitive: at least one answer value starts with 'reject', and no
-   * value is an Approve. Conservative on purpose — Revise, cap-trim replies,
-   * and free-text feedback are NOT rejects (drafts must survive negotiation
-   * rounds); only a deliberate Reject tears the drafts down.
+   *
+   * A decline fires ONLY when the user SELECTED an explicit reject OPTION — the
+   * answer value must EXACTLY equal (case-insensitive, trimmed) one of the
+   * presented question's option LABELS that itself starts with 'reject'. A prefix
+   * match on free text is deliberately NOT enough: at the ship approve-plan gate a
+   * draft-preserving negotiation reply like "Reject TASK-4 but keep the rest"
+   * (which ship.md frames as keep-the-rest) starts with 'reject' but is NOT a
+   * terminal decline, and must never tear the whole draft plan down mid-negotiation.
+   * Fail-safe: when in doubt, keep the drafts.
+   *
+   * When the presented options are unavailable at this seam (`questions` absent or
+   * carrying no reject option), fall back to an EXACT match on a canonical reject
+   * token ('reject' / 'reject plan') — still never a prefix match. Conservative on
+   * purpose: Revise, cap-trim replies, and free-text feedback are NOT rejects
+   * (drafts must survive negotiation rounds); only a deliberate Reject tears them down.
    */
-  private isRejectAnswer(answer: QuestionAnswer): boolean {
+  private isRejectAnswer(answer: QuestionAnswer, questions?: ReadonlyArray<QuestionPayload>): boolean {
     if (this.isApproveAnswer(answer)) return false;
-    return Object.values(answer.answers).some((v) => v.trim().toLowerCase().startsWith('reject'));
+    const values = Object.values(answer.answers).map((v) => v.trim().toLowerCase());
+    if (values.length === 0) return false;
+
+    // Collect the presented reject-option labels (case-insensitive, trimmed).
+    const rejectLabels = new Set<string>();
+    for (const q of questions ?? []) {
+      for (const opt of q.options ?? []) {
+        const label = opt.label.trim().toLowerCase();
+        if (label.startsWith('reject')) rejectLabels.add(label);
+      }
+    }
+    if (rejectLabels.size > 0) {
+      // An explicit reject option was presented — a decline requires selecting it
+      // (exact label match), never a prefix match on free text.
+      return values.some((v) => rejectLabels.has(v));
+    }
+
+    // Fallback (options unavailable): exact-match a canonical reject token only.
+    return values.some((v) => v === 'reject' || v === 'reject plan');
   }
 
   /**
