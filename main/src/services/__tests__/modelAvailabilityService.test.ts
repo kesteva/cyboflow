@@ -130,8 +130,19 @@ describe('ModelAvailabilityService', () => {
       expect(svc2.isUsable(FABLE)).toBe(true);
     });
 
-    it('leaves state unchanged on a transient (5xx) or network error', async () => {
+    it('leaves state unchanged on 403 / transient (5xx) / network errors', async () => {
       process.env.ANTHROPIC_API_KEY = 'sk-test';
+
+      // 403 is deliberately NOT flipped — the probe credential can differ from the
+      // credential the runs use, so a per-org entitlement gap here must not grey out
+      // a model the runtime can access (the reactive path handles real 403s).
+      const svc403 = ModelAvailabilityService.initialize({
+        fetchImpl: vi.fn().mockResolvedValue({ ok: false, status: 403 }) as unknown as typeof fetch,
+      });
+      await svc403.refresh();
+      expect(svc403.snapshot()[FABLE].status).toBe('unknown');
+      expect(svc403.isUsable(FABLE)).toBe(true);
+
       const svc = ModelAvailabilityService.initialize({
         fetchImpl: vi.fn().mockResolvedValue({ ok: false, status: 503 }) as unknown as typeof fetch,
       });

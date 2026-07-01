@@ -183,11 +183,19 @@ export class ModelAvailabilityService extends EventEmitter {
       });
       if (res.ok) {
         this.markAvailable(guarded.concreteId);
-      } else if (res.status === 404 || res.status === 403) {
-        // Definitively gone / no access for this credential → unavailable.
-        this.markUnavailable(guarded.concreteId, String(res.status));
+      } else if (res.status === 404) {
+        // 404 = the model id doesn't exist at all (the "taken away" case). This is
+        // org-independent, so it's safe to flip from the probe credential. A 403
+        // (this credential's org lacks access) is deliberately NOT flipped: the
+        // probe credential (env ANTHROPIC_API_KEY/AUTH_TOKEN) can differ from the
+        // credential the runs actually use (the bundled Claude Code login), so a
+        // per-org entitlement gap here could wrongly grey out a model the runtime
+        // can use. The reactive spawn-error path — which uses the real runtime
+        // credential — is authoritative for permission/403 cases.
+        this.markUnavailable(guarded.concreteId, '404');
       } else {
-        // Transient (401 auth blip, 429, 5xx) — don't flip; stay optimistic.
+        // 401/403/429/5xx — credential-specific or transient. Don't flip; stay
+        // optimistic and let the reactive path decide with the runtime credential.
         this.logger?.debug?.(
           `[ModelAvailability] probe for ${guarded.concreteId} returned ${res.status}; leaving status unchanged.`,
         );
