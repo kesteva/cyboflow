@@ -527,12 +527,18 @@ export class TaskChangeRouter {
    * attempt's). The seed/owned idea is NEVER in the created-epic/task projection,
    * so it is structurally left intact — reachable for the replan.
    *
-   * Self-gated on workflow_runs.plan_approved_at IS NULL: an APPROVED run's
-   * entities were revealed (approved_at-stamped) and accepted by the human, so a
-   * later cancel/dismiss must NOT delete them — the helper no-ops. (A run with no
-   * plan-approval lifecycle created nothing run-keyed, so the projection is empty
-   * and this is a no-op regardless.) Fail-soft: a pre-042 DB lacking the column,
-   * or a vanished run, degrades to no-op.
+   * TRIPLE-gated — all three must hold or the helper no-ops:
+   *  1. The run is PLAN-GATED (runIsPlanGated over its frozen step snapshot /
+   *     workflow name). Non-plan-gated runs (compound, sprint, quick, custom)
+   *     DO create run-keyed entities (e.g. compound's cyboflow_create_task
+   *     clean-up tasks) — but those land approved_at=now and human-visible at
+   *     create, so teardown must never sweep them.
+   *  2. workflow_runs.plan_approved_at IS NULL: an APPROVED run's entities were
+   *     revealed and accepted by the human.
+   *  3. Per-entity approved_at IS NULL (belt-and-braces at the delete loop):
+   *     only still-PENDING drafts are swept, whatever the run-level state says.
+   * Fail-soft: a pre-042 DB lacking the columns, or a vanished run, degrades to
+   * no-op.
    *
    * actor='orchestrator' on each applyDelete — EXEMPT from the active-run guard
    * (the run being torn down IS the active run). Per-entity best-effort: a task
@@ -541,21 +547,47 @@ export class TaskChangeRouter {
    * 'deleted' broadcast + review-item cleanup.
    */
   async deleteRunCreatedEntities(projectId: number, runId: string): Promise<void> {
-    // Gate: never delete an ALREADY-APPROVED run's revealed entities. Fail-soft —
-    // a pre-042 DB lacking plan_approved_at (or a vanished run) means no-op.
+    // Gates 1+2: only a PLAN-GATED run whose plan was never approved sweeps its
+    // drafts. Fail-soft — a pre-042 DB lacking plan_approved_at (or a vanished
+    // run) means no-op.
     try {
       const row = this.db
-        .prepare('SELECT plan_approved_at AS planApprovedAt FROM workflow_runs WHERE id = ?')
-        .get(runId) as { planApprovedAt?: unknown } | undefined;
+        .prepare(
+          `SELECT r.plan_approved_at AS planApprovedAt,
+                  r.steps_snapshot_json AS stepsSnapshotJson,
+                  w.name AS workflowName
+             FROM workflow_runs r
+             LEFT JOIN workflows w ON w.id = r.workflow_id
+            WHERE r.id = ?`,
+        )
+        .get(runId) as
+        | { planApprovedAt?: unknown; stepsSnapshotJson?: unknown; workflowName?: unknown }
+        | undefined;
       if (!row) return;
       if (row.planApprovedAt !== null && row.planApprovedAt !== undefined) return;
+      if (!this.runIsPlanGated(row.stepsSnapshotJson, row.workflowName)) return;
     } catch {
       return;
     }
 
+    // Gate 3: only still-PENDING drafts. A revealed (approved_at-stamped) entity
+    // survives teardown even if the run row is somehow inconsistent.
+    const isPendingEntity = (table: 'epics' | 'tasks', id: string): boolean => {
+      try {
+        const r = this.db
+          .prepare(`SELECT approved_at AS approvedAt FROM ${table} WHERE id = ?`)
+          .get(id) as { approvedAt?: unknown } | undefined;
+        if (!r) return false; // already gone — nothing to delete
+        return r.approvedAt === null || r.approvedAt === undefined;
+      } catch {
+        return false; // pre-042 schema (no approved_at) — treat as visible, spare it
+      }
+    };
+
     // The run's created EPICS first — each epic's cascade takes its child tasks
     // (collectDeleteCascade for an epic deletes tasks WHERE parent_epic_id).
     for (const epicId of listRunCreatedEpicIds(this.db, runId)) {
+      if (!isPendingEntity('epics', epicId)) continue;
       try {
         await this.applyDelete(projectId, {
           actor: 'orchestrator',
@@ -572,6 +604,7 @@ export class TaskChangeRouter {
     // Read AFTER the epic deletions so cascade-claimed tasks are already gone; a
     // straggler that still throws not_found here is swallowed.
     for (const taskId of listRunCreatedTaskIds(this.db, runId)) {
+      if (!isPendingEntity('tasks', taskId)) continue;
       try {
         await this.applyDelete(projectId, {
           actor: 'orchestrator',

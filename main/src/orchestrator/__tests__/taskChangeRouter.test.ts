@@ -1305,6 +1305,61 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(rowCount(db, 'tasks', epicTaskId)).toBe(1);
       expect(rowCount(db, 'ideas', ideaId)).toBe(1);
     });
+
+    it('no-op for a NON-plan-gated run (compound clean-up tasks survive cancel/dismiss)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      // A compound run: no approve-plan step, non-plan-gated name — its creates
+      // land approved_at=now (visible) and plan_approved_at stays NULL forever.
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-compound', 1, 'compound', '{}')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
+         VALUES ('run-compound', 'wf-compound', 1, 'running', 'default')`,
+      ).run();
+      const task = await router.applyChange(1, {
+        actor: 'agent:cyboflow-compound',
+        entityType: 'task',
+        title: 'Clean-up task',
+        runId: 'run-compound',
+      });
+      await router._queueForProject(1).onIdle();
+      // Sanity: the compound create is VISIBLE (approved at create).
+      const approvedAt = (
+        db.prepare('SELECT approved_at FROM tasks WHERE id = ?').get(task.taskId) as {
+          approved_at: string | null;
+        }
+      ).approved_at;
+      expect(approvedAt).not.toBeNull();
+
+      await router.deleteRunCreatedEntities(1, 'run-compound');
+      await router._queueForProject(1).onIdle();
+
+      // plan_approved_at IS NULL for the compound run, but the run is NOT
+      // plan-gated — the sweep must not touch its visible entities.
+      expect(rowCount(db, 'tasks', task.taskId)).toBe(1);
+    });
+
+    it('per-entity gate: an approved_at-stamped draft survives even when the run row says pending', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      seedRun(db, { runId: 'run-mixed' });
+      const { epicId, orphanTaskId, epicTaskId } = await seedRunDrafts(router, 'run-mixed');
+      // Simulate an inconsistent state: one draft was individually revealed.
+      db.prepare('UPDATE tasks SET approved_at = ? WHERE id = ?').run(
+        '2026-06-30T00:00:00.000Z',
+        orphanTaskId,
+      );
+
+      await router.deleteRunCreatedEntities(1, 'run-mixed');
+      await router._queueForProject(1).onIdle();
+
+      // Pending drafts swept; the revealed task survives.
+      expect(rowCount(db, 'epics', epicId)).toBe(0);
+      expect(rowCount(db, 'tasks', epicTaskId)).toBe(0);
+      expect(rowCount(db, 'tasks', orphanTaskId)).toBe(1);
+    });
   });
 
   // -------------------------------------------------------------------------
