@@ -365,11 +365,22 @@ leaves the 4-stage board, reachable only via children) with NO cascade — retir
 exclusively gate-driven (the approve-plan gate retires the planner's root idea). The CREATE seam
 is the Q1 visibility gate: a plan-gated run's epics/tasks are created PENDING
 (`approved_at IS NULL` = backend-invisible + sprint-ineligible) and stay so until the approve-plan
-gate stamps `workflow_runs.plan_approved_at` and REVEALS them (`approved_at = now`); every
-non-plan-gated create is visible immediately. The reveal-on-approve and the
-delete-on-decline/cancel/dismiss draft cleanup both self-gate on `plan_approved_at IS NULL`, and
+gate stamps `workflow_runs.plan_approved_at` and REVEALS them; every non-plan-gated create is
+visible immediately. The REVEAL routes through the chokepoint per entity (the orchestrator-only
+`approved` toggle on `TaskChange` — mirrors `decomposed`) so each flip mints an entity_event +
+version bump + `TaskChangedEvent`; a mounted board sees the drafts appear on approval. Draft
+DELETION is reject-only at the gate (`isRejectAnswer` — a Revise / cap-trim / free-text answer
+keeps the drafts for in-place adjustment) and triple-gated on teardown
+(`deleteRunCreatedEntities`: run plan-gated + `plan_approved_at IS NULL` + per-entity
+`approved_at IS NULL` — a compound/quick/custom run's visible creates are NEVER swept).
 `SprintLaneStore.createForRun` re-applies the `approved_at IS NOT NULL` eligibility filter as the
-single sprint-materialization chokepoint.
+single sprint-materialization chokepoint (drop-with-log for the agent path; the user-facing
+`runs.start` pre-check is STRICT and rejects a mixed selection by naming the ineligible ids).
+
+**Emit-path stamp parity.** `buildBacklogTaskItem` (the chokepoint's broadcast projection) MUST
+carry `decomposed_at` + `approved_at` explicitly — the frontend selectors compare `!== null`, so
+an omitted (undefined) stamp silently flips board visibility on live events. Both fields are
+REQUIRED on `BacklogTaskItem` so an omitting constructor fails the build (silent-drop class).
 
 - **Canonical example:** `main/src/orchestrator/taskChangeRouter.ts`;
   `main/src/orchestrator/__tests__/taskChangeRouter.test.ts`.
@@ -387,12 +398,17 @@ the current stage is a no-op) and best-effort at the follow-on seam:
   ready-to-merge stage to derive. Driven from the run-lifecycle follow-on seams (`runExecutor`,
   `runLauncher`, the `runs.*` tRPC router, and the `git.ts` merge close-out, which mirrors the
   `outcome='merged'` arm inline for sprint lanes).
-- **`recomputeEpicStage(epicId)`** — the ROLLUP over an epic's non-archived child tasks (epics
-  carry no runs). `all children at Done (9) → Done (9)`; `any child not yet Done → Ready for
-  development (6)`; `no non-archived children → no-op`. Wired as a POST-COMMIT follow-on INSIDE
-  `applyChange` itself: after a child-task create or stage-move settles on the per-project queue,
-  the router re-enters via `recomputeEpicStage(parentEpicId)`. The rollup write is an EPIC UPDATE
-  (never a task create/stage-move), so it cannot recurse back through the same hooks.
+- **`recomputeEpicStage(epicId)`** — the ROLLUP over an epic's COUNTABLE child tasks (epics
+  carry no runs). A child counts only when non-archived, not parked at Won't-do (position 10 —
+  an explicit retirement neither blocks Done nor demotes), and not a PENDING draft
+  (`approved_at IS NULL` is board-invisible and must not move a visible epic). `all countable
+  children at Done (9) → Done (9)`; `any countable child not yet Done → Ready for development
+  (6)`; `no countable children → no-op`. NEVER rewrites an epic the human parked at Won't-do.
+  Wired as a POST-COMMIT follow-on INSIDE `applyChange` (child create, stage-move, archive
+  toggle, approved reveal) AND after `applyDelete` settles (recompute deferred OUTSIDE the
+  per-project queue task — re-entering the queue from inside `runDelete` would deadlock). The
+  rollup write is an EPIC UPDATE (never a task create/stage-move), so it cannot recurse back
+  through the same hooks.
 
 - **Canonical example:** `main/src/orchestrator/taskChangeRouter.ts`
   (`recomputeTaskExecutionStage`, `recomputeEpicStage`, and the post-commit follow-on block in

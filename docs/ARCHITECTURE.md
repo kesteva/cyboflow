@@ -516,14 +516,18 @@ stages and gate backend visibility:
   idea — and decomposition has NO cascade: children carry the flow.
 - **`epics.approved_at` / `tasks.approved_at`** — `NULL` = PENDING = backend-invisible +
   sprint-INELIGIBLE until plan approval. This is the deferred-materialization model: the
-  planner CREATES entities pending, and the approve-plan gate REVEALS them (stamps
-  `approved_at = now`); every non-plan-gated create is visible immediately. The eligibility
-  filter at `SprintLaneStore.createForRun` (the single sprint-materialization chokepoint)
-  drops any task whose `approved_at IS NULL`.
+  planner CREATES entities pending, and the approve-plan gate REVEALS them — per entity,
+  through the chokepoint's orchestrator-only `approved` toggle, so each reveal broadcasts a
+  `TaskChangedEvent` and a mounted board updates live. Every non-plan-gated create is visible
+  immediately. The eligibility filter at `SprintLaneStore.createForRun` (the single
+  sprint-materialization chokepoint) drops any task whose `approved_at IS NULL`; the
+  user-facing `runs.start` pre-check is strict and rejects mixed selections outright.
 - **`workflow_runs.plan_approved_at`** — stamped when a run's approve-plan gate is approved.
-  The `applyChange` create seam reads it to decide pending-vs-visible; the post-approval
-  reveal and the delete-on-decline/cancel/dismiss draft cleanup both self-gate on it (an
-  already-approved run's revealed entities survive).
+  The `applyChange` create seam reads it to decide pending-vs-visible. Draft cleanup is
+  REJECT-only at the gate (a Revise / cap-trim answer keeps the drafts for in-place
+  adjustment) and triple-gated on cancel/dismiss teardown (`deleteRunCreatedEntities`:
+  plan-gated run + `plan_approved_at IS NULL` + per-entity `approved_at IS NULL`), so an
+  approved run's revealed entities — and every non-plan-gated run's visible creates — survive.
 
 The `ideas.scope` hint (`'small' | 'large'`) is the pre-extraction small-vs-large signal; the
 post-extraction source of truth is the presence of epics. All four kept stages are `asserted`
