@@ -1,0 +1,226 @@
+/**
+ * snapshotRunForEval — the TRIGGER side of the eval feature. Fired (fire-and-forget,
+ * error-swallowed) when a built-in run crosses the sprint-review => human-review
+ * boundary. It captures everything an async judge needs to survive worktree
+ * teardown — the frozen diff, gate results, run provenance — into a pending
+ * run_evals row RIGHT NOW (before a fast human merge can delete the worktree), then
+ * enqueues the worker.
+ *
+ * Why capture at trigger and store TEXT (not a pointer): merge/dismiss close-out
+ * removes the worktree; an async worker that tried to re-derive the diff later would
+ * find it gone. The row is self-contained.
+ *
+ * Opt-in: default ON for built-in flows (isCyboflowWorkflowName); OFF for quick
+ * sessions (they run under the __quick__ sentinel workflow, never a cyboflow name)
+ * and custom/edited flows (checked on the WORKFLOW NAME, not the step id, since a
+ * custom flow could carry a step literally named 'human-review'). In practice only
+ * sprint + ship reach this trigger (planner/compound have no human-review step).
+ *
+ * Re-fire dedup: the composite PK (run_id, rubric_version) + INSERT OR IGNORE means
+ * a request-changes loop or interactive resume re-reporting human-review does NOT
+ * create a second row — instead it flips human_influenced=1 (the first, pre-human
+ * snapshot is canonical) and does NOT re-enqueue or re-capture.
+ *
+ * Standalone-typecheck invariant: no electron / better-sqlite3 / services import.
+ * The diff capture is an injected closure (over GitDiffManager in index.ts).
+ */
+import type { DatabaseLike, LoggerLike } from '../types';
+import type { RunGitDiff } from '../../../../shared/types/runFiles';
+import { isCyboflowWorkflowName } from '../../../../shared/types/workflows';
+import { computeSpecHash } from '../specHash';
+import { RUBRIC_VERSION, serializeRubricForPrompt } from './rubric';
+import type { GateResults, GateStatus } from './scoring';
+
+/** The prompt-hash content address: the sha256 of the serialized rubric text. */
+export function computeJudgePromptHash(): string {
+  return computeSpecHash(serializeRubricForPrompt());
+}
+
+export interface SnapshotDeps {
+  db: DatabaseLike;
+  logger?: LoggerLike;
+  /** Diff capture closure (worktree, base ref) => unified diff + stats, or null. */
+  gitDiff: (worktreePath: string, baseRef?: string) => Promise<RunGitDiff | null>;
+  /** App version string (package.json), stamped as judge_build_id later by the worker. */
+  appVersion: string;
+  /** Enqueue the worker to grade this (run, rubric) after the row lands. */
+  enqueue: (runId: string, rubricVersion: string) => void;
+  /** Injectable clock for deterministic tests. */
+  now?: () => Date;
+}
+
+/** The outcome of a trigger, surfaced for tests/logging. */
+export type SnapshotOutcome = 'inserted' | 'refire' | 'skipped';
+
+interface RunRow {
+  project_id: number;
+  worktree_path: string | null;
+  base_sha: string | null;
+  spec_hash: string | null;
+  model: string | null;
+  workflow_id: string;
+  workflowName: string;
+}
+
+interface StepResultRow {
+  step_id: string;
+  outcome: string;
+  summary: string | null;
+  error: string | null;
+}
+
+/**
+ * Derive a coarse GateResults from a run's step_results rows. CAVEAT: cyboflow has
+ * NO deterministic build/test/typecheck/lint artifact for orchestrated runs today
+ * (step_results is written only on the programmatic plane). The single signal we
+ * can honor is a *-verify step's outcome: 'failed' => the run's deterministic suite
+ * failed (maps to test='fail' => GATED); 'done' => test='pass'. Everything else is
+ * left absent so we never spuriously gate. Raw rows are retained for display.
+ */
+export function deriveGateResults(rows: StepResultRow[]): GateResults | null {
+  if (rows.length === 0) return null;
+  const verify = rows.find((r) => /verify/i.test(r.step_id));
+  const gate: GateResults = { raw: rows };
+  if (verify) {
+    let status: GateStatus = 'unknown';
+    if (verify.outcome === 'failed') status = 'fail';
+    else if (verify.outcome === 'done') status = 'pass';
+    gate.test = status;
+  }
+  return gate;
+}
+
+/**
+ * Snapshot a run for eval at the human-review trigger. Returns the outcome. NEVER
+ * throws for a business reason — the only throws are programming errors the caller
+ * (index.ts subscriber) still wraps in a swallowing .catch, so a snapshot failure
+ * can never affect the run.
+ */
+export async function snapshotRunForEval(
+  runId: string,
+  deps: SnapshotDeps,
+): Promise<SnapshotOutcome> {
+  const { db, logger } = deps;
+  const nowIso = (deps.now?.() ?? new Date()).toISOString();
+
+  // Resolve the run + its (denormalized) workflow name. Workflows are
+  // user-editable/deletable, so we snapshot the name onto the row.
+  const run = db
+    .prepare(
+      `SELECT r.project_id AS project_id, r.worktree_path AS worktree_path,
+              r.base_sha AS base_sha, r.spec_hash AS spec_hash, r.model AS model,
+              r.workflow_id AS workflow_id, w.name AS workflowName
+       FROM workflow_runs r
+       JOIN workflows w ON w.id = r.workflow_id
+       WHERE r.id = ?`,
+    )
+    .get(runId) as RunRow | undefined;
+
+  if (!run) {
+    logger?.warn('[eval] snapshot skipped — no workflow_runs row', { runId });
+    return 'skipped';
+  }
+
+  // Opt-in gate: built-in flows only (name, not step id). Quick sessions and
+  // custom flows fall out here.
+  if (!isCyboflowWorkflowName(run.workflowName)) {
+    return 'skipped';
+  }
+
+  // Re-fire dedup: if a row already exists, this is a request-changes loop / resume
+  // re-report. Flip human_influenced=1 (first snapshot stays canonical) and stop.
+  const existing = db
+    .prepare('SELECT eval_status FROM run_evals WHERE run_id = ? AND rubric_version = ?')
+    .get(runId, RUBRIC_VERSION) as { eval_status: string } | undefined;
+  if (existing) {
+    db.prepare(
+      `UPDATE run_evals SET human_influenced = 1, updated_at = ?
+       WHERE run_id = ? AND rubric_version = ?`,
+    ).run(nowIso, runId, RUBRIC_VERSION);
+    return 'refire';
+  }
+
+  // Capture the frozen diff NOW (before any teardown races). Best-effort: a diff
+  // failure must not block the snapshot — the worker can still fail-soft on an
+  // empty diff.
+  let diffText: string | null = null;
+  let diffStatsJson: string | null = null;
+  if (run.worktree_path) {
+    try {
+      const captured = await deps.gitDiff(run.worktree_path, run.base_sha ?? undefined);
+      if (captured) {
+        diffText = captured.diff;
+        diffStatsJson = JSON.stringify(captured.stats);
+      }
+    } catch (err) {
+      logger?.warn('[eval] diff capture failed at snapshot', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Fold any step_results (sprint-verify) rows into the gate snapshot.
+  let gateResultsJson: string | null = null;
+  try {
+    const stepRows = db
+      .prepare(
+        'SELECT step_id, outcome, summary, error FROM step_results WHERE run_id = ?',
+      )
+      .all(runId) as StepResultRow[];
+    const gate = deriveGateResults(stepRows);
+    if (gate) gateResultsJson = JSON.stringify(gate);
+  } catch (err) {
+    logger?.warn('[eval] gate-result fold failed at snapshot', {
+      runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const promptHash = computeJudgePromptHash();
+
+  // INSERT OR IGNORE gives re-fire dedup for free even against a race: if a
+  // concurrent trigger inserted first, changes===0 and we flip human_influenced.
+  const result = db
+    .prepare(
+      `INSERT OR IGNORE INTO run_evals (
+         run_id, rubric_version, eval_status,
+         base_sha, diff_text, diff_stats_json, gate_results_json,
+         human_influenced, snapshot_at,
+         prompt_hash, judge_build_id,
+         workflow_id, workflow_name, spec_hash, run_model
+       ) VALUES (?, ?, 'pending', ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      runId,
+      RUBRIC_VERSION,
+      run.base_sha,
+      diffText,
+      diffStatsJson,
+      gateResultsJson,
+      nowIso,
+      promptHash,
+      deps.appVersion,
+      run.workflow_id,
+      run.workflowName,
+      run.spec_hash,
+      run.model,
+    );
+
+  if (result.changes === 0) {
+    // Lost an insert race with a concurrent trigger — treat as re-fire.
+    db.prepare(
+      `UPDATE run_evals SET human_influenced = 1, updated_at = ?
+       WHERE run_id = ? AND rubric_version = ?`,
+    ).run(nowIso, runId, RUBRIC_VERSION);
+    return 'refire';
+  }
+
+  deps.enqueue(runId, RUBRIC_VERSION);
+  logger?.info('[eval] snapshot captured; eval enqueued', {
+    runId,
+    workflow: run.workflowName,
+    hasDiff: diffText !== null,
+  });
+  return 'inserted';
+}
