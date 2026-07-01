@@ -78,9 +78,10 @@ function item(over: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     board_id: 'board-1',
     stage_id: 'board-1-s6',
     archived_at: null,
-    // Default to ON the board: ideas not decomposed; epics/tasks left without an
-    // explicit approved_at read as approved (a pending fixture sets it to null).
+    // Default to ON the board: not decomposed, approved (a pending fixture
+    // overrides approved_at to null).
     decomposed_at: null,
+    approved_at: '2026-01-01T00:00:00.000Z',
     version: 1,
     stage_position: 6,
     inFlow: [],

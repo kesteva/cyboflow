@@ -155,11 +155,10 @@ function task(overrides: Partial<BacklogTaskItem> & { id: string; stage_id: stri
     board_id: overrides.board_id ?? 'board-1-default',
     stage_id: overrides.stage_id,
     archived_at: overrides.archived_at ?? null,
-    // Migration 042: non-decomposed ideas must carry `decomposed_at: null` —
-    // `undefined` reads as decomposed (isDecomposed: decomposed_at !== null) and
-    // vanishes. Epics/tasks leave `approved_at` undefined (reads as approved/visible).
+    // Migration 042 stamps — REQUIRED on BacklogTaskItem (silent-drop guard):
+    // explicit null, never undefined.
     decomposed_at: overrides.decomposed_at ?? null,
-    approved_at: overrides.approved_at,
+    approved_at: overrides.approved_at !== undefined ? overrides.approved_at : '2026-01-01T00:00:00.000Z',
     version: 1,
     stage_position: overrides.stage_position ?? POSITION_BY_STAGE_ID[overrides.stage_id] ?? 0,
     inFlow: overrides.inFlow ?? [],
