@@ -1,4 +1,5 @@
 import type { SdkBeta } from '@anthropic-ai/claude-agent-sdk';
+import { guardedModelByConcreteId } from '../../../../../shared/types/modelAvailability';
 
 /**
  * The Claude Agent SDK beta flag that enables the 1M-token context window.
@@ -63,6 +64,30 @@ export function resolveModelAlias(model?: string | null): string | undefined {
   if (!model) return model ?? undefined;
   const key = model.toLowerCase().trim();
   return MODEL_ALIAS_TO_ID[key] ?? model;
+}
+
+/**
+ * Swap a RESOLVED model id for its fallback when the availability guard reports it
+ * unavailable. Only guarded models (currently Fable 5 — see
+ * `shared/types/modelAvailability`) are affected; every other id, plus
+ * `undefined`/`'auto'`/an unrecognized concrete id, passes through unchanged.
+ *
+ * `isUsable` is INJECTED (the spawn managers wire it to the ModelAvailabilityService
+ * singleton), so this stays a pure, unit-testable transform with no service
+ * dependency. When a guarded model is unavailable, its fallback alias is resolved
+ * back through {@link resolveModelAlias} so the return value is a real spawn-seam id
+ * — e.g. Fable's `'opus'` fallback becomes `'claude-opus-4-8[1m]'`, which
+ * {@link sdkModelAndBetas} / {@link interactiveModelArg} then translate normally.
+ */
+export function applyModelAvailabilityFallback(
+  resolvedId: string | undefined,
+  isUsable: (concreteId: string) => boolean,
+): string | undefined {
+  if (!resolvedId) return resolvedId;
+  const guarded = guardedModelByConcreteId(resolvedId);
+  if (!guarded) return resolvedId;
+  if (isUsable(guarded.concreteId)) return resolvedId;
+  return resolveModelAlias(guarded.fallbackAlias);
 }
 
 /**
@@ -143,9 +168,18 @@ export function interactiveModelArg(resolvedId?: string | null): string | undefi
  * `sonnet` → `claude-sonnet-5`, `haiku` → `claude-haiku-4-5`). The agent editor
  * offers only bare families (no per-window choice), so "Opus" means the current
  * Opus at its default window — exactly this. `auto`/undefined pass through.
+ *
+ * When an optional `isUsable` predicate is supplied (the overlay writer wires it to
+ * the ModelAvailabilityService), a guarded-but-unavailable pinned model — e.g. an
+ * agent pinned to Fable 5 that has been pulled — is swapped for its fallback before
+ * the bare id is emitted, so a subagent `.md` never writes a dead model.
  */
-export function bareModelId(model?: string | null): string | undefined {
-  const resolved = resolveModelAlias(model);
+export function bareModelId(
+  model?: string | null,
+  isUsable?: (concreteId: string) => boolean,
+): string | undefined {
+  let resolved = resolveModelAlias(model);
+  if (isUsable) resolved = applyModelAvailabilityFallback(resolved, isUsable);
   if (!resolved) return resolved ?? undefined;
   return hasContext1MSuffix(resolved) ? stripContext1MSuffix(resolved) : resolved;
 }

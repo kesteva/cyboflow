@@ -6,7 +6,13 @@ import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scri
 import { resolveClaudeExecutablePath } from './claudeExecutablePath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
-import { resolveModelAlias, sdkModelAndBetas } from './modelContext';
+import { resolveModelAlias, sdkModelAndBetas, applyModelAvailabilityFallback } from './modelContext';
+import {
+  ModelAvailabilityService,
+  isModelUsable,
+  isModelUnavailableError,
+} from '../../modelAvailabilityService';
+import { guardedModelByConcreteId } from '../../../../../shared/types/modelAvailability';
 import type { Options, HookCallback, PreToolUseHookInput, McpServerConfig, CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import { makeLoggerLike } from '../../../orchestrator/loggerAdapter';
 import type Database from 'better-sqlite3';
@@ -783,6 +789,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
         const errMsg = err instanceof Error ? err.message : String(err);
         this.logger?.error(`[ClaudeCodeManager] SDK query error for panel ${displayPanelId}: ${errMsg}`);
         this.emit('error', { panelId: displayPanelId, sessionId, error: errMsg });
+        // Reactive availability detection: if the failure names the pinned MODEL
+        // (not found / no access), and that model is one we guard (Fable 5), record
+        // it so every later spawn falls back to Opus and the pickers grey it out.
+        // `sdkOptions.model` is exactly what was sent — undefined/'auto'/Opus (a
+        // prior fallback) never match a guarded id, so this only fires when a
+        // guarded model was actually attempted and rejected.
+        this.noteModelUnavailabilityFromError(sdkOptions.model, errMsg);
       }
     } finally {
       this.cleanupPipeline(spawnKey);
@@ -947,6 +960,23 @@ export class ClaudeCodeManager extends AbstractCliManager {
     });
   }
 
+  /**
+   * When an SDK query fails, check whether the failure was the pinned MODEL being
+   * unavailable and — if it was a guarded model (Fable 5) — record it on the
+   * ModelAvailabilityService so subsequent spawns fall back to Opus and the pickers
+   * grey it out. Best-effort and fail-soft: a non-guarded model, a non-model error,
+   * or an uninitialized service are all no-ops.
+   */
+  private noteModelUnavailabilityFromError(sdkModel: string | undefined, errMsg: string): void {
+    const guarded = guardedModelByConcreteId(sdkModel);
+    if (!guarded) return;
+    if (!isModelUnavailableError(errMsg)) return;
+    ModelAvailabilityService.tryGetInstance()?.markUnavailable(guarded.concreteId, errMsg.slice(0, 200));
+    this.logger?.warn(
+      `[ClaudeCodeManager] ${guarded.label} appears unavailable (${errMsg}); future spawns will fall back to ${guarded.fallbackAlias}.`,
+    );
+  }
+
   // ---------------------------------------------------------------------------
   // SDK options builder
   // ---------------------------------------------------------------------------
@@ -1037,7 +1067,17 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // window marker; sdkModelAndBetas translates it per-family — Opus keeps its
     // `[1m]` id, Sonnet's 1M becomes the bare id + the context-1m beta, and the
     // 250k variants emit neither. 'auto'/undefined/concrete ids pass through.
-    const resolvedModel = resolveModelAlias(options.model);
+    const requestedModel = resolveModelAlias(options.model);
+    // Graceful fallback: if the pinned model is a guarded model the availability
+    // guard reports unavailable (e.g. Fable 5 pulled from release), swap it for its
+    // fallback family (Opus) BEFORE the SDK spawn so the turn runs instead of
+    // hard-failing. A no-op for every other model.
+    const resolvedModel = applyModelAvailabilityFallback(requestedModel, isModelUsable);
+    if (resolvedModel !== requestedModel) {
+      this.logger?.warn(
+        `[ClaudeCodeManager] model '${requestedModel}' is unavailable; falling back to '${resolvedModel}' for panel ${options.panelId}.`,
+      );
+    }
     const { model: sdkModel, betas } = sdkModelAndBetas(resolvedModel);
     if (sdkModel && sdkModel !== 'auto') {
       sdkOptions.model = sdkModel;

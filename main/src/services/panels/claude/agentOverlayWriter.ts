@@ -38,6 +38,7 @@ import { loadBuiltInAgents } from '../../../orchestrator/agents/agentCatalogue';
 import { computeEffectiveAgents } from '../../../orchestrator/agents/effectiveAgents';
 import { renderAgentMarkdown } from '../../../orchestrator/agents/agentMarkdown';
 import { bareModelId } from './modelContext';
+import { isModelUsable } from '../../modelAvailabilityService';
 
 /** The `.claude/agents` subpath (relative to the worktree) the overlay writes into. */
 const AGENTS_DIR = ['.claude', 'agents'] as const;
@@ -111,10 +112,12 @@ export function installAgentOverlay(
       // Unoverridden builtins carry their verbatim `.md` (write byte-for-byte);
       // overrides + custom agents have no rawContent and are rendered. A pinned
       // model alias is resolved to its bare concrete snapshot id for the
-      // subagent `model:` frontmatter (null/inherit emits no model line).
+      // subagent `model:` frontmatter (null/inherit emits no model line); a
+      // guarded model that's been pulled (Fable 5) falls back to Opus so the `.md`
+      // never writes a dead model.
       const content =
         agent.rawContent ??
-        renderAgentMarkdown({ ...agent, model: bareModelId(agent.model) });
+        renderAgentMarkdown({ ...agent, model: bareModelId(agent.model, isModelUsable) });
       const target = path.join(dir, `${CYBOFLOW_PREFIX}${agent.agentKey}.md`);
       fs.writeFileSync(target, content, 'utf8');
       written += 1;

@@ -7,6 +7,7 @@ import { WorktreeManager } from './services/worktreeManager';
 import { GitDiffManager } from './services/gitDiffManager';
 import { GitStatusManager } from './services/gitStatusManager';
 import { ExecutionTracker } from './services/executionTracker';
+import { ModelAvailabilityService } from './services/modelAvailabilityService';
 import { DatabaseService } from './database/database';
 import { RunCommandManager } from './services/runCommandManager';
 import { Logger } from './utils/logger';
@@ -682,6 +683,20 @@ async function initializeServices() {
   // tryGetInstance(); it creates completion review items through
   // ReviewItemRouter.getInstance(), so it MUST initialize after the router.
   DynamicWorkflowTracker.initialize(cyboflowDb, { logger: cyboflowLogger });
+
+  // Guarded-model availability (Fable 5). Seeds the guarded set as optimistically
+  // usable; the spawn seam falls back to Opus and the pickers grey a model out
+  // when it's marked unavailable. refresh() is a best-effort Models-API probe that
+  // no-ops without an Anthropic credential in the environment (most users
+  // authenticate the bundled CLI via Claude Code's own login) — reactive marking
+  // from the claude spawn error path then carries the load. Fire-and-forget so a
+  // slow/failed probe never blocks boot.
+  const modelAvailability = ModelAvailabilityService.initialize({ logger: cyboflowLogger });
+  void modelAvailability.refresh().catch((err: unknown) => {
+    cyboflowLogger?.warn?.(
+      `[ModelAvailability] initial probe failed (non-blocking): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
 
   // Concrete publisher: adapts BrowserWindow.webContents.send to the
   // StreamEventPublisher interface.  This is the only place in the codebase

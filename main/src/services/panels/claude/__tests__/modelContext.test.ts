@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
+  applyModelAvailabilityFallback,
+  bareModelId,
   CONTEXT_1M_BETA,
   hasContext1MSuffix,
   interactiveModelArg,
@@ -165,6 +167,50 @@ describe('modelContext', () => {
     it('passes auto/undefined through unchanged', () => {
       expect(interactiveModelArg('auto')).toBe('auto');
       expect(interactiveModelArg(undefined)).toBeUndefined();
+    });
+  });
+
+  describe('applyModelAvailabilityFallback — guarded-model swap', () => {
+    const allUsable = () => true;
+    const noneUsable = () => false;
+
+    it('passes a guarded model through unchanged when usable', () => {
+      expect(applyModelAvailabilityFallback(resolveModelAlias('fable'), allUsable)).toBe('claude-fable-5');
+    });
+
+    it('swaps an unavailable guarded model for its fallback family (Fable → Opus)', () => {
+      // The fallback alias is re-resolved, so the result is a real spawn-seam id.
+      expect(applyModelAvailabilityFallback(resolveModelAlias('fable'), noneUsable)).toBe('claude-opus-4-8[1m]');
+    });
+
+    it('only consults the predicate for the guarded concreteId', () => {
+      const seen: string[] = [];
+      applyModelAvailabilityFallback('claude-fable-5', (id) => {
+        seen.push(id);
+        return true;
+      });
+      expect(seen).toEqual(['claude-fable-5']);
+    });
+
+    it('leaves non-guarded / auto / undefined ids untouched even when the predicate says false', () => {
+      expect(applyModelAvailabilityFallback('claude-opus-4-8[1m]', noneUsable)).toBe('claude-opus-4-8[1m]');
+      expect(applyModelAvailabilityFallback('claude-sonnet-5', noneUsable)).toBe('claude-sonnet-5');
+      expect(applyModelAvailabilityFallback('auto', noneUsable)).toBe('auto');
+      expect(applyModelAvailabilityFallback(undefined, noneUsable)).toBeUndefined();
+    });
+  });
+
+  describe('bareModelId — optional availability fallback', () => {
+    it('resolves the bare snapshot with no predicate (unchanged legacy behavior)', () => {
+      expect(bareModelId('opus')).toBe('claude-opus-4-8');
+      expect(bareModelId('fable')).toBe('claude-fable-5');
+      expect(bareModelId(null)).toBeUndefined();
+    });
+
+    it('falls back to the bare Opus id when a pinned Fable is unavailable', () => {
+      expect(bareModelId('fable', () => false)).toBe('claude-opus-4-8');
+      // usable predicate keeps Fable
+      expect(bareModelId('fable', () => true)).toBe('claude-fable-5');
     });
   });
 });
