@@ -107,13 +107,22 @@ WHERE entry_stage_id IN (SELECT id FROM board_stages WHERE position IN (2, 3, 4,
 -- 5. EPIC ROLLUP: an epic with >=1 non-archived child task, where EVERY
 --    non-archived child task is at position 9 ('Done'), is rolled up to its
 --    board's position-9 stage. Board-scoped SET subselect (mirrors 024).
+--
+--    An epic a human PARKED at position 10 ('Won't do') is EXCLUDED: Won't do is
+--    an explicit human decision, and resurrecting it into the visible Done column
+--    is the resurrection the runtime recomputeEpicStage refuses. Board-scoped
+--    lookup (mirrors the relocate arms above). Epics at any OTHER pre-collapse
+--    position were already funneled to 6 by step 3, so 10 is the only guard.
 -- ---------------------------------------------------------------------------
 UPDATE epics
 SET stage_id = COALESCE(
       (SELECT bs.id FROM board_stages bs WHERE bs.board_id = epics.board_id AND bs.position = 9),
       stage_id
     )
-WHERE EXISTS (
+WHERE stage_id NOT IN (
+        SELECT bs.id FROM board_stages bs WHERE bs.board_id = epics.board_id AND bs.position = 10
+      )
+  AND EXISTS (
         SELECT 1 FROM tasks t
         WHERE t.parent_epic_id = epics.id
           AND t.archived_at IS NULL

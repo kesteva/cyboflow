@@ -136,6 +136,18 @@ function seedEntities(db: Database.Database): void {
      VALUES ('tsk_mix_open', 1, 'TASK-005', 'Mixed open', ?, ?, 'epc_mixed', '2026-01-06 14:20:00')`,
   ).run(B1, stageId(B1, 6));
 
+  // Epic a human PARKED at position 10 ('Won't do') whose every non-archived
+  // child is Done -> must STAY at 10 (the rollup must not resurrect it). Won't do
+  // is a terminal kept stage, so the epic's stage_id is not relocated by step 3.
+  db.prepare(
+    `INSERT INTO epics (id, project_id, ref, title, board_id, stage_id, updated_at)
+     VALUES ('epc_wontdo', 1, 'EPIC-004', 'Parked won''t-do epic', ?, ?, '2026-01-06 18:00:00')`,
+  ).run(B1, stageId(B1, 10));
+  db.prepare(
+    `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id, parent_epic_id, updated_at)
+     VALUES ('tsk_wontdo_child', 1, 'TASK-008', 'Won''t-do epic child', ?, ?, 'epc_wontdo', '2026-01-06 18:10:00')`,
+  ).run(B1, stageId(B1, 9));
+
   // Standalone task at removed position 7 with a removed-position entry_stage_id
   // (8) -> relocates to 6, entry_stage_id nulled.
   db.prepare(
@@ -301,6 +313,18 @@ describe('Migration 042: collapse board to 4 stages + approval/decompose stamps'
       stage_id: string;
     };
     expect(mixed.stage_id).toBe(stageId(B1, 6)); // a not-done child -> stays at 6
+    db.close();
+  });
+
+  it('does NOT resurrect a human-parked Won\'t-do epic even when all children are Done', () => {
+    const db = buildDbThrough024();
+    seedEntities(db);
+    runMigrationViaProductionPath(db, readMigration('042_collapse_board.sql'));
+
+    const parked = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get('epc_wontdo') as {
+      stage_id: string;
+    };
+    expect(parked.stage_id).toBe(stageId(B1, 10)); // Won't do is an explicit human decision
     db.close();
   });
 
