@@ -95,6 +95,11 @@ them between phases.
    - **Cap.** The sprint can run at most **15** tasks on the `sdk` substrate, **10**
      on `interactive`. If the approved subset exceeds the cap, ask the human to
      trim it to the cap before continuing — do not silently truncate.
+   - **Revise rounds keep your drafts.** A Revise / trim / free-text answer does
+     NOT delete the created tasks — adjust them in place (`cyboflow_update_task`,
+     or `cyboflow_create_task` for additions) and re-present the updated list at
+     the next ask. Only an answer starting with **"Reject"** tears the drafts
+     down and ends the plan — treat a Reject as terminal.
    - The final answer the user gives **must start with "Approve"** so the backend
      promotes the created tasks to Ready-for-development **and removes the
      originating idea(s) from the board by stamping `decomposed_at`** (approving the

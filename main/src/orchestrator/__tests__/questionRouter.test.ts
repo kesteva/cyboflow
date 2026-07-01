@@ -910,7 +910,7 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     }
   });
 
-  it('Revise on approve-plan DELETES the run-created epic + tasks but keeps the seed idea (run stays un-approved)', async () => {
+  it('Revise on approve-plan KEEPS the run-created drafts (negotiation round — agent adjusts in place)', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const taskRouter = TaskChangeRouter.initialize(adapter);
@@ -921,7 +921,29 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
 
     await answerPlanGate(db, router, 'run-p', 'Revise');
 
-    // Q1 GUARD (decline = no tasks): the run's PENDING draft entities are gone...
+    // REJECT-ONLY deletion: a Revise (or cap-trim / free-text) answer keeps the
+    // drafts — ship retains their ids across revise rounds and adjusts them via
+    // update; deleting here bricked the eventual Approve → materialize.
+    expect(rowCount(db, 'epics', epicId)).toBe(1);
+    for (const id of taskIds) expect(rowCount(db, 'tasks', id)).toBe(1);
+    expect(rowCount(db, 'ideas', ideaId)).toBe(1);
+    // Still pending — invisible + sprint-ineligible until the eventual Approve.
+    expect(epicApprovedAt(db, epicId)).toBeNull();
+    expect(planApprovedAt(db, 'run-p')).toBeNull();
+  });
+
+  it('Reject on approve-plan DELETES the run-created epic + tasks but keeps the seed idea (run stays un-approved)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedPlannerRun(db, { runId: 'run-p', currentStepId: 'approve-plan', seedIdeaId: null });
+    const { ideaId, epicId, taskIds } = await seedRunEntities(taskRouter, 2, 'run-p');
+
+    await answerPlanGate(db, router, 'run-p', 'Reject');
+
+    // Q1 GUARD (reject = no tasks): the run's PENDING draft entities are gone...
     expect(rowCount(db, 'epics', epicId)).toBe(0);
     for (const id of taskIds) expect(rowCount(db, 'tasks', id)).toBe(0);
     // ...but the seed idea survives (reachable for the replan)...

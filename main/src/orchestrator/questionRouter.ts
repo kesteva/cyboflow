@@ -641,19 +641,26 @@ export class QuestionRouter extends EventEmitter {
   }
 
   /**
-   * Q1 GUARD (decline = no tasks): when the just-answered gate is the planner's
-   * `approve-plan` step and the human chose Revise/Reject (NOT Approve), hard-
-   * delete the PENDING draft entities this run created during planning — its
-   * epics (cascade takes their child tasks) and its orphan tasks — so a declined
-   * plan leaves no orphaned drafts behind. The agent will re-mint fresh drafts
-   * under the SAME run_id when it revises, which the next approve-plan answer
-   * reveals.
+   * Q1 GUARD (REJECT = no tasks): when the just-answered gate is the planner's
+   * `approve-plan` step and the human chose an explicit REJECT (terminal
+   * decline), hard-delete the PENDING draft entities this run created during
+   * planning — its epics (cascade takes their child tasks) and its orphan tasks
+   * — so a rejected plan leaves no orphaned drafts behind.
+   *
+   * REJECT-ONLY, deliberately NOT any-non-approve: a Revise answer, a cap-trim
+   * negotiation reply ("drop TASK-4 first"), or free-text feedback keeps the
+   * drafts — the agent adjusts them in place (update/create) and re-presents at
+   * the next approve-plan ask. Ship creates its tasks BEFORE this gate and
+   * retains their ids across revise rounds; deleting on every non-approve answer
+   * destroyed the ids mid-negotiation and bricked the run at materialize.
+   * (Cancel/dismiss teardown still sweeps pending drafts unconditionally via
+   * deleteRunCreatedEntities — the interrupt path is unchanged.)
    *
    * Routes through TaskChangeRouter.deleteRunCreatedEntities, which keys on
    * run_id (NEVER the seed idea — that survives for the replan) and self-gates on
-   * plan_approved_at IS NULL (a decline never stamps it, so this proceeds; an
-   * Approve already stamped it in promoteTasksOnPlanApproval AND is filtered out
-   * here, so it can never reach the delete).
+   * plan-gated + plan_approved_at IS NULL + per-entity pending (an Approve
+   * already stamped it in promoteTasksOnPlanApproval AND is filtered out here,
+   * so it can never reach the delete).
    *
    * Backend-deterministic + fail-soft: reads current_step_id defensively (older
    * test DBs lack the column -> the SELECT throws -> caught -> no-op). NEVER
@@ -668,9 +675,9 @@ export class QuestionRouter extends EventEmitter {
         .get(runId) as { projectId?: unknown; currentStepId?: unknown } | undefined;
       if (!run) return;
       if (run.currentStepId !== APPROVE_PLAN_STEP_ID) return;
-      // Approve -> reveal (promoteTasksOnPlanApproval), NOT delete. Only a decline
-      // (Revise / Reject) falls through to the draft deletion.
-      if (this.isApproveAnswer(answer)) return;
+      // ONLY an explicit Reject deletes. Approve -> reveal; Revise / trim / free
+      // text -> drafts persist for the agent to adjust and re-present.
+      if (!this.isRejectAnswer(answer)) return;
 
       const projectId = typeof run.projectId === 'number' ? run.projectId : Number(run.projectId);
       await TaskChangeRouter.getInstance().deleteRunCreatedEntities(projectId, runId);
@@ -774,6 +781,18 @@ export class QuestionRouter extends EventEmitter {
     if (values.length === 0) return false;
     if (values.some((v) => v.includes('revise') || v.includes('reject'))) return false;
     return values.some((v) => v.startsWith('approve'));
+  }
+
+  /**
+   * Decide whether a gate answer is an EXPLICIT Reject (terminal decline).
+   * Case-insensitive: at least one answer value starts with 'reject', and no
+   * value is an Approve. Conservative on purpose — Revise, cap-trim replies,
+   * and free-text feedback are NOT rejects (drafts must survive negotiation
+   * rounds); only a deliberate Reject tears the drafts down.
+   */
+  private isRejectAnswer(answer: QuestionAnswer): boolean {
+    if (this.isApproveAnswer(answer)) return false;
+    return Object.values(answer.answers).some((v) => v.trim().toLowerCase().startsWith('reject'));
   }
 
   /**
