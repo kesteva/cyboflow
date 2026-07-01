@@ -66,7 +66,12 @@ import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
 import { resolveMcpServerScriptPath } from './orchestrator/mcpServer/scriptPath';
 import { OrchSocketServer } from './orchestrator/mcpServer/orchSocketServer';
-import { approvalEvents, questionEvents, runStatusEvents } from './orchestrator/trpc/routers/events';
+import { approvalEvents, questionEvents, runStatusEvents, stepTransitionEvents } from './orchestrator/trpc/routers/events';
+import { EvalWorker } from './orchestrator/eval/evalWorker';
+import { ClaudeJudge } from './orchestrator/eval/evalJury';
+import { makeEvalJudgeQuery } from './orchestrator/eval/evalJudgeQuery';
+import type { WorkflowStepTransitionEvent } from '../../shared/types/workflows';
+import type { RunGitDiff } from '../../shared/types/runFiles';
 import type { RunStatusChangedEvent } from '../../shared/types/cyboflow';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../shared/types/cyboflow';
 import { cancelRunHandler } from './orchestrator/cancelRunHandler';
@@ -683,6 +688,57 @@ async function initializeServices() {
   // tryGetInstance(); it creates completion review items through
   // ReviewItemRouter.getInstance(), so it MUST initialize after the router.
   DynamicWorkflowTracker.initialize(cyboflowDb, { logger: cyboflowLogger });
+
+  // Code-review eval worker (migration 043). Grades a built-in run's frozen
+  // pre-human diff against the 7-dimension rubric with a K-sample Claude jury and
+  // writes net-new findings through ReviewItemRouter — so it MUST initialize after
+  // the router (mirrors DynamicWorkflowTracker above). Electron-touching deps are
+  // injected as closures (GitDiffManager, the SDK judge-query, the findings
+  // chokepoint) so the worker itself imports no concrete service.
+  //
+  // gitDiff closure narrows GitDiffResult to the RunGitDiff wire shape and swallows
+  // capture errors to null (the snapshot fails-soft on a null diff) — same closure
+  // shape as the runs-router tRPC context (index.ts createContext), kept separate so
+  // it can fail-soft rather than throw.
+  const evalGitDiff = async (
+    worktreePath: string,
+    baseRef?: string,
+  ): Promise<RunGitDiff | null> => {
+    try {
+      const result = baseRef
+        ? await gitDiffManager.captureDiffAgainstRef(worktreePath, baseRef)
+        : await gitDiffManager.captureWorkingDirectoryDiff(worktreePath);
+      return { diff: result.diff, stats: result.stats, changedFiles: result.changedFiles };
+    } catch (err) {
+      cyboflowLogger?.warn?.(
+        `[eval] gitDiff closure failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+  };
+  EvalWorker.initialize(cyboflowDb, cyboflowLogger, {
+    gitDiff: evalGitDiff,
+    judge: new ClaudeJudge({
+      structuredQuery: makeEvalJudgeQuery(cyboflowLogger),
+      logger: cyboflowLogger,
+    }),
+    reviewItemWriter: (projectId, change) =>
+      ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
+    appVersion: app.getVersion(),
+  });
+
+  // Trigger seam (zero-touch): subscribe to the SHARED step-transition emitter and
+  // snapshot on the sprint-review => human-review boundary. The flow prompts report
+  // each step as it BEGINS (status='running'), so "human-review begins" is
+  // observable EXACTLY ONCE as stepId==='human-review' && status==='running'. Only
+  // sprint + ship carry that step; the snapshot re-checks isCyboflowWorkflowName so
+  // custom flows with a same-named step default OFF. Fire-and-forget +
+  // error-swallowed inside snapshot() — this can never affect the run.
+  stepTransitionEvents.on('transition', (event: WorkflowStepTransitionEvent) => {
+    if (event.stepId === 'human-review' && event.status === 'running') {
+      void EvalWorker.getInstance().snapshot(event.runId);
+    }
+  });
 
   // Guarded-model availability (Fable 5). Seeds the guarded set as optimistically
   // usable; the spawn seam falls back to Opus and the pickers grey a model out
@@ -1935,6 +1991,16 @@ app.on('before-quit', async (event) => {
     console.log('[Main] Stopping orchestrator...');
     await orchestrator.stop();
     console.log('[Main] Orchestrator stopped');
+  }
+
+  // Pause the eval worker queue. Any pending/running run_evals row simply stays
+  // as-is (no crash-safe resume in v1) and is neither re-picked-up nor auto-failed
+  // on next boot. tryGetInstance() is boot-order-safe (no throw if never inited).
+  const evalWorker = EvalWorker.tryGetInstance();
+  if (evalWorker) {
+    console.log('[Main] Stopping eval worker...');
+    await evalWorker.stop();
+    console.log('[Main] Eval worker stopped');
   }
 
   // Cleanup all sessions and terminate child processes
