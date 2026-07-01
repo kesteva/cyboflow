@@ -1400,6 +1400,51 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(rowCount(db, 'tasks', epicTaskId)).toBe(0);
       expect(rowCount(db, 'tasks', orphanTaskId)).toBe(1);
     });
+
+    it('F2: a pending run-created epic with a FOREIGN visible child is SPARED (epic + foreign child survive; this run\'s pending child is deleted individually)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      seedRun(db, { runId: 'run-a' }); // plan-gated planner run -> its drafts land PENDING
+      const { ideaId, epicId, orphanTaskId, epicTaskId } = await seedRunDrafts(router, 'run-a');
+
+      // A DIFFERENT, non-plan-gated run parents a VISIBLE task under run-a's still-
+      // pending epic (the cascade would otherwise destroy it on decline).
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-vis', 1, 'compound', '{}')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
+         VALUES ('run-vis', 'wf-vis', 1, 'running', 'default')`,
+      ).run();
+      const foreign = await router.applyChange(1, {
+        actor: 'agent:cyboflow-compound',
+        entityType: 'task',
+        title: 'Foreign visible task',
+        parentEpicId: epicId,
+        runId: 'run-vis',
+      });
+      await router._queueForProject(1).onIdle();
+      // Sanity: the foreign child is visible (approved at create, foreign run_id).
+      expect(
+        (db.prepare('SELECT approved_at FROM tasks WHERE id = ?').get(foreign.taskId) as {
+          approved_at: string | null;
+        }).approved_at,
+      ).not.toBeNull();
+
+      await router.deleteRunCreatedEntities(1, 'run-a');
+      await router._queueForProject(1).onIdle();
+
+      // The epic is SPARED — its cascade would have destroyed the foreign child.
+      expect(rowCount(db, 'epics', epicId)).toBe(1);
+      // The foreign visible child survives.
+      expect(rowCount(db, 'tasks', foreign.taskId)).toBe(1);
+      // This run's OWN pending child under the spared epic is deleted individually.
+      expect(rowCount(db, 'tasks', epicTaskId)).toBe(0);
+      // The run's orphan pending task (off the idea) is still swept by the orphan pass.
+      expect(rowCount(db, 'tasks', orphanTaskId)).toBe(0);
+      // The seed idea is untouched.
+      expect(rowCount(db, 'ideas', ideaId)).toBe(1);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -1588,6 +1633,51 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       await router.applyChange(1, { actor: 'orchestrator', taskId: childIds[0], stageId: stageId(9) });
       const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
       expect(epic.stage_id).toBe(stageId(10));
+    });
+
+    it('F9: an epic hand-parked at Idea (position 1) is NEVER re-derived by a child move to Done', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { epicId, childIds } = await makeEpicWithChildren(db, router, 1);
+      // The rollup owns only the derived pair {6, 9}; a hand-set Idea is asserted.
+      db.prepare('UPDATE epics SET stage_id = ? WHERE id = ?').run(stageId(1), epicId);
+      await router.applyChange(1, { actor: 'orchestrator', taskId: childIds[0], stageId: stageId(9) });
+      await router._queueForProject(1).onIdle();
+      const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(1));
+    });
+
+    it('F9: an epic hand-parked at Idea (position 1) is untouched when a child is archived', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { epicId, childIds } = await makeEpicWithChildren(db, router, 1);
+      db.prepare('UPDATE epics SET stage_id = ? WHERE id = ?').run(stageId(1), epicId);
+      await router.applyChange(1, { actor: 'user', taskId: childIds[0], archived: true });
+      await router._queueForProject(1).onIdle();
+      const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
+      expect(epic.stage_id).toBe(stageId(1));
+    });
+
+    it('F7: re-parenting the last not-Done child re-derives BOTH epics (source rolls to Done, target demotes to Ready-for-dev)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      // Epic A: one Done child + one not-Done child (the "last not-Done" task).
+      const a = await makeEpicWithChildren(db, router, 2);
+      setChildStage(db, a.childIds[0], 9); // done
+      // a.childIds[1] stays at its create stage (position 6) — not done.
+      // Epic B: a single Done child, parked at Done (9).
+      const b = await makeEpicWithChildren(db, router, 1);
+      setChildStage(db, b.childIds[0], 9);
+      db.prepare('UPDATE epics SET stage_id = ? WHERE id = ?').run(stageId(9), b.epicId);
+
+      // Re-parent A's not-Done child into B through the chokepoint (fires hook (b)).
+      await router.applyChange(1, { actor: 'user', taskId: a.childIds[1], parentEpicId: b.epicId });
+      await router._queueForProject(1).onIdle();
+
+      const epicA = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(a.epicId) as { stage_id: string };
+      const epicB = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(b.epicId) as { stage_id: string };
+      expect(epicA.stage_id).toBe(stageId(9)); // A now all-Done -> Done (9)
+      expect(epicB.stage_id).toBe(stageId(6)); // B gained a not-Done child -> Ready-for-dev (6)
     });
 
     it('a PENDING draft child (approved_at NULL) is invisible to the rollup', async () => {

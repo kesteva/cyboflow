@@ -309,6 +309,8 @@ interface FieldDelta {
 
 /** The board stage position considered "done" (merged & archived). */
 const DONE_POSITION = 9;
+/** The board stage entities enter development at — the LOW half of the derived pair. */
+const READY_FOR_DEV_POSITION = 6;
 /** Terminal hidden 'Won't do' stage — an explicit human parking, never derived. */
 const WONT_DO_POSITION = 10;
 
@@ -426,7 +428,12 @@ export class TaskChangeRouter {
         return this.runAddDependency(projectId, change);
       }
       return this.runUpdate(projectId, change);
-    })) as { taskId: string; dependsOnTaskId?: string; event: { id: number; seq: number } };
+    })) as {
+      taskId: string;
+      dependsOnTaskId?: string;
+      event: { id: number; seq: number };
+      previousParentEpicId?: string | null;
+    };
 
     // POST-COMMIT FOLLOW-ON (re-entrant per-project-queue block): roll a parent
     // epic's DERIVED stage up after a child-task write settles. Each hook re-enters
@@ -446,23 +453,35 @@ export class TaskChangeRouter {
       await this.recomputeEpicStage(change.parentEpicId).catch(() => {});
     }
 
-    // (b) STAGE-MOVE / ARCHIVE-TOGGLE / REVEAL: any update that changes which
-    //     children COUNT toward the rollup re-derives the parent epic. Covers
-    //     merge->Done(9), sprint close-out->Done(9), a user drag off Done, the
-    //     archive/unarchive toggle (an archived child leaves the countable set —
-    //     archiving the last not-Done child must roll the epic to Done), and the
-    //     Q1 approved reveal (a pending child entering the countable set).
-    //     The SELECT on tasks finds no row for epic/idea ids, so non-task
-    //     updates fall through untouched.
+    // (b) STAGE-MOVE / ARCHIVE-TOGGLE / REVEAL / RE-PARENT: any update that
+    //     changes which children COUNT toward the rollup re-derives the parent
+    //     epic. Covers merge->Done(9), sprint close-out->Done(9), a user drag off
+    //     Done, the archive/unarchive toggle (an archived child leaves the
+    //     countable set — archiving the last not-Done child must roll the epic to
+    //     Done), the Q1 approved reveal (a pending child entering the countable
+    //     set), and a RE-PARENT (the task changes which epic it counts under).
+    //     The SELECT on tasks finds no row for epic/idea ids, so non-task updates
+    //     fall through untouched.
     if (
       change.taskId !== undefined &&
-      (change.stageId !== undefined || change.archived !== undefined || change.approved !== undefined)
+      (change.stageId !== undefined ||
+        change.archived !== undefined ||
+        change.approved !== undefined ||
+        change.parentEpicId !== undefined)
     ) {
       const parent = this.db
         .prepare('SELECT parent_epic_id AS parentEpicId FROM tasks WHERE id = ?')
         .get(change.taskId) as { parentEpicId: string | null } | undefined;
-      if (parent && parent.parentEpicId) {
-        await this.recomputeEpicStage(parent.parentEpicId).catch(() => {});
+      const newParentEpicId = parent?.parentEpicId ?? null;
+      if (newParentEpicId) {
+        await this.recomputeEpicStage(newParentEpicId).catch(() => {});
+      }
+      // F7: a re-parent must ALSO re-derive the PREVIOUS parent (the task LEFT
+      // it — its countable-child set shrank, so an all-Done remainder rolls the
+      // old epic to Done). runUpdate captured the old parent before the UPDATE.
+      const previousParentEpicId = result.previousParentEpicId ?? null;
+      if (previousParentEpicId && previousParentEpicId !== newParentEpicId) {
+        await this.recomputeEpicStage(previousParentEpicId).catch(() => {});
       }
     }
 
@@ -616,10 +635,50 @@ export class TaskChangeRouter {
       }
     };
 
-    // The run's created EPICS first — each epic's cascade takes its child tasks
-    // (collectDeleteCascade for an epic deletes tasks WHERE parent_epic_id).
+    // The set of tasks THIS run created (entity_events attribution) — the same
+    // projection the orphan-task sweep below uses. Used to tell a run-owned
+    // pending child from a foreign task another run parented under this epic.
+    const runCreatedTaskIds = new Set(listRunCreatedTaskIds(this.db, runId));
+
+    // The run's created EPICS first. An epic's applyDelete cascade hard-deletes
+    // ALL its child tasks (collectDeleteCascade WHERE parent_epic_id) regardless
+    // of each child's own approved_at / creating run — so before deleting a
+    // pending run-created epic we inspect its children (F2). If ANY child is not
+    // BOTH (a) pending (approved_at NULL) AND (b) created by THIS run, the cascade
+    // would destroy a visible or foreign task — SPARE the epic entirely (it stays
+    // an invisible pending draft) and delete only this run's own pending children
+    // individually, each still per-entity gated.
     for (const epicId of listRunCreatedEpicIds(this.db, runId)) {
       if (!isPendingEntity('epics', epicId)) continue;
+
+      const childIds = this.db
+        .prepare('SELECT id FROM tasks WHERE parent_epic_id = ?')
+        .all(epicId) as Array<{ id: string }>;
+      const foreignOrVisibleChild = childIds.some(
+        (c) => !(isPendingEntity('tasks', c.id) && runCreatedTaskIds.has(c.id)),
+      );
+
+      if (foreignOrVisibleChild) {
+        // Spare the epic; delete only THIS run's pending children under it.
+        console.info(
+          `[TaskChangeRouter] deleteRunCreatedEntities: sparing pending epic ${epicId} (run ${runId}) — a child is visible or foreign; the epic stays an invisible pending draft`,
+        );
+        for (const child of childIds) {
+          if (!runCreatedTaskIds.has(child.id) || !isPendingEntity('tasks', child.id)) continue;
+          try {
+            await this.applyDelete(projectId, {
+              actor: 'orchestrator',
+              entityType: 'task',
+              taskId: child.id,
+              runId,
+            });
+          } catch {
+            // Best-effort: the child may already be gone (concurrent teardown).
+          }
+        }
+        continue;
+      }
+
       try {
         await this.applyDelete(projectId, {
           actor: 'orchestrator',
@@ -966,7 +1025,7 @@ export class TaskChangeRouter {
   private runUpdate(
     projectId: number,
     change: TaskChange,
-  ): { taskId: string; event: { id: number; seq: number } } {
+  ): { taskId: string; event: { id: number; seq: number }; previousParentEpicId?: string | null } {
     const taskId = change.taskId as string;
     const now = new Date().toISOString();
 
@@ -974,6 +1033,10 @@ export class TaskChangeRouter {
     let eventSeq = 0;
     let action: TaskChangeAction = 'updated';
     let resolvedType: TaskType = 'task';
+    // F7: the task's parent epic BEFORE a re-parent, captured inside the txn so
+    // the post-commit rollup hook can re-derive the epic the task LEFT (not just
+    // the one it joined). Stays null when the change is not an actual re-parent.
+    let previousParentEpicId: string | null = null;
 
     const txn = this.db.transaction(() => {
       // Resolve the entity type: prefer the declared discriminator, else look up
@@ -1088,6 +1151,9 @@ export class TaskChangeRouter {
         if (change.parentEpicId !== null) {
           this.validateParentEpic(projectId, type, taskId, change.parentEpicId);
         }
+        // Capture the OLD parent so the rollup hook re-derives it too (the task
+        // is leaving it — its countable-child set shrank).
+        previousParentEpicId = current.parent_epic_id;
         sets.push('parent_epic_id = ?');
         params.push(change.parentEpicId);
         deltas.push({ field: 'parent_epic_id', from: current.parent_epic_id, to: change.parentEpicId });
@@ -1195,7 +1261,7 @@ export class TaskChangeRouter {
     (txn as () => void)();
 
     this.emitChange(projectId, resolvedType, taskId, action);
-    return { taskId, event: { id: eventId, seq: eventSeq } };
+    return { taskId, event: { id: eventId, seq: eventSeq }, previousParentEpicId };
   }
 
   // --------------------------------------------------------------------------
@@ -1624,7 +1690,7 @@ export class TaskChangeRouter {
       // Every non-merged aggregate (running, awaiting_review, pr_open, integrated,
       // pending approval, or all-terminal-without-merge) holds the task at its
       // entry stage (fallback Ready for development, position 6).
-      targetStageId = task.entry_stage_id ?? this.stageIdForPosition(task.board_id, 6);
+      targetStageId = task.entry_stage_id ?? this.stageIdForPosition(task.board_id, READY_FOR_DEV_POSITION);
     }
 
     if (!targetStageId || targetStageId === task.stage_id) {
@@ -1662,9 +1728,12 @@ export class TaskChangeRouter {
    *   any countable child not yet Done   -> Ready for development (6)
    *   no countable children              -> no-op (epic keeps its stage)
    *
-   * NEVER rewrites an epic the human parked at 'Won't do' — that terminal stage
-   * is an explicit decision, not a derived one; a child stage-move must not
-   * resurrect it.
+   * OWNERSHIP POLICY (F9): the rollup owns ONLY the DERIVED pair Ready for
+   * development (6) <-> Done (9). An epic whose CURRENT stage is anything else —
+   * Idea (1), Won't do (10), or any future position — is a human-asserted parking
+   * and is NEVER re-derived by a child event. This subsumes the old Won't-do-only
+   * guard: a child stage-move must not resurrect a parked epic, whatever position
+   * the human chose.
    *
    * Writes via applyChange with actor='orchestrator' + entityType='epic', so the
    * orchestrator clears assertStageAuthority and the (epic-irrelevant) active-run
@@ -1682,9 +1751,15 @@ export class TaskChangeRouter {
       throw new TaskChangeError('not_found', `epic ${epicId} not found`);
     }
 
-    // A human-parked Won't-do epic is terminal: the rollup never resurrects it.
+    // OWNERSHIP POLICY (F9): the rollup owns ONLY the derived pair {6, 9}. An
+    // epic parked anywhere else (Idea=1, Won't do=10, any future position) is
+    // human-asserted and never re-derived; bail before touching it. An
+    // unresolvable stage row is likewise left untouched.
     const epicStage = this.lookupStage(epic.stage_id);
-    if (epicStage && epicStage.position === WONT_DO_POSITION) {
+    if (
+      !epicStage ||
+      (epicStage.position !== READY_FOR_DEV_POSITION && epicStage.position !== DONE_POSITION)
+    ) {
       return;
     }
 
@@ -1711,7 +1786,10 @@ export class TaskChangeRouter {
 
     const allDone = children.every((c) => c.position === DONE_POSITION);
     // allDone -> Done (9); otherwise hold at Ready for development (position 6).
-    const targetStageId = this.stageIdForPosition(epic.board_id, allDone ? DONE_POSITION : 6);
+    const targetStageId = this.stageIdForPosition(
+      epic.board_id,
+      allDone ? DONE_POSITION : READY_FOR_DEV_POSITION,
+    );
 
     if (!targetStageId || targetStageId === epic.stage_id) {
       return; // already there, or no resolvable target
