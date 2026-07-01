@@ -147,6 +147,7 @@ describe('agentOverlayWriter — overlay content (AC-P1-8)', () => {
       agentKey: 'implement',
       description: 'Inherits the run model.',
       tools: ['Read', 'Edit'],
+      enabledMcps: [],
       systemPrompt: ensureResultSection('Do the work.'),
     });
     expect(inheritMd).not.toMatch(/^model:/m);
@@ -155,6 +156,7 @@ describe('agentOverlayWriter — overlay content (AC-P1-8)', () => {
       agentKey: 'implement',
       description: 'Pinned to a concrete model.',
       tools: ['Read', 'Edit'],
+      enabledMcps: [],
       systemPrompt: ensureResultSection('Do the work.'),
       model: 'claude-sonnet-5',
     });

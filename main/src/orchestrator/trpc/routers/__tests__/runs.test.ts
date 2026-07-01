@@ -589,7 +589,7 @@ describe('cyboflow.runs.start', () => {
 
     try {
       const caller = appRouter.createCaller(createContext());
-      await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, model: 'opus' });
+      await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, sessionId: 'sess-1', model: 'opus' });
 
       expect(launchMock).toHaveBeenCalledOnce();
       expect(launchMock).toHaveBeenCalledWith(
@@ -598,7 +598,7 @@ describe('cyboflow.runs.start', () => {
         undefined, // substrate
         undefined, // taskId
         undefined, // ideaId
-        undefined, // sessionId
+        'sess-1', // sessionId
         undefined, // permissionMode
         undefined, // baseBranch (position 8 placeholder)
         undefined, // taskIds

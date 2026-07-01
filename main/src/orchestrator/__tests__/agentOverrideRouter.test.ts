@@ -559,6 +559,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'x',
       systemPrompt: 'y',
       tools: TOOLS,
+      enabledMcps: [],
     });
     expect((router.getByKey(1, 'implement') as AgentOverrideRow).model).toBeNull();
   });
@@ -574,6 +575,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'x',
       systemPrompt: 'y',
       tools: TOOLS,
+      enabledMcps: [],
       model: 'sonnet',
     });
     expect((router.getByKey(1, 'implement') as AgentOverrideRow).model).toBe('sonnet');
@@ -585,6 +587,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'x2',
       systemPrompt: 'y2',
       tools: TOOLS,
+      enabledMcps: [],
       model: null,
     });
     expect((router.getByKey(1, 'implement') as AgentOverrideRow).model).toBeNull();
@@ -601,6 +604,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
       description: 'x',
       systemPrompt: 'y',
       tools: TOOLS,
+      enabledMcps: [],
       model: 'haiku',
     });
     expect((router.getByKey(1, 'helper') as AgentOverrideRow).model).toBe('haiku');
@@ -618,6 +622,7 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
         description: 'x',
         systemPrompt: 'y',
         tools: TOOLS,
+        enabledMcps: [],
         // Bypass the static type to exercise the runtime guard (the tRPC zod
         // would normally reject this before it reaches the chokepoint).
         model: 'gpt-4' as unknown as 'opus',
