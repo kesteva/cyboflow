@@ -49,7 +49,7 @@ export interface AppConfig {
       claude?: boolean;
     };
     claudeConfig?: {
-      model?: 'auto' | 'sonnet' | 'opus' | 'haiku';
+      model?: 'auto' | 'fable' | 'sonnet' | 'opus' | 'haiku';
       permissionMode?: 'ignore' | 'approve';
       ultrathink?: boolean;
     };

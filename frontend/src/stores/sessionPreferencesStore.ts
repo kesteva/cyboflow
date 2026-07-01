@@ -9,7 +9,7 @@ export interface SessionCreationPreferences {
     claude: boolean;
   };
   claudeConfig: {
-    model: 'auto' | 'sonnet' | 'opus' | 'haiku';
+    model: 'auto' | 'fable' | 'sonnet' | 'opus' | 'haiku';
     permissionMode: 'approve' | 'ignore';
     ultrathink: boolean;
   };

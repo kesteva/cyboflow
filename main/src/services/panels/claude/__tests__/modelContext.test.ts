@@ -58,6 +58,15 @@ describe('modelContext', () => {
       expect(resolveModelAlias('haiku')).toBe('claude-haiku-4-5');
     });
 
+    it('pins the fable alias to the current Fable snapshot (1M-native, no marker)', () => {
+      // Fable 5, like Sonnet 5, is 1M by default — the bare id already reports a
+      // 1M window, so no [1m] marker and no context-1m beta.
+      expect(resolveModelAlias('fable')).toBe('claude-fable-5');
+      expect(resolveModelAlias('Fable')).toBe('claude-fable-5');
+      expect(hasContext1MSuffix(resolveModelAlias('fable'))).toBe(false);
+      expect(modelSupportsContext1M(resolveModelAlias('fable'))).toBe(false);
+    });
+
     it('matches aliases case/space-insensitively', () => {
       expect(resolveModelAlias('Opus')).toBe('claude-opus-4-8[1m]');
       expect(resolveModelAlias(' SONNET ')).toBe('claude-sonnet-5');

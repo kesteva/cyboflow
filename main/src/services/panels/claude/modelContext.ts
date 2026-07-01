@@ -19,7 +19,7 @@ export const CONTEXT_1M_BETA: SdkBeta = 'context-1m-2025-08-07';
  * takes the resolution out of the SDK's hands: Opus 4.8 and Sonnet 5 are both
  * 1M-context at standard pricing.
  *
- * The two families reach their 1M window differently:
+ * The families reach their 1M window differently:
  *   - Opus carries cyboflow's `[1m]` model-id suffix; the runtime reports a
  *     1,000,000 window for `claude-opus-4-8[1m]`, so the suffixed id IS the 1M
  *     model and the seam keeps it (no beta). The bare `claude-opus-4-8`
@@ -32,10 +32,16 @@ export const CONTEXT_1M_BETA: SdkBeta = 'context-1m-2025-08-07';
  *     `[1m]`-suffixed id — that path is preserved in {@link sdkModelAndBetas} /
  *     {@link modelSupportsContext1M} for a caller that explicitly pins
  *     `claude-sonnet-4-6[1m]`, but the default `sonnet` alias no longer uses it.
+ *   - Fable 5 (`claude-fable-5`) is Anthropic's frontier model and, like Sonnet 5,
+ *     is 1M by DEFAULT — the bare id already reports a 1M window, so NO `[1m]`
+ *     suffix and NO beta. Fable can be pulled from availability (it has been
+ *     before); the availability guard ({@link applyModelAvailabilityFallback})
+ *     swaps a picked-but-unavailable Fable to Opus at the spawn seam.
  *
  * Keep these in sync with the latest GA snapshots when models roll forward.
  */
 const MODEL_ALIAS_TO_ID: Readonly<Record<string, string>> = {
+  fable: 'claude-fable-5',
   opus: 'claude-opus-4-8[1m]',
   'opus-250k': 'claude-opus-4-8',
   sonnet: 'claude-sonnet-5',

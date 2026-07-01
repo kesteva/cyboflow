@@ -29,12 +29,16 @@ export interface ModelOption {
   description: string;
 }
 
-// Opus is listed once per context window (1M / 250K); the spawn seam
-// (modelContext.ts) maps `opus`→4.8[1m], `opus-250k`→4.8. Sonnet 5 is 1M-native
-// (no context-1m beta, no 250K mode), so it has a single honest 1M row; the
-// `sonnet-250k` alias stays resolvable (→ Sonnet 5) for back-compat but is not
-// offered here.
+// Fable 5 is Anthropic's frontier model (1M-native, like Sonnet 5) and leads the
+// list. Opus is listed once per context window (1M / 250K); the spawn seam
+// (modelContext.ts) maps `fable`→claude-fable-5, `opus`→4.8[1m], `opus-250k`→4.8.
+// Sonnet 5 is 1M-native (no context-1m beta, no 250K mode), so it has a single
+// honest 1M row; the `sonnet-250k` alias stays resolvable (→ Sonnet 5) for
+// back-compat but is not offered here. Fable can be pulled from availability (it
+// has been before) — the picker greys it out when the availability guard reports
+// it unavailable (see useModelAvailabilityStore / isModelOptionDisabled).
 export const MODEL_OPTIONS: ReadonlyArray<ModelOption> = [
+  { id: 'fable', label: 'Fable 5', context: '1M', description: 'Frontier — most capable' },
   { id: 'opus', label: 'Opus 4.8', context: '1M', description: 'Most capable' },
   { id: 'opus-250k', label: 'Opus 4.8', context: '250K', description: 'Most capable' },
   { id: 'sonnet', label: 'Sonnet 5', context: '1M', description: 'Balanced' },

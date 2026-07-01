@@ -53,9 +53,11 @@ describe('ModelPill', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it('exposes Opus in both context windows, single-row Sonnet 5, most-capable first', () => {
-    // Sonnet 5 is 1M-native (no 250K row); Opus keeps its 1M / 250K pair.
+  it('leads with frontier Fable 5, exposes Opus in both context windows, single-row Sonnet 5', () => {
+    // Fable 5 leads (1M-native frontier); Sonnet 5 is 1M-native (no 250K row);
+    // Opus keeps its 1M / 250K pair.
     expect(MODEL_OPTIONS.map((o) => o.id)).toEqual([
+      'fable',
       'opus',
       'opus-250k',
       'sonnet',

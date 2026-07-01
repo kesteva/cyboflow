@@ -4,10 +4,10 @@
  * model that produced it.
  *
  * Rates are the current public per-MTok list prices, resolved by model family
- * (opus / sonnet / haiku) via substring match so aliases and context-window id
- * suffixes (e.g. 'claude-opus-4-8[1m]', 'opus') all map correctly. Cache
- * pricing follows the standard multipliers: a 5-minute cache WRITE costs 1.25×
- * the input rate, a cache READ costs 0.1×.
+ * (fable / opus / sonnet / haiku) via substring match so aliases and context-window
+ * id suffixes (e.g. 'claude-opus-4-8[1m]', 'opus', 'claude-fable-5') all map
+ * correctly. Cache pricing follows the standard multipliers: a 5-minute cache WRITE
+ * costs 1.25× the input rate, a cache READ costs 0.1×.
  *
  * This is an estimate for the live session meter, not a billing figure: it uses
  * flat family rates (no long-context premium — Opus 4.8 / Sonnet 5 1M context
@@ -15,10 +15,11 @@
  */
 import type { SessionTokenBreakdown } from '../hooks/useSessionMetrics';
 
-type ModelFamily = 'opus' | 'sonnet' | 'haiku';
+type ModelFamily = 'fable' | 'opus' | 'sonnet' | 'haiku';
 
 /** Per-MTok list prices (USD per million tokens) by model family. */
 const PER_MTOK: Record<ModelFamily, { input: number; output: number }> = {
+  fable: { input: 10, output: 50 },
   opus: { input: 5, output: 25 },
   sonnet: { input: 3, output: 15 },
   haiku: { input: 1, output: 5 },
@@ -40,6 +41,7 @@ export interface ModelRates {
 function modelFamily(model: string | null): ModelFamily | null {
   if (!model) return null;
   const m = model.toLowerCase();
+  if (m.includes('fable')) return 'fable';
   if (m.includes('opus')) return 'opus';
   if (m.includes('sonnet')) return 'sonnet';
   if (m.includes('haiku')) return 'haiku';
