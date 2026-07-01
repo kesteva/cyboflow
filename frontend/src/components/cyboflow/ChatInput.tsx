@@ -51,6 +51,7 @@ import type { IPCResponse } from '../../utils/api';
 import { trpc } from '../../trpc/client';
 import { UnifiedComposer } from './unified/UnifiedComposer';
 import { PermissionModePill } from './unified/PermissionModePill';
+import { modelDisplayLabel } from './unified/ModelPill';
 import { resolveChatVisibility } from './unified/useChatVisibility';
 
 /**
@@ -482,6 +483,13 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
       primaryLabel={isSdkRunning ? 'Queue' : 'Send'}
       onSubmit={() => handleSend()}
       onTogglePtyOpen={isInteractive ? () => setPtyOpen((v) => !v) : undefined}
+      // Read-only (untoggleable) model pill for the run — the per-run model is
+      // pinned at launch (workflow_runs.model, migration 037) and never changes
+      // mid-run, so it renders as a ReadonlyPill via UnifiedComposer's modelLabel
+      // path. NULL/'auto' (no pin → SDK default) omits the pill.
+      modelLabel={
+        activeRun?.model && activeRun.model !== 'auto' ? modelDisplayLabel(activeRun.model) : null
+      }
       permissionSlot={permissionSlot}
       sendError={sendError}
     />

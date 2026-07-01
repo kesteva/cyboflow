@@ -170,6 +170,14 @@ export interface WorkflowRunListRow {
   /** Sprint lane batch (migration 022) — soft link to sprint_batches.id; stamped on seeded 'sprint' runs, NULL for every other run. */
   batch_id?: string | null;
   /**
+   * Per-run pinned model alias (migration 037) — the user-facing alias stamped
+   * onto workflow_runs.model at launch (Configure surface), resolved to a concrete
+   * snapshot at the spawn seam. Surfaced on the list row so the run composer can
+   * show a READ-ONLY model pill. NULL/'auto' → no pin (SDK default), so the pill
+   * is omitted. Optional + additive, mirroring `substrate?` (fixtures unaffected).
+   */
+  model?: string | null;
+  /**
    * Per-run agent permission mode (resolved + stamped at creation by
    * permissionModeResolver, mutable at runtime via runs.setPermissionMode — ISSUE
    * #2). Surfaced on the list row so the run composer's PermissionModePill can

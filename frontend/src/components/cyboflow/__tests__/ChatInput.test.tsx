@@ -437,6 +437,28 @@ describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
     // The nudge path must NOT fire for a still-running run.
     expect(vi.mocked(trpc.cyboflow.runs.nudge.mutate)).not.toHaveBeenCalled();
   });
+
+  // Read-only (untoggleable) model pill — the run's launch-pinned model
+  // (workflow_runs.model) surfaces as a locked label; no editable picker.
+  it('renders a read-only model pill from the run\'s pinned model', () => {
+    act(() => {
+      useActiveRunsStore.setState({
+        runsByProject: { [PROJECT_ID]: [{ ...makeAwaitingRow(), model: 'opus' }] },
+      });
+    });
+    render(<ChatInput runId={RUN_ID} />);
+    expect(screen.getByText('Opus 4.8 · 1M')).toBeInTheDocument();
+  });
+
+  it('renders NO model pill when the run pins no model (auto / SDK default)', () => {
+    act(() => {
+      useActiveRunsStore.setState({
+        runsByProject: { [PROJECT_ID]: [{ ...makeAwaitingRow(), model: 'auto' }] },
+      });
+    });
+    render(<ChatInput runId={RUN_ID} />);
+    expect(screen.queryByText(/·\s*(1M|250K|200K)/)).toBeNull();
+  });
 });
 
 describe('ChatInput — workflow-idle reopen (failed)', () => {
