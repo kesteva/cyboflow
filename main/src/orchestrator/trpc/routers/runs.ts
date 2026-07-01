@@ -884,27 +884,42 @@ export const runsRouter = router({
         }
         // Q1 eligibility pre-check (fail fast before the launch machinery). A
         // sprint may only seed APPROVED tasks at a ready-or-later, non-terminal
-        // stage; reject a selection with zero eligible tasks here rather than
-        // letting createForRun reject it deep inside RunLauncher.launch.
+        // stage. STRICT for this user-facing path: a MIXED selection (some
+        // eligible, some not) is rejected too — createForRun silently DROPS
+        // ineligible ids, and launching a sprint that executes only part of an
+        // explicit selection with no notice is worse than asking the user to
+        // fix the selection. (The agent path — cyboflow_create_sprint_batch —
+        // keeps the permissive drop-with-log behaviour in createForRun.)
         // SprintLaneStore.filterEligibleTaskIds is the same guard createForRun
-        // uses (it degrades to permissive on a pre-036 schema). Guarded so an
+        // uses (it degrades to permissive on a pre-042 schema). Guarded so an
         // uninitialized store (tests) simply skips the pre-check — createForRun
         // remains the authoritative gate.
-        let eligibleCount: number | null = null;
+        let eligibleIds: string[] | null = null;
         try {
-          eligibleCount = SprintLaneStore.getInstance().filterEligibleTaskIds(
+          eligibleIds = SprintLaneStore.getInstance().filterEligibleTaskIds(
             input.projectId,
             input.taskIds,
-          ).length;
+          );
         } catch {
-          eligibleCount = null;
+          eligibleIds = null;
         }
-        if (eligibleCount === 0) {
-          throw new TRPCError({
-            code: 'BAD_REQUEST',
-            message:
-              'no sprint-eligible tasks in selection (each must be approved + at "Ready for development" or later, not archived/done)',
-          });
+        if (eligibleIds !== null) {
+          if (eligibleIds.length === 0) {
+            throw new TRPCError({
+              code: 'BAD_REQUEST',
+              message:
+                'no sprint-eligible tasks in selection (each must be approved + at "Ready for development" or later, not archived/done)',
+            });
+          }
+          const uniqueSelection = [...new Set(input.taskIds)];
+          if (eligibleIds.length < uniqueSelection.length) {
+            const eligibleSet = new Set(eligibleIds);
+            const ineligible = uniqueSelection.filter((id) => !eligibleSet.has(id));
+            throw new TRPCError({
+              code: 'BAD_REQUEST',
+              message: `selection includes ${ineligible.length} sprint-ineligible task(s): ${ineligible.join(', ')} — each must be approved + at "Ready for development" or later, not archived/done/won't-do. Remove them or fix their state, then relaunch.`,
+            });
+          }
         }
       }
       // Forward the per-run substrate choice (IDEA-013), native-task link
