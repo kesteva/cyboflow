@@ -22,6 +22,7 @@ const fakeWindowControls = vi.hoisted(() => ({
   failLoad: false,
   emptyPng: false,
   neverFinish: false,
+  neverCapture: false,
   setContentSizeCalls: [] as Array<[number, number]>,
   destroyed: 0,
   // The smallest valid PNG, as bytes capturePage().toPNG() returns.
@@ -56,6 +57,9 @@ vi.mock('electron', () => {
       return this.loadURL();
     }
     async capturePage(): Promise<{ toPNG: () => Buffer }> {
+      // A wedged offscreen renderer: capturePage() never resolves. Exercises the
+      // backend's abort/timeout bound (the window must be destroyed, not leaked).
+      if (fakeWindowControls.neverCapture) return new Promise<{ toPNG: () => Buffer }>(() => {});
       return {
         toPNG: () => (fakeWindowControls.emptyPng ? Buffer.alloc(0) : fakeWindowControls.onePxPng),
       };
@@ -88,6 +92,7 @@ beforeEach(async () => {
   fakeWindowControls.failLoad = false;
   fakeWindowControls.emptyPng = false;
   fakeWindowControls.neverFinish = false;
+  fakeWindowControls.neverCapture = false;
   fakeWindowControls.setContentSizeCalls = [];
   fakeWindowControls.destroyed = 0;
   artifactsDir = await mkdtemp(join(tmpdir(), 'cvv-capture-'));
@@ -198,5 +203,31 @@ describe('CapturePageBackend', () => {
     const res = await new CapturePageBackend().capture(ctx(), ac.signal);
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/aborted/i);
+  });
+
+  it('aborts mid-capture (capturePage never resolves): destroys the window and returns ok:false (R1 #1b)', async () => {
+    // A wedged renderer whose capturePage() never settles + ignores the signal. The
+    // backend must destroy the window on abort and settle ok:false — never hang.
+    fakeWindowControls.neverCapture = true;
+    const ac = new AbortController();
+    const p = new CapturePageBackend({ capturePageTimeoutMs: 10_000 }).capture(ctx(), ac.signal);
+    // Let the page load finish + capturePage() start and hang, then abort.
+    await new Promise((r) => setTimeout(r, 20));
+    ac.abort();
+    const res = await p;
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/aborted/i);
+    expect(fakeWindowControls.destroyed).toBe(1); // window torn down on abort (not leaked)
+  });
+
+  it('times out a wedged capturePage (never resolves) and returns ok:false + destroys the window (R1 #1b)', async () => {
+    fakeWindowControls.neverCapture = true;
+    const res = await new CapturePageBackend({ capturePageTimeoutMs: 20 }).capture(
+      ctx(),
+      new AbortController().signal,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/timed out/i);
+    expect(fakeWindowControls.destroyed).toBe(1); // wedged window destroyed on timeout
   });
 });

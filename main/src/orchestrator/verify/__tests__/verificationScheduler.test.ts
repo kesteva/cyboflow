@@ -24,9 +24,13 @@ import {
   verifyPortLease,
   sprintVerifyBatchLease,
   BATCH_MUTEX_MAX_QUEUED_HOLDERS,
+  verificationEvents,
+  verificationChannel,
   type DevServerProvider,
   type DevServerHandle,
   type DevServerSpawnArgs,
+  type DevServerContextResolver,
+  type VerificationTerminalEvent,
 } from '../verificationScheduler';
 import { Mutex } from '../../../utils/mutex';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
@@ -1633,5 +1637,221 @@ describe('VerificationScheduler — hydrate input from verify.json before lease 
     // No start hydrated → no port lease → no spawn; the static capture still ran.
     expect(spawnSpy).not.toHaveBeenCalled();
     expect(rowStatus(db, id).status).toBe('passed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R1 — scheduler reliability: abort-bounded await (deadline can't be raced away),
+// re-nudge on lease release, and cancel-safe status transitions.
+// ---------------------------------------------------------------------------
+
+/** Poll `pred` until true or the timeout elapses (setImmediate-driven drains need ticks). */
+async function waitFor(pred: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+const RELIABILITY_INPUT = { intent: 'looks right', url: 'http://placeholder' } as const;
+
+describe('VerificationScheduler — R1 reliability: abort-bounded deadline (finding #1)', () => {
+  it('a backend whose capture() NEVER settles: the deadline still marks timeout, releases the lease, and the subsystem keeps draining', async () => {
+    const mutex = new Mutex();
+    const leasePool = new ResourceLeasePool(mutex);
+    // capture() never resolves AND ignores the signal (abort-unaware). Pre-fix this
+    // wedged runChosen forever → drain's allSettled never resolved → draining stuck.
+    const hangBackend: VisualBackend = {
+      id: 'peekaboo',
+      rung: 2,
+      requiredLease: () => 'verify:screen',
+      healthCheck: async () => true,
+      capture: () => new Promise<CaptureResult>(() => {}),
+    };
+    const okSink: { ctx?: CaptureContext } = {};
+    const okBackend = fakeBackend({ id: 'playwright', rung: 1, lease: null, sink: okSink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { peekaboo: hangBackend, playwright: okBackend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      leasePool,
+      requestTimeoutMs: 50,
+    });
+
+    const idHang = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { ...RELIABILITY_INPUT },
+      chain: ['peekaboo'],
+    });
+
+    // The deadline aborts the hung capture → timeout, and the screen lease is freed
+    // even though the underlying capture promise never settled.
+    await waitFor(() => rowStatus(db, idHang).status === 'timeout');
+    expect(mutex.isLocked('verify:screen')).toBe(false);
+
+    // The subsystem is NOT wedged: a freshly enqueued request is still processed.
+    const idOk = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { ...RELIABILITY_INPUT },
+      chain: ['playwright'],
+    });
+    await waitFor(() => rowStatus(db, idOk).status === 'passed');
+  });
+});
+
+describe('VerificationScheduler — R1 reliability: re-nudge on lease release (finding #2)', () => {
+  it('two requests contending for the single verify:screen lease both drain WITHOUT any new enqueue', async () => {
+    const mutex = new Mutex();
+    const leasePool = new ResourceLeasePool(mutex);
+    const order: string[] = [];
+    // Both requests need the SAME count-1 'verify:screen' lease, so pass 1 can only
+    // lease one; the other is left 'queued'. Pre-fix nothing re-scanned after the
+    // first released its lease → the second stranded 'queued' forever.
+    const screenBackend: VisualBackend = {
+      id: 'peekaboo',
+      rung: 2,
+      requiredLease: () => 'verify:screen',
+      healthCheck: async () => true,
+      capture: async (ctx): Promise<CaptureResult> => {
+        order.push(ctx.requestId);
+        return { ok: true, fileNames: ['default.png'] };
+      },
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { peekaboo: screenBackend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      leasePool,
+    });
+
+    const idA = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { ...RELIABILITY_INPUT },
+      chain: ['peekaboo'],
+    });
+    const idB = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { ...RELIABILITY_INPUT },
+      chain: ['peekaboo'],
+    });
+
+    // No further enqueue — the re-nudge on lease release must drain BOTH.
+    await waitFor(
+      () => rowStatus(db, idA).status === 'passed' && rowStatus(db, idB).status === 'passed',
+    );
+    expect(order.length).toBe(2);
+    // The screen lease is free again after both settled.
+    expect(mutex.isLocked('verify:screen')).toBe(false);
+  });
+});
+
+describe('VerificationScheduler — R1 reliability: cancel-safe transitions (finding #3)', () => {
+  it('a row swept to timeout BEFORE markLeased never captures and releases the lease (#3a)', async () => {
+    const mutex = new Mutex();
+    const leasePool = new ResourceLeasePool(mutex);
+    let captured = false;
+    const backend: VisualBackend = {
+      id: 'playwright',
+      rung: 1,
+      requiredLease: () => 'verify:screen',
+      healthCheck: async () => true,
+      capture: async (): Promise<CaptureResult> => {
+        captured = true;
+        return { ok: true, fileNames: ['default.png'] };
+      },
+    };
+
+    // Injected resolver runs DURING processRow's await window (before markLeased). It
+    // sweeps the row to 'timeout' — simulating cancelForRun winning the race. The
+    // closure reads `sched` only when invoked (during drain), after it is assigned.
+    const resolver: DevServerContextResolver = async () => {
+      sched.cancelForRun('run-1');
+      return null;
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { playwright: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      leasePool,
+      devServerContextResolver: resolver,
+    });
+
+    const id = enqueueRow(db, { chain: ['playwright'], url: 'http://placeholder' });
+    await sched.drain();
+
+    expect(captured).toBe(false); // runChosen never ran (markLeased changed 0 rows)
+    expect(rowStatus(db, id).status).toBe('timeout'); // the canceled status is preserved
+    expect(mutex.isLocked('verify:screen')).toBe(false); // the acquired lease was released
+  });
+
+  it('a row swept to timeout WHILE running does not get overwritten and delivers NOTHING (#3b)', async () => {
+    let releaseCapture!: () => void;
+    const gate = new Promise<void>((r) => {
+      releaseCapture = r;
+    });
+    const id = enqueueRow(db, { chain: ['playwright'], url: 'http://placeholder' });
+
+    const backend: VisualBackend = {
+      id: 'playwright',
+      rung: 1,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async (): Promise<CaptureResult> => {
+        // A cancel/timeout sweep WINS the race while this capture is in flight.
+        db.prepare(
+          `UPDATE verification_requests SET status = 'timeout', error_message = 'canceled' WHERE id = ?`,
+        ).run(id);
+        await gate;
+        return { ok: true, fileNames: ['default.png'] };
+      },
+    };
+
+    let delivered = 0;
+    const events: string[] = [];
+    const listener = (e: VerificationTerminalEvent): void => {
+      events.push(e.status);
+    };
+    verificationEvents.on(verificationChannel('run-1'), listener);
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { playwright: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      onVerdict: () => {
+        delivered += 1;
+      },
+    });
+
+    const drainP = sched.drain();
+    await new Promise((r) => setTimeout(r, 20));
+    releaseCapture();
+    await drainP;
+
+    verificationEvents.removeListener(verificationChannel('run-1'), listener);
+
+    // markTerminal's guard blocked the 'passed' write (row already terminal), so:
+    expect(rowStatus(db, id).status).toBe('timeout'); // NOT overwritten with passed
+    expect(delivered).toBe(0); // NO onVerdict delivery (no finding / lane write)
+    expect(events.length).toBe(0); // NO terminal event emitted
   });
 });

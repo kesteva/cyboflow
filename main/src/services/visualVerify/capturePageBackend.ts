@@ -40,6 +40,72 @@ const DEFAULT_VIEWPORT = { width: 1280, height: 800, label: 'default' } as const
 const LOAD_TIMEOUT_MS = 30_000;
 
 /**
+ * How long to wait for a single `webContents.capturePage()` to resolve before
+ * giving up on that viewport. An offscreen renderer can WEDGE (GPU/compositor
+ * stall) so the raw capturePage() promise may never settle; without this ceiling
+ * the scheduler's detached capture work leaks a wedged BrowserWindow forever. The
+ * per-request AbortSignal (deadline / cancelForRun) also short-circuits the wait.
+ * Injectable via CapturePageBackendOptions so tests can drive it fast.
+ */
+const CAPTURE_PAGE_TIMEOUT_MS = 30_000;
+
+/** Constructor options for CapturePageBackend (test-injectable timeouts). */
+export interface CapturePageBackendOptions {
+  /** Per-viewport capturePage() ceiling in ms. Defaults to CAPTURE_PAGE_TIMEOUT_MS. */
+  capturePageTimeoutMs?: number;
+}
+
+/**
+ * Snapshot the offscreen window's current frame, but bounded by BOTH the per-request
+ * AbortSignal AND a capture-side timeout. On abort OR timeout we DESTROY the window
+ * (which unblocks/rejects the underlying capture and frees the wedged renderer) and
+ * reject — capture()'s catch then returns ok:false and the scheduler records the
+ * request terminal instead of hanging. Resolves the PNG bytes on success.
+ */
+function captureViewportPng(
+  win: BrowserWindow,
+  signal: AbortSignal,
+  timeoutMs: number,
+): Promise<Buffer> {
+  return new Promise<Buffer>((resolve, reject) => {
+    let settled = false;
+    const destroyWin = (): void => {
+      if (!win.isDestroyed()) win.destroy();
+    };
+    const settleResolve = (png: Buffer): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      resolve(png);
+    };
+    const settleReject = (err: Error, tearDown: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      if (tearDown) destroyWin();
+      reject(err);
+    };
+    const onAbort = (): void => settleReject(new Error('capture aborted'), true);
+    const timer = setTimeout(
+      () => settleReject(new Error(`capturePage timed out after ${timeoutMs}ms`), true),
+      timeoutMs,
+    );
+
+    if (signal.aborted) {
+      settleReject(new Error('capture aborted'), true);
+      return;
+    }
+    signal.addEventListener('abort', onAbort, { once: true });
+    win.webContents.capturePage().then(
+      (image) => settleResolve(image.toPNG()),
+      (err: unknown) => settleReject(err instanceof Error ? err : new Error(String(err)), false),
+    );
+  });
+}
+
+/**
  * Sanitize a viewport label into a safe PNG basename stem. Strips path separators
  * and odd characters so a malicious/strange label can never escape artifactsDir.
  * Falls back to the index when the label sanitizes to empty.
@@ -143,6 +209,13 @@ export class CapturePageBackend implements VisualBackend {
   readonly id: VisualBackendId = 'capturePage';
   readonly rung = 0;
 
+  /** Per-viewport capturePage() ceiling — injectable so tests drive it fast. */
+  private readonly capturePageTimeoutMs: number;
+
+  constructor(opts: CapturePageBackendOptions = {}) {
+    this.capturePageTimeoutMs = opts.capturePageTimeoutMs ?? CAPTURE_PAGE_TIMEOUT_MS;
+  }
+
   /** Rung 0 needs no scarce resource — fully parallel. */
   requiredLease(_input: VerificationRequestInput): string | null {
     return null;
@@ -200,8 +273,9 @@ export class CapturePageBackend implements VisualBackend {
         // none on an offscreen window, but this is the documented sizing call).
         win.setContentSize(vp.width, vp.height);
 
-        const image = await win.webContents.capturePage();
-        const png = image.toPNG();
+        // Abort/timeout-bounded so a wedged offscreen renderer can never leave this
+        // await (and the scheduler's detached work) hanging with a leaked window.
+        const png = await captureViewportPng(win, signal, this.capturePageTimeoutMs);
         if (png.length === 0) {
           // A blank/zero-byte snapshot is a runtime failure for this viewport;
           // surface it so the scheduler records the request as failed.

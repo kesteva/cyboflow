@@ -201,6 +201,87 @@ export class ResourceLeasePool {
 }
 
 // ---------------------------------------------------------------------------
+// Abort-bounded await (R1 #1a — the scheduler must NEVER hang on a collaborator
+// that ignores its abort signal)
+//
+// The per-request deadline `.abort()`s the shared controller, but a backend/judge
+// that does not honour the signal (e.g. an offscreen renderer wedged on a GPU
+// stall) may never settle its capture promise. Awaiting that promise raw would
+// hang runChosen forever → drain()'s Promise.allSettled never resolves → `draining`
+// stays true → every future request across all runs strands 'queued'. raceWithAbort
+// closes that hole at the SCHEDULER: it rejects with a distinguishable AbortRaceError
+// THE MOMENT the signal aborts, even if the underlying promise never settles. The
+// orphaned promise is intentionally DETACHED (its eventual settle/reject is logged,
+// not awaited). The backend-side cleanup (CapturePageBackend destroys its window on
+// abort) is the complementary fix that prevents a leaked wedged window; this race is
+// the hard guarantee that the loop itself can never wedge.
+// ---------------------------------------------------------------------------
+
+/**
+ * The distinguishable rejection raceWithAbort throws when the signal aborts before
+ * the raced promise settles. runChosen's catch keys timeout-vs-failed off
+ * `signal.aborted` (not this identity), but the named class keeps the abort path
+ * greppable in logs + assertable in tests.
+ */
+export class AbortRaceError extends Error {
+  constructor(label: string) {
+    super(`aborted while awaiting ${label}`);
+    this.name = 'AbortRaceError';
+  }
+}
+
+/**
+ * Await `promise`, but reject with an AbortRaceError the instant `signal` aborts —
+ * even if `promise` never settles (an abort-unaware collaborator). When the abort
+ * wins, the underlying promise is DETACHED: its later settle/reject is logged at
+ * debug (so a leaked orphan is observable) and dropped. When the promise wins, its
+ * value/error propagates and the abort listener is removed. Orchestrator-local (no
+ * electron/service import) so the scheduler stays standalone-typecheck-clean.
+ */
+export function raceWithAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+  label: string,
+  logger?: LoggerLike,
+): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(new AbortRaceError(label));
+  }
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const onAbort = (): void => {
+      if (settled) return;
+      settled = true;
+      reject(new AbortRaceError(label));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        if (settled) {
+          logger?.debug('[VerificationScheduler] detached work settled after abort', { label });
+          return;
+        }
+        settled = true;
+        resolve(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        if (settled) {
+          logger?.debug('[VerificationScheduler] detached work rejected after abort', {
+            label,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return;
+        }
+        settled = true;
+        reject(err instanceof Error ? err : new Error(String(err)));
+      },
+    );
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Dev-server provider seam (S2 — scheduler-owned dev server)
 //
 // The scheduler OWNS the dev server (locked decision #1): for a deliverable whose
@@ -682,7 +763,27 @@ export class VerificationScheduler {
     }
     if (inFlight.length > 0) {
       await Promise.allSettled(inFlight);
+      // RE-NUDGE ON LEASE RELEASE (R1 #2): the in-flight work we just awaited has
+      // released its lease(s). A row left 'queued' this pass may have been blocked
+      // ONLY on a lease that just freed (lease contention — e.g. two lanes wanting
+      // the single 'verify:screen'). Schedule one more drain pass so a released lease
+      // with queued work deterministically re-scans — no polling timer. Guarded on
+      // inFlight.length > 0 so a pass that leased NOTHING (pool held externally, no
+      // work of ours to free it) does NOT spin: it waits for a future enqueue /
+      // cancel to nudge instead. nudge() coalesces into the current runDrainLoop via
+      // rescanRequested (or schedules a fresh loop when drain() was called directly).
+      if (this.hasQueuedRequests()) {
+        this.nudge();
+      }
     }
+  }
+
+  /** True when at least one request row is still awaiting a drain ('queued'). */
+  private hasQueuedRequests(): boolean {
+    const row = this.db
+      .prepare(`SELECT 1 FROM verification_requests WHERE status = 'queued' LIMIT 1`)
+      .get();
+    return row !== undefined;
   }
 
   /** SELECT the 'queued' backlog in fair FIFO order. */
@@ -715,8 +816,13 @@ export class VerificationScheduler {
     const type = row.verify_type as VerificationType;
     const parsed = this.parseInput(row.deliverable_json);
     if (!parsed) {
-      this.markTerminal(row.id, 'skipped', { error: 'unparseable deliverable_json' });
-      await this.deliver(row, 'skipped', undefined, []);
+      await this.markTerminalAndDeliver(
+        row,
+        'skipped',
+        { error: 'unparseable deliverable_json' },
+        undefined,
+        [],
+      );
       return { work: null };
     }
 
@@ -746,10 +852,14 @@ export class VerificationScheduler {
     if (usable.length === 0) {
       // Empty chain OR every listed backend absent from the registry — missing
       // precondition. SKIP, never fail (a missing TCC grant must not wedge a sprint).
-      this.markTerminal(row.id, 'skipped', {
-        error: chain.length === 0 ? 'empty chain' : 'no listed backend available',
-      });
-      await this.deliver(row, 'skipped', undefined, [], input);
+      await this.markTerminalAndDeliver(
+        row,
+        'skipped',
+        { error: chain.length === 0 ? 'empty chain' : 'no listed backend available' },
+        undefined,
+        [],
+        input,
+      );
       return { work: null };
     }
 
@@ -777,7 +887,23 @@ export class VerificationScheduler {
 
     // Transition leased→running SYNCHRONOUSLY (the lease is already held), then
     // detach the capture work so the drain loop proceeds to the next row at once.
-    this.markLeased(row.id, chosen.id);
+    //
+    // CANCEL-SAFE TRANSITION (R1 #3a): markLeased is status-guarded to
+    // `status = 'queued'`. If cancelForRun swept this row to 'timeout' during the
+    // await windows above (deliverable-context resolve / lease acquire), the guarded
+    // UPDATE changes 0 rows — the row is no longer ours to run. Release the
+    // just-acquired lease and return WITHOUT capturing/judging (which would spend a
+    // paid VLM call and clobber the canceled status). The row keeps its canceled
+    // 'timeout'; no delivery fires (nothing to enrich / no lane to advance).
+    const leasedChanges = this.markLeased(row.id, chosen.id);
+    if (leasedChanges === 0) {
+      lease.release();
+      this.logger?.debug('[VerificationScheduler] row no longer queued at lease time; releasing lease, skipping capture', {
+        requestId: row.id,
+        backend: chosen.id,
+      });
+      return { work: null };
+    }
     this.markRunning(row.id, chosen.id);
     return { work: this.runChosen(row, type, input, chosen, lease, resolved) };
   }
@@ -972,11 +1098,14 @@ export class VerificationScheduler {
       // A timeout/cancel that fired DURING dev-server spawn: stop here, mark
       // 'timeout', releasing both the dev server (in finally) and the lease.
       if (controller.signal.aborted) {
-        this.markTerminal(row.id, 'timeout', {
-          backend: backend.id,
-          error: timedOut ? 'request timed out' : 'aborted',
-        });
-        await this.deliver(row, 'timeout', undefined, [], input);
+        await this.markTerminalAndDeliver(
+          row,
+          'timeout',
+          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted' },
+          undefined,
+          [],
+          input,
+        );
         return;
       }
 
@@ -989,11 +1118,14 @@ export class VerificationScheduler {
       // A timeout/cancel that fired WHILE we waited on the batch mutex: stop here,
       // mark 'timeout'; the batch mutex (now held) is released in finally.
       if (controller.signal.aborted) {
-        this.markTerminal(row.id, 'timeout', {
-          backend: backend.id,
-          error: timedOut ? 'request timed out' : 'aborted',
-        });
-        await this.deliver(row, 'timeout', undefined, [], input);
+        await this.markTerminalAndDeliver(
+          row,
+          'timeout',
+          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted' },
+          undefined,
+          [],
+          input,
+        );
         return;
       }
 
@@ -1008,23 +1140,39 @@ export class VerificationScheduler {
         input: captureInput,
       };
 
-      const capture = await backend.capture(ctx, controller.signal);
+      // ABORT-BOUNDED (R1 #1a): race the capture against the deadline/cancel signal
+      // so an abort-unaware backend that never settles can NEVER hang the drain. On
+      // abort raceWithAbort rejects (→ catch, marked 'timeout'); the orphaned capture
+      // is detached (its late settle is logged). The backend-side window teardown
+      // (CapturePageBackend) prevents the leaked wedged renderer.
+      const capture = await raceWithAbort(
+        backend.capture(ctx, controller.signal),
+        controller.signal,
+        'capture',
+        this.logger,
+      );
       // A timeout/cancel that fired DURING capture: stop here, mark 'timeout',
       // regardless of what the (now-aborted) capture nominally returned.
       if (controller.signal.aborted) {
-        this.markTerminal(row.id, 'timeout', {
-          backend: backend.id,
-          error: timedOut ? 'request timed out' : 'aborted',
-        });
-        await this.deliver(row, 'timeout', undefined, [], input);
+        await this.markTerminalAndDeliver(
+          row,
+          'timeout',
+          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted' },
+          undefined,
+          [],
+          input,
+        );
         return;
       }
       if (!capture.ok || capture.fileNames.length === 0) {
-        this.markTerminal(row.id, 'failed', {
-          backend: backend.id,
-          error: capture.error ?? 'capture produced no images',
-        });
-        await this.deliver(row, 'failed', undefined, [], input);
+        await this.markTerminalAndDeliver(
+          row,
+          'failed',
+          { backend: backend.id, error: capture.error ?? 'capture produced no images' },
+          undefined,
+          [],
+          input,
+        );
         return;
       }
 
@@ -1059,11 +1207,14 @@ export class VerificationScheduler {
       } else {
         const preDiff = await this.resolveBaselinePreDiff(row, input, ctx, fileNames);
         if (controller.signal.aborted) {
-          this.markTerminal(row.id, 'timeout', {
-            backend: backend.id,
-            error: timedOut ? 'request timed out' : 'aborted',
-          });
-          await this.deliver(row, 'timeout', undefined, fileNames, input);
+          await this.markTerminalAndDeliver(
+            row,
+            'timeout',
+            { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted' },
+            undefined,
+            fileNames,
+            input,
+          );
           return;
         }
         if (preDiff?.match) {
@@ -1097,15 +1248,22 @@ export class VerificationScheduler {
           // counter UPDATE is this request's OWN row — consistent with markTerminal,
           // within the no-direct-router-table-write rule).
           this.incrementJudgeCallsUsed(row.id);
-          const vlmVerdict = await this.judge.judge(
-            {
-              intent: input.intent,
-              artifactsDir: ctx.artifactsDir,
-              fileNames,
-              type,
-              ...(preDiff?.baselinePath ? { baselinePath: preDiff.baselinePath } : {}),
-            },
+          // ABORT-BOUNDED (R1 #1a): a hung vision call can no more wedge the drain
+          // than a hung capture — race it against the deadline/cancel signal.
+          const vlmVerdict = await raceWithAbort(
+            this.judge.judge(
+              {
+                intent: input.intent,
+                artifactsDir: ctx.artifactsDir,
+                fileNames,
+                type,
+                ...(preDiff?.baselinePath ? { baselinePath: preDiff.baselinePath } : {}),
+              },
+              controller.signal,
+            ),
             controller.signal,
+            'judge',
+            this.logger,
           );
           // Stamp provenance: a VLM-produced verdict is 'vlm_verdict' (+ the SSIM
           // score when a baseline was compared but did not match, for telemetry).
@@ -1119,17 +1277,26 @@ export class VerificationScheduler {
 
       // A timeout/cancel that fired DURING judging: mark 'timeout', drop the verdict.
       if (controller.signal.aborted) {
-        this.markTerminal(row.id, 'timeout', {
-          backend: backend.id,
-          error: timedOut ? 'request timed out' : 'aborted',
-        });
-        await this.deliver(row, 'timeout', undefined, fileNames, input);
+        await this.markTerminalAndDeliver(
+          row,
+          'timeout',
+          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted' },
+          undefined,
+          fileNames,
+          input,
+        );
         return;
       }
 
       const status = this.statusFromVerdict(verdict);
-      this.markTerminal(row.id, status, { backend: backend.id, verdict });
-      await this.deliver(row, status, verdict, fileNames, input);
+      await this.markTerminalAndDeliver(
+        row,
+        status,
+        { backend: backend.id, verdict },
+        verdict,
+        fileNames,
+        input,
+      );
     } catch (err) {
       // An abort-aware backend/judge that THROWS on abort (vs. returning) lands
       // here. If the signal was aborted (deadline or cancel) it is a 'timeout', not
@@ -1138,17 +1305,20 @@ export class VerificationScheduler {
       controller.abort();
       const message = err instanceof Error ? err.message : String(err);
       const status: RequestStatus = aborted ? 'timeout' : 'failed';
-      this.markTerminal(row.id, status, {
-        backend: backend.id,
-        error: aborted ? (timedOut ? 'request timed out' : 'aborted') : message,
-      });
       this.logger?.error('[VerificationScheduler] capture/judge error', {
         requestId: row.id,
         backend: backend.id,
         aborted,
         error: message,
       });
-      await this.deliver(row, status, undefined, fileNames, input);
+      await this.markTerminalAndDeliver(
+        row,
+        status,
+        { backend: backend.id, error: aborted ? (timedOut ? 'request timed out' : 'aborted') : message },
+        undefined,
+        fileNames,
+        input,
+      );
     } finally {
       clearTimeout(deadline);
       this.inFlight.delete(row.id);
@@ -1466,39 +1636,53 @@ export class VerificationScheduler {
   // DB write helpers (status-guarded; never a direct router-table write)
   // --------------------------------------------------------------------------
 
-  /** queued → leased (records the chosen backend + leased_at). */
-  private markLeased(id: string, backend: VisualBackendId): void {
-    this.db
+  /**
+   * queued → leased (records the chosen backend + leased_at). Returns the UPDATE's
+   * .changes: 0 means the row was no longer 'queued' (cancelForRun swept it to
+   * 'timeout' during processRow's await windows), so the caller must release the
+   * just-acquired lease and NOT run capture/judge (R1 #3a).
+   */
+  private markLeased(id: string, backend: VisualBackendId): number {
+    return this.db
       .prepare(
         `UPDATE verification_requests
             SET status = 'leased', current_backend = ?, leased_at = ?
           WHERE id = ? AND status = 'queued'`,
       )
-      .run(backend, new Date().toISOString(), id);
+      .run(backend, new Date().toISOString(), id).changes;
   }
 
-  /** leased → running. */
-  private markRunning(id: string, backend: VisualBackendId): void {
-    this.db
+  /** leased → running. Returns the UPDATE's .changes. */
+  private markRunning(id: string, backend: VisualBackendId): number {
+    return this.db
       .prepare(
         `UPDATE verification_requests
             SET status = 'running', current_backend = ?
           WHERE id = ? AND status = 'leased'`,
       )
-      .run(backend, id);
+      .run(backend, id).changes;
   }
 
   /**
    * Write a terminal status (passed/failed/low_confidence/skipped/timeout) +
    * verdict_json / error_message / ended_at. attempt is bumped so a re-judged
    * request reflects its fall-forward count.
+   *
+   * CANCEL-SAFE (R1 #3b): the write is guarded to a NON-TERMINAL current status
+   * (`status IN ('queued','leased','running')`). If a cancelForRun / timeout sweep
+   * already made the row terminal (e.g. 'timeout') it WON the race — the guard
+   * changes 0 rows so we do NOT clobber the canceled status. Returns the .changes so
+   * markTerminalAndDeliver can suppress delivery when the write lost the race.
+   * (The non-terminal set — a superset of the leased/running the running path sees —
+   * is required because this same writer performs the queued→skipped transition for
+   * the processRow skip paths, which must still succeed on a live 'queued' row.)
    */
   private markTerminal(
     id: string,
     status: RequestStatus,
     extra: { backend?: VisualBackendId; verdict?: VerdictV1; error?: string } = {},
-  ): void {
-    this.db
+  ): number {
+    return this.db
       .prepare(
         `UPDATE verification_requests
             SET status = ?,
@@ -1507,7 +1691,7 @@ export class VerificationScheduler {
                 error_message = ?,
                 attempt = attempt + 1,
                 ended_at = ?
-          WHERE id = ?`,
+          WHERE id = ? AND status IN ('queued', 'leased', 'running')`,
       )
       .run(
         status,
@@ -1516,7 +1700,36 @@ export class VerificationScheduler {
         extra.error ?? null,
         new Date().toISOString(),
         id,
-      );
+      ).changes;
+  }
+
+  /**
+   * Write a terminal status AND fire verdict delivery — but ONLY when the
+   * status-guarded markTerminal actually transitioned the row (changes === 1). A
+   * 0-change write means a cancel/timeout sweep already made the row terminal and
+   * WON the race: we must NOT overwrite it and must NOT deliver — no artifact
+   * enrich, no ReviewItemRouter finding, no SprintLaneStore merge-gate write, no
+   * terminal event — for a canceled run (R1 #3b). This is the SINGLE chokepoint
+   * pairing the guarded write with delivery so every runChosen / skip exit is
+   * cancel-safe by construction.
+   */
+  private async markTerminalAndDeliver(
+    row: VerificationRequestRow,
+    status: RequestStatus,
+    extra: { backend?: VisualBackendId; verdict?: VerdictV1; error?: string },
+    verdict: VerdictV1 | undefined,
+    fileNames: string[],
+    input?: VerificationRequestInput,
+  ): Promise<void> {
+    const changes = this.markTerminal(row.id, status, extra);
+    if (changes === 0) {
+      this.logger?.debug('[VerificationScheduler] terminal write lost race to cancel/timeout; skipping delivery', {
+        requestId: row.id,
+        attemptedStatus: status,
+      });
+      return;
+    }
+    await this.deliver(row, status, verdict, fileNames, input);
   }
 
   // --------------------------------------------------------------------------
