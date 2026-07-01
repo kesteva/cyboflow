@@ -129,18 +129,21 @@ export interface Session {
    */
   agentPermissionMode?: PermissionMode;
   /**
-   * Per-session MCP DENY list (migration 036) — the MCP server names disabled
-   * for this session. Persisted to sessions.disabled_mcp_servers_json; read at
-   * SDK spawn (next-turn apply). Edited from the composer McpTogglePill (which
-   * shows servers enabled-by-default and persists the unchecked complement).
+   * Per-session MCP DENY list (migration 039) — the MCP server names disabled
+   * for this session. Persisted to sessions.disabled_mcp_servers_json; enforced
+   * on BOTH substrates at spawn (next-turn apply): SDK (composeMcpServers delete +
+   * strictMcpConfig + disallowedTools) and interactive (--disallowed-tools
+   * mcp__<srv> + disabledMcpjsonServers). Edited from the composer McpTogglePill
+   * (which shows servers enabled-by-default and persists the unchecked complement).
    * undefined/[] → nothing disabled. Mirror of main/src/types/session.ts Session.
    */
   disabledMcpServers?: string[];
   /**
-   * Per-session plugin ALLOW list (migration 036) — the plugin ids force-enabled
-   * for this session. Persisted to sessions.enabled_plugins_json; read at SDK
-   * spawn (next-turn apply). Edited from the composer PluginTogglePill.
-   * undefined/[] → inherit file settings. Mirror of main/src/types/session.ts.
+   * Per-session plugin ALLOW list (migration 039) — the plugin ids force-enabled
+   * for this session. Persisted to sessions.enabled_plugins_json; read at spawn on
+   * BOTH substrates (SDK inline settings.enabledPlugins; interactive enabledPlugins
+   * via `--settings`). Edited from the composer PluginTogglePill. undefined/[] →
+   * inherit file settings. Mirror of main/src/types/session.ts.
    */
   enabledPlugins?: string[];
 }
@@ -199,16 +202,20 @@ export interface CreateSessionRequest {
   /**
    * Per-session MCP DENY list chosen at session start (the launch wizard's
    * Advanced section). Server names the session must NOT load; persisted to
-   * sessions.disabled_mcp_servers_json by create-quick and enforced at SDK spawn.
-   * Omitted/empty → inherit all configured servers. KEEP IN SYNC with the main
-   * twin in main/src/types/session.ts (request-parity rule).
+   * sessions.disabled_mcp_servers_json by create-quick and enforced on BOTH
+   * substrates at spawn: SDK (composeMcpServers delete + strictMcpConfig +
+   * disallowedTools) and interactive (--disallowed-tools mcp__<srv> +
+   * disabledMcpjsonServers). Omitted/empty → inherit all configured servers. KEEP
+   * IN SYNC with the main twin in main/src/types/session.ts (request-parity rule).
    */
   disabledMcpServers?: string[];
   /**
    * Per-session plugin ALLOW list chosen at session start (Advanced section).
-   * Persisted to sessions.enabled_plugins_json by create-quick. Omitted/empty →
-   * inherit the user's file plugins. KEEP IN SYNC with the main twin in
-   * main/src/types/session.ts (request-parity rule).
+   * Persisted to sessions.enabled_plugins_json by create-quick and force-enabled
+   * on BOTH substrates (SDK inline settings.enabledPlugins; interactive
+   * enabledPlugins via `--settings`). Omitted/empty → inherit the user's file
+   * plugins. KEEP IN SYNC with the main twin in main/src/types/session.ts
+   * (request-parity rule).
    */
   enabledPlugins?: string[];
   projectId?: number;

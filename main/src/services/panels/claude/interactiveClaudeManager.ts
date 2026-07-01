@@ -555,6 +555,34 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     if (options.effort === 'ultracode') {
       sessionSettings.ultracode = true;
     }
+
+    // Per-session MCP DENY enforcement (layer 2 — model context). The PTY
+    // substrate is NOT governed by the SDK's strictMcpConfig enforcement, so mirror
+    // the SDK's disallowedTools guard (mcpDenyListSdkGuards): push `--disallowed-tools
+    // mcp__<server>` for each denied server so the interactive REPL removes those
+    // tools from the model's context entirely (bare `mcp__<server>` → Claude never
+    // sees them). 'cyboflow' is never disable-able (orchestrator socket) and is
+    // filtered out. This MUST be pushed BEFORE the `--settings` push below so the
+    // variadic <tools...> collection is terminated by the following `--settings`
+    // flag (a following `--` flag ends variadic collection — see research
+    // variadicTermination). Layer 1 (disabledMcpjsonServers, preventing server
+    // startup) is added by the InteractiveMcpEnabler in spawnCliProcess.
+    const disabledMcps = this.resolveSessionDisabledMcps(options.sessionId).filter((n) => n !== 'cyboflow');
+    if (disabledMcps.length > 0) {
+      args.push('--disallowed-tools', ...disabledMcps.map((n) => `mcp__${n}`));
+    }
+
+    // Per-session plugin ALLOW enforcement — mirrors the SDK buildSdkOptions
+    // `settings.enabledPlugins` merge (plugin ALLOW parity). `claude --settings`
+    // supports an inline `enabledPlugins` map; the interactive REPL loads it on top
+    // of the file-loaded user/project plugins. `undefined` when the allow-list is
+    // empty, so the default path emits no enabledPlugins key and inherited plugins
+    // are untouched. Set BEFORE the JSON.stringify so it rides the single flag.
+    const enabledPlugins = this.resolveSessionEnabledPlugins(options.sessionId);
+    if (enabledPlugins) {
+      sessionSettings.enabledPlugins = enabledPlugins;
+    }
+
     args.push('--settings', JSON.stringify(sessionSettings));
 
     // Inject the cyboflow MCP stdio entry ONLY when its config file is present on
@@ -864,7 +892,19 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // so the modal is skipped and the run loads exactly the project servers the
     // SDK substrate injects unconditionally (parity). Runs REGARDLESS of
     // permissionMode (the modal blocks even in ignore mode). Synchronous fs.
-    this.mcpEnabler.enable(worktreePath);
+    //
+    // Per-session MCP DENY (layer 1 — server startup): pass the denied server
+    // names so the enabler EXCLUDES them from `enabledMcpjsonServers` AND lists
+    // them in `disabledMcpjsonServers`, preventing the disabled servers from
+    // loading at all (defense-in-depth alongside buildCommandArgs' layer-2
+    // `--disallowed-tools`). 'cyboflow' is filtered out at the call site here
+    // (mirrors composeMcpServers' `if (name === 'cyboflow') continue`) — the
+    // orchestrator-socket server must never be disabled even if a project's
+    // `.mcp.json` happens to name a server 'cyboflow'.
+    this.mcpEnabler.enable(
+      worktreePath,
+      this.resolveSessionDisabledMcps(options.sessionId).filter((n) => n !== 'cyboflow'),
+    );
 
     // Install the run's co-located `/cyboflow-<phase>` command bundle (+ any
     // subagents) into `<worktree>/.claude/commands` | `.claude/agents` BEFORE
@@ -1579,6 +1619,55 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     const stored = this.sessionManager.getDbSession(sessionId)?.agent_permission_mode;
     if (isPermissionMode(stored)) return stored;
     return this.configManager?.getDefaultAgentPermissionMode();
+  }
+
+  /**
+   * Per-session MCP DENY list — read at spawn from sessions.disabled_mcp_servers_json
+   * (migration 039, session_mcp_plugins). Returns the parsed server-name array, or
+   * [] when the column is missing/empty/malformed (so the deny-free path filters
+   * nothing and stays byte-identical). The 'cyboflow' entry is NEVER honored — the
+   * orchestrator socket server is threaded separately and callers filter it out.
+   *
+   * MIRRORS ClaudeCodeManager.resolveSessionDisabledMcps (the SDK twin) VERBATIM —
+   * keep the two in sync (SDK parity). Reading the DB row (not a threaded arg)
+   * keeps it restart-safe, matching resolveSessionAgentPermissionMode.
+   */
+  private resolveSessionDisabledMcps(sessionId: string): string[] {
+    const raw = this.sessionManager.getDbSession(sessionId)?.disabled_mcp_servers_json;
+    if (!raw) return [];
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((x): x is string => typeof x === 'string');
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Per-session plugin ALLOW list — read at spawn from sessions.enabled_plugins_json
+   * (migration 039, session_mcp_plugins). Returns a `{ id: true }` map for
+   * buildCommandArgs to merge into the inline `--settings` `enabledPlugins`, or
+   * `undefined` when the column is missing/empty/malformed — so no enabledPlugins
+   * key is emitted and file-loaded plugins are untouched (byte-identical default).
+   *
+   * MIRRORS ClaudeCodeManager.resolveSessionEnabledPlugins (the SDK twin) VERBATIM —
+   * keep the two in sync (SDK parity).
+   */
+  private resolveSessionEnabledPlugins(sessionId: string): Record<string, boolean> | undefined {
+    const raw = this.sessionManager.getDbSession(sessionId)?.enabled_plugins_json;
+    if (!raw) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return undefined;
+      const ids = parsed.filter((x): x is string => typeof x === 'string');
+      if (ids.length === 0) return undefined;
+      const map: Record<string, boolean> = {};
+      for (const id of ids) map[id] = true;
+      return map;
+    } catch {
+      return undefined;
+    }
   }
 
   async stopPanel(panelId: string): Promise<void> {

@@ -26,6 +26,7 @@ import { makeSpyLogger } from '../../../../orchestrator/__test_fixtures__/logger
 
 interface SettingsLocal {
   enabledMcpjsonServers?: string[];
+  disabledMcpjsonServers?: string[];
   permissions?: { allow?: string[] };
   env?: Record<string, string>;
   [k: string]: unknown;
@@ -131,5 +132,68 @@ describe('InteractiveMcpEnabler', () => {
     const enabled = new InteractiveMcpEnabler().enable(worktree);
     expect(enabled).toEqual([]);
     expect(fs.existsSync(settingsLocalPath(worktree))).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // Per-session MCP DENY (migration 039): denied project servers are EXCLUDED
+  // from enabledMcpjsonServers and UNIONED into disabledMcpjsonServers, so the
+  // interactive REPL rejects them (no load, no approval) — layer 1 of the deny
+  // (layer 2 is buildCommandArgs' --disallowed-tools mcp__<srv>).
+  // -------------------------------------------------------------------------
+  it('(e) excludes denied servers from enabledMcpjsonServers and adds them to disabledMcpjsonServers', () => {
+    writeMcpJson(worktree, ['playwright', 'maestro']);
+    const enabler = new InteractiveMcpEnabler(makeSpyLogger());
+
+    const enabled = enabler.enable(worktree, ['maestro']);
+
+    // Only the non-denied server is returned as enabled.
+    expect(enabled).toEqual(['playwright']);
+    const settings = readSettingsLocal(worktree);
+    expect(settings.enabledMcpjsonServers).toEqual(['playwright']);
+    expect(settings.disabledMcpjsonServers).toEqual(['maestro']);
+  });
+
+  it('(f) a denied server that is not a project server is ignored (nothing to reject)', () => {
+    writeMcpJson(worktree, ['playwright']);
+    const settings0 = new InteractiveMcpEnabler().enable(worktree, ['not-a-project-server']);
+
+    expect(settings0).toEqual(['playwright']);
+    const settings = readSettingsLocal(worktree);
+    expect(settings.enabledMcpjsonServers).toEqual(['playwright']);
+    // No disabledMcpjsonServers key written when nothing project-present is denied.
+    expect(settings.disabledMcpjsonServers).toBeUndefined();
+  });
+
+  it('(g) preserves unrelated keys and prior enabled/disabled entries when denying', () => {
+    writeMcpJson(worktree, ['playwright', 'maestro']);
+    fs.mkdirSync(path.dirname(settingsLocalPath(worktree)), { recursive: true });
+    fs.writeFileSync(
+      settingsLocalPath(worktree),
+      JSON.stringify({
+        enabledMcpjsonServers: ['legacy'],
+        disabledMcpjsonServers: ['old-denied'],
+        permissions: { allow: ['Bash(ls:*)'] },
+      }),
+      'utf8',
+    );
+
+    new InteractiveMcpEnabler().enable(worktree, ['maestro']);
+
+    const settings = readSettingsLocal(worktree);
+    expect([...(settings.enabledMcpjsonServers ?? [])].sort()).toEqual(['legacy', 'playwright']);
+    expect([...(settings.disabledMcpjsonServers ?? [])].sort()).toEqual(['maestro', 'old-denied']);
+    expect(settings.permissions).toEqual({ allow: ['Bash(ls:*)'] });
+  });
+
+  it('(h) is idempotent with a deny-list — a second enable() leaves the file byte-identical', () => {
+    writeMcpJson(worktree, ['playwright', 'maestro']);
+    const enabler = new InteractiveMcpEnabler();
+
+    enabler.enable(worktree, ['maestro']);
+    const first = fs.readFileSync(settingsLocalPath(worktree), 'utf8');
+    enabler.enable(worktree, ['maestro']);
+    const second = fs.readFileSync(settingsLocalPath(worktree), 'utf8');
+
+    expect(second).toBe(first);
   });
 });
