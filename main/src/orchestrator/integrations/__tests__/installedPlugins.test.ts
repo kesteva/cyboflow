@@ -48,8 +48,16 @@ describe('buildExclusiveEnabledPluginsMap', () => {
     expect(buildExclusiveEnabledPluginsMap('', installed)).toBeUndefined();
   });
 
-  it('returns undefined for an empty selection array', () => {
-    expect(buildExclusiveEnabledPluginsMap('[]', installed)).toBeUndefined();
+  it('explicit empty selection [] → disables ALL installed plugins (not inherit)', () => {
+    expect(buildExclusiveEnabledPluginsMap('[]', installed)).toEqual({
+      'a@m': false,
+      'b@m': false,
+      'c@m': false,
+    });
+  });
+
+  it('explicit empty selection over an EMPTY catalogue → undefined (nothing to disable)', () => {
+    expect(buildExclusiveEnabledPluginsMap('[]', [])).toBeUndefined();
   });
 
   it('returns undefined for malformed JSON or a non-array', () => {

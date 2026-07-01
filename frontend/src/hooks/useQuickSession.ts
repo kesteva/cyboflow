@@ -97,11 +97,14 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           ...(substrate ? { substrate } : {}),
           ...(effort ? { effort } : {}),
           ...(claudeConfig ? { claudeConfig } : {}),
-          // Per-session MCP deny / plugin allow chosen in the wizard's Advanced
-          // section. Only sent when non-empty (create-quick leaves the column NULL
-          // otherwise). Persisted before the first spawn so the deny is enforced.
+          // Per-session MCP deny / plugin selection chosen in the wizard's Advanced
+          // section, persisted before the first spawn. MCP is a DENY list → only
+          // sent when non-empty (empty = inherit all servers). Plugins are
+          // EXCLUSIVE and reflect the current enabled set → the wizard passes
+          // `undefined` when unchanged (inherit) and an explicit array otherwise,
+          // INCLUDING `[]` ("disable everything"); forward that distinction as-is.
           ...(disabledMcpServers && disabledMcpServers.length > 0 ? { disabledMcpServers } : {}),
-          ...(enabledPlugins && enabledPlugins.length > 0 ? { enabledPlugins } : {}),
+          ...(enabledPlugins !== undefined ? { enabledPlugins } : {}),
         });
 
         if (!result.success || !result.data) {

@@ -216,6 +216,7 @@ function buildPluginEntry(over: Partial<PluginEntry> = {}): PluginEntry {
     marketplace: 'claude-plugins-official',
     scope: 'user',
     version: 'unknown',
+    enabled: true,
     lastUpdated: null,
     projectPath: null,
     ...over,

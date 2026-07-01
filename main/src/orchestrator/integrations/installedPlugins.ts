@@ -15,6 +15,29 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { PluginEntry } from '../../../../shared/types/integrations';
 
+/**
+ * The user-tier `enabledPlugins` map from `~/.claude/settings.json` — the plugin
+ * ids the user has explicitly enabled. A plugin is treated as ENABLED iff its id
+ * maps to `true` here (matches `claude plugin list` for user-scope plugins). A
+ * missing/malformed file yields {} (→ everything reads as disabled). Pure read.
+ */
+function readUserEnabledPluginsMap(): Record<string, boolean> {
+  const file = path.join(os.homedir(), '.claude', 'settings.json');
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+    if (typeof parsed !== 'object' || parsed === null) return {};
+    const map = (parsed as Record<string, unknown>).enabledPlugins;
+    if (typeof map !== 'object' || map === null) return {};
+    const out: Record<string, boolean> = {};
+    for (const [id, val] of Object.entries(map as Record<string, unknown>)) {
+      out[id] = val === true;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
 /** Parse installed_plugins.json (`{ version, plugins: { "<id>": [record…] } }`). */
 export function readPluginEntries(): PluginEntry[] {
   const file = path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json');
@@ -28,6 +51,7 @@ export function readPluginEntries(): PluginEntry[] {
   const plugins = (parsed as Record<string, unknown>).plugins;
   if (typeof plugins !== 'object' || plugins === null) return [];
 
+  const enabledMap = readUserEnabledPluginsMap();
   const out: PluginEntry[] = [];
   for (const [id, records] of Object.entries(plugins as Record<string, unknown>)) {
     if (!Array.isArray(records)) continue;
@@ -43,6 +67,7 @@ export function readPluginEntries(): PluginEntry[] {
         marketplace,
         scope: typeof r.scope === 'string' ? r.scope : 'user',
         version: typeof r.version === 'string' ? r.version : 'unknown',
+        enabled: enabledMap[id] === true,
         lastUpdated: typeof r.lastUpdated === 'string' ? r.lastUpdated : null,
         projectPath: typeof r.projectPath === 'string' ? r.projectPath : null,
       });
@@ -75,10 +100,15 @@ export function readInstalledPluginIds(): string[] {
  * `--settings` CLI was confirmed empirically to drop a plugin's contributions when
  * passed `{ id: false }` at the flag tier.
  *
- * Returns `undefined` when the allow-list is missing/empty/malformed (→ no
- * enabledPlugins key emitted; inherited plugins untouched). When `installedIds` is
- * empty it degrades to additive (only the selected `true` entries — nothing to
- * disable). A selected id absent from `installedIds` is still force-enabled.
+ * Precedence of the `raw` value:
+ *   - null / '' / malformed / non-array → `undefined` (column never set → INHERIT
+ *     the user's file plugins; no enabledPlugins key emitted).
+ *   - a PRESENT but EMPTY array `[]` → disable ALL installed plugins ({id:false}
+ *     for each) — the "turn everything off for this session" intent, distinct from
+ *     inherit. Degrades to `undefined` only when the installed catalogue is empty
+ *     (nothing to disable).
+ *   - a non-empty array → exclusive: selected → true, other installed → false.
+ * A selected id absent from `installedIds` is still force-enabled.
  */
 export function buildExclusiveEnabledPluginsMap(
   raw: string | null | undefined,
@@ -93,10 +123,11 @@ export function buildExclusiveEnabledPluginsMap(
   }
   if (!Array.isArray(parsed)) return undefined;
   const selected = parsed.filter((x): x is string => typeof x === 'string');
-  if (selected.length === 0) return undefined;
   const selectedSet = new Set(selected);
   const map: Record<string, boolean> = {};
   for (const id of installedIds) map[id] = selectedSet.has(id);
   for (const id of selected) map[id] = true;
-  return map;
+  // Present-but-empty selection over an empty catalogue leaves nothing to say →
+  // inherit (byte-identical) rather than emitting an empty key.
+  return Object.keys(map).length > 0 ? map : undefined;
 }

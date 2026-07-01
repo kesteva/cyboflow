@@ -37,6 +37,14 @@ export interface PluginEntry {
   scope: string;
   /** Reported version ("unknown" when the cache has none). */
   version: string;
+  /**
+   * Whether the plugin is currently ENABLED at the user tier — resolved from
+   * `~/.claude/settings.json` `enabledPlugins[id] === true`. The wizard seeds the
+   * per-session toggles from this so the control reflects the user's real setup
+   * (an enabled plugin renders on, a disabled one off). User-tier only; a plugin
+   * enabled solely in a project's settings reads as disabled here.
+   */
+  enabled: boolean;
   /** ISO timestamp the record was last updated, or null. */
   lastUpdated: string | null;
   /** project/local scope: the project path it is installed for; null for user scope. */

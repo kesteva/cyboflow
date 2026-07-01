@@ -12,11 +12,12 @@ import type { PluginEntry } from '../../../../../shared/types/integrations';
  * PluginTogglePill — multi-select plugin selector for a quick SDK session's
  * composer, rendered after the {@link McpTogglePill}.
  *
- * Unlike the MCP pill (a DENY list), the persisted column
- * (sessions.enabled_plugins_json) is an ALLOW list — the selection IS the stored
- * set. Plugins render UNCHECKED by default, so the empty default ([] enabled)
- * emits no enabledPlugins key and inherits the user's file settings
- * (byte-identical). Checking a plugin force-enables it for the session.
+ * The runtime mental-model matches the MCP pill: every plugin renders CHECKED
+ * when it is ON for the session. The wizard SEEDS `selected` from the user's
+ * current enabled set (PluginEntry.enabled), so the control reflects reality —
+ * enabled plugins show on, disabled ones off — and unchecking one turns it off
+ * for this session (a deterministic exclusive override at the flag tier). The
+ * persisted column (sessions.enabled_plugins_json) is that resulting ON set.
  *
  * Persists via the `sessions:update-session-plugins` IPC, which the SDK spawn
  * re-reads on each turn (claudeCodeManager.resolveSessionEnabledPlugins) — so
@@ -91,7 +92,11 @@ export function PluginTogglePill({
       .sort((a, b) => a.id.localeCompare(b.id));
   }, [plugins, localSelected]);
 
-  const label = localSelected.length === 0 ? 'Plugins' : `Plugins · ${localSelected.length}`;
+  // Mirror the MCP pill: show how many of the listed plugins are OFF (unchecked),
+  // so the trigger reflects the session's disabled count rather than a raw select
+  // count. `options` is the full visible set (installed ∪ any stale selection).
+  const offCount = options.filter((o) => !localSelected.includes(o.id)).length;
+  const label = offCount === 0 ? 'Plugins' : `Plugins · ${offCount} off`;
 
   const handleToggle = async (id: string): Promise<void> => {
     // Apply optimistically so the label + row dot update on the click; revert if

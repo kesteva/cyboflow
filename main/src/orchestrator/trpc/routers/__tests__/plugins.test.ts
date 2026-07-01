@@ -39,6 +39,12 @@ describe('readPluginEntries', () => {
     fs.writeFileSync(path.join(dir, 'installed_plugins.json'), content);
   }
 
+  function writeSettings(content: string): void {
+    const dir = path.join(home, '.claude');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'settings.json'), content);
+  }
+
   it('returns [] when the file is absent', () => {
     expect(readPluginEntries()).toEqual([]);
   });
@@ -76,9 +82,27 @@ describe('readPluginEntries', () => {
       marketplace: 'claude-plugins-official',
       scope: 'user',
       version: 'unknown',
+      enabled: false,
       lastUpdated: '2026-06-26T23:20:44.559Z',
       projectPath: null,
     });
+  });
+
+  it('marks a plugin enabled iff ~/.claude/settings.json enabledPlugins[id] === true', () => {
+    writeInstalled(
+      JSON.stringify({
+        version: 2,
+        plugins: {
+          'on@m': [{ scope: 'user' }],
+          'off@m': [{ scope: 'user' }],
+          'absent@m': [{ scope: 'user' }],
+        },
+      }),
+    );
+    writeSettings(JSON.stringify({ enabledPlugins: { 'on@m': true, 'off@m': false } }));
+    const out = readPluginEntries();
+    const enabledById = Object.fromEntries(out.map((e) => [e.id, e.enabled]));
+    expect(enabledById).toEqual({ 'on@m': true, 'off@m': false, 'absent@m': false });
   });
 
   it('yields one PluginEntry per install record (multiple scopes / projects)', () => {
@@ -119,6 +143,7 @@ describe('readPluginEntries', () => {
       marketplace: 'm',
       scope: 'user',
       version: 'unknown',
+      enabled: false,
       lastUpdated: null,
       projectPath: null,
     });

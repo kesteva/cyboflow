@@ -563,12 +563,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         session.id,
       );
 
-      // Persist the per-session MCP deny-list / plugin allow-list chosen at
-      // session start (the launch wizard's Advanced section; migration 037). Read
-      // at SDK spawn — composeMcpServers deletes disabled servers and
-      // buildSdkOptions enforces the deny via strictMcpConfig + disallowedTools.
-      // Only stamped when non-empty so a deny-free session leaves the columns NULL
-      // (inherit all servers / the user's file plugins), byte-identical to before.
+      // Persist the per-session MCP deny-list / plugin selection chosen at session
+      // start (the launch wizard's Advanced section; migration 039). Read at spawn
+      // on both substrates (MCP: composeMcpServers delete + disallowedTools;
+      // plugins: exclusive enabledPlugins map).
+      //
+      // MCP is a DENY list — only stamped when non-empty so a deny-free session
+      // leaves the column NULL (inherit all servers), byte-identical.
       const requestedDisabledMcps = Array.isArray(request.disabledMcpServers)
         ? request.disabledMcpServers.filter((s): s is string => typeof s === 'string')
         : [];
@@ -578,10 +579,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           session.id,
         );
       }
-      const requestedEnabledPlugins = Array.isArray(request.enabledPlugins)
-        ? request.enabledPlugins.filter((s): s is string => typeof s === 'string')
-        : [];
-      if (requestedEnabledPlugins.length > 0) {
+      // Plugins are EXCLUSIVE — the wizard reflects the user's current enabled set
+      // and sends the selection ONLY when it differs from that baseline. So the
+      // field's presence is meaningful: an ABSENT field → column NULL (inherit),
+      // while a PRESENT array (including an explicit `[]` = "disable everything")
+      // is stamped verbatim. Do NOT skip the empty array here.
+      if (Array.isArray(request.enabledPlugins)) {
+        const requestedEnabledPlugins = request.enabledPlugins.filter(
+          (s): s is string => typeof s === 'string',
+        );
         db.prepare(`UPDATE sessions SET enabled_plugins_json = ? WHERE id = ?`).run(
           JSON.stringify(requestedEnabledPlugins),
           session.id,

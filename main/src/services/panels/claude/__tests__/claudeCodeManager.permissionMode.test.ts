@@ -922,6 +922,17 @@ describe('ClaudeCodeManager.buildSdkOptions — per-session enabledPlugins overl
     expect(settings.enabledPlugins).toEqual({ 'ghost@mkt': true, 'foo@bar': false });
   });
 
+  it('explicit empty selection [] with installed plugins → disable ALL (every id false)', async () => {
+    // "Turn everything off for this session": distinct from the missing-column
+    // inherit default — every installed plugin is force-disabled at the flag tier.
+    const mgr = makeManager('[]', ['acme@market', 'foo@bar']);
+    const opts = await mgr.publicBuildSdkOptions(baseOpts);
+
+    const settings = opts.settings as Record<string, unknown>;
+    expect(settings.enabledPlugins).toEqual({ 'acme@market': false, 'foo@bar': false });
+    expect(opts.settingSources).toEqual(['user', 'project']);
+  });
+
   it('empty [] allow-list → no enabledPlugins key emitted', async () => {
     const mgr = makeManager('[]');
     const opts = await mgr.publicBuildSdkOptions(baseOpts);

@@ -72,6 +72,7 @@ import { McpTogglePill } from '../unified/McpTogglePill';
 import { PluginTogglePill } from '../unified/PluginTogglePill';
 import { ChevronDown } from 'lucide-react';
 import { cn } from '../../../utils/cn';
+import { sameStringSet } from '../../../utils/sameStringSet';
 import { Switch } from '../../ui/Switch';
 import { WorkflowEditorModal } from '../WorkflowEditorModal';
 import { WizardStepHeader } from './WizardStepHeader';
@@ -210,13 +211,41 @@ export default function SessionStartWizard(): React.JSX.Element {
   // separate opt-in, default OFF, QUICK-only, surfaced only while Opus is selected.
   const [model, setModel] = useState<string>(DEFAULT_QUICK_MODEL);
   const [fastMode, setFastMode] = useState<boolean>(false);
-  // Advanced (Configure ③, quick only): per-session MCP DENY set + plugin ALLOW
-  // set, chosen at session start (NOT a mid-conversation toggle — the deny is
-  // enforced at the first SDK spawn). Threaded into createQuick; collapsed by
-  // default behind the Advanced disclosure.
+  // Advanced (Configure ③, quick only): per-session MCP DENY set + plugin
+  // selection, chosen at session start (NOT a mid-conversation toggle — enforced
+  // at the first spawn). Threaded into createQuick; collapsed by default.
   const [showAdvanced, setShowAdvanced] = useState<boolean>(false);
   const [disabledMcpServers, setDisabledMcpServers] = useState<string[]>([]);
+  // Plugins are EXCLUSIVE and reflect the user's CURRENT enabled set: the toggles
+  // are seeded from `pluginBaseline` (the plugins enabled in ~/.claude/settings.json,
+  // via the catalogue), so the control mirrors reality. At launch we send the
+  // selection ONLY when it differs from the baseline (unchanged → undefined →
+  // inherit; a change → the exclusive set, incl [] = "disable everything").
   const [enabledPlugins, setEnabledPlugins] = useState<string[]>([]);
+  const [pluginBaseline, setPluginBaseline] = useState<string[]>([]);
+  const pluginsSeededRef = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await trpc.cyboflow.plugins.list.query();
+        if (cancelled) return;
+        const enabledIds = Array.from(new Set(list.filter((p) => p.enabled).map((p) => p.id)));
+        setPluginBaseline(enabledIds);
+        // Seed the selection to the current-enabled set exactly once (don't clobber
+        // a choice the user already made before the async catalogue arrived).
+        if (!pluginsSeededRef.current) {
+          pluginsSeededRef.current = true;
+          setEnabledPlugins(enabledIds);
+        }
+      } catch {
+        // Catalogue unavailable → baseline stays [] → unchanged → inherit.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // Blueprint editor (workflow path only) — 'edit' (selected flow) or 'create'.
   const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
 
@@ -520,11 +549,13 @@ export default function SessionStartWizard(): React.JSX.Element {
       // Fast mode is Opus-only; never request it for another model even if the
       // toggle was left on before the model was switched.
       //
-      // The MCP deny / plugin allow selection is enforced on BOTH substrates now:
-      // SDK spawn (composeMcpServers delete + strictMcpConfig + disallowedTools) and
-      // interactive spawn (--disallowed-tools mcp__<srv> + disabledMcpjsonServers +
-      // enabledPlugins via --settings). Pass the selection unconditionally so a PTY
-      // session honors the same deny-set / plugin-allow as an SDK one.
+      // MCP deny + plugin selection are enforced on BOTH substrates (SDK:
+      // composeMcpServers delete + disallowedTools; interactive: --disallowed-tools
+      // + disabledMcpjsonServers + enabledPlugins via --settings). Plugins reflect
+      // the current enabled set, so send the selection ONLY when the user changed
+      // it — `undefined` (unchanged) leaves the column NULL (inherit); an explicit
+      // array (incl []) pins the exclusive set for the session.
+      const pluginSelection = sameStringSet(enabledPlugins, pluginBaseline) ? undefined : enabledPlugins;
       void startQuickSession(
         permissionMode,
         substrate,
@@ -532,7 +563,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         model,
         isOpusModel(model) && fastMode,
         disabledMcpServers,
-        enabledPlugins,
+        pluginSelection,
       );
       return;
     }
@@ -566,7 +597,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       return;
     }
     void launchRun(selection.workflowId);
-  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, substrate, model, fastMode, disabledMcpServers, enabledPlugins]);
+  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, substrate, model, fastMode, disabledMcpServers, enabledPlugins, pluginBaseline]);
 
   const handleIdeaPicked = useCallback(
     (ideaId: string) => {
@@ -851,7 +882,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                       <div className="flex flex-col">
                         <span className="text-sm font-medium text-text-primary">Plugins</span>
                         <span className="text-xs text-text-tertiary">
-                          Force-enable plugins for this session
+                          Reflects your enabled plugins — turn any off for this session
                         </span>
                       </div>
                       <PluginTogglePill selected={enabledPlugins} onChange={setEnabledPlugins} />
