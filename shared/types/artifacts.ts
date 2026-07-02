@@ -93,27 +93,58 @@ export function isCanvasArtifact(atype: ArtifactType): boolean {
 export const ARCH_DESIGN_SECTION_HEADING = 'Architecture design';
 
 /**
- * Matches the '## Architecture design' heading on its own line
- * (case-insensitive; tolerates trailing whitespace / CRLF).
+ * Matches the '## Architecture design' heading as a single LINE
+ * (case-insensitive; tolerates trailing whitespace). Deliberately uses
+ * `[ \t]` — never `\s`, which spans newlines and lets a bare '##' line plus a
+ * later 'Architecture design' text line spoof the heading.
  */
-const ARCH_DESIGN_HEADING_RE = new RegExp(
-  `^##\\s+${ARCH_DESIGN_SECTION_HEADING}\\s*$`,
-  'im',
+const ARCH_DESIGN_HEADING_LINE_RE = new RegExp(
+  `^##[ \\t]+${ARCH_DESIGN_SECTION_HEADING}[ \\t]*$`,
+  'i',
 );
+
+/** An H2 line (or a bare '##' empty ATX heading) — terminates the section. */
+const H2_LINE_RE = /^##(?:[ \t]|$)/;
+
+/** A ``` / ~~~ fence line (CommonMark allows up to 3 leading spaces). */
+const FENCE_LINE_RE = /^ {0,3}(?:```|~~~)/;
 
 /**
  * Extract the '## Architecture design' section from an idea body: everything
- * after the heading line up to (not including) the next line starting with
- * '## ' (the next H2) or EOF, trimmed. Returns null when the body is empty,
- * the heading is absent, or the section has no content.
+ * after the heading line up to (not including) the next H2 line or EOF,
+ * trimmed. Line-based and fenced-code-block-aware, so '## '-prefixed lines
+ * inside ``` fences neither start nor terminate a section. When the body
+ * carries MORE than one such heading (e.g. a revise round appended a fresh
+ * section instead of replacing), the LAST section wins — it is the freshest
+ * fold. Returns null when the body is empty, the heading is absent, or the
+ * section has no content.
  */
 export function extractArchDesignSection(body: string | null | undefined): string | null {
   if (!body) return null;
-  const match = ARCH_DESIGN_HEADING_RE.exec(body);
-  if (!match) return null;
-  const rest = body.slice(match.index + match[0].length);
-  const nextH2 = /^##\s/m.exec(rest);
-  const section = (nextH2 ? rest.slice(0, nextH2.index) : rest).trim();
+  const lines = body.split(/\r?\n/);
+
+  let inFence = false;
+  let sectionStart = -1; // line index AFTER the most recent heading match
+  let sectionEnd = lines.length;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (FENCE_LINE_RE.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    if (ARCH_DESIGN_HEADING_LINE_RE.test(line)) {
+      // A later heading supersedes any earlier one (last section wins).
+      sectionStart = i + 1;
+      sectionEnd = lines.length;
+    } else if (sectionStart !== -1 && sectionEnd === lines.length && H2_LINE_RE.test(line)) {
+      sectionEnd = i;
+    }
+  }
+
+  if (sectionStart === -1) return null;
+  const section = lines.slice(sectionStart, sectionEnd).join('\n').trim();
   return section.length > 0 ? section : null;
 }
 
