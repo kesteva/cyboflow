@@ -17,16 +17,19 @@ import { resolveWorkflowBundle } from '../workflowBundle';
 const workflowsDir = path.join(__dirname, '..');
 
 describe('built-in workflow bundles', () => {
-  it('planner ships its 4 heavy-phase subagents in order (gates stay inline)', () => {
+  it('planner ships its 6 heavy-phase subagents in order (gates stay inline)', () => {
     const bundle = resolveWorkflowBundle(path.join(workflowsDir, 'planner.md'));
-    // Human gates (approve-idea / approve-plan) run inline in the orchestrator —
-    // they are NOT delegated, so the bundle ships no commands, only subagents.
+    // Human gates (approve-idea / approve-design / approve-plan) run inline in the
+    // orchestrator — they are NOT delegated, so the bundle ships no commands, only
+    // subagents.
     expect(bundle.commands).toEqual([]);
     expect(bundle.agents.map((a) => a.name)).toEqual([
+      'architecture',
       'context',
       'epics',
       'research',
       'tasks',
+      'ui-prototype',
     ]);
     assertAgentShape(bundle.agents);
   });

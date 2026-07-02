@@ -189,7 +189,7 @@ const modelSchema = z.enum(AGENT_MODEL_ALIASES).nullable().optional();
 
 export const agentsRouter = router({
   /**
-   * List every effective agent for a project: the 13 builtins merged with their
+   * List every effective agent for a project: the 15 builtins merged with their
    * `agent_overrides` rows, plus any custom agents, each as an `AgentEntry`
    * (source / isOverridden / isCustom / usage / stats).
    */

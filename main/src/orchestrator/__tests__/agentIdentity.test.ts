@@ -69,8 +69,8 @@ describe('AC-P0-3: no phantom labels remapped', () => {
 });
 
 describe('CANONICAL_AGENT_KEYS shape + isCanonicalAgentKey guard', () => {
-  it('has exactly 13 canonical keys', () => {
-    expect(CANONICAL_AGENT_KEYS.length).toBe(13);
+  it('has exactly 15 canonical keys', () => {
+    expect(CANONICAL_AGENT_KEYS.length).toBe(15);
   });
 
   it('returns true for a member and false for a non-member', () => {

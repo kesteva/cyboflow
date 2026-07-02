@@ -1,5 +1,5 @@
 /**
- * agentCatalogue — the 13-entry built-in agent catalogue, parsed once at boot
+ * agentCatalogue — the 15-entry built-in agent catalogue, parsed once at boot
  * from the bundled `.md` files under `workflows/<wf>/agents/`.
  *
  * There are intentionally NO hardcoded prompt bodies here: each built-in agent's
