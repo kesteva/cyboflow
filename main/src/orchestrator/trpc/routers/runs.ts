@@ -279,7 +279,7 @@ export interface RunLauncherLike {
    * workflow_runs.model and resolved to a concrete snapshot at the spawn seam; when
    * omitted the run pins no model and falls through to the SDK default.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -851,6 +851,15 @@ export const runsRouter = router({
       // resolve to the SDK default), so an over-strict enum here would be a
       // drift-prone second source of truth. When omitted the run pins no model.
       model: z.string().min(1).optional(),
+      // Optional per-run code-review-eval override (migration 044). true = force
+      // the eval ON for this run, false = force it OFF, omitted = no per-run pin →
+      // inherit the global codeReviewEvalEnabled toggle at the trigger seam. Set
+      // from the launch Configure surface's Advanced "Quality eval" tri-state (flow
+      // launches only — meaningless for quick sessions). Forwarded to
+      // RunLauncher.launch → WorkflowRegistry.createRun, which stamps
+      // workflow_runs.eval_enabled. A per-run ON does NOT unlock quick/custom flows
+      // (the trigger's built-ins-only isCyboflowWorkflowName gate is unchanged).
+      evalEnabled: z.boolean().optional(),
     }))
     .mutation(async ({ ctx, input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
@@ -935,8 +944,8 @@ export const runsRouter = router({
       // flow.) Any optional arg may still be undefined, which the launcher treats
       // as "no link / no host / resolver default". baseBranch and
       // requestedExecutionModel are never sent over this IPC path — undefined
-      // placeholders. findingIds then requestedModel are the LAST positional args,
-      // AFTER requestedExecutionModel.
+      // placeholders. findingIds, requestedModel, then requestedEvalEnabled
+      // (migration 044) are the LAST positional args, AFTER requestedExecutionModel.
       const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
         input.workflowId,
         project.path,
@@ -951,6 +960,7 @@ export const runsRouter = router({
         undefined,
         input.findingIds,
         input.model,
+        input.evalEnabled,
       );
       return { runId, worktreePath, branchName };
     }),

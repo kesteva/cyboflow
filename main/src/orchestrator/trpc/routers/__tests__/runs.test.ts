@@ -325,7 +325,7 @@ describe('cyboflow.runs.start', () => {
       // projectId (10th slot), so createRun can stamp both workflow_runs.session_id
       // and project_id even for a GLOBAL flow (workflow.project_id NULL).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined, undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined, undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined);
     } finally {
       // Reset module state regardless of test outcome.
       setStartRunDeps({
@@ -361,7 +361,7 @@ describe('cyboflow.runs.start', () => {
       // 10th slot — so the launcher writes workflow_runs.seed_idea_id directly (no
       // stage derivation).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -396,7 +396,7 @@ describe('cyboflow.runs.start', () => {
       // launch projectId (migration 030) in the 10th slot — so the launcher hosts
       // the run inside the session's existing worktree.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined, 1, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -431,7 +431,40 @@ describe('cyboflow.runs.start', () => {
       // seedTaskIds (9th) undefined, and the explicit launch projectId (migration
       // 030) in the 10th slot.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-1', 'auto', undefined, undefined, 1, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-1', 'auto', undefined, undefined, 1, undefined, undefined, undefined, undefined);
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a8) evalEnabled supplied (Configure Advanced) → full-form launch carrying the
+  // per-run code-review-eval override into the 14th (LAST) launch slot (migration 044).
+  // -------------------------------------------------------------------------
+  it('(a8) evalEnabled=false → forwards the full-form launch with the per-run eval override in the 14th slot', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-eval',
+      worktreePath: '/tmp/wt/eval',
+      branchName: 'cyboflow/sprint/eval1234',
+    });
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, sessionId: 'sess-1', evalEnabled: false });
+
+      // evalEnabled=false lands in the 14th (last) launch slot, AFTER requestedModel
+      // (13th, undefined here). Every other optional arg stays undefined except the
+      // required sessionId (6th) and the always-threaded projectId (10th).
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, false);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -517,7 +550,8 @@ describe('cyboflow.runs.start', () => {
         1, // projectId (10th)
         undefined, // requestedExecutionModel (11th placeholder)
         ['rvw_a', 'rvw_b'], // findingIds (12th)
-        undefined, // requestedModel (13th, LAST — not requested)
+        undefined, // requestedModel (13th — not requested)
+        undefined, // requestedEvalEnabled (14th, LAST — not requested)
       );
     } finally {
       setStartRunDeps({
@@ -561,7 +595,8 @@ describe('cyboflow.runs.start', () => {
         1, // projectId (10th)
         undefined, // requestedExecutionModel (11th placeholder)
         undefined, // findingIds (12th — omitted)
-        undefined, // requestedModel (13th, LAST — omitted)
+        undefined, // requestedModel (13th — omitted)
+        undefined, // requestedEvalEnabled (14th, LAST — omitted)
       );
     } finally {
       setStartRunDeps({
@@ -605,7 +640,8 @@ describe('cyboflow.runs.start', () => {
         1, // projectId (10th)
         undefined, // requestedExecutionModel (11th placeholder)
         undefined, // findingIds (12th)
-        'opus', // requestedModel (13th, LAST)
+        'opus', // requestedModel (13th)
+        undefined, // requestedEvalEnabled (14th, LAST — not requested)
       );
     } finally {
       setStartRunDeps({

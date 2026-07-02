@@ -633,7 +633,12 @@ export class WorkflowRegistry {
     requestedSubstrate?: CliSubstrate,
     sessionId?: string,
     requestedPermissionMode?: PermissionMode,
-    opts?: { projectId?: number; requestedExecutionModel?: ExecutionModel; requestedModel?: string },
+    opts?: {
+      projectId?: number;
+      requestedExecutionModel?: ExecutionModel;
+      requestedModel?: string;
+      requestedEvalEnabled?: boolean;
+    },
   ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate; executionModel: ExecutionModel } {
     const workflow = this.getById(workflowId);
     if (!workflow) {
@@ -738,6 +743,14 @@ export class WorkflowRegistry {
     // then passes no `model` and the SDK uses its own default.
     const model = opts?.requestedModel ?? null;
 
+    // Per-run code-review-eval override (migration 044). Like model, there is no
+    // resolver ladder: a run either pins an explicit ON/OFF or leaves it NULL to
+    // inherit the GLOBAL codeReviewEvalEnabled toggle at the trigger seam
+    // (snapshotRunForEval). Stamped ONCE here and immutable for the run; NULL — the
+    // legacy/zero-behavior-change floor — means "no per-run pin". Stored as 0/1/NULL.
+    const evalEnabled =
+      opts?.requestedEvalEnabled === undefined ? null : opts.requestedEvalEnabled ? 1 : 0;
+
     // Freeze the workflow's CURRENT spec onto the run as a content address
     // (migration 026). Like substrate, spec_hash is stamped ONCE at INSERT and
     // is immutable for the run lifetime — there is no UPDATE path. It lets
@@ -746,12 +759,12 @@ export class WorkflowRegistry {
     const specHash = computeSpecHash(workflow.spec_json);
 
     const insert = this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, execution_model, model, session_id, spec_hash)
-      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, execution_model, model, eval_enabled, session_id, spec_hash)
+      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const createTx = this.db.transaction(() => {
-      insert.run(runId, workflowId, runProjectId, permissionMode, substrate, executionModel, model, sessionId, specHash);
+      insert.run(runId, workflowId, runProjectId, permissionMode, substrate, executionModel, model, evalEnabled, sessionId, specHash);
       // Ensure the frozen hash is always resolvable to its spec: snapshot a
       // revision for the spec we just stamped. INSERT OR IGNORE keyed on
       // UNIQUE(workflow_id, spec_hash) makes this idempotent, so a workflow that

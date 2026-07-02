@@ -268,6 +268,14 @@ export class RunLauncher {
     // resolver ladder; the value is resolved to a concrete snapshot at the spawn
     // seam (modelContext.resolveModelAlias).
     requestedModel?: string,
+    // The user's explicit per-run CODE-REVIEW-EVAL choice (Configure surface →
+    // runs.start → here). true = force the eval ON for this run, false = force it
+    // OFF, undefined = no per-run pin → inherit the global codeReviewEvalEnabled
+    // toggle at the trigger seam. Threaded into WorkflowRegistry.createRun, which
+    // stamps it onto workflow_runs.eval_enabled (0/1/NULL, migration 044). Like
+    // requestedModel there is no resolver ladder; the value is read at the trigger
+    // (snapshotRunForEval). OPTIONAL — omitted for every legacy/one-click call site.
+    requestedEvalEnabled?: boolean,
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
 
@@ -358,15 +366,20 @@ export class RunLauncher {
     // omitted and createRun falls back to workflow.project_id. The `opts` object
     // is only passed when projectId is defined so the legacy fallback path stays
     // byte-identical for callers that never thread a project.
-    // Pass the opts bag when an explicit project, execution model, OR model is
-    // threaded; omit it entirely otherwise so the legacy fallback path
-    // (workflow.project_id + resolver floor, no model pin) stays byte-identical.
+    // Pass the opts bag when an explicit project, execution model, model, OR
+    // per-run eval override is threaded; omit it entirely otherwise so the legacy
+    // fallback path (workflow.project_id + resolver floor, no model/eval pin) stays
+    // byte-identical.
     const createOpts =
-      projectId !== undefined || requestedExecutionModel !== undefined || requestedModel !== undefined
+      projectId !== undefined ||
+      requestedExecutionModel !== undefined ||
+      requestedModel !== undefined ||
+      requestedEvalEnabled !== undefined
         ? {
             ...(projectId !== undefined ? { projectId } : {}),
             ...(requestedExecutionModel !== undefined ? { requestedExecutionModel } : {}),
             ...(requestedModel !== undefined ? { requestedModel } : {}),
+            ...(requestedEvalEnabled !== undefined ? { requestedEvalEnabled } : {}),
           }
         : undefined;
     const { runId, permissionMode, substrate: resolvedSubstrate } = this.workflowRegistry.createRun(

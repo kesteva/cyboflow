@@ -881,6 +881,60 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    // ───── eval_enabled stamping (migration 044) ─────
+
+    it('stamps a NULL eval_enabled when no per-run override is requested (inherit the global)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'eval-default.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = registry.createRun(workflowId, undefined, 'sess-eval');
+
+        interface EvalRow { eval_enabled: number | null }
+        const row = db.prepare('SELECT eval_enabled FROM workflow_runs WHERE id = ?').get(result.runId) as EvalRow;
+        expect(row.eval_enabled).toBeNull();
+        expect(registry.getRunById(result.runId)?.eval_enabled ?? null).toBeNull();
+      });
+    });
+
+    it('stamps eval_enabled=1 for an explicit per-run ON and getRunById projects it', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'eval-on.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = registry.createRun(workflowId, undefined, 'sess-eval', undefined, {
+          requestedEvalEnabled: true,
+        });
+
+        interface EvalRow { eval_enabled: number | null }
+        const row = db.prepare('SELECT eval_enabled FROM workflow_runs WHERE id = ?').get(result.runId) as EvalRow;
+        expect(row.eval_enabled).toBe(1);
+        expect(registry.getRunById(result.runId)?.eval_enabled).toBe(1);
+      });
+    });
+
+    it('stamps eval_enabled=0 for an explicit per-run OFF', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'eval-off.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = registry.createRun(workflowId, undefined, 'sess-eval', undefined, {
+          requestedEvalEnabled: false,
+        });
+
+        interface EvalRow { eval_enabled: number | null }
+        const row = db.prepare('SELECT eval_enabled FROM workflow_runs WHERE id = ?').get(result.runId) as EvalRow;
+        expect(row.eval_enabled).toBe(0);
+        expect(registry.getRunById(result.runId)?.eval_enabled).toBe(0);
+      });
+    });
+
     it("stamps 'programmatic' on an SDK run when CYBOFLOW_EXECUTION_MODEL resolves it via the env override level", async () => {
       const prev = process.env.CYBOFLOW_EXECUTION_MODEL;
       process.env.CYBOFLOW_EXECUTION_MODEL = 'programmatic';
