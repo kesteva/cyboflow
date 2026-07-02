@@ -23,7 +23,7 @@
  *      reaching the orchestrator query; a fully-valid call DOES dispatch
  *      'mcp-report-finding' with the snake->camel mapped params.
  */
-import { describe, it, expect, beforeAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 
 // ---------------------------------------------------------------------------
 // Captured request handlers + sendQuery spy
@@ -84,12 +84,26 @@ vi.mock('net', () => {
 // Bootstrap env (must be set before the dynamic import)
 // ---------------------------------------------------------------------------
 
+// Save the pre-test values so afterAll can restore (or delete) them — leaving
+// these set process-wide would leak into any other test file that happens to
+// run in the same forked worker after this one (order-dependent flake).
+const originalRunId = process.env.CYBOFLOW_RUN_ID;
+const originalOrchSocket = process.env.CYBOFLOW_ORCH_SOCKET;
+
 beforeAll(async () => {
   process.env.CYBOFLOW_RUN_ID = 'run-test';
   process.env.CYBOFLOW_ORCH_SOCKET = '/tmp/cyboflow-test.sock';
   // Dynamic import AFTER the env + mocks are in place. The module registers its
   // two handlers synchronously during evaluation.
   await import('../cyboflowMcpServer');
+});
+
+afterAll(() => {
+  if (originalRunId === undefined) delete process.env.CYBOFLOW_RUN_ID;
+  else process.env.CYBOFLOW_RUN_ID = originalRunId;
+
+  if (originalOrchSocket === undefined) delete process.env.CYBOFLOW_ORCH_SOCKET;
+  else process.env.CYBOFLOW_ORCH_SOCKET = originalOrchSocket;
 });
 
 // ---------------------------------------------------------------------------
