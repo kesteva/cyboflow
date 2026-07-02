@@ -40,6 +40,7 @@ pnpm test:e2e          # Playwright E2E (requires display + Electron preload —
 pnpm test:unit         # Unit chain — main + frontend vitest, schema parity, build scripts (use this as the verifier AC gate)
 pnpm electron:rebuild  # Fix better-sqlite3 NODE_MODULE_VERSION errors after Node/Electron upgrades
 pnpm rebuild better-sqlite3   # Targeted reverse fix: `pnpm dev` postinstall rebuilds for Electron ABI (NMV 136); run this before `pnpm --filter main test` to restore host Node ABI (NMV 127)
+pnpm test:gate         # Day-gate integration test; requires `claude` on PATH + real API access — manual/unscheduled, not part of test:unit or CI
 ```
 
 Platform packaging (`pnpm build:mac:arm64`, `pnpm build:mac:universal`, etc.) — see `package.json` `scripts`.
