@@ -59,6 +59,8 @@ function makeEval(over: Partial<RunEval> = {}): RunEval {
     ciHigh: 86,
     gated: false,
     securityFlag: false,
+    requirementsUnmet: false,
+    capTriggers: null,
     dimensions: [
       { key: 'correctness', name: 'Correctness', weight: 0.3, score: 85, active: true, passCount: 3, failCount: 1, unknownCount: 0 },
       { key: 'security', name: 'Security', weight: 0.2, score: null, active: false, passCount: 0, failCount: 0, unknownCount: 2 },
@@ -217,6 +219,23 @@ describe('WorkflowSummaryPanel', () => {
     expect(screen.getByTestId('run-summary-eval-gate-lint')).toHaveTextContent('lint pass');
     // one active dimension of the two fixture dims.
     expect(screen.getByTestId('run-summary-eval-dims-active')).toHaveTextContent('1 / 7 dimensions active');
+  });
+
+  it('labels the score band as a sample spread, not a 95% CI', async () => {
+    runEvalQuery.mockResolvedValue(makeEval());
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-eval-ci')).toHaveTextContent('sample spread 78–86');
+    expect(screen.queryByText(/95% CI/)).not.toBeInTheDocument();
+  });
+
+  it('surfaces cap provenance so a capped 69 is distinguishable from an organic Fair', async () => {
+    runEvalQuery.mockResolvedValue(
+      makeEval({ overallScore: 69, band: 'Fair', capTriggers: ['SCP-1', 'security'], requirementsUnmet: true }),
+    );
+    renderPanel();
+    const capped = await screen.findByTestId('run-summary-eval-capped');
+    expect(capped).toHaveTextContent('SCP-1');
+    expect(capped).toHaveTextContent('security');
   });
 
   it('shows the GATED sentinel instead of a numeric hero when gated', async () => {

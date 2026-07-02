@@ -28,6 +28,15 @@ const SUBMIT_DELAY_MS = 300;
 /** How often to re-poll the eval while it is pending/running. */
 const EVAL_POLL_MS = 10_000;
 
+/**
+ * How many times to keep polling on a NULL eval before giving up. The snapshot row
+ * lands only AFTER an async git-diff capture, so a panel mounted right at the
+ * human-review trigger can see null for a few seconds — but a genuinely eval-less
+ * run (planner/compound, custom flows) is null forever, so the null-retry is
+ * bounded rather than infinite.
+ */
+const MAX_NULL_POLLS = 12;
+
 /** Compact token figure: >= 1M → 'N.Nm', >= 1k → 'Nk', else the integer. */
 function compactTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
@@ -146,17 +155,24 @@ export function WorkflowSummaryPanel({
     };
   }, [runId]);
 
-  // Poll the eval while it is pending/running; stop on complete/failed/unmount.
+  // Poll the eval while it is pending/running; stop on complete/failed/unmount. A
+  // null response is retried a bounded number of times (MAX_NULL_POLLS) so a panel
+  // mounted inside the snapshot-capture window still picks up the row once it lands,
+  // without polling forever for a genuinely eval-less run.
   useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let nullPolls = 0;
     const tick = (): void => {
       trpc.cyboflow.insights.runEval
         .query({ runId })
         .then((r) => {
           if (!alive) return;
           setRunEval(r);
-          if (r !== null && (r.evalStatus === 'pending' || r.evalStatus === 'running')) {
+          const inProgress =
+            r !== null && (r.evalStatus === 'pending' || r.evalStatus === 'running');
+          if (r === null) nullPolls += 1;
+          if (inProgress || (r === null && nullPolls < MAX_NULL_POLLS)) {
             timer = setTimeout(tick, EVAL_POLL_MS);
           }
         })
@@ -393,7 +409,7 @@ export function WorkflowSummaryPanel({
         )}
         {runEval !== null && (
           <p className="mt-2 text-xs text-text-muted" data-testid="run-summary-eval-advisory">
-            Assessment is advisory — it doesn&apos;t gate completion.
+            Assessment is advisory — only a confirmed critical finding blocks completion.
           </p>
         )}
       </div>
@@ -455,6 +471,11 @@ function ScoreSummary({ runEval, findings, breakdownOpen, onToggleBreakdown }: S
         {runEval.sampleCount != null && <> ×{runEval.sampleCount}</>}
         {' · '}rubric v{runEval.rubricVersion}
         {' · '}security_flag: {runEval.securityFlag ? 'high/critical' : 'none'}
+        {runEval.capTriggers !== null && (
+          <span data-testid="run-summary-eval-capped">
+            {' · '}capped: {runEval.capTriggers.join(', ')}
+          </span>
+        )}
       </p>
 
       {/* Deterministic-gate chips */}
@@ -625,7 +646,7 @@ function CiScale({
       </div>
       {lo !== null && hi !== null && (
         <p className="mt-1 text-[11px] text-text-tertiary">
-          95% CI {lo}–{hi}
+          sample spread {lo}–{hi}
         </p>
       )}
     </div>
