@@ -243,8 +243,15 @@ export const reviewItemsRouter = router({
               WHERE wrm.session_id = r.session_id AND wrm.outcome = 'merged'))`,
         );
       } else {
+        // Eval-authored findings (source 'agent:eval*') are POST-HOC by design: the
+        // K-sample jury runs for minutes after the human-review trigger, so a fast
+        // 'Complete workflow' can flip the run terminal BEFORE the finding is
+        // written — the orphan-hide would then suppress it (incl. a blocking
+        // catastrophic-cap item) the moment it lands, emptying the summary
+        // drill-down and hiding it from the blocking count. Exempt them so they
+        // surface (and gate) even on a terminal run; the human still dismisses them.
         clauses.push(
-          `NOT (ri.status = 'pending' AND ri.staged_at IS NULL AND ri.run_id IS NOT NULL AND r.status IN ${TERMINAL_RUN_STATUSES_SQL_IN})`,
+          `NOT (ri.status = 'pending' AND ri.staged_at IS NULL AND ri.run_id IS NOT NULL AND r.status IN ${TERMINAL_RUN_STATUSES_SQL_IN} AND ri.source NOT LIKE 'agent:eval%')`,
         );
       }
       const rows = db
