@@ -7,6 +7,7 @@ import {
   interactiveModelArg,
   modelSupportsContext1M,
   resolveModelAlias,
+  resolveUnavailableDefaultModelFallback,
   sdkModelAndBetas,
 } from '../modelContext';
 
@@ -197,6 +198,25 @@ describe('modelContext', () => {
       expect(applyModelAvailabilityFallback('claude-sonnet-5', noneUsable)).toBe('claude-sonnet-5');
       expect(applyModelAvailabilityFallback('auto', noneUsable)).toBe('auto');
       expect(applyModelAvailabilityFallback(undefined, noneUsable)).toBeUndefined();
+    });
+  });
+
+  describe('resolveUnavailableDefaultModelFallback — auto-mode classifier default guard', () => {
+    it('returns undefined when the guarded default is usable (keep the CLI default)', () => {
+      expect(resolveUnavailableDefaultModelFallback(() => true)).toBeUndefined();
+    });
+
+    it('returns the resolved Opus fallback when the guarded default is unavailable', () => {
+      expect(resolveUnavailableDefaultModelFallback(() => false)).toBe('claude-opus-4-8[1m]');
+    });
+
+    it('only consults the predicate for the guarded concreteId', () => {
+      const seen: string[] = [];
+      resolveUnavailableDefaultModelFallback((id) => {
+        seen.push(id);
+        return true;
+      });
+      expect(seen).toEqual(['claude-fable-5']);
     });
   });
 

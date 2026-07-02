@@ -1,5 +1,5 @@
 import type { SdkBeta } from '@anthropic-ai/claude-agent-sdk';
-import { guardedModelByConcreteId } from '../../../../../shared/types/modelAvailability';
+import { GUARDED_MODELS, guardedModelByConcreteId } from '../../../../../shared/types/modelAvailability';
 
 /**
  * The Claude Agent SDK beta flag that enables the 1M-token context window.
@@ -88,6 +88,32 @@ export function applyModelAvailabilityFallback(
   if (!guarded) return resolvedId;
   if (isUsable(guarded.concreteId)) return resolvedId;
   return resolveModelAlias(guarded.fallbackAlias);
+}
+
+/**
+ * Fallback model for the bundled CLI's DEFAULT model when it is unavailable — the
+ * classifier-availability guard for native auto-mode.
+ *
+ * With NO explicit `--model` pin (a run whose model is NULL/'auto') the bundled
+ * CLI selects its own default model, which the native auto-mode classifier ALSO
+ * uses. cyboflow's frontier default is a guarded model (Fable 5); when it is
+ * pulled, the classifier can't run and denies EVERY tool. This returns the
+ * resolved fallback id of the first guarded model the availability guard reports
+ * unavailable (so the spawn seam can pin a working classifier-capable model
+ * instead of stranding on the dead default), else `undefined` — keep the CLI
+ * default. An explicitly-pinned guarded model is already swapped by
+ * {@link applyModelAvailabilityFallback}; this covers only the unpinned default.
+ *
+ * `isUsable` is INJECTED (the spawn managers wire it to the availability service),
+ * keeping this a pure, unit-testable transform.
+ */
+export function resolveUnavailableDefaultModelFallback(
+  isUsable: (concreteId: string) => boolean,
+): string | undefined {
+  for (const guarded of GUARDED_MODELS) {
+    if (!isUsable(guarded.concreteId)) return resolveModelAlias(guarded.fallbackAlias);
+  }
+  return undefined;
 }
 
 /**

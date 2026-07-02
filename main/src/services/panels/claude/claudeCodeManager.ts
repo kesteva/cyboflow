@@ -7,7 +7,12 @@ import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../.
 import { resolveClaudeExecutablePath } from './claudeExecutablePath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
-import { resolveModelAlias, sdkModelAndBetas, applyModelAvailabilityFallback } from './modelContext';
+import {
+  resolveModelAlias,
+  sdkModelAndBetas,
+  applyModelAvailabilityFallback,
+  resolveUnavailableDefaultModelFallback,
+} from './modelContext';
 import {
   ModelAvailabilityService,
   isModelUsable,
@@ -132,6 +137,17 @@ export function mcpDenyListSdkGuards(disabledMcps: readonly string[]): {
   if (denied.length === 0) return {};
   return { strictMcpConfig: true, disallowedTools: denied.map((name) => `mcp__${name}`) };
 }
+
+/**
+ * Tool-name prefix for the first-party 'cyboflow' MCP server (report_step,
+ * create/update task, sprint batch, …) — the app calling its own orchestrator
+ * socket. These are never model-gated: in native auto-mode they are allowed
+ * deterministically BEFORE the classifier so a run's own orchestration surface
+ * can't be denied when the classifier's model is unavailable (which soft-bricks
+ * the flow — `current_step_id` never advances past a denied report_step).
+ * Narrowly the 'cyboflow' server only; other MCP servers stay classifier-gated.
+ */
+const CYBOFLOW_MCP_TOOL_PREFIX = 'mcp__cyboflow__';
 
 interface ClaudeSpawnOptions {
   panelId: string;
@@ -1165,6 +1181,26 @@ export class ClaudeCodeManager extends AbstractCliManager {
       sdkOptions.betas = betas;
     }
 
+    // Classifier-availability guard for native auto-mode. With no explicit model
+    // pin (a NULL/'auto' run model → sdkOptions.model unset above) the bundled CLI
+    // uses its own default, which the auto classifier shares; when that default is
+    // a guarded model the availability guard reports unavailable (Fable 5 pulled),
+    // the classifier can't run and denies every non-first-party tool. Pin the
+    // guarded model's fallback family so the classifier has a working,
+    // classifier-capable model. Explicit pins are already swapped above via
+    // applyModelAvailabilityFallback; this only covers the unpinned default.
+    if (sdkOptions.permissionMode === 'auto' && !sdkOptions.model) {
+      const classifierFallback = resolveUnavailableDefaultModelFallback(isModelUsable);
+      const { model: fbModel, betas: fbBetas } = sdkModelAndBetas(classifierFallback);
+      if (fbModel && fbModel !== 'auto') {
+        sdkOptions.model = fbModel;
+        if (fbBetas.length > 0) sdkOptions.betas = fbBetas;
+        this.logger?.warn(
+          `[ClaudeCodeManager] auto-mode default model unavailable; pinning classifier-capable '${fbModel}' for panel ${options.panelId}.`,
+        );
+      }
+    }
+
     // Fast mode (premium, Opus-only research preview) is a per-launch opt-in.
     // The SDK loads `Settings` from `settingSources: ['user','project']`, so a
     // `/fast` the user once enabled in plain Claude Code PERSISTS in
@@ -1491,7 +1527,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * an allow/deny decision would pre-empt that classifier (hooks run first in
    * the CLI permission order), silently degrading auto to approve. So this hook:
    *   - routes tool_name === 'AskUserQuestion' to QuestionRouter (so planner /
-   *     sprint question gates still work), and
+   *     sprint question gates still work),
+   *   - allows the first-party `mcp__cyboflow__*` tools deterministically (the
+   *     app's own orchestration surface — never model-gated; see
+   *     {@link CYBOFLOW_MCP_TOOL_PREFIX}), and
    *   - for EVERY other tool returns a pass-through with NO permissionDecision,
    *     deferring to the lower layers (the native classifier). Per the SDK
    *     contract (PreToolUseHookSpecificOutput.permissionDecision is optional),
@@ -1505,6 +1544,19 @@ export class ClaudeCodeManager extends AbstractCliManager {
       const pretool = input as PreToolUseHookInput;
       if (pretool.tool_name === 'AskUserQuestion') {
         return this.routeAskUserQuestion(pretool, runId, loggerLike);
+      }
+      // First-party cyboflow MCP tools (report_step, create/update task, …) are the
+      // app's own orchestration surface — allow them deterministically so they never
+      // reach the classifier. When the classifier's model is unavailable it denies
+      // EVERY tool ("cannot determine the safety"), which soft-bricks the run
+      // (report_step denied → current_step_id never advances → the plan gate no-ops).
+      if (pretool.tool_name.startsWith(CYBOFLOW_MCP_TOOL_PREFIX)) {
+        return {
+          hookSpecificOutput: {
+            hookEventName: 'PreToolUse' as const,
+            permissionDecision: 'allow' as const,
+          },
+        };
       }
       // Defer to the native classifier: emit a PreToolUse output with NO
       // permissionDecision so the lower permission layers decide. This is the
