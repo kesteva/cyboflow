@@ -199,6 +199,86 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     }
   });
 
+  it('persists dimension name + weight in dimensions_json so panel labels render', async () => {
+    const db = noExistingFindings();
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      judge: new FakeJudge(async () => sampleAllPass(BROAD_PASS)),
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      appVersion: '0.1.11',
+      sampleCount: 1,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', '1.1');
+    await worker._queue().onIdle();
+    const complete = db.runs.find((r) => r.sql.includes("eval_status = 'complete'"));
+    const dims = JSON.parse(complete?.params[8] as string) as Array<{ name: unknown; weight: unknown }>;
+    expect(dims.length).toBe(7);
+    for (const d of dims) {
+      expect(typeof d.name).toBe('string');
+      expect((d.name as string).length).toBeGreaterThan(0);
+      expect(typeof d.weight).toBe('number');
+    }
+  });
+
+  it('synthesizes a BLOCKING review item when a cap fires with no catastrophic finding', async () => {
+    const db = noExistingFindings();
+    // SCP-1 FAIL fires the overall_fair_cap with NO findings[] entry — the blocking
+    // half of the rubric's cap⇒blocking invariant must be synthesized.
+    const judge = new FakeJudge(async () => ({
+      verdicts: BROAD_PASS.map((id) => ({
+        id,
+        verdict: (id === 'SCP-1' ? 'FAIL' : 'PASS') as 'FAIL' | 'PASS',
+        evidence: '',
+      })),
+      findings: [],
+    }));
+    const writes: ReviewItemCreate[] = [];
+    const writer = vi.fn(async (_projectId: number, change: ReviewItemCreate) => {
+      writes.push(change);
+      return { reviewItemId: 'ri' };
+    });
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      judge,
+      reviewItemWriter: writer,
+      appVersion: '0.1.11',
+      sampleCount: 1,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', '1.1');
+    await worker._queue().onIdle();
+    expect(writes).toHaveLength(1);
+    expect(writes[0].blocking).toBe(true);
+    expect(writes[0].source).toBe('agent:eval');
+    expect(writes[0].title).toMatch(/catastrophic/i);
+  });
+
+  it('recoverInterrupted re-enqueues each pending/running row on boot', () => {
+    const db = new FakeDb(
+      () => evalRunRow(),
+      (sql) =>
+        sql.includes('eval_status IN')
+          ? [
+              { run_id: 'r-a', rubric_version: '1.1' },
+              { run_id: 'r-b', rubric_version: '1.0' },
+            ]
+          : [],
+    );
+    const worker = EvalWorker.initialize(db, undefined, {
+      gitDiff: vi.fn(),
+      judge: new FakeJudge(async () => sampleAllPass(BROAD_PASS)),
+      reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
+      appVersion: '0.1.11',
+      sleep: async () => {},
+    });
+    const spy = vi.spyOn(worker, 'enqueue');
+    worker.recoverInterrupted();
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy).toHaveBeenCalledWith('r-a', '1.1');
+    expect(spy).toHaveBeenCalledWith('r-b', '1.0');
+  });
+
   it('stop() pauses the queue', async () => {
     const worker = EvalWorker.initialize(noExistingFindings(), undefined, {
       gitDiff: vi.fn(),

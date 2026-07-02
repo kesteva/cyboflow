@@ -726,6 +726,10 @@ async function initializeServices() {
       ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
     appVersion: app.getVersion(),
   });
+  // Crash-safe resume: re-enqueue any eval an app quit left 'pending'/'running'
+  // (the frozen diff lives in the row, so a re-grade is self-contained) — otherwise
+  // the summary panel polls a perpetual 'running'.
+  EvalWorker.getInstance().recoverInterrupted();
 
   // Trigger seam (zero-touch): subscribe to the SHARED step-transition emitter and
   // snapshot on the sprint-review => human-review boundary. The flow prompts report

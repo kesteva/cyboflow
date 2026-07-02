@@ -9,17 +9,18 @@
  *   process(runId)   → pending→running, K jury samples, score, complete/failed,
  *                       write net-new findings through ReviewItemRouter.
  *
- * v1 non-goals (documented): NO crash-safe resume — a 'pending'/'running' row left
- * by an app quit simply stays that way and is neither re-picked-up nor auto-failed
- * on next boot (StepResultStore's crash-safe resume is the closest precedent if v2
- * wants it). before-quit pauses the queue; in-flight samples abort via the SDK
- * deadline.
+ * Crash-safe resume: `recoverInterrupted()` (called once at boot) re-enqueues any
+ * row an app quit left in 'pending'/'running' — the frozen diff is captured in the
+ * row, so a re-grade is self-contained and never leaves the panel polling a
+ * perpetual 'running'. before-quit pauses the queue; in-flight samples abort via
+ * the SDK deadline.
  *
  * Impurity lives HERE (SDK via the injected judge, DB writes, findings chokepoint);
  * scoring.ts stays pure. All electron-touching collaborators are injected as
  * closures at initialize() so the worker itself imports no concrete service —
  * mirroring ArtifactRouter's boot wiring.
  */
+import { existsSync } from 'node:fs';
 import PQueue from 'p-queue';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
@@ -27,7 +28,13 @@ import type { RunGitDiff } from '../../../../shared/types/runFiles';
 // router while reusing its create-change shape for the findings write.
 import type { ReviewItemCreate } from '../reviewItemRouter';
 import { RUBRIC_VERSION } from './rubric';
-import { scoreSamples, type JudgeSample, type GateResults, type ScoringResult } from './scoring';
+import {
+  scoreSamples,
+  type JudgeSample,
+  type JudgeFinding,
+  type GateResults,
+  type ScoringResult,
+} from './scoring';
 import type { JudgeClient } from './evalJury';
 import { snapshotRunForEval } from './snapshotRunForEval';
 
@@ -139,6 +146,36 @@ export class EvalWorker {
     void this.queue.add(() => this.processWithRetries(runId, rubricVersion));
   }
 
+  /**
+   * Boot-time crash-safe resume: re-enqueue every row an app quit left mid-flight
+   * ('pending' never started; 'running' interrupted before persistComplete). The
+   * frozen diff/provenance is already in the row, so a re-grade is self-contained.
+   * Without this a 'running' row polls 'Quality assessment running…' forever (the
+   * re-fire dedup guarantees it is never re-picked-up otherwise). Best-effort; a DB
+   * read failure is logged and swallowed so boot is never blocked.
+   */
+  recoverInterrupted(): void {
+    let rows: Array<{ run_id: string; rubric_version: string }> = [];
+    try {
+      rows = this.db
+        .prepare(
+          "SELECT run_id, rubric_version FROM run_evals WHERE eval_status IN ('pending', 'running')",
+        )
+        .all() as Array<{ run_id: string; rubric_version: string }>;
+    } catch (err) {
+      this.logger?.warn('[eval] interrupted-eval recovery read failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    for (const r of rows) {
+      this.enqueue(r.run_id, r.rubric_version);
+    }
+    if (rows.length > 0) {
+      this.logger?.info('[eval] re-enqueued interrupted evals on boot', { count: rows.length });
+    }
+  }
+
   /** Pause the queue on shutdown. Pending rows stay 'pending' (no crash-safe resume). */
   async stop(): Promise<void> {
     this.queue.pause();
@@ -203,9 +240,13 @@ export class EvalWorker {
     const diff = row.diff_text ?? '';
     const gateResults = this.parseGate(row.gate_results_json);
     const diffStatsSummary = this.summarizeStats(row.diff_stats_json);
-    // Pass the worktree as cwd only if it plausibly still exists — a fast human
-    // merge may have torn it down, in which case the judge grades diff-only.
-    const cwd = row.worktree_path ?? undefined;
+    // Pass the worktree as cwd only if it STILL EXISTS on disk — a fast human merge
+    // (close-out deletes the worktree but never NULLs workflow_runs.worktree_path)
+    // may have torn it down, and spawning the judge with a missing cwd is an ENOENT
+    // that fails every sample. The frozen diff_text is self-contained, so the judge
+    // grades diff-only when the worktree is gone.
+    const cwd =
+      row.worktree_path && existsSync(row.worktree_path) ? row.worktree_path : undefined;
 
     const samples = await this.collectSamples({ diff, gateResults, diffStatsSummary, cwd });
     if (samples.length === 0) {
@@ -282,6 +323,10 @@ export class EvalWorker {
     const dimensionsJson = JSON.stringify(
       result.dimensions.map((d) => ({
         key: d.key,
+        // name + weight are part of the RunEvalDimension read contract (the panel
+        // renders {d.name} as the row label); omitting them renders blank labels.
+        name: d.name,
+        weight: d.weight,
         score: d.score,
         band: d.band,
         active: d.active,
@@ -293,13 +338,17 @@ export class EvalWorker {
       })),
     );
     const perSampleJson = JSON.stringify(samples);
+    // Cap provenance: a 69 capped by a catastrophic trigger must be distinguishable
+    // from an organic Fair 69 in the DB / API / UI.
+    const capTriggersJson =
+      result.capTriggers.length > 0 ? JSON.stringify(result.capTriggers) : null;
 
     this.db
       .prepare(
         `UPDATE run_evals SET
            eval_status = 'complete',
            overall_score = ?, band = ?, ci_low = ?, ci_high = ?,
-           gated = ?, security_flag = ?,
+           gated = ?, security_flag = ?, requirements_unmet = ?, cap_triggers_json = ?,
            dimensions_json = ?, per_sample_json = ?,
            sample_count = ?, error = NULL, updated_at = ?
          WHERE run_id = ? AND rubric_version = ?`,
@@ -311,6 +360,8 @@ export class EvalWorker {
         result.ciHigh,
         result.gated ? 1 : 0,
         result.securityFlag ? 1 : 0,
+        result.requirementsUnmet ? 1 : 0,
+        capTriggersJson,
         dimensionsJson,
         perSampleJson,
         result.sampleCount,
@@ -343,12 +394,20 @@ export class EvalWorker {
   // -------------------------------------------------------------------------
 
   /**
-   * Write net-new judge findings through the ReviewItemRouter chokepoint. Dedups
-   * against the run's existing review_items (normalize on file + lowercased title)
-   * and caps at MAX_FINDINGS_PER_EVAL. Blocking ONLY for catastrophic-cap findings
-   * (the rubric's blocking class); all others are advisory blocking:false. Writes
-   * are AWAITED (not fire-and-forget) so a DB CHECK violation on severity surfaces
-   * in the log rather than a swallowed unhandled rejection.
+   * Write judge findings through the ReviewItemRouter chokepoint. Dedups against the
+   * run's existing review_items (normalize on file + lowercased title).
+   *
+   * Blocking policy (reconciles the rubric's "catastrophic ⇒ blocking review item"
+   * with the feature's advisory framing): a finding BLOCKS the gate only when a
+   * MAJORITY of the K samples independently flag that same finding `catastrophic` —
+   * one hallucinated catastrophic=true sample must not gate an otherwise-passing
+   * run. A confirmed-catastrophic finding is ALWAYS written (even if the judge marks
+   * it netNew=false) and is prioritized ahead of the MAX_FINDINGS_PER_EVAL cap so a
+   * flood of advisory findings can never starve it. Advisory (non-confirmed)
+   * findings keep the net-new filter and the ~10 cap.
+   *
+   * Writes are AWAITED (not fire-and-forget) so a DB CHECK violation on severity
+   * surfaces in the log rather than a swallowed unhandled rejection.
    */
   private async writeFindings(
     runId: string,
@@ -358,20 +417,49 @@ export class EvalWorker {
   ): Promise<void> {
     const existing = this.readExistingFindingKeys(runId);
 
-    // Collapse findings across samples by dedup key (first occurrence wins).
-    const candidates = new Map<string, (typeof samples)[number]['findings'][number]>();
+    // Aggregate findings across samples by dedup key, tracking catastrophic votes.
+    interface Candidate {
+      finding: JudgeFinding;
+      catastrophicVotes: number;
+      netNewAny: boolean;
+    }
+    const byKey = new Map<string, Candidate>();
     for (const sample of samples) {
       for (const f of sample.findings) {
-        if (!f.netNew) continue;
         const key = this.findingKey(f.file, f.title);
-        if (existing.has(key) || candidates.has(key)) continue;
-        candidates.set(key, f);
+        const prev = byKey.get(key);
+        if (prev) {
+          if (f.catastrophic) prev.catastrophicVotes += 1;
+          if (f.netNew) prev.netNewAny = true;
+        } else {
+          byKey.set(key, {
+            finding: f,
+            catastrophicVotes: f.catastrophic ? 1 : 0,
+            netNewAny: f.netNew,
+          });
+        }
       }
     }
 
+    const confirmThreshold = Math.max(1, Math.ceil(result.sampleCount / 2));
+    const selectable = [...byKey.entries()]
+      .filter(([key]) => !existing.has(key))
+      .map(([, c]) => ({
+        finding: c.finding,
+        confirmedCatastrophic: c.catastrophicVotes >= confirmThreshold,
+        netNewAny: c.netNewAny,
+      }))
+      .filter((c) => c.confirmedCatastrophic || c.netNewAny)
+      // Confirmed-catastrophic first so the cap can never drop a blocking finding.
+      .sort((a, b) => Number(b.confirmedCatastrophic) - Number(a.confirmedCatastrophic));
+
     let written = 0;
-    for (const f of candidates.values()) {
-      if (written >= MAX_FINDINGS_PER_EVAL) break;
+    let advisoryWritten = 0;
+    let blockingWritten = 0;
+    for (const c of selectable) {
+      // The ~10 cap applies to advisory findings only — never to a blocking one.
+      if (!c.confirmedCatastrophic && advisoryWritten >= MAX_FINDINGS_PER_EVAL) continue;
+      const f = c.finding;
       const change: ReviewItemCreate = {
         op: 'create',
         actor: 'agent:eval',
@@ -380,7 +468,7 @@ export class EvalWorker {
         body: f.body || null,
         severity: f.severity,
         source: 'agent:eval',
-        blocking: f.catastrophic, // only catastrophic-cap findings block the gate
+        blocking: c.confirmedCatastrophic,
         runId,
         payload: {
           kind: 'finding',
@@ -392,6 +480,8 @@ export class EvalWorker {
       try {
         await this.deps.reviewItemWriter(projectId, change);
         written += 1;
+        if (c.confirmedCatastrophic) blockingWritten += 1;
+        else advisoryWritten += 1;
       } catch (err) {
         this.logger?.warn('[eval] finding write failed (swallowed)', {
           runId,
@@ -400,11 +490,51 @@ export class EvalWorker {
         });
       }
     }
-    if (written > 0) {
-      this.logger?.info('[eval] wrote net-new findings', {
+    // Rubric invariant: a fired catastrophic cap must emit a BLOCKING review item
+    // (cap ⇒ 69 AND a blocking item). The cap can fire from a bare FAIL verdict on
+    // a cap-trigger sub-check (ROB-3/4/5, SCP-1) with no paired findings[] entry, or
+    // from a finding that deduped against a non-blocking existing item — in either
+    // case no blocking finding was written above. Synthesize ONE so the human is
+    // forced to reconcile before completion (the rubric's "surfaced for
+    // reconciliation" contract).
+    if (result.capTriggered && blockingWritten === 0) {
+      const change: ReviewItemCreate = {
+        op: 'create',
+        actor: 'agent:eval',
+        kind: 'finding',
+        title: 'Quality eval flagged a catastrophic issue requiring review',
+        body:
+          `The code-review eval soft-capped this run at Fair (≤${result.overallScore ?? 69}) on a ` +
+          `catastrophic-class trigger (${result.capTriggers.join(', ') || 'unspecified'}). ` +
+          'A human must reconcile this before completing the run — review the frozen diff.',
+        severity: 'error',
+        source: 'agent:eval',
+        blocking: true,
+        runId,
+        payload: {
+          kind: 'finding',
+          category: result.securityFlag ? 'security' : 'robustness',
+          impact: { note: `catastrophic cap: ${result.capTriggers.join(', ') || 'unspecified'}` },
+        },
+      };
+      try {
+        await this.deps.reviewItemWriter(projectId, change);
+        written += 1;
+        blockingWritten += 1;
+      } catch (err) {
+        this.logger?.warn('[eval] synthesized cap finding write failed (swallowed)', {
+          runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (written > 0 || result.capTriggered) {
+      this.logger?.info('[eval] wrote findings', {
         runId,
         written,
+        blockingWritten,
         capTriggered: result.capTriggered,
+        capTriggers: result.capTriggers,
       });
     }
   }
