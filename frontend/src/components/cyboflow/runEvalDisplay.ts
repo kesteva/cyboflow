@@ -19,22 +19,45 @@ export interface BandDisplay {
 }
 
 /**
- * Band → design-token mapping. Excellent/Good read as positive (success/blue),
- * Fair as caution, Poor as error. Uses the app's status/interactive tokens — no
- * raw hex — so it tracks the active theme.
+ * Band → design-token mapping. Excellent/Good both read as positive (green),
+ * Fair as caution (amber), Poor as error (red) — matching the approved mock-up,
+ * which colors both Excellent and Good green. Uses the app's status tokens — no
+ * raw hex — so it tracks the active theme. `label` is UPPERCASE for the hero;
+ * the title-case band word is the `RunEvalBand` value itself.
  */
 export function bandDisplay(band: RunEvalBand): BandDisplay {
   switch (band) {
     case 'Excellent':
       return { label: 'EXCELLENT', textClass: 'text-status-success', bgClass: 'bg-status-success' };
     case 'Good':
-      return { label: 'GOOD', textClass: 'text-interactive', bgClass: 'bg-interactive' };
+      return { label: 'GOOD', textClass: 'text-status-success', bgClass: 'bg-status-success' };
     case 'Fair':
       return { label: 'FAIR', textClass: 'text-status-warning', bgClass: 'bg-status-warning' };
     case 'Poor':
       return { label: 'POOR', textClass: 'text-status-error', bgClass: 'bg-status-error' };
   }
 }
+
+/**
+ * Derive a band from a single 0-100 dimension score. The backend hands us an
+ * overall `band` but per-dimension rows carry only a numeric `score`, so the
+ * breakdown derives each dimension's band word/color here. Thresholds mirror the
+ * mock-up's worked example (90→Excellent, 71-89→Good, 68→Fair): ≥90 Excellent,
+ * ≥70 Good, ≥50 Fair, else Poor.
+ */
+export function scoreToBand(score: number): RunEvalBand {
+  if (score >= 90) return 'Excellent';
+  if (score >= 70) return 'Good';
+  if (score >= 50) return 'Fair';
+  return 'Poor';
+}
+
+/** Finding severity → the mock-up's action-oriented chip label. */
+export const FINDING_SEVERITY_LABEL: Record<'info' | 'warning' | 'error', string> = {
+  error: 'MUST-FIX',
+  warning: 'GUIDELINE',
+  info: 'NIT',
+};
 
 export type GateStatus = 'pass' | 'fail' | 'unknown';
 

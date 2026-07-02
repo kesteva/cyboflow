@@ -62,8 +62,8 @@ function makeEval(over: Partial<RunEval> = {}): RunEval {
     requirementsUnmet: false,
     capTriggers: null,
     dimensions: [
-      { key: 'correctness', name: 'Correctness', weight: 0.3, score: 85, active: true, passCount: 3, failCount: 1, unknownCount: 0 },
-      { key: 'security', name: 'Security', weight: 0.2, score: null, active: false, passCount: 0, failCount: 0, unknownCount: 2 },
+      { key: 'correctness', name: 'Correctness', weight: 30, score: 85, active: true, passCount: 3, failCount: 1, unknownCount: 0 },
+      { key: 'security', name: 'Security', weight: 20, score: null, active: false, passCount: 0, failCount: 0, unknownCount: 2 },
     ],
     perSample: null,
     judgeModel: 'claude-opus-4-8',
@@ -213,19 +213,34 @@ describe('WorkflowSummaryPanel', () => {
     expect(await screen.findByTestId('run-summary-eval-band')).toHaveTextContent('GOOD');
     expect(screen.getByTestId('run-summary-eval-score')).toHaveTextContent('82');
     expect(screen.getByTestId('run-summary-eval-provenance')).toHaveTextContent('claude-opus-4-8');
-    expect(screen.getByTestId('run-summary-eval-provenance')).toHaveTextContent('rubric v1.1');
-    expect(screen.getByTestId('run-summary-eval-gate-build')).toHaveTextContent('build pass');
-    expect(screen.getByTestId('run-summary-eval-gate-typecheck')).toHaveTextContent('typecheck fail');
-    expect(screen.getByTestId('run-summary-eval-gate-lint')).toHaveTextContent('lint pass');
+    // The rubric version lives in the module eyebrow, not the provenance block.
+    expect(screen.getByTestId('run-summary-eval-eyebrow')).toHaveTextContent('rubric v1.1');
+    // Gate chips carry the label; pass/fail is conveyed via data-gate-status (+ dot color).
+    expect(screen.getByTestId('run-summary-eval-gate-build')).toHaveTextContent('build');
+    expect(screen.getByTestId('run-summary-eval-gate-build')).toHaveAttribute('data-gate-status', 'pass');
+    expect(screen.getByTestId('run-summary-eval-gate-typecheck')).toHaveAttribute('data-gate-status', 'fail');
+    expect(screen.getByTestId('run-summary-eval-gate-lint')).toHaveAttribute('data-gate-status', 'pass');
     // one active dimension of the two fixture dims.
     expect(screen.getByTestId('run-summary-eval-dims-active')).toHaveTextContent('1 / 7 dimensions active');
+  });
+
+  it('shows a PASSED deterministic-gate sentinel chip for a non-gated eval', async () => {
+    runEvalQuery.mockResolvedValue(makeEval());
+    renderPanel();
+    expect(await screen.findByTestId('run-summary-eval-gate-summary')).toHaveTextContent('Deterministic gate: PASSED');
   });
 
   it('labels the score band as a sample spread, not a 95% CI', async () => {
     runEvalQuery.mockResolvedValue(makeEval());
     renderPanel();
-    expect(await screen.findByTestId('run-summary-eval-ci')).toHaveTextContent('sample spread 78–86');
-    expect(screen.queryByText(/95% CI/)).not.toBeInTheDocument();
+    const ci = await screen.findByTestId('run-summary-eval-ci');
+    expect(ci).toHaveTextContent(/sample spread/i);
+    // The spread bounds and the score-in-a-range explanatory note are both present.
+    expect(ci).toHaveTextContent('78');
+    expect(ci).toHaveTextContent('86');
+    expect(ci).toHaveTextContent('82 sits inside a plausible 78–86');
+    expect(screen.queryByText(/95% CI/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/confidence interval/i)).not.toBeInTheDocument();
   });
 
   it('surfaces cap provenance so a capped 69 is distinguishable from an organic Fair', async () => {
@@ -243,6 +258,8 @@ describe('WorkflowSummaryPanel', () => {
     renderPanel();
     expect(await screen.findByTestId('run-summary-eval-gated')).toHaveTextContent('GATED');
     expect(screen.queryByTestId('run-summary-eval-band')).not.toBeInTheDocument();
+    // The header sentinel chip flips to GATED too.
+    expect(screen.getByTestId('run-summary-eval-gate-summary')).toHaveTextContent('Deterministic gate: GATED');
   });
 
   it('expands the breakdown to dimension rows and eval-authored findings', async () => {
@@ -264,7 +281,7 @@ describe('WorkflowSummaryPanel', () => {
         staged_at: null,
         selected: false,
         source: 'agent:eval',
-        payload: { kind: 'finding', locations: [{ path: 'src/x.ts', line: 42 }] },
+        payload: { kind: 'finding', category: 'Robustness', locations: [{ path: 'src/x.ts', line: 42 }] },
         created_at: '2026-07-01T00:00:00.000Z',
         updated_at: '2026-07-01T00:00:00.000Z',
         resolved_by: null,
@@ -300,11 +317,18 @@ describe('WorkflowSummaryPanel', () => {
     await waitFor(() => expect(toggle).toHaveTextContent('1 finding'));
     fireEvent.click(toggle);
 
-    expect(screen.getByTestId('run-summary-eval-dim-correctness')).toHaveTextContent('85');
+    const correctness = screen.getByTestId('run-summary-eval-dim-correctness');
+    expect(correctness).toHaveTextContent('85');
+    // weight column (0-100 scale) and derived band word render alongside the score.
+    expect(correctness).toHaveTextContent('30%');
+    expect(correctness).toHaveTextContent('Good');
     expect(screen.getByTestId('run-summary-eval-dim-security')).toHaveTextContent('inactive');
     const findings = screen.getAllByTestId('run-summary-eval-finding');
     expect(findings).toHaveLength(1);
     expect(findings[0]).toHaveTextContent('src/x.ts:42');
     expect(findings[0]).toHaveTextContent('Null check missing');
+    // warning severity surfaces as the GUIDELINE chip label; category is the tag.
+    expect(findings[0]).toHaveTextContent('GUIDELINE');
+    expect(findings[0]).toHaveTextContent('Robustness');
   });
 });

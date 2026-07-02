@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { bandDisplay, gateStatus, formatRuntime } from '../runEvalDisplay';
+import {
+  bandDisplay,
+  scoreToBand,
+  gateStatus,
+  formatRuntime,
+  FINDING_SEVERITY_LABEL,
+} from '../runEvalDisplay';
 
 describe('bandDisplay', () => {
   it('maps each band to an uppercased label and a color token', () => {
@@ -9,6 +15,32 @@ describe('bandDisplay', () => {
     expect(bandDisplay('Poor').label).toBe('POOR');
     expect(bandDisplay('Excellent').textClass).toContain('success');
     expect(bandDisplay('Poor').textClass).toContain('error');
+  });
+
+  it('colors Good green (success) to match the approved mock-up', () => {
+    expect(bandDisplay('Good').textClass).toContain('success');
+    expect(bandDisplay('Fair').textClass).toContain('warning');
+  });
+});
+
+describe('scoreToBand', () => {
+  it('derives a band from a 0-100 dimension score at the documented thresholds', () => {
+    expect(scoreToBand(90)).toBe('Excellent');
+    expect(scoreToBand(100)).toBe('Excellent');
+    expect(scoreToBand(89)).toBe('Good');
+    expect(scoreToBand(70)).toBe('Good');
+    expect(scoreToBand(68)).toBe('Fair');
+    expect(scoreToBand(50)).toBe('Fair');
+    expect(scoreToBand(49)).toBe('Poor');
+    expect(scoreToBand(0)).toBe('Poor');
+  });
+});
+
+describe('FINDING_SEVERITY_LABEL', () => {
+  it('maps stored severities to the mock-up chip labels', () => {
+    expect(FINDING_SEVERITY_LABEL.error).toBe('MUST-FIX');
+    expect(FINDING_SEVERITY_LABEL.warning).toBe('GUIDELINE');
+    expect(FINDING_SEVERITY_LABEL.info).toBe('NIT');
   });
 });
 

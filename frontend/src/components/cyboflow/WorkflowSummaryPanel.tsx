@@ -15,8 +15,10 @@ import type { RunUsageRollup, RunEval } from '../../../../shared/types/insights'
 import type { ReviewItem } from '../../../../shared/types/reviews';
 import {
   bandDisplay,
+  scoreToBand,
   gateStatus,
   formatRuntime,
+  FINDING_SEVERITY_LABEL,
   RUBRIC_DIMENSION_COUNT,
   GATE_KEYS,
   type GateStatus,
@@ -62,6 +64,8 @@ interface FindingRow {
   severity: 'info' | 'warning' | 'error';
   /** 'path:line' when a location is present, else null. */
   location: string | null;
+  /** Optional grouping tag (finding payload `category`); null when absent. */
+  category: string | null;
   title: string;
 }
 
@@ -74,16 +78,32 @@ function findingLocation(item: ReviewItem): string | null {
   return loc.line === undefined ? loc.path : `${loc.path}:${loc.line}`;
 }
 
+/** The finding's optional grouping category (payload `category`), if any. */
+function findingCategory(item: ReviewItem): string | null {
+  const payload = item.payload;
+  if (payload === null || payload.kind !== 'finding') return null;
+  return payload.category ?? null;
+}
+
+/** Severity → chip surface (background + text) tokens. `info`/NIT reads neutral. */
 const SEVERITY_CHIP: Record<'info' | 'warning' | 'error', string> = {
-  info: 'bg-status-info/15 text-status-info',
+  info: 'bg-surface-secondary text-text-tertiary',
   warning: 'bg-status-warning/15 text-status-warning',
   error: 'bg-status-error/15 text-status-error',
 };
 
-const GATE_CHIP: Record<GateStatus, string> = {
-  pass: 'bg-status-success/15 text-status-success',
-  fail: 'bg-status-error/15 text-status-error',
-  unknown: 'bg-surface-secondary text-text-tertiary',
+/** Severity → chip status dot color. */
+const SEVERITY_DOT: Record<'info' | 'warning' | 'error', string> = {
+  info: 'bg-text-tertiary',
+  warning: 'bg-status-warning',
+  error: 'bg-status-error',
+};
+
+/** Gate status → chip status dot color (the chip surface itself stays neutral). */
+const GATE_DOT: Record<GateStatus, string> = {
+  pass: 'bg-status-success',
+  fail: 'bg-status-error',
+  unknown: 'bg-text-tertiary',
 };
 
 interface WorkflowSummaryPanelProps {
@@ -204,6 +224,7 @@ export function WorkflowSummaryPanel({
             id: it.id,
             severity: it.severity ?? 'info',
             location: findingLocation(it),
+            category: findingCategory(it),
             title: it.title,
           }));
         setFindings(rows);
@@ -426,9 +447,11 @@ interface ScoreSummaryProps {
 
 /**
  * The advisory Score-summary module. In-progress and failed states collapse to a
- * single muted line; the complete state renders a band-first hero (or the GATED
- * sentinel), provenance, a CI scale, the deterministic-gate chips, an
- * active-dimension count, and an expandable dimension + findings breakdown.
+ * single muted line; the complete state renders a bordered module: an eyebrow +
+ * deterministic-gate chip header, a two-column band-first hero (band word +
+ * score + provenance on the left, sample-spread scale + gate chips on the
+ * right), and an expandable per-dimension + findings breakdown. The GATED
+ * sentinel replaces the numeric hero when a deterministic gate failed.
  */
 function ScoreSummary({ runEval, findings, breakdownOpen, onToggleBreakdown }: ScoreSummaryProps): React.JSX.Element {
   if (runEval.evalStatus === 'pending' || runEval.evalStatus === 'running') {
@@ -449,118 +472,162 @@ function ScoreSummary({ runEval, findings, breakdownOpen, onToggleBreakdown }: S
   const dimensions = runEval.dimensions ?? [];
   const activeCount = dimensions.filter((d) => d.active).length;
   const band = runEval.band;
+  const gatePassed = !runEval.gated;
 
   return (
-    <div className="mt-5" data-testid="run-summary-eval">
-      <div className="eyebrow mb-2 text-text-tertiary">Quality assessment</div>
-
-      {runEval.gated ? (
-        <GatedHero />
-      ) : band !== null ? (
-        <ScoreHero
-          band={band}
-          overallScore={runEval.overallScore}
-          ciLow={runEval.ciLow}
-          ciHigh={runEval.ciHigh}
-        />
-      ) : null}
-
-      {/* Provenance */}
-      <p className="mt-2 text-xs text-text-tertiary" data-testid="run-summary-eval-provenance">
-        graded by {runEval.judgeModel ?? 'unknown'}
-        {runEval.sampleCount != null && <> ×{runEval.sampleCount}</>}
-        {' · '}rubric v{runEval.rubricVersion}
-        {' · '}security_flag: {runEval.securityFlag ? 'high/critical' : 'none'}
-        {runEval.capTriggers !== null && (
-          <span data-testid="run-summary-eval-capped">
-            {' · '}capped: {runEval.capTriggers.join(', ')}
-          </span>
-        )}
-      </p>
-
-      {/* Deterministic-gate chips */}
-      <div className="mt-3 flex flex-wrap items-center gap-1.5" data-testid="run-summary-eval-gates">
-        {GATE_KEYS.map((key) => {
-          const st = gateStatus((runEval.gateResults ?? {})[key]);
-          return (
-            <span
-              key={key}
-              className={cn('rounded-full px-2 py-0.5 text-[11px] font-medium capitalize', GATE_CHIP[st])}
-              data-testid={`run-summary-eval-gate-${key}`}
-            >
-              {key} {st}
-            </span>
-          );
-        })}
+    <div className="mt-5 rounded-card border border-border-primary bg-surface-secondary/30 p-4" data-testid="run-summary-eval">
+      {/* Eyebrow + deterministic-gate sentinel chip */}
+      <div className="mb-4 flex items-center justify-between gap-3">
+        <span className="eyebrow text-text-tertiary" data-testid="run-summary-eval-eyebrow">
+          Score summary — rubric v{runEval.rubricVersion}
+        </span>
+        <span
+          data-testid="run-summary-eval-gate-summary"
+          className={cn(
+            'inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[11px] font-semibold',
+            gatePassed
+              ? 'border-status-success/40 bg-status-success/15 text-status-success'
+              : 'border-status-error/40 bg-status-error/15 text-status-error',
+          )}
+        >
+          <span className={cn('h-1.5 w-1.5 rounded-full', gatePassed ? 'bg-status-success' : 'bg-status-error')} />
+          Deterministic gate: {gatePassed ? 'PASSED' : 'GATED'}
+        </span>
       </div>
 
-      {!runEval.gated && (
-        <p className="mt-2 text-xs text-text-secondary" data-testid="run-summary-eval-dims-active">
-          {activeCount} / {RUBRIC_DIMENSION_COUNT} dimensions active
-        </p>
-      )}
+      {runEval.gated ? (
+        <div className="space-y-4">
+          <GatedHero />
+          <Provenance runEval={runEval} />
+          <GateStrip gateResults={runEval.gateResults} activeCount={activeCount} />
+        </div>
+      ) : band !== null ? (
+        <div className="flex flex-col gap-6 md:flex-row md:items-start" data-testid="run-summary-eval-hero">
+          <ScoreLede band={band} overallScore={runEval.overallScore} runEval={runEval} />
+          <div className="min-w-0 flex-1">
+            {runEval.overallScore !== null && (
+              <CiScale score={runEval.overallScore} ciLow={runEval.ciLow} ciHigh={runEval.ciHigh} band={band} />
+            )}
+            <GateStrip gateResults={runEval.gateResults} activeCount={activeCount} />
+          </div>
+        </div>
+      ) : null}
 
-      {/* Breakdown toggle */}
-      <button
-        type="button"
-        data-testid="run-summary-eval-toggle"
-        onClick={onToggleBreakdown}
-        className="mt-3 flex w-full items-center justify-between rounded-button border border-border-primary px-3 py-2 text-left text-sm text-text-secondary hover:border-border-emphasized hover:text-text-primary"
-      >
-        <span>
-          Show {RUBRIC_DIMENSION_COUNT}-dimension breakdown &amp; {findings.length}{' '}
-          {findings.length === 1 ? 'finding' : 'findings'}
-        </span>
-        {breakdownOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-      </button>
+      {/* Breakdown toggle — full-width bar with a top divider */}
+      <div className="mt-5 border-t border-border-primary pt-4">
+        <button
+          type="button"
+          data-testid="run-summary-eval-toggle"
+          aria-expanded={breakdownOpen}
+          onClick={onToggleBreakdown}
+          className="flex w-full items-center justify-between gap-2 rounded-button border border-border-primary bg-surface-primary px-4 py-2.5 text-left text-sm font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary"
+        >
+          <span>
+            {breakdownOpen ? (
+              'Hide breakdown & findings'
+            ) : (
+              <>
+                Show {RUBRIC_DIMENSION_COUNT}-dimension breakdown &amp; {findings.length}{' '}
+                {findings.length === 1 ? 'finding' : 'findings'}
+              </>
+            )}
+          </span>
+          {breakdownOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+        </button>
+      </div>
 
       {breakdownOpen && (
-        <div className="mt-3 space-y-4" data-testid="run-summary-eval-breakdown">
-          {/* Dimension rows */}
-          <div className="space-y-2">
-            {dimensions.map((d) => (
-              <div
-                key={d.key}
-                className={cn('flex items-center gap-3', !d.active && 'opacity-40')}
-                data-testid={`run-summary-eval-dim-${d.key}`}
-              >
-                <span className="w-32 flex-shrink-0 truncate text-xs text-text-secondary" title={d.name}>
-                  {d.name}
-                </span>
-                <div className="h-2 flex-1 overflow-hidden rounded-full bg-surface-secondary">
-                  <div
-                    className="h-full rounded-full bg-interactive"
-                    style={{ width: d.score !== null ? `${Math.max(d.score, 0)}%` : '0%' }}
-                  />
+        <div className="mt-4" data-testid="run-summary-eval-breakdown">
+          <div className="eyebrow mb-3 text-text-tertiary">Per-dimension sub-scores · weighted</div>
+          <div>
+            {dimensions.map((d) => {
+              const dBand = d.score !== null ? scoreToBand(d.score) : null;
+              const dbd = dBand !== null ? bandDisplay(dBand) : null;
+              return (
+                <div
+                  key={d.key}
+                  className={cn(
+                    'grid grid-cols-[minmax(0,1fr)_auto_2fr_auto_auto] items-center gap-3 border-b border-border-primary/50 py-2 last:border-b-0',
+                    !d.active && 'opacity-40',
+                  )}
+                  data-testid={`run-summary-eval-dim-${d.key}`}
+                >
+                  <span className="truncate text-xs text-text-primary" title={d.name}>
+                    {d.name}
+                  </span>
+                  <span className="w-9 text-right text-[11px] tabular-nums text-text-tertiary">
+                    {Math.round(d.weight)}%
+                  </span>
+                  <div className="h-2 overflow-hidden rounded-full bg-surface-secondary">
+                    <div
+                      className={cn('h-full rounded-full', dbd?.bgClass ?? 'bg-text-tertiary')}
+                      style={{ width: d.score !== null ? `${Math.max(d.score, 0)}%` : '0%' }}
+                    />
+                  </div>
+                  <span className="w-8 text-right text-xs font-bold tabular-nums text-text-primary">
+                    {!d.active ? 'inactive' : d.score !== null ? d.score : '—'}
+                  </span>
+                  <span
+                    className={cn(
+                      'w-16 text-right text-[10px] font-semibold uppercase tracking-wide',
+                      dbd?.textClass ?? 'text-text-tertiary',
+                    )}
+                  >
+                    {d.active && dBand !== null ? dBand : ''}
+                  </span>
                 </div>
-                <span className="w-16 flex-shrink-0 text-right text-xs font-medium tabular-nums text-text-primary">
-                  {!d.active ? 'inactive' : d.score !== null ? d.score : '—'}
-                </span>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Net-new findings */}
           {findings.length > 0 && (
-            <div className="space-y-1.5" data-testid="run-summary-eval-findings">
-              {findings.map((f) => (
-                <div key={f.id} className="flex items-start gap-2 text-xs" data-testid="run-summary-eval-finding">
-                  <span
-                    className={cn(
-                      'mt-0.5 flex-shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium uppercase',
-                      SEVERITY_CHIP[f.severity],
-                    )}
+            <div className="mt-5 border-t border-border-primary pt-4" data-testid="run-summary-eval-findings">
+              <div className="mb-1 flex items-baseline justify-between gap-2">
+                <h4 className="text-sm font-bold text-text-primary">Complete assessment</h4>
+                <span className="eyebrow text-text-tertiary">
+                  {findings.length} net-new {findings.length === 1 ? 'finding' : 'findings'}
+                </span>
+              </div>
+              <p className="mb-2 text-[11px] leading-relaxed text-text-tertiary">
+                The independent judge caught these — the flow&apos;s own code-review missed them. Deduped,
+                tagged with severity, and routed to your review queue.
+              </p>
+              <div>
+                {findings.map((f, i) => (
+                  <div
+                    key={f.id}
+                    className="grid grid-cols-[auto_1fr] gap-3 border-t border-border-primary/60 py-3 first:border-t-0"
+                    data-testid="run-summary-eval-finding"
                   >
-                    {f.severity}
-                  </span>
-                  <div className="min-w-0">
-                    {f.location !== null && (
-                      <span className="font-mono text-text-tertiary">{f.location} </span>
-                    )}
-                    <span className="text-text-secondary">{f.title}</span>
+                    <span
+                      className={cn(
+                        'mt-0.5 inline-flex h-fit items-center gap-1.5 rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide',
+                        SEVERITY_CHIP[f.severity],
+                      )}
+                    >
+                      <span className={cn('h-1.5 w-1.5 rounded-full', SEVERITY_DOT[f.severity])} />
+                      {FINDING_SEVERITY_LABEL[f.severity]}
+                    </span>
+                    <div className="min-w-0">
+                      <div className="mb-1 flex flex-wrap items-center gap-2">
+                        <span className="text-[11px] font-bold tabular-nums text-text-tertiary">
+                          {String(i + 1).padStart(2, '0')}
+                        </span>
+                        {f.category !== null && (
+                          <span className="text-[11px] font-semibold text-text-secondary">{f.category}</span>
+                        )}
+                      </div>
+                      <div className="text-xs leading-relaxed text-text-primary">{f.title}</div>
+                      {f.location !== null && (
+                        <span className="mt-1.5 inline-block rounded-button border border-border-primary bg-surface-secondary px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-interactive">
+                          {f.location}
+                        </span>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           )}
         </div>
@@ -569,34 +636,90 @@ function ScoreSummary({ runEval, findings, breakdownOpen, onToggleBreakdown }: S
   );
 }
 
-/** The complete, non-gated hero: large band-colored label + score / 100. */
-function ScoreHero({
+/** Left column of the hero: huge band word, score / 100, then the provenance block. */
+function ScoreLede({
   band,
   overallScore,
-  ciLow,
-  ciHigh,
+  runEval,
 }: {
   band: NonNullable<RunEval['band']>;
   overallScore: number | null;
-  ciLow: number | null;
-  ciHigh: number | null;
+  runEval: RunEval;
 }): React.JSX.Element {
   const bd = bandDisplay(band);
   return (
-    <div data-testid="run-summary-eval-hero">
-      <div className="flex items-baseline gap-3">
-        <span className={cn('text-2xl font-bold tracking-tight', bd.textClass)} data-testid="run-summary-eval-band">
-          {bd.label}
-        </span>
-        {overallScore !== null && (
-          <span className="text-sm text-text-secondary" data-testid="run-summary-eval-score">
-            <span className="font-semibold tabular-nums text-text-primary">{overallScore}</span> / 100 · overall
-          </span>
-        )}
+    <div className="flex-shrink-0 md:min-w-[12rem]">
+      <div
+        className={cn('text-4xl font-bold leading-none tracking-tight', bd.textClass)}
+        data-testid="run-summary-eval-band"
+      >
+        {bd.label}
       </div>
       {overallScore !== null && (
-        <CiScale score={overallScore} ciLow={ciLow} ciHigh={ciHigh} markerClass={bd.bgClass} />
+        <div className="mt-2 text-sm text-text-secondary" data-testid="run-summary-eval-score">
+          <span className="font-bold tabular-nums text-text-primary">{overallScore}</span> / 100 · overall
+        </div>
       )}
+      <Provenance runEval={runEval} />
+    </div>
+  );
+}
+
+/** The 3-line provenance block (judge/samples, jury descriptor, security + caps). */
+function Provenance({ runEval }: { runEval: RunEval }): React.JSX.Element {
+  return (
+    <div className="mt-3 space-y-0.5 text-[11px] leading-relaxed text-text-tertiary" data-testid="run-summary-eval-provenance">
+      <div>
+        graded by{' '}
+        <span className="font-medium text-text-secondary">
+          {runEval.judgeModel ?? 'unknown'}
+          {runEval.sampleCount != null && <> ×{runEval.sampleCount}</>}
+        </span>{' '}
+        samples
+      </div>
+      <div>pluggable jury · single-family v1</div>
+      <div>
+        security_flag: <span className="font-medium text-text-secondary">{runEval.securityFlag ? 'high/critical' : 'none'}</span>
+        {runEval.capTriggers !== null && (
+          <span data-testid="run-summary-eval-capped"> · capped: {runEval.capTriggers.join(', ')}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** The deterministic-gate chip strip plus the active-dimension count chip. */
+function GateStrip({
+  gateResults,
+  activeCount,
+}: {
+  gateResults: Record<string, unknown> | null;
+  activeCount: number;
+}): React.JSX.Element {
+  return (
+    <div className="mt-4 flex flex-wrap items-center gap-1.5" data-testid="run-summary-eval-gates">
+      {GATE_KEYS.map((key) => {
+        const st = gateStatus((gateResults ?? {})[key]);
+        return (
+          <span
+            key={key}
+            data-testid={`run-summary-eval-gate-${key}`}
+            data-gate-status={st}
+            title={`${key}: ${st}`}
+            className="inline-flex items-center gap-1.5 rounded-full border border-border-primary bg-surface-primary px-2 py-0.5 text-[11px] font-medium text-text-secondary"
+          >
+            <span className={cn('h-1.5 w-1.5 rounded-full', GATE_DOT[st])} />
+            {key}
+          </span>
+        );
+      })}
+      <span
+        data-testid="run-summary-eval-dims-active"
+        className="inline-flex items-center gap-1.5 rounded-full border border-border-primary bg-surface-primary px-2 py-0.5 text-[11px] font-medium text-text-tertiary"
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-text-tertiary" />
+        {activeCount} / {RUBRIC_DIMENSION_COUNT} dimensions active
+      </span>
     </div>
   );
 }
@@ -614,41 +737,68 @@ function GatedHero(): React.JSX.Element {
   );
 }
 
-/** A 0–100 track with the CI band highlighted and a marker at the overall score. */
+/**
+ * Sample-spread scale: a 0–100 track with the sample-spread interval highlighted
+ * in the band color, a marker at the point score (score labeled above it),
+ * 0/25/50/75/100 axis ticks, and an explanatory note. Deliberately labeled
+ * "Sample spread" — the backend computes a naive min/max sample spread, NOT a
+ * statistical confidence interval.
+ */
 function CiScale({
   score,
   ciLow,
   ciHigh,
-  markerClass,
+  band,
 }: {
   score: number;
   ciLow: number | null;
   ciHigh: number | null;
-  markerClass: string;
+  band: NonNullable<RunEval['band']>;
 }): React.JSX.Element {
+  const bd = bandDisplay(band);
   const clamp = (n: number): number => Math.min(100, Math.max(0, n));
   const lo = ciLow !== null ? clamp(ciLow) : null;
   const hi = ciHigh !== null ? clamp(ciHigh) : null;
+  const hasRange = lo !== null && hi !== null && hi >= lo;
   return (
-    <div className="mt-2" data-testid="run-summary-eval-ci">
-      <div className="relative h-2 w-full overflow-hidden rounded-full bg-surface-secondary">
-        {lo !== null && hi !== null && hi >= lo && (
+    <div data-testid="run-summary-eval-ci">
+      <div className="mb-6 flex items-baseline justify-between gap-2">
+        <span className="eyebrow text-text-tertiary">Sample spread</span>
+        {hasRange && (
+          <span className="text-xs tabular-nums text-text-secondary">
+            <span className="font-semibold text-text-primary">{lo}</span> – <span className="font-semibold text-text-primary">{hi}</span>
+          </span>
+        )}
+      </div>
+      <div className="relative h-2.5 w-full rounded-full bg-surface-secondary">
+        {hasRange && (
           <div
-            className="absolute inset-y-0 rounded-full bg-text-tertiary/40"
+            className={cn('absolute inset-y-0 rounded-full opacity-40', bd.bgClass)}
             style={{ left: `${lo}%`, width: `${Math.max(hi - lo, 1)}%` }}
           />
         )}
         <div
-          className={cn('absolute top-1/2 h-3 w-1 -translate-y-1/2 rounded-full', markerClass)}
-          style={{ left: `calc(${clamp(score)}% - 2px)` }}
+          className={cn('absolute -top-[3px] h-[18px] w-0.5 rounded-full', bd.bgClass)}
+          style={{ left: `calc(${clamp(score)}% - 1px)` }}
           data-testid="run-summary-eval-ci-marker"
-        />
+        >
+          <span className={cn('absolute -top-4 left-1/2 -translate-x-1/2 text-[11px] font-bold tabular-nums', bd.textClass)}>
+            {score}
+          </span>
+        </div>
       </div>
-      {lo !== null && hi !== null && (
-        <p className="mt-1 text-[11px] text-text-tertiary">
-          sample spread {lo}–{hi}
-        </p>
-      )}
+      <div className="mt-2 flex justify-between text-[10px] tabular-nums text-text-tertiary">
+        <span>0</span>
+        <span>25</span>
+        <span>50</span>
+        <span>75</span>
+        <span>100</span>
+      </div>
+      <p className="mt-3 text-[11px] leading-relaxed text-text-tertiary">
+        {hasRange
+          ? `The point score is one read of a range — ${score} sits inside a plausible ${lo}–${hi}, not a precise verdict.`
+          : 'The point score is one read — treat it as advisory, not a precise verdict.'}
+      </p>
     </div>
   );
 }
