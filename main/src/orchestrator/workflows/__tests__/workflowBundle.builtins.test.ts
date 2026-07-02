@@ -51,6 +51,32 @@ describe('built-in workflow bundles', () => {
     ]);
     assertAgentShape(bundle.agents);
   });
+
+  it('ship ships its 14 heavy-phase subagents in order (gates stay inline)', () => {
+    const bundle = resolveWorkflowBundle(path.join(workflowsDir, 'ship.md'));
+    // Human gates (approve-idea / approve-design / approve-plan / human-review) run
+    // inline in the orchestrator — they are NOT delegated, so the bundle ships no
+    // commands, only subagents. Ship = planner's plan/refine set ⊕ sprint's
+    // execute/verify set, self-contained as verbatim copies.
+    expect(bundle.commands).toEqual([]);
+    expect(bundle.agents.map((a) => a.name)).toEqual([
+      'architecture',
+      'code-review',
+      'context',
+      'dependency-analyzer',
+      'epics',
+      'implement',
+      'research',
+      'sprint-review',
+      'sprint-verify',
+      'task-verify',
+      'tasks',
+      'ui-prototype',
+      'visual-verify',
+      'write-tests',
+    ]);
+    assertAgentShape(bundle.agents);
+  });
 });
 
 /**
