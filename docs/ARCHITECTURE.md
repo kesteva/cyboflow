@@ -579,12 +579,15 @@ actually merges — see `recomputeTaskExecutionStage` / `recomputeEpicStage` in 
 
 - **`artifacts`** — run-scoped deliverables surfaced as center-pane tabs + a right-rail Artifacts
   panel. One row per `(run_id, atype)` (`atype IN
-  ('idea-spec','decomposed-stories','screenshots','ui-prototype','generic')`); `mode` (`template`
+  ('idea-spec','decomposed-stories','screenshots','ui-prototype','generic','arch-design')`,
+  widened by migration `043_arch_design_atype`); `mode` (`template`
   re-derived-on-read vs `canvas` payload-backed), `committed` / `session_only` / `is_new` flags,
   `step_origin`, `source_ref` (soft link to the derived-from entity), `payload_json`. `run_id`
   FK→`workflow_runs` ON DELETE CASCADE. All writes go through `ArtifactRouter.apply` (see Entity
   write chokepoints); deltas append to `entity_events` with `entity_type='artifact'`. Templated
-  artifacts (idea-spec, decomposed-stories) re-derive content from the entity model; auto-minted by
+  artifacts (idea-spec, decomposed-stories, arch-design) re-derive content from the entity model
+  (arch-design extracts the idea body's `## Architecture design` section; its mint is
+  content-gated on that section existing); auto-minted by
   the orchestrator when a completed step declares `WorkflowStep.outputArtifact`. Session-only
   (uncommitted) artifacts are dropped on session dismiss; committed ones persist.
 
