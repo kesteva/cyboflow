@@ -1,66 +1,40 @@
-import { test, expect } from '@playwright/test';
+/**
+ * Smoke tests — real IPC round-trips against the built Electron bundle.
+ *
+ * Legacy version false-passed test 1 (static `<title>`) and hung tests 2-3
+ * (IPC-backed testids never mounted in a bare Chromium tab). Ported straight
+ * onto the `_electron.launch()` fixture with genuine assertions.
+ */
+import { test, expect, dismissDialogs } from './helpers/electronApp';
 
-test.describe('Smoke Tests', () => {
-  test('Application should start successfully', async ({ page }) => {
-    // Navigate to the app
-    await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    
-    // Wait for any content to appear
-    await page.waitForSelector('body', { timeout: 10000 });
-    
-    // Check that the page has loaded
-    const title = await page.title();
-    expect(title).toBe('Cyboflow');
-    
-    // Take a screenshot for debugging
-    await page.screenshot({ path: 'test-results/smoke-test.png' });
+test.describe('Smoke Tests — built Electron bundle', () => {
+  test('renderer boots with the correct document title', async ({ page }) => {
+    await expect(page).toHaveTitle('Cyboflow');
   });
 
-  test('Main UI elements should be visible', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    
-    // Close welcome dialog if present
-    const getStartedButton = page.locator('button:has-text("Get Started")');
-    if (await getStartedButton.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await getStartedButton.click();
-    }
-    
-    // Check for main UI elements
-    // Sidebar should be visible
-    const sidebar = page.locator('[data-testid="sidebar"], .sidebar, aside').first();
-    await expect(sidebar).toBeVisible({ timeout: 10000 });
-    
-    // Settings button should exist (even if not immediately visible)
+  test('sidebar and settings button mount (IPC-backed)', async ({ page }) => {
+    await dismissDialogs(page);
+
+    const sidebar = page.locator('[data-testid="sidebar"]');
+    await expect(sidebar).toBeVisible({ timeout: 15_000 });
+
     const settingsButton = page.locator('[data-testid="settings-button"]');
     await expect(settingsButton).toHaveCount(1);
+    await expect(settingsButton).toBeVisible();
   });
 
-  test('Settings button is clickable', async ({ page }) => {
-    await page.goto('/', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    
-    // Close welcome dialog if present
-    const getStartedButton = page.locator('button:has-text("Get Started")');
-    if (await getStartedButton.isVisible({ timeout: 1000 }).catch(() => false)) {
-      await getStartedButton.click();
-      // Wait for dialog to close
-      await page.waitForTimeout(500);
-    }
-    
-    // Wait for the settings button to be visible
+  test('settings button is enabled and clickable', async ({ page }) => {
+    await dismissDialogs(page);
+
     const settingsButton = page.locator('[data-testid="settings-button"]');
-    await expect(settingsButton).toBeVisible({ timeout: 5000 });
-    
-    // Verify the button is enabled and clickable
+    await expect(settingsButton).toBeVisible({ timeout: 15_000 });
     await expect(settingsButton).toBeEnabled();
-    
-    // Try to click it - but don't verify modal opens (known CI issue)
-    // This at least verifies the button is functional
+
     await settingsButton.click();
-    
-    // Small wait to ensure no errors are thrown
-    await page.waitForTimeout(500);
-    
-    // If we get here without errors, the button is functional
-    // TODO: Fix modal detection in CI environment
+
+    // With live IPC the click opens the real Settings dialog — assert it (the
+    // legacy spec could not, since it never reached a main process).
+    const settingsDialog = page.locator('div[role="dialog"]:has-text("Settings")');
+    await expect(settingsDialog).toBeVisible({ timeout: 10_000 });
   });
 });

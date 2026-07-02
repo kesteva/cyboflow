@@ -1,0 +1,67 @@
+name: E2E (smoke tier)
+
+# Report-only Playwright smoke tier driving the built Electron bundle via
+# _electron.launch() (tests/helpers/electronApp.ts). Runs on demand and nightly
+# on a macOS runner (ship-target fidelity — a real display, no xvfb). The test
+# step is continue-on-error until the tier is proven green two consecutive
+# nightly runs; at that point flip it to blocking and drop the CLAUDE.md caveat.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 07:00 UTC nightly.
+    - cron: '0 7 * * *'
+
+jobs:
+  e2e-smoke:
+    name: E2E smoke (macOS)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.1'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # Build prereqs for the launched app. The root `postinstall`
+      # (electron-builder install-app-deps) already rebuilds better-sqlite3 for
+      # the Electron ABI, which is exactly what the LAUNCHED app needs — so no
+      # host-Node rebuild here (this job runs no vitest). `build:main` +
+      # `build:frontend` produce main/dist and frontend/dist.
+      - name: Build main + frontend
+        run: |
+          pnpm run build:main
+          pnpm run build:frontend
+
+      - name: Install Playwright (no browser download needed for Electron)
+        run: pnpm exec playwright install-deps || true
+
+      # Report-only until proven green — a launch/environment hiccup must never
+      # block the nightly. Drive the smoke tier only.
+      - name: Run smoke tier
+        continue-on-error: true
+        run: pnpm run test:ci:minimal
+        env:
+          CI: true
+        timeout-minutes: 15
+
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-e2e-report
+          path: |
+            test-results/
+            playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7

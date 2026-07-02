@@ -1,48 +1,34 @@
-import { defineConfig, devices } from '@playwright/test';
+import { defineConfig } from '@playwright/test';
 
+/**
+ * Full e2e tier — every spec, driving the built Electron bundle via
+ * `_electron.launch()` (see tests/helpers/electronApp.ts). There is NO
+ * `webServer`/`baseURL`: the app is launched per-test by the fixture, not by a
+ * Vite dev server, and Playwright attaches to the real Electron window.
+ *
+ * `workers: 1` because the seeded specs (picker, terminal) share a boot-once
+ * data dir and launch multiple Electron processes; serial keeps launches and
+ * screen focus deterministic. Smoke-only runs should use
+ * playwright.ci.minimal.config.ts.
+ *
+ * Prereqs (enforced by root `pretest:e2e`): built main + frontend, and
+ * better-sqlite3 rebuilt for the Electron ABI (`pnpm electron:rebuild`).
+ */
 export default defineConfig({
   testDir: './tests',
-  // Ignore vitest-only test files (e.g. any .spec.ts inside __tests__/ dirs)
-  testIgnore: ['**/__tests__/**'],
-  // Maximum time one test can run for
-  timeout: 60 * 1000,
+  // Vitest-only specs live under __tests__/ — never let Playwright grab them.
+  testIgnore: ['**/__tests__/**', '**/helpers/**'],
+  timeout: 90 * 1000,
   expect: {
-    // Maximum time expect() should wait for the condition to be met
-    timeout: 10000
+    timeout: 15_000,
   },
-  // Run tests in files in parallel
-  fullyParallel: true,
-  // Fail the build on CI if you accidentally left test.only in the source code
+  fullyParallel: false,
   forbidOnly: !!process.env.CI,
-  // Retry on CI only
-  retries: process.env.CI ? 2 : 0,
-  // Opt out of parallel tests on CI
-  workers: process.env.CI ? 1 : undefined,
-  // Reporter to use
+  retries: process.env.CI ? 1 : 0,
+  workers: 1,
   reporter: 'list',
-  
   use: {
-    // Base URL to use in actions like `await page.goto('/')`
-    baseURL: 'http://localhost:4521',
-    // Collect trace when retrying the failed test
     trace: 'on-first-retry',
-    // Take screenshot on failure
     screenshot: 'only-on-failure',
-  },
-
-  // Configure projects for major browsers
-  projects: [
-    {
-      name: 'chromium',
-      use: { ...devices['Desktop Chrome'] },
-    },
-  ],
-
-  // Run your local dev server before starting the tests
-  webServer: {
-    command: 'pnpm electron-dev',
-    port: 4521,
-    reuseExistingServer: !process.env.CI,
-    timeout: 120 * 1000,
   },
 });

@@ -1,67 +1,29 @@
-import { defineConfig, devices } from '@playwright/test';
+import { defineConfig } from '@playwright/test';
 
+/**
+ * Smoke e2e tier — the fast, no-seed subset (health-check + smoke +
+ * permissions). Each test gets its own fresh tmp CYBOFLOW_DIR from the fixture,
+ * so there is no shared state; it could be parallelized, but Electron windows
+ * grab screen focus, so `workers: 1` keeps CI runs stable.
+ *
+ * Drives the built Electron bundle via `_electron.launch()` — no
+ * `webServer`/`baseURL`. Prereqs: built main + frontend + Electron-ABI
+ * better-sqlite3 (see playwright.config.ts header).
+ */
 export default defineConfig({
   testDir: './tests',
-  // Only run smoke tests and health check in CI
-  testMatch: ['smoke.spec.ts', 'health-check.spec.ts'],
-  // Reduce timeout for CI
-  timeout: 20 * 1000,
+  testMatch: ['health-check.spec.ts', 'smoke.spec.ts', 'permissions-ui-fixed.spec.ts'],
+  timeout: 60 * 1000,
   expect: {
-    // Reduce expect timeout for faster failures
-    timeout: 5000
+    timeout: 15_000,
   },
-  // Run tests in files in parallel
-  fullyParallel: true,
-  // Fail the build on CI if you accidentally left test.only in the source code
-  forbidOnly: true,
-  // No retries for minimal tests
-  retries: 0,
-  // Use more workers for parallel execution
-  workers: 2,
-  // Reporter optimized for CI
-  reporter: [
-    ['list'],
-    ['github'],
-  ],
-  
+  fullyParallel: false,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 1 : 0,
+  workers: 1,
+  reporter: process.env.CI ? [['list'], ['github']] : 'list',
   use: {
-    // Base URL to use in actions like await page.goto('/')
-    baseURL: 'http://localhost:4521',
-    // Collect trace only on failure to save time
     trace: 'retain-on-failure',
-    // Take screenshot on failure
     screenshot: 'only-on-failure',
-    // Reduce viewport for faster rendering
-    viewport: { width: 1280, height: 720 },
-    // Disable animations for faster tests
-    launchOptions: {
-      args: ['--disable-gpu', '--disable-dev-shm-usage', '--disable-setuid-sandbox', '--no-sandbox'],
-    },
-  },
-
-  // Configure projects for major browsers
-  projects: [
-    {
-      name: 'chromium',
-      use: { 
-        ...devices['Desktop Chrome'],
-        // Disable GPU for CI
-        launchOptions: {
-          args: ['--disable-gpu', '--disable-dev-shm-usage', '--disable-setuid-sandbox', '--no-sandbox'],
-        },
-      },
-    },
-  ],
-
-  // Run your local dev server before starting the tests
-  webServer: {
-    command: 'pnpm electron-dev',
-    port: 4521,
-    reuseExistingServer: false,
-    timeout: 45 * 1000,
-    env: {
-      DISPLAY: ':99',
-      ELECTRON_DISABLE_SANDBOX: '1',
-    },
   },
 });
