@@ -12,11 +12,13 @@
  *      called with runId context and NO throw escapes.
  *   d. Zeroed row when the run produced no usage events at all.
  *
- * Fixture: a single in-memory better-sqlite3 DB carrying just the two tables the
- * writer touches — raw_events (the scan source, via the shared RAW_EVENTS_DDL)
- * and run_usage (the write target, mirroring migration 026). FK enforcement is
- * off so we can write run_usage without seeding a parent workflow_runs row (the
- * FK is exercised in the migration's own schema-parity tests, not here).
+ * Fixture: a single in-memory better-sqlite3 DB carrying the tables the writer
+ * touches — raw_events (the scan source, via the shared RAW_EVENTS_DDL),
+ * run_usage (the write target, mirroring migration 026), and an empty
+ * workflow_runs stub (the rollup read folds in runtime timestamps from it; no
+ * rows are seeded, so timestamps stay null). FK enforcement is off so we can
+ * write run_usage without seeding a parent workflow_runs row (the FK is
+ * exercised in the migration's own schema-parity tests, not here).
  */
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
@@ -29,6 +31,18 @@ import { RAW_EVENTS_DDL } from '../__test_fixtures__/rawEvents';
 // run_usage DDL — mirrors migration 026 (FK clause omitted; FKs are off in the
 // fixture so run_usage can be written without a parent workflow_runs row).
 // ---------------------------------------------------------------------------
+// Minimal workflow_runs stub: selectRunUsageRollups folds in runtime timestamps
+// via one IN() lookup over workflow_runs(id, started_at, ended_at); without the
+// table that read throws and the writer fail-softs to a no-op. Rows stay
+// unseeded — absent runs simply leave the rollup timestamps null.
+const WORKFLOW_RUNS_DDL = `
+  CREATE TABLE IF NOT EXISTS workflow_runs (
+    id         TEXT PRIMARY KEY,
+    started_at DATETIME,
+    ended_at   DATETIME
+  )
+`;
+
 const RUN_USAGE_DDL = `
   CREATE TABLE IF NOT EXISTS run_usage (
     run_id                  TEXT PRIMARY KEY,
@@ -53,6 +67,7 @@ function makeRollupDb(opts?: { withRunUsage?: boolean }): Database.Database {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = OFF');
   db.exec(RAW_EVENTS_DDL);
+  db.exec(WORKFLOW_RUNS_DDL);
   if (opts?.withRunUsage !== false) {
     db.exec(RUN_USAGE_DDL);
   }
