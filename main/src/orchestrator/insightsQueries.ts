@@ -48,7 +48,6 @@ import type {
   RunEvalStatus,
   RunEvalBand,
   RunEvalDimension,
-  RunEvalSample,
 } from '../../../shared/types/insights';
 import { parseSourceStep } from '../../../shared/types/insights';
 // computeSpecHash is the SAME content address workflow_runs.spec_hash was frozen
@@ -1532,7 +1531,6 @@ interface RunEvalRawRow {
   rubric_version: string;
   eval_status: string;
   base_sha: string | null;
-  diff_text: string | null;
   diff_stats_json: string | null;
   gate_results_json: string | null;
   human_influenced: number;
@@ -1543,8 +1541,9 @@ interface RunEvalRawRow {
   ci_high: number | null;
   gated: number;
   security_flag: number;
+  requirements_unmet: number;
+  cap_triggers_json: string | null;
   dimensions_json: string | null;
-  per_sample_json: string | null;
   judge_model: string | null;
   sample_count: number | null;
   prompt_hash: string | null;
@@ -1622,10 +1621,11 @@ function parseDimensions(text: string | null): RunEvalDimension[] | null {
 }
 
 /**
- * Parse `per_sample_json` into an array of raw sample records, defensively.
- * Non-object elements are skipped; malformed JSON or a non-array yields null.
+ * Parse `cap_triggers_json` into a string-token array, defensively. Non-string
+ * elements are dropped; malformed JSON, a non-array, or an empty array yields null
+ * (null = not capped, so the UI can tell a capped 69 from an organic Fair 69).
  */
-function parseSamples(text: string | null): RunEvalSample[] | null {
+function parseCapTriggers(text: string | null): string[] | null {
   if (text === null) return null;
   let parsed: unknown;
   try {
@@ -1634,7 +1634,8 @@ function parseSamples(text: string | null): RunEvalSample[] | null {
     return null;
   }
   if (!Array.isArray(parsed)) return null;
-  return parsed.filter((entry): entry is RunEvalSample => isRecord(entry));
+  const out = parsed.filter((t): t is string => typeof t === 'string');
+  return out.length > 0 ? out : null;
 }
 
 /** Map a raw `run_evals` row to the shared `RunEval`, parsing JSON defensively. */
@@ -1651,7 +1652,10 @@ function mapRunEvalRow(row: RunEvalRawRow): RunEval {
     rubricVersion: row.rubric_version,
     evalStatus,
     baseSha: row.base_sha,
-    diffText: row.diff_text,
+    // diff_text / per_sample_json are intentionally NOT selected by the polled
+    // read (they can be multi-MB) — the summary panel never reads them. A future
+    // drill-down would fetch them via a dedicated read.
+    diffText: null,
     diffStats: parseJsonRecord(row.diff_stats_json),
     gateResults: parseJsonRecord(row.gate_results_json),
     humanInfluenced: asBool(row.human_influenced),
@@ -1662,8 +1666,10 @@ function mapRunEvalRow(row: RunEvalRawRow): RunEval {
     ciHigh: asNullableNumber(row.ci_high),
     gated: asBool(row.gated),
     securityFlag: asBool(row.security_flag),
+    requirementsUnmet: asBool(row.requirements_unmet),
+    capTriggers: parseCapTriggers(row.cap_triggers_json),
     dimensions: parseDimensions(row.dimensions_json),
-    perSample: parseSamples(row.per_sample_json),
+    perSample: null,
     judgeModel: row.judge_model,
     sampleCount: asNullableNumber(row.sample_count),
     promptHash: row.prompt_hash,
@@ -1697,11 +1703,13 @@ function mapRunEvalRow(row: RunEvalRawRow): RunEval {
 export function getRunEval(db: DatabaseLike, runId: string): RunEval | null {
   const row = db
     .prepare(
-      `SELECT run_id, rubric_version, eval_status, base_sha, diff_text, diff_stats_json,
+      // diff_text + per_sample_json are deliberately EXCLUDED — they can be
+      // multi-MB and the summary panel polls this every 10s but reads neither.
+      `SELECT run_id, rubric_version, eval_status, base_sha, diff_stats_json,
               gate_results_json, human_influenced, snapshot_at, overall_score, band,
-              ci_low, ci_high, gated, security_flag, dimensions_json, per_sample_json,
-              judge_model, sample_count, prompt_hash, judge_build_id, workflow_id,
-              workflow_name, spec_hash, run_model, subagent_models_json,
+              ci_low, ci_high, gated, security_flag, requirements_unmet, cap_triggers_json,
+              dimensions_json, judge_model, sample_count, prompt_hash, judge_build_id,
+              workflow_id, workflow_name, spec_hash, run_model, subagent_models_json,
               difficulty_proxy_prerun, error, created_at, updated_at
        FROM run_evals
        WHERE run_id = ?

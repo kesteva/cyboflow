@@ -86,6 +86,8 @@ const EXPECTED_COLUMNS = [
   'ci_high',
   'gated',
   'security_flag',
+  'requirements_unmet',
+  'cap_triggers_json',
   'dimensions_json',
   'per_sample_json',
   'judge_model',

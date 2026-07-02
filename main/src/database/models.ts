@@ -487,6 +487,8 @@ export interface RunEvalRow {
   ci_high: number | null;
   gated: number; // deterministic-gate-failure sentinel
   security_flag: number; // confirmed high/critical security soft-cap fired
+  requirements_unmet: number; // SCP-1 unimplemented-AC cap fired
+  cap_triggers_json: string | null; // catastrophic-cap trigger tokens JSON; NULL when none
   dimensions_json: string | null;
   per_sample_json: string | null;
   judge_model: string | null; // concrete id, e.g. 'claude-opus-4-8'

@@ -52,7 +52,9 @@ CREATE TABLE IF NOT EXISTS run_evals (
   ci_high                 REAL,
   gated                   INTEGER NOT NULL DEFAULT 0,     -- deterministic-gate-failure sentinel
   security_flag           INTEGER NOT NULL DEFAULT 0,     -- confirmed high/critical security soft-cap fired
-  dimensions_json         TEXT,                          -- per-dimension {score, active, passCount, failCount, unknownCount}
+  requirements_unmet      INTEGER NOT NULL DEFAULT 0,     -- SCP-1 unimplemented-AC cap fired (doc `requirements_unmet` flag)
+  cap_triggers_json       TEXT,                          -- catastrophic-cap trigger tokens (sub-check ids + 'security'); NULL when none
+  dimensions_json         TEXT,                          -- per-dimension {key, name, weight, score, band, active, passCount, failCount, unknownCount}
   per_sample_json         TEXT,                          -- raw K jury structured outputs verbatim
 
   -- Judge provenance ----------------------------------------------------------

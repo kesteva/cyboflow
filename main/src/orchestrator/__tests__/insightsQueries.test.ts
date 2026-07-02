@@ -155,6 +155,8 @@ function createInsightsDb(): Database.Database {
       ci_high REAL,
       gated INTEGER NOT NULL DEFAULT 0,
       security_flag INTEGER NOT NULL DEFAULT 0,
+      requirements_unmet INTEGER NOT NULL DEFAULT 0,
+      cap_triggers_json TEXT,
       dimensions_json TEXT,
       per_sample_json TEXT,
       judge_model TEXT,
@@ -307,6 +309,8 @@ interface SeedRunEvalOpts {
   band?: string | null;
   gated?: number;
   securityFlag?: number;
+  requirementsUnmet?: number;
+  capTriggersJson?: string | null;
   dimensionsJson?: string | null;
   perSampleJson?: string | null;
   diffStatsJson?: string | null;
@@ -321,9 +325,10 @@ function seedRunEval(db: Database.Database, opts: SeedRunEvalOpts): void {
   db.prepare(
     `INSERT INTO run_evals
        (run_id, rubric_version, eval_status, human_influenced, snapshot_at,
-        overall_score, band, gated, security_flag, dimensions_json, per_sample_json,
+        overall_score, band, gated, security_flag, requirements_unmet, cap_triggers_json,
+        dimensions_json, per_sample_json,
         diff_stats_json, subagent_models_json, workflow_id, workflow_name, error)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     opts.runId,
     opts.rubricVersion ?? '1.1',
@@ -334,6 +339,8 @@ function seedRunEval(db: Database.Database, opts: SeedRunEvalOpts): void {
     opts.band === undefined ? 'Good' : opts.band,
     opts.gated ?? 0,
     opts.securityFlag ?? 0,
+    opts.requirementsUnmet ?? 0,
+    opts.capTriggersJson === undefined ? null : opts.capTriggersJson,
     opts.dimensionsJson === undefined ? null : opts.dimensionsJson,
     opts.perSampleJson === undefined ? null : opts.perSampleJson,
     opts.diffStatsJson === undefined ? null : opts.diffStatsJson,
@@ -1849,26 +1856,47 @@ describe('getRunEval', () => {
     ]);
   });
 
-  it('parses per_sample_json into an array of raw sample records', () => {
+  it('excludes the heavy diff_text / per_sample_json columns from the polled read', () => {
+    // getRunEval is polled every 10s by the summary panel, which reads neither of
+    // these (potentially multi-MB) columns — so the read must never ship them.
     seedRunEval(db, {
       runId: 'r1',
-      perSampleJson: JSON.stringify([{ verdict: 'pass', score: 90 }, 42]),
+      perSampleJson: JSON.stringify([{ verdict: 'pass', score: 90 }]),
     });
     const evalRow = getRunEval(dbAdapter(db), 'r1');
-    expect(evalRow?.perSample).toEqual([{ verdict: 'pass', score: 90 }]);
+    expect(evalRow?.perSample).toBeNull();
+    expect(evalRow?.diffText).toBeNull();
+  });
+
+  it('parses cap_triggers_json + requirements_unmet (capped 69 distinguishable from organic)', () => {
+    seedRunEval(db, {
+      runId: 'r1',
+      overallScore: 69,
+      band: 'Fair',
+      requirementsUnmet: 1,
+      capTriggersJson: JSON.stringify(['SCP-1', 'security', 42]),
+    });
+    const evalRow = getRunEval(dbAdapter(db), 'r1');
+    expect(evalRow?.requirementsUnmet).toBe(true);
+    expect(evalRow?.capTriggers).toEqual(['SCP-1', 'security']); // non-strings dropped
+  });
+
+  it('maps an empty / absent cap_triggers_json to null (not capped)', () => {
+    seedRunEval(db, { runId: 'r1', capTriggersJson: JSON.stringify([]) });
+    seedRunEval(db, { runId: 'r2' });
+    expect(getRunEval(dbAdapter(db), 'r1')?.capTriggers).toBeNull();
+    expect(getRunEval(dbAdapter(db), 'r2')?.capTriggers).toBeNull();
   });
 
   it('yields null JSON fields on malformed JSON rather than throwing', () => {
     seedRunEval(db, {
       runId: 'r1',
       dimensionsJson: '{ not json',
-      perSampleJson: 'also bad',
       diffStatsJson: '[not an object array', // parseJsonRecord → null
       subagentModelsJson: '{ broken',
     });
     const evalRow = getRunEval(dbAdapter(db), 'r1');
     expect(evalRow?.dimensions).toBeNull();
-    expect(evalRow?.perSample).toBeNull();
     expect(evalRow?.diffStats).toBeNull();
     expect(evalRow?.subagentModels).toBeNull();
   });

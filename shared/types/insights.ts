@@ -298,7 +298,7 @@ export interface RunEvalDimension {
   key: string;
   /** Human-readable dimension label. */
   name: string;
-  /** Weight in the overall score (0..1). */
+  /** Weight in the overall score (rubric scale, 0-100; the dimensions sum to 100). */
   weight: number;
   /** 0-100 integer; null until the dimension is scored. */
   score: number | null;
@@ -332,7 +332,11 @@ export interface RunEval {
   evalStatus: RunEvalStatus;
   /** Copied from workflow_runs.base_sha; null on legacy/unmaterialized runs. */
   baseSha: string | null;
-  /** Frozen unified diff captured at the trigger (worktree may be gone later). */
+  /**
+   * Frozen unified diff captured at the trigger. EXCLUDED from the polled read
+   * (`insights.runEval`) because it can be multi-MB — always null there; a future
+   * drill-down would fetch it via a dedicated read.
+   */
   diffText: string | null;
   /** Parsed `diff_stats_json` aggregate; null when absent or malformed. */
   diffStats: Record<string, unknown> | null;
@@ -345,16 +349,31 @@ export interface RunEval {
   /** 0-100 overall; null until complete. */
   overallScore: number | null;
   band: RunEvalBand | null;
-  /** Confidence interval across the K samples; null until complete. */
+  /**
+   * Naive [min, max] SPREAD of the per-sample overall scores (NOT a statistical
+   * confidence interval — the Agent SDK exposes no temperature knob); null until
+   * complete. Surfaced in the UI as "sample spread", not "95% CI".
+   */
   ciLow: number | null;
   ciHigh: number | null;
   /** Deterministic-gate-failure sentinel. */
   gated: boolean;
   /** Confirmed high/critical security soft-cap fired. */
   securityFlag: boolean;
+  /** SCP-1 unimplemented-acceptance-criterion cap fired (doc `requirements_unmet`). */
+  requirementsUnmet: boolean;
+  /**
+   * Catastrophic-cap trigger tokens (sub-check ids and/or 'security') when the
+   * overall score was soft-capped at Fair (≤69); null when the score was not
+   * capped. Lets a capped 69 be told apart from an organic Fair 69.
+   */
+  capTriggers: string[] | null;
   /** Per-dimension scored results; null until complete or when malformed. */
   dimensions: RunEvalDimension[] | null;
-  /** Raw K jury structured outputs; null until complete or when malformed. */
+  /**
+   * Raw K jury structured outputs. EXCLUDED from the polled read (`insights.runEval`)
+   * — always null there; kept in the type for a future drill-down read.
+   */
   perSample: RunEvalSample[] | null;
   /** Concrete judge model id; null until running. */
   judgeModel: string | null;
