@@ -175,6 +175,7 @@ const ENTITY_WRITE_STEP_ORIGIN = {
 const STEP_ORIGIN: Record<string, string> = {
   context: 'Plan · get context',
   tasks: 'Refine · decompose into tasks',
+  architecture: 'Refine · architecture design',
 };
 
 // ---------------------------------------------------------------------------

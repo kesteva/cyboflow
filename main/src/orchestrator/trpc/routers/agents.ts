@@ -2,7 +2,7 @@
  * cyboflow.agents sub-router — the typed tRPC contract for the Agents
  * catalogue / editor (the Workflows & Agents pane).
  *
- * Surfaces the 13 built-in agents merged with a project's `agent_overrides`
+ * Surfaces the 15 built-in agents merged with a project's `agent_overrides`
  * rows, plus any custom agents, each as an `AgentEntry` (the post-write
  * effective view: identity + tools + usage + stats). Reads compose the parsed
  * built-in catalogue (`loadBuiltInAgents`) with the chokepoint's per-project
@@ -131,7 +131,7 @@ function computeProjectUsage(ctx: AgentsCtx, projectId: number): Map<string, Age
 }
 
 /**
- * Assemble the full `AgentEntry[]` for a project: every effective agent (the 13
+ * Assemble the full `AgentEntry[]` for a project: every effective agent (the 15
  * builtins merged with their overrides, plus customs) built via
  * `buildEffectiveEntry` with its usage + backing override row (for lastEditedAt).
  */
