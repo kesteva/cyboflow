@@ -31,6 +31,13 @@ export interface AppConfig {
   // Which supervisor a PROGRAMMATIC run runs alongside (Stage 3). 'review-queue' (default) escalates
   // failures to the human review queue; 'sdk' asks an SDK agent to triage (live SDK call — opt-in).
   programmaticSupervisor?: 'review-queue' | 'sdk';
+  // Global on/off for the code-review eval (the K=3 Opus jury pass fired at the
+  // sprint-review => human-review boundary). Absent/undefined = ENABLED (the eval
+  // costs a real Opus jury pass per built-in flow run reaching human-review; users
+  // may turn it off globally, or per-run via workflow_runs.eval_enabled). Read at
+  // the trigger seam via configManager.getCodeReviewEvalEnabled(). NOT seeded into
+  // constructor defaults, so existing config.json files stay byte-identical.
+  codeReviewEvalEnabled?: boolean;
   // On-disk location for COMMITTED-artifact manifests (FEATURE #3 durability
   // snapshot). Relative paths resolve against the project ROOT; absolute paths
   // are used verbatim. Floors to DEFAULT_ARTIFACT_COMMIT_DIR ('.cyboflow/artifacts')
@@ -103,6 +110,8 @@ export interface UpdateConfigRequest {
   defaultExecutionModel?: ExecutionModel;
   // Programmatic-run supervisor kind ('review-queue' | 'sdk'). See AppConfig.
   programmaticSupervisor?: 'review-queue' | 'sdk';
+  // Global on/off for the code-review eval (see AppConfig.codeReviewEvalEnabled).
+  codeReviewEvalEnabled?: boolean;
   // On-disk location for COMMITTED-artifact manifests (see AppConfig.artifactCommitDir).
   artifactCommitDir?: string;
   theme?: 'paper' | 'light' | 'dark';

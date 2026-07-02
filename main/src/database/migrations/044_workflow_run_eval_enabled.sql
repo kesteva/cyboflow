@@ -1,0 +1,39 @@
+-- Migration 044: workflow_runs.eval_enabled — per-run code-review eval override (nullable).
+--
+-- Adds a per-run override for the code-review eval (the K=3 Opus jury pass fired
+-- at the sprint-review => human-review boundary by snapshotRunForEval). It is the
+-- per-run sibling to the GLOBAL `codeReviewEvalEnabled` app-config toggle:
+--
+--   eval_enabled = NULL  → INHERIT the global setting (the default + the migrated
+--                          state of every existing row: byte-identical behavior —
+--                          the global toggle defaults ON, so evals still fire).
+--   eval_enabled = 1     → explicit per-run ON  (overrides a global-OFF setting).
+--   eval_enabled = 0     → explicit per-run OFF (overrides a global-ON setting;
+--                          the snapshot skips, writing NO run_evals row).
+--
+-- A per-run ON does NOT unlock the eval for quick/custom flows — the trigger's
+-- isCyboflowWorkflowName gate (built-ins only) still runs FIRST and is unchanged.
+--
+-- Threaded from the launch "Configure" surface (SessionStartWizard Advanced
+-- options) down through runs.start (zod `evalEnabled`) → RunLauncher.launch →
+-- WorkflowRegistry.createRun, which stamps it here. Like substrate (013) /
+-- execution_model (032) / model (037), it is stamped ONCE at createRun and is
+-- immutable for the run lifetime (no UPDATE path). The resolution order lives in
+-- snapshotRunForEval (per-run 0 → skip; 1 → run; NULL → global; global-off → skip).
+--
+-- INTEGER (0/1/NULL), no CHECK: it is a plain nullable INTEGER like the other
+-- boolean-ish flags, keeping enum/range checks out of CHECK constraints (mirrors
+-- 037's rationale). The field-for-field row contract lives in
+-- shared/types/workflows.ts (WorkflowRunRow); getRunById projects it.
+--
+-- NOTE: runFileBasedMigrations() in database.ts wraps every file in a
+-- this.transaction(...) call, so no explicit BEGIN/COMMIT here. ALTER TABLE ADD
+-- COLUMN is idempotent via the filename-keyed ledger; a re-applied "duplicate
+-- column name" is caught as idempotent-ok in runFileBasedMigrations (same handling
+-- as the nullable ALTERs in migrations 021/031/032/034/036/037).
+--
+-- ⚠️ MIGRATION-NUMBER COLLISION: a concurrent sibling branch may also claim 044.
+-- The ledger is filename-keyed, so whichever lands SECOND must renumber. The
+-- integrator MUST verify no other 044_*.sql exists at merge time.
+
+ALTER TABLE workflow_runs ADD COLUMN eval_enabled INTEGER;

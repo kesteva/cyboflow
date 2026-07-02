@@ -299,6 +299,20 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
+   * Global on/off for the code-review eval — the K=3 Opus jury pass fired at the
+   * sprint-review => human-review boundary (snapshotRunForEval). Floors to TRUE
+   * (enabled) when unset, so the eval keeps firing for byte-identical behavior.
+   * Read at the trigger seam via an injected `isEvalEnabled` closure (the eval
+   * module stays free of concrete-service imports). A per-run override
+   * (workflow_runs.eval_enabled: 0/1) outranks this; NULL inherits it. Like
+   * `defaultAgentPermissionMode`, NOT seeded into the constructor defaults, so
+   * existing config.json files are not rewritten on launch.
+   */
+  getCodeReviewEvalEnabled(): boolean {
+    return this.config.codeReviewEvalEnabled ?? true;
+  }
+
+  /**
    * The global default execution model for new SDK workflow runs — the
    * global-default rung of resolveExecutionModel (the WorkflowConfigProvider
    * seam consumed by WorkflowRegistry.createRun). Returns null when unset so the

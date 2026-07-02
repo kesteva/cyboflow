@@ -138,6 +138,15 @@ export interface WorkflowRunRow {
    * FRESH per spawn by RunExecutor.buildOptionsOverrides.
    */
   model?: string | null;
+  /**
+   * Per-run code-review-eval override pinned at launch (migration 044): 1 = force
+   * ON, 0 = force OFF, NULL (the migrated state of every legacy row) = INHERIT the
+   * global `codeReviewEvalEnabled` app-config toggle. Stamped once at createRun,
+   * immutable for the run. Read at the trigger seam (snapshotRunForEval) to decide
+   * whether the K=3 Opus jury pass fires; a per-run ON does NOT bypass the
+   * built-ins-only isCyboflowWorkflowName gate.
+   */
+  eval_enabled?: number | null;
   started_at?: string | null;
   ended_at?: string | null;
   created_at: string;

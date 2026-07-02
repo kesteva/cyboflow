@@ -64,6 +64,13 @@ export interface EvalWorkerDeps {
   ) => Promise<{ reviewItemId: string }>;
   /** App version (package.json) for judge_build_id. */
   appVersion: string;
+  /**
+   * GLOBAL code-review-eval on/off, read fresh per trigger (closure over
+   * configManager.getCodeReviewEvalEnabled). Passed straight through to the
+   * snapshot, which consults it only when the per-run override is NULL. Kept a
+   * closure so this module imports no concrete service.
+   */
+  isEvalEnabled: () => boolean;
   /** K samples; defaults to DEFAULT_SAMPLE_COUNT. */
   sampleCount?: number;
   /** Whole-eval retries; defaults to DEFAULT_MAX_RETRIES. */
@@ -138,6 +145,7 @@ export class EvalWorker {
         logger: this.logger,
         gitDiff: this.deps.gitDiff,
         appVersion: this.deps.appVersion,
+        isEvalEnabled: this.deps.isEvalEnabled,
         enqueue: (r, v) => this.enqueue(r, v),
       });
     } catch (err) {

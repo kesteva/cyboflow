@@ -128,6 +128,19 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN model TEXT');
     modelAdded = true;
   };
+  // Migration 044 (per-run code-review-eval override): getRunById projects
+  // eval_enabled right beside model, and createRun stamps it. Both read-model
+  // surfaces (includeSubstrate) and the row-level readers
+  // (includeWorkflowRunTaskColumns) therefore need the column — folded in
+  // idempotently exactly like model so passing both flags never double-ALTERs.
+  // Plain nullable INTEGER (0/1/NULL, no CHECK); additive — never widens
+  // GATE_SCHEMA.
+  let evalEnabledAdded = false;
+  const addEvalEnabledColumnOnce = (): void => {
+    if (evalEnabledAdded) return;
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN eval_enabled INTEGER');
+    evalEnabledAdded = true;
+  };
   if (options?.includeStuckDetectedAt) {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER');
   }
@@ -151,6 +164,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addExecutionModelColumnOnce();
     // Migration 037: getRunById projects model beside execution_model.
     addModelColumnOnce();
+    // Migration 044: getRunById projects eval_enabled beside model.
+    addEvalEnabledColumnOnce();
   }
   if (options?.includeQuestionsTable) {
     // Migration 010 references stuck_detected_at (added in migration 007) in the
@@ -190,6 +205,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     // Migration 037: getRunById projects model (sibling immutable stamp to
     // execution_model). Folded in so row-level readers resolve the column.
     addModelColumnOnce();
+    // Migration 044: getRunById projects eval_enabled (per-run eval override).
+    addEvalEnabledColumnOnce();
   }
   return db;
 }

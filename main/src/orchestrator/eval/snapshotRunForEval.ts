@@ -49,6 +49,14 @@ export interface SnapshotDeps {
   gitDiff: (worktreePath: string, baseRef?: string) => Promise<RunGitDiff | null>;
   /** App version string (package.json), stamped as judge_build_id later by the worker. */
   appVersion: string;
+  /**
+   * GLOBAL code-review-eval on/off, read fresh per trigger. Injected as a closure
+   * (over configManager.getCodeReviewEvalEnabled in index.ts) so this module keeps
+   * the standalone-typecheck invariant — no concrete-service import. Consulted ONLY
+   * when the per-run override (workflow_runs.eval_enabled) is NULL; a per-run 0/1
+   * outranks it. Guarded at the call site: a throw here defaults to enabled.
+   */
+  isEvalEnabled: () => boolean;
   /** Enqueue the worker to grade this (run, rubric) after the row lands. */
   enqueue: (runId: string, rubricVersion: string) => void;
   /** Injectable clock for deterministic tests. */
@@ -64,6 +72,8 @@ interface RunRow {
   base_sha: string | null;
   spec_hash: string | null;
   model: string | null;
+  /** Per-run eval override (migration 044): 0 = off, 1 = on, NULL = inherit global. */
+  eval_enabled: number | null;
   workflow_id: string;
   workflowName: string;
 }
@@ -115,6 +125,7 @@ export async function snapshotRunForEval(
     .prepare(
       `SELECT r.project_id AS project_id, r.worktree_path AS worktree_path,
               r.base_sha AS base_sha, r.spec_hash AS spec_hash, r.model AS model,
+              r.eval_enabled AS eval_enabled,
               r.workflow_id AS workflow_id, w.name AS workflowName
        FROM workflow_runs r
        JOIN workflows w ON w.id = r.workflow_id
@@ -131,6 +142,32 @@ export async function snapshotRunForEval(
   // custom flows fall out here.
   if (!isCyboflowWorkflowName(run.workflowName)) {
     return 'skipped';
+  }
+
+  // Eval on/off resolution (migration 044). Cheap + exception-safe — a skip here
+  // must never write a run_evals row and must never throw. Order:
+  //   per-run 0 → OFF (explicit per-run OFF wins over a global-ON setting)
+  //   per-run 1 → ON  (explicit per-run ON  wins over a global-OFF setting)
+  //   per-run NULL → follow the GLOBAL setting (default ON).
+  // The isCyboflowWorkflowName gate above already ran, so a per-run ON does NOT
+  // unlock quick/custom flows.
+  if (run.eval_enabled === 0) {
+    logger?.info('[eval] snapshot skipped — per-run override OFF', { runId });
+    return 'skipped';
+  }
+  if (run.eval_enabled !== 1) {
+    // NULL / undefined → consult the global toggle. A closure throw defaults to
+    // enabled (the global default) so a config-read fault never silently disables.
+    let globalEnabled = true;
+    try {
+      globalEnabled = deps.isEvalEnabled();
+    } catch {
+      globalEnabled = true;
+    }
+    if (!globalEnabled) {
+      logger?.info('[eval] snapshot skipped — global code-review eval disabled', { runId });
+      return 'skipped';
+    }
   }
 
   // Re-fire dedup: if a row already exists, this is a request-changes loop / resume

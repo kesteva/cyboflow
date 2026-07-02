@@ -50,6 +50,7 @@ const runRow = (overrides: Record<string, unknown> = {}) => ({
   base_sha: 'abc123',
   spec_hash: 'spec-hash',
   model: 'claude-opus-4-8',
+  eval_enabled: null, // inherit the global setting by default
   workflow_id: 'wf-1',
   workflowName: 'sprint',
   ...overrides,
@@ -66,6 +67,9 @@ function makeDeps(db: DatabaseLike, over: Partial<SnapshotDeps> = {}): SnapshotD
     db,
     gitDiff: vi.fn(async () => fakeDiff),
     appVersion: '0.1.11',
+    // Global code-review-eval toggle — defaults ON (the config floor) unless a
+    // test overrides it to model a global-OFF setting.
+    isEvalEnabled: () => true,
     enqueue: vi.fn(),
     now: () => new Date('2026-07-01T00:00:00.000Z'),
     ...over,
@@ -114,6 +118,104 @@ describe('snapshotRunForEval', () => {
     expect(outcome).toBe('skipped');
     expect(deps.enqueue).not.toHaveBeenCalled();
     expect(db.runs.length).toBe(0); // no insert
+  });
+
+  // ── Eval on/off resolution matrix (migration 044) ────────────────────────
+
+  it('global OFF + per-run NULL → skips, writes NO row, does not enqueue', async () => {
+    const db = new FakeDb(
+      (sql) => {
+        if (sql.includes('FROM workflow_runs r')) return runRow({ eval_enabled: null });
+        return undefined;
+      },
+      () => ({ changes: 0, lastInsertRowid: 0 }),
+    );
+    const deps = makeDeps(db, { isEvalEnabled: () => false });
+    const outcome = await snapshotRunForEval('run-1', deps);
+    expect(outcome).toBe('skipped');
+    expect(deps.enqueue).not.toHaveBeenCalled();
+    expect(db.runs.length).toBe(0); // no insert, no update
+  });
+
+  it('per-run 0 overriding a global-ON setting → skips (explicit per-run OFF wins)', async () => {
+    const db = new FakeDb(
+      (sql) => {
+        if (sql.includes('FROM workflow_runs r')) return runRow({ eval_enabled: 0 });
+        return undefined;
+      },
+      () => ({ changes: 0, lastInsertRowid: 0 }),
+    );
+    const deps = makeDeps(db, { isEvalEnabled: () => true });
+    const outcome = await snapshotRunForEval('run-1', deps);
+    expect(outcome).toBe('skipped');
+    expect(deps.enqueue).not.toHaveBeenCalled();
+    expect(db.runs.length).toBe(0);
+  });
+
+  it('per-run 1 with a global-OFF setting → runs (explicit per-run ON wins)', async () => {
+    const db = new FakeDb(
+      (sql) => {
+        if (sql.includes('FROM workflow_runs r')) return runRow({ eval_enabled: 1 });
+        if (sql.includes('SELECT eval_status FROM run_evals')) return undefined;
+        return undefined;
+      },
+      () => ({ changes: 1, lastInsertRowid: 1 }),
+    );
+    const deps = makeDeps(db, { isEvalEnabled: () => false });
+    const outcome = await snapshotRunForEval('run-1', deps);
+    expect(outcome).toBe('inserted');
+    expect(deps.enqueue).toHaveBeenCalledWith('run-1', '1.1');
+    expect(db.runs.some((r) => r.sql.includes('INSERT OR IGNORE'))).toBe(true);
+  });
+
+  it('per-run NULL inherits a global-ON setting → runs', async () => {
+    const db = new FakeDb(
+      (sql) => {
+        if (sql.includes('FROM workflow_runs r')) return runRow({ eval_enabled: null });
+        if (sql.includes('SELECT eval_status FROM run_evals')) return undefined;
+        return undefined;
+      },
+      () => ({ changes: 1, lastInsertRowid: 1 }),
+    );
+    const deps = makeDeps(db, { isEvalEnabled: () => true });
+    const outcome = await snapshotRunForEval('run-1', deps);
+    expect(outcome).toBe('inserted');
+    expect(deps.enqueue).toHaveBeenCalled();
+  });
+
+  it('per-run 1 does NOT unlock a non-built-in flow (isCyboflowWorkflowName still gates)', async () => {
+    const db = new FakeDb(
+      (sql) => {
+        if (sql.includes('FROM workflow_runs r'))
+          return runRow({ eval_enabled: 1, workflowName: '__quick__' });
+        return undefined;
+      },
+      () => ({ changes: 0, lastInsertRowid: 0 }),
+    );
+    const deps = makeDeps(db, { isEvalEnabled: () => true });
+    const outcome = await snapshotRunForEval('run-q', deps);
+    expect(outcome).toBe('skipped');
+    expect(deps.enqueue).not.toHaveBeenCalled();
+    expect(db.runs.length).toBe(0);
+  });
+
+  it('is exception-safe when the global toggle throws (defaults to enabled → runs)', async () => {
+    const db = new FakeDb(
+      (sql) => {
+        if (sql.includes('FROM workflow_runs r')) return runRow({ eval_enabled: null });
+        if (sql.includes('SELECT eval_status FROM run_evals')) return undefined;
+        return undefined;
+      },
+      () => ({ changes: 1, lastInsertRowid: 1 }),
+    );
+    const deps = makeDeps(db, {
+      isEvalEnabled: () => {
+        throw new Error('config read blew up');
+      },
+    });
+    const outcome = await snapshotRunForEval('run-1', deps);
+    expect(outcome).toBe('inserted');
+    expect(deps.enqueue).toHaveBeenCalled();
   });
 
   it('skips when the run row is missing', async () => {

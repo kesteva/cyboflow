@@ -725,6 +725,12 @@ async function initializeServices() {
     reviewItemWriter: (projectId, change) =>
       ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
     appVersion: app.getVersion(),
+    // GLOBAL code-review-eval toggle (default ON) — read fresh per trigger so a
+    // Settings change takes effect without relaunch. A per-run override
+    // (workflow_runs.eval_enabled) outranks this; the snapshot consults it only
+    // when the per-run value is NULL. Closure keeps the eval module free of any
+    // concrete-service import (standalone-typecheck invariant).
+    isEvalEnabled: () => configManager.getCodeReviewEvalEnabled(),
   });
   // Crash-safe resume: re-enqueue any eval an app quit left 'pending'/'running'
   // (the frozen diff lives in the row, so a re-grade is self-contained) — otherwise

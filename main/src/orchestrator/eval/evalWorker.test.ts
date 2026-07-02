@@ -89,6 +89,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
       judge,
       reviewItemWriter: writer,
       appVersion: '0.1.11',
+      isEvalEnabled: () => true,
       sampleCount: 3,
       sleep: async () => {},
     });
@@ -119,6 +120,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
       judge,
       reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
       appVersion: '0.1.11',
+      isEvalEnabled: () => true,
       sampleCount: 3,
       sleep: async () => {},
     });
@@ -137,6 +139,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
       judge,
       reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
       appVersion: '0.1.11',
+      isEvalEnabled: () => true,
       sampleCount: 3,
       maxRetries: 1,
       sleep: async () => {},
@@ -180,6 +183,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
       judge,
       reviewItemWriter: writer,
       appVersion: '0.1.11',
+      isEvalEnabled: () => true,
       sampleCount: 1,
       sleep: async () => {},
     });
@@ -231,6 +235,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
         return { reviewItemId: 'ri' };
       }),
       appVersion: '0.1.11',
+      isEvalEnabled: () => true,
       sampleCount: 3,
       sleep: async () => {},
     });
@@ -256,6 +261,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
       judge: new FakeJudge(async () => sampleAllPass(BROAD_PASS)),
       reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
       appVersion: '0.1.11',
+      isEvalEnabled: () => true,
       sampleCount: 1,
       sleep: async () => {},
     });
@@ -293,6 +299,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
       judge,
       reviewItemWriter: writer,
       appVersion: '0.1.11',
+      isEvalEnabled: () => true,
       sampleCount: 1,
       sleep: async () => {},
     });
@@ -320,6 +327,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
       judge: new FakeJudge(async () => sampleAllPass(BROAD_PASS)),
       reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
       appVersion: '0.1.11',
+      isEvalEnabled: () => true,
       sleep: async () => {},
     });
     const spy = vi.spyOn(worker, 'enqueue');
@@ -335,6 +343,7 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
       judge: new FakeJudge(async () => sampleAllPass(BROAD_PASS)),
       reviewItemWriter: vi.fn(async () => ({ reviewItemId: 'ri' })),
       appVersion: '0.1.11',
+      isEvalEnabled: () => true,
       sleep: async () => {},
     });
     await worker.stop();
