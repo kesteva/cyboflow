@@ -72,3 +72,47 @@ jobs:
       env:
         CI: true
       timeout-minutes: 10
+
+    # Report-only coverage — no threshold yet (see docs/proposals/test-coverage-tightening-plan.md
+    # Workstream C). continue-on-error so a coverage-run hiccup never blocks the gate; this step
+    # exists purely to make coverage visible while a baseline is established. The text-reporter
+    # table (main/frontend vitest.config.ts both list 'text' first) is captured to a log file and
+    # tailed into the job summary rather than parsing a coverage-summary.json the 'text'/'json'/
+    # 'html' reporter set doesn't produce.
+    - name: Coverage (report-only, main)
+      if: always()
+      continue-on-error: true
+      run: pnpm --filter main exec vitest run --coverage --reporter=dot | tee main-coverage.log
+      env:
+        CI: true
+      timeout-minutes: 10
+
+    - name: Coverage summary (main)
+      if: always()
+      continue-on-error: true
+      run: |
+        {
+          echo "### Main coverage (report-only)"
+          echo '```'
+          tail -n 60 main-coverage.log 2>/dev/null || echo "(no coverage output captured)"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Coverage (report-only, frontend)
+      if: always()
+      continue-on-error: true
+      run: pnpm --filter frontend exec vitest run --coverage --reporter=dot | tee frontend-coverage.log
+      env:
+        CI: true
+      timeout-minutes: 10
+
+    - name: Coverage summary (frontend)
+      if: always()
+      continue-on-error: true
+      run: |
+        {
+          echo "### Frontend coverage (report-only)"
+          echo '```'
+          tail -n 60 frontend-coverage.log 2>/dev/null || echo "(no coverage output captured)"
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
