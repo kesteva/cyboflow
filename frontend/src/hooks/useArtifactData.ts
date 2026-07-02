@@ -17,6 +17,10 @@
  *                             is NOT usable here — it only nests children for an
  *                             EPIC, so an idea id yields children===undefined and
  *                             the renderer would always show its empty state.
+ *   - 'arch-design'        -> the originating idea (fetched exactly like
+ *                             'idea-spec' via `tasks.get`); the renderer extracts
+ *                             the '## Architecture design' section from its body
+ *                             with the SHARED extractArchDesignSection.
  *   - 'screenshots'        -> no entity source yet; the parsed `payload_json`
  *                             (`{ fileNames?: string[] }`) is surfaced as-is.
  *   - 'ui-prototype' / 'generic' (canvas) -> the parsed `payload_json`
@@ -57,6 +61,7 @@ export interface ScreenshotsPayload {
 export type ArtifactContent =
   | { kind: 'idea'; idea: BacklogTaskItem }
   | { kind: 'stories'; idea: BacklogTaskItem }
+  | { kind: 'arch'; idea: BacklogTaskItem }
   | { kind: 'screenshots'; payload: ScreenshotsPayload }
   | { kind: 'canvas'; payload: CanvasPayload };
 
@@ -128,7 +133,12 @@ export function useArtifactData(artifact: Artifact): ArtifactData {
         setState({
           loading: false,
           error: null,
-          data: atype === 'idea-spec' ? { kind: 'idea', idea } : { kind: 'stories', idea },
+          data:
+            atype === 'idea-spec'
+              ? { kind: 'idea', idea }
+              : atype === 'arch-design'
+                ? { kind: 'arch', idea }
+                : { kind: 'stories', idea },
         });
       },
       (err: unknown) => {

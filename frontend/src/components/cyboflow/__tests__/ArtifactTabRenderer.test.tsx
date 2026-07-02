@@ -141,6 +141,44 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.getByTestId('artifact-idea-error')).toHaveTextContent('boom');
   });
 
+  // --- arch-design -----------------------------------------------------------
+
+  const ARCH_BODY =
+    '# Problem\n\nIntro.\n\n## Architecture design\n\nUse a worker queue for mints.\n\n## Rollout\n\nLater.';
+
+  it('renders the arch-design section markdown with the teal eyebrow', () => {
+    setHook({ loading: false, error: null, data: { kind: 'arch', idea: makeIdea({ body: ARCH_BODY }) } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'arch-design' })} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-arch-design')).toBeInTheDocument();
+    const eyebrow = screen.getByTestId('artifact-eyebrow');
+    expect(eyebrow).toHaveTextContent('Artifact · architecture design');
+    expect(eyebrow).toHaveStyle({ color: '#2d7a8a' });
+    // ONLY the extracted section is rendered — not the whole body.
+    const md = screen.getByTestId('md-preview');
+    expect(md).toHaveTextContent('Use a worker queue for mints.');
+    expect(md).not.toHaveTextContent('Intro.');
+    expect(md).not.toHaveTextContent('Later.');
+  });
+
+  it('shows the arch-design empty state when the body has no architecture section', () => {
+    setHook({ loading: false, error: null, data: { kind: 'arch', idea: makeIdea() } });
+    render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'arch-design' })} {...PROPS} />);
+
+    expect(screen.getByTestId('artifact-arch-nosection')).toHaveTextContent('No architecture design yet.');
+    expect(screen.queryByTestId('md-preview')).not.toBeInTheDocument();
+  });
+
+  it('shows the arch-design loading and error states', () => {
+    setHook({ loading: true, error: null, data: null });
+    const { rerender } = render(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'arch-design' })} {...PROPS} />);
+    expect(screen.getByTestId('artifact-arch-loading')).toBeInTheDocument();
+
+    setHook({ loading: false, error: 'boom', data: null });
+    rerender(<ArtifactTabRenderer artifact={makeArtifact({ atype: 'arch-design' })} {...PROPS} />);
+    expect(screen.getByTestId('artifact-arch-error')).toHaveTextContent('boom');
+  });
+
   // --- decomposed-stories --------------------------------------------------
 
   function makeStoriesIdea(): BacklogTaskItem {
@@ -395,6 +433,7 @@ describe('ArtifactTabRenderer', () => {
       { atype: 'screenshots', mode: 'template', testid: 'artifact-screenshots', data: { loading: false, error: null, data: { kind: 'screenshots', payload: {} } } },
       { atype: 'ui-prototype', mode: 'canvas', testid: 'artifact-canvas', data: { loading: false, error: null, data: { kind: 'canvas', payload: {} } } },
       { atype: 'generic', mode: 'canvas', testid: 'artifact-canvas', data: { loading: false, error: null, data: { kind: 'canvas', payload: {} } } },
+      { atype: 'arch-design', mode: 'template', testid: 'artifact-arch-design', data: { loading: false, error: null, data: { kind: 'arch', idea: makeIdea() } } },
     ];
     for (const c of cases) {
       setHook(c.data);

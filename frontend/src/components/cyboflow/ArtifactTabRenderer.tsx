@@ -8,6 +8,8 @@
  *
  *   - 'idea-spec'          -> a rendered markdown doc (the idea `body`), centered
  *                             on white, max-width 680px (blue accent #3b6dd6).
+ *   - 'arch-design'        -> the idea body's '## Architecture design' section as
+ *                             a markdown doc, same chrome (teal accent #2d7a8a).
  *   - 'decomposed-stories' -> an epic/task card grid: one card per epic, tasks in
  *                             a 2-col grid (indigo accent #5a4ad6).
  *   - 'screenshots'        -> a 2-col gallery; no disk image source yet, so a
@@ -30,7 +32,7 @@ import { TaskDetailModal } from './TaskDetailModal';
 import { LiveCanvasEmbed, isLocalhostUrl } from './LiveCanvasEmbed';
 import { useArtifactData } from '../../hooks/useArtifactData';
 import { useArtifactImages } from '../../hooks/useArtifactImages';
-import { ARTIFACT_COLORS } from '../../../../shared/types/artifacts';
+import { ARTIFACT_COLORS, extractArchDesignSection } from '../../../../shared/types/artifacts';
 import type { Artifact } from '../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 
@@ -135,6 +137,69 @@ function IdeaSpecBody({ artifact, projectId }: { artifact: Artifact; projectId: 
             ) : (
               <div data-testid="artifact-idea-nobody" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
                 This idea has no spec body yet.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </Shell>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// arch-design — the '## Architecture design' section of the originating idea's
+// body, rendered as a markdown doc (same chrome as idea-spec, teal accent).
+// The section is extracted with the SHARED extractArchDesignSection — the same
+// function the backend content gate uses, so mint and render never disagree.
+// ---------------------------------------------------------------------------
+function ArchDesignBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
+  const accent = ARTIFACT_COLORS['arch-design'];
+  const { loading, error, data } = useArtifactData(artifact);
+  const idea = data?.kind === 'arch' ? data.idea : null;
+  const section = idea ? extractArchDesignSection(idea.body) : null;
+
+  return (
+    <Shell testid="artifact-arch-design">
+      <ArtifactHeader
+        artifact={artifact}
+        projectId={projectId}
+        accent={accent}
+        eyebrow="Artifact · architecture design"
+        meta={artifact.sourceRef ? `${artifact.sourceRef} · ${artifact.stepOrigin ?? 'architect'}` : undefined}
+      />
+      {loading ? (
+        <StateRow testid="artifact-arch-loading" color={MUTED} text="Loading architecture design…" />
+      ) : error ? (
+        <StateRow testid="artifact-arch-error" color={RUST} text={error} />
+      ) : !idea ? (
+        <StateRow testid="artifact-arch-empty" color={MUTED} text="No architecture design yet." />
+      ) : (
+        <div style={{ flex: 1 }}>
+          <div
+            data-testid="artifact-arch-doc"
+            style={{
+              maxWidth: 680,
+              margin: '0 auto',
+              background: 'var(--color-surface-primary)',
+              border: `1px solid ${HAIRLINE}`,
+              padding: '34px 40px 56px',
+              marginTop: 18,
+              marginBottom: 18,
+            }}
+          >
+            <div
+              style={{ fontSize: '9px', fontWeight: 700, letterSpacing: '.16em', textTransform: 'uppercase', color: accent, marginBottom: 8 }}
+            >
+              {idea.ref}
+            </div>
+            <h1 style={{ fontSize: '22px', fontWeight: 700, lineHeight: 1.25, color: INK, margin: '0 0 18px' }}>
+              Architecture design
+            </h1>
+            {section ? (
+              <MarkdownPreview content={section} />
+            ) : (
+              <div data-testid="artifact-arch-nosection" style={{ fontSize: '12px', color: FAINT, fontStyle: 'italic' }}>
+                No architecture design yet.
               </div>
             )}
           </div>
@@ -519,6 +584,8 @@ export function ArtifactTabRenderer({ artifact, projectId }: ArtifactTabRenderer
   switch (artifact.atype) {
     case 'idea-spec':
       return <IdeaSpecBody artifact={artifact} projectId={projectId} />;
+    case 'arch-design':
+      return <ArchDesignBody artifact={artifact} projectId={projectId} />;
     case 'decomposed-stories':
       return <DecomposedStoriesBody artifact={artifact} projectId={projectId} />;
     case 'screenshots':
