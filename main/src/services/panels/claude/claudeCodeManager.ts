@@ -113,6 +113,48 @@ function resultErrorText(event: unknown): string | null {
 }
 
 /**
+ * Classify a Claude Code `result` event as a TERMINAL turn failure, returning its
+ * error message (or null when the turn did not fatally fail).
+ *
+ * The CLI surfaces a fatal turn (usage limit, auth failure, execution error) as a
+ * terminal `result` event with `is_error: true` — NOT a thrown error — so it drains
+ * the query() iterator normally. Left unhandled, the driving RunExecutor treats the
+ * clean drain as a REST and parks the run in `awaiting_review` (the false "Workflow
+ * complete" state). This lets spawnCliProcess detect that case and fail the run.
+ *
+ * `error_max_turns` is deliberately EXCLUDED (returns null): a run that merely hit
+ * the turn cap is RECOVERABLE — it rests and can be nudged/resumed — so it must not
+ * be re-marked failed. Every other error subtype (including unknown future ones)
+ * defaults to terminal, so a fatal turn fails loudly rather than resting silently.
+ */
+function terminalResultError(event: unknown): string | null {
+  if (typeof event !== 'object' || event === null) return null;
+  const e = event as { type?: unknown; is_error?: unknown; subtype?: unknown; result?: unknown };
+  if (e.type !== 'result' || e.is_error !== true) return null;
+  if (e.subtype === 'error_max_turns') return null;
+  return typeof e.result === 'string' && e.result.length > 0
+    ? e.result
+    : 'The agent session ended with an error.';
+}
+
+/**
+ * Thrown by spawnCliProcess when a FLOW-RUN's driving SDK turn ends on a TERMINAL
+ * error (a fatal is_error result per `terminalResultError`, or a thrown SDK/spawn
+ * error) that the CLI surfaces WITHOUT rejecting the query() iterator. Rejecting
+ * spawnCliProcess with it routes RunExecutor.execute()'s catch into its single
+ * `failed` transition (transitionToFailed → status='failed' + error_message).
+ *
+ * Quick CHAT turns never raise it (their runId resolves to the `__quick__` sentinel,
+ * not the run panel) so a chat Session Error stays inline exactly as before.
+ */
+export class SdkSessionTerminalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SdkSessionTerminalError';
+  }
+}
+
+/**
  * SDK option guards that ENFORCE a per-session MCP deny-list at spawn.
  *
  * composeMcpServers already deletes disabled servers from the explicit
@@ -300,6 +342,15 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * programmatic fan-out lane, else === panelId). One entry per concurrent lane.
    */
   private readonly sdkRuns = new Map<string, ClaudeSdkRun>();
+
+  /**
+   * TERMINAL turn errors captured by runSdkQuery, keyed by spawnKey. Set when a
+   * flow-run turn ends on a fatal is_error result / thrown SDK error (see
+   * terminalResultError); read+cleared once by spawnCliProcess right after the
+   * iterator drains so it can reject the spawn and drive the run to `failed`.
+   * Per-spawnKey so concurrent fan-out lanes never clobber each other.
+   */
+  private readonly terminalErrorBySpawn = new Map<string, string>();
 
   /**
    * Per-spawn pipeline (router → sink), keyed by spawnKey (per-lane for a
@@ -746,6 +797,22 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // every tool request with RunNotRunningError. runSdkQuery's try/catch swallows
       // SDK errors, so this await never throws — the lock releases on iterator drain.
       await iteratorDone;
+
+      // TERMINAL-error propagation. A fatal turn (usage limit / auth failure / spawn
+      // error) is surfaced by the CLI as an is_error RESULT event or a thrown SDK
+      // error — neither rejects the iterator, so without this spawnCliProcess would
+      // RESOLVE and RunExecutor.execute() would rest the run in awaiting_review (the
+      // false "Workflow complete" state; see WorkflowSummaryPanel). runSdkQuery stashed
+      // the reason (terminalResultError) under spawnKey; read+clear it and REJECT for a
+      // FLOW-RUN spawn (runId === displayPanelId) so execute()'s catch routes the run
+      // through its single `failed` transition. A quick CHAT turn resolves its runId to
+      // the `__quick__` sentinel (≠ displayPanelId) and is left untouched — its Session
+      // Error stays inline exactly as before.
+      const terminalError = this.terminalErrorBySpawn.get(spawnKey);
+      this.terminalErrorBySpawn.delete(spawnKey);
+      if (terminalError !== undefined && runId === displayPanelId) {
+        throw new SdkSessionTerminalError(terminalError);
+      }
     });
   }
 
@@ -781,9 +848,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // is eligible so an Opus error can never loop.
     let activeOptions: Options = sdkOptions;
     let attempt = 0;
+    // A fatal turn-ending error (is_error result or thrown SDK error) for THIS
+    // (final) attempt — stashed for spawnCliProcess to reject on. Reset at the top
+    // of each attempt so a recovered model-fallback retry never leaves a stale one.
+    let terminalError: string | null = null;
     try {
       retry: while (true) {
         attempt++;
+        terminalError = null;
         const q = query({ prompt, options: { ...activeOptions, abortController } });
         for await (const event of q) {
           if (abortController.signal.aborted) break;
@@ -846,6 +918,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
             data: event,
             timestamp: new Date()
           });
+
+          // Detect a TERMINAL turn failure surfaced as an is_error RESULT event
+          // (usage limit / auth / execution error). Placed AFTER the fallback check
+          // above (which `continue retry`s past it), so a recovered model-unavailable
+          // result never counts. `error_max_turns` is excluded as recoverable. The
+          // event is still forwarded as output so the "Session Error" stays visible.
+          const resultErr = terminalResultError(event);
+          if (resultErr !== null) terminalError = resultErr;
         }
         break; // iterator drained without triggering a fallback retry
       }
@@ -858,6 +938,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
         const errMsg = err instanceof Error ? err.message : String(err);
         this.logger?.error(`[ClaudeCodeManager] SDK query error for panel ${displayPanelId}: ${errMsg}`);
         this.emit('error', { panelId: displayPanelId, sessionId, error: errMsg });
+        // A thrown SDK error (auth / network / spawn failure) is terminal too.
+        terminalError = errMsg;
         // Reactive availability detection: if the failure names the pinned MODEL
         // (not found / no access), and that model is one we guard (Fable 5), record
         // it so every later spawn falls back to Opus and the pickers grey it out.
@@ -893,6 +975,15 @@ export class ClaudeCodeManager extends AbstractCliManager {
         exitCode,
         signal: null
       });
+    }
+
+    // Stash a terminal turn error (never on an abort — that is an intentional
+    // cancel, not a failure) AFTER the 'exit' emit so the run's UI teardown is
+    // unchanged. spawnCliProcess reads+clears this by spawnKey and rejects for a
+    // flow-run spawn; the iterator promise itself still RESOLVES so the run.iteratorDone
+    // awaiters (e.g. cancel) are unaffected.
+    if (terminalError !== null && !abortController.signal.aborted) {
+      this.terminalErrorBySpawn.set(spawnKey, terminalError);
     }
   }
 

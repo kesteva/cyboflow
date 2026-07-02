@@ -199,6 +199,13 @@ export interface WorkflowRunListRow {
   started_at: string | null;
   ended_at: string | null;
   stuck_reason: string | null;
+  /**
+   * Failure reason stamped by the `failed` transition (transitionToFailed) — e.g. a
+   * terminal SDK Session Error like "You've hit your limit · resets 7:10pm". NULL on
+   * any non-failed run. Surfaced so the end-of-workflow panel can show WHY a run
+   * failed (WorkflowSummaryPanel). Optional + additive (fixtures unaffected).
+   */
+  error_message?: string | null;
 }
 
 /**

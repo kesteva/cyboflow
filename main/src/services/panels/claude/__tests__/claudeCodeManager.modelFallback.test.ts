@@ -65,8 +65,12 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => {
           } as unknown;
           return;
         }
-        // 'fable-then-success': first attempt fails on the model; retry succeeds.
-        if (attempt === 1) {
+        // 'fable-then-success': the model-unavailable error is emitted ONLY when the
+        // call actually ran on the guarded Fable model (attempt 1, OR a pre-fallback
+        // spawn that resolves straight to Opus never sees it). Gating on `model`
+        // keeps the mock faithful: a real Opus attempt succeeds — it would never
+        // yield a Fable error — so the terminal-error path does not wrongly fail it.
+        if (attempt === 1 && model === FABLE) {
           yield {
             type: 'result',
             subtype: 'error_during_execution',
