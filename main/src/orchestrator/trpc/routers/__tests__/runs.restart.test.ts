@@ -64,7 +64,7 @@ describe('cyboflow.runs.restart', () => {
       `UPDATE workflow_runs
           SET substrate = 'interactive', session_id = 'sess-host', model = 'opus',
               permission_mode_snapshot = 'acceptEdits', seed_idea_id = 'IDEA-9',
-              error_message = 'You hit your limit'
+              error_message = 'You hit your limit', eval_enabled = 1
         WHERE id = ?`,
     ).run(runId);
 
@@ -88,11 +88,12 @@ describe('cyboflow.runs.restart', () => {
     });
     // Full-form launch: workflow, project path, substrate, taskId(undef), ideaId,
     // sessionId, permissionMode, baseBranch(undef), seedTaskIds(undef), projectId,
-    // requestedExecutionModel(undef), findingIds(undef), model.
+    // requestedExecutionModel(undef), findingIds(undef), model, evalEnabled
+    // (per-run pin 1 → true; NULL would thread undefined = inherit global).
     expect(launchMock).toHaveBeenCalledOnce();
     expect(launchMock).toHaveBeenCalledWith(
       workflowId, '/projects/p', 'interactive', undefined, 'IDEA-9', 'sess-host',
-      'acceptEdits', undefined, undefined, 1, undefined, undefined, 'opus',
+      'acceptEdits', undefined, undefined, 1, undefined, undefined, 'opus', true,
     );
 
     // The failed run stays terminal — restart never mutates it.

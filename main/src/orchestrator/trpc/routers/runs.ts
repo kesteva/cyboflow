@@ -1006,7 +1006,8 @@ export const runsRouter = router({
       const row = ctx.db
         .prepare(
           `SELECT workflow_id, project_id, status, substrate, session_id,
-                  permission_mode_snapshot, model, task_id, seed_idea_id, seed_finding_ids, batch_id
+                  permission_mode_snapshot, model, task_id, seed_idea_id, seed_finding_ids, batch_id,
+                  eval_enabled
              FROM workflow_runs WHERE id = ?`,
         )
         .get(input.runId) as
@@ -1022,6 +1023,7 @@ export const runsRouter = router({
             seed_idea_id: string | null;
             seed_finding_ids: string | null;
             batch_id: string | null;
+            eval_enabled: number | null;
           }
         | undefined;
       if (!row) return { noOp: true, reason: 'not_found' };
@@ -1074,6 +1076,9 @@ export const runsRouter = router({
         undefined,
         findingIds,
         row.model ?? undefined,
+        // Copy the failed run's per-run eval pin (1/0 → true/false; NULL → inherit
+        // the global setting) so a restart preserves the launch-time choice.
+        row.eval_enabled === null ? undefined : row.eval_enabled === 1,
       );
       return { runId, worktreePath, branchName };
     }),
