@@ -1,6 +1,6 @@
 # Test-Coverage Tightening Plan — cyboflow
 
-_Status: proposal · Owner: TBD · Gate of record: `pnpm test:unit` (main + frontend vitest, schema parity, build scripts). `pnpm test:e2e` is currently an environmental fail; `pnpm test:gate` is a manual, unscheduled integration test._
+_Status: EXECUTED 2026-07-02 — Milestones 0–2 + Workstream A landed (~493 tests added, all gates green; e2e reworked onto `_electron.launch()`, now 11 passed / 2 skipped). Deferred: C3/C4 coverage-threshold ratchet (needs accumulated baselines) and the two `test.skip`ped terminal-panel interactions (need a live-`claude` session fixture). Product bugs surfaced during execution are tracked in the wrap-up report, not fixed here._
 
 ## 1. Current state
 
