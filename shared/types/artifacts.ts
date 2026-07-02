@@ -25,7 +25,8 @@ export type ArtifactType =
   | 'decomposed-stories'
   | 'screenshots'
   | 'ui-prototype'
-  | 'generic';
+  | 'generic'
+  | 'arch-design';
 
 /** How an artifact tab renders: a bespoke template vs. an embedded live canvas. */
 export type ArtifactRenderMode = 'template' | 'canvas';
@@ -40,6 +41,7 @@ export const ARTIFACT_RENDER_MODE: Record<ArtifactType, ArtifactRenderMode> = {
   screenshots: 'template',
   'ui-prototype': 'canvas',
   generic: 'canvas',
+  'arch-design': 'template',
 };
 
 /**
@@ -53,6 +55,7 @@ export const ARTIFACT_COLORS: Record<ArtifactType, string> = {
   screenshots: '#2d8a5b',
   'ui-prototype': '#c96442',
   generic: '#c96442',
+  'arch-design': '#2d7a8a',
 };
 
 /**
@@ -65,11 +68,53 @@ export const ARTIFACT_GLYPHS: Record<ArtifactType, string> = {
   screenshots: '▦',
   'ui-prototype': '◳',
   generic: '◳',
+  'arch-design': '▣',
 };
 
 /** True when the artifact renders in an embedded live canvas (not a template). */
 export function isCanvasArtifact(atype: ArtifactType): boolean {
   return ARTIFACT_RENDER_MODE[atype] === 'canvas';
+}
+
+// ===========================================================================
+// arch-design — the templated architecture-design section extractor.
+//
+// The 'arch-design' artifact RE-DERIVES its content on READ from the
+// originating idea's markdown `body` — specifically the '## Architecture
+// design' H2 section (folded into the body by the planner/ship architecture
+// step). BOTH sides use this ONE extractor so they can never disagree:
+//   - backend: the autoMintArtifacts content gate (mint only when the section
+//     exists and is non-empty);
+//   - frontend: ArtifactTabRenderer's arch-design body (render the extracted
+//     section through MarkdownPreview).
+// ===========================================================================
+
+/** The H2 heading text that delimits the architecture-design section. */
+export const ARCH_DESIGN_SECTION_HEADING = 'Architecture design';
+
+/**
+ * Matches the '## Architecture design' heading on its own line
+ * (case-insensitive; tolerates trailing whitespace / CRLF).
+ */
+const ARCH_DESIGN_HEADING_RE = new RegExp(
+  `^##\\s+${ARCH_DESIGN_SECTION_HEADING}\\s*$`,
+  'im',
+);
+
+/**
+ * Extract the '## Architecture design' section from an idea body: everything
+ * after the heading line up to (not including) the next line starting with
+ * '## ' (the next H2) or EOF, trimmed. Returns null when the body is empty,
+ * the heading is absent, or the section has no content.
+ */
+export function extractArchDesignSection(body: string | null | undefined): string | null {
+  if (!body) return null;
+  const match = ARCH_DESIGN_HEADING_RE.exec(body);
+  if (!match) return null;
+  const rest = body.slice(match.index + match[0].length);
+  const nextH2 = /^##\s/m.exec(rest);
+  const section = (nextH2 ? rest.slice(0, nextH2.index) : rest).trim();
+  return section.length > 0 ? section : null;
 }
 
 /**

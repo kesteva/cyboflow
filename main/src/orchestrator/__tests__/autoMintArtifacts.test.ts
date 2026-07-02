@@ -86,6 +86,8 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '035_artifacts.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '042_collapse_board.sql'), 'utf-8'));
+  // 045 widens the artifacts.atype CHECK to include 'arch-design'.
+  db.exec(readFileSync(join(migDir, '045_arch_design_atype.sql'), 'utf-8'));
   return db;
 }
 
@@ -1329,6 +1331,290 @@ describe('decomposed task lineage (FIX D)', () => {
       .prepare('SELECT originating_idea_id AS oid FROM tasks WHERE id = ?')
       .get(taskId) as { oid: string | null };
     expect(row.oid).toBeNull();
+  });
+});
+
+// ===========================================================================
+// arch-design — the templated architecture-design artifact (planner + ship).
+// Mints content-gated on the SHARED extractArchDesignSection: only when the
+// idea body carries a non-empty '## Architecture design' section.
+// ===========================================================================
+
+const ARCH_BODY =
+  '# Idea\n\nIntro.\n\n## Architecture design\n\nUse a worker queue.\n\n## Rollout\n\nLater.';
+
+/**
+ * Seed a run whose workflow is NAMED `name` but whose spec_json declares an
+ * 'architecture' step with outputArtifact atype='arch-design' (spec_json fully
+ * overrides the built-in definition at resolve time). Exercises the
+ * handleStepCompletion arch-design branch + its ARCH_DESIGN_WORKFLOWS gate.
+ */
+function seedRunWithArchStep(db: Database.Database, runId: string, name: string): void {
+  const specJson = JSON.stringify({
+    id: `${name}-arch-spec`,
+    phases: [
+      {
+        id: 'refine',
+        label: 'Refine',
+        color: '#2d7a8a',
+        steps: [
+          {
+            id: 'architecture',
+            name: 'Architecture design',
+            agent: 'cyboflow-architect',
+            outputArtifact: { atype: 'arch-design', label: 'Architecture design' },
+          },
+        ],
+      },
+    ],
+  });
+  db.prepare(
+    `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, ?)`,
+  ).run(`wf-arch-${runId}`, name, specJson);
+  db.prepare(
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
+     VALUES (?, ?, 1, 'running', 'default')`,
+  ).run(runId, `wf-arch-${runId}`);
+}
+
+describe('autoMintArtifacts arch-design', () => {
+  afterEach(() => {
+    ArtifactRouter._resetForTesting();
+    artifactChangeEvents.removeAllListeners();
+    TaskChangeRouter._resetForTesting();
+    taskChangeEvents.removeAllListeners();
+  });
+
+  it("mints arch-design on an 'idea' write for a PLANNER run when the body has the section", async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-arch-p');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea with an arch section',
+      body: ARCH_BODY,
+      runId: 'run-arch-p',
+    });
+
+    await handleEntityWrite(adapter, 'run-arch-p', 'idea');
+
+    const art = readArtifact(db, 'run-arch-p', 'arch-design');
+    expect(art).toBeDefined();
+    expect(art!.atype).toBe('arch-design');
+    expect(art!.label).toBe('Architecture design');
+    expect(art!.source_ref).toBe(ideaId);
+    expect(art!.step_origin).toBe('Refine · architecture design');
+    // Templated: content re-derived on read → mode 'template', payload null.
+    expect(art!.mode).toBe('template');
+    expect(art!.payload_json).toBeNull();
+    expect(art!.is_new).toBe(1);
+  });
+
+  it("mints arch-design on an 'idea' write for a SHIP run too", async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedShipRun(db, 'run-arch-ship');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Ship idea with arch',
+      body: ARCH_BODY,
+      runId: 'run-arch-ship',
+    });
+
+    await handleEntityWrite(adapter, 'run-arch-ship', 'idea');
+
+    const art = readArtifact(db, 'run-arch-ship', 'arch-design');
+    expect(art).toBeDefined();
+    expect(art!.source_ref).toBe(ideaId);
+  });
+
+  it('is content-gated: an idea write WITHOUT the section mints idea-spec but NOT arch-design', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-arch-none');
+    await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idea without arch',
+      body: '# Idea\n\n## Problem\n\nNo architecture section here.',
+      runId: 'run-arch-none',
+    });
+
+    await handleEntityWrite(adapter, 'run-arch-none', 'idea');
+
+    expect(readArtifact(db, 'run-arch-none', 'idea-spec')).toBeDefined();
+    expect(readArtifact(db, 'run-arch-none', 'arch-design')).toBeUndefined();
+  });
+
+  it('mints arch-design at RUN START when the idea body already carries the section', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedShipRun(db, 'run-arch-start');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Pre-designed idea',
+      body: ARCH_BODY,
+      runId: 'run-arch-start',
+    });
+    setSeedIdea(db, 'run-arch-start', ideaId);
+
+    await handleRunStart(adapter, 'run-arch-start');
+
+    const art = readArtifact(db, 'run-arch-start', 'arch-design');
+    expect(art).toBeDefined();
+    expect(art!.source_ref).toBe(ideaId);
+    expect(art!.step_origin).toBe('Ship · run start');
+  });
+
+  it('does NOT mint arch-design at run start when the section is absent (content-gated no-op)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedShipRun(db, 'run-arch-start-none');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'No section',
+      summary: 'Just a summary.',
+      runId: 'run-arch-start-none',
+    });
+    setSeedIdea(db, 'run-arch-start-none', ideaId);
+
+    await handleRunStart(adapter, 'run-arch-start-none');
+
+    expect(readArtifact(db, 'run-arch-start-none', 'idea-spec')).toBeDefined();
+    expect(readArtifact(db, 'run-arch-start-none', 'arch-design')).toBeUndefined();
+  });
+
+  it("mints arch-design on the 'architecture' step completion for a PLANNER run", async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedRunWithArchStep(db, 'run-arch-step', 'planner');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Step-minted arch',
+      body: ARCH_BODY,
+      runId: 'run-arch-step',
+    });
+    setSeedIdea(db, 'run-arch-step', ideaId);
+
+    await handleStepCompletion(adapter, 'run-arch-step', 'architecture');
+
+    const art = readArtifact(db, 'run-arch-step', 'arch-design');
+    expect(art).toBeDefined();
+    expect(art!.source_ref).toBe(ideaId);
+    expect(art!.mode).toBe('template');
+    expect(art!.payload_json).toBeNull();
+  });
+
+  it("mints arch-design on the 'architecture' step completion for a SHIP run", async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedRunWithArchStep(db, 'run-arch-step-ship', 'ship');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Ship step-minted arch',
+      body: ARCH_BODY,
+      runId: 'run-arch-step-ship',
+    });
+    setSeedIdea(db, 'run-arch-step-ship', ideaId);
+
+    await handleStepCompletion(adapter, 'run-arch-step-ship', 'architecture');
+
+    expect(readArtifact(db, 'run-arch-step-ship', 'arch-design')).toBeDefined();
+  });
+
+  it('does NOT mint arch-design on step completion for a NON-planner/ship workflow', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedRunWithArchStep(db, 'run-arch-custom', 'my-custom-flow');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Custom-run idea with arch',
+      body: ARCH_BODY,
+      runId: 'run-arch-custom',
+    });
+    setSeedIdea(db, 'run-arch-custom', ideaId);
+
+    await expect(handleStepCompletion(adapter, 'run-arch-custom', 'architecture')).resolves.toBeUndefined();
+    expect(readArtifact(db, 'run-arch-custom', 'arch-design')).toBeUndefined();
+  });
+
+  it('does NOT mint arch-design on step completion when the run has already FAILED', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedRunWithArchStep(db, 'run-arch-failed', 'planner');
+    const { taskId: ideaId } = await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'user',
+      entityType: 'idea',
+      title: 'Failed-run arch',
+      body: ARCH_BODY,
+      runId: 'run-arch-failed',
+    });
+    setSeedIdea(db, 'run-arch-failed', ideaId);
+    setRunStatus(db, 'run-arch-failed', 'failed');
+
+    await expect(handleStepCompletion(adapter, 'run-arch-failed', 'architecture')).resolves.toBeUndefined();
+    expect(readArtifact(db, 'run-arch-failed', 'arch-design')).toBeUndefined();
+  });
+
+  it('is idempotent: two entity-write fires yield ONE arch-design row and one created event', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+
+    seedPlannerRun(db, 'run-arch-idem');
+    await TaskChangeRouter.getInstance().applyChange(1, {
+      actor: 'agent:cyboflow-context',
+      entityType: 'idea',
+      title: 'Idempotent arch',
+      body: ARCH_BODY,
+      runId: 'run-arch-idem',
+    });
+
+    await handleEntityWrite(adapter, 'run-arch-idem', 'idea');
+    await handleEntityWrite(adapter, 'run-arch-idem', 'idea');
+
+    const rows = db
+      .prepare("SELECT COUNT(*) AS n FROM artifacts WHERE run_id = 'run-arch-idem' AND atype = 'arch-design'")
+      .get() as { n: number };
+    expect(rows.n).toBe(1);
+    const artId = readArtifactId(db, 'run-arch-idem', 'arch-design')!;
+    const events = readArtifactEvents(db, artId).map((e) => e.kind);
+    expect(events).toEqual(['created']);
   });
 });
 

@@ -154,6 +154,7 @@ const VALID_ATYPES: ReadonlySet<ArtifactType> = new Set<ArtifactType>([
   'screenshots',
   'ui-prototype',
   'generic',
+  'arch-design',
 ]);
 
 // ---------------------------------------------------------------------------

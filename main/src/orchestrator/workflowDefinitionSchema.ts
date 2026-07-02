@@ -76,7 +76,7 @@ export const workflowStepSchema = z.object({
   // "creates ⟨artifact⟩" chip). Kept in the schema so the field survives parse.
   outputArtifact: z
     .object({
-      atype: z.enum(['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic']),
+      atype: z.enum(['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic', 'arch-design']),
       label: z.string().min(1, 'outputArtifact.label is required'),
     })
     .optional(),

@@ -29,6 +29,7 @@ import { ArtifactRouter } from './artifactRouter';
 import { listRunOwnedIdeaIds, resolveRunBatchIdeaId } from './runEntityOwnership';
 import type { DatabaseLike, LoggerLike } from './types';
 import { resolveWorkflowDefinition, type WorkflowStep } from '../../../shared/types/workflows';
+import { extractArchDesignSection } from '../../../shared/types/artifacts';
 import { TERMINAL_RUN_STATUSES } from '../../../shared/types/cyboflow';
 
 // ---------------------------------------------------------------------------
@@ -61,6 +62,15 @@ const TERMINAL_SKIP_STATUSES = new Set<string>(
  * non-planner workflow declaring them is fail-soft skipped.
  */
 const TEMPLATED_ATYPE_WORKFLOWS = new Set<string>(['planner']);
+
+/**
+ * Workflows whose steps are permitted to auto-mint the templated 'arch-design'
+ * atype. Unlike idea-spec/decomposed-stories (planner-only), the optional
+ * architecture-design step exists on BOTH planner and ship (head of the Refine
+ * phase), so both mint. A custom non-planner/ship workflow declaring the atype
+ * is fail-soft skipped, mirroring TEMPLATED_ATYPE_WORKFLOWS.
+ */
+const ARCH_DESIGN_WORKFLOWS = new Set<string>(['planner', 'ship']);
 
 /**
  * Workflows whose RUN START mints the templated baselines (idea-spec +
@@ -154,6 +164,7 @@ const RUN_START_STEP_ORIGIN: Record<string, string> = {
 const ENTITY_WRITE_STEP_ORIGIN = {
   ideaSpec: 'Plan · idea spec',
   decomposition: 'Plan · decomposition',
+  archDesign: 'Refine · architecture design',
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -361,6 +372,55 @@ async function mintIdeaSpec(
 }
 
 /**
+ * arch-design mint for a KNOWN idea: label = 'Architecture design';
+ * sourceRef = ideaId. Content is re-derived on read (mode 'template') from the
+ * idea body's '## Architecture design' section, so payloadJson is left null.
+ * Missing idea row → fail-soft (logs + returns without minting). Shared by the
+ * step-completion, run-start, and entity-write paths.
+ *
+ * CONTENT GATE: only minted when extractArchDesignSection(body) is non-null —
+ * the SAME shared extractor the frontend renders with, so the tab can never
+ * mint against a body the renderer would show empty.
+ */
+async function mintArchDesignForIdea(
+  db: DatabaseLike,
+  runId: string,
+  projectId: number,
+  ideaId: string,
+  stepOrigin: string | null,
+  logger?: LoggerLike,
+): Promise<void> {
+  const ideaRow = db
+    .prepare('SELECT ref AS ref, title AS title, body AS body, summary AS summary FROM ideas WHERE id = ?')
+    .get(ideaId) as IdeaContentRow | undefined;
+  if (!ideaRow) {
+    logger?.debug('[autoMintArtifacts] arch-design skipped — idea row not found', { runId, ideaId });
+    return;
+  }
+
+  // CONTENT GATE — refuse to mint when the body has no architecture-design section.
+  const body = typeof ideaRow.body === 'string' ? ideaRow.body : null;
+  if (extractArchDesignSection(body) === null) {
+    logger?.debug('[autoMintArtifacts] arch-design skipped — no architecture-design section yet', {
+      runId,
+      ideaId,
+    });
+    return;
+  }
+
+  await ArtifactRouter.getInstance().apply(projectId, {
+    op: 'create',
+    runId,
+    atype: 'arch-design',
+    label: 'Architecture design',
+    sourceRef: ideaId,
+    stepOrigin,
+    isNew: true,
+    actor: 'orchestrator',
+  });
+}
+
+/**
  * Count an idea's epics + tasks. Mirrors TaskChangeRouter.collectDeleteCascade:
  * epics by originating_idea_id; tasks reachable directly (originating_idea_id)
  * UNION via a child epic (parent_epic_id IN epics), deduped.
@@ -552,6 +612,36 @@ export async function handleStepCompletion(
       }
     }
 
+    // arch-design mirrors the templated gates, but is planner+ship (not
+    // planner-only): the optional architecture step exists on both workflows.
+    if (atype === 'arch-design') {
+      const meta = resolveRunMeta(db, runId);
+
+      if (meta !== null && meta.status !== null && TERMINAL_SKIP_STATUSES.has(meta.status)) {
+        logger?.debug(
+          '[autoMintArtifacts] skipped — run is in a terminal failed/canceled state',
+          { runId, stepId, status: meta.status, atype },
+        );
+        return;
+      }
+
+      if (meta !== null && (meta.workflowName === null || !ARCH_DESIGN_WORKFLOWS.has(meta.workflowName))) {
+        logger?.debug(
+          '[autoMintArtifacts] skipped — arch-design atype declared by a non-planner/ship workflow',
+          { runId, stepId, workflowName: meta.workflowName, atype },
+        );
+        return;
+      }
+
+      const ideaId = resolveOriginatingIdeaId(db, runId);
+      if (ideaId === null) {
+        logger?.debug('[autoMintArtifacts] arch-design skipped — run owns no resolvable idea', { runId });
+        return;
+      }
+      await mintArchDesignForIdea(db, runId, projectId, ideaId, STEP_ORIGIN[step.id] ?? null, logger);
+      return;
+    }
+
     if (atype === 'idea-spec') {
       await mintIdeaSpec(db, runId, projectId, step, logger);
     } else if (atype === 'decomposed-stories') {
@@ -638,6 +728,10 @@ export async function handleRunStart(
     // mints nothing here (no resolvable idea yet) and relies on handleEntityWrite.
     await mintIdeaSpecForIdea(db, runId, projectId, ideaId, stepOrigin, 'Idea spec', logger);
     await mintDecomposedStoriesForIdea(db, runId, projectId, ideaId, stepOrigin, logger);
+    // arch-design is content-gated inside its helper (no-op when the idea body
+    // has no '## Architecture design' section) — a re-opened / sprint run over
+    // an idea that already carries an architecture section surfaces the tab.
+    await mintArchDesignForIdea(db, runId, projectId, ideaId, stepOrigin, logger);
   } catch (err) {
     const msg = `[autoMintArtifacts] run-start baseline failed for runId=${runId} (fail-soft): ${
       err instanceof Error ? err.message : String(err)
@@ -718,6 +812,17 @@ export async function handleEntityWrite(
         ideaId,
         ENTITY_WRITE_STEP_ORIGIN.ideaSpec,
         'Idea spec',
+        logger,
+      );
+      // The architecture step folds a '## Architecture design' section into
+      // the idea body — the write that lands it fires this hook, and the
+      // content gate no-ops every idea write until the section exists.
+      await mintArchDesignForIdea(
+        db,
+        runId,
+        projectId,
+        ideaId,
+        ENTITY_WRITE_STEP_ORIGIN.archDesign,
         logger,
       );
     } else {
