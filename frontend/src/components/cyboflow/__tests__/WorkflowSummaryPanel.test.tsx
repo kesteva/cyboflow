@@ -382,6 +382,11 @@ describe('WorkflowSummaryPanel', () => {
     expect(correctness).toHaveTextContent('30%');
     expect(correctness).toHaveTextContent('Good');
     expect(screen.getByTestId('run-summary-eval-dim-security')).toHaveTextContent('inactive');
+    // the inactive label explains the thin-evidence rule on hover.
+    expect(screen.getByTestId('run-summary-eval-dim-security-inactive')).toHaveAttribute(
+      'title',
+      expect.stringContaining('excluded from the overall score'),
+    );
     const findings = screen.getAllByTestId('run-summary-eval-finding');
     expect(findings).toHaveLength(1);
     expect(findings[0]).toHaveTextContent('src/x.ts:42');

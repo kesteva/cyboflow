@@ -692,7 +692,15 @@ function ScoreSummary({ runEval, findings, breakdownOpen, onToggleBreakdown }: S
                       style={{ width: d.score !== null ? `${Math.max(d.score, 0)}%` : '0%' }}
                     />
                   </div>
-                  <span className="w-8 text-right text-xs font-bold tabular-nums text-text-primary">
+                  <span
+                    className="w-8 text-right text-xs font-bold tabular-nums text-text-primary"
+                    title={
+                      !d.active
+                        ? 'Fewer than 2 of this dimension’s checks applied to this diff — excluded from the overall score; its weight is redistributed across the active dimensions.'
+                        : undefined
+                    }
+                    data-testid={!d.active ? `run-summary-eval-dim-${d.key}-inactive` : undefined}
+                  >
                     {!d.active ? 'inactive' : d.score !== null ? d.score : '—'}
                   </span>
                   <span
