@@ -32,7 +32,9 @@ The pattern for every phase:
 
 1. **context** → delegate to `cyboflow-context`. Pass the `# Selected idea` block if
    one was chosen at launch, otherwise the user's raw prompt. It returns a
-   self-contained `## Idea spec` and a `SCOPE: small|large` line.
+   self-contained `## Idea spec` plus a `SCOPE: small|large` line and the design
+   flags `UI_PROTOTYPE: yes|no` / `ARCH_DESIGN: yes|no` (they decide steps 4–5 —
+   remember them).
    - Persist the spec with the rich `## Idea spec` markdown in **`body`** (the
      canonical field the idea artifact renders) and a SHORT one-line caption in
      `summary` — never the whole spec in `summary`.
@@ -62,14 +64,37 @@ decomposition in context — you do **not** call any `cyboflow_create_*` tool un
 the `approve-plan` gate returns **Approve**. Nothing lands on the board before the
 human approves the plan.
 
-4. **epics** (large ideas only) → delegate to `cyboflow-epics`; **hold** the returned
+4. **ui-prototype** (optional) → run ONLY when context returned `UI_PROTOTYPE: yes`
+   (or the user explicitly asked for a prototype). Report the step, then delegate to
+   `cyboflow-ui-prototype` with the approved spec. When it returns `## Prototype`
+   with a URL, surface it: call `cyboflow_report_artifact` with
+   `atype: 'ui-prototype'`, a short label, and `payload_json`
+   `{"url": "<the url>"}` — the live prototype tab renders from that URL. Skip this
+   step entirely when the flag is `no`.
+5. **architecture** (optional) → run ONLY when context returned `ARCH_DESIGN: yes`
+   (or the user explicitly asked for an architecture writeup). Report the step, then
+   delegate to `cyboflow-architecture` with the spec (plus prototype notes when one
+   exists). Fold its `## Architecture design` section into the idea body via
+   `cyboflow_update_task` — append the section to the existing body; the arch-design
+   deliverable tab derives from it automatically, so you do **not** report an
+   artifact for this step. Skip when the flag is `no`.
+6. **approve-design** → **human gate, inline — ONLY when step 4 or 5 ran.** When
+   neither ran, do **not** ask — continue straight to epics. Use **AskUserQuestion**
+   (header `Approve design`, options Approve / Revise ONLY; put the prototype URL
+   and/or the architecture section in the option markdown preview).
+   - **Approve** → continue to epics.
+   - **Revise** → re-delegate the relevant subagent(s) with the feedback, refresh
+     the artifact (a repeat `cyboflow_report_artifact` call with the same atype
+     enriches the same tab) / re-fold the body, and re-ask. Do **not** proceed to
+     epics until the user answers Approve.
+7. **epics** (large ideas only) → delegate to `cyboflow-epics`; **hold** the returned
    epics in context — do **not** create them yet. A `small` idea skips straight to
    tasks.
-5. **tasks** → delegate to `cyboflow-tasks`; **hold** the returned task list in
+8. **tasks** → delegate to `cyboflow-tasks`; **hold** the returned task list in
    context (title, body, acceptance criteria, file/dependency hints, parent
    epic/idea linkage) — do **not** call `cyboflow_create_task` yet. You now hold the
    full decomposition and no `cyboflow_create_*` has run.
-6. **approve-plan** → **human gate, inline.** Use **AskUserQuestion** (header
+9. **approve-plan** → **human gate, inline.** Use **AskUserQuestion** (header
    `Approve plan`, options Approve / Revise; put scope, ordering, and acceptance
    criteria in the option markdown preview). Do **not** proceed until the user
    answers:
@@ -84,23 +109,24 @@ human approves the plan.
    - **Revise** → re-delegate to `cyboflow-epics` / `cyboflow-tasks` with the
      feedback and re-hold the revised decomposition; create nothing until the next
      Approve.
-7. **decompose** → **final human gate, inline — this is the run-completion gate.**
-   After the plan is approved and the tasks created, report the `decompose` step,
-   then present the gate with **AskUserQuestion** (header `Archive idea`, options
-   `Archive & finish` / `Keep ideas & finish`; list the idea(s) you planned — by
-   ref/title — in the option markdown preview). The idea(s) already left the board at
-   `approve-plan` (above), so this gate's job is to **finalize the run**: either choice
-   ends it. `Archive & finish` re-asserts the `decomposed_at` retirement (a no-op if
-   the idea was already retired at approval); `Keep ideas & finish` simply completes
-   the run. Do **not** call any further tools after this gate — the run is ending.
+10. **decompose** → **final human gate, inline — this is the run-completion gate.**
+    After the plan is approved and the tasks created, report the `decompose` step,
+    then present the gate with **AskUserQuestion** (header `Archive idea`, options
+    `Archive & finish` / `Keep ideas & finish`; list the idea(s) you planned — by
+    ref/title — in the option markdown preview). The idea(s) already left the board at
+    `approve-plan` (above), so this gate's job is to **finalize the run**: either choice
+    ends it. `Archive & finish` re-asserts the `decomposed_at` retirement (a no-op if
+    the idea was already retired at approval); `Keep ideas & finish` simply completes
+    the run. Do **not** call any further tools after this gate — the run is ending.
 
 ## Hard rules
 
 - **You are the single writer.** Only this session calls the `cyboflow_*` write
   tools; subagents return results and you persist them. Never write planning state
   to disk — no per-idea or per-task markdown files and no plugin state directory.
-- Use **AskUserQuestion** for every human gate (`approve-idea`, `approve-plan`,
-  `decompose`) and any clarifying question; never silently proceed past a gate.
+- Use **AskUserQuestion** for every human gate (`approve-idea`, `approve-design`,
+  `approve-plan`, `decompose`) and any clarifying question;
+  never silently proceed past a gate.
   `cyboflow_report_step` is observational only and never substitutes for a gate.
 - Report every step transition via `cyboflow_report_step` from this main session —
   including the steps whose work you delegated to a subagent.

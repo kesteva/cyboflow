@@ -49,7 +49,9 @@ them between phases.
 
 1. **context** → delegate to `cyboflow-context`. Pass the `# Selected idea` block
    if one was chosen at launch, otherwise the user's raw prompt. It returns a
-   self-contained `## Idea spec` and a `SCOPE: small|large` line.
+   self-contained `## Idea spec` plus a `SCOPE: small|large` line and the design
+   flags `UI_PROTOTYPE: yes|no` / `ARCH_DESIGN: yes|no` (they decide steps 4–5 —
+   remember them).
    - Persist the spec with the rich `## Idea spec` markdown in **`body`** (the
      canonical field the idea artifact renders) and a SHORT one-line caption in
      `summary` — never the whole spec in `summary`.
@@ -73,17 +75,41 @@ them between phases.
 
 ### Phase 2 — Refine
 
-4. **epics** (large ideas only) → delegate to `cyboflow-epics`; create each
+4. **ui-prototype** (optional) → run ONLY when context returned `UI_PROTOTYPE: yes`
+   (or the user explicitly asked for a prototype). Report the step, then delegate
+   to `cyboflow-ui-prototype` with the approved spec. When it returns `## Prototype`
+   with a URL, surface it: call `cyboflow_report_artifact` with
+   `atype: 'ui-prototype'`, a short label, and `payload_json`
+   `{"url": "<the url>"}` — the live prototype tab renders from that URL. Skip
+   this step entirely when the flag is `no`.
+5. **architecture** (optional) → run ONLY when context returned `ARCH_DESIGN: yes`
+   (or the user explicitly asked for an architecture writeup). Report the step,
+   then delegate to `cyboflow-architecture` with the spec (plus prototype notes
+   when one exists). Fold its `## Architecture design` section into the idea body
+   via `cyboflow_update_task` — append the section to the existing body; the
+   arch-design deliverable tab derives from it automatically, so you do **not**
+   report an artifact for this step. Skip when the flag is `no`.
+6. **approve-design** → **human gate, inline — ONLY when step 4 or 5 ran.** When
+   neither ran, do **not** ask — continue straight to epics. Use
+   **AskUserQuestion** (header `Approve design`, options Approve / Revise ONLY;
+   put the prototype URL and/or the architecture section in the option markdown
+   preview).
+   - **Approve** → continue to epics.
+   - **Revise** → re-delegate the relevant subagent(s) with the feedback, refresh
+     the artifact (a repeat `cyboflow_report_artifact` call with the same atype
+     enriches the same tab) / re-fold the body, and re-ask. Do **not** proceed to
+     epics until the user answers Approve.
+7. **epics** (large ideas only) → delegate to `cyboflow-epics`; create each
    returned epic and link it to the originating idea via `cyboflow_*`. A `small`
    idea skips straight to tasks.
-5. **tasks** → delegate to `cyboflow-tasks`; create each returned task with
+8. **tasks** → delegate to `cyboflow-tasks`; create each returned task with
    `cyboflow_create_task` (title, body, acceptance criteria, file/dependency
    hints, parent epic/idea linkage). **Remember every task id and title you
    create** — you will present the full list at the next gate and pass the
    approved subset to materialize. The idea is NOT retired here; the backend
    removes it from the board (stamps `decomposed_at`) the moment the plan is approved
-   at `approve-plan` (step 6) — see that step.
-6. **approve-plan** → **human gate, inline. This gate doubles as the
+   at `approve-plan` (step 9) — see that step.
+9. **approve-plan** → **human gate, inline. This gate doubles as the
    pre-execution gate.** Use **AskUserQuestion** (header `Approve plan`):
    - Present the **FULL list** of tasks the run created — by ref/title — in the
      option markdown preview, with scope, ordering, and acceptance criteria. You
@@ -114,19 +140,19 @@ them between phases.
 
 ### Phase 3 — Materialize
 
-7. **materialize-batch** → **the handoff seam from planning to execution.** Call
-   the run-bound tool `cyboflow_create_sprint_batch` **EXACTLY ONCE**, passing
-   `taskIds` = the **approved subset of task ids** you retained at `approve-plan`
-   (omit `taskIds` only if the human approved literally every created task — then
-   it defaults to all run-created tasks). This mints the sprint batch + one lane
-   per task and stamps `batch_id` on the run.
-   - On `ship_no_tasks_to_materialize` or `ship_batch_too_large`: record the
-     condition via `cyboflow_report_finding` and **stop the run** — do NOT loop or
-     retry the call.
-   - On success the tool returns `{ ok: true, batch_id, created }`. From this
-     point on, every `cyboflow_update_sprint_task` call will succeed (lane writes
-     require the stamped `batch_id`). Do not call this tool again; it is
-     idempotent and a second call is a no-op.
+10. **materialize-batch** → **the handoff seam from planning to execution.** Call
+    the run-bound tool `cyboflow_create_sprint_batch` **EXACTLY ONCE**, passing
+    `taskIds` = the **approved subset of task ids** you retained at `approve-plan`
+    (omit `taskIds` only if the human approved literally every created task — then
+    it defaults to all run-created tasks). This mints the sprint batch + one lane
+    per task and stamps `batch_id` on the run.
+    - On `ship_no_tasks_to_materialize` or `ship_batch_too_large`: record the
+      condition via `cyboflow_report_finding` and **stop the run** — do NOT loop or
+      retry the call.
+    - On success the tool returns `{ ok: true, batch_id, created }`. From this
+      point on, every `cyboflow_update_sprint_task` call will succeed (lane writes
+      require the stamped `batch_id`). Do not call this tool again; it is
+      idempotent and a second call is a no-op.
 
 ### Phase 4 — Sprint plan
 
@@ -136,25 +162,25 @@ alongside this run. You move lanes with `cyboflow_update_sprint_task` (status:
 `write-tests`, `code-review`, `task-verify`, `visual-verify`). `integrated` means
 the task is complete AND committed in this session's worktree.
 
-8. **analyze-dependencies** → report the step, then delegate to
-   `cyboflow-dependency-analyzer`, passing it the materialized tasks — for each
-   task: its id, title, body, acceptance criteria, and the files it is expected to
-   touch. Ask it to return a `## Dependencies` section listing proposed
-   `task → depends-on` **blocking** edges, each with a one-line reason. For
-   **each** edge it returns, call `cyboflow_add_task_dependency` with
-   `task_id` = the blocked task, `depends_on_task_id` = the prerequisite, and
-   `kind: "blocking"`. The write chokepoint cycle-checks every edge — on
-   `dependency_cycle`, `invalid_dependency`, or `not_found`, skip that edge and
-   continue; the DAG must stay acyclic. Re-adding the same edge is idempotent.
-   Only record edges the analyzer justifies — when in doubt, leave tasks
-   independent so they run in parallel.
+11. **analyze-dependencies** → report the step, then delegate to
+    `cyboflow-dependency-analyzer`, passing it the materialized tasks — for each
+    task: its id, title, body, acceptance criteria, and the files it is expected to
+    touch. Ask it to return a `## Dependencies` section listing proposed
+    `task → depends-on` **blocking** edges, each with a one-line reason. For
+    **each** edge it returns, call `cyboflow_add_task_dependency` with
+    `task_id` = the blocked task, `depends_on_task_id` = the prerequisite, and
+    `kind: "blocking"`. The write chokepoint cycle-checks every edge — on
+    `dependency_cycle`, `invalid_dependency`, or `not_found`, skip that edge and
+    continue; the DAG must stay acyclic. Re-adding the same edge is idempotent.
+    Only record edges the analyzer justifies — when in doubt, leave tasks
+    independent so they run in parallel.
 
 ### Phase 5 — Execute
 
-9. **execute-tasks** → report the step **once** as the phase begins — it covers
-   the whole fan-out; per-task progress is tracked in the lanes, not in extra step
-   reports. **The task set is the tasks Ship materialized** (the lanes you just
-   created) — held in your context. There is no prepended task block.
+12. **execute-tasks** → report the step **once** as the phase begins — it covers
+    the whole fan-out; per-task progress is tracked in the lanes, not in extra step
+    reports. **The task set is the tasks Ship materialized** (the lanes you just
+    created) — held in your context. There is no prepended task block.
 
 Run execution as **DAG waves** over the dependency edges you just recorded:
 
@@ -228,16 +254,16 @@ window into per-task progress; never batch or backfill them.
 Enter this phase only after **every** lane is terminal (`integrated` or
 `failed`).
 
-10. **sprint-verify** → delegate to `cyboflow-sprint-verify` (runs the full suite
+13. **sprint-verify** → delegate to `cyboflow-sprint-verify` (runs the full suite
     ONCE over the whole sprint's combined state). On `VERDICT: FAIL`, identify the
     offending task(s) from the failures, set those lanes back to `running`, and
     loop them back through the Phase 5 per-task pattern; then re-run sprint-verify.
     At most **2** such loops — after that, surface the failure at the human gate
     rather than merging silently.
-11. **sprint-review** → delegate to `cyboflow-sprint-review`; record each entry in
+14. **sprint-review** → delegate to `cyboflow-sprint-review`; record each entry in
     its `## Findings` via `cyboflow_report_finding`, passing `category` + code
     `locations` and a `severity` (this is a verify-phase step).
-12. **human-review** → **final human gate, inline.** Use **AskUserQuestion** for
+15. **human-review** → **final human gate, inline.** Use **AskUserQuestion** for
     the final taste-level sign-off on the whole sprint. Use the header
     `Approve sprint` with the options **Approve** / **Reject** (these exact
     labels). Do **not** self-approve and never silently proceed past a gate.
@@ -267,8 +293,9 @@ Enter this phase only after **every** lane is terminal (`integrated` or
   names so the lane auto-advances.
 - Subagents never call `cyboflow_*` tools and never call **AskUserQuestion** —
   only this session asks the user anything and only this session writes state.
-- Use **AskUserQuestion** for every human gate (`approve-idea`, `approve-plan`,
-  `human-review`) and any clarifying question; never silently proceed past a gate.
+- Use **AskUserQuestion** for every human gate (`approve-idea`, `approve-design`,
+  `approve-plan`, `human-review`) and any clarifying question;
+  never silently proceed past a gate.
   The `approve-plan` final answer MUST start with "Approve" so the backend
   promotes the created tasks. `cyboflow_report_step` is observational only and
   never substitutes for a gate.
@@ -286,9 +313,10 @@ Enter this phase only after **every** lane is terminal (`integrated` or
 
 ## Step reporting
 
-Report each of these 12 step ids via `cyboflow_report_step` as that step begins,
+Report each of these 15 step ids via `cyboflow_report_step` as that step begins,
 in order (the runtime also appends an authoritative copy of this list below):
 
-`context`, `research`, `approve-idea`, `epics`, `tasks`, `approve-plan`,
-`materialize-batch`, `analyze-dependencies`, `execute-tasks`, `sprint-verify`,
-`sprint-review`, `human-review`.
+`context`, `research`, `approve-idea`, `ui-prototype`, `architecture`,
+`approve-design`, `epics`, `tasks`, `approve-plan`, `materialize-batch`,
+`analyze-dependencies`, `execute-tasks`, `sprint-verify`, `sprint-review`,
+`human-review`.
