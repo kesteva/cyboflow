@@ -23,8 +23,11 @@
  * for orchestrator modules (same as runFileExplorer / runLauncher).
  */
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import type { VerifyConfigFile } from '../../../shared/types/visualVerification';
+import { join, resolve } from 'node:path';
+import type {
+  DeliverableVerifyConfig,
+  VerifyConfigFile,
+} from '../../../shared/types/visualVerification';
 import type { LoggerLike } from './types';
 
 /**
@@ -93,4 +96,157 @@ export async function loadVerifyConfig(
     });
     return null;
   }
+}
+
+/**
+ * Matches a `${PORT}` / `$PORT` placeholder in a deliverable `url` template. Kept
+ * a module constant so the template→regex compile references one spelling. The
+ * `${PORT}` alternative is listed FIRST so a `${PORT}` literal is consumed whole
+ * (never split as a bare `$PORT` prefix). Global so a template with several
+ * placeholders replaces every one.
+ */
+const PORT_PLACEHOLDER = /\$\{PORT\}|\$PORT/g;
+
+/** Escape a literal string for embedding in a RegExp source (no `any`, no deps). */
+function escapeRegExp(literal: string): string {
+  return literal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Compile a deliverable `url` template into a prefix-anchored RegExp, treating the
+ * `${PORT}` / `$PORT` placeholder as a numeric wildcard, or null when the template
+ * carries no placeholder (a concrete url — matched by exact string, never here).
+ *
+ * The port wildcard is `\d{2,5}(?![0-9])`: 2–5 digits NOT followed by another
+ * digit, so a non-numeric (`:abc`) or out-of-range (`:1`, `:123456`) port shape is
+ * rejected rather than partially matched. The rest of the template is escaped
+ * literally and the whole is anchored at the START only — a request url matches
+ * when it shares the template's host+port+PATH PREFIX (e.g. the template
+ * `http://localhost:${PORT}/app` matches `http://localhost:29260/app/sub`), while a
+ * different host or scheme never matches (the literal segments differ).
+ */
+function portTemplateToRegex(template: string): RegExp | null {
+  PORT_PLACEHOLDER.lastIndex = 0;
+  if (!PORT_PLACEHOLDER.test(template)) return null;
+  // split() on a group-free global regex drops the separators, so each surviving
+  // segment is literal text to escape; rejoin with the numeric port wildcard.
+  const escaped = template.split(PORT_PLACEHOLDER).map(escapeRegExp).join('\\d{2,5}(?![0-9])');
+  return new RegExp(`^${escaped}`);
+}
+
+/** Resolve a possibly-relative deliverable/request path to an absolute path against `root`. */
+function toAbsolute(root: string, p: string): string {
+  return resolve(root, p);
+}
+
+/**
+ * HONEST deliverable matching — resolve which verify.json deliverable a request
+ * targets, or null when NONE genuinely does (there is deliberately NO
+ * "first startable" consolation fallback — a non-match must leave the request's own
+ * url/htmlPath capture untouched rather than bind + spawn an unrelated deliverable).
+ *
+ * Match order (first hit wins):
+ *   (a) htmlPath EXACT — both the request htmlPath and each deliverable htmlPath are
+ *       normalized to absolute against `checkoutRoot`, then compared.
+ *   (b) url EXACT — the request url equals a deliverable url string verbatim.
+ *   (c) url TEMPLATE — a deliverable url containing `${PORT}`/`$PORT` matches the
+ *       request url on host+port+path-prefix (portTemplateToRegex).
+ *   (d) NO url AND NO htmlPath on the request AND EXACTLY ONE startable deliverable
+ *       (a `start` command) — the hydration-driven case where the agent passed only
+ *       intent/taskRef; two-or-more startables is ambiguous ⇒ null.
+ *
+ * Pure over shared types + node:path — no fs/electron — so it is unit-testable
+ * without a runtime (standalone-typecheck invariant).
+ */
+export function matchDeliverable(
+  config: VerifyConfigFile | null,
+  input: { url?: string; htmlPath?: string },
+  checkoutRoot: string,
+): DeliverableVerifyConfig | null {
+  const deliverables = config?.deliverables ?? [];
+  if (deliverables.length === 0) return null;
+
+  const reqUrl = input.url?.trim();
+  const reqHtmlPath = input.htmlPath?.trim();
+
+  // (a) htmlPath exact (normalized absolute against the config's checkout root).
+  if (reqHtmlPath && reqHtmlPath.length > 0) {
+    const wantAbs = toAbsolute(checkoutRoot, reqHtmlPath);
+    const byHtml = deliverables.find(
+      (d) => d.htmlPath && toAbsolute(checkoutRoot, d.htmlPath) === wantAbs,
+    );
+    if (byHtml) return byHtml;
+  }
+
+  if (reqUrl && reqUrl.length > 0) {
+    // (b) url exact string match.
+    const byUrl = deliverables.find((d) => d.url === reqUrl);
+    if (byUrl) return byUrl;
+    // (c) url template match (`${PORT}` as a numeric wildcard, host+port+path prefix).
+    const byTemplate = deliverables.find((d) => {
+      if (!d.url) return false;
+      const re = portTemplateToRegex(d.url);
+      return re ? re.test(reqUrl) : false;
+    });
+    if (byTemplate) return byTemplate;
+  }
+
+  // (d) hydration-driven: no target on the request + exactly one startable deliverable.
+  const hasTarget = Boolean((reqUrl && reqUrl.length > 0) || (reqHtmlPath && reqHtmlPath.length > 0));
+  if (!hasTarget) {
+    const startable = deliverables.filter((d) => d.start && d.start.trim().length > 0);
+    if (startable.length === 1) return startable[0];
+  }
+
+  // No honest match — the caller captures the request's own url/htmlPath unchanged.
+  return null;
+}
+
+/**
+ * WORKTREE-FIRST deliverable context resolution (locked seam for the index.ts
+ * devServerContextResolver closure — the closure supplies the worktree/project
+ * paths from the DB, this helper does all the fs + matching so it is unit-testable
+ * without electron).
+ *
+ * Config load precedence (locked decision #1): a run's build/start commands execute
+ * in its WORKTREE, so a deliverable recipe added/edited by the very branch under
+ * verification must be read from the worktree — not the project ROOT checkout.
+ *   1. When `worktreePath` is set, load `<worktree>/.cyboflow/verify.json`; if that
+ *      yields a usable config (present + parseable — loadVerifyConfig returns
+ *      non-null), the worktree WINS and `cwd = worktreePath`.
+ *   2. Otherwise (no worktree path / worktree has no verify.json / it is malformed)
+ *      fall back to `<projectPath>/.cyboflow/verify.json` with `cwd = projectPath`.
+ * The returned `cwd` is ALWAYS the same checkout the winning config was loaded from,
+ * so the recipe and its execution can never disagree.
+ *
+ * Then matchDeliverable picks the deliverable the request genuinely targets;
+ * a null match (or an absent config) returns null — the request captures its own
+ * url/htmlPath unchanged (no dev-server context, no unrelated-deliverable binding).
+ */
+export async function resolveDeliverableContext(
+  args: {
+    worktreePath: string | null;
+    projectPath: string;
+    input: { url?: string; htmlPath?: string };
+  },
+  logger?: LoggerLike,
+): Promise<{ cwd: string; deliverable: DeliverableVerifyConfig } | null> {
+  let config: VerifyConfigFile | null = null;
+  let cwd = args.projectPath;
+
+  if (args.worktreePath && args.worktreePath.trim().length > 0) {
+    const worktreeConfig = await loadVerifyConfig(args.worktreePath, logger);
+    if (worktreeConfig) {
+      config = worktreeConfig;
+      cwd = args.worktreePath;
+    }
+  }
+  if (!config) {
+    config = await loadVerifyConfig(args.projectPath, logger);
+    cwd = args.projectPath;
+  }
+
+  const deliverable = matchDeliverable(config, args.input, cwd);
+  if (!deliverable) return null;
+  return { cwd, deliverable };
 }

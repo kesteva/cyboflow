@@ -74,7 +74,7 @@ import { VlmJudgeImpl } from './services/visualVerify/vlmJudge';
 import { DevServerManager } from './services/visualVerify/devServerManager';
 import { FsBaselineStore } from './services/visualVerify/baselineStore';
 import { comparePngFiles } from './services/visualVerify/pixelDiff';
-import { loadVerifyConfig } from './orchestrator/verifyConfigLoader';
+import { resolveDeliverableContext } from './orchestrator/verifyConfigLoader';
 import { execFileSync } from 'node:child_process';
 import type {
   DeliverableVerifyConfig,
@@ -889,11 +889,14 @@ async function initializeServices() {
   // S2 — the scheduler-owned dev-server runner. DevServerManager (a service that
   // imports node:child_process) is the concrete spawner; the scheduler knows only
   // the narrow DevServerProvider interface. The context resolver closure does the
-  // fs work (loadVerifyConfig) + project/worktree path lookup so the scheduler
-  // stays fs/electron/service-free (standalone-typecheck invariant) — mirrors the
-  // ArtifactRouter artifactCommitDir + artifactsDir resolver closures above. It
-  // returns the run's worktree cwd (the build artifacts live there) + the matching
-  // verify.json deliverable recipe whose `start` the runner runs on the leased port.
+  // DB path lookup (project + run worktree) and delegates the fs work to the pure
+  // resolveDeliverableContext helper (worktree-first verify.json load + honest
+  // deliverable match) so the scheduler stays fs/electron/service-free (standalone-
+  // typecheck invariant) — mirrors the ArtifactRouter artifactCommitDir +
+  // artifactsDir resolver closures above. It returns the checkout cwd the winning
+  // verify.json was loaded from (the worktree when the branch owns the recipe, the
+  // project root on fallback) + the matching deliverable recipe whose `start` the
+  // runner runs on the leased port.
   const devServerManager = new DevServerManager({ logger: cyboflowLogger });
   const devServerContextResolver = async (args: {
     runId: string;
@@ -903,27 +906,25 @@ async function initializeServices() {
     try {
       const project = databaseService.getProject(args.projectId);
       if (!project?.path) return null;
-      const verifyConfig = await loadVerifyConfig(project.path, cyboflowLogger);
-      const deliverables = verifyConfig?.deliverables ?? [];
-      // Only a deliverable with a `start` command needs a dev server.
-      const startable = deliverables.filter((d) => d.start && d.start.trim().length > 0);
-      if (startable.length === 0) return null;
-      // Match the deliverable to the request: prefer one whose url/htmlPath matches
-      // the request's; otherwise fall back to the first startable deliverable (the
-      // common single-deliverable project case).
-      const matched =
-        startable.find(
-          (d) =>
-            (args.input.url && d.url === args.input.url) ||
-            (args.input.htmlPath && d.htmlPath === args.input.htmlPath),
-        ) ?? startable[0];
-      // Run the build/start in the run's WORKTREE (the deliverable was built there),
-      // falling back to the project root when the run has no worktree_path yet.
+      // WORKTREE-FIRST (locked decision #1): the build/start commands run in the
+      // run's WORKTREE, so a deliverable recipe added/edited by the very branch under
+      // verification must be read from the worktree checkout — the project ROOT
+      // checkout is only the fallback (quick runs / sessions without a worktree /
+      // pre-branch projects). resolveDeliverableContext loads worktree verify.json
+      // first, falls back to the project root, returns the matching cwd, and matches
+      // the deliverable HONESTLY (no `?? startable[0]` binding — a non-match returns
+      // null so the request captures its own url/htmlPath unchanged).
       const row = cyboflowDb
         .prepare('SELECT worktree_path FROM workflow_runs WHERE id = ?')
         .get(args.runId) as { worktree_path: string | null } | undefined;
-      const cwd = row?.worktree_path ?? project.path;
-      return { cwd, deliverable: matched };
+      return await resolveDeliverableContext(
+        {
+          worktreePath: row?.worktree_path ?? null,
+          projectPath: project.path,
+          input: args.input,
+        },
+        cyboflowLogger,
+      );
     } catch (err) {
       cyboflowLogger?.warn('[VerificationScheduler] dev-server context resolve failed', {
         runId: args.runId,
