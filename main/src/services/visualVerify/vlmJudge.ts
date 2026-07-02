@@ -108,6 +108,29 @@ export interface VlmJudgeOptions {
   logger?: LoggerLike;
 }
 
+/**
+ * Normalize a model-reported confidence onto [0, 1]. Models are inconsistent about
+ * the scale they answer on, so we map piecewise by the raw magnitude rather than
+ * assuming a single scale:
+ *   - [0, 1]     → as-is (already a fraction)
+ *   - (1, 2]     → 1.0 (a slightly-out-of-range float, e.g. 1.2 — clamp, don't rescale)
+ *   - (2, 10]    → raw / 10 (a 0–10 scale, e.g. 9 → 0.9)
+ *   - (10, 100]  → raw / 100 (a percentage, e.g. 85 → 0.85)
+ *   - > 100      → 1.0 (nonsensically large; treat as fully confident after clamp)
+ *   - negative   → 0 (conservative floor)
+ *   - non-finite → 0 (NaN/±Infinity: no information, floor conservatively)
+ * Pure + exported so the mapping is directly unit-testable.
+ */
+export function normalizeConfidence(raw: number): number {
+  if (!Number.isFinite(raw)) return 0;
+  if (raw < 0) return 0;
+  if (raw <= 1) return raw;
+  if (raw <= 2) return 1;
+  if (raw <= 10) return raw / 10;
+  if (raw <= 100) return raw / 100;
+  return 1;
+}
+
 /** Build a fail-soft low_confidence verdict (never fabricates pass/fail). */
 function lowConfidence(
   feedback: string,
@@ -143,8 +166,9 @@ function parseModelVerdict(
 
   const confidenceRaw = obj.confidence;
   if (typeof confidenceRaw !== 'number' || Number.isNaN(confidenceRaw)) return null;
-  // Clamp to [0,1] — the model occasionally reports 0–100 or slightly out of range.
-  const confidence = confidenceRaw > 1 ? Math.min(confidenceRaw / 100, 1) : Math.max(confidenceRaw, 0);
+  // Normalize onto [0,1] — the model reports on inconsistent scales (fraction, 0–10,
+  // percentage, or slightly out of range); see normalizeConfidence for the mapping.
+  const confidence = normalizeConfidence(confidenceRaw);
 
   const feedback = typeof obj.feedback === 'string' ? obj.feedback : '';
 

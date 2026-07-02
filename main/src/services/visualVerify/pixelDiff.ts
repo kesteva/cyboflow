@@ -11,7 +11,12 @@
  * we will NOT add for a pre-diff. PNGs are decoded to a raw RGBA bitmap via
  * Electron's `nativeImage` (already in the runtime) behind the injectable
  * `PngDecoder` seam, and the comparison itself is a tiny hand-rolled per-channel
- * mean-difference with a small anti-aliasing noise tolerance.
+ * difference (with a small anti-aliasing noise tolerance) aggregated as a
+ * WORST-TILE score: the image is partitioned into a fixed tile grid, each tile
+ * gets its own mean normalized channel difference, and the overall score is the
+ * MINIMUM per-tile similarity. This keeps a localized fully-changed region from
+ * being diluted by an unchanged majority — the worst tile decides — while a
+ * near-identical render (sub-tolerance AA noise spread thinly) still scores ~1.0.
  *
  * This file lives under main/src/services/* and MAY import 'electron' (the default
  * decoder) — it is the concrete half injected into the (electron-free) scheduler
@@ -78,11 +83,28 @@ export const DEFAULT_BASELINE_MATCH_THRESHOLD = 0.98;
 export const AA_NOISE_TOLERANCE = 6;
 
 /**
+ * The side length (px) of a square comparison tile. The image is partitioned into a
+ * grid of TILE_SIZE×TILE_SIZE tiles (edge tiles may be smaller); each tile is scored
+ * independently and the overall score is the MINIMUM tile similarity. Small enough
+ * that a localized regression fully saturates at least one tile (driving its
+ * similarity toward 0), large enough that thinly-spread sub-tolerance AA noise never
+ * dominates any single tile.
+ */
+export const TILE_SIZE = 32;
+
+/**
  * Compute a structural-similarity-style score in [0, 1] between two decoded RGBA
- * bitmaps. 1.0 = identical (or differ only within the AA-noise tolerance). The
- * score is `1 - meanNormalizedChannelDifference` over the RGB channels (alpha is
- * ignored — an opaque screenshot's alpha is a constant 255 and contributes noise),
- * with per-channel differences at/under AA_NOISE_TOLERANCE zeroed out.
+ * bitmaps. 1.0 = identical (or differ only within the AA-noise tolerance).
+ *
+ * WORST-TILE metric: the overlapping image area is partitioned into a grid of
+ * TILE_SIZE×TILE_SIZE tiles (edge tiles may be smaller). For each tile we compute
+ * `1 - meanNormalizedChannelDifference` over the RGB channels (alpha is ignored — an
+ * opaque screenshot's alpha is a constant 255 and contributes noise), with
+ * per-channel differences at/under AA_NOISE_TOLERANCE zeroed out. The FINAL score is
+ * the MINIMUM per-tile similarity — the worst tile decides. A fully-changed localized
+ * region drives its tile(s) toward 0 (so the overall score falls far below any sane
+ * threshold and cannot be diluted by the unchanged majority), while a true
+ * near-identical render (AA jitter under tolerance everywhere) still scores ~1.0.
  *
  * MISMATCHED DIMENSIONS → 0 (a definite mismatch; never throws): two renders of
  * different sizes are not the same view, so the VLM must judge them.
@@ -95,25 +117,37 @@ export function compareBitmaps(
   if (a.width !== b.width || a.height !== b.height) return 0;
   const aData = a.data;
   const bData = b.data;
-  const pixels = a.width * a.height;
+  const { width, height } = a;
+  const pixels = width * height;
   if (pixels === 0) return 0;
   const needed = pixels * 4;
   // Defensive: a buffer shorter than its declared dimensions cannot be compared.
   if (aData.length < needed || bData.length < needed) return 0;
 
-  let totalDiff = 0;
-  for (let i = 0; i < needed; i += 4) {
-    // RGB only (skip alpha at +3).
-    for (let c = 0; c < 3; c++) {
-      const diff = Math.abs(aData[i + c] - bData[i + c]);
-      if (diff > tolerance) totalDiff += diff;
+  let worst = 1;
+  for (let ty = 0; ty < height; ty += TILE_SIZE) {
+    const yEnd = Math.min(ty + TILE_SIZE, height);
+    for (let tx = 0; tx < width; tx += TILE_SIZE) {
+      const xEnd = Math.min(tx + TILE_SIZE, width);
+      let tileDiff = 0;
+      for (let y = ty; y < yEnd; y++) {
+        let i = (y * width + tx) * 4;
+        for (let x = tx; x < xEnd; x++, i += 4) {
+          // RGB only (skip alpha at +3).
+          for (let c = 0; c < 3; c++) {
+            const diff = Math.abs(aData[i + c] - bData[i + c]);
+            if (diff > tolerance) tileDiff += diff;
+          }
+        }
+      }
+      // Normalize per tile: max accumulated diff is (RGB channels) * 255 per pixel.
+      const tilePixels = (xEnd - tx) * (yEnd - ty);
+      const tileScore = 1 - tileDiff / (tilePixels * 3 * 255);
+      if (tileScore < worst) worst = tileScore;
     }
   }
-  // Normalize: max possible accumulated diff is (RGB channels) * 255 per pixel.
-  const maxDiff = pixels * 3 * 255;
-  const score = 1 - totalDiff / maxDiff;
   // Clamp into [0, 1] against any float drift.
-  return score < 0 ? 0 : score > 1 ? 1 : score;
+  return worst < 0 ? 0 : worst > 1 ? 1 : worst;
 }
 
 /**
