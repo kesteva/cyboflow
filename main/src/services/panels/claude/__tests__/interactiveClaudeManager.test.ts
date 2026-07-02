@@ -33,6 +33,7 @@ import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchest
 import { InteractiveClaudeManager } from '../interactiveClaudeManager';
 import { InteractiveSettingsWriter } from '../interactiveSettingsWriter';
 import { QUICK_WORKFLOW_NAME } from '../../../../orchestrator/workflowRegistry';
+import { getCyboflowSubdirectory } from '../../../../utils/cyboflowDirectory';
 import type { PermissionMode } from '../../../../../../shared/types/workflows';
 import type { SessionManager } from '../../../sessionManager';
 import type { ConfigManager } from '../../../configManager';
@@ -626,6 +627,25 @@ describe('InteractiveClaudeManager', () => {
     it('defaults COLORFGBG to light ("0;15") when theme is unset', async () => {
       const env = await mgr.callInitializeCliEnvironment(opts);
       expect(env.COLORFGBG).toBe('0;15');
+    });
+
+    // CYBOFLOW_RUN_ARTIFACTS_DIR — SDK-substrate parity (claudeCodeManager.
+    // composeRunEnv). The ui-prototype / visual-verify agent prose writes its
+    // deliverables under "$CYBOFLOW_RUN_ARTIFACTS_DIR", so the interactive
+    // REPL's shell env must export it too, keyed by the SAME resolved runId as
+    // CYBOFLOW_RUN_ID (the id cyboflow_report_artifact derives the run from).
+    it('exports CYBOFLOW_RUN_ARTIFACTS_DIR keyed by the resolved run id when an orch socket is injected', async () => {
+      mgr.setOrchSocketPath('/tmp/orch.sock');
+      const env = await mgr.callInitializeCliEnvironment({ ...opts, runId: 'run-42' });
+      expect(env.CYBOFLOW_RUN_ID).toBe('run-42');
+      expect(env.CYBOFLOW_RUN_ARTIFACTS_DIR).toBe(
+        getCyboflowSubdirectory('artifacts', 'runs', 'run-42'),
+      );
+    });
+
+    it('omits CYBOFLOW_RUN_ARTIFACTS_DIR when no orchestrator socket is injected', async () => {
+      const env = await mgr.callInitializeCliEnvironment(opts);
+      expect(env.CYBOFLOW_RUN_ARTIFACTS_DIR).toBeUndefined();
     });
   });
 

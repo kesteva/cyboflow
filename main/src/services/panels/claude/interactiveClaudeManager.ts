@@ -25,6 +25,7 @@ import type { LoggerLike } from '../../../orchestrator/types';
 import { buildStepReportingAppend } from '../../../orchestrator/prompts/step-reporting-instructions';
 import { QUICK_WORKFLOW_NAME } from '../../../orchestrator/workflowRegistry';
 import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
+import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
 import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelProvider';
 import { isPermissionMode, resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 import { WorkflowBundleWriter } from './workflowBundleWriter';
@@ -736,6 +737,17 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       });
       env.CYBOFLOW_RUN_ID = runId;
       env.CYBOFLOW_ORCH_SOCKET = this.orchSocketPath;
+      // Per-run artifacts dir — SDK-substrate parity (claudeCodeManager.
+      // composeRunEnv). The ui-prototype step writes its static prototype under
+      // "$CYBOFLOW_RUN_ARTIFACTS_DIR/prototype" and the visual-verify step
+      // writes screenshot PNGs into the dir root; without this export the
+      // interactive REPL's shell expands the var to '' and the mkdir targets
+      // "/" (fails) or the agent improvises inside the worktree (pollutes the
+      // run diff). Keyed by the SAME resolved runId as CYBOFLOW_RUN_ID so
+      // cyboflow_report_artifact (which derives the run from CYBOFLOW_RUN_ID)
+      // and the artifacts:load-images / auto-mint-scan resolvers
+      // (CYBOFLOW_DIR/artifacts/runs/<runId>) all agree on one subtree.
+      env.CYBOFLOW_RUN_ARTIFACTS_DIR = getCyboflowSubdirectory('artifacts', 'runs', runId);
     }
 
     // FORCE conversation-transcript persistence for the embedded REPL.
