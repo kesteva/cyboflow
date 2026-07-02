@@ -199,6 +199,56 @@ describe('EvalWorker.process (via enqueue + queue drain)', () => {
     }
   });
 
+  it('collapses cross-sample paraphrases by sub-check id and reaches the blocking majority', async () => {
+    // Live-smoke defect pair (2026-07-02): the K samples paraphrase ONE issue
+    // into distinct titles. Under a title-based key that (a) wrote ~K near-
+    // duplicate advisory items and (b) split the catastrophic vote 1-per-
+    // paraphrase so the majority threshold was never reached.
+    const paraphrase = (call: number, catastrophic: boolean): JudgeFinding => ({
+      subCheckId: 'COR-3',
+      dimension: 'correctness',
+      severity: call === 1 ? 'error' : 'warning', // one sample grades it higher
+      title: `NaN corruption, wording #${call}`,
+      body: '',
+      file: 'transfers.ts',
+      line: 21,
+      netNew: true,
+      catastrophic,
+    });
+    const judge = new FakeJudge(async (_input, call) =>
+      sampleAllPass(BROAD_PASS, [
+        paraphrase(call, true),
+        // General finding (no sub-check id) — title key keeps paraphrases apart.
+        { subCheckId: '', dimension: 'robustness', severity: 'info', title: `general note #${call}`, body: '', netNew: true, catastrophic: false },
+      ]),
+    );
+    const writes: Array<{ change: ReviewItemCreate }> = [];
+    const worker = EvalWorker.initialize(noExistingFindings(), undefined, {
+      gitDiff: vi.fn(),
+      judge,
+      reviewItemWriter: vi.fn(async (_projectId: number, change: ReviewItemCreate) => {
+        writes.push({ change });
+        return { reviewItemId: 'ri' };
+      }),
+      appVersion: '0.1.11',
+      sampleCount: 3,
+      sleep: async () => {},
+    });
+    worker.enqueue('run-1', '1.1');
+    await worker._queue().onIdle();
+
+    // ONE deduped COR-3 finding (not 3), blocking via the 3/3 catastrophic
+    // majority, carrying the max severity seen across paraphrases…
+    const cor3 = writes.filter((w) => JSON.stringify(w.change.payload).includes('COR-3'));
+    expect(cor3).toHaveLength(1);
+    expect(cor3[0].change.blocking).toBe(true);
+    expect(cor3[0].change.severity).toBe('error');
+    // …while the sub-check-less general notes still dedup by title (3 distinct).
+    const general = writes.filter((w) => w.change.title.startsWith('general note'));
+    expect(general).toHaveLength(3);
+    expect(writes).toHaveLength(4);
+  });
+
   it('persists dimension name + weight in dimensions_json so panel labels render', async () => {
     const db = noExistingFindings();
     const worker = EvalWorker.initialize(db, undefined, {

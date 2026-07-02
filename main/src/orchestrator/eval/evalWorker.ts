@@ -45,6 +45,13 @@ export const DEFAULT_MAX_RETRIES = 2;
 /** Cap on net-new findings written per eval (rubric "~10"). */
 export const MAX_FINDINGS_PER_EVAL = 10;
 
+/** Order for keeping the most severe paraphrase of a deduped finding. */
+const SEVERITY_RANK: Record<'info' | 'warning' | 'error', number> = {
+  info: 0,
+  warning: 1,
+  error: 2,
+};
+
 export interface EvalWorkerDeps {
   /** Diff capture closure (also handed to the snapshot). */
   gitDiff: (worktreePath: string, baseRef?: string) => Promise<RunGitDiff | null>;
@@ -395,7 +402,8 @@ export class EvalWorker {
 
   /**
    * Write judge findings through the ReviewItemRouter chokepoint. Dedups against the
-   * run's existing review_items (normalize on file + lowercased title).
+   * run's existing review_items (keyed on file + rubric sub-check id when the
+   * finding carries one, file + lowercased title otherwise — see findingKey).
    *
    * Blocking policy (reconciles the rubric's "catastrophic ⇒ blocking review item"
    * with the feature's advisory framing): a finding BLOCKS the gate only when a
@@ -426,11 +434,16 @@ export class EvalWorker {
     const byKey = new Map<string, Candidate>();
     for (const sample of samples) {
       for (const f of sample.findings) {
-        const key = this.findingKey(f.file, f.title);
+        const key = this.findingKey(f);
         const prev = byKey.get(key);
         if (prev) {
           if (f.catastrophic) prev.catastrophicVotes += 1;
           if (f.netNew) prev.netNewAny = true;
+          // Paraphrases of one issue can disagree on severity — keep the max so
+          // an 'error'-grade sample isn't shadowed by the first-seen wording.
+          if (SEVERITY_RANK[f.severity] > SEVERITY_RANK[prev.finding.severity]) {
+            prev.finding = f;
+          }
         } else {
           byKey.set(key, {
             finding: f,
@@ -443,7 +456,10 @@ export class EvalWorker {
 
     const confirmThreshold = Math.max(1, Math.ceil(result.sampleCount / 2));
     const selectable = [...byKey.entries()]
-      .filter(([key]) => !existing.has(key))
+      // A candidate dedups against an existing item under EITHER key form: the
+      // sub-check key (eval-authored rows round-trip it) or the title key
+      // (in-flow reviewer findings carry no rubric id).
+      .filter(([, c]) => !this.keysForFinding(c.finding).some((k) => existing.has(k)))
       .map(([, c]) => ({
         finding: c.finding,
         confirmedCatastrophic: c.catastrophicVotes >= confirmThreshold,
@@ -549,17 +565,23 @@ export class EvalWorker {
         .all(runId) as Array<{ title: string; payload_json: string | null }>;
       for (const r of rows) {
         let file: string | undefined;
+        let subCheckId = '';
         if (r.payload_json) {
           try {
             const parsed = JSON.parse(r.payload_json) as {
               locations?: Array<{ path?: string }>;
+              suggestedFix?: string;
             };
             file = parsed.locations?.[0]?.path;
+            // Eval-authored rows round-trip the sub-check id through the
+            // suggestedFix convention (see writeFindings' payload).
+            const m = /rubric sub-check ([A-Z]+-\d+)/.exec(parsed.suggestedFix ?? '');
+            if (m) subCheckId = m[1];
           } catch {
             // ignore malformed payload — dedup falls back to title-only for it
           }
         }
-        keys.add(this.findingKey(file, r.title));
+        for (const k of this.keysForFinding({ subCheckId, file, title: r.title })) keys.add(k);
       }
     } catch (err) {
       this.logger?.warn('[eval] existing-findings read failed', {
@@ -570,9 +592,26 @@ export class EvalWorker {
     return keys;
   }
 
-  /** Dedup key: file (or '') + lowercased/trimmed title. */
-  private findingKey(file: string | undefined, title: string): string {
-    return `${(file ?? '').toLowerCase()}::${title.trim().toLowerCase()}`;
+  /**
+   * Canonical dedup/aggregation key. Findings that hang off a rubric sub-check
+   * key on file + sub-check id — the K jury samples paraphrase one issue into
+   * distinct titles, and a title-based key both floods the advisory queue with
+   * near-duplicates and splinters the catastrophic majority vote across
+   * paraphrases (each wording gets 1 of K votes, so blocking confirmation is
+   * never reached). General findings (subCheckId '') keep the title key.
+   */
+  private findingKey(f: Pick<JudgeFinding, 'subCheckId' | 'file' | 'title'>): string {
+    const file = (f.file ?? '').toLowerCase();
+    return f.subCheckId
+      ? `${file}::sub::${f.subCheckId.toUpperCase()}`
+      : `${file}::${f.title.trim().toLowerCase()}`;
+  }
+
+  /** Both key forms a finding can dedup under (sub-check key first when present). */
+  private keysForFinding(f: Pick<JudgeFinding, 'subCheckId' | 'file' | 'title'>): string[] {
+    const titleKey = this.findingKey({ ...f, subCheckId: '' });
+    const key = this.findingKey(f);
+    return key === titleKey ? [titleKey] : [key, titleKey];
   }
 
   // -------------------------------------------------------------------------
