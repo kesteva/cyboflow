@@ -28,12 +28,18 @@ import type { DatabaseLike, LoggerLike } from '../types';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
 import { isCyboflowWorkflowName } from '../../../../shared/types/workflows';
 import { computeSpecHash } from '../specHash';
-import { RUBRIC_VERSION, serializeRubricForPrompt } from './rubric';
+import { RUBRIC_VERSION } from './rubric';
+import { judgeStaticPromptText } from './judgePromptScaffold';
 import type { GateResults, GateStatus } from './scoring';
 
-/** The prompt-hash content address: the sha256 of the serialized rubric text. */
+/**
+ * The prompt-hash content address: the sha256 of the FULL run-independent judge
+ * prompt (scoring-contract preamble + serialized rubric + output-format
+ * instructions), not the rubric alone — so a preamble edit that changes judge
+ * behavior actually changes the hash (see judgePromptScaffold).
+ */
 export function computeJudgePromptHash(): string {
-  return computeSpecHash(serializeRubricForPrompt());
+  return computeSpecHash(judgeStaticPromptText());
 }
 
 export interface SnapshotDeps {

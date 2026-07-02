@@ -15,6 +15,10 @@
  */
 import { RUBRIC, serializeRubricForPrompt, type DimensionKey } from './rubric';
 import {
+  JUDGE_PROMPT_PREAMBLE_LINES,
+  JUDGE_PROMPT_OUTPUT_LINES,
+} from './judgePromptScaffold';
+import {
   VERDICTS,
   type Verdict,
   type SubCheckVerdict,
@@ -153,23 +157,11 @@ export function buildJudgePrompt(input: JudgeGradeInput): string {
   const { text: diffText, truncated } = truncateDiff(input.diff);
   const lines: string[] = [];
 
+  // Preamble + rubric are the RUN-INDEPENDENT scaffold that prompt_hash
+  // fingerprints (judgePromptScaffold.judgeStaticPromptText) — keep them sourced
+  // from that one module so a scoring-contract edit is reflected in the hash.
   lines.push(
-    'You are an INDEPENDENT, OUT-OF-LOOP code-review judge. You did not write this',
-    'code and are not in the authoring loop. Grade the frozen pre-human diff below',
-    'against the rubric. You have the full frozen repo snapshot as your working',
-    'directory when tools are available — GREP/OPEN it to settle a check before',
-    'marking UNKNOWN for a "not visible" reason. UNKNOWN is only for genuinely',
-    'external deps or runtime state not derivable from the snapshot.',
-    '',
-    'SCORING CONTRACT:',
-    '- For every APPLICABLE sub-check emit exactly one verdict: PASS | FAIL | UNKNOWN | NOT_APPLICABLE.',
-    '- NOT_APPLICABLE when the sub-check\'s APPLIES condition does not hold (excluded entirely).',
-    '- UNKNOWN only for an applicable check you genuinely cannot settle from the snapshot.',
-    '- Cite concrete evidence (file + line + the rule it violates) for every FAIL.',
-    '- Surface any catastrophic-class failure (cap=overall_fair_cap sub-checks, or a',
-    '  high/critical security vuln) as a FAIL AND a findings[] entry with catastrophic=true —',
-    '  never soften or omit it.',
-    '- In findings[], set netNew=true only for issues you believe are not already tracked.',
+    ...JUDGE_PROMPT_PREAMBLE_LINES,
     '',
     '===== RUBRIC =====',
     serializeRubricForPrompt(RUBRIC),
@@ -190,8 +182,7 @@ export function buildJudgePrompt(input: JudgeGradeInput): string {
     diffText,
     '',
     '===== OUTPUT =====',
-    'Return ONLY the structured object: { verdicts: [{ id, verdict, evidence }], findings: [...] }.',
-    'Include a verdict for every applicable sub-check id from the rubric above.',
+    ...JUDGE_PROMPT_OUTPUT_LINES,
   );
 
   return lines.join('\n');
