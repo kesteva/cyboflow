@@ -271,6 +271,35 @@ describe('cancelAndRestartHandler', () => {
     expect(newRun.status).toBe('queued');
   });
 
+  it('copies the stamped resolution columns (substrate/permission/model/eval pin) onto the restarted run', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck', '/tmp/wt-prov');
+    db.prepare(
+      `UPDATE workflow_runs
+          SET substrate = 'sdk', permission_mode_snapshot = 'acceptEdits',
+              model = 'opus', eval_enabled = 0
+        WHERE id = ?`,
+    ).run(runId);
+
+    const result = await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
+    if ('noOp' in result) throw new Error('Expected a real result, got noOp');
+
+    const newRun = db.prepare(
+      'SELECT substrate, permission_mode_snapshot, model, eval_enabled FROM workflow_runs WHERE id = ?',
+    ).get(result.newRunId) as {
+      substrate: string | null;
+      permission_mode_snapshot: string | null;
+      model: string | null;
+      eval_enabled: number | null;
+    };
+    expect(newRun).toEqual({
+      substrate: 'sdk',
+      permission_mode_snapshot: 'acceptEdits',
+      model: 'opus',
+      eval_enabled: 0,
+    });
+  });
+
   it('copies the original run session_id onto the restarted run (run stays nested under its session)', async () => {
     const runId = randomUUID();
     const sessionId = `session-${randomUUID()}`;

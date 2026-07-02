@@ -84,6 +84,16 @@ interface WorkflowRunRow {
    * nested under the same session.
    */
   session_id: string | null;
+  /**
+   * Stamped-at-create resolution columns (substrate mig 013, permission
+   * snapshot, model pin mig 037, eval pin mig 044). Copied verbatim so a
+   * restart preserves the launch-time choices — previously dropped, which
+   * (among other things) lost the run's read-only model pill.
+   */
+  substrate: string | null;
+  permission_mode_snapshot: string | null;
+  model: string | null;
+  eval_enabled: number | null;
 }
 
 // Terminal statuses — cancel-and-restart is a no-op on these.
@@ -123,7 +133,8 @@ export async function cancelAndRestartHandler(
   const result = await runQueues.getOrCreate(runId).add(async () => {
     // Step 1: Fetch the run row.
     const row = db.prepare(
-      `SELECT id, workflow_id, project_id, worktree_path, policy_json, status, session_id
+      `SELECT id, workflow_id, project_id, worktree_path, policy_json, status, session_id,
+              substrate, permission_mode_snapshot, model, eval_enabled
        FROM workflow_runs WHERE id = ?`,
     ).get(runId) as WorkflowRunRow | undefined;
 
@@ -192,8 +203,9 @@ export async function cancelAndRestartHandler(
       // so the restarted run stays nested under the same owning session.
       db.prepare(
         `INSERT INTO workflow_runs
-           (id, workflow_id, project_id, worktree_path, policy_json, status, session_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
+           (id, workflow_id, project_id, worktree_path, policy_json, status, session_id,
+            substrate, permission_mode_snapshot, model, eval_enabled, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
         newRunId,
         row.workflow_id,
@@ -201,6 +213,10 @@ export async function cancelAndRestartHandler(
         row.worktree_path,
         row.policy_json,
         row.session_id,
+        row.substrate,
+        row.permission_mode_snapshot,
+        row.model,
+        row.eval_enabled,
         now,
         now,
       );

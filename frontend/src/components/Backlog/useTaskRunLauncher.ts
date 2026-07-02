@@ -23,6 +23,7 @@ import { useCallback, useState } from 'react';
 import { trpc } from '../../trpc/client';
 import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { trackEvent } from '../../utils/telemetry';
+import { DEFAULT_WORKFLOW_MODEL } from '../cyboflow/ModelSelector';
 import type { TaskType } from '../../../../shared/types/tasks';
 
 export interface TaskRunLaunchState {
@@ -79,6 +80,10 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
           workflowId,
           projectId,
           sessionId,
+          // Backlog launches have no model UI — pin the same default the wizard /
+          // picker surfaces use (Opus → workflow_runs.model), so the run's
+          // read-only model pill renders instead of a NULL no-pin.
+          model: DEFAULT_WORKFLOW_MODEL,
           ...seed,
         });
         trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: wantName });
@@ -115,6 +120,8 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
           projectId,
           sessionId,
           taskIds,
+          // Same default pin as the single-entity launch above (no model UI here).
+          model: DEFAULT_WORKFLOW_MODEL,
         });
         trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: 'sprint' });
         return result.runId;
