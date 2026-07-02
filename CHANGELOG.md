@@ -6,6 +6,40 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.13] — 2026-07-02
+
+### Added
+
+- **Code-review evaluation for flow runs.** A run can now be scored against a
+  code-review rubric: the end-of-workflow panel gains a **score summary** broken
+  down by dimension, and rubric-based findings surface in the review queue. It's
+  **off by default**, gated behind a global toggle in Settings with a per-run
+  override on the launch wizard. Dimensions that don't apply to a run explain
+  themselves via a hover tooltip.
+- **Restart a failed run.** A workflow run whose underlying turn dies on a
+  terminal error is now marked **failed** instead of hanging, and can be
+  relaunched **in the same session** with **Restart** — carrying over the run's
+  pinned model and eval settings. The end-of-workflow panel gains dedicated
+  **failed** and **needs-review** states.
+
+### Changed
+
+- **Task board collapsed to a simpler shape.** The board is narrowed to three
+  visible columns — **Idea → Ready for development → Done** — plus a hidden
+  **Won't do**. Retired ideas are marked with a *decomposed* stamp and reached
+  through their child epics/tasks rather than occupying a column, and an epic's
+  stage now **rolls up automatically** from its children (all children Done →
+  epic Done). Entities created by a plan-gated run stay **pending until the plan
+  is approved**, and are removed if the plan is declined. Epic and task cards link
+  back to their originating idea.
+
+### Fixed
+
+- Auto-mode's permission classifier can no longer soft-brick a flow run.
+- The About dialog: removed the Discord button, corrected the **View on GitHub**
+  link (now `kesteva/cyboflow`), and updated the tagline to *"A human-first
+  agentic development environment."*
+
 ## [0.1.12] — 2026-07-01
 
 ### Added
