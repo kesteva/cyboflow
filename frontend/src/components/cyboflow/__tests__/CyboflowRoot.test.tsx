@@ -148,6 +148,11 @@ vi.mock('../../../trpc/client', () => ({
             assistantMessageCount: 5,
           }),
         },
+        // Quality-assessment read polled by the same summary panel; null =
+        // no eval row, so the Score-summary section stays absent in these tests.
+        runEval: {
+          query: vi.fn().mockResolvedValue(null),
+        },
       },
     },
   },
