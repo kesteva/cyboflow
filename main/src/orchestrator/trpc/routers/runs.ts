@@ -966,6 +966,119 @@ export const runsRouter = router({
     }),
 
   /**
+   * Restart a FAILED workflow run (end-of-workflow failure UX).
+   *
+   * Relaunches the SAME workflow in the SAME session/worktree as the failed run,
+   * creating a NEW run row through the SAME RunLauncher.launch chokepoint runs.start
+   * uses (so substrate/model/permission all re-resolve through their seams and no
+   * entity table is written directly). The flows are DB-canonical (the entity model),
+   * so the fresh run picks progress up where the failed run left off. The failed run
+   * stays terminal ('failed') — this never mutates it.
+   *
+   * Provenance is COPIED off the failed row so the caller does not re-thread it:
+   * workflow_id, substrate, model pin, permission_mode_snapshot, and the seed params
+   * (task_id / seed_idea_id / seed_finding_ids, plus the sprint batch's task ids read
+   * back from sprint_batch_tasks). NO lineage column is added — no consumer needs a
+   * restarted_from link, so a schema change would be dead weight.
+   *
+   * Contrast runs.reopen, which REVIVES the same row via --resume and REQUIRES a
+   * captured claude_session_id; restart instead starts a clean run that re-reads DB
+   * state, so it works even for a run that died before capturing a session.
+   *
+   * Reuses the start deps (runLauncher + sessionManager); until wired it throws
+   * METHOD_NOT_SUPPORTED. Returns the new run's ids, or a typed no-op.
+   */
+  restart: protectedProcedure
+    .input(z.object({ runId: z.string().min(1) }))
+    .mutation(async ({ ctx, input }): Promise<
+      | { runId: string; worktreePath: string; branchName: string }
+      | { noOp: true; reason: 'not_found' | 'not_failed' | 'no_session' | 'no_project' }
+    > => {
+      if (!startRunDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'start dependencies not wired yet. Call setStartRunDeps() at boot.',
+        });
+      }
+      if (!ctx.db) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
+      }
+      const row = ctx.db
+        .prepare(
+          `SELECT workflow_id, project_id, status, substrate, session_id,
+                  permission_mode_snapshot, model, task_id, seed_idea_id, seed_finding_ids, batch_id
+             FROM workflow_runs WHERE id = ?`,
+        )
+        .get(input.runId) as
+        | {
+            workflow_id: string;
+            project_id: number;
+            status: string;
+            substrate: CliSubstrate | null;
+            session_id: string | null;
+            permission_mode_snapshot: PermissionMode | null;
+            model: string | null;
+            task_id: string | null;
+            seed_idea_id: string | null;
+            seed_finding_ids: string | null;
+            batch_id: string | null;
+          }
+        | undefined;
+      if (!row) return { noOp: true, reason: 'not_found' };
+      // Only a terminally-FAILED run may restart — a running / rested / completed run
+      // is not a restart candidate (the panel only shows the CTA for 'failed').
+      if (row.status !== 'failed') return { noOp: true, reason: 'not_failed' };
+      // Restart re-hosts in the SAME session's worktree; a legacy session-less run
+      // (no session_id) has no worktree to re-enter.
+      if (!row.session_id) return { noOp: true, reason: 'no_session' };
+      const project = startRunDeps.sessionManager.getProjectById(row.project_id);
+      if (!project) return { noOp: true, reason: 'no_project' };
+
+      // Recover the exact seed params the failed run carried so the restart targets
+      // the SAME work: compound findings (a JSON string array) and sprint batch task
+      // ids (read back from the lane table — the row stores batch_id, not the ids).
+      let findingIds: string[] | undefined;
+      if (row.seed_finding_ids) {
+        try {
+          const parsed: unknown = JSON.parse(row.seed_finding_ids);
+          if (Array.isArray(parsed)) {
+            findingIds = parsed.filter((x): x is string => typeof x === 'string');
+          }
+        } catch {
+          findingIds = undefined;
+        }
+      }
+      let taskIds: string[] | undefined;
+      if (row.batch_id) {
+        const laneRows = ctx.db
+          .prepare('SELECT task_id FROM sprint_batch_tasks WHERE batch_id = ?')
+          .all(row.batch_id) as Array<{ task_id: string }>;
+        if (laneRows.length > 0) taskIds = laneRows.map((r) => r.task_id);
+      }
+
+      // SAME chokepoint runs.start uses. session_id is reused so the new run lands in
+      // the failed run's worktree; substrate / permission / model re-resolve through
+      // their seams inside createRun. baseBranch + requestedExecutionModel are not
+      // threaded over IPC (undefined placeholders), mirroring start.
+      const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
+        row.workflow_id,
+        project.path,
+        row.substrate ?? undefined,
+        row.task_id ?? undefined,
+        row.seed_idea_id ?? undefined,
+        row.session_id,
+        row.permission_mode_snapshot ?? undefined,
+        undefined,
+        taskIds,
+        row.project_id,
+        undefined,
+        findingIds,
+        row.model ?? undefined,
+      );
+      return { runId, worktreePath, branchName };
+    }),
+
+  /**
    * Git-neutral Cancel of a running workflow run (session<->run restructure,
    * Phase 4a). Stops the live agent on BOTH substrates (via the
    * SubstrateDispatchFacade kill seam injected as cancelRunDeps.stopLiveRun) and
