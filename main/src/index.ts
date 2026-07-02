@@ -2154,7 +2154,7 @@ app.whenReady().then(async () => {
     // detached promise died with that process), so they cannot resume — re-drain
     // them to 'timeout'. Mirrors recoverActiveStateOrphans for the visual-verify
     // queue; runs once on the freshly-initialized singleton before any nudge.
-    const verifyOrphans = VerificationScheduler.getInstance().runRecovery();
+    const verifyOrphans = await VerificationScheduler.getInstance().runRecovery();
     if (verifyOrphans > 0) {
       console.log(`[Main] Re-drained ${verifyOrphans} orphaned verification request(s) to timeout on boot`);
     }

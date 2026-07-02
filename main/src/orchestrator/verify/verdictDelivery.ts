@@ -28,14 +28,15 @@
  *     The action returned decides the finding's `blocking` flag below.
  *
  *  3. ReviewItemRouter.applyReviewItem(projectId, { op:'create', kind:'finding' })
- *     raises ONE finding ONLY on a FAIL or low_confidence terminal verdict (PASS
- *     raises none; skipped/timeout raise none). Severity is mapped from the worst
- *     issue; the finding is soft-linked to the run's task when one exists. In
- *     merge-gate mode a FAIL finding is BLOCKING (it holds this lane's integration
- *     until re-verified / escalated — isMergeGateBlocking); low_confidence stays
- *     NON-blocking (advisory human review, never an auto-loop). This is called once
- *     per terminal verdict (the scheduler delivers a request's verdict exactly
- *     once), so it does not spam a finding per drain.
+ *     raises ONE finding on a FAIL, low_confidence, or timeout terminal verdict (PASS
+ *     raises none; skipped raises none — R4). Severity is mapped from the worst issue;
+ *     the finding is soft-linked to the run's task when one exists. In merge-gate mode
+ *     a FAIL finding is BLOCKING (it holds this lane's integration until re-verified /
+ *     escalated — isMergeGateBlocking); low_confidence stays NON-blocking (advisory
+ *     human review, never an auto-loop); a timeout finding is NON-blocking too
+ *     (advance-with-visibility — the lane advanced, but verification did not run).
+ *     This is called once per terminal verdict (the scheduler delivers a request's
+ *     verdict exactly once), so it does not spam a finding per drain.
  *
  * Standalone-typecheck invariant: this file imports ONLY the electron-free
  * orchestrator routers + the merge-gate driver + shared types + the narrow
@@ -61,8 +62,16 @@ export interface VerdictDeliveryDeps {
   logger?: LoggerLike;
 }
 
-/** The terminal request statuses that warrant a finding (FAIL + low confidence). */
-const FINDING_STATUSES: ReadonlySet<string> = new Set(['failed', 'low_confidence']);
+/**
+ * The terminal request statuses that warrant a finding: FAIL + low confidence, PLUS
+ * `timeout` (R4). A timeout ADVANCES the lane (an environment failure must never
+ * wedge a sprint) but raises a NON-blocking finding so a human sees that verification
+ * did not actually run — advance-with-visibility. `skipped` is deliberately ABSENT
+ * (a missing precondition raises no finding). The blocking flag is still derived from
+ * the merge-gate action (isMergeGateBlocking), which is false for a timeout's
+ * advance-integrated / non-sprint noop — so a timeout finding is always non-blocking.
+ */
+const FINDING_STATUSES: ReadonlySet<string> = new Set(['failed', 'low_confidence', 'timeout']);
 
 /**
  * Map a VlmJudge issue severity ('low'|'medium'|'high') to the review_items
@@ -113,6 +122,15 @@ function buildFindingText(
   status: string,
   verdict: VerdictV1 | undefined,
 ): { title: string; body: string } {
+  // R4: timeout is advance-with-visibility — the lane was ADVANCED (not looped back),
+  // and no visual check actually ran, so it gets its own environment-failure framing
+  // distinct from the FAIL body (which says "sent back to re-implement").
+  if (status === 'timeout') {
+    return {
+      title: 'Visual verification did not run (timed out)',
+      body: 'Visual verification timed out before producing a verdict (the dev server never became ready, capture/judge exceeded the deadline, or the request was orphaned by a process restart). The lane was advanced so the sprint is not wedged, but NO visual check actually ran — verify this deliverable manually or re-run verification.',
+    };
+  }
   const title =
     status === 'low_confidence'
       ? 'Visual verification needs human review (low confidence)'
@@ -234,8 +252,10 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
         // Merge-gate (locked decision #2): a FAIL finding BLOCKS — it holds this
         // lane's integration (loopback re-implement, or terminal failure at the
         // 3× cap) until re-verified / escalated. low_confidence stays NON-blocking
-        // (advisory human review; never an auto-loop). A non-sprint run (noop
-        // gateAction) also stays non-blocking — there is no lane to gate.
+        // (advisory human review; never an auto-loop). A timeout (R4) advances the
+        // lane (advance-integrated → isMergeGateBlocking false) so its finding is
+        // NON-blocking too. A non-sprint run (noop gateAction) also stays
+        // non-blocking — there is no lane to gate.
         blocking: isMergeGateBlocking(gateAction),
         severity,
         source: 'visual-verify',

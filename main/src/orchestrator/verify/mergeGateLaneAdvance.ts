@@ -29,8 +29,17 @@
  *                         "needs human visual review" finding informs a human. The
  *                         pixels are fine; the JUDGE is unsure — escalate to a
  *                         person, not another camera.
- *   - skipped / timeout → no gate action (a missing precondition must never wedge a
- *                         lane); the lane keeps whatever step it was on.
+ *   - skipped / timeout → ADVANCE the lane toward `integrated` exactly like a PASS
+ *                         (locked decision R4). A terminal verdict must always drive
+ *                         a parked lane OFF the `awaiting-verify` step: skipped == a
+ *                         missing precondition and timeout == an environment failure,
+ *                         and NEITHER may wedge an orchestrated (SDK) sprint that
+ *                         forbids advancing until PASSED. The visibility difference
+ *                         is in the FINDING (raised by verdictDelivery, not here):
+ *                         skipped raises NONE; timeout raises a NON-blocking one so a
+ *                         human sees that verification did not actually run. A
+ *                         BLOCKING treatment would reintroduce the wedge class R1–R3
+ *                         just removed.
  *
  * ACTUATION CAVEAT (the honest boundary of this slice — see followUps): writing
  * the lane back to `implement` makes the loopback VISIBLE and records the bumped
@@ -62,10 +71,10 @@ export const MERGE_GATE_ATTEMPT_CAP = 3;
 
 /** The lane outcome the merge-gate decision picks for a terminal verdict. */
 export type MergeGateAction =
-  | { kind: 'advance-integrated' } // PASS, or low_confidence advisory pass-through
+  | { kind: 'advance-integrated' } // PASS / low_confidence advisory / skipped / timeout
   | { kind: 'loopback-implement'; nextAttempt: number } // FAIL under cap → re-implement
   | { kind: 'mark-failed' } // FAIL at/over cap → terminal lane failure
-  | { kind: 'noop'; reason: string }; // skipped/timeout/no-verdict — leave the lane as-is
+  | { kind: 'noop'; reason: string }; // no attributable lane / non-terminal — leave as-is
 
 /**
  * PURE merge-gate policy (no DB). Given the terminal request `status`, the judged
@@ -74,9 +83,11 @@ export type MergeGateAction =
  * decision exactly:
  *   passed                     → advance-integrated
  *   low_confidence             → advance-integrated (advisory; never auto-loop)
+ *   skipped|timeout            → advance-integrated (un-park the lane; R4 — the
+ *                                visibility split is in the finding, not the lane)
  *   failed, currentAttempts<cap→ loopback-implement (nextAttempt = max(currentAttempts,1)+1)
  *   failed, currentAttempts>=cap→ mark-failed
- *   skipped|timeout|no-verdict → noop
+ *   queued|leased|running      → noop (not a terminal verdict)
  *
  * `currentAttempts` semantics match SprintLaneRow.attempts (0 = first pass, never
  * looped). The first FAIL bumps to attempt 2 (parity with the orchestrator prose:
@@ -116,8 +127,14 @@ export function decideMergeGate(args: {
     return { kind: 'loopback-implement', nextAttempt };
   }
 
-  // skipped / timeout / queued / leased / running (never delivered terminal) — no
-  // gate action; a missing precondition must not wedge the lane.
+  // skipped == missing precondition, timeout == environment failure (R4). NEITHER
+  // is a block: both ADVANCE the lane toward integrated exactly like a PASS, so an
+  // orchestrated (SDK) lane parked at awaiting-verify is driven OFF the park step
+  // instead of wedging the sprint. The visibility split is in the finding
+  // (verdictDelivery): skipped raises none; timeout raises a NON-blocking one.
+  if (status === 'skipped' || status === 'timeout') return { kind: 'advance-integrated' };
+
+  // queued / leased / running (not a terminal verdict) — no gate action.
   return { kind: 'noop', reason: status };
 }
 
@@ -210,9 +227,9 @@ export function applyMergeGateVerdict(args: {
 }): MergeGateAction {
   const { db, runId, status, verdict, taskRef, logger } = args;
 
-  // A verdict with no possible lane action (skipped/timeout) never touches a lane.
-  const previewless = status === 'skipped' || status === 'timeout';
-  if (previewless) return { kind: 'noop', reason: status };
+  // R4: skipped/timeout are NO LONGER short-circuited here — they flow through lane
+  // resolution + the decision like a PASS so a parked lane is driven OFF
+  // awaiting-verify. A non-sprint run (no batch) still resolves to a noop below.
 
   let store: SprintLaneStore;
   try {

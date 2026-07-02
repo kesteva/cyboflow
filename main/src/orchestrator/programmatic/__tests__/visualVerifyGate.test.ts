@@ -175,6 +175,38 @@ describe('SchedulerVisualVerifyGate', () => {
     await expect(gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' })).resolves.toEqual({ kind: 'advance' });
   });
 
+  it('R4: an already-TIMEOUT request → advance (race-closer; environment failure never wedges)', async () => {
+    const { batchId } = singleLaneParked('run-1');
+    seedRequest(db, { id: 'vr1', runId: 'run-1', status: 'timeout', taskRef: 'TASK-001' });
+    // The merge-gate advanced the lane on timeout (R4); the gate resolves 'advance'
+    // off the terminal STATUS, consistent with the merge-gate policy.
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'integrated', currentStepId: 'visual-verify' });
+    await expect(gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' })).resolves.toEqual({ kind: 'advance' });
+  });
+
+  it('R4: a TIMEOUT terminal event un-parks a waiting programmatic lane → advance', async () => {
+    const { batchId } = singleLaneParked('run-1');
+    seedRequest(db, { id: 'vr1', runId: 'run-1', status: 'running', taskRef: 'TASK-001' });
+    const pending = gate(db).awaitVerdict({ runId: 'run-1', itemId: 'tsk_a' });
+
+    // The scheduler drains to timeout, the merge-gate advances the lane, THEN the
+    // terminal event fires — the parked programmatic lane must wake and advance.
+    db.prepare(`UPDATE verification_requests SET status = 'timeout' WHERE id = 'vr1'`).run();
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'integrated', currentStepId: 'visual-verify' });
+    const event: VerificationTerminalEvent = {
+      runId: 'run-1',
+      requestId: 'vr1',
+      projectId: 1,
+      status: 'timeout',
+      type: 'static-render-snapshot',
+      taskRef: 'TASK-001',
+    };
+    verificationEvents.emit(verificationChannel('run-1'), event);
+
+    await expect(pending).resolves.toEqual({ kind: 'advance' });
+    expect(verificationEvents.listenerCount(verificationChannel('run-1'))).toBe(0);
+  });
+
   it('awaits the terminal event for a non-terminal request, then resolves from the lane', async () => {
     const { batchId } = singleLaneParked('run-1');
     seedRequest(db, { id: 'vr1', runId: 'run-1', status: 'running', taskRef: 'TASK-001' });

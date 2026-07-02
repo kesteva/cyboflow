@@ -534,4 +534,77 @@ describe('verdictDelivery (P8b — merge-gate)', () => {
     expect(lane.status).toBe('integrated');
     expect(findingRows(db, 'run-s2')).toHaveLength(0);
   });
+
+  it('R4: TIMEOUT on a sprint lane ADVANCES it to integrated AND raises a NON-blocking finding', async () => {
+    // R4: a timeout is an environment failure — advance-with-visibility. The parked
+    // lane is driven OFF awaiting-verify (never wedged), and a NON-blocking finding is
+    // raised so a human sees that verification did not actually run.
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id)
+       VALUES ('tsk_to', 1, 'TASK-004', 'D', 'board-1-default', 'stage-board-1-default-5')`,
+    ).run();
+    const store = SprintLaneStore.getInstance();
+    const { batchId } = store.createForRun(1, 'sdk', ['tsk_to']);
+    seedSprintRun(db, 'run-s4', batchId, 'tsk_to');
+    store.updateLane({ runId: 'run-s4', batchId, taskId: 'tsk_to', status: 'running', currentStepId: 'awaiting-verify' });
+
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    await deliver({
+      requestId: 'vr_s4',
+      runId: 'run-s4',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'timeout',
+      verdict: undefined,
+      fileNames: [],
+      input: { intent: 'shows the submit button', taskRef: 'TASK-004' },
+    });
+
+    // Lane advanced to integrated (un-parked), NOT looped back / wedged.
+    const lane = db
+      .prepare('SELECT status, current_step_id AS step FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+      .get(batchId, 'tsk_to') as { status: string; step: string };
+    expect(lane).toEqual({ status: 'integrated', step: 'visual-verify' });
+
+    // Exactly one NON-blocking finding, framed as an environment failure.
+    const findings = findingRows(db, 'run-s4');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].blocking).toBe(0);
+    expect(findings[0].severity).toBe('warning');
+    expect(findings[0].source).toBe('visual-verify');
+    expect(findings[0].title).toMatch(/did not run|timed out/i);
+    // No verdict → nothing enriched.
+    expect(screenshotsRows(db, 'run-s4')).toHaveLength(0);
+  });
+
+  it('R4: SKIPPED on a sprint lane ADVANCES it to integrated with NO finding', async () => {
+    // R4: a skipped is a missing precondition — advance, no finding, no side effects.
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id)
+       VALUES ('tsk_sk', 1, 'TASK-005', 'E', 'board-1-default', 'stage-board-1-default-5')`,
+    ).run();
+    const store = SprintLaneStore.getInstance();
+    const { batchId } = store.createForRun(1, 'sdk', ['tsk_sk']);
+    seedSprintRun(db, 'run-s5', batchId, 'tsk_sk');
+    store.updateLane({ runId: 'run-s5', batchId, taskId: 'tsk_sk', status: 'running', currentStepId: 'awaiting-verify' });
+
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+    await deliver({
+      requestId: 'vr_s5',
+      runId: 'run-s5',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'skipped',
+      verdict: undefined,
+      fileNames: [],
+      input: { intent: 'shows the submit button', taskRef: 'TASK-005' },
+    });
+
+    const lane = db
+      .prepare('SELECT status FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+      .get(batchId, 'tsk_sk') as { status: string };
+    expect(lane.status).toBe('integrated'); // un-parked
+    expect(findingRows(db, 'run-s5')).toHaveLength(0); // skipped raises NO finding
+    expect(screenshotsRows(db, 'run-s5')).toHaveLength(0);
+  });
 });

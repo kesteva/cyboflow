@@ -5,7 +5,7 @@
  *  A. decideMergeGate — the PURE loopback policy (no DB). Mirrors the task-verify
  *     3× cap: PASS / low_confidence → advance-integrated; FAIL under the cap →
  *     loopback-implement with a bumped attempt; FAIL at/over the cap → mark-failed;
- *     skipped/timeout → noop.
+ *     skipped/timeout → advance-integrated (R4 — un-park the lane, never wedge).
  *
  *  B. applyMergeGateVerdict — the WRITE side, against a migration-backed in-memory
  *     DB + the real SprintLaneStore chokepoint. Verifies run→batch→lane attribution
@@ -155,15 +155,24 @@ describe('decideMergeGate (pure loopback policy)', () => {
     });
   });
 
-  it('skipped / timeout are no-ops (a missing precondition never wedges a lane)', () => {
+  it('skipped / timeout ADVANCE the lane (R4 — un-park; never wedge, never loop)', () => {
+    // R4: a terminal skipped/timeout drives a parked lane OFF awaiting-verify exactly
+    // like a PASS (advance-integrated). Neither loops back or fails the lane; the
+    // visibility split (skipped = no finding, timeout = non-blocking finding) is in
+    // verdictDelivery, not this pure decision.
     expect(decideMergeGate({ status: 'skipped', verdict: undefined, currentAttempts: 0 })).toEqual({
-      kind: 'noop',
-      reason: 'skipped',
+      kind: 'advance-integrated',
     });
     expect(decideMergeGate({ status: 'timeout', verdict: undefined, currentAttempts: 1 })).toEqual({
-      kind: 'noop',
-      reason: 'timeout',
+      kind: 'advance-integrated',
     });
+  });
+
+  it('skipped / timeout advance-integrated is NON-blocking (isMergeGateBlocking false)', () => {
+    // The advance the merge-gate picks for skipped/timeout must never be treated as a
+    // blocking gate action (that would reintroduce the wedge class R1–R3 removed).
+    expect(isMergeGateBlocking(decideMergeGate({ status: 'skipped', verdict: undefined, currentAttempts: 0 }))).toBe(false);
+    expect(isMergeGateBlocking(decideMergeGate({ status: 'timeout', verdict: undefined, currentAttempts: 0 }))).toBe(false);
   });
 
   it('isMergeGateBlocking: loopback + failed BLOCK; advance/noop do not', () => {
@@ -294,17 +303,41 @@ describe('applyMergeGateVerdict (lane write side)', () => {
     expect(readLane(batchId, 'tsk_a').status).toBe('integrated');
   });
 
-  it('skipped/timeout verdicts touch no lane', () => {
+  it('skipped ADVANCES a parked lane to integrated (R4 — same write as a PASS)', () => {
     seedTask(db, 'tsk_a', 'TASK-001', 'A');
     const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
     seedRun(db, 'run-1', batchId);
     store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'awaiting-verify' });
 
-    expect(applyMergeGateVerdict({ db: dbAdapter(db), runId: 'run-1', status: 'skipped', verdict: undefined })).toEqual({
+    const action = applyMergeGateVerdict({ db: dbAdapter(db), runId: 'run-1', status: 'skipped', verdict: undefined });
+    expect(action).toEqual({ kind: 'advance-integrated' });
+    // The lane is driven OFF awaiting-verify with the SAME write shape as a PASS.
+    expect(readLane(batchId, 'tsk_a')).toEqual({ status: 'integrated', step: 'visual-verify', attempts: 0 });
+  });
+
+  it('timeout ADVANCES a parked lane to integrated (R4 — un-park on environment failure)', () => {
+    seedTask(db, 'tsk_a', 'TASK-001', 'A');
+    const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+    seedRun(db, 'run-1', batchId);
+    store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'awaiting-verify' });
+
+    const action = applyMergeGateVerdict({ db: dbAdapter(db), runId: 'run-1', status: 'timeout', verdict: undefined });
+    expect(action).toEqual({ kind: 'advance-integrated' });
+    expect(readLane(batchId, 'tsk_a')).toEqual({ status: 'integrated', step: 'visual-verify', attempts: 0 });
+    // Advance is non-blocking — the finding (raised by verdictDelivery) is what informs.
+    expect(isMergeGateBlocking(action)).toBe(false);
+  });
+
+  it('a non-sprint run still no-ops on skipped/timeout (no lane to advance)', () => {
+    seedRun(db, 'run-quick', null);
+    expect(applyMergeGateVerdict({ db: dbAdapter(db), runId: 'run-quick', status: 'skipped', verdict: undefined })).toEqual({
       kind: 'noop',
-      reason: 'skipped',
+      reason: 'lane-unresolved',
     });
-    expect(readLane(batchId, 'tsk_a').status).toBe('running');
+    expect(applyMergeGateVerdict({ db: dbAdapter(db), runId: 'run-quick', status: 'timeout', verdict: undefined })).toEqual({
+      kind: 'noop',
+      reason: 'lane-unresolved',
+    });
   });
 
   it('emits a SprintLaneChangedEvent on the run channel when it drives a lane', () => {

@@ -55,8 +55,8 @@ import { VERIFY_PORT_ANY, VISUAL_VERIFY_DEFAULTS } from '../../../../shared/type
 // already visible to a subscriber). The PROGRAMMATIC visual merge-gate
 // (programmatic/visualVerifyGate.ts) subscribes to this to un-park a lane that is
 // awaiting its async verdict; it is the wake signal that covers EVERY terminal
-// status uniformly — including skipped/timeout, where the merge-gate performs no
-// lane write (so a lane-only subscription would never wake). Mirrors
+// status uniformly — including skipped/timeout (which the merge-gate ADVANCES per
+// R4, and a non-sprint run leaves as a lane-less no-op). Mirrors
 // sprintLaneEvents (sprintLaneStore.ts): a module-level emitter + a per-run channel.
 // ---------------------------------------------------------------------------
 
@@ -652,26 +652,51 @@ export class VerificationScheduler {
    * holds no in-flight handle for them — so they are marked 'timeout' (lease already
    * dropped with the dead process; the freshly-constructed `mutex` holds nothing).
    *
+   * R4 — routes EACH orphan through the SAME markTerminalAndDeliver chokepoint a
+   * live timeout uses, rather than a bare UPDATE. That is what un-wedges a sprint
+   * after a restart: the delivery drives the parked lane OFF `awaiting-verify`
+   * (applyMergeGateVerdict advances it) AND raises the non-blocking timeout finding,
+   * exactly like a live timeout. The terminal event also fires; recovery runs before
+   * any event subscriber exists, but events are best-effort — the LANE write is the
+   * load-bearing part, and it is synchronous through the router.
+   *
    * Mirrors recoverActiveStateOrphans (runRecovery.ts): "no in-process worker → the
    * row is an orphan; force it terminal so nothing waits on it forever". Called ONCE
    * at scheduler init from index.ts boot recovery, BEFORE any nudge, so a stale row
    * can never be confused with a live in-flight one (inFlight is empty at boot).
    * Returns the number of rows re-drained. Idempotent: a second call finds none.
    */
-  runRecovery(): number {
-    const res = this.db
+  async runRecovery(): Promise<number> {
+    const rows = this.db
       .prepare(
-        `UPDATE verification_requests
-            SET status = 'timeout', ended_at = ?, error_message = 'orphaned by process restart'
-          WHERE status IN ('leased', 'running')`,
+        `SELECT id, run_id, project_id, status, verify_type, deliverable_json,
+                chain_json, current_backend, attempt
+           FROM verification_requests
+          WHERE status IN ('leased', 'running')
+          ORDER BY enqueued_at ASC, id ASC`,
       )
-      .run(new Date().toISOString());
-    if (res.changes > 0) {
+      .all() as VerificationRequestRow[];
+    let recovered = 0;
+    for (const row of rows) {
+      // Parse the input so the delivery can attribute the lane (deliverable_json →
+      // taskRef); an unparseable row still recovers to 'timeout' with no attribution.
+      const input = this.parseInput(row.deliverable_json) ?? undefined;
+      await this.markTerminalAndDeliver(
+        row,
+        'timeout',
+        { error: 'orphaned by process restart' },
+        undefined,
+        [],
+        input,
+      );
+      recovered += 1;
+    }
+    if (recovered > 0) {
       this.logger?.info('[VerificationScheduler] re-drained orphaned requests on boot', {
-        timedOut: res.changes,
+        timedOut: recovered,
       });
     }
-    return res.changes;
+    return recovered;
   }
 
   // --------------------------------------------------------------------------
@@ -1954,8 +1979,8 @@ export class VerificationScheduler {
     // Fire the terminal event LAST — after onVerdict (so any merge-gate lane write
     // is already visible) and REGARDLESS of whether a hook is wired. This is the
     // wake signal the programmatic visual merge-gate awaits to un-park a lane. It
-    // fires for EVERY terminal status (incl. skipped/timeout, which the merge-gate
-    // does not lane-write) so a parked programmatic lane can never hang. Fail-soft:
+    // fires for EVERY terminal status (incl. skipped/timeout — which the merge-gate
+    // now ADVANCES per R4) so a parked programmatic lane can never hang. Fail-soft:
     // a throwing listener must never wedge the drain loop.
     try {
       const event: VerificationTerminalEvent = {

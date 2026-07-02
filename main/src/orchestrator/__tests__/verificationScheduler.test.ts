@@ -617,7 +617,7 @@ describe('VerificationScheduler', () => {
       leasePool: new ResourceLeasePool(new Mutex()),
     });
 
-    const drained = sched.runRecovery();
+    const drained = await sched.runRecovery();
     expect(drained).toBe(2); // leased + running
     expect(status(db, 'leased1')).toBe('timeout');
     expect(status(db, 'running1')).toBe('timeout');
@@ -629,7 +629,51 @@ describe('VerificationScheduler', () => {
     expect(row.error_message).toBe('orphaned by process restart');
     expect(row.ended_at).not.toBeNull();
     // Idempotent: a second pass finds nothing.
-    expect(sched.runRecovery()).toBe(0);
+    expect(await sched.runRecovery()).toBe(0);
+  });
+
+  it('R4: runRecovery routes each orphan through the delivery chokepoint (onVerdict + terminal event), not a bare UPDATE', async () => {
+    // Regression: pre-R4 runRecovery bulk-UPDATEd orphans to 'timeout' with NO
+    // delivery — no onVerdict (so no lane write, no finding) and no terminal event,
+    // leaving a parked orchestrated lane wedged after a restart. Now each orphan is
+    // re-driven through markTerminalAndDeliver: onVerdict fires with status 'timeout'
+    // (carrying the parsed input.taskRef for lane attribution) AND the terminal event
+    // is emitted — exactly like a live timeout.
+    db.prepare(
+      `INSERT INTO verification_requests (id, run_id, project_id, status, verify_type, deliverable_json, leased_at)
+       VALUES ('orph1', 'run-1', 1, 'leased', 'static-render-snapshot', ?, ?)`,
+    ).run(JSON.stringify({ intent: 'shows the button', taskRef: 'TASK-042' }), new Date().toISOString());
+
+    const delivered: Array<{ status: string; taskRef?: string }> = [];
+    const onVerdict: OnVerdict = async ({ status, input }) => {
+      delivered.push({ status, taskRef: input?.taskRef });
+    };
+    const events: VerificationTerminalEvent[] = [];
+    const listener = (e: VerificationTerminalEvent): void => {
+      events.push(e);
+    };
+    verificationEvents.on(verificationChannel('run-1'), listener);
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: {},
+      judge: fakeJudge(),
+      artifactsDirResolver: (runId) => `/tmp/${runId}`,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      onVerdict,
+    });
+
+    const drained = await sched.runRecovery();
+    verificationEvents.removeListener(verificationChannel('run-1'), listener);
+
+    expect(drained).toBe(1);
+    expect(status(db, 'orph1')).toBe('timeout');
+    // The chokepoint fired delivery with the terminal status + the parsed taskRef.
+    expect(delivered).toEqual([{ status: 'timeout', taskRef: 'TASK-042' }]);
+    // And the terminal event was emitted (the wake signal for a parked programmatic lane).
+    expect(events).toHaveLength(1);
+    expect(events[0].status).toBe('timeout');
+    expect(events[0].taskRef).toBe('TASK-042');
   });
 
   it('fires the onVerdict hook with the terminal outcome', async () => {
