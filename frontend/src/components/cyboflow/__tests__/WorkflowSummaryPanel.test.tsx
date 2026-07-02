@@ -8,6 +8,7 @@ const runUsageQuery = vi.fn();
 const runEvalQuery = vi.fn();
 const reviewItemsListQuery = vi.fn();
 const relayInputMutate = vi.fn();
+const restartMutate = vi.fn();
 const showError = vi.fn();
 
 vi.mock('../../../trpc/client', () => ({
@@ -18,7 +19,10 @@ vi.mock('../../../trpc/client', () => ({
         runEval: { query: (...a: unknown[]) => runEvalQuery(...a) },
       },
       reviewItems: { list: { query: (...a: unknown[]) => reviewItemsListQuery(...a) } },
-      runs: { relayInput: { mutate: (...a: unknown[]) => relayInputMutate(...a) } },
+      runs: {
+        relayInput: { mutate: (...a: unknown[]) => relayInputMutate(...a) },
+        restart: { mutate: (...a: unknown[]) => restartMutate(...a) },
+      },
     },
   },
 }));
@@ -92,6 +96,8 @@ beforeEach(() => {
   reviewItemsListQuery.mockResolvedValue([]);
   relayInputMutate.mockReset();
   relayInputMutate.mockResolvedValue({ success: true });
+  restartMutate.mockReset();
+  restartMutate.mockResolvedValue({ runId: 'run-2', worktreePath: '/w', branchName: 'b' });
   showError.mockReset();
 });
 
@@ -158,9 +164,62 @@ describe('WorkflowSummaryPanel', () => {
     expect(relayInputMutate).not.toHaveBeenCalled();
   });
 
-  it('frames a failed run as "Workflow stopped"', async () => {
-    renderPanel({ status: 'failed' });
-    expect(await screen.findByText('Workflow stopped')).toBeInTheDocument();
+  // ---- Three header states (one panel) --------------------------------------
+
+  it('titles the complete state "Workflow complete" with the Complete CTA', async () => {
+    renderPanel({ variant: 'complete' });
+    expect(await screen.findByTestId('run-summary-title')).toHaveTextContent('Workflow complete');
+    expect(screen.getByTestId('run-summary-complete')).toBeInTheDocument();
+  });
+
+  it('titles the failed state "Workflow failed" and surfaces the error reason', async () => {
+    renderPanel({ variant: 'failed', errorMessage: "You've hit your limit · resets 7:10pm" });
+    expect(await screen.findByTestId('run-summary-title')).toHaveTextContent('Workflow failed');
+    expect(screen.getByTestId('run-summary-error')).toHaveTextContent("You've hit your limit · resets 7:10pm");
+    // The happy-path Complete primary is NOT the lead action on a failed run.
+    expect(screen.queryByTestId('run-summary-complete')).not.toBeInTheDocument();
+  });
+
+  it('degrades gracefully when a failed run has no error reason', async () => {
+    renderPanel({ variant: 'failed', errorMessage: null });
+    expect(await screen.findByTestId('run-summary-error')).toHaveTextContent('The run ended on an error');
+  });
+
+  it('titles the review state "Ready for review" with a hint and no action CTAs', async () => {
+    renderPanel({ variant: 'review', status: 'running' });
+    expect(await screen.findByTestId('run-summary-title')).toHaveTextContent('Ready for review');
+    expect(screen.getByTestId('run-summary-review-hint')).toBeInTheDocument();
+    // No Complete / Restart primary — the decision is the pending question below.
+    expect(screen.queryByTestId('run-summary-complete')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-restart')).not.toBeInTheDocument();
+    // Token usage still renders (it is input to the review decision).
+    expect(await screen.findByTestId('run-summary-categories')).toBeInTheDocument();
+  });
+
+  // ---- Restart flow (failed state) ------------------------------------------
+
+  it('restarts a failed run via runs.restart and hands the new run id to onRestarted', async () => {
+    const onRestarted = vi.fn();
+    renderPanel({ variant: 'failed', onRestarted });
+    fireEvent.click(await screen.findByTestId('run-summary-restart'));
+    await waitFor(() => expect(restartMutate).toHaveBeenCalledWith({ runId: 'run-1' }));
+    await waitFor(() => expect(onRestarted).toHaveBeenCalledWith('run-2'));
+  });
+
+  it('surfaces a no-op restart as an error and does not swap the run', async () => {
+    restartMutate.mockResolvedValue({ noOp: true, reason: 'not_failed' });
+    const onRestarted = vi.fn();
+    renderPanel({ variant: 'failed', onRestarted });
+    fireEvent.click(await screen.findByTestId('run-summary-restart'));
+    await waitFor(() => expect(showError).toHaveBeenCalled());
+    expect(onRestarted).not.toHaveBeenCalled();
+  });
+
+  it('omits the Restart CTA when no onRestarted handler is provided', async () => {
+    renderPanel({ variant: 'failed' });
+    // Close out is always available; Restart requires the swap handler.
+    expect(await screen.findByTestId('run-summary-close-out')).toBeInTheDocument();
+    expect(screen.queryByTestId('run-summary-restart')).not.toBeInTheDocument();
   });
 
   it('shows a no-usage note when the run recorded zero tokens', async () => {

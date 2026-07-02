@@ -7,12 +7,15 @@ import {
   ChevronDown,
   ChevronRight,
   ShieldAlert,
+  RotateCcw,
+  ClipboardCheck,
 } from 'lucide-react';
 import { trpc } from '../../trpc/client';
 import { useErrorStore } from '../../stores/errorStore';
 import { cn } from '../../utils/cn';
 import type { RunUsageRollup, RunEval } from '../../../../shared/types/insights';
 import type { ReviewItem } from '../../../../shared/types/reviews';
+import type { RunSummaryVariant } from '../../hooks/useRunSummaryVariant';
 import {
   bandDisplay,
   scoreToBand,
@@ -116,20 +119,44 @@ interface WorkflowSummaryPanelProps {
   substrate?: string;
   /** Human label for the finished flow (workflow name or run id fallback). */
   workflowLabel: string;
-  /** Open the End-workflow confirm (RunEndDialog) — the primary "Complete" path. */
+  /**
+   * Which of the three panel states to render (resolveRunSummaryVariant):
+   *   'complete' — end-eligible; 'failed' — terminal error; 'review' — running at
+   *   an open human-review gate. Defaults to 'complete' (back-compat).
+   */
+  variant?: RunSummaryVariant;
+  /**
+   * Failure reason (workflow_runs.error_message) — shown in the 'failed' state.
+   * Degrades gracefully when absent.
+   */
+  errorMessage?: string | null;
+  /** Open the End-workflow confirm (RunEndDialog) — the "Complete"/"Close out" path. */
   onComplete: () => void;
+  /**
+   * Called after runs.restart mints a NEW run (failed state only). The parent swaps
+   * the active run to `newRunId` (same session), which unmounts this panel as the
+   * new run's status propagates. Absent ⇒ the Restart CTA is not offered.
+   */
+  onRestarted?: (newRunId: string) => void;
 }
 
 /**
  * WorkflowSummaryPanel — the end-of-workflow center-pane module. Replaces the
- * all-steps-completed WorkflowCanvas (and the old "this workflow is finished"
- * banner) once a run is end-eligible (rested with no open gate, or
- * self-terminated). Shows the run's token usage broken down by category, an
- * optional advisory quality Score-summary (code-review eval), then two CTAs:
- *   - PRIMARY  "Complete workflow"  → onComplete (runs.end via RunEndDialog)
- *   - SECONDARY "Request changes"   → INTERACTIVE ONLY: relays feedback into the
- *     live PTY (runs.relayInput) so the user keeps working with the SAME agent.
- *     SDK runs have no live process to continue, so the CTA is hidden for them.
+ * WorkflowCanvas in three states (resolveRunSummaryVariant), all sharing the same
+ * token-usage module and the advisory quality Score-summary (code-review eval),
+ * with state-specific header + CTAs:
+ *   - 'complete' → "Workflow complete": PRIMARY "Complete workflow" (runs.end via
+ *     RunEndDialog); INTERACTIVE-ONLY "Request changes" (runs.relayInput into the
+ *     live PTY — SDK runs have no live process, so it is hidden for them).
+ *   - 'failed' → "Workflow failed": surfaces the failure reason; PRIMARY
+ *     "Restart flow" (runs.restart, same session/worktree); secondary "Close out"
+ *     (runs.end is a no-op on a terminal run, so this is pure navigation).
+ *   - 'review' → "Ready for review": the run is STILL running at an open human gate,
+ *     so the summary — including the eval score, which lands exactly at this step —
+ *     is INPUT to the decision. No "Complete workflow" primary — it would no-op
+ *     (runs.end guards not_rested) and reads as if the run were done; the
+ *     Approve/Reject decision happens via the pending question in the chat /
+ *     review queue below, so this state shows a muted hint instead of an action.
  */
 export function WorkflowSummaryPanel({
   runId,
@@ -137,7 +164,10 @@ export function WorkflowSummaryPanel({
   status,
   substrate,
   workflowLabel,
+  variant = 'complete',
+  errorMessage,
   onComplete,
+  onRestarted,
 }: WorkflowSummaryPanelProps): React.JSX.Element {
   const [usage, setUsage] = useState<RunUsageRollup | null>(null);
   const [loading, setLoading] = useState(true);
@@ -152,9 +182,12 @@ export function WorkflowSummaryPanel({
   const [changeText, setChangeText] = useState('');
   const [sending, setSending] = useState(false);
   const [sent, setSent] = useState(false);
+  // "Restart flow" busy latch (failed state only).
+  const [restarting, setRestarting] = useState(false);
 
   const isInteractive = substrate === 'interactive';
-  const isFailed = status === 'failed';
+  const isFailed = variant === 'failed';
+  const isReview = variant === 'review';
 
   useEffect(() => {
     let alive = true;
@@ -276,30 +309,93 @@ export function WorkflowSummaryPanel({
     }
   };
 
+  const handleRestart = async (): Promise<void> => {
+    if (restarting) return;
+    setRestarting(true);
+    try {
+      // runs.restart mints a NEW run in the SAME session/worktree (the failed run
+      // stays terminal). On success the parent swaps the active run; this panel
+      // unmounts as the new run's status propagates — so keep `restarting` latched.
+      const result = await trpc.cyboflow.runs.restart.mutate({ runId });
+      if ('noOp' in result) {
+        useErrorStore.getState().showError({
+          title: 'Restart failed',
+          error: `The run could not be restarted (${result.reason}).`,
+        });
+        setRestarting(false);
+        return;
+      }
+      onRestarted?.(result.runId);
+    } catch (err: unknown) {
+      useErrorStore.getState().showError({
+        title: 'Restart failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      setRestarting(false);
+    }
+  };
+
+  // Header treatment per variant (icon + accent + title). One panel, three states.
+  const header =
+    variant === 'failed'
+      ? { title: 'Workflow failed', icon: <AlertTriangle size={18} />, wrap: 'bg-status-error/15 text-status-error' }
+      : variant === 'review'
+        ? { title: 'Ready for review', icon: <ClipboardCheck size={18} />, wrap: 'bg-interactive/15 text-interactive' }
+        : { title: 'Workflow complete', icon: <CheckCircle2 size={18} />, wrap: 'bg-status-success/15 text-status-success' };
+
   return (
     <div
       data-testid="run-summary-panel"
       className="flex w-full max-w-2xl flex-col rounded-card border border-border-primary bg-surface-primary px-6 py-5 shadow-md"
     >
-      {/* Header */}
+      {/* Header — three states (complete / failed / review). */}
       <div className="flex items-start gap-3">
         <div
           className={cn(
             'mt-0.5 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full',
-            isFailed ? 'bg-status-error/15 text-status-error' : 'bg-status-success/15 text-status-success',
+            header.wrap,
           )}
         >
-          {isFailed ? <AlertTriangle size={18} /> : <CheckCircle2 size={18} />}
+          {header.icon}
         </div>
         <div className="min-w-0 flex-1">
-          <h2 className="text-lg font-semibold text-text-primary">
-            {isFailed ? 'Workflow stopped' : 'Workflow complete'}
+          <h2 className="text-lg font-semibold text-text-primary" data-testid="run-summary-title">
+            {header.title}
           </h2>
           <p className="truncate text-sm text-text-secondary" title={workflowLabel}>
             {workflowLabel}
+            {/* In the pre-terminal review state, surface the run's actual status so
+                the header never reads as if the run were finished. */}
+            {isReview && status ? <span className="text-text-tertiary"> · {status}</span> : null}
           </p>
         </div>
       </div>
+
+      {/* Failure reason — prominent in the failed state, degrades when absent. */}
+      {isFailed && (
+        <div
+          className="mt-4 rounded-card border border-status-error/30 bg-status-error/5 px-3 py-2"
+          data-testid="run-summary-error"
+        >
+          <div className="eyebrow mb-0.5 text-status-error">Session error</div>
+          <p className="text-sm text-text-secondary">
+            {errorMessage && errorMessage.trim().length > 0
+              ? errorMessage
+              : 'The run ended on an error. See the chat transcript below for details.'}
+          </p>
+        </div>
+      )}
+
+      {/* Review-gate hint — the run is still running and awaiting the operator's
+          decision, which is made via the pending question in the chat / review
+          queue below (not this panel). */}
+      {isReview && (
+        <p className="mt-4 text-sm text-text-secondary" data-testid="run-summary-review-hint">
+          The flow is paused at Human review. Approve or request changes from the pending
+          question in the chat below (or the review queue) — this summary is here to inform
+          that decision.
+        </p>
+      )}
 
       {/* Token usage breakdown (Run summary) */}
       <div className="mt-5">
@@ -354,8 +450,12 @@ export function WorkflowSummaryPanel({
         )}
       </div>
 
-      {/* Score summary (advisory code-review eval) */}
-      {runEval !== null && (
+      {/* Score summary (advisory code-review eval). Renders in the review and
+          complete states whenever an eval row exists — in review it is exactly the
+          decision input the eval was built to provide. Suppressed for failed runs
+          (a failed flow never reached the human-review trigger; a stale row from a
+          restarted predecessor would mislead). */}
+      {runEval !== null && !isFailed && (
         <ScoreSummary
           runEval={runEval}
           findings={findings}
@@ -364,9 +464,37 @@ export function WorkflowSummaryPanel({
         />
       )}
 
-      {/* CTAs */}
+      {/* CTAs — per variant. Review shows none (the decision is the pending
+          question below); failed offers Restart + Close out; complete keeps the
+          Complete / interactive Request-changes flow. */}
       <div className="mt-auto pt-5">
-        {sent ? (
+        {isReview ? null : isFailed ? (
+          <div className="flex items-center gap-2" data-testid="run-summary-failed-ctas">
+            {onRestarted && (
+              <button
+                type="button"
+                data-testid="run-summary-restart"
+                onClick={() => void handleRestart()}
+                disabled={restarting}
+                className="inline-flex items-center gap-1.5 rounded-button bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+                title="Relaunch the same flow in this session — it resumes from where it left off"
+              >
+                <RotateCcw size={15} />
+                {restarting ? 'Restarting…' : 'Restart flow'}
+              </button>
+            )}
+            <button
+              type="button"
+              data-testid="run-summary-close-out"
+              onClick={onComplete}
+              disabled={restarting}
+              className="inline-flex items-center gap-1.5 rounded-button border border-border-primary px-4 py-2 text-sm font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary disabled:opacity-50"
+            >
+              <Flag size={15} />
+              Close out
+            </button>
+          </div>
+        ) : sent ? (
           <p className="text-sm text-text-secondary" data-testid="run-summary-sent">
             Sent — continuing with the agent…
           </p>

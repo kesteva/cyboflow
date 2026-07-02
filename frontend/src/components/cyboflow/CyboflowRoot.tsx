@@ -57,6 +57,7 @@ import { RunEndDialog } from './RunEndDialog';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { useErrorStore } from '../../stores/errorStore';
 import { useRunEndEligibility } from '../../hooks/useRunEndEligibility';
+import { resolveRunSummaryVariant } from '../../hooks/useRunSummaryVariant';
 import { trpc } from '../../trpc/client';
 import { SessionActionToast } from './SessionActionToast';
 
@@ -274,6 +275,14 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
   // finished run's exit is not hidden in the top bar.
   const runEndEligible = useRunEndEligibility(activeRunId, activeRun?.status);
 
+  // Which summary state (if any) replaces the WorkflowCanvas: 'failed' (terminal
+  // error), 'complete' (end-eligible), or 'review' (run still running but paused at
+  // an open human-review gate — the summary is input to that decision, so it must
+  // surface the moment the gate opens, not only once the run rests/terminates). The
+  // review signal is derived from the SAME phaseState the canvas renders — no new
+  // subscription. null ⇒ keep the canvas.
+  const summaryVariant = resolveRunSummaryVariant(activeRun?.status, runEndEligible, phaseState);
+
   return (
     <div className="flex h-full flex-col">
       {/* Thin top header row */}
@@ -334,7 +343,7 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
               phaseState={phaseState}
               activeRun={activeRun}
               flowEndSummary={
-                runEndEligible ? (
+                summaryVariant !== null ? (
                   <div
                     style={{ background: GRAPH_PAPER_BACKGROUND }}
                     className="flex h-full items-start justify-center overflow-auto p-6"
@@ -346,7 +355,17 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                       status={activeRun?.status}
                       substrate={activeRun?.substrate}
                       workflowLabel={activeRun?.workflowName ?? activeRunId}
+                      variant={summaryVariant}
+                      errorMessage={activeRun?.error_message}
                       onComplete={() => setIsEndOpen(true)}
+                      onRestarted={(newRunId) => {
+                        // Same-session relaunch: swap the active run to the new one
+                        // (mirrors useLaunchWorkflow); this panel unmounts as the new
+                        // run's status propagates.
+                        if (activeRunSessionId !== null) {
+                          useCyboflowStore.getState().setActiveRun(newRunId, activeRunSessionId);
+                        }
+                      }}
                     />
                   </div>
                 ) : undefined
