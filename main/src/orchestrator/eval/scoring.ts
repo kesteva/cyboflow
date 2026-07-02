@@ -19,6 +19,7 @@ import {
   bandForFraction,
   type Rubric,
   type RubricSubCheck,
+  type RubricDimension,
   type DimensionKey,
   type CapFlag,
 } from './rubric';
@@ -152,9 +153,18 @@ interface SubCheckResolution {
   /**
    * PASS / FAIL when the sub-check has >=1 non-UNKNOWN, non-NA vote and the pass
    * share resolves; UNKNOWN when it only ever drew UNKNOWN votes; NOT_APPLICABLE
-   * when every vote was NA (or the sub-check drew no votes at all).
+   * when every vote was NA (or the sub-check drew no votes at all). Binary — used
+   * for counts + cap detection; the fractional dimension mean uses `passShare`.
    */
   resolved: Verdict;
+  /**
+   * Doc "K-sample mechanics": the sub-check's value is the pass share of its
+   * non-UNKNOWN samples (passVotes / (passVotes + failVotes)); null when the
+   * sub-check is not applicable (no decisive vote). This — NOT the binarized
+   * `resolved` — is what the dimension mean averages, so a 2-PASS/1-FAIL split
+   * contributes 0.667, not 1.0.
+   */
+  passShare: number | null;
   passVotes: number;
   failVotes: number;
   unknownVotes: number;
@@ -197,11 +207,15 @@ function resolveSubCheck(check: RubricSubCheck, samples: JudgeSample[]): SubChec
 
   const decisive = passVotes + failVotes;
   let resolved: Verdict;
+  let passShare: number | null;
   if (decisive > 0) {
-    resolved = passVotes / decisive >= 0.5 ? 'PASS' : 'FAIL';
+    passShare = passVotes / decisive;
+    resolved = passShare >= 0.5 ? 'PASS' : 'FAIL';
   } else if (unknownVotes > 0) {
+    passShare = null;
     resolved = 'UNKNOWN';
   } else {
+    passShare = null;
     resolved = 'NOT_APPLICABLE';
   }
 
@@ -209,6 +223,7 @@ function resolveSubCheck(check: RubricSubCheck, samples: JudgeSample[]): SubChec
     id: check.id,
     dimension: check.dimension,
     resolved,
+    passShare,
     passVotes,
     failVotes,
     unknownVotes,
@@ -227,18 +242,27 @@ interface DimensionAggregate extends DimensionScore {
 }
 
 function aggregateDimension(
-  key: DimensionKey,
-  name: string,
-  weight: number,
+  dim: RubricDimension,
   resolutions: SubCheckResolution[],
+  opts: { forcedScore?: number } = {},
 ): DimensionAggregate {
+  const { key, name, weight } = dim;
   const passCount = resolutions.filter((r) => r.resolved === 'PASS').length;
   const failCount = resolutions.filter((r) => r.resolved === 'FAIL').length;
   const unknownCount = resolutions.filter((r) => r.resolved === 'UNKNOWN').length;
   const naCount = resolutions.filter((r) => r.resolved === 'NOT_APPLICABLE').length;
 
-  const applicable = passCount + failCount; // non-UNKNOWN, non-NA resolved sub-checks
-  const active = applicable >= AGGREGATION.THIN_EVIDENCE_MIN_SUBCHECKS;
+  // Applicable = sub-checks with a decisive (non-UNKNOWN, non-NA) pass share.
+  const shares = resolutions
+    .map((r) => r.passShare)
+    .filter((s): s is number => s !== null);
+  const applicable = shares.length;
+
+  // Gate-dodge / forced-zero override (doc "Test gate-dodge"): a forced score makes
+  // the dimension ACTIVE even under the thin-evidence rule so the penalty cannot be
+  // erased by the sub-checks going NOT_APPLICABLE.
+  const forced = opts.forcedScore !== undefined;
+  const active = forced || applicable >= AGGREGATION.THIN_EVIDENCE_MIN_SUBCHECKS;
 
   if (!active) {
     return {
@@ -258,12 +282,26 @@ function aggregateDimension(
     };
   }
 
-  const rawFraction = passCount / applicable;
-  // Special ceilings (e.g. COR-2 self-authored-green tests => 0.89 cap on the
-  // dimension) apply only when that sub-check RESOLVED to FAIL. Take the tightest.
+  // Dimension score = MEAN of the per-sub-check pass shares (doc "K-sample
+  // mechanics"), NOT the count of binarized PASSes — a systematically split jury
+  // must not round up to Excellent.
+  const rawFraction = forced
+    ? (opts.forcedScore as number) / 100
+    : applicable > 0
+      ? shares.reduce((sum, s) => sum + s, 0) / applicable
+      : 0;
+
+  // Special ceilings apply only when their sub-check RESOLVED to FAIL: COR-2 self-
+  // authored-green-tests => 0.89; the catastrophic ROB-3/4/5 => Poor (0.39); the
+  // SCP-1/DES-2 dimension soft-caps => Fair (0.69). Plus conjunction pair caps
+  // (MTN-2 AND MTN-4 both FAIL => Fair). Take the tightest.
   const ceilings = resolutions
     .map((r) => r.failCeiling)
     .filter((c): c is number => c !== null);
+  const failedIds = new Set(resolutions.filter((r) => r.resolved === 'FAIL').map((r) => r.id));
+  for (const pc of dim.pairCaps ?? []) {
+    if (pc.whenAllFail.every((id) => failedIds.has(id))) ceilings.push(pc.ceiling);
+  }
   const ceiling = ceilings.length > 0 ? Math.min(...ceilings) : null;
   const cappedFraction = ceiling !== null ? Math.min(rawFraction, ceiling) : rawFraction;
 
@@ -307,13 +345,43 @@ function weightedGeometricMean(entries: Array<{ weight: number; score: number }>
   return Math.exp(logSum / totalWeight);
 }
 
-/** Overall (0-100, unrounded) for a set of dimension aggregates — active only. */
-function overallFromDimensions(dims: DimensionAggregate[]): number {
+/**
+ * Overall (0-100, unrounded) for a set of dimension aggregates — active only.
+ * Returns NULL when NO dimension is active: an inert diff is skipped, not
+ * penalized (doc "Thin-evidence dimensions"), so it never earns a 0/Poor verdict
+ * from no evidence — the caller persists a null overall / band instead.
+ */
+function overallFromDimensions(dims: DimensionAggregate[]): number | null {
   const active = dims.filter((d) => d.active && d.exactScore !== null);
-  if (active.length === 0) return 0;
+  if (active.length === 0) return null;
   return weightedGeometricMean(
     active.map((d) => ({ weight: d.weight, score: d.exactScore as number })),
   );
+}
+
+/**
+ * Gate-dodge override (doc "Test gate-dodge"): a behavior-changing diff whose Test
+ * dimension has TST-1 resolved FAIL (no runnable test reaches the changed path)
+ * FORCES the Test dimension to Poor (score 0). It enters the geometric mean floored
+ * at 1, dragging an otherwise-85 run to ≈60 — the penalty must survive even when
+ * the other TST sub-checks go NOT_APPLICABLE (which would otherwise mark the
+ * dimension thin-evidence INACTIVE and erase the penalty).
+ */
+function gateDodgeOpts(
+  dim: RubricDimension,
+  resolutions: SubCheckResolution[],
+): { forcedScore?: number } {
+  if (dim.key !== 'tests') return {};
+  const tst1 = resolutions.find((r) => r.id === 'TST-1');
+  return tst1 && tst1.resolved === 'FAIL' ? { forcedScore: 0 } : {};
+}
+
+/** Aggregate every dimension over `samples`, applying the gate-dodge override. */
+function aggregateAll(rubric: Rubric, samples: JudgeSample[]): DimensionAggregate[] {
+  return rubric.dimensions.map((dim) => {
+    const resolutions = dim.subChecks.map((check) => resolveSubCheck(check, samples));
+    return aggregateDimension(dim, resolutions, gateDodgeOpts(dim, resolutions));
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -360,7 +428,11 @@ function detectCaps(rubric: Rubric, samples: JudgeSample[]): CapDetection {
     }
     if (securityCapActive) {
       for (const f of sample.findings) {
-        if (f.dimension === 'security' && f.severity === 'error') {
+        // Only a CONFIRMED high/critical security finding soft-caps (doc line 123:
+        // a finding the judge cannot fully confirm is a PLAUSIBLE confidence-flag,
+        // NO soft-cap). `catastrophic` is the judge's confirmed marker; severity
+        // 'error' is the high/critical level. Both required.
+        if (f.dimension === 'security' && f.severity === 'error' && f.catastrophic === true) {
           triggers.add('security');
           flags.add('security_flag');
         }
@@ -401,22 +473,18 @@ export function scoreSamples(samples: JudgeSample[], opts: ScoreOptions = {}): S
   const rubric = opts.rubric ?? RUBRIC;
   const gate = opts.gateResults ?? null;
 
-  const dims: DimensionAggregate[] = rubric.dimensions.map((dim) => {
-    const resolutions = dim.subChecks.map((check) => resolveSubCheck(check, samples));
-    return aggregateDimension(dim.key, dim.name, dim.weight, resolutions);
-  });
+  const dims = aggregateAll(rubric, samples);
 
   const caps = detectCaps(rubric, samples);
   const gated = isGated(gate);
 
-  // Per-sample overalls (raw quality, no cap/gate) for the CI band.
-  const perSampleOveralls = samples.map((sample) => {
-    const sampleDims = rubric.dimensions.map((dim) => {
-      const resolutions = dim.subChecks.map((check) => resolveSubCheck(check, [sample]));
-      return aggregateDimension(dim.key, dim.name, dim.weight, resolutions);
-    });
-    return overallFromDimensions(sampleDims);
-  });
+  // Per-sample overalls (raw quality, no cap/gate) for the CI band. A sample with
+  // no active dimension yields null and is dropped from the spread.
+  const perSampleOveralls = samples
+    .map((sample) => overallFromDimensions(aggregateAll(rubric, [sample])))
+    .filter((v): v is number => v !== null);
+
+  const rawOverall = overallFromDimensions(dims);
 
   let overallScore: number | null;
   let band: string | null;
@@ -429,16 +497,22 @@ export function scoreSamples(samples: JudgeSample[], opts: ScoreOptions = {}): S
     band = GATED_SENTINEL;
     ciLow = null;
     ciHigh = null;
+  } else if (rawOverall === null) {
+    // No active dimension (inert diff): no evidence => no score, not a 0/Poor.
+    overallScore = null;
+    band = null;
+    ciLow = null;
+    ciHigh = null;
   } else {
-    let rawOverall = overallFromDimensions(dims);
+    let capped = rawOverall;
     if (caps.triggered) {
-      rawOverall = Math.min(rawOverall, AGGREGATION.OVERALL_CATASTROPHIC_CAP);
+      capped = Math.min(capped, AGGREGATION.OVERALL_CATASTROPHIC_CAP);
     }
-    overallScore = Math.round(rawOverall);
+    overallScore = Math.round(capped);
     band = bandForFraction(overallScore / 100).name;
 
-    let low = perSampleOveralls.length > 0 ? Math.min(...perSampleOveralls) : rawOverall;
-    let high = perSampleOveralls.length > 0 ? Math.max(...perSampleOveralls) : rawOverall;
+    let low = perSampleOveralls.length > 0 ? Math.min(...perSampleOveralls) : capped;
+    let high = perSampleOveralls.length > 0 ? Math.max(...perSampleOveralls) : capped;
     if (caps.triggered) {
       low = Math.min(low, AGGREGATION.OVERALL_CATASTROPHIC_CAP);
       high = Math.min(high, AGGREGATION.OVERALL_CATASTROPHIC_CAP);

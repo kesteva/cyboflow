@@ -244,6 +244,107 @@ describe('GATED sentinel', () => {
   });
 });
 
+describe('fractional per-sub-check pass share (not binary majority)', () => {
+  it('a systematically-split jury averages the pass FRACTIONS, not the binaries', () => {
+    // 4 correctness sub-checks, each 2-PASS/1-FAIL across 3 samples. Rubric: each
+    // contributes 0.667 => dimension mean 0.667 (Fair). A binary >=0.5 collapse
+    // would resolve each PASS and score the dimension 100 (Excellent).
+    const pick = idsOf('correctness').slice(0, 4);
+    const base = setDim('correctness', 'NOT_APPLICABLE');
+    const withPick = (v: Verdict): Record<string, Verdict> => ({
+      ...base,
+      ...Object.fromEntries(pick.map((id) => [id, v])),
+    });
+    const s1 = buildSample(withPick('PASS'));
+    const s2 = buildSample(withPick('PASS'));
+    const s3 = buildSample(withPick('FAIL'));
+    const c = dimByKey(scoreSamples([s1, s2, s3]), 'correctness');
+    expect(c.passFraction).toBeCloseTo(0.667, 2);
+    expect(c.score).toBe(67);
+    expect(c.band).toBe('Fair');
+    expect(c.score).not.toBe(100);
+  });
+});
+
+describe('dimension-level caps (ROB Poor, DES/SCP Fair, MTN-2∧MTN-4 Fair)', () => {
+  it('a catastrophic ROB-3 FAIL soft-caps the robustness dimension at Poor (<0.40)', () => {
+    const r = dimByKey(scoreSamples([buildSample({ 'ROB-3': 'FAIL' })]), 'robustness');
+    expect(r.ceiling).toBe(0.39);
+    expect(r.passFraction).toBeLessThanOrEqual(0.39);
+    expect(r.band).toBe('Poor');
+  });
+
+  it('a DES-2 FAIL soft-caps the design dimension at Fair (<=0.69)', () => {
+    const d = dimByKey(scoreSamples([buildSample({ 'DES-2': 'FAIL' })]), 'design');
+    expect(d.ceiling).toBe(0.69);
+    expect(d.passFraction).toBeLessThanOrEqual(0.69);
+  });
+
+  it('MTN-2 AND MTN-4 both FAIL caps maintainability at Fair via the pair rule', () => {
+    const m = dimByKey(
+      scoreSamples([buildSample({ 'MTN-2': 'FAIL', 'MTN-4': 'FAIL' })]),
+      'maintainability',
+    );
+    expect(m.ceiling).toBe(0.69);
+    expect(m.passFraction).toBeLessThanOrEqual(0.69);
+  });
+
+  it('MTN-2 alone (without MTN-4) does NOT trigger the pair cap', () => {
+    const m = dimByKey(scoreSamples([buildSample({ 'MTN-2': 'FAIL' })]), 'maintainability');
+    expect(m.ceiling).toBeNull();
+  });
+});
+
+describe('inert diff (no active dimension) earns NO score, not 0/Poor', () => {
+  it('yields null overall/band/CI when every sub-check is NOT_APPLICABLE', () => {
+    const overrides: Record<string, Verdict> = {};
+    for (const key of [
+      'correctness',
+      'security',
+      'robustness',
+      'design',
+      'maintainability',
+      'tests',
+      'scope',
+    ] as DimensionKey[]) {
+      setDim(key, 'NOT_APPLICABLE', overrides);
+    }
+    const result = scoreSamples([buildSample(overrides)]);
+    expect(result.overallScore).toBeNull();
+    expect(result.band).toBeNull();
+    expect(result.ciLow).toBeNull();
+    expect(result.ciHigh).toBeNull();
+    expect(result.gated).toBe(false);
+  });
+});
+
+describe('security cap requires a CONFIRMED (catastrophic) finding', () => {
+  it('does NOT fire on an unconfirmed high-severity security finding', () => {
+    const finding: JudgeFinding = {
+      subCheckId: 'SEC-2',
+      dimension: 'security',
+      severity: 'error',
+      title: 'possible SSRF (reachability uncertain)',
+      body: '',
+      netNew: true,
+      catastrophic: false, // PLAUSIBLE confidence-flag, not confirmed
+    };
+    const result = scoreSamples([buildSample({}, 'PASS', [finding])]);
+    expect(result.securityFlag).toBe(false);
+    expect(result.capTriggered).toBe(false);
+  });
+});
+
+describe('test gate-dodge forces an ACTIVE tests dimension despite thin evidence', () => {
+  it('TST-1 FAIL with all other TST sub-checks NA still scores tests 0 (not inactive)', () => {
+    const o = setDim('tests', 'NOT_APPLICABLE');
+    o['TST-1'] = 'FAIL';
+    const t = dimByKey(scoreSamples([buildSample(o)]), 'tests');
+    expect(t.active).toBe(true);
+    expect(t.score).toBe(0);
+  });
+});
+
 describe('special ceiling (COR-2 self-authored green tests)', () => {
   it('caps the correctness dimension at 0.89 when COR-2 resolves FAIL', () => {
     // All correctness PASS except COR-2 FAIL => raw fraction 8/9=0.889, but the

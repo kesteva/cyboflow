@@ -61,6 +61,17 @@ export interface RubricSubCheck {
   readonly specialCeiling: number | null;
 }
 
+/**
+ * A dimension-level ceiling that fires only when EVERY listed sub-check resolves
+ * FAIL together (a conjunction the per-sub-check `specialCeiling` cannot express).
+ * The doc's only such rule: Maintainability MTN-2 (naming) AND MTN-4 (size) both
+ * FAIL => cap the dimension at Fair (<=0.69).
+ */
+export interface DimensionPairCap {
+  readonly whenAllFail: readonly string[];
+  readonly ceiling: number;
+}
+
 export interface RubricDimension {
   readonly key: DimensionKey;
   /** Human display name from the doc's "Dimensions & weights" table. */
@@ -74,6 +85,8 @@ export interface RubricDimension {
    * dimension-level rather than tied to a single sub-check (doc: "SEC gate").
    */
   readonly overallCapOnHighSeverity: boolean;
+  /** Conjunction ceilings (doc "Gate / cap behavior"); empty for most dimensions. */
+  readonly pairCaps?: readonly DimensionPairCap[];
   readonly subChecks: readonly RubricSubCheck[];
 }
 
@@ -125,6 +138,10 @@ export const AGGREGATION = {
   THIN_EVIDENCE_MIN_SUBCHECKS: 2,
   /** COR-2 self-authored-green-tests ceiling (mirrors that sub-check's specialCeiling). */
   SELF_AUTHORED_TEST_CEILING: 0.89,
+  /** Fair-band ceiling (<=0.69): SCP-1 / DES-2 / MTN-2∧MTN-4 dimension soft-caps. */
+  FAIR_CEILING: 0.69,
+  /** Poor-band ceiling (<0.40): ROB-3/4/5 catastrophic dimension soft-cap. */
+  ROBUSTNESS_CATASTROPHIC_CEILING: 0.39,
 } as const;
 
 function subCheck(
@@ -305,7 +322,7 @@ const ROBUSTNESS_SUBCHECKS: readonly RubricSubCheck[] = [
     'Migration safety (SOLE OWNER of destructiveness/idempotency/parity): any new migration is forward-only, uses idempotent CREATE (IF NOT EXISTS/guarded), performs no destructive/irreversible ALTER on existing tables (no column drop/rename, no NOT NULL without default/backfill), and carries the accompanying schema-parity update.',
     'only when the diff adds/edits a file under the migrations directory or the schema/parity snapshot',
     'The parity artifact\'s location cannot be located in the snapshot even by grep — exclude only the parity clause; still judge destructive/idempotent clauses from the SQL present.',
-    { capTrigger: 'overall_fair_cap' },
+    { capTrigger: 'overall_fair_cap', specialCeiling: 0.39 },
   ),
   subCheck(
     'ROB-4',
@@ -313,7 +330,7 @@ const ROBUSTNESS_SUBCHECKS: readonly RubricSubCheck[] = [
     'Migration chain/collision integrity: BEFORE verdict the judge MUST enumerate the migrations directory in the snapshot; the new migration number must be strictly greater than the current max, collide with no existing/sibling migration, and be contiguous with the chain.',
     'only when the diff adds a new migration file',
     'The migrations directory is genuinely absent from the snapshot so no existing numbers can be enumerated (should be rare).',
-    { capTrigger: 'overall_fair_cap' },
+    { capTrigger: 'overall_fair_cap', specialCeiling: 0.39 },
   ),
   subCheck(
     'ROB-5',
@@ -321,7 +338,7 @@ const ROBUSTNESS_SUBCHECKS: readonly RubricSubCheck[] = [
     'Chokepoint & concurrency safety (SOLE OWNER of off-chokepoint bypass): all writes to ideas/epics/tasks/review_items/artifacts go through TaskChangeRouter.applyChange / ReviewItemRouter / ArtifactRouter (no raw UPDATE/INSERT bypassing them, incl. raw-UPDATE-with-no-emit), and async write/read paths have no missing await, TOCTOU race, or re-entrant double-write.',
     'only when the diff touches an entity/review/artifact write path or introduces/edits async or concurrent control flow',
     'A called helper\'s routing cannot be confirmed because its body is genuinely absent from the snapshot — exclude that call; still FAIL on any raw SQL visible in the diff.',
-    { capTrigger: 'overall_fair_cap' },
+    { capTrigger: 'overall_fair_cap', specialCeiling: 0.39 },
   ),
   subCheck(
     'ROB-6',
@@ -360,6 +377,7 @@ const DESIGN_SUBCHECKS: readonly RubricSubCheck[] = [
     'SOLE OWNER of preserved-seam/hidden-code integrity: AbstractCliManager is not collapsed into ClaudeCodeManager; the LIVE dual-substrate PTY methods (spawnPtyProcess/setupProcessHandlers/killProcessTree) are not pruned or relabeled @cyboflow-hidden; @cyboflow-hidden code is neither deleted nor added to actively-called code.',
     'only when the diff touches AbstractCliManager, ClaudeCodeManager, interactiveClaudeManager, the substrate facade/seam, or any @cyboflow-hidden-annotated region',
     'Whether the annotated code is truly live/dead cannot be determined even after grepping call sites in the snapshot.',
+    { specialCeiling: 0.69 },
   ),
   subCheck(
     'DES-3',
@@ -530,7 +548,7 @@ const SCOPE_SUBCHECKS: readonly RubricSubCheck[] = [
     'Every explicit OR clearly-implied acceptance criterion in the task spec (derived from prose where the body is not bullet-listed) is implemented by some hunk in the diff.',
     'always',
     'The spec is so vague that no discrete requirement can be responsibly derived even from the prose — reserve UNKNOWN for genuinely contentless goals, not merely un-bulleted ones.',
-    { capTrigger: 'overall_fair_cap', capFlag: 'requirements_unmet' },
+    { capTrigger: 'overall_fair_cap', capFlag: 'requirements_unmet', specialCeiling: 0.69 },
   ),
   subCheck(
     'SCP-2',
@@ -621,6 +639,9 @@ export const RUBRIC: Rubric = {
       name: 'Maintainability & Simplicity',
       weight: 12,
       overallCapOnHighSeverity: false,
+      // Doc "Gate / cap behavior": MTN-2 (naming) AND MTN-4 (size) both FAIL caps
+      // the dimension at Fair (<=0.69) — a conjunction, not a per-sub-check ceiling.
+      pairCaps: [{ whenAllFail: ['MTN-2', 'MTN-4'], ceiling: 0.69 }],
       subChecks: MAINTAINABILITY_SUBCHECKS,
     },
     {
@@ -692,7 +713,10 @@ export function serializeRubricForPrompt(rubric: Rubric = RUBRIC): string {
     lines.push(
       `[${index + 1}] ${dim.key} :: ${dim.name} :: weight=${dim.weight} ::` +
         ` subchecks=${dim.subChecks.length}` +
-        (dim.overallCapOnHighSeverity ? ' :: overall_cap_on_high_severity' : ''),
+        (dim.overallCapOnHighSeverity ? ' :: overall_cap_on_high_severity' : '') +
+        (dim.pairCaps ?? [])
+          .map((pc) => ` :: pair_cap(${pc.whenAllFail.join('+')})<=${pc.ceiling}`)
+          .join(''),
     );
     for (const check of dim.subChecks) {
       const flags: string[] = [];
