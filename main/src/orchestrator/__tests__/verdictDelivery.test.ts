@@ -329,6 +329,75 @@ describe('verdictDelivery (P8a)', () => {
     expect(findings[0].entity_id).toBeNull();
   });
 
+  it('R7: enrich carries verdict.baselineKey from the request input (round-trip key for Accept-as-baseline)', async () => {
+    seedRun(db, 'run-bk', 'tsk_bk');
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+
+    await deliver({
+      requestId: 'vr_bk',
+      runId: 'run-bk',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'passed',
+      verdict: PASS_VERDICT,
+      fileNames: ['home.png'],
+      input: { intent: 'landing renders', baselineKey: 'landing-page' },
+    });
+
+    const arts = screenshotsRows(db, 'run-bk');
+    expect(arts).toHaveLength(1);
+    const payload = JSON.parse(arts[0].payload_json ?? '{}') as ScreenshotsArtifactPayload;
+    // The hydrated key is carried INSIDE the verdict block so the tab's Accept
+    // button files accepted baselines under the SAME namespace the SSIM pre-diff
+    // resolves them by (not the opaque per-run artifact id).
+    expect(payload.verdict?.baselineKey).toBe('landing-page');
+  });
+
+  it('R7: absent input.baselineKey → the verdict block has NO baselineKey field (not undefined-serialized)', async () => {
+    seedRun(db, 'run-nobk', 'tsk_nobk');
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+
+    await deliver({
+      requestId: 'vr_nobk',
+      runId: 'run-nobk',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'passed',
+      verdict: PASS_VERDICT,
+      fileNames: ['home.png'],
+      input: { intent: 'landing renders' }, // no baselineKey
+    });
+
+    const arts = screenshotsRows(db, 'run-nobk');
+    expect(arts).toHaveLength(1);
+    const rawPayload = JSON.parse(arts[0].payload_json ?? '{}') as ScreenshotsArtifactPayload;
+    expect(rawPayload.verdict?.status).toBe('pass');
+    // The key is OMITTED, not present-as-undefined — assert on the raw parsed object.
+    expect(rawPayload.verdict && 'baselineKey' in rawPayload.verdict).toBe(false);
+  });
+
+  it('R7: no input at all → verdict enriched with no baselineKey (byte-safe)', async () => {
+    seedRun(db, 'run-noinput', 'tsk_ni');
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+
+    await deliver({
+      requestId: 'vr_ni',
+      runId: 'run-noinput',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'passed',
+      verdict: PASS_VERDICT,
+      fileNames: ['home.png'],
+      // input omitted entirely
+    });
+
+    const arts = screenshotsRows(db, 'run-noinput');
+    expect(arts).toHaveLength(1);
+    const payload = JSON.parse(arts[0].payload_json ?? '{}') as ScreenshotsArtifactPayload;
+    expect(payload.verdict?.status).toBe('pass');
+    expect(payload.verdict && 'baselineKey' in payload.verdict).toBe(false);
+  });
+
   it('enrich is idempotent — a pre-existing screenshots artifact is UPDATED, not duplicated', async () => {
     seedRun(db, 'run-6', 'tsk_idem');
     // Producer already minted the screenshots artifact with just fileNames.

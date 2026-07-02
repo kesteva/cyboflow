@@ -239,6 +239,18 @@ export interface VerdictV1 {
    */
   verdictSource?: 'ssim_match' | 'vlm_verdict';
   ssimScore?: number;
+  /**
+   * The stable baseline handle this verdict's deliverable is filed under (R7 —
+   * threaded from the delivered request's `input.baselineKey`, which R2 hydrates
+   * from `.cyboflow/verify.json` as `deliverable.baselineKey ?? deliverable.id`).
+   * Carried INSIDE the verdict block so the enrich chokepoint delivers it to the
+   * screenshots-tab Accept-as-baseline button, which uses THIS key (not the opaque
+   * per-run artifact row id) so accepted PNGs land in the SAME namespace the SSIM
+   * pre-diff later resolves baselines by. OPTIONAL: absent when the request carried
+   * no baselineKey (a raw inline request with no verify.json deliverable) — the
+   * button is then disabled rather than minting an orphaned id-keyed baseline.
+   */
+  baselineKey?: string;
 }
 
 /**

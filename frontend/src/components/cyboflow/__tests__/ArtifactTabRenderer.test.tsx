@@ -390,7 +390,7 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.queryByTestId('artifact-verdict-issues')).not.toBeInTheDocument();
   });
 
-  it('shows the Accept-as-baseline button ONLY on a PASS verdict and calls the mutation', async () => {
+  it('R7: Accept-as-baseline uses verdict.baselineKey (NOT artifact.sourceRef) and calls the mutation', async () => {
     setHook({
       loading: false,
       error: null,
@@ -406,6 +406,10 @@ describe('ArtifactTabRenderer', () => {
             judgedFileNames: ['home.png'],
             baselineUsed: false,
             model: 'claude-opus-4-8',
+            // R7: the hydrated stable key threaded through the verdict block. Note it
+            // is DELIBERATELY different from the artifact's sourceRef below to prove
+            // the button no longer falls back to sourceRef/id.
+            baselineKey: 'landing-page',
           },
         },
       },
@@ -425,12 +429,50 @@ describe('ArtifactTabRenderer', () => {
       expect(acceptBaselineMutate).toHaveBeenCalledWith({
         projectId: 1,
         runId: 'run-1',
-        baselineKey: 'IDEA-018',
+        baselineKey: 'landing-page', // from verdict, NOT the 'IDEA-018' sourceRef
         fileNames: ['home.png'],
       }),
     );
     // After acceptance the button reflects the saved state.
     await waitFor(() => expect(btn).toHaveTextContent('✓ Saved as baseline'));
+  });
+
+  it('R7: Accept-as-baseline is DISABLED (with a tooltip) when the verdict carries no baselineKey', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: {
+        kind: 'screenshots',
+        payload: {
+          fileNames: ['home.png'],
+          verdict: {
+            status: 'pass',
+            confidence: 0.9,
+            issues: [],
+            feedback: 'ok',
+            judgedFileNames: ['home.png'],
+            baselineUsed: false,
+            model: 'claude-opus-4-8',
+            // no baselineKey — no stable handle to file the baseline under.
+          },
+        },
+      },
+    });
+    render(
+      // sourceRef IS present, proving the button no longer falls back to it.
+      <ArtifactTabRenderer
+        artifact={makeArtifact({ atype: 'screenshots', mode: 'template', sourceRef: 'IDEA-018' })}
+        {...PROPS}
+      />,
+    );
+
+    const btn = screen.getByTestId('artifact-accept-baseline-button');
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute('title', expect.stringContaining('verify.json'));
+
+    // Clicking a disabled button must NOT fire the mutation.
+    fireEvent.click(btn);
+    expect(acceptBaselineMutate).not.toHaveBeenCalled();
   });
 
   it('does NOT render the Accept-as-baseline button on a FAIL verdict', () => {

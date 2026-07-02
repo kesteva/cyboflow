@@ -469,8 +469,15 @@ function VerdictBanner({
   verdict: VerdictV1;
   projectId: number;
   runId: string;
-  /** The key the accepted baseline PNGs are filed under (the deliverable/artifact key). */
-  baselineKey: string;
+  /**
+   * The STABLE key the accepted baseline PNGs are filed under (R7): the delivered
+   * request's hydrated `input.baselineKey` (deliverable.baselineKey ?? deliverable.id),
+   * carried through the verdict block by the verdict-delivery chokepoint. `undefined`
+   * when the request declared no baseline key — the Accept button is then DISABLED
+   * (a baseline filed under an ad-hoc key the SSIM pre-diff never resolves would be
+   * orphaned git-committed junk).
+   */
+  baselineKey?: string;
 }): ReactElement {
   const { accent, icon, label } = verdictPresentation(verdict.status);
   const confidencePct = Math.round((verdict.confidence ?? 0) * 100);
@@ -487,10 +494,19 @@ function VerdictBanner({
   const judgedFileNames = Array.isArray(verdict.judgedFileNames)
     ? verdict.judgedFileNames.filter((n): n is string => typeof n === 'string')
     : [];
-  const canAccept = verdict.status === 'pass' && judgedFileNames.length > 0 && !accepted;
+  // Gated on a PRESENT baselineKey (R7): without a stable key the accepted PNGs
+  // would file under an ad-hoc namespace the SSIM pre-diff never resolves (orphaned
+  // git junk), so the button is disabled + explained via tooltip instead.
+  const hasBaselineKey = typeof baselineKey === 'string' && baselineKey.length > 0;
+  const canAccept =
+    verdict.status === 'pass' && judgedFileNames.length > 0 && hasBaselineKey && !accepted;
 
   const onAcceptBaseline = (): void => {
+    // Narrow baselineKey to a non-empty string here so the mutation input (which
+    // requires a string key) type-checks — the button is already disabled when it
+    // is absent (canAccept), this is the defensive re-check.
     if (accepting || !canAccept) return;
+    if (typeof baselineKey !== 'string' || baselineKey.length === 0) return;
     setAccepting(true);
     setAcceptError(null);
     trpc.cyboflow.artifacts.acceptAsBaseline
@@ -597,6 +613,11 @@ function VerdictBanner({
             data-testid="artifact-accept-baseline-button"
             onClick={onAcceptBaseline}
             disabled={!canAccept || accepting}
+            title={
+              !hasBaselineKey
+                ? 'No stable baseline key — declare the deliverable in .cyboflow/verify.json'
+                : undefined
+            }
             style={{
               fontSize: '10px',
               fontWeight: 700,
@@ -690,9 +711,16 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
           verdict={verdict}
           projectId={projectId}
           runId={artifact.runId}
-          // Default the baseline key to the deliverable/artifact key (sourceRef when
-          // present, else the artifact id) so accepted PNGs file under a stable handle.
-          baselineKey={artifact.sourceRef ?? artifact.id}
+          // R7: the baseline key is the STABLE handle threaded through the verdict
+          // block by the verdict-delivery chokepoint (the request's hydrated
+          // input.baselineKey). It is the ONLY key the SSIM pre-diff later resolves
+          // baselines by — so accepting under the opaque per-run artifact id would
+          // orphan the baseline. Absent ⇒ the banner disables the Accept button.
+          baselineKey={
+            typeof verdict.baselineKey === 'string' && verdict.baselineKey.length > 0
+              ? verdict.baselineKey
+              : undefined
+          }
         />
       )}
       {loading ? (

@@ -198,7 +198,18 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
     // its "new" dot just because a verdict arrived.
     if (verdict) {
       try {
-        const payload: ScreenshotsArtifactPayload = { fileNames, verdict };
+        // R7 (finding #1): thread the hydrated baselineKey THROUGH delivery so the
+        // screenshots-tab Accept-as-baseline button files accepted PNGs under the
+        // SAME stable key the SSIM pre-diff later resolves baselines by (input's
+        // baselineKey = deliverable.baselineKey ?? deliverable.id, hydrated by R2).
+        // Carried inside the verdict block. Omitted (not undefined-serialized) when
+        // the request carried no baselineKey — the button then disables rather than
+        // minting an orphan keyed by the opaque per-run artifact row id.
+        const enrichedVerdict: VerdictV1 =
+          input?.baselineKey !== undefined && input.baselineKey.length > 0
+            ? { ...verdict, baselineKey: input.baselineKey }
+            : verdict;
+        const payload: ScreenshotsArtifactPayload = { fileNames, verdict: enrichedVerdict };
         await ArtifactRouter.getInstance().apply(projectId, {
           op: 'create',
           runId,

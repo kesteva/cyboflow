@@ -1774,6 +1774,74 @@ describe('autoMintArtifacts.handleVisualArtifactsScan', () => {
     expect(art!.step_origin).toBe('Ship · visual-verify');
   });
 
+  it('R7: PRESERVES an existing verdict block (with baselineKey) across a re-mint (banner survives a step transition)', async () => {
+    // Regression (fails on pre-R7 code): the verdict-delivery hook enriched the
+    // screenshots artifact with `{ fileNames, verdict }`; the next step 'running'
+    // transition fires this safety-net scan, which re-mints from the PNGs on disk.
+    // Before the fix it wrote plain `{ fileNames }` and ArtifactRouter's wholesale
+    // payload replace ERASED the verdict (banner + Accept button data vanished). It
+    // must now merge: fresh fileNames + the preserved verdict block.
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    seedSprintRun(db, 'run-s', 'batch-1');
+
+    // The verdict-delivery hook already enriched the SAME artifact.
+    await ArtifactRouter.getInstance().apply(1, {
+      op: 'create',
+      runId: 'run-s',
+      atype: 'screenshots',
+      label: '1 screenshot',
+      payloadJson: JSON.stringify({
+        fileNames: ['home.png'],
+        verdict: {
+          status: 'pass',
+          confidence: 0.95,
+          issues: [],
+          feedback: 'looks right',
+          judgedFileNames: ['home.png'],
+          baselineUsed: false,
+          model: 'fake',
+          baselineKey: 'landing-page',
+        },
+      }),
+      actor: 'orchestrator',
+    });
+
+    // A later step transition fires the scan; the PNGs on disk now include a new one.
+    useDir(makeRunDir(['detail.png', 'home.png']));
+    await handleVisualArtifactsScan(adapter, 'run-s');
+
+    const art = readArtifact(db, 'run-s', 'screenshots');
+    expect(art).toBeDefined();
+    const payload = JSON.parse(art!.payload_json!) as {
+      fileNames: string[];
+      verdict?: { status: string; baselineKey?: string };
+    };
+    // Fresh fileNames win …
+    expect(payload.fileNames).toEqual(['detail.png', 'home.png']);
+    // … and the verdict block (banner + Accept button's baselineKey) SURVIVES.
+    expect(payload.verdict?.status).toBe('pass');
+    expect(payload.verdict?.baselineKey).toBe('landing-page');
+  });
+
+  it('R7: a scan with no pre-existing verdict writes a byte-identical { fileNames } payload (no regression)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    TaskChangeRouter.initialize(adapter);
+    ArtifactRouter.initialize(adapter);
+    seedSprintRun(db, 'run-s', 'batch-1');
+    useDir(makeRunDir(['home.png']));
+
+    await handleVisualArtifactsScan(adapter, 'run-s');
+
+    const art = readArtifact(db, 'run-s', 'screenshots');
+    expect(art).toBeDefined();
+    // No verdict key when none pre-existed — byte-identical to the pre-R7 payload.
+    expect(art!.payload_json).toBe(JSON.stringify({ fileNames: ['home.png'] }));
+  });
+
   it('is idempotent: re-scanning the same files yields ONE row and exactly ONE created event', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
