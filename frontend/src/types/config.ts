@@ -16,6 +16,10 @@ export interface AppConfig {
   interactivePtyOnly?: boolean;
   // Global default agent permission mode for workflow runs on both substrates ('default' | 'acceptEdits' | 'auto' | 'dontAsk'). Floors to 'default' when unset.
   defaultAgentPermissionMode?: PermissionMode;
+  // Global on/off for the code-review eval (the K=3 Opus jury pass fired at a
+  // built-in flow's human-review step). Absent/undefined = ENABLED. A per-run
+  // Configure override (workflow_runs.eval_enabled) outranks this; NULL inherits it.
+  codeReviewEvalEnabled?: boolean;
   // On-disk location for COMMITTED-artifact manifests (FEATURE #3 durability
   // snapshot). Relative paths resolve against the project ROOT; absolute paths
   // are used verbatim. Floors to '.cyboflow/artifacts' when unset.

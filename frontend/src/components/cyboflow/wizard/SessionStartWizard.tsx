@@ -211,6 +211,12 @@ export default function SessionStartWizard(): React.JSX.Element {
   // separate opt-in, default OFF, QUICK-only, surfaced only while Opus is selected.
   const [model, setModel] = useState<string>(DEFAULT_QUICK_MODEL);
   const [fastMode, setFastMode] = useState<boolean>(false);
+  // Advanced (Configure ③, WORKFLOW only): per-run code-review-eval override.
+  // 'inherit' → omit `evalEnabled` (the run inherits the global codeReviewEvalEnabled
+  // setting); 'on'/'off' → send true/false → workflow_runs.eval_enabled (migration
+  // 044). Meaningless for a quick session (evals only fire for built-in flows), so
+  // the control is not shown there. Default 'inherit' keeps launches byte-identical.
+  const [evalOverride, setEvalOverride] = useState<'inherit' | 'on' | 'off'>('inherit');
   // Advanced (Configure ③, quick only): per-session MCP DENY set + plugin
   // selection, chosen at session start (NOT a mid-conversation toggle — enforced
   // at the first spawn). Threaded into createQuick; collapsed by default.
@@ -465,6 +471,10 @@ export default function SessionStartWizard(): React.JSX.Element {
           permissionMode,
           // Per-run model pin (migration 037) — the Configure picker, default Opus.
           model,
+          // Per-run code-review-eval override (migration 044) — Advanced options.
+          // 'inherit' omits the field (inherit the global setting); on/off send a
+          // boolean. A per-run ON does NOT unlock quick/custom flows server-side.
+          ...(evalOverride !== 'inherit' ? { evalEnabled: evalOverride === 'on' } : {}),
           ...(ideaId !== undefined ? { ideaId } : {}),
           ...(selectedFindingIds?.length && meta?.name === 'compound'
             ? { findingIds: selectedFindingIds }
@@ -495,7 +505,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, selectedFindingIds],
+    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride, selectedFindingIds],
   );
 
   // Sprint launch — ONE session-hosted run seeded with the multi-selected task
@@ -522,6 +532,8 @@ export default function SessionStartWizard(): React.JSX.Element {
           permissionMode,
           // Per-run model pin (migration 037) — the Configure picker, default Opus.
           model,
+          // Per-run code-review-eval override (migration 044) — Advanced options.
+          ...(evalOverride !== 'inherit' ? { evalEnabled: evalOverride === 'on' } : {}),
           taskIds,
         });
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
@@ -539,7 +551,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model],
+    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride],
   );
 
   const handleStart = useCallback(() => {
@@ -886,6 +898,73 @@ export default function SessionStartWizard(): React.JSX.Element {
                         </span>
                       </div>
                       <PluginTogglePill selected={enabledPlugins} onChange={setEnabledPlugins} />
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Advanced (WORKFLOW only): per-run code-review-eval override. Evals
+                only fire for built-in flows at their human-review step, so this is
+                meaningless for a quick session and is not shown there. 'Use global
+                setting' omits the field (inherit the Settings toggle); On/Off pin
+                workflow_runs.eval_enabled for this run (migration 044). Collapsed by
+                default — reuses showAdvanced (only one selection kind renders). */}
+            {selection.kind === 'workflow' && (
+              <div className="rounded-button border border-border-secondary bg-surface-secondary">
+                <button
+                  type="button"
+                  onClick={() => setShowAdvanced((v) => !v)}
+                  data-testid="wizard-workflow-advanced-toggle"
+                  aria-expanded={showAdvanced}
+                  className="flex w-full items-center justify-between px-3 py-2 text-sm font-medium text-text-primary"
+                >
+                  <span>Advanced</span>
+                  <ChevronDown
+                    className={cn(
+                      'h-4 w-4 text-text-tertiary transition-transform',
+                      showAdvanced && 'rotate-180',
+                    )}
+                  />
+                </button>
+                {showAdvanced && (
+                  <div
+                    className="flex flex-col gap-2 border-t border-border-secondary px-3 py-3"
+                    data-testid="wizard-workflow-advanced-body"
+                  >
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-sm font-medium text-text-primary">Quality eval</span>
+                      <span className="text-xs text-text-tertiary">
+                        LLM-jury review of this run's diff at the review step
+                      </span>
+                    </div>
+                    <div
+                      className="flex gap-1.5"
+                      role="radiogroup"
+                      aria-label="Quality eval"
+                    >
+                      {([
+                        { value: 'inherit', label: 'Use global setting' },
+                        { value: 'on', label: 'On' },
+                        { value: 'off', label: 'Off' },
+                      ] as const).map(({ value, label }) => (
+                        <button
+                          key={value}
+                          type="button"
+                          role="radio"
+                          aria-checked={evalOverride === value}
+                          onClick={() => setEvalOverride(value)}
+                          data-testid={`wizard-eval-${value}`}
+                          className={cn(
+                            'flex-1 rounded-button border px-2 py-1.5 text-xs font-medium transition-colors',
+                            evalOverride === value
+                              ? 'border-interactive bg-interactive-surface text-text-primary'
+                              : 'border-border-secondary bg-bg-primary text-text-secondary hover:bg-surface-hover',
+                          )}
+                        >
+                          {label}
+                        </button>
+                      ))}
                     </div>
                   </div>
                 )}

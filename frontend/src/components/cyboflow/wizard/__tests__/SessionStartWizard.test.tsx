@@ -368,6 +368,57 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ model: 'sonnet' }));
   });
 
+  it('omits evalEnabled when the Quality eval control is left on "Use global setting"', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    // The Advanced section is collapsed by default — the control is not yet mounted.
+    expect(screen.queryByTestId('wizard-eval-off')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    // Default 'inherit' → the field is not sent, so the run inherits the global toggle.
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    const startArg = mockRunStart.mock.calls[0][0] as Record<string, unknown>;
+    expect(startArg).not.toHaveProperty('evalEnabled');
+  });
+
+  it('threads evalEnabled=false when the Quality eval override is set to Off (Advanced)', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-workflow-advanced-toggle'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-eval-off'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ evalEnabled: false }));
+  });
+
+  it('threads evalEnabled=true when the Quality eval override is set to On (Advanced)', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-workflow-advanced-toggle'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-eval-on'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ evalEnabled: true }));
+  });
+
   it('always forces a NEW session — never absorbs the selected quick session', async () => {
     // Regression: the wizard IS the explicit "Start a new session" surface, so it
     // must call ensureSessionForLaunch with forceNew:true. Without this it silently

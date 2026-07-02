@@ -52,6 +52,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Global CLI runtime: false = allow SDK (per-run picker available, default
   // 'sdk'); true = force the interactive PTY substrate everywhere (SDK disabled).
   const [interactivePtyOnly, setInteractivePtyOnly] = useState(false);
+  // Global code-review-eval toggle (default ON) — the K=3 Opus jury pass fired at
+  // a built-in flow's human-review step. A per-run Configure override outranks it.
+  const [codeReviewEvalEnabled, setCodeReviewEvalEnabled] = useState(true);
   // Telemetry is opt-out (default on). These flags take effect after a restart
   // since the SDKs are initialized once at boot.
   const [errorReportingEnabled, setErrorReportingEnabled] = useState(true);
@@ -106,6 +109,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
       setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
       setInteractivePtyOnly(data.interactivePtyOnly ?? false);
+      setCodeReviewEvalEnabled(data.codeReviewEvalEnabled ?? true);
       setErrorReportingEnabled(data.telemetry?.errorReportingEnabled ?? true);
       setUsageMetricsEnabled(data.telemetry?.usageMetricsEnabled ?? true);
       setArtifactCommitDir(data.artifactCommitDir ?? '');
@@ -146,6 +150,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         enableCyboflowFooter,
         defaultAgentPermissionMode,
         interactivePtyOnly,
+        codeReviewEvalEnabled,
         // Empty field → undefined → the getter floors to the default (config.json
         // stays free of the key). A set value is trimmed before persisting.
         artifactCommitDir: artifactCommitDir.trim() ? artifactCommitDir.trim() : undefined,
@@ -391,6 +396,41 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                   substrate and hides the per-run picker. Pause/Resume (SDK-only) become unavailable, and
                   the interactive substrate carries v1 limits. Only affects runs started after you save;
                   demo mode always uses the SDK.
+                </p>
+              </SettingsSection>
+
+              <SettingsSection
+                title="Code Review Eval"
+                description="Automatic LLM-jury quality assessment of a flow's diff at the review step"
+                icon={<ShieldCheck className="w-4 h-4" />}
+              >
+                <div className="flex flex-col gap-1.5">
+                  {([
+                    { enabled: true, label: 'On', hint: 'Default · grade every built-in flow run' },
+                    { enabled: false, label: 'Off', hint: 'Skip the jury pass — no eval cost' },
+                  ] as const).map(({ enabled, label, hint }) => (
+                    <button
+                      key={label}
+                      type="button"
+                      onClick={() => setCodeReviewEvalEnabled(enabled)}
+                      aria-pressed={codeReviewEvalEnabled === enabled}
+                      className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+                        codeReviewEvalEnabled === enabled
+                          ? 'border-interactive bg-interactive-surface'
+                          : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                      }`}
+                    >
+                      <span className="text-text-primary font-medium text-sm">{label}</span>
+                      <span className="text-xs text-text-tertiary">{hint}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-text-tertiary mt-2">
+                  When a built-in flow (Sprint / Ship) reaches its human-review step, Cyboflow can run a
+                  K=3 Opus jury pass over the run's diff and file any findings into the review queue. Each
+                  eval costs a real Opus jury call. Turn it off to skip it globally; a per-run "Quality
+                  eval" override in the launch wizard's Advanced options can force it on or off for a single
+                  run. Only affects runs started after you save.
                 </p>
               </SettingsSection>
 
