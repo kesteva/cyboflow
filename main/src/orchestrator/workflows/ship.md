@@ -86,9 +86,10 @@ them between phases.
    (or the user explicitly asked for an architecture writeup). Report the step,
    then delegate to `cyboflow-architecture` with the spec (plus prototype notes
    when one exists). Fold its `## Architecture design` section into the idea body
-   via `cyboflow_update_task` — append the section to the existing body; the
-   arch-design deliverable tab derives from it automatically, so you do **not**
-   report an artifact for this step. Skip when the flag is `no`.
+   via `cyboflow_update_task` — when the body already has an `## Architecture
+   design` section, REPLACE that section (never stack a second copy); otherwise
+   append it. The arch-design deliverable tab derives from the body automatically,
+   so you do **not** report an artifact for this step. Skip when the flag is `no`.
 6. **approve-design** → **human gate, inline — ONLY when step 4 or 5 ran.** When
    neither ran, do **not** ask — continue straight to epics. Use
    **AskUserQuestion** (header `Approve design`, options Approve / Revise ONLY;
@@ -97,7 +98,8 @@ them between phases.
    - **Approve** → continue to epics.
    - **Revise** → re-delegate the relevant subagent(s) with the feedback, refresh
      the artifact (a repeat `cyboflow_report_artifact` call with the same atype
-     enriches the same tab) / re-fold the body, and re-ask. Do **not** proceed to
+     enriches the same tab) / re-fold the body (REPLACING the existing
+     `## Architecture design` section), and re-ask. Do **not** proceed to
      epics until the user answers Approve.
 7. **epics** (large ideas only) → delegate to `cyboflow-epics`; create each
    returned epic and link it to the originating idea via `cyboflow_*`. A `small`
@@ -309,7 +311,10 @@ Enter this phase only after **every** lane is terminal (`integrated` or
 - **Failed lanes never block the gate** — they are reported at it. The user
   decides what to do with a partially-failed sprint.
 - Report every step transition via `cyboflow_report_step` from this main session —
-  including the steps whose work you delegated to a subagent.
+  including the steps whose work you delegated to a subagent. When a design step id
+  (`ui-prototype`, `architecture`, `approve-design`) is missing from the appended
+  step-reporting list (an older user-edited definition), still run the phases the
+  flags call for — just skip those steps' reports (unknown ids are rejected).
 
 ## Step reporting
 

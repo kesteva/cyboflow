@@ -20,8 +20,16 @@ the run diff.
 
 ## Serving it
 
-Pick a random port in 8100–8999 and verify it is free, then start a detached
-static server and confirm it serves:
+First check whether a server for THIS run's prototype dir is already running (a
+prior revise round started one) — if so, reuse its port instead of starting a
+second one:
+
+```bash
+pgrep -fl "http.server.*$CYBOFLOW_RUN_ARTIFACTS_DIR/prototype"
+```
+
+Otherwise pick a random port in 8100–8999 and verify it is free, then start a
+detached static server and confirm it serves:
 
 ```bash
 mkdir -p "$CYBOFLOW_RUN_ARTIFACTS_DIR/prototype"
@@ -30,7 +38,10 @@ nohup python3 -m http.server PORT --directory "$CYBOFLOW_RUN_ARTIFACTS_DIR/proto
 curl -sf "http://localhost:PORT/" >/dev/null
 ```
 
-The server is a throwaway; it is fine that it dies with the session.
+The detached server intentionally OUTLIVES this run so the human can keep the
+prototype tab open; it serves only static files from the run's artifacts dir and
+costs nothing meaningful. It is not cleaned up automatically — the user can kill
+it any time (`pkill -f "http.server.*prototype"`).
 
 You run in your own context window and do **not** write cyboflow state — never
 call the cyboflow MCP write tools and never call AskUserQuestion; the orchestrator
