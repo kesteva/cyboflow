@@ -411,7 +411,6 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'context',
             mcps: ['filesystem', 'web-search'],
             retries: 0,
-            human: true,
             desc: "Parse the user's prompt, scan the codebase, capture the idea in the DB.",
             outputArtifact: { atype: 'idea-spec', label: 'Idea spec' },
           },
@@ -674,7 +673,6 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'context',
             mcps: ['filesystem', 'web-search'],
             retries: 0,
-            human: true,
             desc: "Parse the user's prompt, scan the codebase, capture the idea in the DB.",
           },
           {

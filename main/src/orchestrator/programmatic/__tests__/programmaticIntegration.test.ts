@@ -311,14 +311,15 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
     // approve-design/approve-plan/decompose) did NOT spawn.
     const stepPrompts = spawner.calls.map((c) => c.prompt);
     expect(spawner.calls).toHaveLength(6);
-    expect(stepPrompts.some((p) => p.includes('`context`'))).toBe(true); // agent-then-gate: agent DID run
+    expect(stepPrompts.some((p) => p.includes('`context`'))).toBe(true);
     expect(stepPrompts.some((p) => p.includes('`epics`'))).toBe(true);
     expect(stepPrompts.some((p) => p.includes('`tasks`'))).toBe(true);
 
-    // All five human gates were opened AND resolved (context's trailing gate +
-    // approve-idea + approve-design + approve-plan + decompose).
+    // All four human gates were opened AND resolved (approve-idea +
+    // approve-design + approve-plan + decompose). context no longer carries a
+    // bogus `human: true` (it soft-blocked runs at step 1 on both planes).
     const rows = reviewRows(db, 'run-int');
-    expect(rows).toHaveLength(5);
+    expect(rows).toHaveLength(4);
     expect(rows.every((r) => r.status === 'resolved')).toBe(true);
     expect(rows.every((r) => r.source.startsWith('gate:human-step:'))).toBe(true);
 
