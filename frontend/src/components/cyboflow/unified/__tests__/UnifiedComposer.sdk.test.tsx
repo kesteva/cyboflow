@@ -182,16 +182,14 @@ describe('UnifiedComposer (SDK) — submit attachment lifecycle', () => {
     await waitFor(() => expect(screen.queryByText(/Pasted Text/i)).toBeNull());
   });
 
-  it('LEAVES attachments in place when onSubmit rejects', async () => {
-    // submit() has no catch (only a finally), so a rejecting onSubmit floats an
-    // unhandled rejection out of the fire-and-forget `void submit()` in the Send
-    // handler. Temporarily take over the process' unhandledRejection listeners so
-    // that intentional float doesn't fail the run, then restore them.
-    const saved = process.listeners('unhandledRejection');
-    process.removeAllListeners('unhandledRejection');
+  it('LEAVES attachments in place when onSubmit rejects, with no unhandled rejection', async () => {
+    // submit() catches its own rejection (console.error) so a rejecting onSubmit
+    // never floats an unhandled rejection out of the fire-and-forget `void
+    // submit()` call in the Send handler. Fail the test if one leaks anyway.
     const captured: unknown[] = [];
     const capture = (r: unknown) => captured.push(r);
     process.on('unhandledRejection', capture);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       const onSubmit = vi.fn().mockRejectedValue(new Error('send failed'));
       render(<Harness onSubmit={onSubmit} />);
@@ -205,12 +203,17 @@ describe('UnifiedComposer (SDK) — submit attachment lifecycle', () => {
       await waitFor(() => expect(onSubmit).toHaveBeenCalled());
       // The attachment survives the failed send so the user can retry.
       expect(screen.getByText(/Pasted Text/i)).toBeInTheDocument();
-      // Let the floating rejection settle so we capture (not leak) it.
+      // Give any (would-be) floating rejection a tick to surface, then assert
+      // none did.
       await new Promise((r) => setTimeout(r, 0));
-      expect(captured.some((e) => e instanceof Error && e.message === 'send failed')).toBe(true);
+      expect(captured).toHaveLength(0);
+      expect(consoleError).toHaveBeenCalledWith(
+        '[UnifiedComposer] onSubmit rejected',
+        expect.any(Error),
+      );
     } finally {
       process.removeListener('unhandledRejection', capture);
-      saved.forEach((l) => process.on('unhandledRejection', l as (...a: unknown[]) => void));
+      consoleError.mockRestore();
     }
   });
 });

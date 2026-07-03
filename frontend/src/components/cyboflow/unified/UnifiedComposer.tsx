@@ -188,6 +188,15 @@ export function UnifiedComposer(props: UnifiedComposerProps): React.ReactElement
     try {
       await onSubmit(atts);
       setAtts(emptyAttachments());
+    } catch (err: unknown) {
+      // No internal error-surfacing state: `sendError` is a host-controlled
+      // prop (see ChatInput's setSendError), so a host that rejects here is
+      // responsible for surfacing its own message. This catch only stops the
+      // rejection from floating out of the fire-and-forget `void submit()`
+      // call sites (Send button / Cmd+Enter) as an unhandled rejection.
+      // Attachments are deliberately left in place (setAtts above is skipped)
+      // so the user can retry the send.
+      console.error('[UnifiedComposer] onSubmit rejected', err);
     } finally {
       setBusy(false);
     }
