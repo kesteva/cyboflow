@@ -282,13 +282,6 @@ export type FolderWithProjectId = Folder;
 
 export type ContextMenuPayload = Session | Folder;
 
-// Permission request input types  
-export interface PermissionInput {
-  tool_name?: string;
-  args?: Record<string, unknown>;
-  [key: string]: unknown;
-}
-
 // Attachment types for Claude Code config
 export interface AttachedImage {
   id: string;

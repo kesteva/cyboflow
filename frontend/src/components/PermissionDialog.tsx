@@ -1,3 +1,11 @@
+// @cyboflow-hidden: Crystal-baseline modal permission prompt, unreachable in
+// cyboflow v1. The live tool-permission flow is tRPC/canUseTool → the review
+// queue (PendingApprovalCard), not this modal — its trigger event
+// ('permission:request') is never emitted and its response channels
+// ('permission:respond'/'getPending') have no ipcMain handler. Preserved for a
+// possible future modal approval surface.
+// Re-enable by restoring the <PermissionDialog> mount + 'permission:request'
+// listener in frontend/src/App.tsx and wiring the response IPC handlers.
 import React, { useState, useEffect } from 'react';
 import { Check, X, Shield, AlertTriangle, Code, Edit } from 'lucide-react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';

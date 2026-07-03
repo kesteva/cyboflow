@@ -464,19 +464,6 @@ export class API {
     },
   };
 
-  // Permissions
-  static permissions = {
-    async respond(requestId: string, response: { allow: boolean; reason?: string }) {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.permissions.respond(requestId, response);
-    },
-
-    async getPending() {
-      if (!isElectron()) throw new Error('Electron API not available');
-      return window.electronAPI.permissions.getPending();
-    },
-  };
-
   // Version info
   static async getVersionInfo() {
     if (!isElectron()) throw new Error('Electron API not available');

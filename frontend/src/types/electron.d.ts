@@ -19,11 +19,6 @@ interface LogEntry {
   source?: string;
 }
 
-interface PermissionResponse {
-  allow: boolean;
-  reason?: string;
-}
-
 /**
  * Resume eligibility for an interactive (PTY) quick session whose REPL was lost
  * (app close/restart). Returned by sessions.getInteractiveResumeState. The UI
@@ -278,7 +273,6 @@ interface ElectronAPI {
 
   // File operations
   file: {
-    listProject: (projectId: number, path?: string) => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
     readProject: (projectId: number, filePath: string) => Promise<IPCResponse<string | null>>;
     writeProject: (projectId: number, filePath: string, content: string) => Promise<IPCResponse<void>>;
   };
@@ -287,12 +281,6 @@ interface ElectronAPI {
   dialog: {
     openFile: (options?: Electron.OpenDialogOptions) => Promise<IPCResponse<string | null>>;
     openDirectory: (options?: Electron.OpenDialogOptions) => Promise<IPCResponse<string | null>>;
-  };
-
-  // Permissions
-  permissions: {
-    respond: (requestId: string, response: PermissionResponse) => Promise<IPCResponse<void>>;
-    getPending: () => Promise<IPCResponse<unknown>>; // Caller does not consume .data directly
   };
 
   // Dashboard — ProjectDashboardData is locally typed in ProjectDashboard.tsx; IPCDataResponse for direct .data access

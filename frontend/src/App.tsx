@@ -11,7 +11,6 @@ import Welcome from './components/Welcome';
 import { AboutDialog } from './components/AboutDialog';
 import { MainProcessLogger } from './components/MainProcessLogger';
 import { ErrorDialog } from './components/ErrorDialog';
-import { PermissionDialog } from './components/PermissionDialog';
 import { useErrorStore } from './stores/errorStore';
 import { useSessionStore } from './stores/sessionStore';
 import { useConfigStore } from './stores/configStore';
@@ -34,23 +33,13 @@ import { useReviewItemsSlice } from './stores/reviewItemsSlice';
 import { useBacklogStore } from './stores/backlogStore';
 import { useActiveRunsStore } from './stores/activeRunsStore';
 import { useLandingStore, useAggregatedReviewItems } from './stores/landingStore';
-import type { PermissionInput } from './types/session';
 
 // Type for IPC response
 import type { IPCResponse } from './utils/api';
 
-interface PermissionRequest {
-  id: string;
-  sessionId: string;
-  toolName: string;
-  input: PermissionInput;
-  timestamp: number;
-}
-
 function App() {
   const [isWelcomeOpen, setIsWelcomeOpen] = useState(false);
   const [isAboutOpen, setIsAboutOpen] = useState(false);
-  const [currentPermissionRequest, setCurrentPermissionRequest] = useState<PermissionRequest | null>(null);
   const [hasCheckedWelcome, setHasCheckedWelcome] = useState(false);
   const [isPromptHistoryOpen, setIsPromptHistoryOpen] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
@@ -88,7 +77,7 @@ function App() {
   );
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
   const { currentError, clearError } = useErrorStore();
-  const { sessions, isLoaded } = useSessionStore();
+  const { isLoaded } = useSessionStore();
   const { fetchConfig } = useConfigStore();
   const { activeProjectId } = useNavigationStore();
   
@@ -255,20 +244,6 @@ function App() {
     checkInitialState();
   }, [isLoaded]);
 
-  useEffect(() => {
-    // Set up permission request listener
-    const handlePermissionRequest = (...args: unknown[]) => {
-      const request = args[0] as PermissionRequest;
-      setCurrentPermissionRequest(request);
-    };
-    
-    window.electron?.on('permission:request', handlePermissionRequest);
-    
-    return () => {
-      window.electron?.off('permission:request', handlePermissionRequest);
-    };
-  }, []);
-
   // Add keyboard shortcut for token test page (Cmd/Ctrl + Shift + T) - Development only
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -284,18 +259,6 @@ function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
-  
-  const handlePermissionResponse = async (requestId: string, behavior: 'allow' | 'deny', _updatedInput?: PermissionInput, message?: string) => {
-    try {
-      await API.permissions.respond(requestId, {
-        allow: behavior === 'allow',
-        reason: message
-      });
-      setCurrentPermissionRequest(null);
-    } catch (error) {
-      console.error('Failed to respond to permission request:', error);
-    }
-  };
 
   return (
     <ContextMenuProvider>
@@ -414,11 +377,6 @@ function App() {
           error={currentError?.error || ''}
           details={currentError?.details}
           command={currentError?.command}
-        />
-        <PermissionDialog
-          request={currentPermissionRequest}
-          onRespond={handlePermissionResponse}
-          session={currentPermissionRequest ? sessions.find(s => s.id === currentPermissionRequest.sessionId) : undefined}
         />
         <PromptHistoryModal
           isOpen={isPromptHistoryOpen}

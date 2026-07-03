@@ -375,7 +375,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // File operations
   file: {
-    listProject: (projectId: number, path?: string): Promise<IPCResponse> => ipcRenderer.invoke('file:list-project', { projectId, path }),
     readProject: (projectId: number, filePath: string): Promise<IPCResponse> => ipcRenderer.invoke('file:read-project', { projectId, filePath }),
     writeProject: (projectId: number, filePath: string, content: string): Promise<IPCResponse> => ipcRenderer.invoke('file:write-project', { projectId, filePath, content }),
   },
@@ -384,12 +383,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   dialog: {
     openFile: (options?: DialogOptions): Promise<IPCResponse<string | null>> => ipcRenderer.invoke('dialog:open-file', options),
     openDirectory: (options?: DialogOptions): Promise<IPCResponse<string | null>> => ipcRenderer.invoke('dialog:open-directory', options),
-  },
-
-  // Permissions
-  permissions: {
-    respond: (requestId: string, response: boolean | { approved: boolean; remember?: boolean }): Promise<IPCResponse> => ipcRenderer.invoke('permission:respond', requestId, response),
-    getPending: (): Promise<IPCResponse> => ipcRenderer.invoke('permission:getPending'),
   },
 
   // Dashboard
@@ -620,14 +613,12 @@ const electronListenerWrappers = new Map<
   Map<(...args: unknown[]) => void, (event: Electron.IpcRendererEvent, ...args: unknown[]) => void>
 >();
 
-// Expose electron event listeners and utilities for permission requests
+// Expose electron event listeners for the streaming/PTY/shell push channels
 contextBridge.exposeInMainWorld('electron', {
   openExternal: (url: string) => ipcRenderer.invoke('openExternal', url),
   invoke: (channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args),
   on: (channel: string, callback: (...args: unknown[]) => void) => {
-    const validChannels = [
-      'permission:request'
-    ];
+    const validChannels: string[] = [];
     if (validChannels.includes(channel) || channel.startsWith('cyboflow:stream:') || channel.startsWith('cyboflow:pty:') || channel.startsWith('cyboflow:shell:')) {
       const wrapper = (_event: Electron.IpcRendererEvent, ...args: unknown[]) => callback(...args);
       if (!electronListenerWrappers.has(channel)) {
@@ -638,9 +629,7 @@ contextBridge.exposeInMainWorld('electron', {
     }
   },
   off: (channel: string, callback: (...args: unknown[]) => void) => {
-    const validChannels = [
-      'permission:request'
-    ];
+    const validChannels: string[] = [];
     if (validChannels.includes(channel) || channel.startsWith('cyboflow:stream:') || channel.startsWith('cyboflow:pty:') || channel.startsWith('cyboflow:shell:')) {
       const inner = electronListenerWrappers.get(channel);
       if (inner) {

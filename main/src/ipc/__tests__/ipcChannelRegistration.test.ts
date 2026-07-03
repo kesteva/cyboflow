@@ -15,10 +15,12 @@
  *      service graph is a 2066-line bootstrap), so this half parses the source —
  *      the AST/regex extraction the plan explicitly sanctions.
  *
- * The static half currently surfaces THREE orphaned channels the preload exposes
- * with NO handler (a real drift bug — see KNOWN_ORPHANS below). They are pinned
- * so this guard fails the moment a NEW orphan appears, while the existing ones are
- * documented and reported up as suspected product bugs rather than silently green.
+ * The static half asserts the preload's invoked-channel surface is FULLY handled
+ * (KNOWN_ORPHANS is empty). The three former orphans — file:list-project,
+ * permission:respond, permission:getPending — were stale wiring for a dead
+ * permission modal chain (the live approval flow is tRPC/canUseTool → the review
+ * queue) and were removed from the preload + api.ts in the same change. The guard
+ * fails the moment a NEW orphan appears.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
@@ -114,22 +116,13 @@ function collectInvokedChannels(): Set<string> {
 
 /**
  * Channels the preload invokes that have NO ipcMain.handle registration today.
- * These are LATENT BUGS (invoke → hangs/rejects at runtime, never in CI), pinned
- * so the guard still catches NEW drift. Reported up as suspected product bugs:
- *   - file:list-project  → preload exposes file.listProject; no handler exists
- *                          (the handler is file:list; the -project variant was
- *                          never wired). No live caller in the frontend today.
- *   - permission:respond / permission:getPending → api.ts's permissions namespace
- *                          (App.tsx handlePermissionResponse) invokes these, but
- *                          no ipcMain.handle registers them anywhere. The permission
- *                          flow moved to tRPC/canUseTool; these preload+api entries
- *                          are stale.
+ * Now EMPTY: the former orphans (file:list-project, permission:respond,
+ * permission:getPending) were stale wiring for a dead permission-modal chain and
+ * were removed from the preload + api.ts. Any entry here is a latent bug (invoke →
+ * hangs/rejects at runtime, never in CI); keep this set empty and instead remove
+ * the stale preload entry or add the missing handler.
  */
-const KNOWN_ORPHANS = new Set([
-  'file:list-project',
-  'permission:respond',
-  'permission:getPending',
-]);
+const KNOWN_ORPHANS = new Set<string>([]);
 
 describe('C6 — every preload-invoked IPC channel has a handler (drift guard)', () => {
   it('the extraction found the expected order-of-magnitude of channels', () => {
