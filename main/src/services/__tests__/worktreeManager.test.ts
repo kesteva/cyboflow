@@ -489,24 +489,59 @@ describe('WorktreeManager.squashAndMergeWorktreeToMain (integration)', () => {
     });
   });
 
-  it('fails the ff-only merge loudly (no silent history rewrite) when main advanced past the fork point', async () => {
-    await withTempDir('worktree-squash-ffonly-', async (tmpDir) => {
+  it('squashes atop main\'s advanced tip when main moved past the fork point with a NON-conflicting commit', async () => {
+    await withTempDir('worktree-squash-adv-ok-', async (tmpDir) => {
       initRepo(tmpDir);
       const main = headBranch(tmpDir);
       const manager = new WorktreeManager();
       const { worktreePath } = await manager.createWorktree(tmpDir, 'adv');
       ensureUser(worktreePath);
       commitFile(worktreePath, 'a.txt', 'branch', 'w1');
-      // Advance main with a NON-conflicting commit after the worktree forked.
+      commitFile(worktreePath, 'a2.txt', 'branch2', 'w2');
+      // Advance main with a NON-conflicting commit (different file) after the fork.
       commitFile(tmpDir, 'm.txt', 'main-adv', 'm1');
 
+      const mainBefore = shaOf(tmpDir, main); // main's advanced tip (contains m.txt)
+      // The rebase replays the branch atop main's tip; the squash base is that tip,
+      // so --ff-only succeeds and lands ONE squashed commit as its direct child.
+      await manager.squashAndMergeWorktreeToMain(tmpDir, worktreePath, main, 'msg');
+
+      // Exactly one new commit landed on main, directly atop its previous tip.
+      const count = execSync(`git rev-list --count ${mainBefore}..${main}`, { cwd: tmpDir }).toString().trim();
+      expect(count).toBe('1');
+      expect(shaOf(tmpDir, `${main}^`)).toBe(mainBefore); // squash is a child of the advanced tip
+
+      // The tree contains BOTH main's advanced file and the branch's files.
+      expect(execSync(`git show ${main}:m.txt`, { cwd: tmpDir }).toString().trim()).toBe('main-adv');
+      expect(execSync(`git show ${main}:a.txt`, { cwd: tmpDir }).toString().trim()).toBe('branch');
+      expect(execSync(`git show ${main}:a2.txt`, { cwd: tmpDir }).toString().trim()).toBe('branch2');
+
+      // main's earlier history is intact (m1 still reachable and unrewritten).
+      const log = execSync(`git log --format=%s ${main}`, { cwd: tmpDir }).toString();
+      expect(log).toContain('m1');
+    });
+  });
+
+  it('still refuses cleanly (throws, main UNTOUCHED, worktree clean) when main advances with a CONFLICTING commit', async () => {
+    await withTempDir('worktree-squash-adv-conflict-', async (tmpDir) => {
+      initRepo(tmpDir);
+      const main = headBranch(tmpDir);
+      const manager = new WorktreeManager();
+      const { worktreePath } = await manager.createWorktree(tmpDir, 'advconf');
+      ensureUser(worktreePath);
+      // Branch and main both add the SAME file after the fork → rebase conflicts.
+      commitFile(worktreePath, 'shared.txt', 'branch-version', 'w1');
+      commitFile(tmpDir, 'shared.txt', 'main-version', 'm1');
+
       const mainBefore = shaOf(tmpDir, main);
-      // The squash resets to the merge-base, so the squashed branch is no longer a
-      // descendant of main's new tip → SAFETY CHECK 2 (--ff-only) refuses.
       await expect(
         manager.squashAndMergeWorktreeToMain(tmpDir, worktreePath, main, 'msg'),
       ).rejects.toThrow(/Failed to squash and merge/);
+
+      // main is byte-for-byte where it started; the rebase was aborted; tree clean.
       expect(shaOf(tmpDir, main)).toBe(mainBefore);
+      expect(execSync('git status --porcelain', { cwd: worktreePath }).toString().trim()).toBe('');
+      expect(() => execSync('git rev-parse --verify REBASE_HEAD', { cwd: worktreePath, stdio: 'pipe' })).toThrow();
     });
   });
 

@@ -706,22 +706,10 @@ export class WorktreeManager {
         lastOutput = currentBranch || stderr1 || '';
         const branchName = currentBranch.trim();
 
-        // Get the base commit (where the worktree branch diverged from main)
-        command = `git merge-base ${mainBranch} HEAD`;
-        executedCommands.push(`git merge-base ${mainBranch} HEAD (in ${worktreePath})`);
-        const { stdout: baseCommit, stderr: stderr2 } = await execWithShellPath(command, { cwd: worktreePath });
-        lastOutput = baseCommit || stderr2 || '';
-        const base = baseCommit.trim();
-
-        // Check if there are any changes to squash
-        command = `git log --oneline ${base}..HEAD`;
-        const { stdout: commits, stderr: stderr3 } = await execWithShellPath(command, { cwd: worktreePath });
-        lastOutput = commits || stderr3 || '';
-        if (!commits.trim()) {
-          throw new Error(`No commits to squash. The branch is already up to date with ${mainBranch}.`);
-        }
-
-        // SAFETY CHECK 1: Rebase worktree onto main FIRST before squashing
+        // SAFETY CHECK 1: Rebase worktree onto main FIRST before squashing. This
+        // replays the branch's commits directly atop main's CURRENT tip, so the
+        // squash base computed below is main's tip — not the (possibly stale)
+        // fork point.
         command = `git rebase ${mainBranch}`;
         executedCommands.push(`git rebase ${mainBranch} (in ${worktreePath})`);
         try {
@@ -743,7 +731,32 @@ export class WorktreeManager {
           );
         }
 
-        // Now squash all commits since base into one
+        // Compute the squash base AFTER the rebase. The rebased branch is now a
+        // descendant of main's tip, so merge-base(main, HEAD) === main's tip.
+        // Resetting to THIS base (rather than the pre-rebase fork point) leaves
+        // the squashed commit a direct child of main's tip, so the final
+        // --ff-only can succeed even when main advanced past the fork with
+        // non-conflicting commits. Using the stale fork point would drop main's
+        // advanced commits from the squashed branch's ancestry and make ff-only
+        // always refuse.
+        command = `git merge-base ${mainBranch} HEAD`;
+        executedCommands.push(`git merge-base ${mainBranch} HEAD (in ${worktreePath})`);
+        const { stdout: baseCommit, stderr: stderr2 } = await execWithShellPath(command, { cwd: worktreePath });
+        lastOutput = baseCommit || stderr2 || '';
+        const base = baseCommit.trim();
+
+        // Check if there are any changes to squash (post-rebase): empty iff the
+        // branch adds nothing beyond main's tip — already merged, at the tip, or
+        // its commits collapsed to nothing against main. Detected AFTER the rebase
+        // so a now-redundant branch does not mint an empty squash commit.
+        command = `git log --oneline ${base}..HEAD`;
+        const { stdout: commits, stderr: stderr3 } = await execWithShellPath(command, { cwd: worktreePath });
+        lastOutput = commits || stderr3 || '';
+        if (!commits.trim()) {
+          throw new Error(`No commits to squash. The branch is already up to date with ${mainBranch}.`);
+        }
+
+        // Now squash all commits since base (main's tip) into one
         command = `git reset --soft ${base}`;
         executedCommands.push(`git reset --soft ${base} (in ${worktreePath})`);
         const resetResult = await execWithShellPath(command, { cwd: worktreePath });
