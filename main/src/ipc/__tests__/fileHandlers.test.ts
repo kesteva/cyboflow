@@ -15,12 +15,15 @@
  *  - file:write creates missing nested parent directories.
  *  - file:readAtRevision returns empty content when the file is absent at the
  *    revision, vs surfacing a real git error (bad revision) as success:false.
+ *  - realpath containment guard (file:read/file:write): a symlink inside the
+ *    worktree pointing OUTSIDE it is rejected; a sibling worktree whose name is
+ *    a string prefix of the real worktree is rejected; a legit symlink pointing
+ *    WITHIN the worktree still works.
  *
- * See the suspected-bug note in the batch return: the realpath containment guard
- * in file:read/file:write is dead (its `&&` pairs an always-true inner condition,
- * and it uses a separator-less startsWith), so a symlink inside the worktree can
- * escape it. That case is intentionally NOT asserted here (it would require
- * pinning vulnerable behavior); it is reported instead.
+ * The realpath containment guard in file:read/file:write was previously dead
+ * (its `&&` paired an always-true inner condition, and it used a separator-less
+ * startsWith), so a symlink inside the worktree could escape it. That guard is
+ * now fixed and the escape cases are asserted below.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFileSync } from 'child_process';
@@ -189,6 +192,149 @@ describe('file path guards (file:read / file:write)', () => {
     })) as { success: boolean; error?: string };
     expect(result.success).toBe(false);
     expect(result.error).toBe('Invalid file path');
+  });
+});
+
+describe('realpath containment guard (symlink escape)', () => {
+  function handlersForWorktree(worktree: string) {
+    const session = { id: 's1', worktreePath: worktree } as unknown as Session;
+    const { ipcMain, handlers } = makeHandlerCapture();
+    registerFileHandlers(
+      ipcMain as unknown as Parameters<typeof registerFileHandlers>[0],
+      servicesFor(session),
+    );
+    return handlers;
+  }
+
+  it('file:read rejects a symlink inside the worktree that points outside it', async () => {
+    const worktree = path.join(tmpRoot, 'wt');
+    fs.mkdirSync(worktree);
+    const outside = path.join(tmpRoot, 'outside.txt');
+    fs.writeFileSync(outside, 'TOPSECRET\n');
+    fs.symlinkSync(outside, path.join(worktree, 'escape.txt'));
+
+    const handlers = handlersForWorktree(worktree);
+    const result = (await invoke(handlers, 'file:read', {
+      sessionId: 's1',
+      filePath: 'escape.txt',
+    })) as { success: boolean; error?: string; content?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('File path is outside worktree');
+    expect(result.content).toBeUndefined();
+  });
+
+  it('file:read rejects a symlink escaping to a sibling worktree that shares a name prefix', async () => {
+    // worktree `.../xyz-wt`, sibling `.../xyz-wt-other`: the sibling's realpath
+    // is a string prefix of nothing valid, but a separator-less startsWith
+    // (the old bug) would treat `.../xyz-wt-other/...` as inside `.../xyz-wt`.
+    const worktree = path.join(tmpRoot, 'xyz-wt');
+    fs.mkdirSync(worktree);
+    const sibling = path.join(tmpRoot, 'xyz-wt-other');
+    fs.mkdirSync(sibling);
+    const secret = path.join(sibling, 'secret.txt');
+    fs.writeFileSync(secret, 'SIBLING SECRET\n');
+    fs.symlinkSync(secret, path.join(worktree, 'leak.txt'));
+
+    const handlers = handlersForWorktree(worktree);
+    const result = (await invoke(handlers, 'file:read', {
+      sessionId: 's1',
+      filePath: 'leak.txt',
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('File path is outside worktree');
+  });
+
+  it('file:write rejects a symlink escaping the worktree and does not write through it', async () => {
+    const worktree = path.join(tmpRoot, 'wt');
+    fs.mkdirSync(worktree);
+    const outside = path.join(tmpRoot, 'target.txt');
+    fs.writeFileSync(outside, 'ORIGINAL\n');
+    fs.symlinkSync(outside, path.join(worktree, 'escape-w.txt'));
+
+    const handlers = handlersForWorktree(worktree);
+    const result = (await invoke(handlers, 'file:write', {
+      sessionId: 's1',
+      filePath: 'escape-w.txt',
+      content: 'PWNED',
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('File path is outside worktree');
+    // The out-of-worktree target must be untouched (no write-through).
+    expect(fs.readFileSync(outside, 'utf-8')).toBe('ORIGINAL\n');
+  });
+
+  it('file:write rejects a DANGLING symlink pointing outside the worktree and does not create the target', async () => {
+    // realpath refuses dangling links, but fs.writeFile through one CREATES
+    // the (outside) target — the guard must chase the link chain manually.
+    const worktree = path.join(tmpRoot, 'wt');
+    fs.mkdirSync(worktree);
+    const outsideTarget = path.join(tmpRoot, 'not-yet-created.txt');
+    fs.symlinkSync(outsideTarget, path.join(worktree, 'dangling.txt'));
+
+    const handlers = handlersForWorktree(worktree);
+    const result = (await invoke(handlers, 'file:write', {
+      sessionId: 's1',
+      filePath: 'dangling.txt',
+      content: 'PWNED',
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('File path is outside worktree');
+    // The write must not have materialized the outside file.
+    expect(fs.existsSync(outsideTarget)).toBe(false);
+  });
+
+  it('file:write through a dangling symlink to a not-yet-existing path INSIDE the worktree works', async () => {
+    const worktree = path.join(tmpRoot, 'wt');
+    fs.mkdirSync(worktree);
+    const insideTarget = path.join(worktree, 'future.txt');
+    fs.symlinkSync(insideTarget, path.join(worktree, 'dangling-in.txt'));
+
+    const handlers = handlersForWorktree(worktree);
+    const result = (await invoke(handlers, 'file:write', {
+      sessionId: 's1',
+      filePath: 'dangling-in.txt',
+      content: 'created via link',
+    })) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    // The write landed at the (in-worktree) link target.
+    expect(fs.readFileSync(insideTarget, 'utf-8')).toBe('created via link');
+  });
+
+  it('file:read follows a legitimate symlink that stays within the worktree', async () => {
+    const worktree = path.join(tmpRoot, 'wt');
+    fs.mkdirSync(worktree);
+    const real = path.join(worktree, 'real.txt');
+    fs.writeFileSync(real, 'INSIDE\n');
+    fs.symlinkSync(real, path.join(worktree, 'link.txt'));
+
+    const handlers = handlersForWorktree(worktree);
+    const result = (await invoke(handlers, 'file:read', {
+      sessionId: 's1',
+      filePath: 'link.txt',
+    })) as { success: boolean; content?: string };
+
+    expect(result.success).toBe(true);
+    expect(result.content).toBe('INSIDE\n');
+  });
+
+  it('file:read reads a normal in-worktree file unaffected by the guard', async () => {
+    const worktree = path.join(tmpRoot, 'wt');
+    fs.mkdirSync(worktree);
+    fs.writeFileSync(path.join(worktree, 'note.txt'), 'hello\n');
+
+    const handlers = handlersForWorktree(worktree);
+    const result = (await invoke(handlers, 'file:read', {
+      sessionId: 's1',
+      filePath: 'note.txt',
+    })) as { success: boolean; content?: string };
+
+    expect(result.success).toBe(true);
+    expect(result.content).toBe('hello\n');
   });
 });
 

@@ -50,6 +50,72 @@ interface FileSearchRequest {
   limit?: number;
 }
 
+/** True iff `resolved` is `base` itself or lives beneath it (path.sep-boundary
+ * safe, so a sibling whose name is a string prefix — e.g. `/tmp/wt-other` vs
+ * base `/tmp/wt` — does NOT pass). */
+function isWithin(resolved: string, base: string): boolean {
+  return resolved === base || resolved.startsWith(base + path.sep);
+}
+
+const MAX_SYMLINK_HOPS = 8;
+
+/**
+ * Follow the leaf's symlink chain manually even when the FINAL target does not
+ * exist (a dangling symlink — realpath refuses these, but fs.writeFile through
+ * one CREATES the target, so containment must be judged on where the write
+ * would actually land). Relative link targets resolve against the link's own
+ * directory; the hop cap bounds chained/circular links (a circular chain can't
+ * be written through anyway — writeFile fails with ELOOP).
+ */
+async function resolveLeafSymlinkChain(target: string): Promise<string> {
+  let current = target;
+  for (let hop = 0; hop < MAX_SYMLINK_HOPS; hop++) {
+    let isLink: boolean;
+    try {
+      isLink = (await fs.lstat(current)).isSymbolicLink();
+    } catch {
+      return current; // leaf does not exist — nothing more to follow
+    }
+    if (!isLink) return current;
+    try {
+      current = path.resolve(path.dirname(current), await fs.readlink(current));
+    } catch {
+      return current;
+    }
+  }
+  return current;
+}
+
+/**
+ * Resolve `target` to a real path for containment checking. The leaf's symlink
+ * chain is chased first (see resolveLeafSymlinkChain — covers dangling links).
+ * realpath() throws when the leaf (or any trailing segment) does not exist yet
+ * — so we walk up to the deepest EXISTING ancestor, realpath THAT (collapsing
+ * every symlink in the real portion, including a dir symlink that escapes the
+ * worktree), then re-append the still-nonexistent tail. This lets the guard
+ * honor symlinks in each existing segment while still working for
+ * not-yet-created files (file:write to a brand-new path).
+ */
+async function resolveForContainment(target: string): Promise<string> {
+  const chased = await resolveLeafSymlinkChain(target);
+  let existing = chased;
+  const tail: string[] = [];
+  for (;;) {
+    try {
+      const real = await fs.realpath(existing);
+      return tail.length ? path.join(real, ...tail) : real;
+    } catch {
+      const parent = path.dirname(existing);
+      if (parent === existing) {
+        // Reached the filesystem root without any existing ancestor.
+        return chased;
+      }
+      tail.unshift(path.basename(existing));
+      existing = parent;
+    }
+  }
+}
+
 export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): void {
   const { sessionManager, databaseService, gitStatusManager, configManager } = services;
 
@@ -68,33 +134,13 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
       }
 
       const fullPath = path.join(session.worktreePath, normalizedPath);
-      
-      // Verify the file is within the worktree
-      // First resolve the worktree path to handle symlinks
+
+      // Verify the file is within the worktree. Containment is judged on the
+      // realpath result alone (symlinks fully collapsed) with a sep-boundary
+      // check — a symlink inside the worktree pointing outside is rejected.
       const resolvedWorktreePath = await fs.realpath(session.worktreePath).catch(() => session.worktreePath);
-      
-      // For the file path, we need to handle the case where the file might not exist yet
-      let resolvedFilePath: string;
-      try {
-        resolvedFilePath = await fs.realpath(fullPath);
-      } catch (err) {
-        // File doesn't exist, check if its directory is within the worktree
-        const dirPath = path.dirname(fullPath);
-        try {
-          const resolvedDirPath = await fs.realpath(dirPath);
-          if (!resolvedDirPath.startsWith(resolvedWorktreePath)) {
-            throw new Error('File path is outside worktree');
-          }
-          // File doesn't exist but directory is valid
-          resolvedFilePath = fullPath;
-        } catch {
-          // Directory doesn't exist either, just use the full path for validation
-          resolvedFilePath = fullPath;
-        }
-      }
-      
-      // Check if the resolved path is within the worktree
-      if (!resolvedFilePath.startsWith(resolvedWorktreePath) && !fullPath.startsWith(session.worktreePath)) {
+      const resolvedFilePath = await resolveForContainment(fullPath);
+      if (!isWithin(resolvedFilePath, resolvedWorktreePath)) {
         throw new Error('File path is outside worktree');
       }
 
@@ -138,40 +184,16 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
       }
 
       const fullPath = path.join(session.worktreePath, normalizedPath);
-      
-      // Verify the file is within the worktree
       const dirPath = path.dirname(fullPath);
-      
-      // Try to resolve both paths to handle symlinks properly
-      let resolvedDirPath = dirPath;
-      let resolvedWorktreePath = session.worktreePath;
-      
-      try {
-        // Resolve the worktree path first
-        resolvedWorktreePath = await fs.realpath(session.worktreePath);
-        
-        // Try to resolve the directory path
-        try {
-          resolvedDirPath = await fs.realpath(dirPath);
-        } catch (err) {
-          // Directory might not exist yet, that's OK
-          // Use the full path's parent that should exist
-          const parentPath = path.dirname(dirPath);
-          try {
-            const resolvedParent = await fs.realpath(parentPath);
-            resolvedDirPath = path.join(resolvedParent, path.basename(dirPath));
-          } catch {
-            // Even parent doesn't exist, just use the original path
-            resolvedDirPath = dirPath;
-          }
-        }
-      } catch (err) {
-        console.error('Error resolving paths:', err);
-        // If we can't resolve paths, just use the original ones
-      }
-      
-      // Check if the path is within the worktree (using resolved paths)
-      if (!resolvedDirPath.startsWith(resolvedWorktreePath) && !dirPath.startsWith(session.worktreePath)) {
+
+      // Verify the target is within the worktree BEFORE any mkdir/write side
+      // effect. Containment is judged on the realpath of the target (the leaf
+      // may not exist yet — resolveForContainment falls back to the deepest
+      // existing ancestor) with a sep-boundary check, so an existing symlink
+      // that escapes the worktree is rejected rather than followed by writeFile.
+      const resolvedWorktreePath = await fs.realpath(session.worktreePath).catch(() => session.worktreePath);
+      const resolvedTarget = await resolveForContainment(fullPath);
+      if (!isWithin(resolvedTarget, resolvedWorktreePath)) {
         throw new Error('File path is outside worktree');
       }
 
@@ -520,8 +542,9 @@ export function registerFileHandlers(ipcMain: IpcMain, services: AppServices): v
         throw new Error(`File not found: ${normalizedPath}`);
       }
       
-      // Check if the resolved path is within the worktree
-      if (!resolvedFilePath.startsWith(resolvedWorktreePath)) {
+      // Check if the resolved path is within the worktree (sep-boundary safe;
+      // realpath already collapsed any symlink that would escape it).
+      if (!isWithin(resolvedFilePath, resolvedWorktreePath)) {
         throw new Error('File path is outside worktree');
       }
 
