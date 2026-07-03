@@ -6,6 +6,37 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.14] — 2026-07-03
+
+### Fixed
+
+- **Hardened file-access IPC against path escapes.** All file handlers now
+  enforce `realpath` containment, closing symlink, sibling-prefix, and
+  dangling-link escapes out of the working directory.
+- **Stricter HTML sanitization.** Rendered markdown enforces a style-property
+  allowlist through a real DOMPurify `afterSanitizeAttributes` hook rather than a
+  best-effort filter.
+- **Process-tree termination on macOS.** Descendant PIDs are enumerated via
+  `pgrep -P` — the previous GNU-only `ps --ppid` path returned nothing on macOS,
+  leaving stray child processes behind on cancel/kill.
+- **Long replays keep their newest output.** Sessions with more than 500 buffered
+  output items no longer drop the true tail when the transcript is replayed.
+- **Squash-merge after an auto-rebase.** The squash base is now recomputed after
+  a rebase, so a merge succeeds when `main` has advanced underneath the run.
+- Boot-recovery review-item resolution is routed through the entity chokepoint
+  with post-commit emits.
+- The composer no longer surfaces an unhandled promise rejection when a submit is
+  rejected.
+
+### Changed
+
+- Removed the dead permission IPC chain; the legacy permission dialog is now
+  hidden.
+- **Substantially expanded automated test coverage** — main-process and renderer
+  unit gaps, destructive IPC / worktree-lifecycle chokepoints, live PTY
+  primitives, and the MCP + eval-judge boundaries — and reworked the end-to-end
+  suite onto Electron's `_electron.launch()` against an isolated data directory.
+
 ## [0.1.13] — 2026-07-02
 
 ### Added
