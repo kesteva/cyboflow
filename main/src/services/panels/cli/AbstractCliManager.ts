@@ -810,15 +810,23 @@ export abstract class AbstractCliManager extends EventEmitter {
   protected getAllDescendantPids(parentPid: number): number[] {
     const descendants: number[] = [];
 
+    if (!Number.isInteger(parentPid) || parentPid <= 0) {
+      return descendants;
+    }
+
     try {
+      // `pgrep -P <ppid>` lists direct child PIDs and is portable across
+      // macOS/BSD and Linux. GNU `ps --ppid` is Linux-only and is not a
+      // recognized option on macOS/BSD `ps`, so it silently returned no
+      // descendants on macOS (the primary ship platform).
       const result = execSync(
-        `ps -o pid= --ppid ${parentPid} 2>/dev/null || true`,
+        `pgrep -P ${parentPid} 2>/dev/null || true`,
         { encoding: 'utf8' }
       );
 
       const pids = result.split('\n')
-        .map((line: string) => parseInt(line.trim()))
-        .filter((pid: number) => !isNaN(pid) && pid !== parentPid);
+        .map((line: string) => parseInt(line.trim(), 10))
+        .filter((pid: number) => Number.isInteger(pid) && pid !== parentPid);
 
       for (const pid of pids) {
         descendants.push(pid);

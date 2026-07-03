@@ -12,18 +12,20 @@
  *    (verified independently via `pgrep` + `process.kill(pid, 0)`); SIGTERM ->
  *    SIGKILL escalation via a SIGTERM-ignoring child; already-exited pid resolves
  *    without throwing.
- *  - getAllDescendantPids: empty-safe on a childless pid.
+ *  - getAllDescendantPids: finds a real descendant tree (`sh -c 'sleep 100 &
+ *    sleep 100 & wait'`) recursively; empty-safe on a childless pid.
  *  - spawnPtyProcess: cwd + env threaded to the child, returned IPty exposes a
  *    numeric pid and an exit event; absent command surfaces as a nonzero exit.
  *
- * PLATFORM NOTE: `getAllDescendantPids` shells out to `ps -o pid= --ppid <pid>`,
- * which is GNU-ps-only syntax. On macOS/BSD `ps` this errors ("illegal option")
- * and is swallowed by the trailing `|| true`, so descendant ENUMERATION returns
- * [] here. The actual teardown still works because `killProcessTree` also issues
- * process-GROUP kills (`kill -TERM -<pid>`, `kill -9 -<pid>`, `pkill -9 -P`),
- * which macOS honors for a detached group leader. The kill assertions below are
- * therefore verified with an OS-agnostic liveness probe rather than through
- * `getAllDescendantPids`, so they hold on both macOS and Linux.
+ * PLATFORM NOTE: `getAllDescendantPids` shells out to `pgrep -P <pid>`, which is
+ * portable across macOS/BSD and Linux and so genuinely enumerates descendants
+ * on both. (It previously used GNU-only `ps -o pid= --ppid <pid>`, which errors
+ * on macOS/BSD `ps` and was swallowed by a trailing `|| true`, so descendant
+ * enumeration silently returned [] on macOS — the primary ship platform.) The
+ * killProcessTree kill assertions below still verify teardown independently via
+ * `pgrep` + a `process.kill(pid, 0)` liveness probe rather than by asserting on
+ * `getAllDescendantPids` itself, to keep that coverage decoupled from the
+ * primitive exercised directly in the section below.
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
@@ -272,6 +274,31 @@ describe('AbstractCliManager.killProcessTree', () => {
 });
 
 describe('AbstractCliManager.getAllDescendantPids', () => {
+  it('finds a real descendant tree recursively', async () => {
+    const mgr = new TestCliManager();
+    const child = trackChild(
+      spawn('sh', ['-c', 'sleep 100 & sleep 100 & wait'], { detached: true, stdio: 'ignore' })
+    );
+    const pid = child.pid;
+    if (!pid) throw new Error('no pid');
+
+    // Poll: the two backgrounded sleeps take a beat to appear under the shell.
+    let found: number[] = [];
+    const ok = await waitUntil(() => {
+      found = mgr.descendants(pid);
+      return found.length >= 2;
+    }, 5000);
+
+    expect(ok).toBe(true);
+    expect(found.length).toBeGreaterThanOrEqual(2);
+    expect(found.every((k) => isAlive(k))).toBe(true);
+    // Cross-check against an independent enumeration (pgrep) of the same tree.
+    const independentlyFound = childPidsOf(pid);
+    for (const k of independentlyFound) {
+      expect(found).toContain(k);
+    }
+  }, 10000);
+
   it('returns an empty array for a childless pid', async () => {
     const mgr = new TestCliManager();
     const child = trackChild(spawn('sleep', ['100'], { detached: true, stdio: 'ignore' }));
@@ -279,8 +306,7 @@ describe('AbstractCliManager.getAllDescendantPids', () => {
     if (!pid) throw new Error('no pid');
     await new Promise((r) => setTimeout(r, 150));
 
-    // `sleep` has no children; empty-safe on both macOS (broken ps -> []) and
-    // Linux (genuinely childless -> []).
+    // `sleep` genuinely has no children.
     expect(mgr.descendants(pid)).toEqual([]);
   }, 10000);
 });
