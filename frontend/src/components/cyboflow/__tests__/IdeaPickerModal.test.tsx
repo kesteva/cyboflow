@@ -61,6 +61,14 @@ const ITEMS: BacklogTaskItem[] = [
     title: 'Archived idea',
     archived_at: '2026-06-11T20:43:34Z',
   }),
+  // Retired at plan approval: keeps its original stage (isDone stays false) and
+  // is marked solely by decomposed_at — must not reappear as a planner seed.
+  makeItem({
+    id: 'IDEA-5',
+    ref: 'IDEA-5',
+    title: 'Decomposed idea',
+    decomposed_at: '2026-06-30T10:00:00Z',
+  }),
 ];
 
 // ---------------------------------------------------------------------------
@@ -104,7 +112,7 @@ describe('IdeaPickerModal — pick existing', () => {
 
     const select = (await screen.findByLabelText('Select idea')) as HTMLSelectElement;
     // Only the two open ideas (IDEA-1, IDEA-3) — not the done idea, the
-    // archived-in-place idea, or the epic.
+    // archived-in-place idea, the decomposed (retired) idea, or the epic.
     const optionValues = Array.from(select.options).map((o) => o.value);
     expect(optionValues).toEqual(['IDEA-1', 'IDEA-3']);
 
