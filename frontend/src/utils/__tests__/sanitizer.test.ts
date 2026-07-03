@@ -48,10 +48,38 @@ describe('sanitizeHtml — XSS allowlist', () => {
     expect(out).toContain('class="hl"');
     expect(out).toContain('color: red');
     expect(out).toContain('font-weight: bold');
-    // NOTE: the config's `ALLOWED_STYLE_PROPS` key is NOT a real DOMPurify
-    // option, so per-property style filtering is NOT enforced (a non-allowlisted
-    // property like `position` survives). See suspected-bug report. This test
-    // deliberately does NOT assert style-prop dropping to avoid pinning a hole.
+  });
+
+  it('keeps allowlisted style props (color)', () => {
+    const out = sanitizeHtml('<span style="color: red">x</span>');
+    expect(out).toContain('color: red');
+  });
+
+  it('strips non-allowlisted style props (position, opacity)', () => {
+    const out = sanitizeHtml('<span style="position: absolute">x</span>');
+    expect(out).toContain('<span');
+    expect(out).not.toContain('position');
+    expect(out).not.toContain('absolute');
+
+    const out2 = sanitizeHtml('<div style="opacity: 0.1">y</div>');
+    expect(out2).not.toContain('opacity');
+  });
+
+  it('keeps only allowlisted props from a mixed style attribute', () => {
+    const out = sanitizeHtml(
+      '<span style="color: red; position: absolute; font-weight: bold">x</span>',
+    );
+    expect(out).toContain('color: red');
+    expect(out).toContain('font-weight: bold');
+    expect(out).not.toContain('position');
+    expect(out).not.toContain('absolute');
+  });
+
+  it('leaves an element without a style attribute unaffected', () => {
+    const out = sanitizeHtml('<span class="ok">x</span>');
+    expect(out).toContain('<span');
+    expect(out).toContain('class="ok"');
+    expect(out).not.toContain('style');
   });
 
   it('keeps every allowlisted formatting tag', () => {
