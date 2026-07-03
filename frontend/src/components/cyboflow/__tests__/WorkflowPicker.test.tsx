@@ -179,6 +179,22 @@ beforeEach(() => {
   });
 });
 
+/**
+ * Resolve the Start Run button only once it is ENABLED. The button renders from
+ * mount but stays `disabled` until the async workflows.list resolves and seeds
+ * `selectedId` — and `fireEvent.click` on a disabled button is a silent no-op.
+ * Tests that did `findByRole` (which resolves on PRESENCE, not enabledness) and
+ * clicked immediately raced that load and flaked under shuffle / CPU contention:
+ * the click landed on a still-disabled button, `runs.start` was never called,
+ * and the assertion saw 0 calls. Always gate Start Run clicks through this
+ * helper.
+ */
+async function findEnabledStartRun(): Promise<HTMLElement> {
+  const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+  await waitFor(() => expect(startRunBtn).toBeEnabled());
+  return startRunBtn;
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -314,7 +330,7 @@ describe('WorkflowPicker — Quick Session button', () => {
     render(<WorkflowPicker projectId={1} />);
 
     const quickBtn = await screen.findByTestId('quick-session-button');
-    const startRunBtn = screen.getByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
 
     fireEvent.click(quickBtn);
 
@@ -348,11 +364,22 @@ describe('WorkflowPicker — Quick Session button', () => {
 });
 
 describe('WorkflowPicker — Start Run double-submit guard', () => {
-  it('double-clicking "Start Run" starts exactly ONE run (no duplicate worktree)', async () => {
+  beforeEach(() => {
     mockRunStart.mockClear();
+    // Re-point the workflows list at a CUSTOM (direct-launch) flow. The gated
+    // describes (Planner / Ship / Sprint) re-point this shared mock in their own
+    // beforeEach and it PERSISTS after them — under --sequence.shuffle they can
+    // run first, leaving a planner/ship/sprint-only list here, so Start Run
+    // would open a pre-launch modal instead of firing runs.start (0 calls).
+    mockWorkflowsList.mockResolvedValue([
+      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+    ]);
+  });
+
+  it('double-clicking "Start Run" starts exactly ONE run (no duplicate worktree)', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
 
     // Two clicks in the same tick — before React re-renders the disabled button.
     // The synchronous in-flight ref must reject the second one.
@@ -368,6 +395,12 @@ describe('WorkflowPicker — Start Run double-submit guard', () => {
 describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
   beforeEach(() => {
     mockRunStart.mockClear();
+    // Re-point the workflows list at a CUSTOM (direct-launch) flow — see the
+    // double-submit guard's beforeEach for why (shuffle-order leakage from the
+    // gated describes' shared-mock re-pointing).
+    mockWorkflowsList.mockResolvedValue([
+      { id: 'wf-1', project_id: 1, name: 'custom', workflow_path: null, permission_mode: 'default', spec_json: '{}', created_at: '' },
+    ]);
   });
 
   it("renders a substrate selector that defaults to 'sdk'", async () => {
@@ -382,7 +415,7 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
   it("forwards the default substrate ('sdk') in the runs.start.mutate payload", async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
@@ -410,7 +443,7 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
       fireEvent.change(substrateSelect, { target: { value: 'interactive' } });
     });
 
-    const startRunBtn = screen.getByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
@@ -434,7 +467,7 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
       fireEvent.change(modelSelect, { target: { value: 'sonnet' } });
     });
 
-    const startRunBtn = screen.getByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
@@ -508,7 +541,7 @@ describe('WorkflowPicker — agent permission selector (per-run override)', () =
       fireEvent.click(autoBtn);
     });
 
-    const startRunBtn = screen.getByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
@@ -524,7 +557,7 @@ describe('WorkflowPicker — agent permission selector (per-run override)', () =
 
     render(<WorkflowPicker projectId={1} />);
 
-    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
@@ -544,7 +577,7 @@ describe('WorkflowPicker — agent permission selector (per-run override)', () =
       useConfigStore.setState({ config: { defaultAgentPermissionMode: 'auto' } as unknown as AppConfig });
     });
 
-    const startRunBtn = screen.getByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
@@ -567,7 +600,7 @@ describe('WorkflowPicker — agent permission selector (per-run override)', () =
       useConfigStore.setState({ config: { defaultAgentPermissionMode: 'dontAsk' } as unknown as AppConfig });
     });
 
-    const startRunBtn = screen.getByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
@@ -607,7 +640,7 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
   it('opens IdeaPickerModal on Start Run and does NOT launch until an idea is picked', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
@@ -630,7 +663,7 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
 
     render(<WorkflowPicker projectId={1} />);
 
-    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
@@ -671,37 +704,48 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
   it('with NO active session: creates one (createQuick + panels), threads its id, and nests the run under it', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
 
     // A session was created for the launch + its default panels bootstrapped.
-    // The click handler's async chain (createQuick → createPanel → runStart)
-    // settles across microtasks, so gate on waitFor rather than asserting
-    // synchronously — a bare expect here races and flakes on slow CI runners.
-    // The explicit timeout gives loaded CI runners headroom (the default 1s
-    // expired once on GitHub Actions while the chain was still settling).
+    // The click handler's async chain (createQuick → createPanel → createPanel
+    // → runStart) settles across MULTIPLE microtask hops, and each hop is only
+    // guaranteed to have run by the time its OWN effect is observed — gating on
+    // an earlier, weaker condition (e.g. createQuick merely having been CALLED,
+    // which happens synchronously before its promise even resolves) does not
+    // guarantee later links in the chain have settled too. So every downstream
+    // assertion gets its own waitFor rather than a bare expect racing the chain
+    // — a bare expect here intermittently fails under CPU contention (full-suite
+    // / parallel test-file runs), because the chain's remaining microtasks lose
+    // the race against the outer test's continuation. The explicit timeout gives
+    // loaded CI runners headroom (the default 1s expired once on GitHub Actions
+    // while the chain was still settling).
     await waitFor(() => {
       expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1 });
     }, { timeout: 5000 });
-    expect(panelApi.createPanel).toHaveBeenCalledWith({ sessionId: 'session-quick-001', type: 'claude' });
-    expect(panelApi.createPanel).toHaveBeenCalledWith({
-      sessionId: 'session-quick-001',
-      type: 'terminal',
-      title: 'Terminal',
-      initialState: { cwd: '/tmp/quick-wt' },
-    });
+    await waitFor(() => {
+      expect(panelApi.createPanel).toHaveBeenCalledWith({ sessionId: 'session-quick-001', type: 'claude' });
+      expect(panelApi.createPanel).toHaveBeenCalledWith({
+        sessionId: 'session-quick-001',
+        type: 'terminal',
+        title: 'Terminal',
+        initialState: { cwd: '/tmp/quick-wt' },
+      });
+    }, { timeout: 5000 });
 
     // runs.start carries the created session id.
-    expect(mockRunStart).toHaveBeenCalledWith({
-      workflowId: 'wf-1',
-      projectId: 1,
-      substrate: 'sdk',
-      sessionId: 'session-quick-001',
-      permissionMode: 'default',
-      model: 'opus',
-    });
+    await waitFor(() => {
+      expect(mockRunStart).toHaveBeenCalledWith({
+        workflowId: 'wf-1',
+        projectId: 1,
+        substrate: 'sdk',
+        sessionId: 'session-quick-001',
+        permissionMode: 'default',
+        model: 'opus',
+      });
+    }, { timeout: 5000 });
 
     // setActiveRun nested the run under its parent session: BOTH ids are set.
     await waitFor(() => {
@@ -718,7 +762,7 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
 
     render(<WorkflowPicker projectId={1} />);
 
-    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
@@ -759,7 +803,7 @@ describe('WorkflowPicker — Ship idea-selection gate (feat/ship-workflow)', () 
   it('opens IdeaPickerModal (NOT the batch picker) on Start Run and does NOT launch until an idea is picked', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
@@ -782,7 +826,7 @@ describe('WorkflowPicker — Ship idea-selection gate (feat/ship-workflow)', () 
 
     render(<WorkflowPicker projectId={1} />);
 
-    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
@@ -833,7 +877,7 @@ describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)',
   it('opens TaskBatchPickerModal on Start Run and does NOT launch a run yet', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
@@ -848,7 +892,7 @@ describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)',
     const onWorkflowStarted = vi.fn();
     render(<WorkflowPicker projectId={1} onWorkflowStarted={onWorkflowStarted} />);
 
-    const startRunBtn = await screen.findByRole('button', { name: /^Start Run$/ });
+    const startRunBtn = await findEnabledStartRun();
     await act(async () => {
       fireEvent.click(startRunBtn);
     });
