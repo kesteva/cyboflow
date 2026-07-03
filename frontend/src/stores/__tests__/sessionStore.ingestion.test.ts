@@ -114,10 +114,6 @@ describe('addSessionOutput — caps + main-repo mirror', () => {
 
 describe('setSessionOutputs — tail truncation', () => {
   it('keeps the LAST 300 stdout lines of a 450-item input (true tail)', () => {
-    // NOTE: 450 stays UNDER the >500 early-break threshold, so the whole input
-    // is processed and slice(-300) yields the genuine tail. For inputs >500 the
-    // early-break drops the NEWEST lines instead — a suspected bug reported in
-    // the batch return, deliberately not pinned here.
     useSessionStore.setState({ sessions: [makeSession('s1')] });
     const outputs: SessionOutput[] = [];
     for (let i = 0; i < 450; i++) outputs.push(stdout('s1', `l-${i}`));
@@ -127,6 +123,22 @@ describe('setSessionOutputs — tail truncation', () => {
     expect(out[out.length - 1]).toBe('l-449'); // newest present
     expect(out[0]).toBe('l-150'); // oldest 150 dropped
     expect(out).not.toContain('l-0');
+  });
+
+  it('keeps the true tail for a >500-item input (newest present, oldest dropped)', () => {
+    // Regression: the old forward batching early-break stopped after ~400 items
+    // and slice(-300) then kept a stale MIDDLE window (l-100..l-399), silently
+    // dropping the NEWEST ~200 lines. The tail walk must keep l-300..l-599.
+    useSessionStore.setState({ sessions: [makeSession('s1')] });
+    const outputs: SessionOutput[] = [];
+    for (let i = 0; i < 600; i++) outputs.push(stdout('s1', `l-${i}`));
+    useSessionStore.getState().setSessionOutputs('s1', outputs);
+    const out = useSessionStore.getState().sessions[0].output!;
+    expect(out).toHaveLength(300);
+    expect(out[out.length - 1]).toBe('l-599'); // newest present
+    expect(out[0]).toBe('l-300'); // oldest 300 dropped
+    expect(out).not.toContain('l-299');
+    expect(out).toContain('l-400'); // the previously-lost newest window is now retained
   });
 
   it('splits mixed stdout/json outputs and caps each independently', () => {
