@@ -9,6 +9,8 @@
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { ApprovalRouter } from '../approvalRouter';
+import { reviewItemChangeEvents, reviewItemProjectChannel } from '../reviewItemRouter';
+import type { ReviewItemChangedEvent } from '../../../../shared/types/reviews';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import {
   buildReviewInboxDb,
@@ -18,6 +20,7 @@ import {
 
 afterEach(() => {
   ApprovalRouter._resetForTesting();
+  reviewItemChangeEvents.removeAllListeners();
 });
 
 /** Insert a pending approvals row for a run. */
@@ -68,14 +71,18 @@ describe('ApprovalRouter.recoverStaleAwaitingReview — review_items reconciliat
     expect(item.resolution).toBe('app_restart');
   });
 
-  it('DOCUMENTS CURRENT BEHAVIOR: boot recovery emits NO review-item entity_events delta for the reconciled item', () => {
-    // The recovery branch resolves review_items with a bare UPDATE inside its
-    // transaction — it does NOT append a 'resolved' entity_events row and does
-    // NOT emit a renderer delta (unlike the normal resolve path). This is the
-    // current behavior; a queue chip resolved only by boot recovery relies on a
-    // full re-sync rather than an incremental delta. Pinned as a regression guard.
+  it('boot recovery writes a "resolved" review-item entity_events delta AND emits a renderer change event', () => {
+    // Boot recovery routes the reconciliation through the sanctioned sync resolve
+    // helper (resolveReviewItemById), so — exactly like the normal respond path —
+    // it appends a 'resolved' entity_events row (resolved_by='system',
+    // resolution='app_restart') AND emits a renderer delta after commit. A queue
+    // chip resolved by boot recovery therefore updates incrementally instead of
+    // relying on a full re-sync. Pinned as a regression guard.
     const db = buildReviewInboxDb();
     const router = ApprovalRouter.initialize(dbAdapter(db));
+
+    const events: ReviewItemChangedEvent[] = [];
+    reviewItemChangeEvents.on(reviewItemProjectChannel(1), (e: ReviewItemChangedEvent) => events.push(e));
 
     seedInboxRun(db, 'run-G1', 'awaiting_review');
     seedApproval(db, 'approval-G1', 'run-G1');
@@ -88,14 +95,23 @@ describe('ApprovalRouter.recoverStaleAwaitingReview — review_items reconciliat
 
     router.recoverStaleAwaitingReview();
 
+    // A single 'resolved' entity_events delta is appended for the reconciled item.
     const resolvedEvents = db
       .prepare(
         `SELECT COUNT(*) AS n FROM entity_events
           WHERE entity_type = 'review_item' AND entity_id = 'rvw_perm' AND kind = 'resolved'`,
       )
       .get() as { n: number };
-    // No 'resolved' delta is written by boot recovery (documented no-emit gap).
-    expect(resolvedEvents.n).toBe(0);
+    expect(resolvedEvents.n).toBe(1);
+
+    // A renderer review-item change event is emitted after commit, carrying the
+    // resolved item (resolved_by/resolution preserved on the shaped read-model).
+    expect(events).toHaveLength(1);
+    expect(events[0].action).toBe('resolved');
+    expect(events[0].reviewItemId).toBe('rvw_perm');
+    expect(events[0].item.status).toBe('resolved');
+    expect(events[0].item.resolved_by).toBe('system');
+    expect(events[0].item.resolution).toBe('app_restart');
   });
 
   it('leaves an unrelated pending review_item on a clean-rest run untouched', () => {

@@ -52,8 +52,10 @@ import type { DatabaseLike } from './types';
 import {
   coWritePermissionReviewItem,
   resolvePermissionReviewItem,
+  resolveReviewItemById,
   hasReviewItemsTable,
 } from './reviewItemListing';
+import { emitReviewItemChangedById } from './reviewItemRouter';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -659,6 +661,11 @@ export class ApprovalRouter extends EventEmitter {
    * Returns the number of workflow_runs rows transitioned.
    */
   recoverStaleAwaitingReview(): number {
+    // Ids of the folded inbox items resolved by this recovery pass. Collected
+    // INSIDE the transaction, emitted AFTER commit (see below) — an emit before
+    // commit could broadcast a row the transaction then rolls back.
+    const resolvedReviewItemIds: string[] = [];
+
     const transition = this.db.transaction(() => {
       const staleRunIds = this.db
         .prepare(
@@ -685,19 +692,46 @@ export class ApprovalRouter extends EventEmitter {
       // Reconcile the folded inbox: orphaned pending permission review_items for
       // these recovered runs can never resolve (the socket is gone), so resolve
       // them too so they don't linger as stale blocking items. No-op pre-016.
+      //
+      // Route each resolution through the sanctioned sync helper
+      // (resolveReviewItemById) rather than a bare UPDATE, so it writes the
+      // 'resolved' entity_events delta exactly like the normal respond path
+      // (resolved_by='system', resolution='app_restart'). The helper does NOT
+      // open its own transaction (plain guarded UPDATE + entity_events INSERT),
+      // so it is safe to call inside this enclosing boot transaction — nesting a
+      // better-sqlite3 db.transaction() here would throw.
       if (hasReviewItemsTable(this.db)) {
         const now = new Date().toISOString();
-        this.db
+        const orphaned = this.db
           .prepare(
-            `UPDATE review_items
-                SET status = 'resolved', resolved_by = 'system', resolution = 'app_restart', updated_at = ?
+            `SELECT id, run_id AS runId FROM review_items
               WHERE kind = 'permission' AND status = 'pending' AND run_id IN (${placeholders})`,
           )
-          .run(now, ...ids);
+          .all(...ids) as { id: string; runId: string | null }[];
+        for (const { id, runId } of orphaned) {
+          const resolved = resolveReviewItemById(this.db, id, 'system', 'app_restart', now, runId);
+          if (resolved) resolvedReviewItemIds.push(resolved);
+        }
       }
       return staleRunIds.length;
     });
     const count = transition();
+
+    // Fail-soft renderer emits AFTER commit: broadcast a review-item delta for
+    // each reconciled item so the queue chip updates incrementally instead of
+    // waiting for a full re-sync. Guarded — a boot with no renderer listening yet
+    // is a harmless no-op on the module-level emitter, and a DB error here must
+    // never crash boot recovery.
+    for (const id of resolvedReviewItemIds) {
+      try {
+        emitReviewItemChangedById(this.db, id, 'resolved');
+      } catch (err) {
+        console.warn(
+          `[ApprovalRouter] recoverStaleAwaitingReview: review-item emit failed for ${id}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
     if (count > 0) {
       console.log(`[ApprovalRouter] Boot recovery transitioned ${count} stale awaiting_review run(s) to failed`);
     }
