@@ -124,7 +124,7 @@ export function sdkSystemInit(
     type: 'system',
     subtype: 'init',
     apiKeySource: 'user',
-    claude_code_version: '0.2.141',
+    claude_code_version: '0.3.201',
     cwd: opts.cwd ?? '/tmp/fake-worktree',
     tools: opts.tools ?? ['Read', 'Grep', 'Glob'],
     mcp_servers: [],

@@ -43,7 +43,7 @@ import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream
 // ---------------------------------------------------------------------------
 
 /** The `@anthropic-ai/claude-agent-sdk` version the fakeSdk builders were verified against. */
-const PINNED_SDK_VERSION = '0.2.141';
+const PINNED_SDK_VERSION = '0.3.201';
 
 /**
  * The `type` (or `type/subtype`) discriminants every fakeSdk builder emits, sorted.
