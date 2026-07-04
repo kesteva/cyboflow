@@ -79,9 +79,13 @@ jobs:
 
   # Blocking mocked-SDK integration tier (Tier-3). Runs in PARALLEL with `test`
   # (both only need `quality-checks`), so the PR critical path stays at
-  # max(test, integration), not their sum. Drives the real
-  # RunExecutor → ClaudeCodeManager → query() (module-mocked) → chokepoints
-  # chain over a migration-replay temp DB; no live `claude` CLI, no Electron.
+  # max(test, integration), not their sum. Drives the real orchestrator stack
+  # (WorkflowRegistry / RunLauncher / ApprovalRouter / chokepoint routers) plus
+  # the real TypedEventNarrowing + MessageProjection read pipeline over a
+  # migration-replay temp DB with only the SDK query() faked; the run lifecycle
+  # loop itself is the headlessRun harness's (RunExecutor/ClaudeCodeManager
+  # write-side coverage is a recorded follow-up — see the plan doc's
+  # "Follow-ups"); no live `claude` CLI, no Electron.
   integration:
     name: Integration (mocked SDK)
     runs-on: ubuntu-latest
@@ -167,7 +171,7 @@ jobs:
         {
           echo "### Main coverage (report-only)"
           echo '```'
-          tail -n 60 main-coverage.log 2>/dev/null || echo "(no coverage output captured)"
+          head -n 60 main-coverage.log 2>/dev/null || echo "(no coverage output captured)"
           echo '```'
         } >> "$GITHUB_STEP_SUMMARY"
 
@@ -186,6 +190,6 @@ jobs:
         {
           echo "### Frontend coverage (report-only)"
           echo '```'
-          tail -n 60 frontend-coverage.log 2>/dev/null || echo "(no coverage output captured)"
+          head -n 60 frontend-coverage.log 2>/dev/null || echo "(no coverage output captured)"
           echo '```'
         } >> "$GITHUB_STEP_SUMMARY"

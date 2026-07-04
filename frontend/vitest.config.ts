@@ -8,9 +8,13 @@ export default defineConfig({
     globals: true,
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
     // Flake quarantine — *.quarantine.test.ts is pulled out of the blocking
-    // suite and run report-only by e2e.yml's flake-watch job. See
+    // suite and run report-only by e2e.yml's flake-watch job, which sets
+    // CYBOFLOW_RUN_QUARANTINE=1 to lift this exclude. See
     // docs/plans/ci-gate-mocked-sdk-integration.md "Flake quarantine".
-    exclude: [...configDefaults.exclude, '**/*.quarantine.test.ts'],
+    exclude: [
+      ...configDefaults.exclude,
+      ...(process.env.CYBOFLOW_RUN_QUARANTINE ? [] : ['**/*.quarantine.test.ts']),
+    ],
     setupFiles: ['./src/test/setup.ts'],
     coverage: {
       provider: 'v8',

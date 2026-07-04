@@ -152,17 +152,41 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
+      # Quarantined main unit tests hit real better-sqlite3 like the blocking suite.
+      - name: Rebuild better-sqlite3 for host Node ABI
+        run: node scripts/rebuild-better-sqlite3-host.mjs
+
+      # Each set runs under its OWNING config (alias/setupFiles/environment/pool) —
+      # a bare `vitest run <files>` from the root would fall back to vitest's
+      # default config (no @ alias, no electron mock, no jsdom) and error on
+      # collection every night, making the two-green-nightlies promotion bar
+      # unreachable. CYBOFLOW_RUN_QUARANTINE=1 lifts the quarantine exclude that
+      # those configs otherwise apply.
       - name: Run quarantined tests (if any)
         continue-on-error: true
         run: |
-          files=$(find main frontend -type d -name node_modules -prune -o -type f \( -name '*.quarantine.test.ts' -o -name '*.quarantine.itest.ts' \) -print)
-          if [ -z "$files" ]; then
+          status=0
+          main_unit=$(find main/src -type f -name '*.quarantine.test.ts' | sed 's|^main/||')
+          fe_unit=$(find frontend/src -type f -name '*.quarantine.test.ts' | sed 's|^frontend/||')
+          itests=$(find main/src -type f -name '*.quarantine.itest.ts')
+          if [ -z "$main_unit$fe_unit$itests" ]; then
             echo "::notice::No quarantined tests — nothing to run."
             exit 0
           fi
-          echo "Running quarantined tests:"
-          echo "$files"
-          pnpm exec vitest run $files
+          if [ -n "$main_unit" ]; then
+            echo "Quarantined main unit tests:"; echo "$main_unit"
+            (cd main && pnpm exec vitest run $main_unit) || status=1
+          fi
+          if [ -n "$fe_unit" ]; then
+            echo "Quarantined frontend unit tests:"; echo "$fe_unit"
+            (cd frontend && pnpm exec vitest run $fe_unit) || status=1
+          fi
+          if [ -n "$itests" ]; then
+            echo "Quarantined integration tests:"; echo "$itests"
+            pnpm exec vitest run --config vitest.config.integration.ts $itests || status=1
+          fi
+          exit $status
         env:
           CI: true
+          CYBOFLOW_RUN_QUARANTINE: '1'
         timeout-minutes: 15
