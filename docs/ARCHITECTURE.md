@@ -630,6 +630,52 @@ means "task complete + committed in the session worktree"; the session Merge clo
 integrated lanes' tasks to Done and marks the batch terminal. See
 `docs/parallel-sprint-design.md` for the full architecture.
 
+#### Workflow A/B testing — variants, experiments, pairwise grading (migrations 046–048)
+
+**Variants (046).** A `workflow_variants` row is a named, frozen snapshot of a workflow's
+resolved definition (`spec_json`) plus per-variant config (agent prompt/model deltas in
+`agent_overrides_json`, optional `model` / `execution_model` defaults, rotation `weight`).
+Status is `draft` (default — pinnable, experiment-usable, never auto-rotated) | `active`
+(in rotation) | `paused` | `retired`; **rotation is explicit opt-in** — any launch of a
+workflow with ≥1 ACTIVE weight>0 variant gets a server-side weighted-random assignment at
+the `RunLauncher.launch` seam (`VariantResolver`, injectable rng) unless the launch pins a
+variant or the baseline. Runs stamp `variant_id`/`variant_label` (+ `experiment_id`/
+`experiment_arm`) immutably at `createRun`, and **`spec_hash` is computed from the run's
+EFFECTIVE spec** (the variant's frozen `spec_json` when present). Every per-run reader of a
+workflow definition resolves the frozen spec via **`resolveRunFrozenSpec`**
+(`main/src/orchestrator/runFrozenSpec.ts` — revision by `(workflow_id, spec_hash)`, live-spec
+fallback); reading live `workflows.spec_json` per-run is a bug class (it also used to let a
+mid-run edit change a running definition).
+
+**Experiments (047).** A side-by-side A/B test is an `experiments` row owning ONE
+pre-resolved `base_sha` and two arm sessions whose worktrees are pinned to that exact
+committish, two arm runs (launched via `experiments.startSideBySide`), and — when
+idea-seeded — one hidden per-arm CLONE of the seed idea. Arm entity writes are
+**sandboxed**: creates stamp `entities.experiment_id` (+ epics/tasks land `approved_at`
+NULL), `selectProjectBacklog` excludes tagged rows server-side, the plan-gate reveal paths
+no-op for experiment runs, and a bidirectional `experiment_sandboxed` guard at
+`TaskChangeRouter` denies cross-boundary updates in both directions (only orchestrator
+promote/fold/sweep paths cross). `experiments.decide({winnerRunId|null})` folds the winner
+clone back into the original idea, reveals winner entities, hard-sweeps the loser
+(`deleteExperimentArmEntities`), and dismisses the loser session; `rerun` chains a fresh
+head-to-head via `rerun_of_experiment_id`, `switchToRotation` activates both variants.
+`workflow_runs.merge_sha` is stamped at merge close-out and `ideas/epics/tasks.caused_by_run_id`
+is the manual post-merge-bug attribution link.
+
+**Pairwise grading (048).** `experiment_comparisons` (UNIQUE per experiment) is a
+self-contained verdict row: both arms' diffs are FROZEN onto it at capture (worktree-
+independent), K=3 position-randomized judge samples aggregate to a `preference A|B|tie`, and
+completion mints a blocking `kind='decision'` review item (gate `experiment-comparison`)
+resolved by `decide`. The trigger is a workflow-agnostic terminal-status subscriber
+(`terminalEvalSubscriber.ts` on `runStatusEvents`, all four settled statuses) that also
+widens the run-eval snapshot to variant/experiment-tagged runs — gated by a run_evals
+row-existence pre-check plus a step-ownership predicate so `human_influenced` is never
+spuriously flipped, and by the `autoGradeVariantRuns` config toggle (default ON).
+`PairwiseJudgeWorker` runs on its own serial queue beside `EvalWorker`. Per-variant rotation
+stats (`selectVariantStats`, excluding experiment arms) power the Insights `04 Experiments`
+section; the compare view is `ExperimentComparisonView` (center-pane overlay routed via
+`navigationStore.experimentComparisonId`).
+
 #### Migration file list
 
 Migration files present today under `main/src/database/migrations/`: `003_add_tool_panels.sql`,
@@ -642,10 +688,12 @@ satellites), `015_entity_model_rebuild.sql` (the 3-table entity model + `entity_
 `017_run_seed_idea.sql`, `018_run_claude_session.sql`, `019_workflow_run_session_id.sql`,
 `020_workflow_run_paused_status.sql`, `021_session_agent_permission_mode.sql`,
 `022_sprint_batches.sql` (sprint batches + lanes + `workflow_runs.batch_id`),
-`023_sprint_lane_step.sql` (lane `current_step_id`), continuing through `024`–`035` and
+`023_sprint_lane_step.sql` (lane `current_step_id`), continuing through `024`–`035`,
 `042_collapse_board.sql` (narrows the board to the 4 kept stages + adds the off-board
 `ideas.decomposed_at` / `epics`+`tasks.approved_at` / `workflow_runs.plan_approved_at` stamps
-via a relocate-then-delete that respects the `ON DELETE RESTRICT` stage FK, mirroring 024). 015
+via a relocate-then-delete that respects the `ON DELETE RESTRICT` stage FK, mirroring 024),
+`043`–`045`, and the A/B-testing trio `046_workflow_variants.sql` /
+`047_experiments.sql` / `048_experiment_comparisons.sql` (see the section above). 015
 and 016 are forward-only with no backfill (no prod data existed); the destructive DROP+recreate
 in 015 is intentional and safe.
 

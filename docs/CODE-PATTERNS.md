@@ -241,6 +241,28 @@ not in IPC handlers — handlers should be thin: validate input, delegate to ser
 better-sqlite3 throws or returns wrong rows silently. Hand-rolled type guards are forbidden
 — they fork the error-shape and make the in-progress tRPC ipcLink migration harder.
 
+### Per-run workflow definitions resolve the FROZEN spec (never live `workflows.spec_json`)
+
+A run stamps `spec_hash` at `createRun` from its EFFECTIVE spec — the variant's frozen
+`spec_json` for a variant run (migration 046), else the live workflow spec — and
+`recordRevision`s it in the same transaction, so `(workflow_id, spec_hash)` always resolves
+to the exact spec the run executes. **Any code that resolves a workflow definition FOR A
+RUN must call `resolveRunFrozenSpec(db, runId)`** (`main/src/orchestrator/runFrozenSpec.ts`;
+live-spec fallback keeps legacy/baseline runs byte-identical) — never
+`JOIN workflows … read spec_json` keyed by the run. A live read makes a structural-variant
+run walk the wrong graph and re-opens the historical bug where editing a workflow mid-run
+changed the running definition. Seven readers were migrated (RunExecutor prompt/programmatic,
+stepTransitionBridge, autoMintArtifacts, mcpQueryHandler `report_step`,
+interactiveClaudeManager step-reporting, `RunLauncher.buildStepsSnapshotJson`,
+`runs.getPhaseState`); a new per-run reader that greps its spec from `workflows` directly is
+a review-blocking defect. Reading the live spec is correct ONLY for definition-authoring
+surfaces (the editor, `resolveWorkflowDefinition` at variant-creation time) that are about
+the workflow, not a run.
+
+- **Canonical example:** `main/src/orchestrator/stepTransitionBridge.ts` (reader) +
+  `main/src/orchestrator/__tests__/stepTransitionBridge.frozenSpec.test.ts` (accepts a
+  variant-only step id, rejects a live-only one).
+
 ## IPC handler input validation
 
 All `ipcMain.handle` handlers in `main/src/ipc/*.ts` MUST validate args via
