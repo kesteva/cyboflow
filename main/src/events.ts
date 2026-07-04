@@ -15,6 +15,7 @@ import {
 import type { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { ModelAvailabilityService } from './services/modelAvailabilityService';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
+import type { FastModeStateNotice } from '../../shared/types/panels';
 import type { GitCommit } from './services/gitDiffManager';
 import type { Project } from './database/models';
 import { DEFAULT_PERMISSION_MODE } from '../../shared/types/permissionMode';
@@ -846,6 +847,20 @@ export function setupEventListeners(services: AppServices, getMainWindow: () => 
     if (mw && !mw.isDestroyed()) {
       try {
         mw.webContents.send('model-fallback', payload);
+      } catch {
+        /* window torn down mid-send — ignore */
+      }
+    }
+  });
+
+  // Per-turn fast-mode report (CLI `fast_mode_state` changed): forward so the
+  // composer's Fast pill can warn when a requested opt-in didn't engage (org
+  // entitlement / credits / cooldown) instead of silently showing the toggle.
+  claudeCodeManager.on('fast-mode-state', (payload: FastModeStateNotice) => {
+    const mw = getMainWindow();
+    if (mw && !mw.isDestroyed()) {
+      try {
+        mw.webContents.send('fast-mode-state', payload);
       } catch {
         /* window torn down mid-send — ignore */
       }

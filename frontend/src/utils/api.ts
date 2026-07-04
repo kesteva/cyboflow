@@ -4,6 +4,7 @@ import type { Project } from '../types/project';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
+import type { FastModeStateNotice } from '../../../shared/types/panels';
 
 // Type for IPC response.
 // T defaults to `unknown` (not `any`) so callers must narrow before reading .data.
@@ -546,6 +547,18 @@ export class API {
     async getFastMode(panelId: string) {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.claudePanels.getFastMode(panelId);
+    },
+
+    /** Latest CLI-reported fast-mode state for the panel (null until a turn reports). */
+    async getFastModeState(panelId: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.claudePanels.getFastModeState(panelId);
+    },
+
+    /** Subscribe to live per-turn fast-mode reports; returns an unsubscribe fn. No-op off Electron. */
+    onFastModeState(callback: (notice: FastModeStateNotice) => void): () => void {
+      if (!isElectron()) return () => {};
+      return window.electronAPI.claudePanels.onFastModeState(callback);
     },
   };
 

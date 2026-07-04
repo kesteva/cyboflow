@@ -3,7 +3,7 @@ import type { Session, SessionOutput, GitStatus, GitCommands } from './session';
 import type { Project } from './project';
 import type { Folder } from './folder';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
-import type { ToolPanel } from '../../../shared/types/panels';
+import type { ToolPanel, FastModeStateNotice } from '../../../shared/types/panels';
 import type { CreateSessionRequest } from './session';
 import type { AppConfig } from './config';
 import type { ExecutionDiff, GitDiffResult } from './diff';
@@ -363,6 +363,9 @@ interface ElectronAPI {
     setModel: (panelId: string, model: string) => Promise<IPCResponse<void>>;
     setFastMode: (panelId: string, fastMode: boolean) => Promise<IPCResponse<void>>;
     getFastMode: (panelId: string) => Promise<IPCResponse<boolean>>;
+    /** Latest CLI-reported fast-mode state (null until a turn has reported). */
+    getFastModeState: (panelId: string) => Promise<IPCResponse<FastModeStateNotice | null>>;
+    onFastModeState: (callback: (notice: FastModeStateNotice) => void) => () => void;
   };
 
   // Model availability (guarded models, e.g. Fable 5)

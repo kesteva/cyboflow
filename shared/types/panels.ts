@@ -84,6 +84,29 @@ export interface ClaudePanelState extends BaseAIPanelState {
   lastAutoContextAt?: string;            // ISO timestamp of the most recent automatic context refresh
 }
 
+/**
+ * Fast-mode state as REPORTED by the CLI per turn (`fast_mode_state` on the
+ * system/init and result stream events). This is the ground truth for whether
+ * fast mode is actually active — the per-panel toggle only records the user's
+ * request; the CLI's boot-time org/entitlement check (paid subscription /
+ * usage credits) or a rate-limit cooldown can decline it.
+ */
+export type FastModeState = 'off' | 'cooldown' | 'on';
+
+/**
+ * Live per-turn fast-mode report, pushed main → renderer on change over the
+ * `fast-mode-state` channel (claudeCodeManager event of the same name) so the
+ * composer's Fast pill can reflect reality rather than the toggle.
+ */
+export interface FastModeStateNotice {
+  panelId: string;
+  sessionId: string;
+  /** What the CLI reported for the turn. */
+  state: FastModeState;
+  /** Whether the spawn that produced this report actually requested fast mode. */
+  requestedFast: boolean;
+}
+
 export interface EditorPanelState {
   filePath?: string;              // Currently open file
   content?: string;               // File content (for unsaved changes)

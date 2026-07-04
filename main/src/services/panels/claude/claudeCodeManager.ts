@@ -48,6 +48,7 @@ import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transition
 import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
 import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelProvider';
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
+import type { FastModeState, FastModeStateNotice } from '../../../../../shared/types/panels';
 import { isPermissionMode, type PermissionMode } from '../../../../../shared/types/workflows';
 
 /**
@@ -351,6 +352,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * Per-spawnKey so concurrent fan-out lanes never clobber each other.
    */
   private readonly terminalErrorBySpawn = new Map<string, string>();
+
+  /**
+   * Latest per-panel fast-mode report, keyed by displayPanelId. The CLI stamps
+   * `fast_mode_state` on the system/init and result stream events; the toggle
+   * only records the user's REQUEST, so the composer's Fast pill reads this to
+   * show whether fast mode actually engaged (the CLI's org/entitlement check or
+   * a rate-limit cooldown can decline it). Pushed to the renderer on change via
+   * the 'fast-mode-state' event; snapshot readable via getFastModeReport.
+   */
+  private readonly fastModeReports = new Map<string, FastModeStateNotice>();
 
   /**
    * Per-spawn pipeline (router → sink), keyed by spawnKey (per-lane for a
@@ -896,6 +907,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
             if (captured) runClaudeSessionCaptured = true;
           }
 
+          // Surface the CLI's per-turn fast_mode_state (system/init + result
+          // events) so the composer's Fast pill reflects whether fast mode
+          // actually engaged — the entitlement check or a cooldown can decline
+          // a requested opt-in silently.
+          this.captureFastModeState(displayPanelId, sessionId, event, activeOptions);
+
           // Step G — native auto-mode visibility. When the auto classifier (or any
           // non-interactive deny) short-circuits a tool call, the SDK emits a
           // system/permission_denied message. Fold it into the review inbox as a
@@ -1025,6 +1042,40 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // Return true regardless of UPDATE row count: the session_id has been
     // observed for this run, so the caller stops probing further events.
     return true;
+  }
+
+  /**
+   * Capture the CLI's per-turn `fast_mode_state` (stamped on the system/init and
+   * result stream events) and, on change, push a {@link FastModeStateNotice} to
+   * the renderer (events.ts forwards the 'fast-mode-state' emit). The notice
+   * carries whether THIS spawn requested fast mode, so the pill only warns about
+   * a declined opt-in — never about a turn that ran with fast mode off by choice.
+   * Structurally narrowed (no `any`); never throws.
+   */
+  private captureFastModeState(
+    displayPanelId: string,
+    sessionId: string,
+    event: unknown,
+    activeOptions: Options,
+  ): void {
+    if (typeof event !== 'object' || event === null) return;
+    const state = (event as { fast_mode_state?: unknown }).fast_mode_state;
+    if (state !== 'off' && state !== 'cooldown' && state !== 'on') return;
+
+    const settings = activeOptions.settings;
+    const requestedFast =
+      typeof settings === 'object' && settings !== null && (settings as { fastMode?: unknown }).fastMode === true;
+
+    const previous = this.fastModeReports.get(displayPanelId);
+    const notice: FastModeStateNotice = { panelId: displayPanelId, sessionId, state: state as FastModeState, requestedFast };
+    this.fastModeReports.set(displayPanelId, notice);
+    if (previous?.state === notice.state && previous.requestedFast === notice.requestedFast) return;
+    this.emit('fast-mode-state', notice);
+  }
+
+  /** Latest fast-mode report for a panel, or null if no turn has reported yet. */
+  getFastModeReport(panelId: string): FastModeStateNotice | null {
+    return this.fastModeReports.get(panelId) ?? null;
   }
 
   /**

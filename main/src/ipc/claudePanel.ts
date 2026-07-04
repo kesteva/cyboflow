@@ -2,6 +2,7 @@ import { IpcMain } from 'electron';
 import type { AppServices } from './types';
 import { BaseAIPanelHandler } from './baseAIPanelHandler';
 import { ClaudePanelManager } from '../services/panels/claude/claudePanelManager';
+import { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import { panelManager } from '../services/panelManager';
 import { ClaudePanelState } from '../../../shared/types/panels';
 import type { SessionOutput } from '../database/models';
@@ -183,6 +184,24 @@ class ClaudePanelHandler extends BaseAIPanelHandler {
       } catch (error) {
         console.error('Failed to get Claude panel fast mode:', error);
         return { success: false, error: 'Failed to get Claude panel fast mode' };
+      }
+    });
+
+    // Latest CLI-reported fast-mode state for the panel (null until a turn has
+    // reported). The composer combines it with the persisted toggle to warn when
+    // a requested opt-in didn't actually engage (entitlement / cooldown). Live
+    // updates arrive over the 'fast-mode-state' push (events.ts); this getter is
+    // the mount-time snapshot. Only the real SDK manager tracks it — the demo /
+    // PTY managers report null.
+    this.ipcMain.handle('claude-panels:get-fast-mode-state', async (_event, panelId: string) => {
+      try {
+        const { claudeCodeManager } = this.services;
+        const report =
+          claudeCodeManager instanceof ClaudeCodeManager ? claudeCodeManager.getFastModeReport(panelId) : null;
+        return { success: true, data: report };
+      } catch (error) {
+        console.error('Failed to get Claude panel fast-mode state:', error);
+        return { success: false, error: 'Failed to get Claude panel fast-mode state' };
       }
     });
 

@@ -10,6 +10,7 @@ import { useSessionStore } from '../../../stores/sessionStore';
 import { UnifiedComposer } from './UnifiedComposer';
 import { resolveChatVisibility } from './useChatVisibility';
 import type { AttachedImage, AttachedText, ComposerAttachments } from './attachments';
+import type { FastModeStateNotice } from '../../../../../shared/types/panels';
 
 /**
  * QuickSessionComposer — the panel-host adapter for the unified composer.
@@ -88,10 +89,15 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   // so the composer toggle reflects the launch choice.
   const [modelId, setModelId] = useState<string | null>(null);
   const [fastMode, setFastMode] = useState(false);
+  // Latest CLI-reported fast-mode state (ground truth vs the request toggle) —
+  // snapshot on mount, then live per-turn pushes. Lets the Fast pill warn when
+  // the opt-in was declined (entitlement / cooldown) instead of lying.
+  const [fastModeReport, setFastModeReport] = useState<FastModeStateNotice | null>(null);
   useEffect(() => {
     if (interactive || !panelId) {
       setModelId(null);
       setFastMode(false);
+      setFastModeReport(null);
       return;
     }
     let cancelled = false;
@@ -111,8 +117,20 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       .catch(() => {
         /* non-fatal: fast toggle stays off */
       });
+    API.claudePanels
+      .getFastModeState(panelId)
+      .then((res) => {
+        if (!cancelled && res.success) setFastModeReport(res.data ?? null);
+      })
+      .catch(() => {
+        /* non-fatal: pill just can't warn */
+      });
+    const unsubscribe = API.claudePanels.onFastModeState((notice) => {
+      if (notice.panelId === panelId) setFastModeReport(notice);
+    });
     return () => {
       cancelled = true;
+      unsubscribe();
     };
   }, [interactive, panelId]);
 
@@ -198,7 +216,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   // selected model — fast mode has no effect on other models.
   const fastModeSlot =
     !interactive && !running && panelId && isOpusModel(modelId) ? (
-      <FastModePill panelId={panelId} fastMode={fastMode} onChange={setFastMode} />
+      <FastModePill panelId={panelId} fastMode={fastMode} onChange={setFastMode} report={fastModeReport} />
     ) : undefined;
 
   // Agent-permission selector, next to the model pill. Persists to

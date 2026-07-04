@@ -14,6 +14,8 @@ const mockUpdateSessionMcps = vi.fn();
 const mockUpdateSessionPlugins = vi.fn();
 const mockSetModel = vi.fn();
 const mockOnModelFallback = vi.fn((_cb: (notice: unknown) => void) => () => {});
+const mockGetFastModeState = vi.fn();
+const mockOnFastModeState = vi.fn((_cb: (notice: unknown) => void) => () => {});
 vi.mock('../../../../utils/api', () => ({
   API: {
     sessions: {
@@ -25,6 +27,8 @@ vi.mock('../../../../utils/api', () => ({
     claudePanels: {
       getModel: (id: string) => mockGetModel(id),
       getFastMode: (id: string) => mockGetFastMode(id),
+      getFastModeState: (id: string) => mockGetFastModeState(id),
+      onFastModeState: (cb: (notice: unknown) => void) => mockOnFastModeState(cb),
       setFastMode: (id: string, v: boolean) => mockSetFastMode(id, v),
       setModel: (id: string, model: string) => mockSetModel(id, model),
     },
@@ -127,6 +131,8 @@ beforeEach(() => {
   mockSendInput.mockReset().mockResolvedValue({ success: true });
   mockGetModel.mockReset().mockResolvedValue({ success: true, data: 'sonnet' });
   mockGetFastMode.mockReset().mockResolvedValue({ success: true, data: false });
+  mockGetFastModeState.mockReset().mockResolvedValue({ success: true, data: null });
+  mockOnFastModeState.mockReset().mockImplementation((_cb: (notice: unknown) => void) => () => {});
   mockSetFastMode.mockReset().mockResolvedValue({ success: true });
   mockUpdatePermission.mockReset().mockResolvedValue({ success: true });
   mockUpdateSessionMcps.mockReset().mockResolvedValue({ success: true });

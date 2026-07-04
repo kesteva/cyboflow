@@ -4,7 +4,7 @@ import { exposeElectronTRPC } from 'trpc-electron/main';
 import type { CreateSessionRequest, Session } from './types/session';
 import type { AppConfig, UpdateConfigRequest } from './types/config';
 import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../frontend/src/types/project';
-import type { ToolPanel } from '../../shared/types/panels';
+import type { ToolPanel, FastModeStateNotice } from '../../shared/types/panels';
 import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
 
@@ -578,6 +578,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     setModel: (panelId: string, model: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:set-model', panelId, model),
     setFastMode: (panelId: string, fastMode: boolean): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:set-fast-mode', panelId, fastMode),
     getFastMode: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-fast-mode', panelId),
+    getFastModeState: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('claude-panels:get-fast-mode-state', panelId),
+    onFastModeState: (callback: (notice: FastModeStateNotice) => void) => {
+      const subscription = (_event: Electron.IpcRendererEvent, notice: FastModeStateNotice) => callback(notice);
+      ipcRenderer.on('fast-mode-state', subscription);
+      return () => ipcRenderer.removeListener('fast-mode-state', subscription);
+    },
   },
 
   // Logs panel operations

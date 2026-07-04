@@ -45,3 +45,49 @@ describe('FastModePill', () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 });
+
+describe('FastModePill — declined-opt-in warning (CLI fast_mode_state)', () => {
+  const report = (state: 'off' | 'cooldown' | 'on', requestedFast: boolean) => ({
+    panelId: 'panel-1',
+    sessionId: 'sess-1',
+    state,
+    requestedFast,
+  });
+
+  it('warns when the toggle is on but the requested turn reported off', () => {
+    render(<FastModePill panelId="panel-1" fastMode onChange={vi.fn()} report={report('off', true)} />);
+    expect(screen.getByTestId('composer-fast-mode-warning')).toBeInTheDocument();
+    expect(screen.getByTestId('composer-fast-mode-pill')).toHaveAttribute(
+      'title',
+      expect.stringContaining('extra usage'),
+    );
+  });
+
+  it('warns with cooldown copy when the CLI reports cooldown', () => {
+    render(<FastModePill panelId="panel-1" fastMode onChange={vi.fn()} report={report('cooldown', true)} />);
+    expect(screen.getByTestId('composer-fast-mode-warning')).toBeInTheDocument();
+    expect(screen.getByTestId('composer-fast-mode-pill')).toHaveAttribute(
+      'title',
+      expect.stringContaining('cooling down'),
+    );
+  });
+
+  it('does NOT warn when fast mode is actually on', () => {
+    render(<FastModePill panelId="panel-1" fastMode onChange={vi.fn()} report={report('on', true)} />);
+    expect(screen.queryByTestId('composer-fast-mode-warning')).not.toBeInTheDocument();
+  });
+
+  it('does NOT warn on a stale report from a turn that never requested fast mode', () => {
+    render(<FastModePill panelId="panel-1" fastMode onChange={vi.fn()} report={report('off', false)} />);
+    expect(screen.queryByTestId('composer-fast-mode-warning')).not.toBeInTheDocument();
+  });
+
+  it('does NOT warn while the toggle is off or before any turn has reported', () => {
+    const { rerender } = render(
+      <FastModePill panelId="panel-1" fastMode={false} onChange={vi.fn()} report={report('off', true)} />,
+    );
+    expect(screen.queryByTestId('composer-fast-mode-warning')).not.toBeInTheDocument();
+    rerender(<FastModePill panelId="panel-1" fastMode onChange={vi.fn()} report={null} />);
+    expect(screen.queryByTestId('composer-fast-mode-warning')).not.toBeInTheDocument();
+  });
+});
