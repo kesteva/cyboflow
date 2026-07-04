@@ -76,6 +76,7 @@ function nonNullableUsage(input = 0, output = 0): SDKResultSuccess['usage'] {
     input_tokens: input,
     iterations: [],
     output_tokens: output,
+    output_tokens_details: { thinking_tokens: 0 },
     server_tool_use: { web_fetch_requests: 0, web_search_requests: 0 },
     service_tier: 'standard',
     speed: 'standard',
@@ -92,6 +93,7 @@ function betaUsage(input = 0, output = 0): SDKAssistantMessage['message']['usage
     input_tokens: input,
     iterations: null,
     output_tokens: output,
+    output_tokens_details: null,
     server_tool_use: null,
     service_tier: null,
     speed: null,
@@ -155,6 +157,7 @@ export function sdkAssistantText(
       container: null,
       content: texts.map((t) => ({ type: 'text', text: t, citations: null })),
       context_management: null,
+      diagnostics: null,
       model: opts.model ?? DEFAULT_MODEL,
       role: 'assistant',
       stop_details: null,
@@ -189,6 +192,7 @@ export function sdkAssistantToolUse(
         },
       ],
       context_management: null,
+      diagnostics: null,
       model: opts.model ?? DEFAULT_MODEL,
       role: 'assistant',
       stop_details: null,
@@ -451,10 +455,17 @@ export class ScenarioBuilder {
           const pending = canUseTool(step.toolName, step.input, {
             signal: controller.signal,
             toolUseID: `toolu_${randomUUID()}`,
+            requestId: `req_${randomUUID()}`,
           });
           // Signal "canUseTool has been invoked" so a test can respond out-of-band.
           step.requested.resolve();
           const result = await pending;
+          // SDK 0.3.201 widened canUseTool to `PermissionResult | null` (null =
+          // suppress the control response); cyboflow's permission chain always
+          // decides, so a null here means the code-under-test regressed.
+          if (result === null) {
+            throw new Error('fakeSdk: canUseTool returned null (the permission chain must always decide)');
+          }
           for (const message of step.onResult?.(result) ?? []) {
             yield message;
           }
