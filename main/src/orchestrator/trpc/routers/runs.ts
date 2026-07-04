@@ -860,6 +860,14 @@ export const runsRouter = router({
       // workflow_runs.eval_enabled. A per-run ON does NOT unlock quick/custom flows
       // (the trigger's built-ins-only isCyboflowWorkflowName gate is unchanged).
       evalEnabled: z.boolean().optional(),
+      // Optional per-run execution-model override — the HIGHEST-precedence rung of
+      // resolveExecutionModel (above frontmatter / project config / the global
+      // defaultExecutionModel / env). 'programmatic' hands the run's DAG walk to the
+      // in-process host loop (WorkflowController); omitted = no per-run choice → the
+      // resolver ladder decides (floor 'orchestrated'). Set from the launch wizard's
+      // Advanced "Orchestration" tri-state. Safe on any substrate: the resolver
+      // hard-pins 'orchestrated' for interactive-PTY runs regardless of this value.
+      executionModel: z.enum(['orchestrated', 'programmatic']).optional(),
     }))
     .mutation(async ({ ctx, input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
@@ -942,9 +950,10 @@ export const runsRouter = router({
       // throw without it. (The earlier "legacy 2-arg shape when all optionals are
       // omitted" fast path is gone — it could not supply a project for a global
       // flow.) Any optional arg may still be undefined, which the launcher treats
-      // as "no link / no host / resolver default". baseBranch and
-      // requestedExecutionModel are never sent over this IPC path — undefined
-      // placeholders. findingIds, requestedModel, then requestedEvalEnabled
+      // as "no link / no host / resolver default". baseBranch is never sent over
+      // this IPC path — an undefined placeholder. requestedExecutionModel carries
+      // the wizard's per-run Orchestration override (undefined = inherit the
+      // resolver ladder); findingIds, requestedModel, then requestedEvalEnabled
       // (migration 044) are the LAST positional args, AFTER requestedExecutionModel.
       const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
         input.workflowId,
@@ -957,7 +966,7 @@ export const runsRouter = router({
         undefined,
         input.taskIds,
         input.projectId,
-        undefined,
+        input.executionModel,
         input.findingIds,
         input.model,
         input.evalEnabled,

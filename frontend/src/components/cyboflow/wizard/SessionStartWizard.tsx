@@ -84,6 +84,7 @@ import { UltracodeCard } from './UltracodeCard';
 import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME } from './workflowMeta';
 import type { WorkflowCardMeta } from './workflowMeta';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
+import type { ExecutionModel } from '../../../../../shared/types/executionModel';
 import { trackEvent } from '../../../utils/telemetry';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
 import type { TelemetryFlow } from '../../../../../shared/types/telemetry';
@@ -217,6 +218,13 @@ export default function SessionStartWizard(): React.JSX.Element {
   // 044). Meaningless for a quick session (evals only fire for built-in flows), so
   // the control is not shown there. Default 'inherit' keeps launches byte-identical.
   const [evalOverride, setEvalOverride] = useState<'inherit' | 'on' | 'off'>('inherit');
+  // Advanced (Configure ③, WORKFLOW only): per-run execution-model override.
+  // 'inherit' → omit `executionModel` (the run resolves via the global
+  // defaultExecutionModel setting → env → the 'orchestrated' floor); an explicit
+  // choice is the HIGHEST-precedence resolver rung. Interactive-PTY runs always
+  // hard-pin 'orchestrated' inside the resolver, so the override only matters on
+  // the SDK substrate. Default 'inherit' keeps launches byte-identical.
+  const [executionModelOverride, setExecutionModelOverride] = useState<'inherit' | ExecutionModel>('inherit');
   // Advanced (Configure ③, quick only): per-session MCP DENY set + plugin
   // selection, chosen at session start (NOT a mid-conversation toggle — enforced
   // at the first spawn). Threaded into createQuick; collapsed by default.
@@ -475,6 +483,10 @@ export default function SessionStartWizard(): React.JSX.Element {
           // 'inherit' omits the field (inherit the global setting); on/off send a
           // boolean. A per-run ON does NOT unlock quick/custom flows server-side.
           ...(evalOverride !== 'inherit' ? { evalEnabled: evalOverride === 'on' } : {}),
+          // Per-run execution-model override — Advanced options. 'inherit' omits the
+          // field (the resolver ladder decides); an explicit choice is the
+          // highest-precedence rung of resolveExecutionModel.
+          ...(executionModelOverride !== 'inherit' ? { executionModel: executionModelOverride } : {}),
           ...(ideaId !== undefined ? { ideaId } : {}),
           ...(selectedFindingIds?.length && meta?.name === 'compound'
             ? { findingIds: selectedFindingIds }
@@ -505,7 +517,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride, selectedFindingIds],
+    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride, executionModelOverride, selectedFindingIds],
   );
 
   // Sprint launch — ONE session-hosted run seeded with the multi-selected task
@@ -534,6 +546,8 @@ export default function SessionStartWizard(): React.JSX.Element {
           model,
           // Per-run code-review-eval override (migration 044) — Advanced options.
           ...(evalOverride !== 'inherit' ? { evalEnabled: evalOverride === 'on' } : {}),
+          // Per-run execution-model override — Advanced options (see launchRun).
+          ...(executionModelOverride !== 'inherit' ? { executionModel: executionModelOverride } : {}),
           taskIds,
         });
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
@@ -551,7 +565,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride],
+    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride, executionModelOverride],
   );
 
   const handleStart = useCallback(() => {
@@ -958,6 +972,47 @@ export default function SessionStartWizard(): React.JSX.Element {
                           className={cn(
                             'flex-1 rounded-button border px-2 py-1.5 text-xs font-medium transition-colors',
                             evalOverride === value
+                              ? 'border-interactive bg-interactive-surface text-text-primary'
+                              : 'border-border-secondary bg-bg-primary text-text-secondary hover:bg-surface-hover',
+                          )}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Per-run execution-model override — the highest-precedence rung
+                        of resolveExecutionModel. 'Use global setting' omits the field
+                        (inherit Settings → Workflow Orchestration / env / the
+                        'orchestrated' floor). Interactive-PTY runs hard-pin
+                        orchestrated in the resolver, so an explicit 'Programmatic'
+                        only takes effect on the SDK substrate. */}
+                    <div className="mt-1 flex flex-col gap-0.5">
+                      <span className="text-sm font-medium text-text-primary">Orchestration</span>
+                      <span className="text-xs text-text-tertiary">
+                        Who walks this run's steps — SDK runs only; the terminal substrate is always orchestrated
+                      </span>
+                    </div>
+                    <div
+                      className="flex gap-1.5"
+                      role="radiogroup"
+                      aria-label="Orchestration"
+                    >
+                      {([
+                        { value: 'inherit', label: 'Use global setting' },
+                        { value: 'orchestrated', label: 'Orchestrated' },
+                        { value: 'programmatic', label: 'Programmatic' },
+                      ] as const).map(({ value, label }) => (
+                        <button
+                          key={value}
+                          type="button"
+                          role="radio"
+                          aria-checked={executionModelOverride === value}
+                          onClick={() => setExecutionModelOverride(value)}
+                          data-testid={`wizard-execmodel-${value}`}
+                          className={cn(
+                            'flex-1 rounded-button border px-2 py-1.5 text-xs font-medium transition-colors',
+                            executionModelOverride === value
                               ? 'border-interactive bg-interactive-surface text-text-primary'
                               : 'border-border-secondary bg-bg-primary text-text-secondary hover:bg-surface-hover',
                           )}

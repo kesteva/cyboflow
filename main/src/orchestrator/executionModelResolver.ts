@@ -55,9 +55,9 @@ export interface ExecutionModelResolverInputs {
   substrate: CliSubstrate;
   /**
    * Explicit per-run choice from the run-launch UI. HIGHEST precedence among the
-   * override levels (but still below the interactive hard-pin). Not yet wired
-   * through createRun/launch — reserved for the picker that lands with the
-   * programmatic consumer.
+   * override levels (but still below the interactive hard-pin). Wired from the
+   * launch wizard's Advanced "Orchestration" tri-state via runs.start
+   * ({ executionModel }) → RunLauncher.launch → createRun.
    */
   requestedExecutionModel?: string | null;
   /** Workflow .md frontmatter `execution_model:` value. */
