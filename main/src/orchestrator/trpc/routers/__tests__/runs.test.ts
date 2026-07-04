@@ -683,6 +683,70 @@ describe('cyboflow.runs.start', () => {
   });
 
   // -------------------------------------------------------------------------
+  // (a9) A/B testing: baseline:true (and no variantId) → forwarded as the
+  // trailing (15th) launchOptions object as { baseline: true }, pinning the
+  // baseline (live-spec, no-rotation) run — VariantSelector's "Baseline (no
+  // variant)" option.
+  // -------------------------------------------------------------------------
+  it('(a9) baseline:true (no variantId) → forwards { baseline: true } as the trailing launchOptions', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-baseline',
+      worktreePath: '/tmp/wt/baseline',
+      branchName: 'cyboflow/planner/baseline12',
+    });
+    const sessionManagerStub = { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) };
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({ workflowId: 'wf-planner', projectId: 1, sessionId: 'sess-1', baseline: true });
+
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock.mock.calls[0][14]).toEqual({ baseline: true });
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a10) A/B testing: variantId AND baseline both supplied → variantId wins
+  // (an explicit variant pin always takes precedence over the baseline pin;
+  // the VariantSelector never sends both, but the router's precedence must be
+  // deterministic).
+  // -------------------------------------------------------------------------
+  it('(a10) variantId + baseline both supplied → variantId wins (forwards requestedVariantId only)', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-both',
+      worktreePath: '/tmp/wt/both',
+      branchName: 'cyboflow/planner/both12',
+    });
+    const sessionManagerStub = { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) };
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({
+        workflowId: 'wf-planner',
+        projectId: 1,
+        sessionId: 'sess-1',
+        variantId: 'wfv_7',
+        baseline: true,
+      });
+
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock.mock.calls[0][14]).toEqual({ requestedVariantId: 'wfv_7' });
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
   // (a7) findingIds = [] → Zod rejects the empty array (the array elements are
   // non-empty strings but the schema does not constrain length; an EMPTY array is
   // a valid Zod value, so it reaches launch as []). The launcher enforces the

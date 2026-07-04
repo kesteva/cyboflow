@@ -912,6 +912,13 @@ export const runsRouter = router({
       // weighted rotation over the workflow's active variants (or resolves null →
       // baseline live-spec run, byte-identical to before).
       variantId: z.string().min(1).optional(),
+      // Optional explicit "Baseline (no variant)" pin (VariantSelector). When true
+      // (and variantId is omitted), forces the launcher's VariantResolver to return
+      // null WITHOUT consulting rotation — a baseline live-spec run even when the
+      // workflow has active weight>0 variants. Ignored when variantId is supplied
+      // (an explicit variant pin always wins). Mirrors the launchOptions.baseline
+      // pin runs.restart already uses to reproduce a baseline run on retry.
+      baseline: z.boolean().optional(),
     }))
     .mutation(async ({ ctx, input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
@@ -1014,10 +1021,15 @@ export const runsRouter = router({
         input.findingIds,
         input.model,
         input.evalEnabled,
-        // A/B testing (migration 046): the trailing launchOptions object. Only an
-        // explicit variant pin is threaded over this IPC path; rotation (no pin)
-        // and experiment stamps are resolved/supplied elsewhere.
-        input.variantId !== undefined ? { requestedVariantId: input.variantId } : undefined,
+        // A/B testing (migration 046): the trailing launchOptions object. An
+        // explicit variant pin wins over a baseline pin (VariantSelector only ever
+        // sends one or the other); rotation (neither supplied) and experiment
+        // stamps are resolved/supplied elsewhere.
+        input.variantId !== undefined
+          ? { requestedVariantId: input.variantId }
+          : input.baseline
+            ? { baseline: true }
+            : undefined,
       );
       return { runId, worktreePath, branchName };
     }),

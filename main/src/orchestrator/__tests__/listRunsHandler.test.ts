@@ -187,3 +187,61 @@ describe('listRunsHandler substrate round-trip', () => {
     expect(result[0].substrate).toBe('sdk');
   });
 });
+
+// ---------------------------------------------------------------------------
+// (f) variant_label projection (migration 046 / A/B testing).
+//
+// includeSubstrate folds in the four workflow_runs A/B tagging columns
+// (addVariantColumnsOnce in orchestratorTestDb.ts), so the same fixture flag
+// this suite already opts into covers variant_label — no new fixture flag
+// needed. Surfaced on the list row so the left-rail run chip can render
+// "Variant: <label>" without a second query (WorkflowRunListRow.variant_label).
+// ---------------------------------------------------------------------------
+
+function seedRunWithVariantLabel(
+  db: Database.Database,
+  runId: string,
+  projectId: number,
+  variantLabel: string | null,
+): void {
+  const workflowId = `workflow-for-${runId}`;
+
+  db.prepare(
+    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json)
+     VALUES (?, ?, 'test-workflow', '{}')`,
+  ).run(workflowId, projectId);
+
+  db.prepare(
+    `INSERT INTO workflow_runs
+       (id, workflow_id, project_id, worktree_path, status, policy_json, variant_label)
+     VALUES (?, ?, ?, '/tmp/test', 'running', '{}', ?)`,
+  ).run(runId, workflowId, projectId, variantLabel);
+}
+
+describe('listRunsHandler variant_label projection', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb({ includeSubstrate: true });
+  });
+
+  it('surfaces the denormalized variant_label for a variant-tagged run', () => {
+    seedRunWithVariantLabel(db, 'run-variant', 1, 'Variant B');
+
+    const adapter = dbAdapter(db);
+    const result = listRunsHandler(adapter, 1);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].variant_label).toBe('Variant B');
+  });
+
+  it('reads back variant_label as null for a baseline (non-variant) run', () => {
+    seedRun(db, { id: 'run-baseline', projectId: 1 });
+
+    const adapter = dbAdapter(db);
+    const result = listRunsHandler(adapter, 1);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].variant_label).toBeNull();
+  });
+});

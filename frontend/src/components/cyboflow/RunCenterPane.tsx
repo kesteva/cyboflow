@@ -193,12 +193,42 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
 
   return (
     <div className="flex h-full flex-col overflow-hidden" data-testid="run-center-pane">
-      <CenterPaneTabStrip
-        tabs={session.tabs}
-        activeTabId={session.activeTabId}
-        onTabClick={(id) => focusTab(sessionKey, id)}
-        onTabClose={(id) => closeTab(sessionKey, id)}
-      />
+      <div style={{ display: 'flex', alignItems: 'stretch' }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <CenterPaneTabStrip
+            tabs={session.tabs}
+            activeTabId={session.activeTabId}
+            onTabClick={(id) => focusTab(sessionKey, id)}
+            onTabClose={(id) => closeTab(sessionKey, id)}
+          />
+        </div>
+        {/* A/B variant pill (migration 046) — reads the denormalized
+            workflow_runs.variant_label off the active run row, so no extra query
+            is needed. Absent for baseline (non-variant) runs. */}
+        {activeRun?.variant_label && (
+          <div
+            data-testid="run-variant-pill"
+            title={`Variant: ${activeRun.variant_label}`}
+            style={{
+              flexShrink: 0,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '0 11px',
+              fontSize: '10.5px',
+              fontWeight: 600,
+              letterSpacing: '-.005em',
+              color: 'var(--color-text-secondary)',
+              background: 'var(--color-bg-secondary)',
+              borderBottom: '1px solid var(--color-border-primary)',
+              borderLeft: '1px solid var(--color-border-primary)',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Variant: {activeRun.variant_label}
+          </div>
+        )}
+      </div>
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>{renderActiveTab()}</div>
       <TerminalDock
         open={session.terminalOpen}

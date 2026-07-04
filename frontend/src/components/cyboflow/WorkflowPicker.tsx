@@ -23,6 +23,8 @@ import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { SubstrateSelector } from './SubstrateSelector';
 import { ModelSelector, DEFAULT_WORKFLOW_MODEL } from './ModelSelector';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
+import { VariantSelector } from './VariantSelector';
+import { variantSelectionToStartInput, type VariantSelection } from './variantSelectorLogic';
 import { type WorkflowRow, CYBOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
 import { trackEvent } from '../../utils/telemetry';
@@ -65,6 +67,18 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
    * launches, and into useQuickSession.start for the Quick Session button.
    */
   const [model, setModel] = useState<string>(DEFAULT_WORKFLOW_MODEL);
+
+  /**
+   * The per-run A/B variant choice (migration 046, VariantSelector). Defaults to
+   * 'rotation' — a no-op selection ({@link variantSelectionToStartInput} sends
+   * neither `variantId` nor `baseline`) so a workflow with zero (or no eligible)
+   * variants launches exactly as before. VariantSelector re-seeds this to the
+   * architect-specified default once its list resolves; reset to 'rotation'
+   * whenever the selected workflow changes so a stale variant id from a
+   * PREVIOUS workflow selection is never sent to a different workflow's launch
+   * (variant ids are workflow-scoped — the resolver rejects a foreign pin).
+   */
+  const [variantSelection, setVariantSelection] = useState<VariantSelection>({ mode: 'rotation' });
 
   /**
    * The per-run agent permission choice — seeded from the global default and
@@ -145,6 +159,14 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     void loadWorkflows();
   }, [loadWorkflows]);
 
+  // A variant id is workflow-scoped — reset to the no-op 'rotation' selection
+  // whenever the selected workflow changes so a PRIOR workflow's variant pin is
+  // never sent to a different workflow's launch (VariantSelector re-seeds the
+  // real default for the new workflow once its list resolves).
+  useEffect(() => {
+    setVariantSelection({ mode: 'rotation' });
+  }, [selectedId]);
+
   const handleEditorSaved = useCallback(
     (savedId: string) => {
       setEditorMode(null);
@@ -180,11 +202,16 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         // the session in the store (setActiveRun's parentSessionId). forceNew
         // bypasses reuse for the PTY add-workflow flow (separate session).
         const sessionId = await ensureSessionForLaunch(projectId, { forceNew: forceNewSession });
-        const result = await trpc.cyboflow.runs.start.mutate(
-          ideaId === undefined
-            ? { workflowId, projectId, substrate, sessionId, permissionMode, model }
-            : { workflowId, projectId, substrate, sessionId, permissionMode, model, ideaId },
-        );
+        const result = await trpc.cyboflow.runs.start.mutate({
+          workflowId,
+          projectId,
+          substrate,
+          sessionId,
+          permissionMode,
+          model,
+          ...(ideaId !== undefined ? { ideaId } : {}),
+          ...variantSelectionToStartInput(variantSelection),
+        });
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
         trackEvent('workflow_run_started', {
           launch_surface: 'topbar',
@@ -201,7 +228,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projectId, substrate, permissionMode, model, onWorkflowStarted, forceNewSession, workflows],
+    [projectId, substrate, permissionMode, model, variantSelection, onWorkflowStarted, forceNewSession, workflows],
   );
 
   /**
@@ -230,6 +257,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           permissionMode,
           model,
           taskIds,
+          ...variantSelectionToStartInput(variantSelection),
         });
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
         trackEvent('workflow_run_started', {
@@ -247,7 +275,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projectId, substrate, permissionMode, model, onWorkflowStarted, forceNewSession, workflows],
+    [projectId, substrate, permissionMode, model, variantSelection, onWorkflowStarted, forceNewSession, workflows],
   );
 
   const handleStartRun = async () => {
@@ -337,6 +365,18 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           spawns with (default Opus). Workflow: threaded into runs.start as `model`
           → workflow_runs.model (migration 037). Quick: into useQuickSession. */}
       <ModelSelector value={model} onChange={setModel} id="workflow-picker-model" />
+
+      {/* Per-run A/B variant selector (migration 046) — hidden entirely for a
+          workflow with zero variants. Threaded into runs.start as variantId /
+          baseline (never both); rotation sends neither field. */}
+      {selectedId !== null && (
+        <VariantSelector
+          workflowId={selectedId}
+          value={variantSelection}
+          onChange={setVariantSelection}
+          id="workflow-picker-variant"
+        />
+      )}
 
       {combinedError && (
         <p className="text-xs text-status-error" role="alert">

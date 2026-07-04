@@ -41,6 +41,12 @@ vi.mock('../../../../trpc/client', () => ({
       substrates: {
         resolveEffective: { query: vi.fn().mockResolvedValue({ substrate: 'sdk' }) },
       },
+      // A/B testing (migration 046) — VariantSelector fetches this for the
+      // selected workflow. Empty by default so it renders nothing and never
+      // adds variantId/baseline to the runs.start payload.
+      variants: {
+        list: { query: vi.fn().mockResolvedValue([]) },
+      },
       workflows: {
         list: {
           query: vi.fn().mockResolvedValue([

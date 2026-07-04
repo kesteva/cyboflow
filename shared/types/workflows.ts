@@ -232,6 +232,14 @@ export interface WorkflowRunListRow {
    * failed (WorkflowSummaryPanel). Optional + additive (fixtures unaffected).
    */
   error_message?: string | null;
+  /**
+   * Denormalized variant label (migration 046) that survives variant
+   * rename/delete — see `WorkflowRunRow.variant_label`. Surfaced on the list row
+   * so the left-rail run chip and any other list-driven surface can render a
+   * "Variant: <label>" tag without a second query. NULL for baseline
+   * (non-variant) runs. Optional + additive, mirroring `model?`.
+   */
+  variant_label?: string | null;
 }
 
 /**

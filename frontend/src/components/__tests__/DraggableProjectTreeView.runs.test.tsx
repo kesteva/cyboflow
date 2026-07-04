@@ -575,6 +575,43 @@ describe('DraggableProjectTreeView — runs nest under their session', () => {
 });
 
 // ---------------------------------------------------------------------------
+// A/B variant chip (migration 046) — denormalized workflow_runs.variant_label
+// ---------------------------------------------------------------------------
+
+describe('DraggableProjectTreeView — A/B variant chip', () => {
+  it('renders the variant chip on a nested (session-hosted) run carrying variant_label', async () => {
+    mockSessions = [makeSession({ id: 'sess-A', name: 'quick-A', projectId: 1 })];
+    mockRunsByProject = {
+      1: [makeRun({ session_id: 'sess-A', workflowName: 'sprint', branch_name: 'quick-A', variant_label: 'Variant B' })],
+    };
+
+    await renderExpanded();
+    await waitFor(() => expect(screen.getByText('Variant B')).toBeInTheDocument());
+  });
+
+  it('renders the variant chip on a parentless run carrying variant_label', async () => {
+    mockSessions = [];
+    mockRunsByProject = {
+      1: [makeRun({ session_id: 'sess-gone', workflowName: 'planner', branch_name: 'orphan-br', variant_label: 'Variant A' })],
+    };
+
+    await renderExpanded();
+    await waitFor(() => expect(screen.getByText('Variant A')).toBeInTheDocument());
+  });
+
+  it('omits the chip for a baseline run (no variant_label)', async () => {
+    mockSessions = [];
+    mockRunsByProject = {
+      1: [makeRun({ session_id: 'sess-gone', workflowName: 'planner', branch_name: 'orphan-br' })],
+    };
+
+    await renderExpanded();
+    await waitFor(() => expect(screen.getByText('planner · orphan-br')).toBeInTheDocument());
+    expect(screen.queryByTitle(/^Variant:/)).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Empty saved expansion must not lock projects collapsed (collapse regression)
 // ---------------------------------------------------------------------------
 

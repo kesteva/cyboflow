@@ -125,6 +125,24 @@ describe('RunCenterPane', () => {
     expect(screen.getByTestId('terminal-dock')).toBeInTheDocument();
   });
 
+  it('renders the "Variant: <label>" pill when the active run carries a variant_label', () => {
+    render(
+      <RunCenterPane
+        activeRunId="run-1"
+        phaseState={makePhaseState(DEFINITION)}
+        activeRun={makeRun({ variant_label: 'Variant B' })}
+      />,
+    );
+    expect(screen.getByTestId('run-variant-pill')).toHaveTextContent('Variant: Variant B');
+  });
+
+  it('omits the variant pill for a baseline run (no variant_label)', () => {
+    render(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    expect(screen.queryByTestId('run-variant-pill')).not.toBeInTheDocument();
+  });
+
   it('hosts WorkflowCanvas for a normal run', () => {
     render(
       <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,

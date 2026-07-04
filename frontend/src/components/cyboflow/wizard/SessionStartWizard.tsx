@@ -68,6 +68,8 @@ import { AgentPermissionModeSelector, PERMISSION_MODE_OPTIONS } from '../AgentPe
 import { SubstrateSelector } from '../SubstrateSelector';
 import { ModelSelector, DEFAULT_QUICK_MODEL, ULTRACODE_DEFAULT_MODEL } from '../ModelSelector';
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
+import { VariantSelector } from '../VariantSelector';
+import { variantSelectionToStartInput, type VariantSelection } from '../variantSelectorLogic';
 import { isOpusModel, modelDisplayLabel } from '../unified/ModelPill';
 import { McpTogglePill } from '../unified/McpTogglePill';
 import { PluginTogglePill } from '../unified/PluginTogglePill';
@@ -257,6 +259,15 @@ export default function SessionStartWizard(): React.JSX.Element {
   // interactive gate rides the inline `--settings` flag — no checkout writes).
   // Default 'inherit' keeps launches byte-identical.
   const [worktreeModeOverride, setWorktreeModeOverride] = useState<'inherit' | QuickSessionWorktreeMode>('inherit');
+  // Advanced (Configure ③, WORKFLOW only): per-run A/B variant choice (migration
+  // 046, VariantSelector). Defaults to 'rotation' — a no-op selection
+  // (variantSelectionToStartInput sends neither `variantId` nor `baseline`) so a
+  // workflow with zero/ineligible variants launches exactly as before.
+  // VariantSelector re-seeds this to the architect default once its list
+  // resolves; reset to 'rotation' whenever the selected workflow changes (below)
+  // so a stale variant id from a PREVIOUS workflow is never sent to a different
+  // workflow's launch.
+  const [variantSelection, setVariantSelection] = useState<VariantSelection>({ mode: 'rotation' });
   // Advanced (Configure ③, quick only): per-session MCP DENY set + plugin
   // selection, chosen at session start (NOT a mid-conversation toggle — enforced
   // at the first spawn). Threaded into createQuick; collapsed by default.
@@ -292,6 +303,15 @@ export default function SessionStartWizard(): React.JSX.Element {
       cancelled = true;
     };
   }, []);
+  // A variant id is workflow-scoped — reset to the no-op 'rotation' selection
+  // whenever the selected workflow changes so a PRIOR workflow's variant pin is
+  // never sent to a different workflow's launch (VariantSelector re-seeds the
+  // real default for the new workflow once its list resolves).
+  const selectedWorkflowId = selection?.kind === 'workflow' ? selection.workflowId : null;
+  useEffect(() => {
+    setVariantSelection({ mode: 'rotation' });
+  }, [selectedWorkflowId]);
+
   // Blueprint editor (workflow path only) — 'edit' (selected flow) or 'create'.
   const [editorMode, setEditorMode] = useState<'edit' | 'create' | null>(null);
 
@@ -523,6 +543,7 @@ export default function SessionStartWizard(): React.JSX.Element {
           ...(selectedFindingIds?.length && meta?.name === 'compound'
             ? { findingIds: selectedFindingIds }
             : {}),
+          ...variantSelectionToStartInput(variantSelection),
         });
         // Nest the run under its session so the close-out + panels resolve
         // (setActiveRun's parentSessionId sets selectedSessionId).
@@ -549,7 +570,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride, executionModelOverride, selectedFindingIds],
+    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride, executionModelOverride, selectedFindingIds, variantSelection],
   );
 
   // Sprint launch — ONE session-hosted run seeded with the multi-selected task
@@ -581,6 +602,7 @@ export default function SessionStartWizard(): React.JSX.Element {
           // Per-run execution-model override — Advanced options (see launchRun).
           ...(executionModelOverride !== 'inherit' ? { executionModel: executionModelOverride } : {}),
           taskIds,
+          ...variantSelectionToStartInput(variantSelection),
         });
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
         useNavigationStore.getState().setActiveProjectId(selectedProjectId);
@@ -597,7 +619,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride, executionModelOverride],
+    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride, executionModelOverride, variantSelection],
   );
 
   const handleStart = useCallback(() => {
@@ -911,6 +933,19 @@ export default function SessionStartWizard(): React.JSX.Element {
                 onChange={setSubstrate}
                 id="wizard-substrate"
                 caveatsTestId="wizard-substrate-caveats"
+              />
+            )}
+
+            {/* Per-run A/B variant selector (migration 046), WORKFLOW only — hidden
+                entirely for a workflow with zero variants. Threaded into
+                runs.start as variantId / baseline (never both); rotation sends
+                neither field. */}
+            {selection.kind === 'workflow' && (
+              <VariantSelector
+                workflowId={selection.workflowId}
+                value={variantSelection}
+                onChange={setVariantSelection}
+                id="wizard-variant"
               />
             )}
 

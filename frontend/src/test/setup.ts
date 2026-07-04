@@ -40,6 +40,12 @@ vi.mock('../trpc/client', () => ({
           ]),
         },
       },
+      // A/B testing (migration 046) — VariantSelector / VariantManagerSection
+      // fetch this for the selected workflow. Empty by default so either renders
+      // its "nothing to show" state without any test file needing its own mock.
+      variants: {
+        list: { query: vi.fn().mockResolvedValue([]) },
+      },
       events: {
         onStuckDetected: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
         onApprovalCreated: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
