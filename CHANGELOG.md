@@ -6,6 +6,35 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.15] — 2026-07-04
+
+### Added
+
+- **Optional design phase for Planner and Ship.** Both flows can now run two
+  optional design steps before an idea is decomposed:
+  - a **UI prototype** — a static HTML mockup the flow builds, serves from a
+    local server, and shows in its own **iframe tab**; and
+  - an **architecture design** — folded into the idea body and surfaced as a
+    dedicated **arch-design** artifact tab.
+
+  These run at the refinement head, after idea approval, and are gated by a new
+  **approve-design** human checkpoint so nothing decomposes until you sign off on
+  the design. [migration 045]
+
+### Fixed
+
+- The end-of-run review panel now appears only at a flow's **final** human gate,
+  not at every intermediate gate.
+- The Planner idea picker excludes **decomposed** (retired) ideas.
+- Removed a spurious human-review prompt on the Planner/Ship context step.
+
+### Changed
+
+- Expanded CI and test infrastructure — a mocked-SDK integration harness
+  (Tier-2 chokepoint + Tier-3 scenario coverage over a migration-replay DB), a
+  parallel blocking integration job with coverage moved off the critical path,
+  nightly SDK canaries, and flake quarantining.
+
 ## [0.1.14] — 2026-07-03
 
 ### Fixed
