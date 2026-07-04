@@ -58,9 +58,13 @@ jobs:
     # The root `postinstall` (electron-builder install-app-deps) rebuilds
     # better-sqlite3 against the Electron ABI. The unit suite runs under host
     # Node (vitest), so restore the host-Node ABI or main DB tests throw
-    # NODE_MODULE_VERSION mismatches. See CLAUDE.md.
+    # NODE_MODULE_VERSION mismatches. See CLAUDE.md. The rebuild is wrapped in
+    # scripts/rebuild-better-sqlite3-host.mjs, which asserts a real :memory:
+    # database opens post-rebuild and retries once with a forced source build
+    # before failing loudly — a bare `pnpm rebuild` can silently leave a stale
+    # wrong-arch prebuild in place.
     - name: Rebuild better-sqlite3 for host Node ABI
-      run: pnpm rebuild better-sqlite3
+      run: node scripts/rebuild-better-sqlite3-host.mjs
 
     # Headless unit chain (main + frontend vitest, schema parity, build scripts).
     # The Playwright E2E suite is intentionally excluded: the renderer cannot
