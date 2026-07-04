@@ -1793,6 +1793,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               sessionManager.addPanelConversationMessage(panelId, 'user', input);
             }
 
+            // Per-panel fast-mode persisted at quick-session launch (wizard toggle)
+            // or by the in-composer FastModePill — panels:continue respawns the SDK
+            // process per turn, so read the persisted choice and thread it on every
+            // respawn exactly like sessions:input does; otherwise fast mode silently
+            // reverts to standard speed the moment a turn routes through this path.
+            const panelFastMode = databaseService.getPanelSettings(panelId)?.fastMode === true;
+
             // If there's no running process and no Claude session id yet, this is likely the first message.
             // Start fresh (no --resume) so the user can begin a new conversation.
             const isRunning = claudePanelManager.isPanelRunning(panelId);
@@ -1807,7 +1814,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
                 session.worktreePath,
                 input || '',
                 dbSession?.permission_mode,
-                model
+                model,
+                panelFastMode
               );
               return { success: true };
             }
@@ -1823,7 +1831,8 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               session.worktreePath,
               input || '',
               conversationHistory,
-              model
+              model,
+              panelFastMode
             );
             return { success: true };
           } catch (err) {

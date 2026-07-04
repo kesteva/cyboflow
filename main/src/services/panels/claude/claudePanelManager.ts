@@ -30,12 +30,13 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
 
   /**
    * Extract Claude-specific configuration parameters
-   * Claude uses: permissionMode, model
+   * Claude uses: permissionMode, model, fastMode
    */
-  protected extractAgentConfig(config: AIPanelConfig): [string | undefined, string | undefined] {
+  protected extractAgentConfig(config: AIPanelConfig): [string | undefined, string | undefined, boolean | undefined] {
     return [
       config.permissionMode, // 'approve' | 'ignore' | undefined
-      config.model          // model string
+      config.model,          // model string
+      config.fastMode        // Opus fast-mode opt-in (persisted per-panel)
     ];
   }
 
@@ -43,14 +44,15 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
    * Claude-specific panel start method for backward compatibility
    * Delegates to the base class startPanel with unified config
    */
-  async startPanel(panelId: string, worktreePath: string, prompt: string, permissionMode?: 'approve' | 'ignore', model?: string): Promise<void>;
+  async startPanel(panelId: string, worktreePath: string, prompt: string, permissionMode?: 'approve' | 'ignore', model?: string, fastMode?: boolean): Promise<void>;
   async startPanel(config: StartPanelConfig): Promise<void>;
   async startPanel(
     panelIdOrConfig: string | StartPanelConfig,
     worktreePath?: string,
     prompt?: string,
     permissionMode?: 'approve' | 'ignore',
-    model?: string
+    model?: string,
+    fastMode?: boolean
   ): Promise<void> {
     // Handle both signatures for backward compatibility
     if (typeof panelIdOrConfig === 'string') {
@@ -59,7 +61,8 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
         worktreePath: worktreePath!,
         prompt: prompt!,
         permissionMode,
-        model
+        model,
+        fastMode
       };
       return super.startPanel(config);
     } else {
@@ -71,14 +74,15 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
    * Claude-specific panel continue method for backward compatibility
    * Delegates to the base class continuePanel with unified config
    */
-  async continuePanel(panelId: string, worktreePath: string, prompt: string, conversationHistory: ConversationMessage[], model?: string): Promise<void>;
+  async continuePanel(panelId: string, worktreePath: string, prompt: string, conversationHistory: ConversationMessage[], model?: string, fastMode?: boolean): Promise<void>;
   async continuePanel(config: ContinuePanelConfig): Promise<void>;
   async continuePanel(
     panelIdOrConfig: string | ContinuePanelConfig,
     worktreePath?: string,
     prompt?: string,
     conversationHistory?: ConversationMessage[],
-    model?: string
+    model?: string,
+    fastMode?: boolean
   ): Promise<void> {
     // Handle both signatures for backward compatibility
     if (typeof panelIdOrConfig === 'string') {
@@ -87,7 +91,8 @@ export class ClaudePanelManager extends AbstractAIPanelManager {
         worktreePath: worktreePath!,
         prompt: prompt!,
         conversationHistory: conversationHistory!,
-        model
+        model,
+        fastMode
       };
       return super.continuePanel(config);
     } else {

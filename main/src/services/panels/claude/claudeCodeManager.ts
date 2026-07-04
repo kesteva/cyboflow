@@ -1983,7 +1983,8 @@ export class ClaudeCodeManager extends AbstractCliManager {
     prompt: string,
     conversationHistory: ConversationMessage[],
     permissionModeOverride?: 'approve' | 'ignore',
-    model?: string
+    model?: string,
+    fastMode?: boolean
   ): Promise<void> {
     return await withLock(`claude-continue-${panelId}`, async () => {
       const { validatePanelSessionOwnership, logValidationFailure } = require('../../../utils/sessionValidation');
@@ -2018,17 +2019,18 @@ export class ClaudeCodeManager extends AbstractCliManager {
         skip_continue_next_raw: skipContinueRaw,
         shouldSkipContinue,
         permissionMode,
-        model
+        model,
+        fastMode
       });
 
       if (shouldSkipContinue) {
         console.log(`[ClaudeCodeManager] Clearing skip_continue_next flag for session ${sessionId}`);
         this.sessionManager.updateSession(sessionId, { skip_continue_next: false });
         console.log(`[ClaudeCodeManager] Skipping resume for panel ${panelId} due to prompt compaction`);
-        return this.spawnClaudeCode(panelId, sessionId, worktreePath, prompt, [], false, permissionMode, model);
+        return this.spawnClaudeCode(panelId, sessionId, worktreePath, prompt, [], false, permissionMode, model, fastMode);
       } else {
         console.log(`[ClaudeCodeManager] Using resume for panel ${panelId}`);
-        return this.spawnClaudeCode(panelId, sessionId, worktreePath, prompt, [], true, permissionMode, model);
+        return this.spawnClaudeCode(panelId, sessionId, worktreePath, prompt, [], true, permissionMode, model, fastMode);
       }
     });
   }
