@@ -42,6 +42,15 @@ export interface AppConfig {
   // the trigger seam via configManager.getCodeReviewEvalEnabled(). NOT seeded into
   // constructor defaults, so existing config.json files stay byte-identical.
   codeReviewEvalEnabled?: boolean;
+  // Sub-toggle of the code-review eval (A/B testing slice C): whether variant- and
+  // experiment-tagged runs are auto-graded (per-arm K=3 eval AND the pairwise
+  // judge). Absent/undefined = ENABLED (default ON). OFF => per-arm eval is
+  // skipped and the pairwise judge behaves as eval-disabled (status='skipped',
+  // diffs still captured for manual compare). Guards against silent Opus spend
+  // from merely activating two variants. Read at the widened trigger seam via
+  // configManager.getAutoGradeVariantRuns(). NOT seeded into constructor defaults,
+  // so existing config.json files stay byte-identical.
+  autoGradeVariantRuns?: boolean;
   // On-disk location for COMMITTED-artifact manifests (FEATURE #3 durability
   // snapshot). Relative paths resolve against the project ROOT; absolute paths
   // are used verbatim. Floors to DEFAULT_ARTIFACT_COMMIT_DIR ('.cyboflow/artifacts')
@@ -116,6 +125,8 @@ export interface UpdateConfigRequest {
   quickSessionWorktreeMode?: QuickSessionWorktreeMode;
   // Global on/off for the code-review eval (see AppConfig.codeReviewEvalEnabled).
   codeReviewEvalEnabled?: boolean;
+  // Auto-grade variant & experiment runs sub-toggle (see AppConfig.autoGradeVariantRuns).
+  autoGradeVariantRuns?: boolean;
   // On-disk location for COMMITTED-artifact manifests (see AppConfig.artifactCommitDir).
   artifactCommitDir?: string;
   theme?: 'paper' | 'light' | 'dark';

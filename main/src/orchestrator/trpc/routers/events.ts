@@ -93,6 +93,20 @@ export const stepTransitionEvents = new EventEmitter();
  */
 export const runStatusEvents = new EventEmitter();
 
+/**
+ * Main-process EventEmitter for A/B experiment lifecycle events (slice C).
+ *
+ * PairwiseJudgeWorker emits on this emitter via the `emitComparisonReady` closure
+ * wired in main/src/index.ts when a pairwise comparison reaches a terminal status
+ * (complete / failed / skipped):
+ *   experimentEvents.emit('comparisonReady', event satisfies ExperimentComparisonReadyEvent);
+ *
+ * Module-level singleton so the PairwiseJudgeWorker bridge and the
+ * experiments.onComparisonReady subscription share one instance without a
+ * circular import (mirrors runStatusEvents).
+ */
+export const experimentEvents = new EventEmitter();
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------

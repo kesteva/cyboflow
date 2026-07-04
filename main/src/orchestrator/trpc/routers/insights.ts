@@ -47,6 +47,7 @@ import type {
   DailyModelUsagePoint,
   RunEval,
 } from '../../../../../shared/types/insights';
+import type { VariantStats } from '../../../../../shared/types/experiments';
 import {
   selectWorkflowRunStats,
   selectWorkflowUsageStats,
@@ -57,6 +58,7 @@ import {
   selectUsageTrend,
   selectWorkflowRevisionStats,
   selectDailyModelUsage,
+  selectVariantStats,
   getRunEval,
 } from '../../insightsQueries';
 
@@ -257,6 +259,20 @@ export const insightsRouter = router({
     .query(({ ctx, input }): WorkflowRevisionStats[] => {
       const db = requireDb(ctx.db, 'revisionHistory');
       return selectWorkflowRevisionStats(db, input.workflowId);
+    }),
+
+  /**
+   * Per-variant rotation statistics for one workflow (A/B testing slice C). One
+   * row per variant_id that has non-experiment runs (side-by-side ARM runs are
+   * excluded — see selectVariantStats). `projectId` scopes on the run's project
+   * (mig-030 caveat); null aggregates every project. Low-sample variants (runs <
+   * MIN_VARIANT_RUNS) are returned with the `lowSample` flag, never hidden.
+   */
+  variantStats: protectedProcedure
+    .input(z.object({ workflowId: z.string().min(1), projectId: projectIdSchema }))
+    .query(({ ctx, input }): VariantStats[] => {
+      const db = requireDb(ctx.db, 'variantStats');
+      return selectVariantStats(db, input.workflowId, input.projectId ?? null);
     }),
 
   /**

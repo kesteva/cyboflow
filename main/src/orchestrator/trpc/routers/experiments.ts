@@ -28,6 +28,17 @@ import type {
   DecideResult,
   WorkflowVariantRow,
   WorkflowVariantStatus,
+  ComparisonStatus,
+  ExperimentComparisonRow,
+  ExperimentComparisonPayload,
+  ExperimentComparisonDiffs,
+  ExperimentArmView,
+  ExperimentSummary,
+  ExperimentComparisonReadyEvent,
+  ExperimentDecision,
+  PairwiseVerdict,
+  PairwiseSample,
+  PairwisePreference,
 } from '../../../../../shared/types/experiments';
 import { isExperimentArmSettled, isExperimentSettled } from '../../../../../shared/types/experiments';
 import {
@@ -38,6 +49,8 @@ import {
   updateExperimentStatus,
 } from '../../experimentStore';
 import { listRunCreatedEpicIds, listRunCreatedIdeaIds, listRunCreatedTaskIds } from '../../runEntityOwnership';
+import { selectRunUsageRollups, selectRunFindings, getRunEval } from '../../insightsQueries';
+import { experimentEvents, eventToAsyncIterable } from './events';
 
 // ---------------------------------------------------------------------------
 // Injected dependency bag (setExperimentsDeps, mirroring setStartRunDeps).
@@ -104,6 +117,15 @@ export interface ExperimentsDeps {
   setVariantWeight: (variantId: string, weight: number) => void;
   /** Optional: resolve the pairwise decision review item (slice C). Fail-soft when absent. */
   resolveReviewItem?: (reviewItemId: string) => void;
+  /**
+   * Optional (slice C): re-drive the pairwise snapshot + enqueue for an experiment
+   * (PairwiseJudgeWorker.maybeSnapshotAndEnqueue). Used by rerunComparison after
+   * deleting the stale comparison row. AWAITABLE — rerunComparison awaits it so the
+   * fresh comparison row exists before it reads back eval_status (a fire-and-forget
+   * snapshot would let the read race the INSERT and report a spurious 'absent').
+   * Fail-soft when absent (pre-slice-C boot).
+   */
+  pairwiseMaybeSnapshot?: (experimentId: string) => Promise<void>;
 }
 
 let experimentsDeps: ExperimentsDeps | null = null;
@@ -651,6 +673,99 @@ export async function abandonExperiment(deps: ExperimentsDeps, experimentId: str
 }
 
 // ---------------------------------------------------------------------------
+// Comparison reads (slice C) — assemble the compare-view payloads
+// ---------------------------------------------------------------------------
+
+/** Read the pairwise comparison row for an experiment (null when absent). */
+function readComparisonRow(db: DatabaseLike, experimentId: string): ExperimentComparisonRow | null {
+  const row = db
+    .prepare('SELECT * FROM experiment_comparisons WHERE experiment_id = ?')
+    .get(experimentId) as ExperimentComparisonRow | undefined;
+  return row ?? null;
+}
+
+/** Build the aggregate verdict from a complete comparison row (null otherwise). */
+function buildVerdict(row: ExperimentComparisonRow | null): PairwiseVerdict | null {
+  if (!row || row.eval_status !== 'complete' || row.preference === null) return null;
+  let perSample: PairwiseSample[] = [];
+  if (row.per_sample_json) {
+    try {
+      const parsed = JSON.parse(row.per_sample_json);
+      if (Array.isArray(parsed)) perSample = parsed as PairwiseSample[];
+    } catch {
+      perSample = [];
+    }
+  }
+  return {
+    preference: row.preference,
+    confidence: row.confidence ?? 0,
+    rationale: row.rationale ?? '',
+    aCount: row.a_count,
+    bCount: row.b_count,
+    tieCount: row.tie_count,
+    sampleCount: row.sample_count ?? perSample.length,
+    perSample,
+  };
+}
+
+/** The variant's live label; falls back to the id when the variant was deleted. */
+function variantLabel(deps: ExperimentsDeps, variantId: string): string {
+  return deps.getVariant(variantId)?.label ?? variantId;
+}
+
+/** Assemble one arm's view (usage rollup + eval + findings + entity counts). */
+function buildArmView(
+  deps: ExperimentsDeps,
+  runId: string | null,
+  arm: ExperimentArm,
+  variantId: string,
+): ExperimentArmView {
+  const { db } = deps;
+  const label = variantLabel(deps, variantId);
+  if (!runId) {
+    return {
+      runId: '',
+      arm,
+      variantLabel: label,
+      status: 'pending',
+      usage: null,
+      evalSummary: null,
+      findings: [],
+      entitySummary: { ideas: 0, epics: 0, tasks: 0 },
+    };
+  }
+  const usage = selectRunUsageRollups(db, [runId])[0] ?? null;
+  const evalSummary = getRunEval(db, runId);
+  const findings = selectRunFindings(db, runId);
+  const entitySummary = {
+    ideas: listRunCreatedIdeaIds(db, runId).length,
+    epics: listRunCreatedEpicIds(db, runId).length,
+    tasks: listRunCreatedTaskIds(db, runId).length,
+  };
+  return {
+    runId,
+    arm,
+    variantLabel: label,
+    status: runStatus(db, runId) ?? 'pending',
+    usage,
+    evalSummary,
+    findings,
+    entitySummary,
+  };
+}
+
+/**
+ * Stable grouping key chaining repeated head-to-heads into a dashboard series:
+ * the same workflow + variant pair (order-independent). Reruns always reuse the
+ * source's variant pair, so this groups an arbitrarily deep chain without walking
+ * rerun_of_experiment_id.
+ */
+function seriesKey(workflowId: string, variantAId: string, variantBId: string): string {
+  const pair = [variantAId, variantBId].sort().join('|');
+  return `${workflowId}:${pair}`;
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 
@@ -767,4 +882,214 @@ export const experimentsRouter = router({
       const deps = requireDeps();
       return listExperimentsForProject(deps.db, input.projectId);
     }),
+
+  // -------------------------------------------------------------------------
+  // Comparison reads (slice C) — additive; consumed by the compare view + dashboard
+  // -------------------------------------------------------------------------
+
+  /**
+   * Assemble the full comparison payload for one experiment (per-arm status /
+   * usage / eval / findings / entity counts + the pairwise verdict). Returns null
+   * when the experiment does not exist.
+   */
+  getComparison: protectedProcedure
+    .input(z.object({ experimentId: z.string().min(1) }))
+    .query(async ({ input }): Promise<ExperimentComparisonPayload | null> => {
+      const deps = requireDeps();
+      const exp = getExperiment(deps.db, input.experimentId);
+      if (!exp) return null;
+      const comparison = readComparisonRow(deps.db, input.experimentId);
+      const comparisonStatusValue: ComparisonStatus | 'absent' = comparison?.eval_status ?? 'absent';
+      return {
+        experimentId: exp.id,
+        comparisonStatus: comparisonStatusValue,
+        baseSha: comparison?.base_sha ?? exp.base_sha,
+        verdict: buildVerdict(comparison),
+        armA: buildArmView(deps, exp.run_a_id, 'A', exp.variant_a_id),
+        armB: buildArmView(deps, exp.run_b_id, 'B', exp.variant_b_id),
+      };
+    }),
+
+  /**
+   * The FROZEN per-arm diff texts (worktree-independent; works post-decide).
+   * Returns null when no comparison row exists yet.
+   */
+  getComparisonDiffs: protectedProcedure
+    .input(z.object({ experimentId: z.string().min(1) }))
+    .query(async ({ input }): Promise<ExperimentComparisonDiffs | null> => {
+      const deps = requireDeps();
+      const exp = getExperiment(deps.db, input.experimentId);
+      if (!exp) return null;
+      const comparison = readComparisonRow(deps.db, input.experimentId);
+      if (!comparison) return null;
+      return {
+        baseSha: comparison.base_sha,
+        armA: {
+          runId: comparison.run_id_a,
+          label: variantLabel(deps, exp.variant_a_id),
+          diff: comparison.diff_a_text ?? '',
+        },
+        armB: {
+          runId: comparison.run_id_b,
+          label: variantLabel(deps, exp.variant_b_id),
+          diff: comparison.diff_b_text ?? '',
+        },
+      };
+    }),
+
+  /** Lightweight status probe (WorkflowSummaryPanel "View comparison" gate). */
+  comparisonStatus: protectedProcedure
+    .input(z.object({ experimentId: z.string().min(1) }))
+    .query(async ({ input }): Promise<{ status: ComparisonStatus | 'absent' }> => {
+      const deps = requireDeps();
+      const row = deps.db
+        .prepare('SELECT eval_status FROM experiment_comparisons WHERE experiment_id = ?')
+        .get(input.experimentId) as { eval_status?: ComparisonStatus } | undefined;
+      return { status: row?.eval_status ?? 'absent' };
+    }),
+
+  /**
+   * Dashboard list rows (verdict + human decision + rerun-chain series key).
+   * Optional projectId (nullable) + workflowId filters.
+   */
+  listForDashboard: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.number().int().positive().nullable().optional(),
+        workflowId: z.string().min(1).optional(),
+      }),
+    )
+    .query(async ({ input }): Promise<ExperimentSummary[]> => {
+      const deps = requireDeps();
+      const conds: string[] = [];
+      const params: unknown[] = [];
+      if (input.projectId !== null && input.projectId !== undefined) {
+        conds.push('e.project_id = ?');
+        params.push(input.projectId);
+      }
+      if (input.workflowId) {
+        conds.push('e.workflow_id = ?');
+        params.push(input.workflowId);
+      }
+      const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
+      const rows = deps.db
+        .prepare(
+          `SELECT
+             e.id AS experimentId, e.workflow_id AS workflowId, e.base_branch AS baseBranch,
+             e.variant_a_id AS variantAId, e.variant_b_id AS variantBId,
+             e.status AS status, e.winner_arm AS winnerArm, e.winner_run_id AS winnerRunId,
+             e.decided_at AS decidedAt, e.created_at AS createdAt,
+             e.rerun_of_experiment_id AS rerunOfExperimentId,
+             va.label AS aLabel, vb.label AS bLabel,
+             c.preference AS verdictPreference, c.confidence AS verdictConfidence
+           FROM experiments e
+           LEFT JOIN experiment_comparisons c ON c.experiment_id = e.id
+           LEFT JOIN workflow_variants va ON va.id = e.variant_a_id
+           LEFT JOIN workflow_variants vb ON vb.id = e.variant_b_id
+           ${where}
+           ORDER BY e.created_at DESC, e.id DESC`,
+        )
+        .all(...params) as Array<{
+        experimentId: string;
+        workflowId: string;
+        baseBranch: string;
+        variantAId: string;
+        variantBId: string;
+        status: ExperimentRow['status'];
+        winnerArm: ExperimentArm | null;
+        winnerRunId: string | null;
+        decidedAt: string | null;
+        createdAt: string;
+        rerunOfExperimentId: string | null;
+        aLabel: string | null;
+        bLabel: string | null;
+        verdictPreference: PairwisePreference | null;
+        verdictConfidence: number | null;
+      }>;
+
+      return rows.map((row): ExperimentSummary => {
+        const decision: ExperimentDecision | null =
+          row.status !== 'decided'
+            ? null
+            : row.winnerArm === 'A'
+              ? 'promote_a'
+              : row.winnerArm === 'B'
+                ? 'promote_b'
+                : 'discard';
+        return {
+          experimentId: row.experimentId,
+          workflowId: row.workflowId,
+          baseBranch: row.baseBranch,
+          variantAId: row.variantAId,
+          variantBId: row.variantBId,
+          armALabel: row.aLabel ?? row.variantAId,
+          armBLabel: row.bLabel ?? row.variantBId,
+          verdictPreference: row.verdictPreference,
+          verdictConfidence: row.verdictConfidence,
+          decision,
+          status: row.status,
+          decidedAt: row.decidedAt,
+          createdAt: row.createdAt,
+          rerunOfExperimentId: row.rerunOfExperimentId,
+          seriesKey: seriesKey(row.workflowId, row.variantAId, row.variantBId),
+        };
+      });
+    }),
+
+  /**
+   * Stale-diff recovery: delete the comparison row and re-snapshot + re-judge from
+   * the arms' current worktrees (e.g. after a request-changes loop changed an
+   * awaiting_review arm). Guard: the experiment must exist and still be
+   * running|grading (decided/abandoned experiments have torn-down worktrees).
+   */
+  rerunComparison: protectedProcedure
+    .input(z.object({ experimentId: z.string().min(1) }))
+    .mutation(async ({ input }): Promise<{ experimentId: string; status: ComparisonStatus | 'absent' }> => {
+      const deps = requireDeps();
+      const exp = getExperiment(deps.db, input.experimentId);
+      if (!exp) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: `experiment ${input.experimentId} not found` });
+      }
+      if (exp.status !== 'running' && exp.status !== 'grading') {
+        throw new TRPCError({
+          code: 'CONFLICT',
+          message: `experiment ${input.experimentId} must be running|grading to re-run the comparison`,
+        });
+      }
+      // Clear any blocking decision review item minted for the OLD comparison
+      // BEFORE deleting its row — decision_review_item_id lives only on that row,
+      // so dropping it first would orphan the item (unresolvable forever: decide
+      // resolves only the CURRENT row, and there is no FK/CASCADE). Fail-soft.
+      resolveDecisionReviewItem(deps, input.experimentId);
+      deps.db.prepare('DELETE FROM experiment_comparisons WHERE experiment_id = ?').run(input.experimentId);
+      // AWAIT the re-snapshot so the fresh comparison row is inserted before we read
+      // eval_status back — maybeSnapshotAndEnqueue captures both arms' diffs (git
+      // I/O) before its INSERT, so a fire-and-forget call would let this SELECT race
+      // the insert and return a spurious 'absent'.
+      await deps.pairwiseMaybeSnapshot?.(input.experimentId);
+      const row = deps.db
+        .prepare('SELECT eval_status FROM experiment_comparisons WHERE experiment_id = ?')
+        .get(input.experimentId) as { eval_status?: ComparisonStatus } | undefined;
+      return { experimentId: input.experimentId, status: row?.eval_status ?? 'absent' };
+    }),
+
+  /**
+   * Live "comparison ready" toast stream (all experiments). Emitted by the
+   * PairwiseJudgeWorker when a comparison reaches a terminal status. Mirrors
+   * events.onRunStatusChanged (eventToAsyncIterable over the module-level
+   * experimentEvents emitter).
+   */
+  onComparisonReady: protectedProcedure.subscription(
+    async function* ({ signal }): AsyncGenerator<ExperimentComparisonReadyEvent> {
+      const abortSignal = signal ?? new AbortController().signal;
+      const source = eventToAsyncIterable<ExperimentComparisonReadyEvent>(
+        experimentEvents,
+        'comparisonReady',
+        abortSignal,
+      );
+      for await (const ev of source) {
+        yield ev;
+      }
+    },
+  ),
 });

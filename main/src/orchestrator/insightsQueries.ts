@@ -50,6 +50,8 @@ import type {
   RunEvalDimension,
 } from '../../../shared/types/insights';
 import { parseSourceStep } from '../../../shared/types/insights';
+import type { VariantStats } from '../../../shared/types/experiments';
+import { MIN_VARIANT_RUNS } from '../../../shared/types/experiments';
 // computeSpecHash is the SAME content address workflow_runs.spec_hash was frozen
 // with at createRun; hashing the live workflows.spec_json the identical way lets
 // us flag the current revision. It imports only node:crypto (verified), so it
@@ -943,6 +945,58 @@ export function selectQualityFindings(
   });
 }
 
+/**
+ * `kind='finding'` review items for ONE run (A/B testing slice C — the per-arm
+ * findings list on the experiment comparison payload). Same row shape + mapping as
+ * {@link selectQualityFindings}, scoped to a single run_id, newest-first.
+ */
+export function selectRunFindings(db: DatabaseLike, runId: string): QualityFinding[] {
+  const rows = db
+    .prepare(
+      `SELECT
+         ri.id           AS id,
+         ri.project_id   AS projectId,
+         ri.title        AS title,
+         ri.severity     AS severity,
+         ri.status       AS status,
+         ri.source       AS source,
+         ri.payload_json AS payloadJson,
+         ri.created_at   AS createdAt,
+         ri.resolution   AS resolution,
+         ri.run_id       AS runId,
+         r.outcome       AS runOutcome,
+         r.ended_at      AS runEndedAt,
+         w.name          AS workflowName
+       FROM review_items ri
+       LEFT JOIN workflow_runs r ON r.id = ri.run_id
+       LEFT JOIN workflows w     ON w.id = r.workflow_id
+       WHERE ri.kind = 'finding' AND ri.run_id = ?
+       ORDER BY ri.created_at DESC`,
+    )
+    .all(runId) as QualityFindingRow[];
+
+  return rows.map((row) => {
+    const { category, locations } = parseFindingPayload(row.payloadJson);
+    return {
+      id: row.id,
+      projectId: row.projectId,
+      title: row.title,
+      severity: narrowSeverity(row.severity),
+      status: narrowFindingStatus(row.status),
+      source: row.source,
+      sourceStep: parseSourceStep(row.source),
+      category,
+      locations,
+      createdAt: toIso(row.createdAt) ?? row.createdAt,
+      resolution: row.resolution,
+      runId: row.runId,
+      runOutcome: row.runOutcome,
+      runEndedAt: toIso(row.runEndedAt),
+      workflowName: row.workflowName,
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // 6. selectStepTokenBuckets
 // ---------------------------------------------------------------------------
@@ -1372,6 +1426,207 @@ export function selectWorkflowRevisionStats(
       // SQLite AVG over zero matched run_usage rows returns null — keep it null.
       avgTotalTokens:
         row.avgTotalTokens === null ? null : Math.round(row.avgTotalTokens),
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 8b. selectVariantStats (A/B testing slice C — per-variant rotation aggregates)
+// ---------------------------------------------------------------------------
+
+interface VariantStatsBaseRow {
+  variantId: string;
+  variantLabel: string | null;
+  variantStatus: string | null;
+  weight: number | null;
+  runs: number;
+  completedRuns: number;
+  failedRuns: number;
+  canceledRuns: number;
+  activeRuns: number;
+  mergedRuns: number;
+  dismissedRuns: number;
+  nullOutcomeRuns: number;
+  outcomeRuns: number;
+  avgDurationMs: number | null;
+  avgTotalTokens: number | null;
+  avgCostUsd: number | null;
+}
+
+/** Narrow a raw workflow_variants.status string to the shared enum (NULL when deleted). */
+function narrowVariantStatus(
+  raw: string | null,
+): 'draft' | 'active' | 'paused' | 'retired' | null {
+  return raw === 'draft' || raw === 'active' || raw === 'paused' || raw === 'retired'
+    ? raw
+    : null;
+}
+
+/**
+ * Per-variant rotation statistics for one workflow (A/B testing slice C), modeled
+ * on {@link selectWorkflowRevisionStats} but grouped on `workflow_runs.variant_id`.
+ *
+ * Scope: `variant_id IS NOT NULL AND experiment_id IS NULL` — side-by-side
+ * experiment ARM runs are EXCLUDED (a decided experiment always dismisses the
+ * loser, which would systematically depress rotation success rates). Honors the
+ * mig-030 project-scoping caveat (filter on the RUN's project_id when non-null).
+ *
+ * `LEFT JOIN workflow_variants` (never INNER) so a DELETED variant still reports
+ * via the denormalized `workflow_runs.variant_label` (variantStatus NULL then).
+ *
+ * The per-run averages that could fan out (eval score, findings, post-merge bugs)
+ * are computed in SEPARATE grouped passes and merged in TS, so multiple
+ * run_evals/review_items rows per run can never inflate the base run counts.
+ * `avgTotalTokens`/`avgCostUsd` join `run_usage` (1:1 with a run — no fan-out).
+ *
+ * `postMergeBugCount` uses slice B's bug predicate: a UNION of ideas/epics/tasks
+ * whose `caused_by_run_id` points at a run of this variant (setting the link =
+ * declaring the regression). `lowSample = runs < MIN_VARIANT_RUNS` (display-only —
+ * no auto-promotion / auto-weight adjustment in v1).
+ *
+ * @param db         - Narrow DatabaseLike surface.
+ * @param workflowId - The workflow whose variant runs are aggregated.
+ * @param projectId  - When non-null, restricts to that project's runs; null = all.
+ */
+export function selectVariantStats(
+  db: DatabaseLike,
+  workflowId: string,
+  projectId: number | null,
+): VariantStats[] {
+  const scope = projectId === null ? '' : 'AND r.project_id = ?';
+  const bind = (...extra: unknown[]): unknown[] =>
+    projectId === null ? [workflowId, ...extra] : [workflowId, projectId, ...extra];
+
+  // Base pass: counts + duration + usage averages (usage is 1:1 with a run).
+  const baseRows = db
+    .prepare(
+      `SELECT
+         r.variant_id       AS variantId,
+         MAX(r.variant_label) AS variantLabel,
+         v.status           AS variantStatus,
+         v.weight           AS weight,
+         COUNT(r.id) AS runs,
+         SUM(CASE WHEN r.status = 'completed' THEN 1 ELSE 0 END) AS completedRuns,
+         SUM(CASE WHEN r.status = 'failed'    THEN 1 ELSE 0 END) AS failedRuns,
+         SUM(CASE WHEN r.status = 'canceled'  THEN 1 ELSE 0 END) AS canceledRuns,
+         SUM(CASE WHEN r.status NOT IN (${TERMINAL_SQL}) THEN 1 ELSE 0 END) AS activeRuns,
+         SUM(CASE WHEN r.outcome = 'merged'    THEN 1 ELSE 0 END) AS mergedRuns,
+         SUM(CASE WHEN r.outcome = 'dismissed' THEN 1 ELSE 0 END) AS dismissedRuns,
+         SUM(CASE WHEN r.status IN (${TERMINAL_SQL}) AND r.outcome IS NULL THEN 1 ELSE 0 END) AS nullOutcomeRuns,
+         SUM(CASE WHEN r.outcome IS NOT NULL THEN 1 ELSE 0 END) AS outcomeRuns,
+         AVG(CASE
+               WHEN r.status IN (${TERMINAL_SQL})
+                    AND r.started_at IS NOT NULL AND r.ended_at IS NOT NULL
+               THEN (julianday(r.ended_at) - julianday(r.started_at)) * 86400000
+             END) AS avgDurationMs,
+         AVG(u.total_tokens) AS avgTotalTokens,
+         AVG(u.cost_usd)     AS avgCostUsd
+       FROM workflow_runs r
+       LEFT JOIN workflow_variants v ON v.id = r.variant_id
+       LEFT JOIN run_usage u ON u.run_id = r.id
+       WHERE r.workflow_id = ?
+         AND r.variant_id IS NOT NULL
+         AND r.experiment_id IS NULL
+         ${scope}
+       GROUP BY r.variant_id
+       ORDER BY runs DESC, variantId ASC`,
+    )
+    .all(...bind()) as VariantStatsBaseRow[];
+
+  // Eval-score pass (own grouping so multiple complete evals per run never fan out the base counts).
+  const evalRows = db
+    .prepare(
+      `SELECT r.variant_id AS variantId, AVG(e.overall_score) AS avgEvalScore
+       FROM run_evals e
+       JOIN workflow_runs r ON r.id = e.run_id
+       WHERE r.workflow_id = ?
+         AND r.variant_id IS NOT NULL
+         AND r.experiment_id IS NULL
+         AND e.eval_status = 'complete'
+         ${scope}
+       GROUP BY r.variant_id`,
+    )
+    .all(...bind()) as Array<{ variantId: string; avgEvalScore: number | null }>;
+  const evalByVariant = new Map<string, number | null>(
+    evalRows.map((row) => [row.variantId, row.avgEvalScore]),
+  );
+
+  // Findings pass (kind='finding' review items whose run belongs to the variant).
+  const findingRows = db
+    .prepare(
+      `SELECT r.variant_id AS variantId, COUNT(*) AS findingsCount
+       FROM review_items ri
+       JOIN workflow_runs r ON r.id = ri.run_id
+       WHERE r.workflow_id = ?
+         AND r.variant_id IS NOT NULL
+         AND r.experiment_id IS NULL
+         AND ri.kind = 'finding'
+         ${scope}
+       GROUP BY r.variant_id`,
+    )
+    .all(...bind()) as Array<{ variantId: string; findingsCount: number }>;
+  const findingsByVariant = new Map<string, number>(
+    findingRows.map((row) => [row.variantId, row.findingsCount]),
+  );
+
+  // Post-merge-bug pass: UNION of ideas/epics/tasks whose caused_by_run_id points
+  // at a run of this variant (slice B's bug predicate). Scoped on the CAUSING run's
+  // project (br.project_id), matching the base pass's run-project scoping.
+  const bugScope = projectId === null ? '' : 'AND br.project_id = ?';
+  const bugBind: unknown[] =
+    projectId === null
+      ? [workflowId, workflowId, workflowId]
+      : [workflowId, projectId, workflowId, projectId, workflowId, projectId];
+  const bugRows = db
+    .prepare(
+      `SELECT variantId, COUNT(*) AS postMergeBugCount FROM (
+         SELECT br.variant_id AS variantId
+           FROM ideas b JOIN workflow_runs br ON br.id = b.caused_by_run_id
+          WHERE b.caused_by_run_id IS NOT NULL AND br.workflow_id = ?
+            AND br.variant_id IS NOT NULL AND br.experiment_id IS NULL ${bugScope}
+         UNION ALL
+         SELECT br.variant_id AS variantId
+           FROM epics b JOIN workflow_runs br ON br.id = b.caused_by_run_id
+          WHERE b.caused_by_run_id IS NOT NULL AND br.workflow_id = ?
+            AND br.variant_id IS NOT NULL AND br.experiment_id IS NULL ${bugScope}
+         UNION ALL
+         SELECT br.variant_id AS variantId
+           FROM tasks b JOIN workflow_runs br ON br.id = b.caused_by_run_id
+          WHERE b.caused_by_run_id IS NOT NULL AND br.workflow_id = ?
+            AND br.variant_id IS NOT NULL AND br.experiment_id IS NULL ${bugScope}
+       )
+       WHERE variantId IS NOT NULL
+       GROUP BY variantId`,
+    )
+    .all(...bugBind) as Array<{ variantId: string; postMergeBugCount: number }>;
+  const bugsByVariant = new Map<string, number>(
+    bugRows.map((row) => [row.variantId, row.postMergeBugCount]),
+  );
+
+  return baseRows.map((row): VariantStats => {
+    const successRatePct =
+      row.outcomeRuns === 0 ? 0 : round1((row.mergedRuns / row.outcomeRuns) * 100);
+    return {
+      variantId: row.variantId,
+      variantLabel: row.variantLabel ?? row.variantId,
+      variantStatus: narrowVariantStatus(row.variantStatus),
+      weight: row.weight,
+      runs: row.runs,
+      completedRuns: row.completedRuns,
+      failedRuns: row.failedRuns,
+      canceledRuns: row.canceledRuns,
+      activeRuns: row.activeRuns,
+      mergedRuns: row.mergedRuns,
+      dismissedRuns: row.dismissedRuns,
+      nullOutcomeRuns: row.nullOutcomeRuns,
+      successRatePct,
+      avgDurationMs: row.avgDurationMs === null ? null : Math.round(row.avgDurationMs),
+      avgTotalTokens: row.avgTotalTokens === null ? null : Math.round(row.avgTotalTokens),
+      avgCostUsd: row.avgCostUsd === null ? null : row.avgCostUsd,
+      avgEvalScore: evalByVariant.get(row.variantId) ?? null,
+      findingsCount: findingsByVariant.get(row.variantId) ?? 0,
+      postMergeBugCount: bugsByVariant.get(row.variantId) ?? 0,
+      lowSample: row.runs < MIN_VARIANT_RUNS,
     };
   });
 }

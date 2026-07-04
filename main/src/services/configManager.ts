@@ -318,6 +318,19 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
+   * Sub-toggle of the code-review eval (A/B testing slice C): whether variant- and
+   * experiment-tagged runs get auto-graded (per-arm K=3 eval AND the pairwise
+   * judge). Defaults to TRUE when unset so activating variants grades them out of
+   * the box; users flip it OFF to avoid Opus spend from rotation. Read fresh at the
+   * widened trigger seam via an injected closure (the eval module stays free of
+   * concrete-service imports). Like `getCodeReviewEvalEnabled`, NOT seeded into the
+   * constructor defaults, so existing config.json files are not rewritten on launch.
+   */
+  getAutoGradeVariantRuns(): boolean {
+    return this.config.autoGradeVariantRuns ?? true;
+  }
+
+  /**
    * The global default execution model for new SDK workflow runs — the
    * global-default rung of resolveExecutionModel (the WorkflowConfigProvider
    * seam consumed by WorkflowRegistry.createRun). Returns null when unset so the

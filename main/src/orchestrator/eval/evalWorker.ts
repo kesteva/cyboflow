@@ -71,6 +71,14 @@ export interface EvalWorkerDeps {
    * closure so this module imports no concrete service.
    */
   isEvalEnabled: () => boolean;
+  /**
+   * Sub-toggle consulted ONLY for variant/experiment-tagged runs (A/B testing
+   * slice C): the "Auto-grade variant & experiment runs" setting (default ON).
+   * Passed straight through to the snapshot; a tagged run with auto-grade OFF is
+   * skipped there. Optional so pre-slice-C callers/tests remain valid (absent =>
+   * ON). Closure keeps the module free of a concrete-service import.
+   */
+  isVariantAutoGradeEnabled?: () => boolean;
   /** K samples; defaults to DEFAULT_SAMPLE_COUNT. */
   sampleCount?: number;
   /** Whole-eval retries; defaults to DEFAULT_MAX_RETRIES. */
@@ -146,6 +154,9 @@ export class EvalWorker {
         gitDiff: this.deps.gitDiff,
         appVersion: this.deps.appVersion,
         isEvalEnabled: this.deps.isEvalEnabled,
+        ...(this.deps.isVariantAutoGradeEnabled
+          ? { isVariantAutoGradeEnabled: this.deps.isVariantAutoGradeEnabled }
+          : {}),
         enqueue: (r, v) => this.enqueue(r, v),
       });
     } catch (err) {

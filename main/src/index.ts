@@ -86,11 +86,17 @@ import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
 import { resolveMcpServerScriptPath } from './orchestrator/mcpServer/scriptPath';
 import { OrchSocketServer } from './orchestrator/mcpServer/orchSocketServer';
-import { approvalEvents, questionEvents, runStatusEvents, stepTransitionEvents } from './orchestrator/trpc/routers/events';
+import { approvalEvents, experimentEvents, questionEvents, runStatusEvents, stepTransitionEvents } from './orchestrator/trpc/routers/events';
 import { EvalWorker } from './orchestrator/eval/evalWorker';
 import { ClaudeJudge } from './orchestrator/eval/evalJury';
 import { makeEvalJudgeQuery } from './orchestrator/eval/evalJudgeQuery';
+import { PairwiseJudgeWorker } from './orchestrator/eval/pairwiseJudgeWorker';
+import { ClaudePairwiseJudge } from './orchestrator/eval/pairwiseJudge';
+import { makePairwiseJudgeQuery } from './orchestrator/eval/pairwiseJudgeQuery';
+import { handleTerminalStatusEvent } from './orchestrator/terminalEvalSubscriber';
+import { resolveRunFrozenSpec } from './orchestrator/runFrozenSpec';
 import type { WorkflowStepTransitionEvent } from '../../shared/types/workflows';
+import { resolveWorkflowDefinition } from '../../shared/types/workflows';
 import type { RunGitDiff } from '../../shared/types/runFiles';
 import type { RunStatusChangedEvent } from '../../shared/types/cyboflow';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../shared/types/cyboflow';
@@ -125,7 +131,7 @@ import { readWorkflowPromptForRow } from './orchestrator/workflowPromptReaderAda
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import { recoverActiveStateOrphans, recoverArchivedSessionRunOrphans, backfillTerminalOutcomes, stampSessionRunsOutcome } from './orchestrator/runRecovery';
 import { setExperimentsDeps } from './orchestrator/trpc/routers/experiments';
-import { recoverExperiments } from './orchestrator/experimentStore';
+import { recoverExperiments, reconcileExperimentStatus } from './orchestrator/experimentStore';
 import { createQuickSessionCore } from './services/createQuickSessionCore';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs } from './utils/devDebugLog';
@@ -811,11 +817,39 @@ async function initializeServices() {
     // when the per-run value is NULL. Closure keeps the eval module free of any
     // concrete-service import (standalone-typecheck invariant).
     isEvalEnabled: () => configManager.getCodeReviewEvalEnabled(),
+    // A/B testing slice C: the "Auto-grade variant & experiment runs" sub-toggle
+    // (default ON). Consulted by the snapshot ONLY for variant/experiment-tagged
+    // runs (untagged built-in runs ignore it), on TOP of the global toggle above.
+    isVariantAutoGradeEnabled: () => configManager.getAutoGradeVariantRuns(),
   });
   // Crash-safe resume: re-enqueue any eval an app quit left 'pending'/'running'
   // (the frozen diff lives in the row, so a re-grade is self-contained) — otherwise
   // the summary panel polls a perpetual 'running'.
   EvalWorker.getInstance().recoverInterrupted();
+
+  // A/B testing slice C — the pairwise A/B judge worker. A SEPARATE singleton with
+  // its OWN concurrency-1 queue (so pairwise judging runs CONCURRENTLY with per-arm
+  // rubric evals, not behind them). Same closure-injected impurity shape as
+  // EvalWorker: the diff-capture, the SDK pairwise judge, and the review-item
+  // chokepoint are all closures so the worker imports no concrete service. Its
+  // isEvalEnabled is COMPOSED — global code-review eval AND the auto-grade
+  // sub-toggle — so turning either off captures the diffs but skips the judge.
+  PairwiseJudgeWorker.initialize(cyboflowDb, cyboflowLogger, {
+    gitDiff: evalGitDiff,
+    judge: new ClaudePairwiseJudge({
+      structuredQuery: makePairwiseJudgeQuery(cyboflowLogger),
+      logger: cyboflowLogger,
+    }),
+    reviewItemWriter: (projectId, change) =>
+      ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
+    emitComparisonReady: (event) => experimentEvents.emit('comparisonReady', event),
+    appVersion: app.getVersion(),
+    isEvalEnabled: () =>
+      configManager.getCodeReviewEvalEnabled() && configManager.getAutoGradeVariantRuns(),
+  });
+  // Crash-safe resume: re-enqueue any comparison an app quit left 'pending'/'running'
+  // (both frozen diffs live on the row, so a re-grade is self-contained).
+  PairwiseJudgeWorker.getInstance().recoverInterrupted();
 
   // Trigger seam (zero-touch): subscribe to the SHARED step-transition emitter and
   // snapshot on the sprint-review => human-review boundary. The flow prompts report
@@ -828,6 +862,55 @@ async function initializeServices() {
     if (event.stepId === 'human-review' && event.status === 'running') {
       void EvalWorker.getInstance().snapshot(event.runId);
     }
+  });
+
+  // A/B testing slice C — the workflow-agnostic terminal-status trigger. Fires on
+  // ALL FOUR settled statuses so a failed/canceled second arm still completes the
+  // experiment. A cheap tag SELECT gates EVERYTHING: an untagged run is a total
+  // no-op (normal sprint/ship/planner/compound/quick runs are unaffected). Only
+  // variant/experiment-tagged runs reach the auto-eval (healthy statuses + no
+  // existing run_evals row, so the refire path is never hit), and experiment-tagged
+  // runs additionally reconcile the experiment status + attempt the pairwise
+  // comparison. The subscriber body lives in the deps-injected
+  // handleTerminalStatusEvent helper (unit-testable); everything here is
+  // fire-and-forget so a trigger failure can never affect a run.
+  runStatusEvents.on('changed', (event: RunStatusChangedEvent) => {
+    handleTerminalStatusEvent(event, {
+      db: cyboflowDb,
+      hasRunEvalRow: (runId) => {
+        const row = cyboflowDb
+          .prepare('SELECT 1 AS one FROM run_evals WHERE run_id = ? LIMIT 1')
+          .get(runId) as { one?: number } | undefined;
+        return row !== undefined;
+      },
+      // Path A (the human-review step-transition subscriber above) owns the rubric
+      // snapshot for any run whose resolved definition carries a 'human-review'
+      // step (built-in sprint/ship). Deferring to it here avoids the two
+      // non-serialized snapshot() calls racing snapshotRunForEval's INSERT OR
+      // IGNORE (which would flip human_influenced=1 on the loser). Planner/compound/
+      // custom runs — which path A never covers — resolve to no such step, so this
+      // returns false and the terminal auto-eval still fires. Fail-soft: any
+      // resolution error is treated as "not owned" (eval may fire).
+      stepTransitionOwnsEval: (runId) => {
+        try {
+          const frozen = resolveRunFrozenSpec(cyboflowDb, runId);
+          if (!frozen) return false;
+          const def = resolveWorkflowDefinition(frozen.workflowName, frozen.specJson);
+          if (!def) return false;
+          return def.phases.some((phase) => phase.steps.some((step) => step.id === 'human-review'));
+        } catch {
+          return false;
+        }
+      },
+      evalSnapshot: (runId) => void EvalWorker.getInstance().snapshot(runId),
+      reconcile: (experimentId) => {
+        reconcileExperimentStatus(cyboflowDb, experimentId);
+      },
+      pairwiseMaybe: (experimentId) => {
+        void PairwiseJudgeWorker.getInstance().maybeSnapshotAndEnqueue(experimentId);
+      },
+      logger: cyboflowLogger,
+    });
   });
 
   // Guarded-model availability (Fable 5). Seeds the guarded set as optimistically
@@ -2444,6 +2527,35 @@ app.whenReady().then(async () => {
       },
       setVariantStatus: (variantId, status) => workflowRegistry.setVariantStatus(variantId, status),
       setVariantWeight: (variantId, weight) => workflowRegistry.updateVariant(variantId, { weight }),
+      // Slice C: experiments.decide resolves the blocking pairwise decision review
+      // item via experiment_comparisons.decision_review_item_id. Look up the item's
+      // project (review items are project-scoped) then route the resolve through the
+      // single ReviewItemRouter chokepoint. Fire-and-forget + fail-soft — a decide
+      // must never fail because the notification could not be resolved.
+      resolveReviewItem: (reviewItemId) => {
+        try {
+          const row = db
+            .prepare('SELECT project_id AS projectId FROM review_items WHERE id = ?')
+            .get(reviewItemId) as { projectId?: number } | undefined;
+          if (!row || typeof row.projectId !== 'number') return;
+          void ReviewItemRouter.getInstance()
+            .applyReviewItem(row.projectId, {
+              op: 'resolve',
+              actor: 'orchestrator',
+              reviewItemId,
+              resolution: 'experiment-decided',
+            })
+            .catch(() => {});
+        } catch {
+          /* fail-soft: pre-048 DB or missing item — nothing to resolve */
+        }
+      },
+      // Slice C: rerunComparison re-drives the pairwise snapshot+enqueue after
+      // deleting the stale comparison row.
+      pairwiseMaybeSnapshot: async (experimentId) => {
+        const worker = PairwiseJudgeWorker.tryGetInstance();
+        if (worker) await worker.maybeSnapshotAndEnqueue(experimentId);
+      },
     });
     console.log('[Main] experiments deps wired');
 
@@ -2664,6 +2776,16 @@ app.on('before-quit', async (event) => {
     console.log('[Main] Stopping eval worker...');
     await evalWorker.stop();
     console.log('[Main] Eval worker stopped');
+  }
+
+  // Pause the pairwise judge worker queue (A/B testing slice C). Any pending/running
+  // experiment_comparisons row stays as-is and is re-enqueued by recoverInterrupted
+  // on next boot (both frozen diffs live on the row). tryGetInstance is boot-safe.
+  const pairwiseWorker = PairwiseJudgeWorker.tryGetInstance();
+  if (pairwiseWorker) {
+    console.log('[Main] Stopping pairwise judge worker...');
+    await pairwiseWorker.stop();
+    console.log('[Main] Pairwise judge worker stopped');
   }
 
   // Cleanup all sessions and terminate child processes

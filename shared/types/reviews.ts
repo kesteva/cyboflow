@@ -146,9 +146,12 @@ export interface PermissionPayload {
 }
 
 /**
- * Decision payload — an approve-idea / approve-plan gate, OR an
- * ask-user-question-recovery gate. `gate` discriminates which gate opened it;
- * resolving auto-resumes the run (P4, aggregate-unblock).
+ * Decision payload — an approve-idea / approve-plan gate, an
+ * ask-user-question-recovery gate, OR (A/B testing slice C) an
+ * experiment-comparison "pairwise verdict ready" notification. `gate`
+ * discriminates which opened it; resolving an approve-* gate auto-resumes the run
+ * (P4, aggregate-unblock), while an `experiment-comparison` item is resolved by
+ * experiments.decide (it carries no run to resume).
  *
  * `ask-user-question-recovery` is a DURABLE fallback for the SDK substrate: when
  * an in-turn `AskUserQuestion` gate fails (the SDK control channel intermittently
@@ -159,10 +162,15 @@ export interface PermissionPayload {
  * `recoveredQuestions` so the review queue can re-offer the same options; picking
  * one resolves the item AND re-drives the run with the chosen answer as a resumed
  * turn. See main/src/orchestrator/askUserQuestionFailureDetector.ts.
+ *
+ * For `gate:'experiment-comparison'` the experiment fields are populated so the
+ * review-queue card can route the human straight to the comparison view and
+ * pre-select the suggested winner; they are omitted for the approve-* / recovery
+ * gates.
  */
 export interface DecisionPayload {
   kind: 'decision';
-  gate: 'approve-idea' | 'approve-plan' | 'ask-user-question-recovery';
+  gate: 'approve-idea' | 'approve-plan' | 'ask-user-question-recovery' | 'experiment-comparison';
   /** Optional summary the gate wants the human to confirm. */
   summary?: string;
   /**
@@ -171,6 +179,12 @@ export interface DecisionPayload {
    * exact same questions/options. The chosen option label becomes the resume text.
    */
   recoveredQuestions?: QuestionPayload[];
+  /** (experiment-comparison) the experiment whose comparison is ready. */
+  experimentId?: string;
+  /** (experiment-comparison) the aggregate pairwise preference. */
+  comparisonPreference?: 'A' | 'B' | 'tie';
+  /** (experiment-comparison) the winning arm's run id, when the verdict has one. */
+  suggestedWinnerRunId?: string | null;
 }
 
 /**

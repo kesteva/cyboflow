@@ -557,6 +557,18 @@ export type { WorkflowVariantRow } from '../../../shared/types/experiments';
 export type { ExperimentRow } from '../../../shared/types/experiments';
 
 /**
+ * `experiment_comparisons` row (migration 048) — one self-contained pairwise
+ * A/B verdict per side-by-side experiment (v1: 2 arms => 1 comparison). Freezes
+ * both arms' diffs + seed context on the row so the pairwise judge survives
+ * worktree teardown and does not depend on per-arm run_evals rows. The canonical
+ * shape lives in `shared/types/experiments.ts` (cross-slice contract); re-exported
+ * here so DB-row consumers can import it alongside the other `*Row` interfaces.
+ * `decision_review_item_id` is written by slice C's pairwise worker and resolved
+ * by slice B's experiments.decide.
+ */
+export type { ExperimentComparisonRow } from '../../../shared/types/experiments';
+
+/**
  * `agent_overrides` row (migration 029) — a per-project override of a built-in
  * agent (`base_agent_key === agent_key`, `is_custom 0`) OR a brand-new custom
  * agent (`base_agent_key NULL`, `is_custom 1`). One row per (project_id,

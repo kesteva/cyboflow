@@ -25,7 +25,8 @@ export function listRunsHandler(
     .prepare(
       `SELECT id, workflow_id, project_id, status, worktree_path, branch_name,
               created_at, updated_at, started_at, ended_at, stuck_reason, substrate, session_id,
-              batch_id, permission_mode_snapshot, model, error_message, execution_model, variant_label
+              batch_id, permission_mode_snapshot, model, error_message, execution_model, variant_label,
+              experiment_id, experiment_arm
          FROM workflow_runs
         WHERE project_id = ?
         ORDER BY created_at DESC`,

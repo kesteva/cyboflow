@@ -51,6 +51,8 @@ const runRow = (overrides: Record<string, unknown> = {}) => ({
   spec_hash: 'spec-hash',
   model: 'claude-opus-4-8',
   eval_enabled: null, // inherit the global setting by default
+  experiment_id: null, // untagged by default (A/B testing slice C)
+  variant_id: null,
   workflow_id: 'wf-1',
   workflowName: 'sprint',
   ...overrides,
@@ -282,6 +284,84 @@ describe('snapshotRunForEval', () => {
     const insert = db.runs.find((r) => r.sql.includes('INSERT OR IGNORE'));
     expect(insert?.params[3]).toBeNull(); // diff_text null
     expect(deps.enqueue).toHaveBeenCalled();
+  });
+
+  // ── Widened opt-in gate (A/B testing slice C) ────────────────────────────
+
+  it('tagged non-built-in run (experiment_id set, custom name) now snapshots', async () => {
+    const db = new FakeDb(
+      (sql) => {
+        if (sql.includes('FROM workflow_runs r'))
+          return runRow({ workflowName: 'my-custom-flow', experiment_id: 'exp-1' });
+        if (sql.includes('SELECT eval_status FROM run_evals')) return undefined;
+        return undefined;
+      },
+      () => ({ changes: 1, lastInsertRowid: 1 }),
+    );
+    const deps = makeDeps(db, { isEvalEnabled: () => true });
+    const outcome = await snapshotRunForEval('run-x', deps);
+    expect(outcome).toBe('inserted');
+    expect(deps.enqueue).toHaveBeenCalled();
+  });
+
+  it('variant-tagged custom run snapshots too', async () => {
+    const db = new FakeDb(
+      (sql) => {
+        if (sql.includes('FROM workflow_runs r'))
+          return runRow({ workflowName: 'my-custom-flow', variant_id: 'var-1' });
+        if (sql.includes('SELECT eval_status FROM run_evals')) return undefined;
+        return undefined;
+      },
+      () => ({ changes: 1, lastInsertRowid: 1 }),
+    );
+    const deps = makeDeps(db, { isEvalEnabled: () => true });
+    expect(await snapshotRunForEval('run-x', deps)).toBe('inserted');
+  });
+
+  it('UNtagged non-built-in run still skips (the gate only widens for tagged runs)', async () => {
+    const db = new FakeDb(
+      (sql) => {
+        if (sql.includes('FROM workflow_runs r')) return runRow({ workflowName: 'my-custom-flow' });
+        return undefined;
+      },
+      () => ({ changes: 0, lastInsertRowid: 0 }),
+    );
+    const deps = makeDeps(db, { isEvalEnabled: () => true });
+    expect(await snapshotRunForEval('run-c', deps)).toBe('skipped');
+    expect(db.runs.length).toBe(0);
+  });
+
+  it('tagged run with the auto-grade sub-toggle OFF skips (no row, no enqueue)', async () => {
+    const db = new FakeDb(
+      (sql) => {
+        if (sql.includes('FROM workflow_runs r')) return runRow({ variant_id: 'var-1' });
+        return undefined;
+      },
+      () => ({ changes: 0, lastInsertRowid: 0 }),
+    );
+    const deps = makeDeps(db, {
+      isEvalEnabled: () => true,
+      isVariantAutoGradeEnabled: () => false,
+    });
+    expect(await snapshotRunForEval('run-v', deps)).toBe('skipped');
+    expect(deps.enqueue).not.toHaveBeenCalled();
+    expect(db.runs.length).toBe(0);
+  });
+
+  it('tagged run with auto-grade ON + eval_enabled=0 still skips (per-run OFF wins)', async () => {
+    const db = new FakeDb(
+      (sql) => {
+        if (sql.includes('FROM workflow_runs r')) return runRow({ variant_id: 'var-1', eval_enabled: 0 });
+        return undefined;
+      },
+      () => ({ changes: 0, lastInsertRowid: 0 }),
+    );
+    const deps = makeDeps(db, {
+      isEvalEnabled: () => true,
+      isVariantAutoGradeEnabled: () => true,
+    });
+    expect(await snapshotRunForEval('run-v', deps)).toBe('skipped');
+    expect(db.runs.length).toBe(0);
   });
 });
 

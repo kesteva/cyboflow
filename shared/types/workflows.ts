@@ -246,6 +246,15 @@ export interface WorkflowRunListRow {
    * (non-variant) runs. Optional + additive, mirroring `model?`.
    */
   variant_label?: string | null;
+  /**
+   * A/B experiment membership (migration 046, slice B) surfaced on the list row
+   * so list-driven surfaces (RunCenterPane experiment chip, left rail) can mark
+   * side-by-side arm runs without a second query. NULL for non-experiment runs.
+   * Optional + additive, mirroring `variant_label?`; the frontend `ActiveRunRow`
+   * already declares the matching optional fields.
+   */
+  experiment_id?: string | null;
+  experiment_arm?: ExperimentArm | null;
 }
 
 /**

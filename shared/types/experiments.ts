@@ -12,6 +12,7 @@
  * experiment reconcile + decide guard (B), and pairwise readiness (C).
  */
 import type { WorkflowRunStatus } from './cyboflow';
+import type { RunUsageRollup, RunEval, QualityFinding } from './insights';
 
 /**
  * Lifecycle status of a workflow variant (migration 046).
@@ -179,4 +180,165 @@ export interface DecideResult {
   experimentId: string;
   status: ExperimentStatus;
   winnerRunId: string | null;
+}
+
+// ===========================================================================
+// Slice C — pairwise grading + per-variant stats + comparison payloads
+// (migration 048, experiment_comparisons). Appended below slices A/B without
+// touching their exports.
+// ===========================================================================
+
+/** Pairwise preference mapped back to arm identity (position bias cancelled). */
+export type PairwisePreference = 'A' | 'B' | 'tie';
+
+/** Lifecycle of the pairwise comparison row (experiment_comparisons.eval_status). */
+export type ComparisonStatus = 'pending' | 'running' | 'complete' | 'failed' | 'skipped';
+
+/** Minimum runs before a variant's aggregates are treated as non-provisional (display-only). */
+export const MIN_VARIANT_RUNS = 5;
+
+/**
+ * One pairwise judge sample. `positionAFirst` records which arm was shown as
+ * "Solution 1" so the raw→arm mapping is auditable; `rawPreference` is the
+ * judge's neutral-label output; `preference` is the mapped-back arm identity.
+ */
+export interface PairwiseSample {
+  sampleIndex: number;
+  positionAFirst: boolean;
+  rawPreference: '1' | '2' | 'tie';
+  preference: PairwisePreference;
+  confidence: number; // 0..1
+  rationale: string;
+}
+
+/** Aggregate verdict over the surviving K pairwise samples. */
+export interface PairwiseVerdict {
+  preference: PairwisePreference;
+  confidence: number; // mean confidence of the winning-side samples (0 for tie)
+  rationale: string; // representative (highest-confidence winning-side) rationale
+  aCount: number;
+  bCount: number;
+  tieCount: number;
+  sampleCount: number; // valid samples that survived (<= K)
+  perSample: PairwiseSample[];
+}
+
+/** `experiment_comparisons` DB row (migration 048). */
+export interface ExperimentComparisonRow {
+  id: string;
+  experiment_id: string;
+  run_id_a: string;
+  run_id_b: string;
+  eval_status: ComparisonStatus;
+  base_sha: string | null;
+  diff_a_text: string | null;
+  diff_b_text: string | null;
+  diff_a_stats_json: string | null;
+  diff_b_stats_json: string | null;
+  seed_context: string | null;
+  sample_count: number | null;
+  per_sample_json: string | null;
+  preference: PairwisePreference | null;
+  confidence: number | null;
+  rationale: string | null;
+  a_count: number;
+  b_count: number;
+  tie_count: number;
+  judge_model: string | null;
+  judge_build_id: string | null;
+  prompt_hash: string | null;
+  error: string | null;
+  decision_review_item_id: string | null;
+  snapshot_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Per-variant rotation aggregate (insights.variantStats). */
+export interface VariantStats {
+  variantId: string;
+  variantLabel: string; // denormalized; survives variant deletion
+  variantStatus: WorkflowVariantStatus | null; // NULL = variant deleted
+  weight: number | null;
+  runs: number;
+  completedRuns: number;
+  failedRuns: number;
+  canceledRuns: number;
+  activeRuns: number;
+  mergedRuns: number;
+  dismissedRuns: number;
+  nullOutcomeRuns: number;
+  successRatePct: number;
+  avgDurationMs: number | null;
+  avgTotalTokens: number | null;
+  avgCostUsd: number | null;
+  avgEvalScore: number | null;
+  findingsCount: number;
+  postMergeBugCount: number; // via slice B's caused_by_run_id
+  lowSample: boolean; // runs < MIN_VARIANT_RUNS
+}
+
+/** One arm of the assembled comparison payload. */
+export interface ExperimentArmView {
+  runId: string;
+  arm: ExperimentArm;
+  variantLabel: string;
+  status: string; // workflow_runs.status
+  usage: RunUsageRollup | null;
+  evalSummary: RunEval | null;
+  findings: QualityFinding[];
+  entitySummary: { ideas: number; epics: number; tasks: number };
+}
+
+/** Assembled comparison payload (experiments.getComparison). */
+export interface ExperimentComparisonPayload {
+  experimentId: string;
+  comparisonStatus: ComparisonStatus | 'absent';
+  baseSha: string | null;
+  verdict: PairwiseVerdict | null;
+  armA: ExperimentArmView;
+  armB: ExperimentArmView;
+}
+
+/** Frozen per-arm diff texts (experiments.getComparisonDiffs); worktree-independent. */
+export interface ExperimentComparisonDiffs {
+  baseSha: string | null;
+  armA: { runId: string; label: string; diff: string };
+  armB: { runId: string; label: string; diff: string };
+}
+
+/** Human decision recorded on a decided experiment (derived from winner_arm). */
+export type ExperimentDecision = 'promote_a' | 'promote_b' | 'discard';
+
+/** Dashboard list row (experiments.listForDashboard) — includes rerun-chain fields. */
+export interface ExperimentSummary {
+  experimentId: string;
+  workflowId: string;
+  baseBranch: string;
+  variantAId: string;
+  variantBId: string;
+  armALabel: string;
+  armBLabel: string;
+  verdictPreference: PairwisePreference | null;
+  verdictConfidence: number | null;
+  decision: ExperimentDecision | null; // from slice B's experiments.winner_arm
+  status: ExperimentStatus;
+  decidedAt: string | null;
+  createdAt: string;
+  /** Soft chain link to the source experiment (experiments.rerun); NULL for an original. */
+  rerunOfExperimentId: string | null;
+  /**
+   * Stable grouping key for chaining repeated head-to-heads into a series in the
+   * dashboard: the root of the rerun chain when known, else the sorted variant
+   * pair. Computed server-side so the client groups without walking the chain.
+   */
+  seriesKey: string;
+}
+
+/** Live "comparison ready" toast payload (experiments.onComparisonReady). */
+export interface ExperimentComparisonReadyEvent {
+  experimentId: string;
+  preference: PairwisePreference;
+  status: ComparisonStatus;
 }

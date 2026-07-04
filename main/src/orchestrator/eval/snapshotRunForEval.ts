@@ -57,6 +57,16 @@ export interface SnapshotDeps {
    * outranks it. Guarded at the call site: a throw here defaults to enabled.
    */
   isEvalEnabled: () => boolean;
+  /**
+   * Sub-toggle consulted ONLY for variant/experiment-TAGGED runs (A/B testing
+   * slice C): the "Auto-grade variant & experiment runs" setting (default ON),
+   * injected as a closure over configManager.getAutoGradeVariantRuns so this
+   * module keeps its standalone-typecheck invariant. When a tagged run reaches
+   * this trigger and auto-grade is OFF, the snapshot is skipped (no run_evals
+   * row, no enqueue). Untagged built-in runs never consult it. Absent => treated
+   * as ON (a config-read fault never silently disables auto-grade).
+   */
+  isVariantAutoGradeEnabled?: () => boolean;
   /** Enqueue the worker to grade this (run, rubric) after the row lands. */
   enqueue: (runId: string, rubricVersion: string) => void;
   /** Injectable clock for deterministic tests. */
@@ -74,6 +84,9 @@ interface RunRow {
   model: string | null;
   /** Per-run eval override (migration 044): 0 = off, 1 = on, NULL = inherit global. */
   eval_enabled: number | null;
+  /** A/B testing tags (migration 046) — set => this run is variant/experiment-tagged. */
+  experiment_id: string | null;
+  variant_id: string | null;
   workflow_id: string;
   workflowName: string;
 }
@@ -126,6 +139,7 @@ export async function snapshotRunForEval(
       `SELECT r.project_id AS project_id, r.worktree_path AS worktree_path,
               r.base_sha AS base_sha, r.spec_hash AS spec_hash, r.model AS model,
               r.eval_enabled AS eval_enabled,
+              r.experiment_id AS experiment_id, r.variant_id AS variant_id,
               r.workflow_id AS workflow_id, w.name AS workflowName
        FROM workflow_runs r
        JOIN workflows w ON w.id = r.workflow_id
@@ -138,10 +152,32 @@ export async function snapshotRunForEval(
     return 'skipped';
   }
 
-  // Opt-in gate: built-in flows only (name, not step id). Quick sessions and
-  // custom flows fall out here.
-  if (!isCyboflowWorkflowName(run.workflowName)) {
+  // Opt-in gate (A/B testing slice C widening): a built-in flow (name, not step id)
+  // OR a variant/experiment-tagged run. Quick sessions and untagged custom flows
+  // fall out here. The tag columns land in migration 046 — the row read above is
+  // fail-soft (the surrounding caller swallows any throw), and on a pre-046 DB the
+  // SELECT simply omits them (undefined → treated as null → not tagged).
+  const tagged = run.experiment_id !== null || run.variant_id !== null;
+  if (!isCyboflowWorkflowName(run.workflowName) && !tagged) {
     return 'skipped';
+  }
+
+  // For a TAGGED run, the "Auto-grade variant & experiment runs" sub-toggle
+  // (default ON) gates the eval on TOP of eval_enabled/global — OFF means a
+  // variant/experiment run is never auto-graded (prevents silent Opus spend from
+  // merely activating variants). Untagged built-in runs never consult it. A
+  // closure throw defaults to ON so a config-read fault never silently disables.
+  if (tagged) {
+    let autoGrade = true;
+    try {
+      autoGrade = deps.isVariantAutoGradeEnabled?.() ?? true;
+    } catch {
+      autoGrade = true;
+    }
+    if (!autoGrade) {
+      logger?.info('[eval] snapshot skipped — auto-grade variant/experiment runs OFF', { runId });
+      return 'skipped';
+    }
   }
 
   // Eval on/off resolution (migration 044). Cheap + exception-safe — a skip here
