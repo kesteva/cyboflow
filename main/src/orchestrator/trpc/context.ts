@@ -15,6 +15,7 @@ import type { CliSubstrate } from '../../../../shared/types/substrate';
 import type { RunGitDiff } from '../../../../shared/types/runFiles';
 import type { WorkflowDescriptor } from '../workflowRegistry';
 import type { AgentOverrideRow } from '../../database/models';
+import type { WorkflowVariantRow, WorkflowVariantStatus } from '../../../../shared/types/experiments';
 
 /**
  * Narrow structural interface for AgentOverrideRouter used in tRPC context.
@@ -74,6 +75,31 @@ export interface WorkflowRegistryLike {
    * ('reserved'), or a flow with run history ('run history').
    */
   deleteWorkflow(workflowId: string): void;
+  // --- Workflow variants (A/B testing, migration 046) ---
+  /** List a workflow's variants (newest-first). */
+  listVariants(workflowId: string): WorkflowVariantRow[];
+  /**
+   * Create a variant snapshotting the workflow's current resolved definition
+   * (seeds status='draft'). Throws distinguishable Errors: 'not found' / reserved
+   * sentinel / unresolvable definition / label 'already exists'.
+   */
+  createVariantFromCurrent(workflowId: string, label: string): WorkflowVariantRow;
+  /** Patch a variant in place (re-snapshot). Throws 'not found' when missing. */
+  updateVariant(
+    variantId: string,
+    patch: {
+      specJson?: string;
+      agentOverridesJson?: string | null;
+      model?: string | null;
+      executionModel?: 'orchestrated' | 'programmatic' | null;
+      weight?: number;
+      label?: string;
+    },
+  ): void;
+  /** Transition a variant's rotation status. Throws 'not found' when missing. */
+  setVariantStatus(variantId: string, status: WorkflowVariantStatus): void;
+  /** Delete a variant. Throws 'run history' when runs reference it; 'not found' when missing. */
+  deleteVariant(variantId: string): void;
 }
 
 /**

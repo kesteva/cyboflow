@@ -534,6 +534,18 @@ export interface WorkflowRevisionRow {
 }
 
 /**
+ * `workflow_variants` row (migration 046) — a named A/B variant of a workflow
+ * that snapshots a frozen resolved spec_json + optional per-agent deltas + model
+ * / execution-model defaults. The canonical shape lives in
+ * `shared/types/experiments.ts` (cross-slice contract); re-exported here so DB-row
+ * consumers can import it alongside the other `*Row` interfaces. The four sibling
+ * `workflow_runs` tagging cells (experiment_id / experiment_arm / variant_id /
+ * variant_label) also land in migration 046 and are declared on `WorkflowRunRow`
+ * (shared/types/workflows.ts).
+ */
+export type { WorkflowVariantRow } from '../../../shared/types/experiments';
+
+/**
  * `agent_overrides` row (migration 029) — a per-project override of a built-in
  * agent (`base_agent_key === agent_key`, `is_custom 0`) OR a brand-new custom
  * agent (`base_agent_key NULL`, `is_custom 1`). One row per (project_id,

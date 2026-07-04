@@ -25,6 +25,7 @@ import { bridgeEvents as bridgeEventsImpl } from './runEventBridge';
 import type { StreamEventPublisher } from './runLauncher';
 import { rollupRunUsage } from './runUsageRollup';
 import { resolveRunAgentPermissionMode } from './permissionModeResolver';
+import { resolveRunFrozenSpec } from './runFrozenSpec';
 import { buildSeedTasksBlock } from './seedTasksBlock';
 import type { FindingTagBucket } from '../../../shared/types/reviews';
 import { findingBucket } from '../../../shared/types/reviews';
@@ -647,12 +648,22 @@ export class RunExecutor {
       throw new Error(`RunExecutor.execute: workflow_runs row not found for runId=${runId}`);
     }
 
-    const workflow = this.registry.getById(run.workflow_id);
-    if (!workflow) {
+    const workflowRow = this.registry.getById(run.workflow_id);
+    if (!workflowRow) {
       throw new Error(
         `RunExecutor.execute: workflow row not found for workflowId=${run.workflow_id} (runId=${runId})`,
       );
     }
+
+    // A/B testing (migration 046): the run walks its FROZEN effective spec, not
+    // the live workflow spec_json. For a variant run this is the variant's graph;
+    // for a baseline run it is byte-identical to the live spec. resolveRunFrozenSpec
+    // falls back to the live spec when no revision resolves, so this is safe even
+    // for legacy runs / when no db is injected (tests). Fixes the latent mid-run
+    // edit bug for every run, variant or not.
+    const workflow: WorkflowRow = this.db
+      ? { ...workflowRow, spec_json: resolveRunFrozenSpec(this.db, runId)?.specJson ?? workflowRow.spec_json }
+      : workflowRow;
 
     if (!run.worktree_path) {
       throw new Error(

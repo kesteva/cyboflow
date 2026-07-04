@@ -317,3 +317,112 @@ describe('agentOverlayWriter — installAgentOverlay integration (AC-P1-6)', () 
     db.close();
   });
 });
+
+describe('agentOverlayWriter — variant agent deltas (A/B testing, migration 046)', () => {
+  let worktree: string;
+
+  beforeEach(() => {
+    worktree = tmpWorktree();
+  });
+
+  afterEach(() => {
+    fs.rmSync(worktree, { recursive: true, force: true });
+  });
+
+  /** DB with the migration-046 variant surface: run.variant_id + workflow_variants. */
+  function makeVariantDb(): Database.Database {
+    const db = makeDb();
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_id TEXT');
+    db.exec(`
+      CREATE TABLE workflow_variants (
+        id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
+        spec_json TEXT NOT NULL DEFAULT '{}', agent_overrides_json TEXT, model TEXT, execution_model TEXT,
+        weight INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',
+        created_at TEXT, updated_at TEXT
+      );
+    `);
+    return db;
+  }
+
+  function insertVariant(db: Database.Database, id: string, agentOverridesJson: string | null): void {
+    db.prepare(
+      "INSERT INTO workflow_variants (id, workflow_id, label, agent_overrides_json) VALUES (?, 'wf-1', ?, ?)",
+    ).run(id, id, agentOverridesJson);
+  }
+
+  function insertVariantRun(db: Database.Database, id: string, projectId: number, variantId: string | null): void {
+    db.prepare('INSERT INTO workflow_runs (id, project_id, workflow_path, variant_id) VALUES (?, ?, NULL, ?)').run(
+      id,
+      projectId,
+      variantId,
+    );
+  }
+
+  it('applies a variant prompt delta over an unoverridden builtin (renders the variant body, not the bundled one)', () => {
+    const db = makeVariantDb();
+    const projectId = insertProject(db, 'Acme');
+    insertVariant(db, 'wfv_1', JSON.stringify({ implement: { systemPrompt: 'VARIANT IMPLEMENT BODY.\n\n## Result\nstub' } }));
+    insertVariantRun(db, 'run-variant', projectId, 'wfv_1');
+
+    installAgentOverlay(db, 'run-variant', worktree, makeSpyLogger());
+
+    const md = fs.readFileSync(agentFile(worktree, 'implement'), 'utf8');
+    expect(md).toContain('VARIANT IMPLEMENT BODY.');
+    const bundled = loadBuiltInAgents().get('implement')?.rawContent;
+    expect(md).not.toBe(bundled); // rawContent dropped, rendered via renderAgentMarkdown
+
+    db.close();
+  });
+
+  it('variant delta WINS over a project override for the touched agent', () => {
+    const db = makeVariantDb();
+    const projectId = insertProject(db, 'Acme');
+    insertOverride(db, projectId, {
+      agentKey: 'implement',
+      baseAgentKey: 'implement',
+      description: 'Project override.',
+      systemPrompt: 'PROJECT BODY.\n\n## Result\nstub',
+      tools: ['Read', 'Edit'],
+      isCustom: false,
+    });
+    insertVariant(db, 'wfv_1', JSON.stringify({ implement: { systemPrompt: 'VARIANT BODY.\n\n## Result\nstub' } }));
+    insertVariantRun(db, 'run-variant', projectId, 'wfv_1');
+
+    installAgentOverlay(db, 'run-variant', worktree, makeSpyLogger());
+
+    const md = fs.readFileSync(agentFile(worktree, 'implement'), 'utf8');
+    expect(md).toContain('VARIANT BODY.');
+    expect(md).not.toContain('PROJECT BODY.');
+
+    db.close();
+  });
+
+  it('is fail-soft: malformed agent_overrides_json writes the project overlay unchanged', () => {
+    const db = makeVariantDb();
+    const projectId = insertProject(db, 'Acme');
+    insertVariant(db, 'wfv_bad', '{not valid json');
+    insertVariantRun(db, 'run-bad', projectId, 'wfv_bad');
+
+    expect(() => installAgentOverlay(db, 'run-bad', worktree, makeSpyLogger())).not.toThrow();
+    // The builtin overlay still lands verbatim (no delta applied).
+    const md = fs.readFileSync(agentFile(worktree, 'implement'), 'utf8');
+    const bundled = loadBuiltInAgents().get('implement')?.rawContent;
+    expect(md).toBe(bundled);
+
+    db.close();
+  });
+
+  it('applies nothing for a baseline run (variant_id NULL)', () => {
+    const db = makeVariantDb();
+    const projectId = insertProject(db, 'Acme');
+    insertVariantRun(db, 'run-baseline', projectId, null);
+
+    installAgentOverlay(db, 'run-baseline', worktree, makeSpyLogger());
+
+    const md = fs.readFileSync(agentFile(worktree, 'implement'), 'utf8');
+    const bundled = loadBuiltInAgents().get('implement')?.rawContent;
+    expect(md).toBe(bundled);
+
+    db.close();
+  });
+});

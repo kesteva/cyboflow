@@ -276,6 +276,12 @@ export interface RunStartedEvent {
   runId: string;
   worktreePath: string;
   branchName: string;
+  /**
+   * The A/B variant label assigned to this run (migration 046), surfaced at launch
+   * so the renderer can badge the run without an extra query. Omitted for a
+   * baseline (no-variant) run.
+   */
+  variantLabel?: string;
 }
 
 /**

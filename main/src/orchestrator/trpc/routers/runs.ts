@@ -14,6 +14,7 @@ import type { WorkflowStepTransitionEvent } from '../../../../../shared/types/wo
 import type { ChatMessage } from '../../../../../shared/types/chatMessage';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
 import type { DatabaseLike } from '../../types';
+import { resolveRunFrozenSpec } from '../../runFrozenSpec';
 import { getStuckInspectionHandler } from '../../inspectorQueries';
 import { listRunsHandler } from '../../runQueries';
 import { selectRunMessages } from '../../runMessagesListing';
@@ -26,6 +27,7 @@ import type { RunFileEntry, RunFileContent, RunGitDiff } from '../../../../../sh
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
+import type { ExperimentArm } from '../../../../../shared/types/experiments';
 import type { SprintLaneRow, SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../../shared/types/sprintBatch';
 import { sprintLaneEvents, sprintLaneChannel, SprintLaneStore } from '../../sprintLaneStore';
@@ -315,7 +317,7 @@ export interface RunLauncherLike {
    * workflow_runs.model and resolved to a concrete snapshot at the spawn seam; when
    * omitted the run pins no model and falls through to the SDK default.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean }): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -904,6 +906,12 @@ export const runsRouter = router({
       // Advanced "Orchestration" tri-state. Safe on any substrate: the resolver
       // hard-pins 'orchestrated' for interactive-PTY runs regardless of this value.
       executionModel: z.enum(['orchestrated', 'programmatic']).optional(),
+      // Optional explicit A/B variant pin (migration 046). When supplied it is
+      // threaded to RunLauncher.launch as an EXPLICIT variant pin (loaded
+      // regardless of status); when omitted the launcher's VariantResolver applies
+      // weighted rotation over the workflow's active variants (or resolves null →
+      // baseline live-spec run, byte-identical to before).
+      variantId: z.string().min(1).optional(),
     }))
     .mutation(async ({ ctx, input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
       if (!startRunDeps) {
@@ -1006,6 +1014,10 @@ export const runsRouter = router({
         input.findingIds,
         input.model,
         input.evalEnabled,
+        // A/B testing (migration 046): the trailing launchOptions object. Only an
+        // explicit variant pin is threaded over this IPC path; rotation (no pin)
+        // and experiment stamps are resolved/supplied elsewhere.
+        input.variantId !== undefined ? { requestedVariantId: input.variantId } : undefined,
       );
       return { runId, worktreePath, branchName };
     }),
@@ -1052,7 +1064,7 @@ export const runsRouter = router({
         .prepare(
           `SELECT workflow_id, project_id, status, substrate, session_id,
                   permission_mode_snapshot, model, task_id, seed_idea_id, seed_finding_ids, batch_id,
-                  eval_enabled
+                  eval_enabled, variant_id, experiment_id
              FROM workflow_runs WHERE id = ?`,
         )
         .get(input.runId) as
@@ -1069,12 +1081,25 @@ export const runsRouter = router({
             seed_finding_ids: string | null;
             batch_id: string | null;
             eval_enabled: number | null;
+            variant_id: string | null;
+            experiment_id: string | null;
           }
         | undefined;
       if (!row) return { noOp: true, reason: 'not_found' };
       // Only a terminally-FAILED run may restart — a running / rested / completed run
       // is not a restart candidate (the panel only shows the CTA for 'failed').
       if (row.status !== 'failed') return { noOp: true, reason: 'not_failed' };
+      // A/B testing (migration 046): REFUSE restarting an experiment-tagged arm.
+      // The arm's run identity is load-bearing for the experiment (its entity writes
+      // are sandboxed by experiment_id); a fresh run would silently lose the tag and
+      // de-sandbox its writes. The human must decide/abandon the experiment (or
+      // reopen the run) instead.
+      if (row.experiment_id !== null) {
+        throw new TRPCError({
+          code: 'CONFLICT',
+          message: `run ${input.runId} is part of experiment ${row.experiment_id}; restart is disabled for experiment arms — decide or abandon the experiment, or reopen the run instead`,
+        });
+      }
       // Restart re-hosts in the SAME session's worktree; a legacy session-less run
       // (no session_id) has no worktree to re-enter.
       if (!row.session_id) return { noOp: true, reason: 'no_session' };
@@ -1124,6 +1149,13 @@ export const runsRouter = router({
         // Copy the failed run's per-run eval pin (1/0 → true/false; NULL → inherit
         // the global setting) so a restart preserves the launch-time choice.
         row.eval_enabled === null ? undefined : row.eval_enabled === 1,
+        // A/B testing (migration 046): INHERIT the failed run's variant (no re-roll)
+        // so per-variant stats stay coherent. An explicit pin loads regardless of
+        // status, so a paused/retired variant still restarts correctly. Baseline
+        // runs (variant_id NULL) pin `baseline: true` so the resolver returns null
+        // WITHOUT rotating — reproducing the baseline config even if the workflow has
+        // since gained active variants (restart inherits, no re-roll).
+        row.variant_id !== null ? { requestedVariantId: row.variant_id } : { baseline: true },
       );
       return { runId, worktreePath, branchName };
     }),
@@ -2341,13 +2373,20 @@ export const runsRouter = router({
         });
       }
 
-      // Resolve the effective definition: an edited/custom `spec_json` wins, else
-      // the built-in fallback for a CyboflowWorkflowName, else null.
-      const definition = resolveWorkflowDefinition(row.workflow_name, row.spec_json);
+      // A/B testing (migration 046): resolve the effective definition from the run's
+      // FROZEN spec (its variant graph, else the live spec) via resolveRunFrozenSpec —
+      // NOT the live JOIN read above — so a structural variant run (or a run whose live
+      // workflows.spec_json was edited mid-run) renders the graph its current_step_id was
+      // validated against. Falls back to the live JOIN read (workflow_name + spec_json)
+      // when no frozen revision resolves, keeping legacy/baseline runs byte-identical.
+      const frozen = resolveRunFrozenSpec(ctx.db, input.runId);
+      const effectiveWorkflowName = frozen?.workflowName ?? row.workflow_name;
+      const effectiveSpecJson = frozen ? frozen.specJson : row.spec_json;
+      const definition = resolveWorkflowDefinition(effectiveWorkflowName, effectiveSpecJson);
       if (definition === null) {
         throw new TRPCError({
           code: 'NOT_FOUND',
-          message: `No workflow definition for run ${input.runId} (workflow name '${row.workflow_name}')`,
+          message: `No workflow definition for run ${input.runId} (workflow name '${effectiveWorkflowName}')`,
         });
       }
 

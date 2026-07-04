@@ -23,6 +23,7 @@ import { substratesRouter } from './routers/substrates';
 import { monitorRouter } from './routers/monitor';
 import { mcpsRouter } from './routers/mcps';
 import { pluginsRouter } from './routers/plugins';
+import { variantsRouter } from './routers/variants';
 
 export const appRouter = router({
   cyboflow: router({
@@ -42,6 +43,7 @@ export const appRouter = router({
     runs: runsRouter,
     substrates: substratesRouter,
     tasks: tasksRouter,
+    variants: variantsRouter,
     workflows: workflowsRouter,
   }),
 });

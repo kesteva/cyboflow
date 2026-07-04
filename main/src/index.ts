@@ -107,6 +107,7 @@ import { WorkflowRegistry } from './orchestrator/workflowRegistry';
 import { makeChatSentinelProvider } from './orchestrator/chatSentinelProvider';
 import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
+import { VariantResolver } from './orchestrator/variantResolver';
 import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
 import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, FindingReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
@@ -1478,6 +1479,10 @@ async function initializeServices() {
     // explicit requestedPermissionMode is supplied, launch() writes it to the host
     // session through the shared chokepoint before createRun.
     sessionPermissionModeDeps,
+    // A/B testing (migration 046): the rotation resolver. launch() resolves the
+    // variant (explicit pin or weighted random over active variants) pre-createRun
+    // so every launch surface inherits rotation from one place.
+    new VariantResolver(cyboflowDb),
   );
 
   // Capture the orch socket path once for the lifecycle + CLI-manager wiring.

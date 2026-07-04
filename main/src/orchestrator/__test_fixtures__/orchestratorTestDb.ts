@@ -141,6 +141,22 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN eval_enabled INTEGER');
     evalEnabledAdded = true;
   };
+  // Migration 046 (A/B testing): createRun stamps + getRunById projects four new
+  // workflow_runs tagging columns (experiment_id / experiment_arm / variant_id /
+  // variant_label). Both read-model surfaces (includeSubstrate) and the row-level
+  // readers (includeWorkflowRunTaskColumns) therefore need them — folded in
+  // idempotently exactly like model/eval_enabled so passing both flags never
+  // double-ALTERs. Plain nullable TEXT (no CHECK); additive — never widens
+  // GATE_SCHEMA.
+  let variantColumnsAdded = false;
+  const addVariantColumnsOnce = (): void => {
+    if (variantColumnsAdded) return;
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_arm TEXT');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_id TEXT');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_label TEXT');
+    variantColumnsAdded = true;
+  };
   if (options?.includeStuckDetectedAt) {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN stuck_detected_at INTEGER');
   }
@@ -166,6 +182,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addModelColumnOnce();
     // Migration 044: getRunById projects eval_enabled beside model.
     addEvalEnabledColumnOnce();
+    // Migration 046: getRunById projects the four A/B tagging columns.
+    addVariantColumnsOnce();
   }
   if (options?.includeQuestionsTable) {
     // Migration 010 references stuck_detected_at (added in migration 007) in the
@@ -207,6 +225,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addModelColumnOnce();
     // Migration 044: getRunById projects eval_enabled (per-run eval override).
     addEvalEnabledColumnOnce();
+    // Migration 046: getRunById projects the four A/B tagging columns.
+    addVariantColumnsOnce();
   }
   return db;
 }

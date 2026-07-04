@@ -89,11 +89,16 @@ describe('cyboflow.runs.restart', () => {
     // Full-form launch: workflow, project path, substrate, taskId(undef), ideaId,
     // sessionId, permissionMode, baseBranch(undef), seedTaskIds(undef), projectId,
     // requestedExecutionModel(undef), findingIds(undef), model, evalEnabled
-    // (per-run pin 1 → true; NULL would thread undefined = inherit global).
+    // (per-run pin 1 → true; NULL would thread undefined = inherit global), then
+    // the trailing A/B launchOptions — `{ baseline: true }` here because the failed
+    // run is a baseline run (variant_id NULL): the resolver must PIN baseline and NOT
+    // rotate, reproducing the retried config even if the workflow gained active
+    // variants ("restart inherits, no re-roll").
     expect(launchMock).toHaveBeenCalledOnce();
     expect(launchMock).toHaveBeenCalledWith(
       workflowId, '/projects/p', 'interactive', undefined, 'IDEA-9', 'sess-host',
       'acceptEdits', undefined, undefined, 1, undefined, undefined, 'opus', true,
+      { baseline: true },
     );
 
     // The failed run stays terminal — restart never mutates it.
@@ -124,6 +129,45 @@ describe('cyboflow.runs.restart', () => {
     // seedTaskIds is the 9th positional arg.
     expect(launchMock.mock.calls[0][0]).toBe(workflowId);
     expect(launchMock.mock.calls[0][8]).toEqual(['TASK-1', 'TASK-2']);
+  });
+
+  // -------------------------------------------------------------------------
+  // (b2) A/B testing (migration 046): restart INHERITS the failed run's variant.
+  // -------------------------------------------------------------------------
+  it('(b2) re-pins the failed run variant_id as the trailing launchOptions (inherit, no re-roll)', async () => {
+    const { runId } = seedRun(db, { id: 'run-variant-failed', status: 'failed', projectId: 1 });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-host', variant_id = 'wfv_42' WHERE id = ?`).run(runId);
+
+    const launchMock = vi.fn().mockResolvedValue({ runId: 'run-2', worktreePath: '/w', branchName: 'b' });
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: () => ({ path: '/projects/p' }) },
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.restart({ runId });
+
+    expect(launchMock).toHaveBeenCalledOnce();
+    // The 15th positional arg is the A/B launchOptions object.
+    expect(launchMock.mock.calls[0][14]).toEqual({ requestedVariantId: 'wfv_42' });
+  });
+
+  // -------------------------------------------------------------------------
+  // (b3) A/B testing (migration 046): restart REFUSES an experiment-tagged arm.
+  // -------------------------------------------------------------------------
+  it('(b3) refuses to restart an experiment-tagged run with a CONFLICT', async () => {
+    const { runId } = seedRun(db, { id: 'run-exp-failed', status: 'failed', projectId: 1 });
+    db.prepare(`UPDATE workflow_runs SET session_id = 'sess-host', experiment_id = 'exp-9' WHERE id = ?`).run(runId);
+
+    const launchMock = vi.fn();
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: () => ({ path: '/projects/p' }) },
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(caller.cyboflow.runs.restart({ runId })).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(launchMock).not.toHaveBeenCalled();
   });
 
   // -------------------------------------------------------------------------

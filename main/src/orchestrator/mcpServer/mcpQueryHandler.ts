@@ -46,6 +46,7 @@
 import * as net from 'net';
 import type { DatabaseLike, LoggerLike } from '../types';
 import { resolveWorkflowDefinition, isPermissionMode } from '../../../../shared/types/workflows';
+import { resolveRunFrozenSpec } from '../runFrozenSpec';
 import type { PermissionMode } from '../../../../shared/types/workflows';
 import { buildStepTransitionEvent } from '../stepTransitionBridge';
 import { handleEntityWrite } from '../autoMintArtifacts';
@@ -655,14 +656,10 @@ export class McpQueryHandler {
       return;
     }
 
-    const row = this.db
-      .prepare(
-        `SELECT w.name AS name, w.spec_json AS specJson
-           FROM workflow_runs r
-           JOIN workflows w ON w.id = r.workflow_id
-          WHERE r.id = ?`,
-      )
-      .get(msg.runId) as { name?: unknown; specJson?: unknown } | undefined;
+    // A/B testing (migration 046): resolve the run's FROZEN effective spec (its
+    // variant graph, else the live spec) via resolveRunFrozenSpec (already keyed by
+    // runId) instead of a live JOIN read.
+    const row = resolveRunFrozenSpec(this.db, msg.runId);
 
     if (!row) {
       this.writeResponse(client, {
@@ -674,8 +671,8 @@ export class McpQueryHandler {
       return;
     }
 
-    const name = typeof row.name === 'string' ? row.name : '';
-    const specJson = typeof row.specJson === 'string' ? row.specJson : null;
+    const name = row.workflowName;
+    const specJson = row.specJson;
 
     // Validate stepId against the run's RESOLVED definition — NOT the static
     // WORKFLOW_DEFINITIONS constant (which is now only the seed/fallback).

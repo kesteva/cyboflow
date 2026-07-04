@@ -35,8 +35,13 @@ import type Database from 'better-sqlite3';
 import type { LoggerLike } from '../../../orchestrator/types';
 import type { AgentOverrideRow } from '../../../database/models';
 import { loadBuiltInAgents } from '../../../orchestrator/agents/agentCatalogue';
-import { computeEffectiveAgents } from '../../../orchestrator/agents/effectiveAgents';
+import {
+  computeEffectiveAgents,
+  applyVariantAgentDeltas,
+  type EffectiveAgent,
+} from '../../../orchestrator/agents/effectiveAgents';
 import { renderAgentMarkdown } from '../../../orchestrator/agents/agentMarkdown';
+import type { WorkflowVariantAgentOverrides } from '../../../../../shared/types/experiments';
 import { bareModelId } from './modelContext';
 import { isModelUsable } from '../../modelAvailabilityService';
 
@@ -83,9 +88,65 @@ function readOverrides(db: Database.Database, projectId: number, logger?: Logger
 }
 
 /**
+ * Read a run's VARIANT agent deltas (A/B testing, migration 046): resolve the
+ * run's `variant_id`, load the variant's `agent_overrides_json`, and parse it into
+ * a `WorkflowVariantAgentOverrides` map. Returns `null` (apply nothing) when the
+ * run is not variant-tagged, the variant/column is absent, or the JSON is
+ * malformed — a broken variant must NEVER break a spawn (fail-soft, warn once).
+ */
+function readVariantAgentDeltas(
+  db: Database.Database,
+  runId: string,
+  logger?: LoggerLike,
+): WorkflowVariantAgentOverrides | null {
+  let variantId: string | null;
+  try {
+    const runRow = db
+      .prepare('SELECT variant_id AS variantId FROM workflow_runs WHERE id = ?')
+      .get(runId) as { variantId?: unknown } | undefined;
+    variantId = typeof runRow?.variantId === 'string' ? runRow.variantId : null;
+  } catch {
+    // Pre-046 DB (column absent) — no variants exist, so nothing to apply.
+    return null;
+  }
+  if (variantId === null) return null;
+
+  let overridesJson: string | null;
+  try {
+    const variantRow = db
+      .prepare('SELECT agent_overrides_json AS overridesJson FROM workflow_variants WHERE id = ?')
+      .get(variantId) as { overridesJson?: unknown } | undefined;
+    overridesJson = typeof variantRow?.overridesJson === 'string' ? variantRow.overridesJson : null;
+  } catch (err) {
+    logger?.warn(
+      `[AgentOverlay] variant lookup failed for runId=${runId} variant=${variantId}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+  if (overridesJson === null) return null;
+
+  try {
+    const parsed: unknown = JSON.parse(overridesJson);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    // Trust the stored shape (the router validated it on write); a downstream
+    // delta with the wrong field types is tolerated by applyVariantAgentDeltas.
+    return parsed as WorkflowVariantAgentOverrides;
+  } catch (err) {
+    logger?.warn(
+      `[AgentOverlay] malformed agent_overrides_json for variant=${variantId} (runId=${runId}); skipping variant deltas: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+}
+
+/**
  * Materialize the project's full effective agent set into `<worktreePath>/.claude/agents/`
  * as `cyboflow-<agentKey>.md` files. No-op (writes nothing) when the run row is missing.
  * Never removes anything; never throws — a failure here must not break a spawn.
+ *
+ * A/B testing (migration 046): after computing the project-override effective set,
+ * a variant run applies its per-agent deltas ON TOP via applyVariantAgentDeltas —
+ * so the variant delta WINS over the project override for the fields it touches.
  */
 export function installAgentOverlay(
   db: Database.Database,
@@ -101,7 +162,11 @@ export function installAgentOverlay(
     }
 
     const overrides = readOverrides(db, projectId, logger);
-    const effective = computeEffectiveAgents(loadBuiltInAgents(), overrides);
+    let effective: EffectiveAgent[] = computeEffectiveAgents(loadBuiltInAgents(), overrides);
+    const variantDeltas = readVariantAgentDeltas(db, runId, logger);
+    if (variantDeltas) {
+      effective = applyVariantAgentDeltas(effective, variantDeltas);
+    }
     if (effective.length === 0) return;
 
     const dir = path.join(worktreePath, ...AGENTS_DIR);

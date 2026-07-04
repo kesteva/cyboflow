@@ -29,6 +29,9 @@ import type { McpConfigWriter } from './mcpConfigWriter';
 import type { RunExecutor } from './runExecutor';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import type { TaskChange } from './taskChangeRouter';
+import type { VariantResolver } from './variantResolver';
+import type { ExperimentArm } from '../../../shared/types/experiments';
+import { resolveRunFrozenSpec } from './runFrozenSpec';
 import {
   updateSessionAgentPermissionMode,
   type SessionAgentPermissionModeDeps,
@@ -155,6 +158,15 @@ export class RunLauncher {
      * as an audit-only value that may diverge).
      */
     private readonly sessionPermissionModeDeps?: SessionAgentPermissionModeDeps,
+    /**
+     * Optional rotation resolver (A/B testing, migration 046). When injected,
+     * launch() resolves the variant for every launch (explicit pin or weighted
+     * random over active variants) BEFORE createRun and threads the variant fields
+     * into the createRun opts bag. When absent (legacy call sites / tests that
+     * predate the feature), no variant is ever resolved — every launch is a
+     * baseline live-spec run, byte-identical to before.
+     */
+    private readonly variantResolver?: VariantResolver,
   ) {
     // Legacy-bridge collaborators are required only when no runExecutor is
     // supplied.  Under the SDK substrate, the PreToolUse hook gates permissions
@@ -276,6 +288,23 @@ export class RunLauncher {
     // requestedModel there is no resolver ladder; the value is read at the trigger
     // (snapshotRunForEval). OPTIONAL — omitted for every legacy/one-click call site.
     requestedEvalEnabled?: boolean,
+    // A/B testing (migration 046). ONE trailing options object (resolves the
+    // variant-pin + experiment-stamp surface without adding two positionals):
+    //   - requestedVariantId — an EXPLICIT variant pin (UI selection / restart
+    //     inherit / experiment arm). When omitted the VariantResolver applies
+    //     weighted rotation over active variants (or resolves null → baseline).
+    //   - experiment — slice B stamps the run's experiment_id + arm so the arm's
+    //     entity writes are sandboxed. The 046 columns exist for this; slice B
+    //     supplies the values, and createRun stamps them immutably now.
+    launchOptions?: {
+      requestedVariantId?: string;
+      experiment?: { experimentId: string; arm: ExperimentArm };
+      // Restart of a baseline (variant_id NULL) run: PIN the baseline so the
+      // resolver returns null WITHOUT rotating, reproducing the retried run's
+      // baseline config even after the workflow gained active variants ("restart
+      // inherits, no re-roll"). Ignored when requestedVariantId is set.
+      baseline?: boolean;
+    },
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
 
@@ -366,20 +395,46 @@ export class RunLauncher {
     // omitted and createRun falls back to workflow.project_id. The `opts` object
     // is only passed when projectId is defined so the legacy fallback path stays
     // byte-identical for callers that never thread a project.
-    // Pass the opts bag when an explicit project, execution model, model, OR
-    // per-run eval override is threaded; omit it entirely otherwise so the legacy
-    // fallback path (workflow.project_id + resolver floor, no model/eval pin) stays
-    // byte-identical.
+    // A/B testing (migration 046): resolve the variant for this launch ONCE, here,
+    // pre-createRun — so EVERY launch surface (picker, one-click, backlog, restart,
+    // experiment arm) inherits rotation from a single place and createRun stays a
+    // pure stamper. An explicit pin (requestedVariantId) loads regardless of status;
+    // otherwise the resolver does weighted random over active variants (or null →
+    // baseline live-spec run). A foreign-workflow pin throws inside the resolver.
+    const rv =
+      this.variantResolver?.resolveForLaunch(workflowId, launchOptions?.requestedVariantId, {
+        baseline: launchOptions?.baseline,
+      }) ?? null;
+    const experiment = launchOptions?.experiment;
+
+    // Pass the opts bag when an explicit project, execution model, model, per-run
+    // eval override, a resolved variant, OR an experiment stamp is threaded; omit it
+    // entirely otherwise so the legacy fallback path (workflow.project_id + resolver
+    // floor, no model/eval/variant pin) stays byte-identical.
     const createOpts =
       projectId !== undefined ||
       requestedExecutionModel !== undefined ||
       requestedModel !== undefined ||
-      requestedEvalEnabled !== undefined
+      requestedEvalEnabled !== undefined ||
+      rv !== null ||
+      experiment !== undefined
         ? {
             ...(projectId !== undefined ? { projectId } : {}),
             ...(requestedExecutionModel !== undefined ? { requestedExecutionModel } : {}),
             ...(requestedModel !== undefined ? { requestedModel } : {}),
             ...(requestedEvalEnabled !== undefined ? { requestedEvalEnabled } : {}),
+            ...(rv !== null
+              ? {
+                  variantId: rv.variantId,
+                  variantLabel: rv.variantLabel,
+                  variantSpecJson: rv.specJson,
+                  ...(rv.model !== null ? { variantModel: rv.model } : {}),
+                  ...(rv.executionModel !== null ? { variantExecutionModel: rv.executionModel } : {}),
+                }
+              : {}),
+            ...(experiment !== undefined
+              ? { experimentId: experiment.experimentId, experimentArm: experiment.arm }
+              : {}),
           }
         : undefined;
     const { runId, permissionMode, substrate: resolvedSubstrate } = this.workflowRegistry.createRun(
@@ -518,7 +573,16 @@ export class RunLauncher {
       // main/src/index.ts:580-589); real SDK events follow. Retained as UI-bootstrap aid.
       this.publisher?.publish(runId, {
         type: 'run_started',
-        payload: { type: 'run_started', runId, worktreePath, branchName },
+        payload: {
+          type: 'run_started',
+          runId,
+          worktreePath,
+          branchName,
+          // A/B testing (migration 046): surface the variant assignment immediately
+          // so the UI can badge the run without an extra query. Omitted for a
+          // baseline run.
+          ...(rv !== null ? { variantLabel: rv.variantLabel } : {}),
+        },
         timestamp: new Date().toISOString(),
       });
 
@@ -681,7 +745,7 @@ export class RunLauncher {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    const stepsSnapshotJson = this.buildStepsSnapshotJson(workflow);
+    const stepsSnapshotJson = this.buildStepsSnapshotJson(runId, workflow);
 
     // (2) workflow_runs linkage + triage columns (NOT a `tasks` write).
     this.db
@@ -740,13 +804,23 @@ export class RunLauncher {
 
   /**
    * Build the frozen step->agent map persisted in workflow_runs.steps_snapshot_json.
-   * Resolves the effective WorkflowDefinition (edited spec_json wins, else the
-   * built-in by name) and flattens all phase steps into `{ [stepId]: agent }`.
-   * Returns null when no definition resolves (custom flow with a broken spec /
-   * unknown name) — the overlay reader falls back to current_step_id then 'agent'.
+   *
+   * A/B testing (migration 046): resolves the run's FROZEN effective definition via
+   * resolveRunFrozenSpec — a VARIANT run's snapshot must describe ITS graph, not the
+   * live workflow spec_json (the snapshot's consumers are load-bearing: runIsPlanGated
+   * → pending/hidden + reveal + delete-gate, board current-agent display). Falls back
+   * to the passed-in workflow's live spec (then null) so a legacy / no-hash run is
+   * byte-identical to before. Returns null when no definition resolves — the overlay
+   * reader falls back to current_step_id then 'agent'.
    */
-  private buildStepsSnapshotJson(workflow: { name: string; spec_json?: string | null }): string | null {
-    const definition = resolveWorkflowDefinition(workflow.name, workflow.spec_json ?? null);
+  private buildStepsSnapshotJson(
+    runId: string,
+    workflow: { name: string; spec_json?: string | null },
+  ): string | null {
+    const frozen = resolveRunFrozenSpec(this.db, runId);
+    const name = frozen?.workflowName ?? workflow.name;
+    const specJson = frozen?.specJson ?? workflow.spec_json ?? null;
+    const definition = resolveWorkflowDefinition(name, specJson);
     if (!definition) return null;
     const map: Record<string, string> = {};
     for (const phase of definition.phases) {

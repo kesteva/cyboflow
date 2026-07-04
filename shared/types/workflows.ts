@@ -10,6 +10,7 @@ import type { CliSubstrate } from './substrate';
 import type { ExecutionModel } from './executionModel';
 import type { WorkflowRunStatus } from './cyboflow';
 import type { ArtifactType } from './artifacts';
+import type { ExperimentArm } from './experiments';
 
 /**
  * Workflow-run permission contract consumed by the SDK PreToolUse mapper
@@ -147,6 +148,23 @@ export interface WorkflowRunRow {
    * built-ins-only isCyboflowWorkflowName gate.
    */
   eval_enabled?: number | null;
+  /**
+   * Side-by-side experiment id (migration 046) — soft link to experiments.id
+   * (slice B owns that table). NULL for every non-experiment run. Stamped once at
+   * createRun and immutable for the run. Sandboxes the arm's entity writes.
+   */
+  experiment_id?: string | null;
+  /** Which arm of the experiment this run drives ('A' | 'B'; migration 046). NULL for non-experiment runs. */
+  experiment_arm?: ExperimentArm | null;
+  /**
+   * Variant assignment (migration 046) — a SOFT link (no FK) to workflow_variants.id,
+   * so a retired/deleted variant never orphans a historical run. NULL = baseline
+   * (live-spec) run. Stamped once at createRun and immutable; the run froze the
+   * variant's spec into spec_hash + workflow_revisions at the same time.
+   */
+  variant_id?: string | null;
+  /** Denormalized variant label (migration 046) that survives variant rename/delete. NULL for baseline runs. */
+  variant_label?: string | null;
   started_at?: string | null;
   ended_at?: string | null;
   created_at: string;

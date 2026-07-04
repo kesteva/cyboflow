@@ -25,6 +25,7 @@ import { InteractiveMcpEnabler } from './interactiveMcpEnabler';
 import type { LoggerLike } from '../../../orchestrator/types';
 import { buildStepReportingAppend } from '../../../orchestrator/prompts/step-reporting-instructions';
 import { QUICK_WORKFLOW_NAME } from '../../../orchestrator/workflowRegistry';
+import { resolveRunFrozenSpec } from '../../../orchestrator/runFrozenSpec';
 import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
 import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelProvider';
@@ -1232,16 +1233,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * No DB write, no emit — this is a pure read of the run's workflow row.
    */
   private buildStepReportingAppendForRun(runId: string): string {
-    let row: { name?: unknown; specJson?: unknown } | undefined;
+    // A/B testing (migration 046): resolve the run's FROZEN effective spec (its
+    // variant graph, else the live spec) via resolveRunFrozenSpec instead of a live
+    // JOIN read, so an interactive variant run reports against ITS definition.
+    let row: { workflowName: string; specJson: string | null } | null;
     try {
-      row = this.db
-        .prepare(
-          `SELECT w.name AS name, w.spec_json AS specJson
-             FROM workflow_runs r
-             JOIN workflows w ON w.id = r.workflow_id
-            WHERE r.id = ?`,
-        )
-        .get(runId) as { name?: unknown; specJson?: unknown } | undefined;
+      row = resolveRunFrozenSpec(this.db, runId);
     } catch (err) {
       this.logger?.warn(
         `[InteractiveClaudeManager] step-reporting workflow lookup failed for runId=${runId}: ${err instanceof Error ? err.message : String(err)}`,
@@ -1250,7 +1247,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     }
 
     if (!row) return '';
-    const name = typeof row.name === 'string' ? row.name : '';
+    const name = row.workflowName;
     // __quick__ sentinel suppression: a quick session's run row points at the
     // per-project sentinel workflow (workflowRegistry.ensureQuickWorkflow), which
     // has NO real steps — prepending step-reporting instructions to its prompts
@@ -1259,8 +1256,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // onto the sentinel row cannot leak workflow instructions into quick-session
     // prompts.
     if (name === QUICK_WORKFLOW_NAME) return '';
-    const specJson = typeof row.specJson === 'string' ? row.specJson : null;
-    return buildStepReportingAppend(resolveWorkflowDefinition(name, specJson));
+    return buildStepReportingAppend(resolveWorkflowDefinition(name, row.specJson));
   }
 
   /**

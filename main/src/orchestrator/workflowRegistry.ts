@@ -19,6 +19,11 @@ import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName,
 import { isCyboflowWorkflowName, resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
+import type {
+  ExperimentArm,
+  WorkflowVariantRow,
+  WorkflowVariantStatus,
+} from '../../../shared/types/experiments';
 import { resolveSubstrate } from './substrateResolver';
 import { resolveExecutionModel } from './executionModelResolver';
 import { resolvePermissionMode } from './permissionModeResolver';
@@ -374,6 +379,196 @@ export class WorkflowRegistry {
       .run(workflowId, specHash, specJson);
   }
 
+  // --------------------------------------------------------------------------
+  // Workflow variants (A/B testing, migration 046)
+  // --------------------------------------------------------------------------
+
+  /** Read a single variant row by id. Returns null when absent. */
+  getVariantById(variantId: string): WorkflowVariantRow | null {
+    const row = this.db
+      .prepare('SELECT * FROM workflow_variants WHERE id = ?')
+      .get(variantId) as WorkflowVariantRow | undefined;
+    return row ?? null;
+  }
+
+  /** List a workflow's variants, newest-first. */
+  listVariants(workflowId: string): WorkflowVariantRow[] {
+    return this.db
+      .prepare('SELECT * FROM workflow_variants WHERE workflow_id = ? ORDER BY created_at DESC, id DESC')
+      .all(workflowId) as WorkflowVariantRow[];
+  }
+
+  /**
+   * Create a variant snapshotting the workflow's RESOLVED effective definition
+   * ("Create variant from current").
+   *
+   * Snapshots `resolveWorkflowDefinition(name, spec_json)` — so a built-in with a
+   * live `spec_json='{}'` freezes the CONCRETE static graph rather than '{}'
+   * (independent of later built-in code changes). Seeds `status='draft'` (rotation
+   * is explicit opt-in — a fresh variant is pinnable + experiment-usable but never
+   * auto-rotated), `weight=1`, NULL model/execution_model/agent_overrides_json.
+   *
+   * Guards (distinguishable Error messages the router maps to TRPCError):
+   *   - missing workflow → 'not found' (NOT_FOUND)
+   *   - reserved sentinel (__quick__) → 'reserved' (BAD_REQUEST)
+   *   - unresolvable definition (broken custom flow) → 'unresolvable' (BAD_REQUEST)
+   *   - label collision (UNIQUE) → 'already exists' (CONFLICT)
+   */
+  createVariantFromCurrent(workflowId: string, label: string): WorkflowVariantRow {
+    const workflow = this.getById(workflowId);
+    if (!workflow) {
+      throw new Error(`WorkflowRegistry.createVariantFromCurrent: workflow ${workflowId} not found`);
+    }
+    if (workflow.name === QUICK_WORKFLOW_NAME) {
+      throw new Error(
+        `WorkflowRegistry.createVariantFromCurrent: '${workflow.name}' is a reserved sentinel and cannot have variants`,
+      );
+    }
+    const definition = resolveWorkflowDefinition(workflow.name, workflow.spec_json);
+    if (definition === null) {
+      throw new Error(
+        `WorkflowRegistry.createVariantFromCurrent: workflow ${workflowId} has an unresolvable definition`,
+      );
+    }
+    const trimmed = label.trim();
+    if (trimmed.length === 0) {
+      throw new Error('WorkflowRegistry.createVariantFromCurrent: label must be non-empty');
+    }
+    // Collision pre-check for a clean CONFLICT message (the UNIQUE index is the
+    // authoritative guard; a concurrent insert would still throw the raw error).
+    const collision = this.db
+      .prepare('SELECT 1 FROM workflow_variants WHERE workflow_id = ? AND label = ? LIMIT 1')
+      .get(workflowId, trimmed);
+    if (collision !== undefined) {
+      throw new Error(
+        `WorkflowRegistry.createVariantFromCurrent: a variant named '${trimmed}' already exists for this workflow`,
+      );
+    }
+
+    const id = `wfv_${randomUUID().replace(/-/g, '').slice(0, 16)}`;
+    const specJson = JSON.stringify(definition);
+    const insert = this.db.prepare(`
+      INSERT INTO workflow_variants (id, workflow_id, label, spec_json, status, weight)
+      VALUES (?, ?, ?, ?, 'draft', 1)
+    `);
+    const tx = this.db.transaction(() => {
+      insert.run(id, workflowId, trimmed, specJson);
+    });
+    tx();
+
+    const row = this.getVariantById(id);
+    if (!row) {
+      throw new Error(
+        `WorkflowRegistry.createVariantFromCurrent: inserted variant ${id} could not be read back`,
+      );
+    }
+    return row;
+  }
+
+  /**
+   * Patch a variant IN PLACE (re-snapshot). Any subset of fields may be supplied;
+   * `updated_at` always touches. Past runs are unaffected — each froze its own
+   * `spec_hash` into `workflow_revisions` at createRun. The caller pre-validates
+   * `specJson`/`agentOverridesJson` (the router serializes zod-validated shapes);
+   * the registry does NOT re-validate, it only persists.
+   *
+   * Throws 'not found' when the variant is missing (→ NOT_FOUND). A label
+   * collision surfaces the UNIQUE constraint error (→ CONFLICT upstream).
+   */
+  updateVariant(
+    variantId: string,
+    patch: {
+      specJson?: string;
+      agentOverridesJson?: string | null;
+      model?: string | null;
+      executionModel?: 'orchestrated' | 'programmatic' | null;
+      weight?: number;
+      label?: string;
+    },
+  ): void {
+    if (patch.weight !== undefined && (!Number.isInteger(patch.weight) || patch.weight < 0)) {
+      throw new Error('WorkflowRegistry.updateVariant: weight must be a non-negative integer');
+    }
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    if (patch.specJson !== undefined) {
+      sets.push('spec_json = ?');
+      params.push(patch.specJson);
+    }
+    if (patch.agentOverridesJson !== undefined) {
+      sets.push('agent_overrides_json = ?');
+      params.push(patch.agentOverridesJson);
+    }
+    if (patch.model !== undefined) {
+      sets.push('model = ?');
+      params.push(patch.model);
+    }
+    if (patch.executionModel !== undefined) {
+      sets.push('execution_model = ?');
+      params.push(patch.executionModel);
+    }
+    if (patch.weight !== undefined) {
+      sets.push('weight = ?');
+      params.push(patch.weight);
+    }
+    if (patch.label !== undefined) {
+      const trimmed = patch.label.trim();
+      if (trimmed.length === 0) {
+        throw new Error('WorkflowRegistry.updateVariant: label must be non-empty');
+      }
+      sets.push('label = ?');
+      params.push(trimmed);
+    }
+    sets.push("updated_at = datetime('now')");
+    const stmt = this.db.prepare(`UPDATE workflow_variants SET ${sets.join(', ')} WHERE id = ?`);
+    const tx = this.db.transaction(() => {
+      const result = stmt.run(...params, variantId);
+      if (result.changes === 0) {
+        throw new Error(`WorkflowRegistry.updateVariant: variant ${variantId} not found`);
+      }
+    });
+    tx();
+  }
+
+  /** Transition a variant's rotation status. Throws 'not found' when absent. */
+  setVariantStatus(variantId: string, status: WorkflowVariantStatus): void {
+    const stmt = this.db.prepare(
+      "UPDATE workflow_variants SET status = ?, updated_at = datetime('now') WHERE id = ?",
+    );
+    const tx = this.db.transaction(() => {
+      const result = stmt.run(status, variantId);
+      if (result.changes === 0) {
+        throw new Error(`WorkflowRegistry.setVariantStatus: variant ${variantId} not found`);
+      }
+    });
+    tx();
+  }
+
+  /**
+   * Delete a variant. MIRRORS deleteWorkflow's run-history guard: refuses (throws
+   * 'run history' → CONFLICT) when any workflow_runs.variant_id references it —
+   * retire instead so per-variant stats stay resolvable. A variant with 0 runs is
+   * hard-deleted. Throws 'not found' when the variant is missing.
+   */
+  deleteVariant(variantId: string): void {
+    const variant = this.getVariantById(variantId);
+    if (!variant) {
+      throw new Error(`WorkflowRegistry.deleteVariant: variant ${variantId} not found`);
+    }
+    const { count } = this.db
+      .prepare('SELECT COUNT(*) AS count FROM workflow_runs WHERE variant_id = ?')
+      .get(variantId) as { count: number };
+    if (count > 0) {
+      throw new Error(
+        `WorkflowRegistry.deleteVariant: variant ${variantId} has run history (${count} run(s)); retire it instead of deleting`,
+      );
+    }
+    const tx = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM workflow_variants WHERE id = ?').run(variantId);
+    });
+    tx();
+  }
+
   /**
    * Create a brand-new custom workflow row from an edited definition
    * ("Save as new flow" / "Create a project-specific copy").
@@ -638,6 +833,17 @@ export class WorkflowRegistry {
       requestedExecutionModel?: ExecutionModel;
       requestedModel?: string;
       requestedEvalEnabled?: boolean;
+      // A/B testing (migration 046). variant* are supplied by the VariantResolver
+      // via RunLauncher.launch; experiment* are supplied by slice B's experiment
+      // launcher. All stamped immutably (no UPDATE path), mirroring model/substrate.
+      variantId?: string;
+      variantLabel?: string;
+      /** The variant's frozen spec_json — the EFFECTIVE spec this run executes. */
+      variantSpecJson?: string;
+      variantModel?: string;
+      variantExecutionModel?: ExecutionModel;
+      experimentId?: string;
+      experimentArm?: ExperimentArm;
     },
   ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate; executionModel: ExecutionModel } {
     const workflow = this.getById(workflowId);
@@ -726,9 +932,11 @@ export class WorkflowRegistry {
     // substrate hard-pin + floor. With no override every run resolves
     // 'orchestrated' (zero-behavior-change). Like substrate, this is stamped ONCE
     // at INSERT and is immutable for the run lifetime — there is no UPDATE path.
+    // Execution-model ladder (A/B): explicit per-run request > variant default >
+    // global default > env > 'orchestrated' floor (interactive still hard-pins).
     const executionModel = resolveExecutionModel({
       substrate,
-      requestedExecutionModel: opts?.requestedExecutionModel,
+      requestedExecutionModel: opts?.requestedExecutionModel ?? opts?.variantExecutionModel,
       globalDefaultExecutionModel: this.config?.getDefaultExecutionModel?.(),
       env: process.env,
     });
@@ -741,7 +949,8 @@ export class WorkflowRegistry {
     // either pins a model or it does not. Stamped ONCE here and immutable for the
     // run; NULL (no pin) is the legacy/zero-behavior-change floor — RunExecutor
     // then passes no `model` and the SDK uses its own default.
-    const model = opts?.requestedModel ?? null;
+    // Model ladder (A/B): explicit per-run request > variant default > NULL.
+    const model = opts?.requestedModel ?? opts?.variantModel ?? null;
 
     // Per-run code-review-eval override (migration 044). Like model, there is no
     // resolver ladder: a run either pins an explicit ON/OFF or leaves it NULL to
@@ -751,27 +960,47 @@ export class WorkflowRegistry {
     const evalEnabled =
       opts?.requestedEvalEnabled === undefined ? null : opts.requestedEvalEnabled ? 1 : 0;
 
-    // Freeze the workflow's CURRENT spec onto the run as a content address
-    // (migration 026). Like substrate, spec_hash is stamped ONCE at INSERT and
-    // is immutable for the run lifetime — there is no UPDATE path. It lets
-    // Insights bucket runs by the exact workflow revision they executed even
-    // after the live spec_json is later edited.
-    const specHash = computeSpecHash(workflow.spec_json);
+    // Freeze the run's EFFECTIVE spec onto the run as a content address
+    // (migration 026 + A/B 046). For a VARIANT run the effective spec is the
+    // variant's frozen spec_json; otherwise it is the workflow's live spec_json.
+    // Like substrate, spec_hash is stamped ONCE at INSERT and is immutable for the
+    // run lifetime — there is no UPDATE path. The six per-run "effective
+    // definition" readers resolve the run's spec from (workflow_id, spec_hash) via
+    // resolveRunFrozenSpec, so a variant run walks its OWN graph and a mid-run
+    // workflow edit no longer changes a running definition.
+    const effectiveSpecJson = opts?.variantSpecJson ?? workflow.spec_json ?? '{}';
+    const specHash = computeSpecHash(effectiveSpecJson);
 
     const insert = this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, execution_model, model, eval_enabled, session_id, spec_hash)
-      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, execution_model, model, eval_enabled, session_id, spec_hash, experiment_id, experiment_arm, variant_id, variant_label)
+      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const createTx = this.db.transaction(() => {
-      insert.run(runId, workflowId, runProjectId, permissionMode, substrate, executionModel, model, evalEnabled, sessionId, specHash);
+      insert.run(
+        runId,
+        workflowId,
+        runProjectId,
+        permissionMode,
+        substrate,
+        executionModel,
+        model,
+        evalEnabled,
+        sessionId,
+        specHash,
+        opts?.experimentId ?? null,
+        opts?.experimentArm ?? null,
+        opts?.variantId ?? null,
+        opts?.variantLabel ?? null,
+      );
       // Ensure the frozen hash is always resolvable to its spec: snapshot a
-      // revision for the spec we just stamped. INSERT OR IGNORE keyed on
-      // UNIQUE(workflow_id, spec_hash) makes this idempotent, so a workflow that
-      // ran the same spec before (or was explicitly edited to it) adds no row —
-      // but a spec that ONLY ever ran (never saved via the editor) still gets a
-      // revision row here, so historic spec text is never lost.
-      this.recordRevision(workflowId, workflow.spec_json ?? '{}');
+      // revision for the EFFECTIVE spec we just stamped. INSERT OR IGNORE keyed on
+      // UNIQUE(workflow_id, spec_hash) makes this idempotent, so a workflow (or
+      // variant) that ran the same spec before adds no row — but a spec that ONLY
+      // ever ran (never saved via the editor) still gets a revision row here, so
+      // historic spec text is never lost. Same transaction as the INSERT, so the
+      // frozen hash is always resolvable.
+      this.recordRevision(workflowId, effectiveSpecJson);
     });
 
     createTx();
@@ -785,7 +1014,7 @@ export class WorkflowRegistry {
    */
   getRunById(runId: string): WorkflowRunRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, outcome, base_branch, base_sha, steps_snapshot_json, substrate, execution_model, model, eval_enabled, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
+      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, outcome, base_branch, base_sha, steps_snapshot_json, substrate, execution_model, model, eval_enabled, experiment_id, experiment_arm, variant_id, variant_label, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
     );
     const row = stmt.get(runId) as WorkflowRunRow | undefined;
     return row ?? null;

@@ -326,7 +326,7 @@ describe('cyboflow.runs.start', () => {
       // projectId (10th slot), so createRun can stamp both workflow_runs.session_id
       // and project_id even for a GLOBAL flow (workflow.project_id NULL).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined, undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined, undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined);
     } finally {
       // Reset module state regardless of test outcome.
       setStartRunDeps({
@@ -362,7 +362,7 @@ describe('cyboflow.runs.start', () => {
       // 10th slot — so the launcher writes workflow_runs.seed_idea_id directly (no
       // stage derivation).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -397,7 +397,7 @@ describe('cyboflow.runs.start', () => {
       // launch projectId (migration 030) in the 10th slot — so the launcher hosts
       // the run inside the session's existing worktree.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -432,7 +432,7 @@ describe('cyboflow.runs.start', () => {
       // seedTaskIds (9th) undefined, and the explicit launch projectId (migration
       // 030) in the 10th slot.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-1', 'auto', undefined, undefined, 1, undefined, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-1', 'auto', undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -465,7 +465,7 @@ describe('cyboflow.runs.start', () => {
       // (13th, undefined here). Every other optional arg stays undefined except the
       // required sessionId (6th) and the always-threaded projectId (10th).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, false);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, false, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -552,7 +552,8 @@ describe('cyboflow.runs.start', () => {
         undefined, // requestedExecutionModel (11th placeholder)
         ['rvw_a', 'rvw_b'], // findingIds (12th)
         undefined, // requestedModel (13th — not requested)
-        undefined, // requestedEvalEnabled (14th, LAST — not requested)
+        undefined, // requestedEvalEnabled (14th — not requested)
+        undefined, // launchOptions (15th, LAST — no variant pin)
       );
     } finally {
       setStartRunDeps({
@@ -597,7 +598,8 @@ describe('cyboflow.runs.start', () => {
         undefined, // requestedExecutionModel (11th placeholder)
         undefined, // findingIds (12th — omitted)
         undefined, // requestedModel (13th — omitted)
-        undefined, // requestedEvalEnabled (14th, LAST — omitted)
+        undefined, // requestedEvalEnabled (14th — omitted)
+        undefined, // launchOptions (15th, LAST — no variant pin)
       );
     } finally {
       setStartRunDeps({
@@ -642,8 +644,36 @@ describe('cyboflow.runs.start', () => {
         undefined, // requestedExecutionModel (11th placeholder)
         undefined, // findingIds (12th)
         'opus', // requestedModel (13th)
-        undefined, // requestedEvalEnabled (14th, LAST — not requested)
+        undefined, // requestedEvalEnabled (14th — not requested)
+        undefined, // launchOptions (15th, LAST — no variant pin)
       );
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a8) A/B testing (migration 046): variantId supplied → forwarded as the
+  // trailing (15th) launchOptions object as an EXPLICIT variant pin.
+  // -------------------------------------------------------------------------
+  it('(a8) variantId supplied → forwards { requestedVariantId } as the trailing launchOptions', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-variant',
+      worktreePath: '/tmp/wt/variant',
+      branchName: 'cyboflow/planner/variant12',
+    });
+    const sessionManagerStub = { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) };
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({ workflowId: 'wf-planner', projectId: 1, sessionId: 'sess-1', variantId: 'wfv_7' });
+
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock.mock.calls[0][14]).toEqual({ requestedVariantId: 'wfv_7' });
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -2510,6 +2540,52 @@ describe('cyboflow.runs.getPhaseState — spec_json resolution', () => {
     const result = await caller.cyboflow.runs.getPhaseState({ runId });
 
     expect(result.definition.id).toBe('sprint');
+  });
+
+  // A/B testing (migration 046): a variant / mid-run-edited run must render its
+  // FROZEN graph (resolveRunFrozenSpec by (workflow_id, spec_hash)), NOT the live
+  // workflows.spec_json. Seeds a run whose spec_hash points at a frozen revision
+  // that DIFFERS from the live workflow spec, and asserts the frozen graph wins.
+  it('resolves the FROZEN revision spec over the live workflows.spec_json (variant run)', async () => {
+    const runId = 'run-gps-frozen';
+    const workflowId = `wf-${runId}`;
+    const frozen = makeSpecDefinition('planner');
+    // The workflow's LIVE spec differs from the frozen one the run walked (edited
+    // mid-run, or a structural variant): two phases, distinct step id.
+    const liveSpec = JSON.stringify({
+      id: 'planner',
+      phases: [
+        { id: 'live-phase', label: 'Live', color: '#000', steps: [{ id: 'live-step', name: 'Live', agent: 'x', mcps: [], retries: 0 }] },
+      ],
+    });
+
+    // Layer the spec_hash column + workflow_revisions table onto the base test DB
+    // (createTestDbWithStepTracking omits them; the frozen resolver degrades to the
+    // live JOIN read when they are absent).
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
+    db.exec(`CREATE TABLE workflow_revisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id TEXT NOT NULL,
+      spec_hash TEXT NOT NULL, spec_json TEXT NOT NULL, UNIQUE(workflow_id, spec_hash)
+    )`);
+
+    db.prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, 'planner', ?)`)
+      .run(workflowId, liveSpec);
+    db.prepare(`INSERT INTO workflow_revisions (workflow_id, spec_hash, spec_json) VALUES (?, 'hashFrozen', ?)`)
+      .run(workflowId, JSON.stringify(frozen));
+    db.prepare(
+      `INSERT INTO workflow_runs
+         (id, workflow_id, project_id, worktree_path, status, policy_json, current_step_id, spec_hash)
+       VALUES (?, ?, 1, '/tmp/test', 'running', '{}', 'edited-step', 'hashFrozen')`,
+    ).run(runId, workflowId);
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    // Frozen graph (single 'only' phase / 'edited-step'), NOT the live 'live-phase'.
+    expect(result.definition).toEqual(frozen);
+    expect(result.stepStates.map((s) => s.stepId)).toEqual(['edited-step']);
+    const edited = result.stepStates.find((s) => s.stepId === 'edited-step');
+    expect(edited!.status).toBe('running');
   });
 });
 

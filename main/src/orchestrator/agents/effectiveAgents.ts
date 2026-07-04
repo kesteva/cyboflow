@@ -22,6 +22,7 @@ import type {
   AgentUsage,
 } from '../../../../shared/types/agents';
 import { agentModelLabel, isAgentModelAlias } from '../../../../shared/types/agents';
+import type { WorkflowVariantAgentOverrides } from '../../../../shared/types/experiments';
 import type { BuiltInAgent } from './agentCatalogue';
 
 /** The effective (post-override) view of one agent. */
@@ -148,6 +149,45 @@ export function computeEffectiveAgents(
     if (row.is_custom === 1) effective.push(customAgent(row));
   }
   return effective;
+}
+
+/**
+ * Apply a workflow VARIANT's per-agent deltas ON TOP of an already-computed
+ * effective agent set (A/B testing, migration 046). Pure — no DB / FS.
+ *
+ * For each agent whose `agentKey` has a delta:
+ *   - `systemPrompt` (when present) replaces the agent's prompt;
+ *   - `model` (when a valid {@link isAgentModelAlias} alias) narrows the model;
+ *     an unrecognized alias leaves the existing model unchanged;
+ *   - `rawContent` is DROPPED and `source` flips `builtin → builtin-override`, so
+ *     the overlay renders the delta via `renderAgentMarkdown` instead of writing
+ *     the stale verbatim `.md`. (A `builtin-override` / `custom` agent keeps its
+ *     source; it already renders.)
+ *
+ * Merge order at the call site (agentOverlayWriter) is
+ * `computeEffectiveAgents(builtins, projectOverrides)` FIRST, THEN this — so the
+ * VARIANT delta WINS over the project override for the fields it touches. An agent
+ * key with no matching effective agent (e.g. a delta targeting a custom agent that
+ * was later deleted) is silently ignored — deltas never ADD agents.
+ */
+export function applyVariantAgentDeltas(
+  effective: EffectiveAgent[],
+  deltas: WorkflowVariantAgentOverrides,
+): EffectiveAgent[] {
+  return effective.map((agent) => {
+    const delta = deltas[agent.agentKey];
+    if (!delta) return agent;
+
+    const systemPrompt = delta.systemPrompt ?? agent.systemPrompt;
+    const model = isAgentModelAlias(delta.model) ? delta.model : agent.model;
+    const source = agent.source === 'builtin' ? 'builtin-override' : agent.source;
+
+    // Drop rawContent so the overlay renders via renderAgentMarkdown (the flipped
+    // source guarantees a builtin no longer writes its stale verbatim body).
+    const { rawContent: _dropped, ...rest } = agent;
+    void _dropped;
+    return { ...rest, systemPrompt, model, source };
+  });
 }
 
 /**

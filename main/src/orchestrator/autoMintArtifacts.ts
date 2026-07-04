@@ -29,6 +29,7 @@ import { ArtifactRouter } from './artifactRouter';
 import { listRunOwnedIdeaIds, resolveRunBatchIdeaId } from './runEntityOwnership';
 import type { DatabaseLike, LoggerLike } from './types';
 import { resolveWorkflowDefinition, type WorkflowStep } from '../../../shared/types/workflows';
+import { resolveRunFrozenSpec } from './runFrozenSpec';
 import { extractArchDesignSection } from '../../../shared/types/artifacts';
 import { TERMINAL_RUN_STATUSES } from '../../../shared/types/cyboflow';
 
@@ -211,18 +212,13 @@ interface IdeaContentRow {
  * the step id is absent.
  */
 function resolveStep(db: DatabaseLike, runId: string, stepId: string): WorkflowStep | null {
-  const runRow = db
-    .prepare(
-      `SELECT w.name AS workflowName, w.spec_json AS specJson
-         FROM workflow_runs r
-         JOIN workflows w ON w.id = r.workflow_id
-        WHERE r.id = ?`,
-    )
-    .get(runId) as { workflowName?: unknown; specJson?: unknown } | undefined;
-  if (!runRow || typeof runRow.workflowName !== 'string') return null;
+  // A/B testing (migration 046): resolve the run's FROZEN effective spec (its
+  // variant graph, else the live spec) via resolveRunFrozenSpec instead of a live
+  // JOIN read, so a variant run's steps resolve against ITS definition.
+  const runRow = resolveRunFrozenSpec(db, runId);
+  if (!runRow) return null;
 
-  const specJson = typeof runRow.specJson === 'string' ? runRow.specJson : null;
-  const def = resolveWorkflowDefinition(runRow.workflowName, specJson);
+  const def = resolveWorkflowDefinition(runRow.workflowName, runRow.specJson);
   if (def === null) return null;
 
   return def.phases.flatMap((p) => p.steps).find((s) => s.id === stepId) ?? null;

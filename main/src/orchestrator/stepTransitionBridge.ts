@@ -44,6 +44,7 @@ import { handleStepCompletion, handleRunStart, handleVisualArtifactsScan } from 
 import type { DatabaseLike, LoggerLike } from './types';
 import type { CyboflowWorkflowName, WorkflowStepTransitionEvent } from '../../../shared/types/workflows';
 import { CYBOFLOW_WORKFLOW_NAMES, resolveWorkflowDefinition } from '../../../shared/types/workflows';
+import { resolveRunFrozenSpec } from './runFrozenSpec';
 
 export type { WorkflowStepTransitionEvent } from '../../../shared/types/workflows';
 
@@ -154,22 +155,18 @@ export function buildStepTransitionEvent(
 ): WorkflowStepTransitionEvent | null {
   const timestamp = new Date().toISOString();
 
-  // Resolve the run's workflow name + spec_json by JOIN on runId, then validate
-  // the stepId against the run's EFFECTIVE definition (dynamic step-id model:
-  // resolveWorkflowDefinition is the runtime source of truth, NOT the static
-  // WORKFLOW_DEFINITIONS seed). This makes a typo / unknown / removed-by-edit
-  // step id impossible to write — no UPDATE, no emit (FIND-SPRINT-024-4
-  // silent-corruption class). Mirrors the JOIN in index.ts:599-604.
-  const runRow = db
-    .prepare(
-      `SELECT w.name AS workflowName, w.spec_json AS specJson
-       FROM workflow_runs r
-       JOIN workflows w ON w.id = r.workflow_id
-       WHERE r.id = ?`,
-    )
-    .get(runId) as { workflowName: string; specJson: string | null } | undefined;
+  // Resolve the run's workflow name + FROZEN spec (A/B testing, migration 046:
+  // resolveRunFrozenSpec resolves the run's (workflow_id, spec_hash) revision,
+  // falling back to the live workflows.spec_json), then validate the stepId against
+  // the run's EFFECTIVE definition (dynamic step-id model: resolveWorkflowDefinition
+  // is the runtime source of truth, NOT the static WORKFLOW_DEFINITIONS seed). This
+  // makes a typo / unknown / removed-by-edit step id impossible to write — no
+  // UPDATE, no emit (FIND-SPRINT-024-4 silent-corruption class). A variant run
+  // validates against ITS graph, and a mid-run workflow edit no longer changes the
+  // accepted step-id set.
+  const runRow = resolveRunFrozenSpec(db, runId);
 
-  if (runRow === undefined) {
+  if (runRow === null) {
     const msg = `[stepTransitionBridge] No workflow_runs row found for runId=${runId} — skipping step transition emit`;
     if (logger) {
       logger.warn(msg, { runId, stepId, status });
