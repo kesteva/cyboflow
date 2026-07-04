@@ -31,6 +31,12 @@ export interface AppConfig {
   // built-in flow's human-review step). Absent/undefined = ENABLED. A per-run
   // Configure override (workflow_runs.eval_enabled) outranks this; NULL inherits it.
   codeReviewEvalEnabled?: boolean;
+  // A/B testing slice C sub-toggle: whether variant / experiment-arm runs are
+  // auto-graded (per-arm rubric eval + the pairwise judge) at their terminal
+  // status, on top of the global codeReviewEvalEnabled toggle above. Absent =
+  // ENABLED (see ConfigManager.getAutoGradeVariantRuns). Turn off to activate
+  // rotation / run side-by-side experiments without incurring judge cost.
+  autoGradeVariantRuns?: boolean;
   // On-disk location for COMMITTED-artifact manifests (FEATURE #3 durability
   // snapshot). Relative paths resolve against the project ROOT; absolute paths
   // are used verbatim. Floors to '.cyboflow/artifacts' when unset.

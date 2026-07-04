@@ -364,6 +364,8 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                       workflowLabel={activeRun?.workflowName ?? activeRunId}
                       variant={summaryVariant}
                       errorMessage={activeRun?.error_message}
+                      experimentId={activeRun?.experiment_id ?? null}
+                      experimentArm={activeRun?.experiment_arm ?? null}
                       onComplete={() => setIsEndOpen(true)}
                       onRestarted={(newRunId) => {
                         // Same-session relaunch: swap the active run to the new one

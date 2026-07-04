@@ -27,6 +27,7 @@ import { useInsightsStore } from '../../stores/insightsStore';
 import { FindingsSection } from './FindingsSection';
 import { StatsSection } from './StatsSection';
 import { CodeQualitySection } from './CodeQualitySection';
+import { ExperimentsSection } from './ExperimentsSection';
 import { ProjectFilter } from './ProjectFilter';
 
 // ---------------------------------------------------------------------------
@@ -46,6 +47,7 @@ const SECTION_INDEX: readonly SectionIndexEntry[] = [
   { ordinal: '01', label: 'Findings', anchor: 'insights-findings' },
   { ordinal: '02', label: 'Statistics', anchor: 'insights-statistics' },
   { ordinal: '03', label: 'Code quality', anchor: 'insights-code-quality' },
+  { ordinal: '04', label: 'Experiments', anchor: 'insights-experiments' },
 ];
 
 /**
@@ -156,6 +158,9 @@ export function InsightsView(): React.JSX.Element {
               </section>
               <section id="insights-code-quality">
                 <CodeQualitySection />
+              </section>
+              <section id="insights-experiments">
+                <ExperimentsSection />
               </section>
             </>
           )}

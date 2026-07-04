@@ -26,6 +26,7 @@ import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPan
 import { ARTIFACT_COLORS, ARTIFACT_GLYPHS } from '../../../../shared/types/artifacts';
 import { useArtifactsList, useSessionArtifactsList } from '../../hooks/useArtifactsList';
 import { useArtifactTabsSync } from '../../hooks/useArtifactTabsSync';
+import { useNavigationStore } from '../../stores/navigationStore';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
 
@@ -231,12 +232,22 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
         {/* A/B side-by-side experiment chip (migration 047, slice B thin launch
             UI) — reads the denormalized workflow_runs.experiment_id/experiment_arm
             off the active run row. Absent for a non-experiment run. Deliberately
-            minimal (label + arm only); the full banner + "View comparison" link
-            is slice C's WorkflowSummaryPanel work. */}
+            minimal (label + arm only); the full banner + gated "View comparison"
+            CTA lives on WorkflowSummaryPanel (slice C). This chip is a clickable
+            shortcut straight to the comparison view — ungated (unlike the panel's
+            CTA) since a click here is an explicit user action on an affordance
+            they already know is experiment-scoped; the comparison view itself
+            renders the pending/absent states gracefully. */}
         {activeRun?.experiment_id && activeRun.experiment_arm && (
-          <div
+          <button
+            type="button"
             data-testid="run-experiment-chip"
-            title={`A/B experiment · Arm ${activeRun.experiment_arm}`}
+            title={`A/B experiment · Arm ${activeRun.experiment_arm} — open comparison`}
+            onClick={() => {
+              if (activeRun.experiment_id) {
+                useNavigationStore.getState().openExperimentComparison(activeRun.experiment_id);
+              }
+            }}
             style={{
               flexShrink: 0,
               display: 'flex',
@@ -248,13 +259,16 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
               letterSpacing: '-.005em',
               color: 'var(--color-text-secondary)',
               background: 'var(--color-bg-secondary)',
+              border: 'none',
               borderBottom: '1px solid var(--color-border-primary)',
               borderLeft: '1px solid var(--color-border-primary)',
               whiteSpace: 'nowrap',
+              cursor: 'pointer',
+              fontFamily: 'inherit',
             }}
           >
             A/B experiment · Arm {activeRun.experiment_arm}
-          </div>
+          </button>
         )}
       </div>
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>{renderActiveTab()}</div>

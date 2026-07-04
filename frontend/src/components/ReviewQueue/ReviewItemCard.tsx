@@ -164,6 +164,23 @@ function findingProposedTarget(item: ReviewItem): FindingProposedTarget | null {
   return null;
 }
 
+/**
+ * A/B testing slice C: the experimentId when this decision item is a
+ * `gate:'experiment-comparison'` pairwise-verdict notification (minted by
+ * PairwiseJudgeWorker), or null for every other decision (approve-idea /
+ * approve-plan / a malformed payload) — which keep the legacy resolve/dismiss
+ * actions unchanged. Parsed defensively so an absent/foreign payload shape
+ * behaves exactly like no payload.
+ */
+function experimentComparisonId(item: ReviewItem): string | null {
+  if (item.kind !== 'decision') return null;
+  const payload: unknown = item.payload;
+  if (payload === null || typeof payload !== 'object') return null;
+  const p = payload as { gate?: unknown; experimentId?: unknown };
+  if (p.gate !== 'experiment-comparison' || typeof p.experimentId !== 'string') return null;
+  return p.experimentId;
+}
+
 export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewItemCardProps): React.ReactElement {
   const { pendingItemId, error, resolve, acceptFinding, dismiss, promoteToTask } = useReviewItemActions();
   const [approvalBusy, setApprovalBusy] = React.useState(false);
@@ -177,6 +194,9 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
   const busy = pendingItemId === item.id || approvalBusy;
   // Accept-routing hint (findings only); null = legacy actions, zero change.
   const proposedTarget = findingProposedTarget(item);
+  // A/B testing slice C: an experiment-comparison decision routes to the
+  // comparison view instead of the legacy resolve/dismiss actions.
+  const comparisonExperimentId = experimentComparisonId(item);
   const focusClass = isFocused
     ? ' ring-2 ring-interactive'
     : ' focus-within:ring-2 focus-within:ring-interactive';
@@ -234,6 +254,12 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
     void acceptFinding(item.project_id, item.id, target).then((r) => {
       if (r !== null) onResolved?.();
     });
+  };
+
+  // A/B testing slice C: jump straight to the pairwise comparison view.
+  const handleViewComparison = (): void => {
+    if (comparisonExperimentId === null) return;
+    useNavigationStore.getState().openExperimentComparison(comparisonExperimentId);
   };
 
   // A question-sourced decision can only be settled by ANSWERING the question
@@ -364,6 +390,22 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
                 Answer &amp; resume
               </Button>
             </div>
+          );
+        }
+        // A/B testing slice C: an experiment-comparison verdict-ready item routes
+        // straight to the comparison view (promote/discard/rerun/switch-to-
+        // rotation all live there) — resolve/dismiss would just drop the card
+        // without recording any decision.
+        if (comparisonExperimentId !== null) {
+          return (
+            <Button
+              variant="primary"
+              size="sm"
+              onClick={handleViewComparison}
+              data-testid="decision-view-comparison"
+            >
+              View comparison →
+            </Button>
           );
         }
         // A question-sourced decision is an OPEN AskUserQuestion: the run is

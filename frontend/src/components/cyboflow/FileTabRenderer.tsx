@@ -245,7 +245,13 @@ function SplitView({ hunks }: { hunks: DiffHunk[] }): ReactElement {
   );
 }
 
-function DiffBody({ fileDiff, mode }: { fileDiff: ParsedFileDiff; mode: 'diff' | 'split' }): ReactElement {
+/**
+ * DiffBody — the unified/split hunk renderer for one file's parsed diff. Exported
+ * (internals otherwise module-private) so ExperimentComparisonView (A/B testing
+ * slice C) can render the SAME diff body for each arm's frozen text instead of
+ * forking a duplicate.
+ */
+export function DiffBody({ fileDiff, mode }: { fileDiff: ParsedFileDiff; mode: 'diff' | 'split' }): ReactElement {
   if (fileDiff.isBinary) {
     return (
       <div data-testid="file-tab-binary" style={{ padding: 16, fontSize: '12px', color: MUTED }}>

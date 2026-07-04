@@ -904,6 +904,7 @@ export const experimentsRouter = router({
         experimentId: exp.id,
         comparisonStatus: comparisonStatusValue,
         baseSha: comparison?.base_sha ?? exp.base_sha,
+        snapshotAt: comparison?.snapshot_at ?? null,
         verdict: buildVerdict(comparison),
         armA: buildArmView(deps, exp.run_a_id, 'A', exp.variant_a_id),
         armB: buildArmView(deps, exp.run_b_id, 'B', exp.variant_b_id),

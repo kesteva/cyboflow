@@ -157,7 +157,13 @@ export function VariantManagerSection({ workflowId, projectId }: VariantManagerS
           No variants yet — create one from the current definition to start A/B testing this workflow.
         </p>
       ) : (
-        <div className="flex flex-col gap-1.5">
+        <>
+          <p className="text-[11px] text-text-tertiary" data-testid="variant-manager-rotation-cost-note">
+            Rotation weight controls how often each active variant is picked for a normal launch — every
+            rotation run still accrues its own eval/judge cost when auto-grading is on (Settings → Code
+            Review Eval).
+          </p>
+          <div className="flex flex-col gap-1.5">
           {variants.map((variant) => {
             const isBusy = busySetRef.current.has(variant.id);
             const weightValue = weightDrafts[variant.id] ?? String(variant.weight);
@@ -241,7 +247,8 @@ export function VariantManagerSection({ workflowId, projectId }: VariantManagerS
               </div>
             );
           })}
-        </div>
+          </div>
+        </>
       )}
 
       <FlowNameDialog

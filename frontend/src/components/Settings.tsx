@@ -64,6 +64,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Global code-review-eval toggle (default ON) — the K=3 Opus jury pass fired at
   // a built-in flow's human-review step. A per-run Configure override outranks it.
   const [codeReviewEvalEnabled, setCodeReviewEvalEnabled] = useState(true);
+  // A/B testing slice C sub-toggle: auto-grade variant/experiment-arm runs
+  // (per-arm rubric eval + the pairwise judge) on top of the global eval toggle
+  // above. Absent/undefined = ENABLED.
+  const [autoGradeVariantRuns, setAutoGradeVariantRuns] = useState(true);
   // Telemetry is opt-out (default on). These flags take effect after a restart
   // since the SDKs are initialized once at boot.
   const [errorReportingEnabled, setErrorReportingEnabled] = useState(true);
@@ -121,6 +125,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setDefaultExecutionModel(data.defaultExecutionModel ?? 'orchestrated');
       setQuickSessionWorktreeMode(data.quickSessionWorktreeMode ?? 'worktree');
       setCodeReviewEvalEnabled(data.codeReviewEvalEnabled ?? true);
+      setAutoGradeVariantRuns(data.autoGradeVariantRuns ?? true);
       setErrorReportingEnabled(data.telemetry?.errorReportingEnabled ?? true);
       setUsageMetricsEnabled(data.telemetry?.usageMetricsEnabled ?? true);
       setArtifactCommitDir(data.artifactCommitDir ?? '');
@@ -164,6 +169,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         defaultExecutionModel,
         quickSessionWorktreeMode,
         codeReviewEvalEnabled,
+        autoGradeVariantRuns,
         // Empty field → undefined → the getter floors to the default (config.json
         // stays free of the key). A set value is trimmed before persisting.
         artifactCommitDir: artifactCommitDir.trim() ? artifactCommitDir.trim() : undefined,
@@ -521,6 +527,20 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                   eval" override in the launch wizard's Advanced options can force it on or off for a single
                   run. Only affects runs started after you save.
                 </p>
+
+                <div className="mt-4 border-t border-border-secondary pt-4">
+                  <Checkbox
+                    label="Auto-grade variant & experiment runs"
+                    checked={autoGradeVariantRuns}
+                    onChange={(e) => setAutoGradeVariantRuns(e.target.checked)}
+                  />
+                  <p className="text-xs text-text-tertiary mt-1">
+                    Extends the jury pass to workflow-variant runs (rotation) and side-by-side A/B
+                    experiment arms — a per-arm rubric score plus, for experiments, a pairwise judge
+                    verdict. Default on. Turning it off stops the extra judge cost from activating
+                    variants or running an A/B test, without touching the global toggle above.
+                  </p>
+                </div>
               </SettingsSection>
 
               <SettingsSection

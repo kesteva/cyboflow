@@ -12,10 +12,12 @@ import {
 } from 'lucide-react';
 import { trpc } from '../../trpc/client';
 import { useErrorStore } from '../../stores/errorStore';
+import { useNavigationStore } from '../../stores/navigationStore';
 import { cn } from '../../utils/cn';
 import type { RunUsageRollup, RunEval } from '../../../../shared/types/insights';
 import type { ReviewItem } from '../../../../shared/types/reviews';
 import type { RunSummaryVariant } from '../../hooks/useRunSummaryVariant';
+import type { ExperimentArm, ComparisonStatus } from '../../../../shared/types/experiments';
 import {
   bandDisplay,
   scoreToBand,
@@ -61,8 +63,13 @@ interface TokenCategory {
   barClass: string;
 }
 
-/** One eval-authored finding flattened for display (severity chip + file:line + text). */
-interface FindingRow {
+/**
+ * One eval-authored finding flattened for display (severity chip + file:line +
+ * text). Exported so ExperimentComparisonView (A/B testing slice C) can feed
+ * each arm's findings into the reused {@link ScoreSummary} without a local
+ * mirror of this shape.
+ */
+export interface FindingRow {
   id: string;
   severity: 'info' | 'warning' | 'error';
   /** 'path:line' when a location is present, else null. */
@@ -146,6 +153,14 @@ interface WorkflowSummaryPanelProps {
    * new run's status propagates. Absent ⇒ the Restart CTA is not offered.
    */
   onRestarted?: (newRunId: string) => void;
+  /**
+   * A/B testing slice C: the run's `workflow_runs.experiment_id` (denormalized),
+   * when this run is one arm of a side-by-side experiment. Absent/null ⇒ no
+   * experiment banner (the vast majority of runs).
+   */
+  experimentId?: string | null;
+  /** Which arm this run drives (paired with {@link experimentId}); null when absent. */
+  experimentArm?: ExperimentArm | null;
 }
 
 /**
@@ -179,9 +194,41 @@ export function WorkflowSummaryPanel({
   errorMessage,
   onComplete,
   onRestarted,
+  experimentId = null,
+  experimentArm = null,
 }: WorkflowSummaryPanelProps): React.JSX.Element {
   const [usage, setUsage] = useState<RunUsageRollup | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // A/B testing slice C: gate the "View comparison" CTA on whether a comparison
+  // row exists yet (it is minted only once BOTH arms have settled). Poll while
+  // absent so the banner flips live once the sibling arm finishes, without a
+  // dedicated subscription. Null-safe no-op when this run carries no experiment.
+  const [comparisonStatus, setComparisonStatus] = useState<ComparisonStatus | 'absent' | null>(null);
+  useEffect(() => {
+    if (experimentId === null) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = (): void => {
+      trpc.cyboflow.experiments.comparisonStatus
+        .query({ experimentId })
+        .then((r) => {
+          if (!alive) return;
+          setComparisonStatus(r.status);
+          if (r.status === 'absent') {
+            timer = setTimeout(tick, EVAL_POLL_MS);
+          }
+        })
+        .catch(() => {
+          /* transient read error — leave the last-known status */
+        });
+    };
+    tick();
+    return () => {
+      alive = false;
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [experimentId]);
 
   // Advisory quality eval (null = no eval row → section absent entirely).
   const [runEval, setRunEval] = useState<RunEval | null>(null);
@@ -415,6 +462,36 @@ export function WorkflowSummaryPanel({
         </div>
       </div>
 
+      {/* A/B testing slice C: experiment banner — only when this run drives an
+          arm of a side-by-side experiment. "View comparison" is gated on a
+          comparison row existing (minted only once BOTH arms have settled); until
+          then it reads "Awaiting other arm" rather than opening an empty/absent
+          view. */}
+      {experimentId !== null && experimentArm !== null && (
+        <div
+          className="mt-4 flex items-center gap-2 rounded-card border border-interactive/30 bg-interactive/5 px-3 py-2"
+          data-testid="run-summary-experiment-banner"
+        >
+          <span className="text-sm text-text-secondary">
+            Part of experiment — Arm {experimentArm}
+          </span>
+          <button
+            type="button"
+            data-testid="run-summary-view-comparison"
+            disabled={comparisonStatus === null || comparisonStatus === 'absent'}
+            title={
+              comparisonStatus === null || comparisonStatus === 'absent'
+                ? 'Awaiting the other arm to finish'
+                : undefined
+            }
+            onClick={() => useNavigationStore.getState().openExperimentComparison(experimentId)}
+            className="ml-auto rounded-button border border-interactive/40 bg-surface-primary px-2.5 py-1 text-xs font-medium text-interactive hover:bg-interactive/10 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {comparisonStatus === null || comparisonStatus === 'absent' ? 'Awaiting other arm' : 'View comparison'}
+          </button>
+        </div>
+      )}
+
       {/* Failure reason — prominent in the failed state, degrades when absent. */}
       {isFailed && (
         <div
@@ -637,8 +714,12 @@ interface ScoreSummaryProps {
  * score + provenance on the left, sample-spread scale + gate chips on the
  * right), and an expandable per-dimension + findings breakdown. The GATED
  * sentinel replaces the numeric hero when a deterministic gate failed.
+ *
+ * Exported (module-private internals unchanged) so ExperimentComparisonView (A/B
+ * testing slice C) can render the SAME per-arm quality module in its two-column
+ * comparison layout instead of forking a duplicate.
  */
-function ScoreSummary({ runEval, findings, breakdownOpen, onToggleBreakdown }: ScoreSummaryProps): React.JSX.Element {
+export function ScoreSummary({ runEval, findings, breakdownOpen, onToggleBreakdown }: ScoreSummaryProps): React.JSX.Element {
   if (runEval.evalStatus === 'pending' || runEval.evalStatus === 'running') {
     return (
       <p className="mt-5 text-sm text-text-muted" data-testid="run-summary-eval-progress">

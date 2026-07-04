@@ -416,4 +416,40 @@ describe('ReviewItemCard', () => {
     expect(screen.queryByTestId('accept-finding')).not.toBeInTheDocument();
     expect(screen.getByTestId('promote-to-task')).toHaveTextContent('Promote to task');
   });
+
+  // -- A/B testing slice C: experiment-comparison decision routing -----------
+
+  it("a decision with gate:'experiment-comparison' routes to 'View comparison' instead of resolve/dismiss", async () => {
+    const { useNavigationStore } = await import('../../../stores/navigationStore');
+    useNavigationStore.setState({ experimentComparisonId: null });
+
+    const item = makeItem(
+      'decision',
+      { id: 'rvw_exp', blocking: true },
+      {
+        kind: 'decision',
+        gate: 'experiment-comparison',
+        experimentId: 'exp_42',
+        comparisonPreference: 'A',
+        suggestedWinnerRunId: 'run-a',
+      },
+    );
+    render(<ReviewItemCard item={item} />);
+
+    expect(screen.queryByTestId('decision-resolve')).not.toBeInTheDocument();
+    const button = screen.getByTestId('decision-view-comparison');
+    expect(button).toHaveTextContent('View comparison');
+
+    fireEvent.click(button);
+    expect(useNavigationStore.getState().experimentComparisonId).toBe('exp_42');
+    expect(mockResolve).not.toHaveBeenCalled();
+    expect(mockDismiss).not.toHaveBeenCalled();
+  });
+
+  it('a decision with a foreign gate keeps the legacy resolve/dismiss actions', () => {
+    const item = makeItem('decision', { id: 'rvw_gate' }, { kind: 'decision', gate: 'approve-idea' });
+    render(<ReviewItemCard item={item} />);
+    expect(screen.queryByTestId('decision-view-comparison')).not.toBeInTheDocument();
+    expect(screen.getByTestId('decision-resolve')).toBeInTheDocument();
+  });
 });

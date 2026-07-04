@@ -296,6 +296,8 @@ export interface ExperimentComparisonPayload {
   experimentId: string;
   comparisonStatus: ComparisonStatus | 'absent';
   baseSha: string | null;
+  /** When the frozen diffs were captured (experiment_comparisons.snapshot_at); null pre-capture. */
+  snapshotAt: string | null;
   verdict: PairwiseVerdict | null;
   armA: ExperimentArmView;
   armB: ExperimentArmView;

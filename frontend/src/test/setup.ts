@@ -46,6 +46,18 @@ vi.mock('../trpc/client', () => ({
       variants: {
         list: { query: vi.fn().mockResolvedValue([]) },
       },
+      // A/B testing slice C — ExperimentsSection (Insights) fetches variantStats
+      // per workflow and the past-experiments dashboard list; WorkflowSummaryPanel's
+      // experiment banner polls comparisonStatus when a run carries an experimentId.
+      // Empty/absent by default so any component mounting these renders its
+      // "nothing to show" state without every test file needing its own mock.
+      insights: {
+        variantStats: { query: vi.fn().mockResolvedValue([]) },
+      },
+      experiments: {
+        listForDashboard: { query: vi.fn().mockResolvedValue([]) },
+        comparisonStatus: { query: vi.fn().mockResolvedValue({ status: 'absent' }) },
+      },
       events: {
         onStuckDetected: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
         onApprovalCreated: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
