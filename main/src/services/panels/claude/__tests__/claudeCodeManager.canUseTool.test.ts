@@ -130,7 +130,7 @@ function extractPreToolUseHook(opts: Options): HookCallback | null {
 }
 
 /** Invoke the installed canUseTool with a minimal options object. */
-function callCanUseTool(
+async function callCanUseTool(
   opts: Options,
   toolName: string,
   input: Record<string, unknown>,
@@ -140,8 +140,13 @@ function callCanUseTool(
   const callOpts = {
     signal: new AbortController().signal,
     toolUseID: 'tu-1',
+    requestId: 'req-1',
   } as Parameters<CanUseTool>[2];
-  return fn(toolName, input, callOpts);
+  // SDK 0.3.201 widened CanUseTool to `PermissionResult | null` (null = suppress the
+  // control response); cyboflow's makeCanUseTool always decides, so null is a test failure.
+  const res = await fn(toolName, input, callOpts);
+  if (res === null) throw new Error('canUseTool returned null');
+  return res;
 }
 
 const basePreTool = {
