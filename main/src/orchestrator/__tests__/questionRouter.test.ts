@@ -877,6 +877,12 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
     db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
     db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
+    // migration 046/047: experiment tag on runs + entity tables (reveal suppression).
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT;');
+    for (const t of ['ideas', 'epics', 'tasks']) {
+      db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
+      db.exec(`ALTER TABLE ${t} ADD COLUMN caused_by_run_id TEXT;`);
+    }
     return db;
   }
 
@@ -1280,6 +1286,35 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     expect(epicApprovedAt(db, epicId)).not.toBeNull();
   });
 
+  // A/B REVEAL SUPPRESSION (migration 047): an experiment-arm run's drafts must
+  // NOT be revealed by the completion/approve path — reveal happens exclusively via
+  // experiments.decide. Both promotePendingDraftsForRun and promoteTasksOnPlanApproval
+  // funnel through revealRunDrafts, which no-ops for an experiment-tagged run.
+  it('experiment-tagged run: promotePendingDraftsForRun does NOT reveal (drafts stay pending)', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedPlannerRun(db, { runId: 'run-exp', currentStepId: 'execute', seedIdeaId: null });
+    db.prepare("UPDATE workflow_runs SET experiment_id = 'exp-1' WHERE id = ?").run('run-exp');
+    const { epicId, taskIds } = await seedRunEntities(taskRouter, 2, 'run-exp');
+
+    // Minted PENDING + tagged.
+    for (const id of taskIds) expect(taskApprovedAt(db, id)).toBeNull();
+    expect(epicApprovedAt(db, epicId)).toBeNull();
+
+    await router.promotePendingDraftsForRun('run-exp');
+    await TaskChangeRouter.getInstance()._queueForProject(1).onIdle();
+
+    // SUPPRESSED: still pending, run NOT plan-approved, tags intact.
+    expect(planApprovedAt(db, 'run-exp')).toBeNull();
+    for (const id of taskIds) expect(taskApprovedAt(db, id)).toBeNull();
+    expect(epicApprovedAt(db, epicId)).toBeNull();
+    const epicTag = (db.prepare('SELECT experiment_id AS v FROM epics WHERE id = ?').get(epicId) as { v: unknown }).v;
+    expect(epicTag).toBe('exp-1');
+  });
+
   it('F3: promotePendingDraftsForRun is a no-op for an ALREADY-approved run (idempotent)', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
@@ -1380,6 +1415,12 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
     db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
     db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
     db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
+    // migration 046/047: experiment tag on runs + entity tables (reveal suppression).
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT;');
+    for (const t of ['ideas', 'epics', 'tasks']) {
+      db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
+      db.exec(`ALTER TABLE ${t} ADD COLUMN caused_by_run_id TEXT;`);
+    }
     return db;
   }
 
@@ -1601,6 +1642,12 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
     db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
     db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
+    // migration 046/047: experiment tag on runs + entity tables (reveal suppression).
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT;');
+    for (const t of ['ideas', 'epics', 'tasks']) {
+      db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
+      db.exec(`ALTER TABLE ${t} ADD COLUMN caused_by_run_id TEXT;`);
+    }
     return db;
   }
 

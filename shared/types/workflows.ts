@@ -165,6 +165,12 @@ export interface WorkflowRunRow {
   variant_id?: string | null;
   /** Denormalized variant label (migration 046) that survives variant rename/delete. NULL for baseline runs. */
   variant_label?: string | null;
+  /**
+   * The merge commit SHA where this run's code landed (migration 047), stamped at
+   * merge close-out (stampSessionRunsOutcome 'merged'). NULL until merged (or when
+   * the SHA read fails, fail-soft). Read by slice C's post-merge bug attribution.
+   */
+  merge_sha?: string | null;
   started_at?: string | null;
   ended_at?: string | null;
   created_at: string;

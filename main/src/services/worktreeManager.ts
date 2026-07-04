@@ -105,6 +105,13 @@ export class WorktreeManager {
     worktreePath: string,
     branchName: string,
     baseBranch?: string,
+    // A/B experiments (migration 047): pin the new worktree's branch to an EXACT
+    // committish (a raw SHA), not a branch tip. When set, the `refs/heads/<base>`
+    // guard is skipped (a SHA is not a branch) and `git worktree add -b` cuts the
+    // branch at that commit — so "the base branch moved between the two arm
+    // worktree creations" is impossible by construction (both arms pin the same
+    // pre-resolved SHA). See experiments.startSideBySide.
+    baseCommittish?: string,
   ): Promise<{ worktreePath: string; baseCommit: string; baseBranch: string }> {
     try {
       // First check if this is a git repository
@@ -150,12 +157,30 @@ export class WorktreeManager {
       let actualBaseBranch: string;
 
       if (branchExists) {
+        // SHA-PIN GUARD (A/B experiments): when an exact committish is requested,
+        // an existing branch of the same name would SILENTLY bypass the pin (the
+        // attach path below ignores baseCommittish). Hard-error instead so a caller
+        // that needs a specific base SHA never gets a worktree on a stale branch.
+        if (baseCommittish) {
+          throw new Error(
+            `Cannot pin worktree to committish '${baseCommittish}': branch '${branchName}' already exists`,
+          );
+        }
         // Use existing branch
         await execWithShellPath(`git worktree add "${worktreePath}" ${branchName}`, { cwd: projectPath });
 
         // Get the commit this branch is based on
         baseCommit = (await execWithShellPath(`git rev-parse ${branchName}`, { cwd: projectPath })).stdout.trim();
         actualBaseBranch = branchName;
+      } else if (baseCommittish) {
+        // A/B pin: cut the branch at an EXACT commit. Skip the refs/heads guard (a
+        // raw SHA is not a branch); actualBaseBranch keeps the human-facing branch
+        // label the caller passed (or 'HEAD') for the session row.
+        actualBaseBranch = baseBranch || 'HEAD';
+        // rev-parse both validates the SHA (a bad committish fails loudly) and
+        // records the pinned base commit.
+        baseCommit = (await execWithShellPath(`git rev-parse ${baseCommittish}`, { cwd: projectPath })).stdout.trim();
+        await execWithShellPath(`git worktree add -b ${branchName} "${worktreePath}" ${baseCommittish}`, { cwd: projectPath });
       } else {
         // Create new branch from specified base branch (or current HEAD if not specified)
         const baseRef = baseBranch || 'HEAD';
@@ -185,12 +210,12 @@ export class WorktreeManager {
     }
   }
 
-  async createWorktree(projectPath: string, name: string, branch?: string, baseBranch?: string, worktreeFolder?: string): Promise<{ worktreePath: string; baseCommit: string; baseBranch: string }> {
+  async createWorktree(projectPath: string, name: string, branch?: string, baseBranch?: string, worktreeFolder?: string, baseCommittish?: string): Promise<{ worktreePath: string; baseCommit: string; baseBranch: string }> {
     return await withLock(`worktree-create-${projectPath}-${name}`, async () => {
       const { baseDir } = this.getProjectPaths(projectPath, worktreeFolder);
       const worktreePath = join(baseDir, name);
       const branchName = branch || name;
-      return await this._createAtPath(projectPath, worktreePath, branchName, baseBranch);
+      return await this._createAtPath(projectPath, worktreePath, branchName, baseBranch, baseCommittish);
     });
   }
 

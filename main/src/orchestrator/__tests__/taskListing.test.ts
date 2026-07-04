@@ -55,6 +55,11 @@ function buildDb(): Database.Database {
   db.exec('ALTER TABLE ideas ADD COLUMN decomposed_at TEXT');
   db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT');
   db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT');
+  // Migration 047 adds the A/B experiment sandbox tag to all three entity tables;
+  // the read-side UNION now projects experiment_id, so the fixture needs it.
+  db.exec('ALTER TABLE ideas ADD COLUMN experiment_id TEXT');
+  db.exec('ALTER TABLE epics ADD COLUMN experiment_id TEXT');
+  db.exec('ALTER TABLE tasks ADD COLUMN experiment_id TEXT');
   return db;
 }
 
@@ -486,6 +491,24 @@ describe('taskListing — dependency overlay', () => {
     const a = selectTaskById(dbAdapter(db), 'tsk_a')!;
     expect(a.readyToWork).toBe(false);
     expect(a.blockedBy).toEqual([{ taskId: 'tsk_b', ref: 'TASK-002', title: 'Title TASK-002' }]);
+  });
+
+  // A/B experiments (migration 047): experiment-tagged rows are hidden by default.
+  it('selectProjectBacklog EXCLUDES experiment-tagged rows by default, includes them with the flag', () => {
+    const db = buildDb();
+    const { ideaId, epicId } = seedFixture(db);
+    // Tag the idea + its epic into an experiment sandbox.
+    db.prepare("UPDATE ideas SET experiment_id = 'exp-1' WHERE id = ?").run(ideaId);
+    db.prepare("UPDATE epics SET experiment_id = 'exp-1' WHERE id = ?").run(epicId);
+
+    const hidden = selectProjectBacklog(dbAdapter(db), 1);
+    expect(hidden.some((t) => t.id === ideaId)).toBe(false);
+    expect(hidden.some((t) => t.id === epicId)).toBe(false);
+
+    const shown = selectProjectBacklog(dbAdapter(db), 1, { includeExperimentTagged: true });
+    expect(shown.some((t) => t.id === ideaId)).toBe(true);
+    const shownIdea = shown.find((t) => t.id === ideaId)!;
+    expect(shownIdea.experiment_id).toBe('exp-1');
   });
 });
 

@@ -537,6 +537,35 @@ describe('stampSessionRunsOutcome', () => {
     expect(readOutcome(db, 'run-other')).toBeNull();
   });
 
+  // A/B post-merge attribution (migration 047): the mergeSha param stamps
+  // workflow_runs.merge_sha ONLY for a 'merged' outcome.
+  it('stamps merge_sha on a merged outcome; leaves it NULL for dismissed', () => {
+    const db = makeDb();
+    seedRun(db, { id: 'run-merge', status: 'completed' });
+    seedRun(db, { id: 'run-dismiss', status: 'completed' });
+    setSession(db, 'run-merge', 'sess-m');
+    setSession(db, 'run-dismiss', 'sess-d');
+
+    stampSessionRunsOutcome(dbAdapter(db), 'sess-m', 'merged', 'sha-abc123');
+    stampSessionRunsOutcome(dbAdapter(db), 'sess-d', 'dismissed', 'sha-ignored');
+
+    const readSha = (id: string) =>
+      (db.prepare('SELECT merge_sha AS v FROM workflow_runs WHERE id = ?').get(id) as { v: unknown }).v;
+    expect(readSha('run-merge')).toBe('sha-abc123');
+    // dismissed never records a merge_sha, even when one is (wrongly) supplied.
+    expect(readSha('run-dismiss')).toBeNull();
+  });
+
+  it('merged with no mergeSha leaves merge_sha NULL (fail-soft)', () => {
+    const db = makeDb();
+    seedRun(db, { id: 'run-nosha', status: 'completed' });
+    setSession(db, 'run-nosha', 'sess-n');
+    stampSessionRunsOutcome(dbAdapter(db), 'sess-n', 'merged');
+    expect(readOutcome(db, 'run-nosha')).toBe('merged');
+    const sha = (db.prepare('SELECT merge_sha AS v FROM workflow_runs WHERE id = ?').get('run-nosha') as { v: unknown }).v;
+    expect(sha).toBeNull();
+  });
+
   it('returns 0 when a session has no runs', () => {
     const db = makeDb();
     const stamped = stampSessionRunsOutcome(dbAdapter(db), 'sess-empty', 'dismissed');

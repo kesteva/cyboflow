@@ -61,6 +61,13 @@ interface CreateSessionJob {
   projectId?: number;
   folderId?: string;
   baseBranch?: string;
+  /**
+   * A/B experiments (migration 047): pin the session worktree's branch to an
+   * EXACT committish (a raw SHA) instead of a branch tip. Threaded into
+   * worktreeManager.createWorktree → _createAtPath (skips the refs/heads guard;
+   * hard-errors if the branch already exists). Undefined = normal branch-tip base.
+   */
+  baseCommittish?: string;
   autoCommit?: boolean;
   toolType?: 'claude' | 'none';
   commitMode?: 'structured' | 'checkpoint' | 'disabled';
@@ -143,7 +150,7 @@ export class TaskQueue {
     const sessionConcurrency = isLinux ? 1 : 5;
 
     this.sessionQueue.process(sessionConcurrency, async (job) => {
-      const { prompt, worktreeTemplate, index, permissionMode, projectId, baseBranch, autoCommit, toolType, claudeConfig, inPlace } = job.data;
+      const { prompt, worktreeTemplate, index, permissionMode, projectId, baseBranch, baseCommittish, autoCommit, toolType, claudeConfig, inPlace } = job.data;
       const { sessionManager, worktreeManager } = this.options;
 
       // Processing session creation job - verbose debug logging removed
@@ -222,7 +229,10 @@ export class TaskQueue {
           }
           actualBaseBranch = getCurrentBranch(targetProject.path) ?? undefined;
         } else {
-          ({ worktreePath, baseCommit, baseBranch: actualBaseBranch } = await worktreeManager.createWorktree(targetProject.path, worktreeName, undefined, baseBranch, targetProject.worktree_folder || undefined));
+          // A/B experiment arms (migration 047) pin the arm's worktree to a fixed
+          // baseCommittish so every arm branches from the SAME base commit; undefined
+          // for ordinary sessions keeps createWorktree's default base behaviour.
+          ({ worktreePath, baseCommit, baseBranch: actualBaseBranch } = await worktreeManager.createWorktree(targetProject.path, worktreeName, undefined, baseBranch, targetProject.worktree_folder || undefined, baseCommittish));
         }
 
         const session = await sessionManager.createSession(

@@ -546,6 +546,17 @@ export interface WorkflowRevisionRow {
 export type { WorkflowVariantRow } from '../../../shared/types/experiments';
 
 /**
+ * `experiments` row (migration 047) — a side-by-side head-to-head umbrella that
+ * owns `base_branch`/`base_sha` (pinned once) and links its two arm runs +
+ * sessions + per-arm hidden seed-idea clones back via soft columns. The canonical
+ * shape lives in `shared/types/experiments.ts` (cross-slice contract); re-exported
+ * here so DB-row consumers can import it alongside the other `*Row` interfaces.
+ * The sibling entity columns (ideas/epics/tasks `experiment_id` + `caused_by_run_id`)
+ * and `workflow_runs.merge_sha` also land in migration 047.
+ */
+export type { ExperimentRow } from '../../../shared/types/experiments';
+
+/**
  * `agent_overrides` row (migration 029) — a per-project override of a built-in
  * agent (`base_agent_key === agent_key`, `is_custom 0`) OR a brand-new custom
  * agent (`base_agent_key NULL`, `is_custom 1`). One row per (project_id,

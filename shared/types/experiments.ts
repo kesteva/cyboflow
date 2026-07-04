@@ -102,3 +102,81 @@ const _settledStatusesAreValid: readonly _SettledStatuses[] = [
   'canceled',
 ];
 void _settledStatusesAreValid;
+
+// ===========================================================================
+// Slice B — side-by-side experiments (migration 047)
+//
+// Appended below slice A's variant types; the ExperimentArm definition above is
+// shared (one definition, cross-slice contract). Slice C appends comparison /
+// stats types below these without touching them.
+// ===========================================================================
+
+/** The only experiment kind in v1 — a two-arm side-by-side head-to-head. */
+export type ExperimentKind = 'side_by_side';
+
+/**
+ * Lifecycle of a side-by-side experiment (migration 047, `experiments.status`).
+ *
+ * - `running`   — one or both arms still executing.
+ * - `grading`   — both arms settled (isExperimentArmSettled); awaiting the human
+ *                 decision. Flipped by `reconcileExperimentStatus`.
+ * - `decided`   — a winner was promoted (or both discarded) via experiments.decide.
+ * - `abandoned` — torn down before a decision (rollback / explicit abandon /
+ *                 half-created crash recovery).
+ */
+export type ExperimentStatus = 'running' | 'grading' | 'decided' | 'abandoned';
+
+/** The four `ExperimentStatus` values, for zod/enum construction + iteration. */
+export const EXPERIMENT_STATUSES: readonly ExperimentStatus[] = [
+  'running',
+  'grading',
+  'decided',
+  'abandoned',
+] as const;
+
+/** A settled experiment can no longer be re-run/re-decided; rerun/switchToRotation require it. */
+export function isExperimentSettled(status: string): boolean {
+  return status === 'decided' || status === 'abandoned';
+}
+
+/** `experiments` DB row (migration 047). */
+export interface ExperimentRow {
+  id: string;
+  project_id: number;
+  workflow_id: string;
+  kind: ExperimentKind;
+  base_branch: string;
+  base_sha: string;
+  variant_a_id: string;
+  variant_b_id: string;
+  run_a_id: string | null;
+  run_b_id: string | null;
+  session_a_id: string | null;
+  session_b_id: string | null;
+  seed_idea_id: string | null;
+  seed_idea_clone_a_id: string | null;
+  seed_idea_clone_b_id: string | null;
+  status: ExperimentStatus;
+  winner_run_id: string | null;
+  winner_arm: ExperimentArm | null;
+  merge_sha: string | null;
+  decided_at: string | null;
+  /** Soft chain link to the source experiment (experiments.rerun); NULL for an original. */
+  rerun_of_experiment_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Result of `experiments.startSideBySide`. */
+export interface StartSideBySideResult {
+  experimentId: string;
+  armA: { runId: string; sessionId: string };
+  armB: { runId: string; sessionId: string };
+}
+
+/** Result of `experiments.decide` / `abandon` / `rerun` / `switchToRotation` status mutations. */
+export interface DecideResult {
+  experimentId: string;
+  status: ExperimentStatus;
+  winnerRunId: string | null;
+}

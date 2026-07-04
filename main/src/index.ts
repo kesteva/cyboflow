@@ -123,7 +123,10 @@ import {
 } from './services/cyboflow/transitions';
 import { readWorkflowPromptForRow } from './orchestrator/workflowPromptReaderAdapter';
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
-import { recoverActiveStateOrphans, recoverArchivedSessionRunOrphans, backfillTerminalOutcomes } from './orchestrator/runRecovery';
+import { recoverActiveStateOrphans, recoverArchivedSessionRunOrphans, backfillTerminalOutcomes, stampSessionRunsOutcome } from './orchestrator/runRecovery';
+import { setExperimentsDeps } from './orchestrator/trpc/routers/experiments';
+import { recoverExperiments } from './orchestrator/experimentStore';
+import { createQuickSessionCore } from './services/createQuickSessionCore';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs } from './utils/devDebugLog';
 import type { DevLogLevel } from './utils/devDebugLog';
@@ -1830,6 +1833,33 @@ app.whenReady().then(async () => {
       console.log(`[Main] Backfilled terminal outcomes (failed: ${outcomeBackfill.failedBackfilled}, canceled: ${outcomeBackfill.canceledBackfilled})`);
     }
 
+    // Boot recovery: reconcile non-terminal A/B experiments (migration 047).
+    // running→grading when both arms are settled; a half-created experiment (crash
+    // mid-startSideBySide, one arm never launched) → abandoned + clone sweep.
+    try {
+      await recoverExperiments(db, async (exp) => {
+        const tcr = TaskChangeRouter.getInstance();
+        await tcr
+          .deleteExperimentArmEntities(exp.project_id, {
+            experimentId: exp.id,
+            runId: exp.run_a_id ?? '',
+            seedCloneId: exp.seed_idea_clone_a_id,
+          })
+          .catch(() => {});
+        await tcr
+          .deleteExperimentArmEntities(exp.project_id, {
+            experimentId: exp.id,
+            runId: exp.run_b_id ?? '',
+            seedCloneId: exp.seed_idea_clone_b_id,
+          })
+          .catch(() => {});
+      });
+    } catch (err) {
+      loggerLike.error('[Main] experiment boot recovery failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     // Known limitation: ApprovalRouter.clearPendingForRun is still a documented no-op
     // until TASK-304 lands. The Cancel-and-restart button therefore stops the Claude
     // SDK run and updates DB rows, but does not yet send deny-replies on the
@@ -2327,6 +2357,95 @@ app.whenReady().then(async () => {
       sessionManager,
     });
     console.log('[Main] runs.start deps wired');
+
+    // A/B experiments (slice B, migration 047). Inject the concrete collaborators
+    // the experiments router orchestrates: the SHA-pinned arm-session core
+    // (createQuickSessionCore — the SAME path sessions:create-quick uses), the run
+    // launcher, the entity chokepoint, the git-neutral run cancel, and the FULL
+    // session-dismiss path (cancels hosted runs THEN removes the worktree — never a
+    // bare worktree-remove, per the plan).
+    const experimentsDb = makeDatabaseLike(databaseService);
+    const dismissSessionFully = async (sessionId: string): Promise<void> => {
+      const dbSession = databaseService.getSession(sessionId);
+      // 1. Cancel hosted runs first (git-neutral; settles pending approvals).
+      try {
+        if (cancelHostedRunsImpl) await cancelHostedRunsImpl(sessionId);
+      } catch (err) {
+        loggerLike.warn('[Main] experiment dismiss: cancel hosted runs failed', {
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      // 2. Archive the session + stamp outcome='dismissed' on its runs.
+      try {
+        await sessionManager.archiveSession(sessionId);
+      } catch (err) {
+        loggerLike.warn('[Main] experiment dismiss: archiveSession failed', {
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      try {
+        stampSessionRunsOutcome(experimentsDb, sessionId, 'dismissed');
+      } catch {
+        /* fail-soft */
+      }
+      // 3. Remove the worktree (non-main-repo sessions).
+      if (dbSession?.worktree_name && dbSession.project_id && !dbSession.is_main_repo) {
+        const project = databaseService.getProject(dbSession.project_id);
+        if (project) {
+          try {
+            await worktreeManager.removeWorktree(
+              project.path,
+              dbSession.worktree_name,
+              project.worktree_folder || undefined,
+            );
+          } catch (err) {
+            loggerLike.warn('[Main] experiment dismiss: removeWorktree failed', {
+              sessionId,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
+      }
+    };
+    setExperimentsDeps({
+      db: experimentsDb,
+      runLauncher,
+      worktreeManager: {
+        getProjectMainBranch: (p) => worktreeManager.getProjectMainBranch(p),
+        getHeadCommit: (p) => worktreeManager.getHeadCommit(p),
+      },
+      createArmSession: async ({ projectId, baseCommittish, nameHint }) => {
+        const { session } = await createQuickSessionCore(
+          {
+            taskQueue: taskQueue!,
+            sessionManager,
+            workflowRegistry,
+            getDb: () => databaseService.getDb(),
+          },
+          { projectId, baseCommittish, nameHint },
+        );
+        return { sessionId: session.id, worktreePath: session.worktreePath };
+      },
+      taskChangeRouter: TaskChangeRouter.getInstance(),
+      dismissSession: dismissSessionFully,
+      cancelRun: async (runId) => {
+        await cancelRunHandler(runId, cancelRunDepsBag);
+      },
+      getVariant: (variantId) => workflowRegistry.getVariantById(variantId),
+      getWorkflow: (workflowId) => {
+        const w = workflowRegistry.getById(workflowId);
+        return w ? { id: w.id, name: w.name } : null;
+      },
+      getProjectPath: (projectId) => {
+        const p = sessionManager.getProjectById(projectId);
+        return p?.path ?? null;
+      },
+      setVariantStatus: (variantId, status) => workflowRegistry.setVariantStatus(variantId, status),
+      setVariantWeight: (variantId, weight) => workflowRegistry.updateVariant(variantId, { weight }),
+    });
+    console.log('[Main] experiments deps wired');
 
     // runs.setPermissionMode → shared session-mode write chokepoint (permission-
     // mode redesign §3d / Slice 5). Re-routes the chat / flow-run permission pill

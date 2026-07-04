@@ -304,7 +304,24 @@ export function stampSessionRunsOutcome(
   db: DatabaseLike,
   sessionId: string,
   outcome: 'merged' | 'dismissed',
+  // A/B post-merge attribution (migration 047): the merge commit SHA where this
+  // session's code landed. Stamped onto workflow_runs.merge_sha ONLY for a
+  // 'merged' outcome AND only when provided (the caller computes it post-merge);
+  // 'dismissed' and a missing SHA leave merge_sha NULL. Guarded by the same
+  // `outcome IS NULL` predicate so a run that already decided is never clobbered.
+  mergeSha?: string,
 ): number {
+  const stampMerge = outcome === 'merged' && typeof mergeSha === 'string' && mergeSha.length > 0;
+  if (stampMerge) {
+    const info = db
+      .prepare(
+        `UPDATE workflow_runs
+            SET outcome = ?, merge_sha = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE session_id = ? AND outcome IS NULL`,
+      )
+      .run(outcome, mergeSha, sessionId) as { changes: number };
+    return info.changes;
+  }
   const info = db
     .prepare(
       `UPDATE workflow_runs

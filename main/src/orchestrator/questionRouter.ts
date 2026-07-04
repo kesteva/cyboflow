@@ -734,6 +734,24 @@ export class QuestionRouter extends EventEmitter {
    * best-effort (a vanished row must not abort the remaining reveals).
    */
   private async revealRunDrafts(runId: string, projectId: number): Promise<void> {
+    // A/B REVEAL SUPPRESSION (migration 047): an experiment-arm run's drafts are
+    // sandboxed until the human decides the head-to-head — reveal happens
+    // EXCLUSIVELY via experiments.decide (clearExperiment + approved). Answering an
+    // arm's approve-plan gate (promoteTasksOnPlanApproval) or an arm completing
+    // (promotePendingDraftsForRun) must NOT flip its entities visible mid-experiment.
+    // Guard the single reveal core so BOTH callers no-op. Fail-soft: a pre-046 DB
+    // (no experiment_id column) throws here and falls through to the normal reveal.
+    try {
+      const expRow = this.db
+        .prepare('SELECT experiment_id AS experimentId FROM workflow_runs WHERE id = ?')
+        .get(runId) as { experimentId?: unknown } | undefined;
+      if (typeof expRow?.experimentId === 'string' && expRow.experimentId.length > 0) {
+        return;
+      }
+    } catch {
+      // pre-046 DB (no experiment_id column) — proceed with the normal reveal.
+    }
+
     const now = new Date().toISOString();
 
       // Q1 REVEAL: the plan is approved — stamp the run's plan-approval gate and

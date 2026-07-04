@@ -198,9 +198,22 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
   //
   // Fail-soft: a stamping failure is logged and never propagates — the merge has
   // already succeeded and its response must not depend on this bookkeeping.
-  const stampMergedOutcomeForSession = (sessionId: string) => {
+  const stampMergedOutcomeForSession = async (sessionId: string, projectPath?: string) => {
+    // A/B post-merge attribution (migration 047): after a successful merge the
+    // project root is checked out on the just-updated main branch, so its HEAD is
+    // the merge commit this session's code landed on. Compute it and stamp it onto
+    // workflow_runs.merge_sha. Fail-soft: a SHA read failure leaves merge_sha NULL
+    // (never blocks the merge). Covers both the squash and rebase callers.
+    let mergeSha: string | undefined;
+    if (projectPath) {
+      try {
+        mergeSha = await worktreeManager.getHeadCommit(projectPath);
+      } catch (error) {
+        console.error(`[IPC:git] Failed to read merged SHA for session ${sessionId}:`, error);
+      }
+    }
     try {
-      const stamped = stampSessionRunsOutcome(makeDatabaseLike(databaseService), sessionId, 'merged');
+      const stamped = stampSessionRunsOutcome(makeDatabaseLike(databaseService), sessionId, 'merged', mergeSha);
       if (stamped > 0) {
         console.log(`[IPC:git] Stamped outcome='merged' on ${stamped} run(s) for session ${sessionId}`);
       }
@@ -1099,7 +1112,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       await finalizeSprintLanesOnSessionMerge(sessionId);
 
       // Stamp outcome='merged' on this session's runs (fail-soft, never blocks the merge response).
-      stampMergedOutcomeForSession(sessionId);
+      await stampMergedOutcomeForSession(sessionId, project?.path);
 
       // Auto-resolve any open dynamic-workflow review items for this session —
       // the merge IS the human's close-out action. Fire-and-forget: a resolve
@@ -1219,7 +1232,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
       await finalizeSprintLanesOnSessionMerge(sessionId);
 
       // Stamp outcome='merged' on this session's runs (fail-soft, never blocks the merge response).
-      stampMergedOutcomeForSession(sessionId);
+      await stampMergedOutcomeForSession(sessionId, project?.path);
 
       // Auto-resolve any open dynamic-workflow review items for this session —
       // the merge IS the human's close-out action. Fire-and-forget: a resolve

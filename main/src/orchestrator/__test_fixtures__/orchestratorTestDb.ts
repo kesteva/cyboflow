@@ -155,6 +155,9 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_arm TEXT');
     db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_id TEXT');
     db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_label TEXT');
+    // Migration 047 (A/B slice B): getRunById also projects merge_sha (the merge
+    // commit the run's code landed on, stamped at close-out). Additive nullable TEXT.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN merge_sha TEXT');
     variantColumnsAdded = true;
   };
   if (options?.includeStuckDetectedAt) {

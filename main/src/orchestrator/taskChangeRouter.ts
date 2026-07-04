@@ -51,7 +51,7 @@ import type {
   TaskType,
 } from '../../../shared/types/tasks';
 import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
-import { listRunCreatedEpicIds, listRunCreatedTaskIds } from './runEntityOwnership';
+import { listRunCreatedEpicIds, listRunCreatedIdeaIds, listRunCreatedTaskIds } from './runEntityOwnership';
 
 // ---------------------------------------------------------------------------
 // Public event emitter — exported HERE (NOT trpc/routers/events.ts) per the
@@ -121,7 +121,13 @@ export type TaskChangeErrorCode =
   | 'active_runs'
   | 'concurrency'
   | 'invalid_dependency'
-  | 'dependency_cycle';
+  | 'dependency_cycle'
+  // A/B experiments (migration 047): a write crossed an experiment sandbox
+  // boundary — an experiment-tagged run tried to mutate an entity outside its
+  // experiment, OR an untagged actor (user / other run) tried to mutate a
+  // hidden experiment-tagged entity. Surfaced to the agent as a tool-error so
+  // the flow fails soft (it creates its own entity instead).
+  | 'experiment_sandboxed';
 
 /** Edge kind for a task->task dependency (mirrors the task_dependencies.kind CHECK). */
 export type TaskDependencyKind = 'blocking' | 'related';
@@ -213,6 +219,29 @@ export interface TaskChange {
   expectedVersion?: number;
   /** The run that triggered this change, recorded on the entity_events row. */
   runId?: string;
+  // ----- A/B experiment sandbox (migration 047) -----
+  /**
+   * CREATE path: stamp `experiment_id` on the new entity, sandboxing it (hidden
+   * from the board + sandbox-scoped for updates). Supplied EXPLICITLY for the
+   * orchestrator-created per-arm seed clones (which carry no runId); for a
+   * run-created entity the stamp is derived from the creating run's own
+   * experiment_id, so this field is only needed for the clone case.
+   */
+  experimentId?: string;
+  /**
+   * UPDATE path, ORCHESTRATOR-ONLY: clear the entity's `experiment_id` (SET NULL),
+   * revealing it out of the sandbox. Minted as its own entity_event + broadcast so
+   * a mounted board sees it appear. Used by experiments.decide on promote. Rejected
+   * ('forbidden_stage') for non-orchestrator actors.
+   */
+  clearExperiment?: boolean;
+  /**
+   * UPDATE path: link this entity to the run that INTRODUCED it (post-merge bug
+   * attribution, migration 047). A normal nullable scalar — human-settable (a user
+   * declares "this bug was introduced by run X"), mints an entity_event + broadcast.
+   * NOT orchestrator-restricted.
+   */
+  causedByRunId?: string | null;
   // ----- add-dependency path (task->task edge) -----
   /**
    * ADD-DEPENDENCY path: when set (alongside `taskId`), the change records a
@@ -279,6 +308,10 @@ interface EntityDbRow {
   approved_at: string | null;
   /** JSON IdeaAttachment[] (ideas-only, migration 028); NULL on epics/tasks + when unset. */
   attachments: string | null;
+  /** A/B experiment sandbox tag (migration 047); NULL on a normal board entity + pre-047 DBs. */
+  experiment_id: string | null;
+  /** Post-merge bug attribution (migration 047); the run that introduced this entity, else NULL. */
+  caused_by_run_id: string | null;
   version: number;
   created_at: string;
   updated_at: string;
@@ -709,6 +742,104 @@ export class TaskChangeRouter {
     }
   }
 
+  /**
+   * A/B DISCARD SWEEP (migration 047) — hard-delete a losing/abandoned experiment
+   * arm's entities. A generalization of {@link deleteRunCreatedEntities} with the
+   * plan-gating triple-gate replaced by an EXPERIMENT gate: a target is swept iff
+   * its `experiment_id === experimentId` (belt-and-braces per entity), reusing the
+   * same epic-cascade child-sparing shape. Enumerates the run's created
+   * epics/tasks/ideas (entity_events) PLUS the explicit orchestrator-created seed
+   * clone (`seedCloneId`, which has no run-created event). Routes each delete
+   * through applyDelete (actor 'orchestrator', exempt from the active-run guard).
+   *
+   * HARD-delete, not archive: experiment entities were NEVER on the board (hidden
+   * by the tag the whole time), so archiving would surface throwaway drafts as
+   * clutter; the winner's content is preserved via the fold+reparent BEFORE the
+   * loser is swept (see experiments.decide). Best-effort per entity.
+   */
+  async deleteExperimentArmEntities(
+    projectId: number,
+    opts: { experimentId: string; runId: string; seedCloneId?: string | null },
+  ): Promise<void> {
+    const { experimentId, runId, seedCloneId } = opts;
+
+    // A target is swept iff its experiment_id matches. Fail-soft: a vanished row
+    // or a pre-047 DB (no experiment_id column) spares it (never a wrong delete).
+    const matchesExperiment = (table: 'ideas' | 'epics' | 'tasks', id: string): boolean => {
+      try {
+        const r = this.db
+          .prepare(`SELECT experiment_id AS eid FROM ${table} WHERE id = ?`)
+          .get(id) as { eid?: unknown } | undefined;
+        if (!r) return false; // already gone
+        return r.eid === experimentId;
+      } catch {
+        return false; // pre-047 schema (no experiment_id) — spare it
+      }
+    };
+
+    const runCreatedTaskIds = new Set(listRunCreatedTaskIds(this.db, runId));
+
+    // Run-created EPICS first (their applyDelete cascade claims child tasks). If a
+    // child is NOT both (a) this experiment's AND (b) this run's, SPARE the epic
+    // and delete only this run's matching children individually (belt-and-braces
+    // against cross-arm contamination — id-isolation makes this rare).
+    for (const epicId of listRunCreatedEpicIds(this.db, runId)) {
+      if (!matchesExperiment('epics', epicId)) continue;
+      const childIds = this.db
+        .prepare('SELECT id FROM tasks WHERE parent_epic_id = ?')
+        .all(epicId) as Array<{ id: string }>;
+      const foreignChild = childIds.some(
+        (c) => !(matchesExperiment('tasks', c.id) && runCreatedTaskIds.has(c.id)),
+      );
+      if (foreignChild) {
+        for (const child of childIds) {
+          if (!runCreatedTaskIds.has(child.id) || !matchesExperiment('tasks', child.id)) continue;
+          try {
+            await this.applyDelete(projectId, { actor: 'orchestrator', entityType: 'task', taskId: child.id, runId });
+          } catch {
+            /* best-effort */
+          }
+        }
+        continue;
+      }
+      try {
+        await this.applyDelete(projectId, { actor: 'orchestrator', entityType: 'epic', taskId: epicId, runId });
+      } catch {
+        /* best-effort */
+      }
+    }
+
+    // Run-created ORPHAN tasks (read after epic deletions so cascade-claimed ones are gone).
+    for (const taskId of listRunCreatedTaskIds(this.db, runId)) {
+      if (!matchesExperiment('tasks', taskId)) continue;
+      try {
+        await this.applyDelete(projectId, { actor: 'orchestrator', entityType: 'task', taskId, runId });
+      } catch {
+        /* best-effort */
+      }
+    }
+
+    // Run-created IDEAS (a raw-prompt arm may mint its own idea).
+    for (const ideaId of listRunCreatedIdeaIds(this.db, runId)) {
+      if (!matchesExperiment('ideas', ideaId)) continue;
+      try {
+        await this.applyDelete(projectId, { actor: 'orchestrator', entityType: 'idea', taskId: ideaId, runId });
+      } catch {
+        /* best-effort */
+      }
+    }
+
+    // The explicit orchestrator-created seed clone (no run-created event links it).
+    // Its applyDelete cascade claims any epics/tasks still parented under it.
+    if (seedCloneId && matchesExperiment('ideas', seedCloneId)) {
+      try {
+        await this.applyDelete(projectId, { actor: 'orchestrator', entityType: 'idea', taskId: seedCloneId, runId });
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+
   // --------------------------------------------------------------------------
   // Create path
   // --------------------------------------------------------------------------
@@ -814,12 +945,21 @@ export class TaskChangeRouter {
       const attachments =
         attachmentsArr && attachmentsArr.length > 0 ? JSON.stringify(attachmentsArr) : null;
 
+      // A/B SANDBOX (migration 047): the experiment this entity belongs to — the
+      // EXPLICIT change.experimentId (orchestrator-created seed clones, no runId)
+      // OR the creating run's own experiment_id (run-created drafts). A non-null
+      // value hides the entity from the board + sandbox-scopes its future updates.
+      const createExperimentId = this.resolveCreateExperimentId(change);
+
       // Q1 GUARD: an epic/task created during an UNAPPROVED plan-gated run lands
       // PENDING (approved_at NULL = backend-invisible + sprint-ineligible) until
       // the approve-plan gate flips the run's plan_approved_at; every other create
       // is VISIBLE (approved_at = now). Ideas never carry approved_at (always
-      // visible — hasApproval=false).
-      const approvedAt = desc.hasApproval ? this.computeCreateApprovedAt(change, now) : null;
+      // visible — hasApproval=false). An experiment-tagged epic/task ALSO lands
+      // PENDING regardless of gate (it must never surface until decide reveals it).
+      const approvedAt = desc.hasApproval
+        ? this.computeCreateApprovedAt(change, now, createExperimentId)
+        : null;
 
       this.insertEntity(desc, {
         id: taskId,
@@ -837,6 +977,7 @@ export class TaskChangeRouter {
         approvedAt,
         parentEpicId,
         originatingIdeaId,
+        experimentId: createExperimentId,
         now,
       });
 
@@ -881,6 +1022,8 @@ export class TaskChangeRouter {
       approvedAt: string | null;
       parentEpicId: string | null;
       originatingIdeaId: string | null;
+      /** A/B experiment sandbox tag (migration 047); null = normal board entity. */
+      experimentId: string | null;
       now: string;
     },
   ): void {
@@ -901,6 +1044,13 @@ export class TaskChangeRouter {
     if (desc.hasApproval && this.columnExists(desc.table, 'approved_at')) {
       cols.push('approved_at');
       vals.push(v.approvedAt);
+    }
+    // A/B experiment sandbox tag (migration 047). Gated on the column existing so
+    // pre-047 / partial-migration test DBs keep inserting; only stamps a non-null
+    // value on an experiment-created entity (every other create passes null).
+    if (this.columnExists(desc.table, 'experiment_id')) {
+      cols.push('experiment_id');
+      vals.push(v.experimentId);
     }
     if (desc.hasEntryStage) {
       cols.push('entry_stage_id');
@@ -949,7 +1099,67 @@ export class TaskChangeRouter {
    * plan_approved_at column, degrades to VISIBLE (the prior, no-guard behaviour).
    * Only consulted for epics/tasks (desc.hasApproval); ideas never call this.
    */
-  private computeCreateApprovedAt(change: TaskChange, now: string): string | null {
+  /**
+   * A/B SANDBOX (migration 047): resolve the experiment_id a CREATED entity
+   * belongs to. Precedence: an EXPLICIT `change.experimentId` (the orchestrator
+   * stamps it on the per-arm seed clones, which have no runId) wins; otherwise the
+   * creating run's OWN experiment_id (so every entity a tagged run mints inherits
+   * the sandbox). Fail-soft: a missing column / vanished run degrades to null (a
+   * normal, board-visible entity — the prior behaviour).
+   */
+  private resolveCreateExperimentId(change: TaskChange): string | null {
+    if (typeof change.experimentId === 'string' && change.experimentId.length > 0) {
+      return change.experimentId;
+    }
+    return this.runExperimentIdFor(change.runId);
+  }
+
+  /**
+   * The experiment_id stamped on a run (migration 046), or null. Fail-soft: no
+   * runId, a vanished run, or a pre-046 DB (no experiment_id column) all yield
+   * null. Used by both the create-tag derivation and the update sandbox guard.
+   */
+  private runExperimentIdFor(runId?: string): string | null {
+    if (!runId) return null;
+    try {
+      const run = this.db
+        .prepare('SELECT experiment_id AS experimentId FROM workflow_runs WHERE id = ?')
+        .get(runId) as { experimentId?: unknown } | undefined;
+      return typeof run?.experimentId === 'string' && run.experimentId.length > 0
+        ? run.experimentId
+        : null;
+    } catch {
+      return null; // pre-046 DB (no experiment_id column) -> untagged
+    }
+  }
+
+  /**
+   * The experiment_id tag on a TASK row (migration 047), or null. Fail-soft: a
+   * vanished task or a pre-047 DB (no experiment_id column) yields null. Used by
+   * the add-dependency sandbox guard, which cannot read `current.experiment_id`
+   * (runAddDependency has no located-entity row like runUpdate does).
+   */
+  private taskExperimentIdFor(taskId: string): string | null {
+    try {
+      const row = this.db
+        .prepare('SELECT experiment_id AS experimentId FROM tasks WHERE id = ?')
+        .get(taskId) as { experimentId?: unknown } | undefined;
+      return typeof row?.experimentId === 'string' && row.experimentId.length > 0
+        ? row.experimentId
+        : null;
+    } catch {
+      return null; // pre-047 DB (no experiment_id column) -> untagged
+    }
+  }
+
+  private computeCreateApprovedAt(
+    change: TaskChange,
+    now: string,
+    createExperimentId: string | null,
+  ): string | null {
+    // A/B SANDBOX: an experiment-tagged epic/task is PENDING until decide reveals
+    // it — never visible mid-experiment regardless of the plan gate.
+    if (createExperimentId !== null) return null;
     if (!change.runId) return now; // user/manual create or no creating run -> visible
     let run:
       | { planApprovedAt?: unknown; stepsSnapshotJson?: unknown; workflowName?: unknown }
@@ -1057,6 +1267,33 @@ export class TaskChangeRouter {
         );
       }
 
+      // A/B SANDBOX GUARD (migration 047) — BIDIRECTIONAL, before every per-kind
+      // branch so ALL update kinds (fields/stage/archive/reparent/originatingIdea)
+      // are denied uniformly. The orchestrator is EXEMPT — only its promote/fold/
+      // sweep/reveal (clearExperiment) paths legitimately cross the boundary.
+      //   (a) an experiment-tagged run may write ONLY entities of its OWN
+      //       experiment (blocks mutating the original seed idea, the main board,
+      //       or a different experiment's entities);
+      //   (b) an untagged actor (user edit / other run) may NOT write a hidden
+      //       experiment-tagged entity (it is sandboxed until decide reveals it).
+      if (change.actor !== 'orchestrator') {
+        const runExperimentId = this.runExperimentIdFor(change.runId);
+        const entityExperimentId = current.experiment_id ?? null;
+        if (runExperimentId !== null) {
+          if (entityExperimentId !== runExperimentId) {
+            throw new TaskChangeError(
+              'experiment_sandboxed',
+              `entity ${taskId} is outside this experiment arm's sandbox — create a new entity instead of editing shared/main-board entities`,
+            );
+          }
+        } else if (entityExperimentId !== null) {
+          throw new TaskChangeError(
+            'experiment_sandboxed',
+            `entity ${taskId} belongs to an experiment sandbox and cannot be edited until the experiment is decided`,
+          );
+        }
+      }
+
       const deltas: FieldDelta[] = [];
       const sets: string[] = [];
       const params: unknown[] = [];
@@ -1123,6 +1360,34 @@ export class TaskChangeRouter {
           sets.push('approved_at = ?');
           params.push(approvedAt);
           deltas.push({ field: 'approved_at', from: current.approved_at, to: approvedAt });
+        }
+      }
+
+      // ----- clearExperiment toggle (A/B reveal, migration 047) -----
+      // ORCHESTRATOR-ONLY: experiments.decide clears the winner's sandbox tag,
+      // revealing it out of the experiment. Minting it through the chokepoint (vs a
+      // raw UPDATE) gives the entity_event + version bump + broadcast a mounted
+      // board needs to render the reveal. No-op if already clear.
+      if (change.clearExperiment === true) {
+        if (change.actor !== 'orchestrator') {
+          throw new TaskChangeError('forbidden_stage', 'experiment_id is orchestrator-cleared');
+        }
+        if (this.columnExists(desc.table, 'experiment_id') && current.experiment_id !== null) {
+          sets.push('experiment_id = ?');
+          params.push(null);
+          deltas.push({ field: 'experiment_id', from: current.experiment_id, to: null });
+        }
+      }
+
+      // ----- causedByRunId scalar (post-merge bug attribution, migration 047) -----
+      // A normal nullable scalar — human-settable ("this bug was introduced by run
+      // X"). NOT orchestrator-restricted. Guarded on the column existing (pre-047).
+      if (change.causedByRunId !== undefined && this.columnExists(desc.table, 'caused_by_run_id')) {
+        const next = change.causedByRunId ?? null;
+        if (next !== (current.caused_by_run_id ?? null)) {
+          sets.push('caused_by_run_id = ?');
+          params.push(next);
+          deltas.push({ field: 'caused_by_run_id', from: current.caused_by_run_id ?? null, to: next });
         }
       }
 
@@ -1510,6 +1775,34 @@ export class TaskChangeRouter {
         throw new TaskChangeError('invalid_dependency', 'a task cannot depend on itself');
       }
 
+      // A/B SANDBOX GUARD (migration 047) — BIDIRECTIONAL, mirroring runUpdate.
+      // The DAG edge mutates the blocked task's dependency state + mints a
+      // 'dependency-added' event/broadcast on it, so the same sandbox boundary
+      // applies here as to any other update. The orchestrator is EXEMPT (its
+      // promote/reveal paths legitimately span cleared entities):
+      //   (a) an experiment-tagged run may only add an edge when BOTH endpoints
+      //       belong to its OWN experiment (never touch main-board / other arms);
+      //   (b) an untagged actor may NOT add an edge touching a hidden
+      //       experiment-tagged task (sandboxed until decide reveals it).
+      if (change.actor !== 'orchestrator') {
+        const runExperimentId = this.runExperimentIdFor(change.runId);
+        const blockedExperimentId = this.taskExperimentIdFor(blockedId);
+        const prereqExperimentId = this.taskExperimentIdFor(prereqId);
+        if (runExperimentId !== null) {
+          if (blockedExperimentId !== runExperimentId || prereqExperimentId !== runExperimentId) {
+            throw new TaskChangeError(
+              'experiment_sandboxed',
+              'dependency endpoints are outside this experiment arm\'s sandbox — both tasks must belong to this experiment',
+            );
+          }
+        } else if (blockedExperimentId !== null || prereqExperimentId !== null) {
+          throw new TaskChangeError(
+            'experiment_sandboxed',
+            'cannot add a dependency touching an experiment-sandboxed task until the experiment is decided',
+          );
+        }
+      }
+
       // Idempotent no-op: the edge already exists (any kind on this pair).
       const existing = this.db
         .prepare('SELECT kind FROM task_dependencies WHERE task_id = ? AND depends_on_task_id = ?')
@@ -1630,10 +1923,17 @@ export class TaskChangeRouter {
       desc.hasApproval && this.columnExists(desc.table, 'approved_at')
         ? 'approved_at'
         : 'NULL AS approved_at';
+    // A/B experiment tag + attribution (migration 047), fail-soft on pre-047 / partial test DBs.
+    const experimentId = this.columnExists(desc.table, 'experiment_id')
+      ? 'experiment_id'
+      : 'NULL AS experiment_id';
+    const causedByRunId = this.columnExists(desc.table, 'caused_by_run_id')
+      ? 'caused_by_run_id'
+      : 'NULL AS caused_by_run_id';
     const row = this.db
       .prepare(
         `SELECT id, project_id, ref, title, summary, body, priority, repo, board_id, stage_id, archived_at,
-                ${decomposedAt}, ${approvedAt}, version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
+                ${decomposedAt}, ${approvedAt}, ${experimentId}, ${causedByRunId}, version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
            FROM ${desc.table} WHERE id = ? AND project_id = ?`,
       )
       .get(id, projectId) as EntityDbRow | undefined;
@@ -2041,6 +2341,10 @@ export class TaskChangeRouter {
       // stamp silently flips board visibility on every live event.
       decomposed_at: row.decomposed_at,
       approved_at: row.approved_at,
+      // A/B sandbox tag (migration 047). Same silent-drop rationale as the
+      // visibility stamps: the client `isExperimentSandboxed` selector compares
+      // `!== null`, so it MUST be projected on the emit path.
+      experiment_id: row.experiment_id ?? null,
       version: row.version,
       stage_position: stage?.position ?? 0,
       inFlow,

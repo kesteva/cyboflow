@@ -24,6 +24,7 @@ import type { SessionOutput } from '../types/session';
 import type { Logger } from '../utils/logger';
 import { transitionToRunning } from '../services/cyboflow/transitions';
 import { assertTransitionAllowed } from '../services/cyboflow/stateMachine';
+import { createQuickSessionCore } from '../services/createQuickSessionCore';
 import { isPermissionMode, type PermissionMode } from '../../../shared/types/workflows';
 import { stampSessionRunsOutcome } from '../orchestrator/runRecovery';
 import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
@@ -473,138 +474,42 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         : undefined;
       const inPlace = (requestedWorktreeMode ?? configManager.getQuickSessionWorktreeMode()) === 'in-place';
 
-      const job = await taskQueue.createSession({
-        prompt: '',
-        worktreeTemplate: branchName,
-        projectId: targetProject.id,
-        folderId: request.folderId,
-        baseBranch: request.baseBranch,
-        // In-place sessions share the user's real checkout, so checkpoint
-        // auto-commit (a `git add -A` in the session cwd) must never run — it
-        // would sweep the user's unrelated dirty files. Force it off here (the
-        // request's own autoCommit/commitMode are ignored for in-place) and rely
-        // on the executionTracker backstop (§5) for later per-session edits.
-        autoCommit: inPlace ? false : request.autoCommit,
-        toolType,
-        commitMode: inPlace ? 'disabled' : request.commitMode,
-        commitModeSettings: request.commitModeSettings,
-        inPlace,
-        claudeConfig: request.claudeConfig
-      });
-
-      // Await the session row by listening for session-created events on the
-      // SessionManager. Concurrent sessions:create-quick calls share the same
-      // emitter, so we filter by worktreePath: TaskQueue's ensureUniqueNames may
-      // append a `-<counter>` suffix to resolve same-second name collisions, so
-      // accept both `/{branchName}` and `/{branchName}-<n>` tails. Non-matching
-      // events are ignored — the listener is left in place via `on` (not `once`)
-      // until the matching session arrives or the timeout fires.
-      const session = await new Promise<import('../types/session').Session>((resolve, reject) => {
-        const suffixed = new RegExp(`/${branchName}-\\d+$`);
-        // In-place sessions (migration 047) have worktreePath === the project
-        // path, never `/${branchName}`, so the path match above can never fire for
-        // them and the promise would time out. Fall back to the session NAME:
-        // TaskQueue sets it to the worktree template (branchName); ensureUniqueNames
-        // may append a ` <n>` (name) / `-<n>` (worktree) suffix on a same-name
-        // collision. Scoped to in-place so normal worktree sessions keep matching
-        // by path exactly as before.
-        const nameSuffixed = new RegExp(`^${branchName}[ -]\\d+$`);
-        const onCreated = (createdSession: import('../types/session').Session) => {
-          const wt = createdSession.worktreePath ?? '';
-          const name = createdSession.name ?? '';
-          const matches =
-            wt.endsWith(`/${branchName}`) ||
-            suffixed.test(wt) ||
-            (inPlace && (name === branchName || nameSuffixed.test(name)));
-          if (!matches) return;
-          // Same-second concurrent create-quick calls share one branchName, and
-          // BOTH matchers accept BOTH resulting sessions (base + `-<n>` suffixed
-          // forms) — without a claim, both callers would resolve to the FIRST
-          // session, orphaning the second with a stuck sentinel. First listener
-          // to see a session claims its id; the other keeps waiting for the
-          // sibling event. (Listeners run synchronously on the same emit, so the
-          // claim is race-free.) Covers the in-place NAME match and the
-          // pre-existing worktree PATH ambiguity alike.
-          if (claimedQuickSessionIds.has(createdSession.id)) return;
-          claimedQuickSessionIds.add(createdSession.id);
-          clearTimeout(timeout);
-          sessionManager.removeListener('session-created', onCreated);
-          resolve(createdSession);
-        };
-        const timeout = setTimeout(() => {
-          sessionManager.removeListener('session-created', onCreated);
-          reject(new Error('Timed out waiting for quick session to be created'));
-        }, 30_000);
-
-        sessionManager.on('session-created', onCreated);
-      });
-
-      // Wire the quick session to a workflow_runs row so ApprovalRouter can
-      // work for quick sessions.
-      //
-      // 1. Ensure the __quick__ sentinel workflow exists for this project.
-      // 2. Create a workflow_runs row (status='queued').
-      // 3. Advance: queued -> starting -> running.
-      // 4. Backfill sessions.run_id with the new runId.
-      const sentinelWorkflowId = cyboflow.workflowRegistry.ensureQuickWorkflow(targetProject.id);
-      // Stamp the chosen 4-mode onto the sentinel run's permission_mode_snapshot too,
-      // so the run row is truthful (the quick PANEL reads the session column below,
-      // but workflow-world tooling that inspects the run sees the right value).
-      // createRun resolves the substrate through the FULL ladder (requested →
-      // global default → CYBOFLOW_SUBSTRATE env → 'sdk') and returns the value it
-      // stamped onto workflow_runs.substrate — everything below (the session
-      // stamp + the eager spawn gate) keys off that RESOLVED value, never the
-      // requested one, so the run row and the session can never diverge.
-      // Thread the already-resolved host session (:405-422) so createRun stamps
-      // workflow_runs.session_id for the sentinel — the never-session-less
-      // invariant (permission-mode redesign slice 1a; the createRun throw lands
-      // in 1b). This stamps session_id for the SDK sentinel too, so the prior
-      // interactive-only conditional stamp below is now redundant and removed.
-      const { runId, substrate: resolvedSubstrate } = cyboflow.workflowRegistry.createRun(
-        sentinelWorkflowId,
-        requestedSubstrate,
-        session.id,
-        requestedAgentMode,
+      // Create the session + wire the __quick__ sentinel run via the SHARED core
+      // (createQuickSessionCore) — the same path experiments.startSideBySide uses
+      // for its SHA-pinned arm sessions. The core: enqueues the session-create job
+      // (worktree + session row, or in-place directly in the project checkout),
+      // awaits the session-created event, ensures the __quick__ sentinel workflow,
+      // creates the sentinel run through the FULL substrate/permission ladder
+      // (returning the RESOLVED substrate everything below keys off), advances it
+      // queued→starting→running, stamps its worktree_path, and backfills
+      // sessions.run_id + chat_run_id. The per-session config persistence + eager
+      // PTY spawn below layer on top of the result.
+      const { session, runId, resolvedSubstrate, jobId } = await createQuickSessionCore(
+        {
+          taskQueue,
+          sessionManager,
+          workflowRegistry: cyboflow.workflowRegistry,
+          getDb: () => databaseService.getDb(),
+        },
+        {
+          projectId: targetProject.id,
+          nameHint: branchName,
+          baseBranch: request.baseBranch,
+          folderId: request.folderId,
+          autoCommit: request.autoCommit,
+          toolType,
+          commitMode: request.commitMode,
+          commitModeSettings: request.commitModeSettings,
+          claudeConfig: request.claudeConfig,
+          requestedSubstrate,
+          requestedAgentMode,
+          // In-place quick session (migration 047): the core forces auto-commit off
+          // + commitMode disabled and switches session matching to the NAME fallback.
+          inPlace,
+        },
       );
 
       const db = databaseService.getDb();
-
-      // queued -> starting (no helper exists; do guarded UPDATE directly).
-      assertTransitionAllowed('queued', 'starting', runId);
-      const startingResult = db.prepare(
-        `UPDATE workflow_runs
-            SET status = 'starting', updated_at = CURRENT_TIMESTAMP
-          WHERE id = ? AND status = 'queued'`,
-      ).run(runId);
-      if (startingResult.changes === 0) {
-        throw new Error(`Failed to advance run ${runId} from queued to starting`);
-      }
-
-      // starting -> running via the guarded helper in transitions.ts.
-      transitionToRunning(db, { runId });
-
-      // Stamp the session's worktree onto the sentinel run (ALL quick sessions).
-      // Sentinel runs never pass through RunLauncher (which stamps
-      // workflow_runs.worktree_path for workflow runs at launch), so without
-      // this the column stays NULL and mcpQueryHandler.resolveRunWorktree
-      // returns null — short-circuiting the per-run worktree allow-list for
-      // quick-session MCP writes. Mirror of the runLauncher.ts UPDATE, minus
-      // status/branch (the transitions above own status).
-      db.prepare(
-        `UPDATE workflow_runs SET worktree_path = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-      ).run(session.worktreePath, runId);
-
-      // Backfill sessions.run_id AND sessions.chat_run_id (migration 038). For a
-      // freshly-created quick session the sentinel IS both the latest run (Role-D)
-      // and the persistent chat gate vehicle (Role-G), so they coincide here; a
-      // later flow launch overwrites run_id only, leaving chat_run_id pinned to this
-      // sentinel (the permission-mode redesign §6 split — chat turns never lose
-      // their gate to a terminal/active flow run).
-      db.prepare(`UPDATE sessions SET run_id = ?, chat_run_id = ? WHERE id = ?`).run(
-        runId,
-        runId,
-        session.id,
-      );
 
       // NOTE: the sentinel run's session_id is now stamped by createRun above (it
       // received session.id), for BOTH substrates — the prior interactive-only
@@ -781,7 +686,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       return {
         success: true,
         data: {
-          jobId: job.id,
+          jobId,
           sessionId: session.id,
           worktreePath: session.worktreePath,
           runId,

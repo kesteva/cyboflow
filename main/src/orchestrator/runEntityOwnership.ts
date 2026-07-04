@@ -105,6 +105,17 @@ export function listRunCreatedEpicIds(db: DatabaseLike, runId: string): string[]
 }
 
 /**
+ * The idea ids a run CREATED during execution (the run-created projection ONLY —
+ * unlike {@link listRunOwnedIdeaIds}, this does NOT union the run's seed_idea_id).
+ * Used by the experiment-arm sweep, which must delete only ideas the arm minted,
+ * never the (orchestrator-created) injected seed clone — that is passed
+ * explicitly. Fail-soft — see file header contract.
+ */
+export function listRunCreatedIdeaIds(db: DatabaseLike, runId: string): string[] {
+  return entityIdsCreatedByRun(db, runId, 'idea');
+}
+
+/**
  * The idea id a run OPERATES ON when it does not own one directly. A standalone
  * sprint run has a null `seed_idea_id` and creates no ideas, so
  * listRunOwnedIdeaIds yields [] for it — but it still executes the tasks of an

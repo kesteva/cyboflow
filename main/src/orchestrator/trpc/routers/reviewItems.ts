@@ -163,6 +163,7 @@ function rethrowAsTRPCError(err: unknown): never {
       concurrency: 'CONFLICT',
       invalid_dependency: 'BAD_REQUEST',
       dependency_cycle: 'CONFLICT',
+      experiment_sandboxed: 'CONFLICT',
     };
     throw new TRPCError({
       code: codeMap[err.code],
