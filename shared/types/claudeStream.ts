@@ -306,7 +306,7 @@ export interface RateLimitEvent {
   rate_limit_info: {
     status: 'allowed' | 'allowed_warning' | 'rejected';
     resetsAt?: number;
-    rateLimitType?: 'five_hour' | 'seven_day' | 'seven_day_opus' | 'seven_day_sonnet' | 'overage';
+    rateLimitType?: 'five_hour' | 'seven_day' | 'seven_day_opus' | 'seven_day_sonnet' | 'seven_day_overage_included' | 'overage';
     utilization?: number;
     overageStatus?: 'allowed' | 'allowed_warning' | 'rejected';
     overageResetsAt?: number;

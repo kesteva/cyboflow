@@ -425,6 +425,24 @@ describe('RateLimitEvent — rejected status', () => {
   });
 });
 
+describe('RateLimitEvent — rateLimitType=seven_day_overage_included', () => {
+  it('narrows rate_limit_event with rateLimitType=seven_day_overage_included to rate_limit_event (not __unknown__)', () => {
+    const raw = rateLimitEvent({
+      rate_limit_info: { status: 'allowed_warning', resetsAt: 1747776000, rateLimitType: 'seven_day_overage_included' },
+    });
+    const event = narrower.narrow(raw);
+
+    if ('kind' in event) {
+      throw new Error('Expected typed variant, got UnknownStreamEvent');
+    }
+    expect(event.type).toBe('rate_limit_event');
+    if (event.type !== 'rate_limit_event') {
+      throw new Error('Expected RateLimitEvent');
+    }
+    expect(event.rate_limit_info.rateLimitType).toBe('seven_day_overage_included');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // UnknownStreamEvent fallback — catch-all behavior on malformed input
 // ---------------------------------------------------------------------------

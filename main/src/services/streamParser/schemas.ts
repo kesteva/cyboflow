@@ -347,6 +347,7 @@ const rateLimitEventSchema = z.object({
       z.literal('seven_day'),
       z.literal('seven_day_opus'),
       z.literal('seven_day_sonnet'),
+      z.literal('seven_day_overage_included'),
       z.literal('overage'),
     ]).optional(),
     utilization: z.number().optional(),
