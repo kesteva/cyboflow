@@ -199,10 +199,21 @@ describe('Tier-3: guarded model unavailable mid-call → marked unavailable + re
     }
   });
 
-  it('availability resets cleanly between cases — Fable is usable again at the start of a fresh test', () => {
-    // 3. If the prior case's `unavailable` state had bled across (singleFork), this
-    //    would be false. integration.setup.ts's per-test _resetForTesting() +
-    //    beforeEach re-initialize guarantee a clean slate.
+  it('_resetForTesting clears unavailability so a fresh initialize starts clean', () => {
+    // 3. Exercise the reset seam DIRECTLY rather than trusting beforeEach's
+    //    unconditional initialize() (which constructs a brand-new instance and
+    //    would mask a broken reset): mark unavailable → reset → the singleton is
+    //    gone → a fresh initialize seeds the model usable again. This is the
+    //    contract integration.setup.ts's per-test _resetForTesting() relies on
+    //    for between-file isolation under singleFork.
+    const service = ModelAvailabilityService.getInstance();
+    service.markUnavailable(FABLE_CONCRETE, 'itest');
+    expect(service.isUsable(FABLE_CONCRETE)).toBe(false);
+
+    ModelAvailabilityService._resetForTesting();
+    expect(ModelAvailabilityService.tryGetInstance()).toBeNull();
+
+    ModelAvailabilityService.initialize();
     expect(ModelAvailabilityService.getInstance().isUsable(FABLE_CONCRETE)).toBe(true);
   });
 });
