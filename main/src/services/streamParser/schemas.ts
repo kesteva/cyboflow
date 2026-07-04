@@ -71,11 +71,15 @@ const systemInitSchema = z.object({
   apiKeySource: z.string().optional(),
   claude_code_version: z.string().optional(),
   uuid: z.string().optional(),
-  agents: z.record(z.unknown()).optional(),
+  // SDK `SDKSystemMessage` types `agents`/`skills` as `string[]`; older wire
+  // captures modeled them as name→definition maps. Accept both so a real SDK
+  // `system/init` (which always carries `skills` as an array) narrows instead of
+  // falling through to `{kind:'__unknown__'}`. Surfaced by the sdkContract keystone.
+  agents: z.union([z.record(z.unknown()), z.array(z.string())]).optional(),
   betas: z.array(z.string()).optional(),
   slash_commands: z.array(z.string()).optional(),
   output_style: z.string().optional(),
-  skills: z.record(z.unknown()).optional(),
+  skills: z.union([z.record(z.unknown()), z.array(z.string())]).optional(),
   plugins: z.array(z.object({ name: z.string(), path: z.string() }).passthrough()).optional(),
 });
 

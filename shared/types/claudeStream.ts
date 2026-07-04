@@ -72,11 +72,13 @@ export interface SystemInitEvent {
   apiKeySource?: string;
   claude_code_version?: string;
   uuid?: string;
-  agents?: Record<string, unknown>;
+  /** SDK types this as `string[]`; older wire captures used a name→definition map. Accept both. */
+  agents?: Record<string, unknown> | string[];
   betas?: string[];
   slash_commands?: string[];
   output_style?: string;
-  skills?: Record<string, unknown>;
+  /** SDK types this as `string[]`; older wire captures used a name→definition map. Accept both. */
+  skills?: Record<string, unknown> | string[];
   plugins?: Array<{ name: string; path: string }>;
 }
 
