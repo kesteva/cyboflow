@@ -455,8 +455,11 @@ export async function createHarness(options: CreateHarnessOptions = {}): Promise
       // Reset the ApprovalRouter singleton so subsequent test runs start clean
       ApprovalRouter._resetForTesting();
 
-      // Close the DB
+      // Close the DB and remove its temp directory (migration-replay uses a
+      // file-backed DB, unlike the old :memory: harness — without this every
+      // gate run leaks a cyboflow-gate-db-* dir in the OS tmpdir).
       db.close();
+      fs.rmSync(dbDir, { recursive: true, force: true });
     },
   };
 
