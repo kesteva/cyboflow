@@ -58,6 +58,12 @@ export interface QuickSessionComposerProps {
    * Fable 5 → Opus) mid-call. The host shows it in the same toast slot.
    */
   onModelFallback?: (message: string) => void;
+  /**
+   * Surface a notice when a turn REQUESTED fast mode but the CLI declined it
+   * (entitlement / cooldown — see FastModePill). Same toast slot as the above.
+   * Naturally one-off: the main process only pushes fast-mode-state CHANGES.
+   */
+  onFastModeDeclined?: (message: string) => void;
 }
 
 export function QuickSessionComposer(props: QuickSessionComposerProps): React.ReactElement {
@@ -77,6 +83,7 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     onTogglePtyOpen,
     onPermissionApplied,
     onModelFallback,
+    onFastModeDeclined,
   } = props;
 
   const transport = interactive ? 'interactive' : 'sdk';
@@ -125,14 +132,30 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       .catch(() => {
         /* non-fatal: pill just can't warn */
       });
-    const unsubscribe = API.claudePanels.onFastModeState((notice) => {
-      if (notice.panelId === panelId) setFastModeReport(notice);
-    });
     return () => {
       cancelled = true;
-      unsubscribe();
     };
   }, [interactive, panelId]);
+
+  // Live per-turn fast-mode pushes. A decline (a turn that REQUESTED fast mode
+  // reporting anything but 'on') additionally raises a one-off toast — one-off
+  // because the main process only emits on state change, so a run of declined
+  // turns produces a single push. The mount-time snapshot above never toasts.
+  useEffect(() => {
+    if (interactive || !panelId) return;
+    const unsubscribe = API.claudePanels.onFastModeState((notice) => {
+      if (notice.panelId !== panelId) return;
+      setFastModeReport(notice);
+      if (notice.requestedFast && notice.state !== 'on') {
+        onFastModeDeclined?.(
+          notice.state === 'cooldown'
+            ? 'Fast mode is cooling down after a rate limit — this turn ran at standard speed.'
+            : "Fast mode isn't available on this account — it may need extra usage enabled. This turn ran at standard speed.",
+        );
+      }
+    });
+    return unsubscribe;
+  }, [interactive, panelId, onFastModeDeclined]);
 
   // Switching away from Opus drops fast mode (it is Opus-only; the spawn seam
   // threads the persisted value ungated, so we never leave it true off-Opus).

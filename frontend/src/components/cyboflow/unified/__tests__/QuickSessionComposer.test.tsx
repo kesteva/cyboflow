@@ -105,6 +105,7 @@ function Harness(props: {
   handleContinueConversation?: ReturnType<typeof vi.fn>;
   onPermissionApplied?: (message: string) => void;
   onModelFallback?: (message: string) => void;
+  onFastModeDeclined?: (message: string) => void;
 }) {
   const [input, setInput] = useState('');
   const [ptyOpen, setPtyOpen] = useState(false);
@@ -123,6 +124,7 @@ function Harness(props: {
       onTogglePtyOpen={() => setPtyOpen((v) => !v)}
       onPermissionApplied={props.onPermissionApplied}
       onModelFallback={props.onModelFallback}
+      onFastModeDeclined={props.onFastModeDeclined}
     />
   );
 }
@@ -229,6 +231,69 @@ describe('QuickSessionComposer — mid-call model fallback', () => {
 
     expect(mockSetModel).not.toHaveBeenCalled();
     expect(onModelFallback).not.toHaveBeenCalled();
+  });
+});
+
+describe('QuickSessionComposer — declined fast-mode toast', () => {
+  async function pushNotice(onFastModeDeclined: ReturnType<typeof vi.fn>, notice: unknown) {
+    render(
+      <Harness
+        session={makeSession({ status: 'stopped' })}
+        interactive={false}
+        onFastModeDeclined={onFastModeDeclined}
+      />,
+    );
+    await waitFor(() => expect(mockOnFastModeState).toHaveBeenCalled());
+    const notify = mockOnFastModeState.mock.calls[0][0] as (n: unknown) => void;
+    act(() => notify(notice));
+  }
+
+  it('toasts when a fast-requested turn reports off (entitlement copy)', async () => {
+    const onFastModeDeclined = vi.fn();
+    await pushNotice(onFastModeDeclined, { panelId: 'panel-1', sessionId: 's1', state: 'off', requestedFast: true });
+    expect(onFastModeDeclined).toHaveBeenCalledTimes(1);
+    expect(onFastModeDeclined.mock.calls[0][0]).toContain('extra usage');
+  });
+
+  it('toasts with cooldown copy when the CLI reports cooldown', async () => {
+    const onFastModeDeclined = vi.fn();
+    await pushNotice(onFastModeDeclined, { panelId: 'panel-1', sessionId: 's1', state: 'cooldown', requestedFast: true });
+    expect(onFastModeDeclined.mock.calls[0][0]).toContain('cooling down');
+  });
+
+  it('does NOT toast when fast mode actually engaged', async () => {
+    const onFastModeDeclined = vi.fn();
+    await pushNotice(onFastModeDeclined, { panelId: 'panel-1', sessionId: 's1', state: 'on', requestedFast: true });
+    expect(onFastModeDeclined).not.toHaveBeenCalled();
+  });
+
+  it('does NOT toast for a turn that never requested fast mode', async () => {
+    const onFastModeDeclined = vi.fn();
+    await pushNotice(onFastModeDeclined, { panelId: 'panel-1', sessionId: 's1', state: 'off', requestedFast: false });
+    expect(onFastModeDeclined).not.toHaveBeenCalled();
+  });
+
+  it('ignores a notice addressed to a DIFFERENT panel', async () => {
+    const onFastModeDeclined = vi.fn();
+    await pushNotice(onFastModeDeclined, { panelId: 'someone-else', sessionId: 's9', state: 'off', requestedFast: true });
+    expect(onFastModeDeclined).not.toHaveBeenCalled();
+  });
+
+  it('never toasts from the mount-time snapshot (push-only)', async () => {
+    mockGetFastModeState.mockResolvedValue({
+      success: true,
+      data: { panelId: 'panel-1', sessionId: 's1', state: 'off', requestedFast: true },
+    });
+    const onFastModeDeclined = vi.fn();
+    render(
+      <Harness
+        session={makeSession({ status: 'stopped' })}
+        interactive={false}
+        onFastModeDeclined={onFastModeDeclined}
+      />,
+    );
+    await waitFor(() => expect(mockGetFastModeState).toHaveBeenCalled());
+    expect(onFastModeDeclined).not.toHaveBeenCalled();
   });
 });
 
