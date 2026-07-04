@@ -64,7 +64,8 @@
     "test:build": "node build/afterSign.test.js && node scripts/configure-build.test.js",
     "verify:schema": "node scripts/verify-schema-parity.js",
     "test:unit": "pnpm --filter main test && pnpm --filter frontend test && pnpm run verify:schema && node scripts/__tests__/verify-schema-parity.test.js && node scripts/__tests__/release-scripts.test.js && pnpm run test:build",
-    "test:gate": "vitest run --config vitest.config.gate.ts"
+    "test:gate": "vitest run --config vitest.config.gate.ts",
+    "test:integration": "vitest run --config vitest.config.integration.ts"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.2.141",
