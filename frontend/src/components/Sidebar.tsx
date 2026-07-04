@@ -124,10 +124,14 @@ export function Sidebar({
 
   return (
     <>
-      <div 
-        data-testid="sidebar" 
+      <div
+        data-testid="sidebar"
         className="bg-surface-primary text-text-primary h-full flex flex-col pt-4 relative flex-shrink-0 border-r border-border-primary"
-        style={{ width: `${width}px` }}
+        // The persisted drag width (up to 600px) is set on a large window; on a
+        // narrow one an unclamped 500px sidebar + the fixed 296px right rail
+        // starve the center column to ~0 (composer collapses). Clamp to a
+        // viewport fraction so the center always keeps usable width.
+        style={{ width: `${width}px`, maxWidth: 'min(600px, 40vw)' }}
       >
         {/* Resize handle */}
         <div

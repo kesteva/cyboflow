@@ -312,10 +312,29 @@ export function UnifiedChatView({
     setTimeout(() => el.classList.remove('highlight-prompt'), 2000);
   }, []);
 
-  const showRail = !isInteractive;
+  // Auto-hide the fixed-width (230px) prompt rail when the chat host is too
+  // narrow to fit it AND a usable transcript/composer. The host width depends on
+  // the window, the resizable app sidebar, and the 296px right rail, so this is
+  // measured on the element (ResizeObserver), not a window breakpoint. Below the
+  // threshold the rail would squeeze the main column toward 0 (dead composer).
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const [hostTooNarrowForRail, setHostTooNarrowForRail] = useState(false);
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width ?? 0;
+      // 230px rail + ~330px minimum usable main column.
+      if (width > 0) setHostTooNarrowForRail(width < 560);
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  const showRail = !isInteractive && !hostTooNarrowForRail;
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full" ref={rootRef}>
       {/* Main column: identity strip + transcript region + meta strip + bottom slot. */}
       <div className="flex flex-1 min-w-0 flex-col">
         <ModeIdentityStrip

@@ -323,8 +323,12 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
 
       {/* Main content area — two-column flex-row layout */}
       <div className="flex flex-row flex-1 overflow-hidden">
-        {/* Left column — fluid; hosts empty-state CTA, RunBottomPane, or Canvas+RunBottomPane */}
-        <div className="flex-1 flex flex-col overflow-hidden">
+        {/* Left column — fluid; hosts empty-state CTA, RunBottomPane, or Canvas+RunBottomPane.
+            min-w floor: with the app sidebar at its clamped max and the fixed
+            296px right rail, an unfloored flex-1 column can collapse to ~0 on a
+            narrow window (dead composer). Overflowing clips the rail instead —
+            it has its own collapse affordance. */}
+        <div className="flex-1 flex flex-col overflow-hidden min-w-[280px]">
           {activeRunId !== null ? (
             // Tabbed center surface (pinned Flow tab hosting the WorkflowCanvas,
             // or SprintSwimlaneCanvas for sprint runs) over a collapsible terminal
