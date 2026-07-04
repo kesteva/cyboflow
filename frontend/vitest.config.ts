@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { defineConfig, configDefaults } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
 export default defineConfig({
@@ -7,6 +7,10 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    // Flake quarantine — *.quarantine.test.ts is pulled out of the blocking
+    // suite and run report-only by e2e.yml's flake-watch job. See
+    // docs/plans/ci-gate-mocked-sdk-integration.md "Flake quarantine".
+    exclude: [...configDefaults.exclude, '**/*.quarantine.test.ts'],
     setupFiles: ['./src/test/setup.ts'],
     coverage: {
       provider: 'v8',

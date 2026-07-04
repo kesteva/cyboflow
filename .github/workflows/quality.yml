@@ -77,12 +77,81 @@ jobs:
         CI: true
       timeout-minutes: 10
 
-    # Report-only coverage — no threshold yet (see docs/proposals/test-coverage-tightening-plan.md
-    # Workstream C). continue-on-error so a coverage-run hiccup never blocks the gate; this step
-    # exists purely to make coverage visible while a baseline is established. The text-reporter
-    # table (main/frontend vitest.config.ts both list 'text' first) is captured to a log file and
-    # tailed into the job summary rather than parsing a coverage-summary.json the 'text'/'json'/
-    # 'html' reporter set doesn't produce.
+  # Blocking mocked-SDK integration tier (Tier-3). Runs in PARALLEL with `test`
+  # (both only need `quality-checks`), so the PR critical path stays at
+  # max(test, integration), not their sum. Drives the real
+  # RunExecutor → ClaudeCodeManager → query() (module-mocked) → chokepoints
+  # chain over a migration-replay temp DB; no live `claude` CLI, no Electron.
+  integration:
+    name: Integration (mocked SDK)
+    runs-on: ubuntu-latest
+    needs: quality-checks
+    timeout-minutes: 8
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22.15.1'
+        cache: 'pnpm'
+
+    - name: Install dependencies
+      run: pnpm install
+
+    # Same host-Node ABI flip the `test` job needs: the integration suite runs
+    # under host Node (vitest) against real migration-replay temp DBs. See the
+    # `test` job comment above and CLAUDE.md.
+    - name: Rebuild better-sqlite3 for host Node ABI
+      run: node scripts/rebuild-better-sqlite3-host.mjs
+
+    - name: Run integration tests
+      run: pnpm test:integration
+      env:
+        CI: true
+      timeout-minutes: 8
+
+  # Report-only coverage — no threshold yet (see docs/proposals/test-coverage-tightening-plan.md
+  # Workstream C). Split into its own job (needs: test, if: always(),
+  # continue-on-error) so its four ~always() steps stop inflating the PR critical
+  # path — they gate nothing and roughly doubled the `test` job's wall-clock.
+  # continue-on-error so a coverage-run hiccup never reds the workflow; this job
+  # exists purely to make coverage visible while a baseline is established. The
+  # text-reporter table (main/frontend vitest.config.ts both list 'text' first)
+  # is captured to a log file and tailed into the job summary rather than parsing
+  # a coverage-summary.json the 'text'/'json'/'html' reporter set doesn't produce.
+  coverage:
+    name: Coverage (report-only)
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    continue-on-error: true
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22.15.1'
+        cache: 'pnpm'
+
+    - name: Install dependencies
+      run: pnpm install
+
+    # Coverage runs main DB tests under host Node, so the same ABI flip applies.
+    - name: Rebuild better-sqlite3 for host Node ABI
+      run: node scripts/rebuild-better-sqlite3-host.mjs
+
     - name: Coverage (report-only, main)
       if: always()
       continue-on-error: true

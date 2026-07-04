@@ -102,3 +102,21 @@
 - **The `canUseTool` interleave is the most fragile component** — the fake must invoke the real callback and await it. Kept event/promise-driven (no sleeps) to avoid flake, but its fidelity to real SDK ordering is only validated by the nightly diff.
 - **better-sqlite3 ABI flip stays structurally fragile.** The smoke assertion catches a broken flip loudly but does not auto-fix; a Node/Electron bump can still red the gate until someone reruns `electron:rebuild`. The migration-replay temp-file DBs make this tier *more* ABI-sensitive than the `:memory:` unit tests.
 - **Scope.** Eight milestones is the broadest of the three designs. Mitigated by strict independent shippability — M1 alone (dedup) lands value even if the gate never ships — but `fakeSdk.ts` becomes a single shared contract whose sloppy edit can red-cascade the SDK-touching suite; treat it as a contract, not a scratch fixture.
+
+---
+
+## Flake quarantine
+
+**Convention.** A test that must be pulled out of a *blocking* suite is renamed to the `*.quarantine.test.ts` (unit/`test:unit`) or `*.quarantine.itest.ts` (integration/`test:integration`) suffix. The blocking vitest configs exclude both patterns, so the rename is the only edit needed to remove a flaky test from the PR critical path:
+
+- `main/vitest.config.ts` — `exclude` adds `**/*.quarantine.test.ts`.
+- `frontend/vitest.config.ts` — `exclude` = `[...configDefaults.exclude, '**/*.quarantine.test.ts']` (frontend previously relied on vitest's default exclude, so the defaults are spread back in).
+- `vitest.config.integration.ts` — `exclude` = `[...configDefaults.exclude, '**/*.quarantine.itest.ts']` (its `include` is `main/src/**/*.itest.ts`, which would otherwise re-collect a quarantined file).
+
+**Report-only runner.** `e2e.yml`'s `flake-watch` job (macOS, nightly, no `continue-on-error` needed at job level — the run step is best-effort) `find`s any `*.quarantine.test.ts` / `*.quarantine.itest.ts` under `main`/`frontend`, exits 0 with a `::notice::` when there are none, and otherwise runs them via `pnpm exec vitest run <files>`. It never blocks; it exists to keep quarantined tests visible and to gather the two-green-nightlies signal for promotion.
+
+**Policy** (mirrors `e2e.yml`'s existing "green twice" promotion convention):
+
+1. **Quarantine within 24h.** A test that fails twice on *unrelated* PRs (i.e. the failure is not caused by the PR's own change) is renamed to the `*.quarantine.*` suffix within 24 hours, with a tracking task filed. This removes it from the blocking gate immediately so it stops taxing every unrelated PR.
+2. **Fix within one week.** The tracking task carries a one-week SLA to root-cause and fix (or delete) the test. A quarantined test is not a permanent parking spot — an unfixable test is deleted, not left to rot.
+3. **Promote back after two green nightlies.** Once fixed, the test is promoted back into the blocking suite (drop the `.quarantine` suffix) only after it has run green in the `flake-watch` job on **two consecutive nightlies** — the same bar `e2e.yml` uses before flipping the smoke tier to blocking.

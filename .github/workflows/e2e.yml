@@ -65,3 +65,104 @@ jobs:
             playwright-report/
           if-no-files-found: ignore
           retention-days: 7
+
+  # Nightly SDK drift canaries (report-only). These hit the REAL Anthropic API
+  # via the logged-in `claude` CLI, so they can only run where `claude` is on
+  # PATH and authenticated — otherwise they skip cleanly with a notice. They
+  # catch behavioral/protocol drift (WHEN canUseTool fires, event reordering,
+  # new event kinds) that the mocked-SDK gate and `pnpm typecheck` cannot see.
+  # Both continue-on-error — a canary must never red the nightly.
+  sdk-canaries:
+    name: SDK drift canaries (macOS)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.1'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      # Wire-shape canary: the real orchestrator day-gate against a live `claude`.
+      # Proves the true pre-narrow wire bytes still satisfy TypedEventNarrowing.
+      - name: Wire-shape canary (test:gate, real API)
+        continue-on-error: true
+        run: |
+          if ! command -v claude >/dev/null 2>&1; then
+            echo "::notice::claude not on PATH — skipping test:gate wire-shape canary"
+            exit 0
+          fi
+          pnpm test:gate
+        env:
+          CI: true
+        timeout-minutes: 20
+
+      # Protocol canary: the standalone raw-SDK smoke probe. Decoupled from
+      # main/src, so it validates the library surface directly.
+      - name: Protocol canary (smoke:sdk, real API)
+        continue-on-error: true
+        run: |
+          if ! command -v claude >/dev/null 2>&1; then
+            echo "::notice::claude not on PATH — skipping smoke:sdk protocol canary"
+            exit 0
+          fi
+          pnpm smoke:sdk
+        env:
+          CI: true
+        timeout-minutes: 10
+
+      # TODO(M7 follow-up): re-record-and-diff canary. Capture a fresh scrubbed
+      # transcript from a real test:gate run and structurally diff it against a
+      # committed reference to catch new event kinds / callback-ordering drift,
+      # uploading a candidate artifact for a human to promote. Deferred: it needs
+      # recorder/scrubber tooling (consistent-id map, tool_use↔tool_result pair
+      # preservation) that intentionally does not exist yet.
+
+  # Report-only flake-watch: runs any quarantined tests (*.quarantine.test.ts /
+  # *.quarantine.itest.ts) that have been pulled out of the blocking configs.
+  # Exits 0 when there are none, so this job is a no-op until a test is
+  # quarantined. See docs/plans/ci-gate-mocked-sdk-integration.md "Flake
+  # quarantine" for the promotion/demotion policy.
+  flake-watch:
+    name: Flake watch (quarantined tests, report-only)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.1'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install
+
+      - name: Run quarantined tests (if any)
+        continue-on-error: true
+        run: |
+          files=$(find main frontend -type d -name node_modules -prune -o -type f \( -name '*.quarantine.test.ts' -o -name '*.quarantine.itest.ts' \) -print)
+          if [ -z "$files" ]; then
+            echo "::notice::No quarantined tests — nothing to run."
+            exit 0
+          fi
+          echo "Running quarantined tests:"
+          echo "$files"
+          pnpm exec vitest run $files
+        env:
+          CI: true
+        timeout-minutes: 15
