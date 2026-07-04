@@ -57,6 +57,8 @@ export interface TelemetryEventMap {
   agent_saved: { custom: boolean };
   permission_mode_changed: { mode: PermissionMode };
   substrate_default_changed: { substrate: CliSubstrate };
+  execution_model_default_changed: { executionModel: 'orchestrated' | 'programmatic' };
+  programmatic_supervisor_changed: { supervisor: 'review-queue' | 'sdk' };
   theme_changed: { theme: 'paper' | 'light' | 'dark' };
   update_applied: { variant: 'stable' | 'dev' };
 }

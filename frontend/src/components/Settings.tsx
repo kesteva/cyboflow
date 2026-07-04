@@ -5,6 +5,7 @@ import { useNotifications } from '../hooks/useNotifications';
 import { API } from '../utils/api';
 import { trackEvent } from '../utils/telemetry';
 import type { AppConfig } from '../types/config';
+import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import { useConfigStore } from '../stores/configStore';
 import {
@@ -52,6 +53,12 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Global CLI runtime: false = allow SDK (per-run picker available, default
   // 'sdk'); true = force the interactive PTY substrate everywhere (SDK disabled).
   const [interactivePtyOnly, setInteractivePtyOnly] = useState(false);
+  // Global default execution model for new SDK runs: 'orchestrated' (default) or
+  // 'programmatic' (the in-process WorkflowController host walks the run's DAG).
+  const [defaultExecutionModel, setDefaultExecutionModel] = useState<ExecutionModel>('orchestrated');
+  // Supervisor for programmatic runs: 'review-queue' (default · escalate to human
+  // review) or 'sdk' (on-demand monitor agent, chattable mid-run).
+  const [programmaticSupervisor, setProgrammaticSupervisor] = useState<'review-queue' | 'sdk'>('review-queue');
   // Global code-review-eval toggle (default ON) — the K=3 Opus jury pass fired at
   // a built-in flow's human-review step. A per-run Configure override outranks it.
   const [codeReviewEvalEnabled, setCodeReviewEvalEnabled] = useState(true);
@@ -109,6 +116,8 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
       setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
       setInteractivePtyOnly(data.interactivePtyOnly ?? false);
+      setDefaultExecutionModel(data.defaultExecutionModel ?? 'orchestrated');
+      setProgrammaticSupervisor(data.programmaticSupervisor ?? 'review-queue');
       setCodeReviewEvalEnabled(data.codeReviewEvalEnabled ?? true);
       setErrorReportingEnabled(data.telemetry?.errorReportingEnabled ?? true);
       setUsageMetricsEnabled(data.telemetry?.usageMetricsEnabled ?? true);
@@ -150,6 +159,8 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         enableCyboflowFooter,
         defaultAgentPermissionMode,
         interactivePtyOnly,
+        defaultExecutionModel,
+        programmaticSupervisor,
         codeReviewEvalEnabled,
         // Empty field → undefined → the getter floors to the default (config.json
         // stays free of the key). A set value is trimmed before persisting.
@@ -400,6 +411,44 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               </SettingsSection>
 
               <SettingsSection
+                title="Workflow Orchestration"
+                description="Who walks a flow run's steps — the classic orchestrator or the programmatic host loop"
+                icon={<Zap className="w-4 h-4" />}
+              >
+                <div className="flex flex-col gap-1.5">
+                  {([
+                    { model: 'orchestrated', label: 'Orchestrated', hint: 'Default · orchestrator-driven steps' },
+                    { model: 'programmatic', label: 'Programmatic', hint: 'In-process host walks the DAG' },
+                  ] as const).map(({ model, label, hint }) => (
+                    <button
+                      key={label}
+                      type="button"
+                      onClick={() => {
+                        setDefaultExecutionModel(model);
+                        trackEvent('execution_model_default_changed', { executionModel: model });
+                      }}
+                      aria-pressed={defaultExecutionModel === model}
+                      className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+                        defaultExecutionModel === model
+                          ? 'border-interactive bg-interactive-surface'
+                          : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                      }`}
+                    >
+                      <span className="text-text-primary font-medium text-sm">{label}</span>
+                      <span className="text-xs text-text-tertiary">{hint}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-text-tertiary mt-2">
+                  "Programmatic" hands new SDK flow runs to the in-process host loop, which walks the
+                  run's steps deterministically instead of the classic orchestrator. Only affects SDK
+                  runs started after you save — the interactive terminal substrate always runs
+                  orchestrated. To also chat with a live monitor agent during a programmatic run, set
+                  Programmatic Supervisor to "SDK monitor" under Advanced Options.
+                </p>
+              </SettingsSection>
+
+              <SettingsSection
                 title="Code Review Eval"
                 description="Automatic LLM-jury quality assessment of a flow's diff at the review step"
                 icon={<ShieldCheck className="w-4 h-4" />}
@@ -560,6 +609,45 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                     Adds a "Messages" tab to each session showing raw JSON responses from Claude Code. Useful for debugging and development.
                   </p>
                 </div>
+              </SettingsSection>
+
+              <SettingsSection
+                title="Programmatic Supervisor"
+                description="How programmatic runs triage failures and answer mid-run chat"
+                icon={<Eye className="w-4 h-4" />}
+              >
+                <div className="flex flex-col gap-1.5">
+                  {([
+                    { supervisor: 'review-queue', label: 'Review queue', hint: 'Default · escalate to human review' },
+                    { supervisor: 'sdk', label: 'SDK monitor', hint: 'On-demand agent · triage + live chat' },
+                  ] as const).map(({ supervisor, label, hint }) => (
+                    <button
+                      key={label}
+                      type="button"
+                      onClick={() => {
+                        setProgrammaticSupervisor(supervisor);
+                        trackEvent('programmatic_supervisor_changed', { supervisor });
+                      }}
+                      aria-pressed={programmaticSupervisor === supervisor}
+                      className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+                        programmaticSupervisor === supervisor
+                          ? 'border-interactive bg-interactive-surface'
+                          : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                      }`}
+                    >
+                      <span className="text-text-primary font-medium text-sm">{label}</span>
+                      <span className="text-xs text-text-tertiary">{hint}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-text-tertiary mt-2">
+                  Only affects runs whose Workflow Orchestration is "Programmatic". "SDK monitor" wires
+                  an on-demand monitor agent into each such run: it triages step failures with the full
+                  run history and answers your Chat messages live while the run executes (each consult
+                  is a real Claude call). "Review queue" escalates failures to the human review queue
+                  instead, and mid-run Chat messages are queued for the next turn. Applies to runs
+                  started after you save.
+                </p>
               </SettingsSection>
 
               <SettingsSection
