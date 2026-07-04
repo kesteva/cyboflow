@@ -7,10 +7,20 @@
  * and a clean abort-signal bridge.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import {
+  makeFakeQuery,
+  makeRejectingQuery,
+  makeBlockUntilAbortQuery,
+  sdkAssistantText,
+  sdkResultSuccess,
+  type FakeQueryFn,
+  type FakeQueryParams,
+} from '../../../test/fakes/fakeSdk';
 
 // The SDK `query` is mocked so the evalJudgeQuery boundary is unit-testable
-// without a real claude binary. Each test installs its own async-generator
-// behavior via the shared `queryMock`.
+// without a real claude binary. Each test installs its own behavior via the shared
+// fakeSdk builders/factories, wired through `install(...)` which captures options.
 const queryMock = vi.fn();
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: (...args: unknown[]) => queryMock(...args),
@@ -23,59 +33,17 @@ import { makeEvalJudgeQuery, EVAL_JUDGE_TIMEOUT_MS } from '../evalJudgeQuery';
 
 let lastOptions: unknown;
 
-/** Build an async generator yielding the given SDK messages, recording options. */
-function yieldsMessages(messages: unknown[]): void {
-  queryMock.mockImplementation(({ options }: { options: unknown }) => {
-    lastOptions = options;
-    return (async function* () {
-      for (const m of messages) yield m;
-    })();
+/** Point the mocked `query()` at a shared fakeSdk `FakeQueryFn`, capturing options. */
+function install(fn: FakeQueryFn): void {
+  queryMock.mockImplementation((params: FakeQueryParams) => {
+    lastOptions = params.options;
+    return fn(params);
   });
 }
 
-/**
- * An async iterable whose first `next()` rejects — models the SDK iterator
- * throwing. Hand-built (not a generator) so there is no empty-generator
- * `require-yield` error.
- */
-function rejectingIterable(error: Error): AsyncIterable<unknown> {
-  return {
-    [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(error) }),
-  };
-}
-
-/**
- * Blocking async generator for `queryMock` that completes (without yielding)
- * once its run's abortController fires — models a hung query unblocked by the
- * deadline timer or the caller's abort signal. `onAbort` observes the abort.
- * The unreachable trailing `yield` only satisfies the `require-yield` lint rule.
- */
-function blockUntilAbort(onAbort?: () => void): void {
-  queryMock.mockImplementation(({ options }: { options: { abortController: AbortController } }) => {
-    lastOptions = options;
-    const ac = options.abortController;
-    return (async function* () {
-      // If the deadline/bridge already aborted the controller before the query
-      // ran (the pre-aborted-signal case), resolve immediately — a real aborted
-      // SDK query would not block either.
-      if (ac.signal.aborted) {
-        onAbort?.();
-        if (false as boolean) yield undefined as never;
-        return;
-      }
-      await new Promise<void>((resolve) =>
-        ac.signal.addEventListener(
-          'abort',
-          () => {
-            onAbort?.();
-            resolve();
-          },
-          { once: true },
-        ),
-      );
-      if (false as boolean) yield undefined as never; // unreachable — satisfies require-yield
-    })();
-  });
+/** Install a straight-line stream of the given SDK messages. */
+function yieldsMessages(messages: readonly SDKMessage[]): void {
+  install(makeFakeQuery(messages));
 }
 
 beforeEach(() => {
@@ -86,12 +54,8 @@ beforeEach(() => {
 describe('makeEvalJudgeQuery', () => {
   it('returns the structured_output of the successful result', async () => {
     yieldsMessages([
-      { type: 'assistant', message: { content: [{ type: 'text', text: 'grepping snapshot' }] } },
-      {
-        type: 'result',
-        subtype: 'success',
-        structured_output: { verdicts: [{ id: 'COR-1', verdict: 'PASS', evidence: 'x' }] },
-      },
+      sdkAssistantText('grepping snapshot'),
+      sdkResultSuccess({ structuredOutput: { verdicts: [{ id: 'COR-1', verdict: 'PASS', evidence: 'x' }] } }),
     ]);
     const fn = makeEvalJudgeQuery();
 
@@ -101,7 +65,7 @@ describe('makeEvalJudgeQuery', () => {
   });
 
   it('passes JUDGE_ALLOWED_TOOLS, json_schema outputFormat, cwd, model, exe path, and a bounded maxTurns', async () => {
-    yieldsMessages([{ type: 'result', subtype: 'success', structured_output: {} }]);
+    yieldsMessages([sdkResultSuccess({ structuredOutput: {} })]);
     const fn = makeEvalJudgeQuery();
 
     await fn({ prompt: 'p', schema: { type: 'object', required: ['verdicts'] }, cwd: '/wt', model: 'opus-x' });
@@ -122,7 +86,7 @@ describe('makeEvalJudgeQuery', () => {
   });
 
   it('omits cwd and model from the SDK options when not supplied', async () => {
-    yieldsMessages([{ type: 'result', subtype: 'success', structured_output: {} }]);
+    yieldsMessages([sdkResultSuccess({ structuredOutput: {} })]);
     const fn = makeEvalJudgeQuery();
 
     await fn({ prompt: 'p', schema: {} });
@@ -133,25 +97,25 @@ describe('makeEvalJudgeQuery', () => {
   });
 
   it('returns null when the stream drains with no successful result', async () => {
-    yieldsMessages([{ type: 'assistant', message: { content: [] } }]);
+    yieldsMessages([sdkAssistantText([])]);
     const fn = makeEvalJudgeQuery();
     expect(await fn({ prompt: 'p', schema: {}, cwd: '/wt' })).toBeNull();
   });
 
   it('returns null when the success result carries no structured_output', async () => {
-    yieldsMessages([{ type: 'result', subtype: 'success' }]);
+    yieldsMessages([sdkResultSuccess()]);
     const fn = makeEvalJudgeQuery();
     expect(await fn({ prompt: 'p', schema: {}, cwd: '/wt' })).toBeNull();
   });
 
   it('throws when the SDK iterator throws', async () => {
-    queryMock.mockImplementation(() => rejectingIterable(new Error('sdk boom')));
+    install(makeRejectingQuery(new Error('sdk boom')));
     const fn = makeEvalJudgeQuery();
     await expect(fn({ prompt: 'p', schema: {}, cwd: '/wt' })).rejects.toThrow('sdk boom');
   });
 
   it('aborts and throws a timeout error on a custom timeoutMs deadline', async () => {
-    blockUntilAbort();
+    install(makeBlockUntilAbortQuery());
     const fn = makeEvalJudgeQuery(undefined, 5);
     await expect(fn({ prompt: 'p', schema: {}, cwd: '/wt' })).rejects.toThrow(/timed out after 5ms/);
   });
@@ -160,16 +124,16 @@ describe('makeEvalJudgeQuery', () => {
     // The blockUntilAbort generator RESOLVES (no throw) once aborted; the didTimeOut
     // post-loop guard must still convert that clean drain into a timeout throw — the
     // paid-Claude "no silent empty on a hung binary" contract.
-    blockUntilAbort();
+    install(makeBlockUntilAbortQuery());
     const fn = makeEvalJudgeQuery(undefined, 5);
     await expect(fn({ prompt: 'p', schema: {} })).rejects.toThrow(/timed out/);
   });
 
   it('bridges the caller AbortSignal onto the SDK abortController', async () => {
     let observedAbort = false;
-    blockUntilAbort(() => {
+    install(makeBlockUntilAbortQuery(() => {
       observedAbort = true;
-    });
+    }));
     const controller = new AbortController();
     const fn = makeEvalJudgeQuery();
     const p = fn({ prompt: 'p', schema: {}, cwd: '/wt', signal: controller.signal }).catch(() => undefined);
@@ -180,9 +144,9 @@ describe('makeEvalJudgeQuery', () => {
 
   it('aborts immediately when the caller signal is ALREADY aborted before the call', async () => {
     let observedAbort = false;
-    blockUntilAbort(() => {
+    install(makeBlockUntilAbortQuery(() => {
       observedAbort = true;
-    });
+    }));
     const controller = new AbortController();
     controller.abort(); // pre-aborted
     const fn = makeEvalJudgeQuery();
@@ -193,7 +157,7 @@ describe('makeEvalJudgeQuery', () => {
   it('cleanup() removes the caller signal listener on the throw path (no leak)', async () => {
     const controller = new AbortController();
     const removeSpy = vi.spyOn(controller.signal, 'removeEventListener');
-    queryMock.mockImplementation(() => rejectingIterable(new Error('boom')));
+    install(makeRejectingQuery(new Error('boom')));
     const fn = makeEvalJudgeQuery();
 
     await expect(fn({ prompt: 'p', schema: {}, signal: controller.signal })).rejects.toThrow('boom');

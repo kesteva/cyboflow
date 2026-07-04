@@ -1,8 +1,19 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import {
+  makeFakeQuery,
+  makeRejectingQuery,
+  makeThenRejectQuery,
+  makeBlockUntilAbortQuery,
+  sdkAssistantText,
+  sdkResultSuccess,
+  type FakeQueryFn,
+  type FakeQueryParams,
+} from '../../../test/fakes/fakeSdk';
 
 // The SDK `query` is mocked so the monitorQuery boundary is unit-testable without a
-// real claude binary. Each test installs its own async-generator behavior via the
-// shared `queryMock`.
+// real claude binary. Each test installs its own behavior via the shared fakeSdk
+// builders/factories, wired through `install(...)` which also captures `lastOptions`.
 const queryMock = vi.fn();
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
   query: (...args: unknown[]) => queryMock(...args),
@@ -17,70 +28,19 @@ import {
   SUPERVISOR_QUERY_TIMEOUT_MS,
 } from '../monitorQuery';
 
-/** Build an async generator yielding the given SDK messages, recording options. */
-function yieldsMessages(messages: unknown[]): void {
-  queryMock.mockImplementation(({ options }: { options: unknown }) => {
-    lastOptions = options;
-    return (async function* () {
-      for (const m of messages) yield m;
-    })();
-  });
-}
 let lastOptions: unknown;
 
-/**
- * An async iterable whose first `next()` rejects — models the SDK iterator throwing.
- * Hand-built (not a generator) so there is no empty-generator `require-yield` error.
- */
-function rejectingIterable(error: Error): AsyncIterable<unknown> {
-  return {
-    [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(error) }),
-  };
-}
-
-/**
- * An async iterable that yields the given messages, THEN its next `next()` rejects —
- * models the SDK iterator producing output and then throwing (e.g. `error_max_turns`
- * after the monitor has already spoken). Used to assert graceful partial-answer
- * degradation in the text query.
- */
-function yieldsThenRejects(messages: unknown[], error: Error): AsyncIterable<unknown> {
-  let i = 0;
-  return {
-    [Symbol.asyncIterator]: () => ({
-      next: () =>
-        i < messages.length
-          ? Promise.resolve({ value: messages[i++], done: false })
-          : Promise.reject(error),
-    }),
-  };
-}
-
-/**
- * Build a blocking async generator for `queryMock` that completes (without yielding)
- * once its run's abortController fires — models a hung query unblocked by the
- * deadline timer or the caller's abort signal. `onAbort` observes the abort firing.
- * The unreachable trailing `yield` only satisfies the `require-yield` lint rule (an
- * async generator with no `yield` token); it never executes.
- */
-function blockUntilAbort(onAbort?: () => void): void {
-  queryMock.mockImplementation(({ options }: { options: { abortController: AbortController } }) => {
-    lastOptions = options;
-    const ac = options.abortController;
-    return (async function* () {
-      await new Promise<void>((resolve) =>
-        ac.signal.addEventListener(
-          'abort',
-          () => {
-            onAbort?.();
-            resolve();
-          },
-          { once: true },
-        ),
-      );
-      if (false as boolean) yield undefined as never; // unreachable — satisfies require-yield
-    })();
+/** Point the mocked `query()` at a shared fakeSdk `FakeQueryFn`, capturing options. */
+function install(fn: FakeQueryFn): void {
+  queryMock.mockImplementation((params: FakeQueryParams) => {
+    lastOptions = params.options;
+    return fn(params);
   });
+}
+
+/** Install a straight-line stream of the given SDK messages. */
+function yieldsMessages(messages: readonly SDKMessage[]): void {
+  install(makeFakeQuery(messages));
 }
 
 beforeEach(() => {
@@ -91,8 +51,8 @@ beforeEach(() => {
 describe('makeSdkStructuredQuery', () => {
   it('returns the structured_output of the successful result', async () => {
     yieldsMessages([
-      { type: 'assistant', message: { content: [{ type: 'text', text: 'thinking' }] } },
-      { type: 'result', subtype: 'success', structured_output: { decision: 'retry', rationale: 'flaky' } },
+      sdkAssistantText('thinking'),
+      sdkResultSuccess({ structuredOutput: { decision: 'retry', rationale: 'flaky' } }),
     ]);
     const fn = makeSdkStructuredQuery();
 
@@ -102,7 +62,7 @@ describe('makeSdkStructuredQuery', () => {
   });
 
   it('passes read-only tools, json_schema outputFormat, cwd, model, and a small maxTurns', async () => {
-    yieldsMessages([{ type: 'result', subtype: 'success', structured_output: {} }]);
+    yieldsMessages([sdkResultSuccess({ structuredOutput: {} })]);
     const fn = makeSdkStructuredQuery();
 
     await fn({ prompt: 'p', schema: { type: 'object' }, cwd: '/wt', model: 'opus' });
@@ -118,28 +78,28 @@ describe('makeSdkStructuredQuery', () => {
   });
 
   it('returns null when no successful result is drained', async () => {
-    yieldsMessages([{ type: 'assistant', message: { content: [] } }]);
+    yieldsMessages([sdkAssistantText([])]);
     const fn = makeSdkStructuredQuery();
     expect(await fn({ prompt: 'p', schema: {}, cwd: '/wt' })).toBeNull();
   });
 
   it('throws when the SDK iterator throws', async () => {
-    queryMock.mockImplementation(() => rejectingIterable(new Error('sdk boom')));
+    install(makeRejectingQuery(new Error('sdk boom')));
     const fn = makeSdkStructuredQuery();
     await expect(fn({ prompt: 'p', schema: {}, cwd: '/wt' })).rejects.toThrow('sdk boom');
   });
 
   it('aborts and throws on timeout', async () => {
-    blockUntilAbort();
+    install(makeBlockUntilAbortQuery());
     const fn = makeSdkStructuredQuery(undefined, 5);
     await expect(fn({ prompt: 'p', schema: {}, cwd: '/wt' })).rejects.toThrow(/timed out/);
   });
 
   it('bridges the caller abort signal to the SDK abortController', async () => {
     let observedAbort = false;
-    blockUntilAbort(() => {
+    install(makeBlockUntilAbortQuery(() => {
       observedAbort = true;
-    });
+    }));
     const controller = new AbortController();
     const fn = makeSdkStructuredQuery();
     const p = fn({ prompt: 'p', schema: {}, cwd: '/wt', signal: controller.signal });
@@ -159,9 +119,9 @@ describe('makeSdkStructuredQuery', () => {
 describe('makeSdkTextQuery', () => {
   it('returns the concatenated text of the last assistant message', async () => {
     yieldsMessages([
-      { type: 'assistant', message: { content: [{ type: 'text', text: 'first' }] } },
-      { type: 'assistant', message: { content: [{ type: 'text', text: 'final ' }, { type: 'text', text: 'answer' }] } },
-      { type: 'result', subtype: 'success' },
+      sdkAssistantText('first'),
+      sdkAssistantText(['final ', 'answer']),
+      sdkResultSuccess(),
     ]);
     const fn = makeSdkTextQuery();
 
@@ -169,13 +129,13 @@ describe('makeSdkTextQuery', () => {
   });
 
   it("returns '' when there is no assistant message", async () => {
-    yieldsMessages([{ type: 'result', subtype: 'success' }]);
+    yieldsMessages([sdkResultSuccess()]);
     const fn = makeSdkTextQuery();
     expect(await fn({ prompt: 'p', cwd: '/wt' })).toBe('');
   });
 
   it('uses NO outputFormat and read-only tools', async () => {
-    yieldsMessages([{ type: 'assistant', message: { content: [{ type: 'text', text: 'hi' }] } }]);
+    yieldsMessages([sdkAssistantText('hi')]);
     const fn = makeSdkTextQuery();
 
     await fn({ prompt: 'p', cwd: '/wt' });
@@ -186,7 +146,7 @@ describe('makeSdkTextQuery', () => {
   });
 
   it('throws when the SDK iterator throws BEFORE the monitor speaks (no partial to show)', async () => {
-    queryMock.mockImplementation(() => rejectingIterable(new Error('text boom')));
+    install(makeRejectingQuery(new Error('text boom')));
     const fn = makeSdkTextQuery();
     await expect(fn({ prompt: 'p', cwd: '/wt' })).rejects.toThrow('text boom');
   });
@@ -196,19 +156,18 @@ describe('makeSdkTextQuery', () => {
     // threw error_max_turns. Graceful degradation surfaces the partial answer the
     // user can use instead of a bare apology (the brain only apologizes on a true
     // empty/throw). Higher MONITOR_MAX_TURNS makes this rare; this is the backstop.
-    queryMock.mockImplementation(({ options }: { options: unknown }) => {
-      lastOptions = options;
-      return yieldsThenRejects(
-        [{ type: 'assistant', message: { content: [{ type: 'text', text: 'partial state summary' }] } }],
+    install(
+      makeThenRejectQuery(
+        [sdkAssistantText('partial state summary')],
         new Error('Claude Code returned an error result: Reached maximum number of turns (24)'),
-      );
-    });
+      ),
+    );
     const fn = makeSdkTextQuery();
     expect(await fn({ prompt: 'p', cwd: '/wt' })).toBe('partial state summary');
   });
 
   it('aborts and throws on timeout', async () => {
-    blockUntilAbort();
+    install(makeBlockUntilAbortQuery());
     const fn = makeSdkTextQuery(undefined, 5);
     await expect(fn({ prompt: 'p', cwd: '/wt' })).rejects.toThrow(/timed out/);
   });

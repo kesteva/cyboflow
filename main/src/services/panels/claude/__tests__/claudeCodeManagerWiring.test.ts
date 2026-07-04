@@ -23,11 +23,13 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type Database from 'better-sqlite3';
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../../orchestrator/questionRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
 import { makeProdLoggerSpy } from '../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
 import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
+import { createModuleFakeSdk, sdkResultSuccess, type FakeQueryParams } from '../../../../test/fakes/fakeSdk';
 import { ClaudeCodeManager } from '../claudeCodeManager';
 import { CliManagerFactory } from '../../../cliManagerFactory';
 import type { SessionManager } from '../../../sessionManager';
@@ -36,44 +38,28 @@ import type { Logger } from '../../../../utils/logger';
 type LoggerSpy = ReturnType<typeof makeProdLoggerSpy>;
 
 // ---------------------------------------------------------------------------
-// Hoisted SDK yield factory — allows per-test override of the yielded sequence.
+// Shared fake SDK — one module mock backed by the shared fakeSdk handle. It
+// captures each query() call's options (for the systemPrompt/toolConfig
+// assertions) and defaults to a single happy-path result event; individual tests
+// swap the stream via `fakeSdk.setMessages` / `fakeSdk.setImplementation`.
+// The factory arrow reads `fakeSdk` lazily (only when query() is actually called),
+// mirroring the queryMock delegation pattern in monitorQuery.test.ts.
 // ---------------------------------------------------------------------------
 
-const { sdkYields } = vi.hoisted(() => {
-  /**
-   * sdkYields: a vi.fn() that returns an AsyncGenerator of SDK events.
-   *
-   * Default implementation yields one happy-path result event.
-   * Tests that need a different sequence call
-   * `sdkYields.mockImplementationOnce(async function* () { ... })`.
-   */
-  const sdkYields = vi.fn(async function* () {
-    yield { type: 'result', subtype: 'success' } as unknown;
-  });
-  return { sdkYields };
-});
+const fakeSdk = createModuleFakeSdk([sdkResultSuccess()]);
 
-// ---------------------------------------------------------------------------
-// Mocks
-// ---------------------------------------------------------------------------
+vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
+  query: (params: FakeQueryParams) => fakeSdk.query(params),
+}));
 
-/**
- * Capture the latest `options` passed to query() so tests can inspect
- * systemPrompt.append without depending on SDK internals.
- */
-let capturedQueryOptions: { systemPrompt?: { append?: string | null } } | null = null;
-
-vi.mock('@anthropic-ai/claude-agent-sdk', () => {
-  const queryFn = vi.fn(
-    (params: { prompt: string; options?: { systemPrompt?: { append?: string | null }; abortController?: AbortController } }) => {
-      capturedQueryOptions = params.options ?? null;
-      // Delegate to the hoisted sdkYields factory so tests can override the
-      // yielded event sequence without replacing the whole query mock.
-      return sdkYields();
-    },
-  );
-  return { query: queryFn };
-});
+/** The buildSdkOptions output captured on the latest query() call, typed for reads. */
+type CapturedOptions = {
+  systemPrompt?: { append?: string | null };
+  toolConfig?: { askUserQuestion?: { previewFormat?: string } };
+};
+function capturedOptions(): CapturedOptions | undefined {
+  return fakeSdk.lastOptions as CapturedOptions | undefined;
+}
 
 vi.mock('../../../orchestrator/mcpServer/scriptPath', () => ({
   resolveMcpServerScriptPath: vi.fn(() => '/mock/mcp-server.js'),
@@ -116,7 +102,7 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
   let logger: LoggerSpy;
 
   beforeEach(() => {
-    capturedQueryOptions = null;
+    fakeSdk.reset();
     db = createTestDb();
     logger = makeProdLoggerSpy();
     const adapter = dbAdapter(db);
@@ -158,8 +144,8 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     // Wait for the SDK iterator to complete.
     await new Promise<void>((r) => setTimeout(r, 0));
 
-    expect(capturedQueryOptions).not.toBeNull();
-    const append = capturedQueryOptions?.systemPrompt?.append;
+    expect(fakeSdk.lastOptions).toBeDefined();
+    const append = capturedOptions()?.systemPrompt?.append;
     expect(append).toBe('global instruction\n\nper-spawn instruction');
   });
 
@@ -186,7 +172,7 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
 
     await new Promise<void>((r) => setTimeout(r, 0));
 
-    const append = capturedQueryOptions?.systemPrompt?.append;
+    const append = capturedOptions()?.systemPrompt?.append;
     expect(append).toBe('only per-spawn');
   });
 
@@ -213,7 +199,7 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
 
     await new Promise<void>((r) => setTimeout(r, 0));
 
-    const append = capturedQueryOptions?.systemPrompt?.append;
+    const append = capturedOptions()?.systemPrompt?.append;
     expect(append).toBe('global instruction');
   });
 
@@ -239,7 +225,7 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
 
     await new Promise<void>((r) => setTimeout(r, 0));
 
-    const append = capturedQueryOptions?.systemPrompt?.append;
+    const append = capturedOptions()?.systemPrompt?.append;
     expect(append === undefined || append === null).toBe(true);
   });
 
@@ -368,7 +354,7 @@ describe('TypedEventNarrowing convergence (TASK-730)', () => {
   let logger: LoggerSpy;
 
   beforeEach(() => {
-    capturedQueryOptions = null;
+    fakeSdk.reset();
     // FK enforcement off: raw_events rows can reference a panelId run_id
     // without seeding the workflows → workflow_runs FK chain.
     db = createTestDb({ disableForeignKeys: true });
@@ -390,9 +376,13 @@ describe('TypedEventNarrowing convergence (TASK-730)', () => {
     // that the Zod schema cannot parse. TypedEventNarrowing.narrow() must
     // return { kind: '__unknown__', raw: { type: 'completely_unknown_variant_xyz', ... } }
     // and RawEventsSink must persist that object as payload_json.
-    sdkYields.mockImplementationOnce(async function* () {
-      yield { type: 'completely_unknown_variant_xyz', timestamp: '2026-05-22T00:00:00Z' } as unknown;
-    });
+    // A deliberately malformed event (not a builder) so the narrower must fall
+    // back to { kind: '__unknown__' }; the cast is intrinsic to the test.
+    fakeSdk.setImplementation(() =>
+      (async function* () {
+        yield { type: 'completely_unknown_variant_xyz', timestamp: '2026-05-22T00:00:00Z' } as unknown as SDKMessage;
+      })(),
+    );
 
     const sessionManager = createMockSessionManager();
     const mgr = new ClaudeCodeManager(
@@ -437,19 +427,9 @@ describe('TypedEventNarrowing convergence (TASK-730)', () => {
   });
 
   it('well-formed SDK event → narrow() produces typed variant (not __unknown__) in raw_events', async () => {
-    // Override sdkYields to emit a fully-valid result event (all required fields
-    // per resultSuccessSchema: is_error, duration_ms, num_turns). The minimal
-    // { type: 'result', subtype: 'success' } shape fails Zod validation because
-    // resultBaseFields requires these numeric fields.
-    sdkYields.mockImplementationOnce(async function* () {
-      yield {
-        type: 'result',
-        subtype: 'success',
-        is_error: false,
-        duration_ms: 100,
-        num_turns: 1,
-      } as unknown;
-    });
+    // A fully-valid result event from the shared typed builder (all required
+    // fields per resultSuccessSchema), so the narrower yields a typed variant.
+    fakeSdk.setMessages([sdkResultSuccess()]);
 
     const sessionManager = createMockSessionManager();
     const mgr = new ClaudeCodeManager(
@@ -494,7 +474,7 @@ describe('TASK-758: AskUserQuestion wiring', () => {
   let logger: LoggerSpy;
 
   beforeEach(() => {
-    capturedQueryOptions = null;
+    fakeSdk.reset();
     db = createTestDb();
     logger = makeProdLoggerSpy();
     const adapter = dbAdapter(db);
@@ -535,13 +515,8 @@ describe('TASK-758: AskUserQuestion wiring', () => {
 
     await new Promise<void>((r) => setTimeout(r, 0));
 
-    expect(capturedQueryOptions).not.toBeNull();
-    // Cast to access the full runtime shape — TypeScript narrowing on
-    // capturedQueryOptions is intentionally conservative.
-    const opts = capturedQueryOptions as unknown as {
-      toolConfig?: { askUserQuestion?: { previewFormat?: string } };
-    };
-    expect(opts.toolConfig?.askUserQuestion?.previewFormat).toBe('markdown');
+    expect(fakeSdk.lastOptions).toBeDefined();
+    expect(capturedOptions()?.toolConfig?.askUserQuestion?.previewFormat).toBe('markdown');
   });
 
   // ─── routeAskUserQuestion happy path: updatedInput shape ─────────────────
