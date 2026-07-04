@@ -654,6 +654,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
             CYBOFLOW_RUN_ID: runId,
             CYBOFLOW_ORCH_SOCKET: this.orchSocketPath,
           },
+          // Parity with the SDK substrate: CLI ≥2.1.142 made MCP startup
+          // non-blocking by default; block startup until the socket server is
+          // connected so turn-1 cyboflow_* calls don't race its readiness. The
+          // user's global claude CLI owns connect semantics here (resolved via
+          // getCliExecutablePath, not the bundled SDK binary).
+          alwaysLoad: true,
         },
       },
     };

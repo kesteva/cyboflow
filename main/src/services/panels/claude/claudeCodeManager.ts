@@ -1395,6 +1395,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
             CYBOFLOW_RUN_ID: (options.runId && options.runId.length > 0) ? options.runId : options.sessionId,
             CYBOFLOW_ORCH_SOCKET: this.orchSocketPath,
           },
+          // SDK 0.3.142 made MCP startup non-blocking by default; block startup
+          // until the injected socket server is connected so turn-1 cyboflow_*
+          // tool calls don't race its readiness.
+          alwaysLoad: true,
         };
         // Key literal kept as a string so grep-based AC checks can verify it.
         mcpServers["cyboflow"] = cyboflowEntry;
