@@ -6,23 +6,60 @@
  *
  * This harness MUST NOT be used in production code.
  */
-import Database from 'better-sqlite3';
+import { randomUUID } from 'node:crypto';
+import type Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import type { Options, HookCallback, PreToolUseHookInput } from '@anthropic-ai/claude-agent-sdk';
+import type {
+  Options,
+  HookCallback,
+  PreToolUseHookInput,
+  SDKMessage,
+  SDKUserMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 import { WorkflowRegistry } from '../../main/src/orchestrator/workflowRegistry';
 import { RunLauncher } from '../../main/src/orchestrator/runLauncher';
 import type { OrchSocketProvider, BridgeScriptResolver, NodeResolver } from '../../main/src/orchestrator/runLauncher';
 import { McpConfigWriter } from '../../main/src/orchestrator/mcpConfigWriter';
 import { WorktreeManager } from '../../main/src/services/worktreeManager';
 import { ApprovalRouter } from '../../main/src/orchestrator/approvalRouter';
+import { DatabaseService } from '../../main/src/database/database';
 import type { CyboflowWorkflowName } from '../../shared/types/workflows';
 import type { ApprovalDecision } from '../../shared/types/approval';
-import { GATE_SCHEMA } from '../../main/src/database/__test_fixtures__/registrySchema';
 import { dbAdapter } from '../../main/src/orchestrator/__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../../main/src/orchestrator/__test_fixtures__/loggerLikeSpy';
+
+// ---------------------------------------------------------------------------
+// Injectable SDK query — the single seam a caller substitutes a fake at.
+// ---------------------------------------------------------------------------
+
+/**
+ * The SDK `query()` shape the harness invokes. Structurally identical to
+ * fakeSdk's `FakeQueryFn` (`main/src/test/fakes/fakeSdk.ts`) so a later milestone
+ * can plug a per-run fake (e.g. `makeFakeQueryFromRegistry`, which dispatches off
+ * the run id the harness stamps into `options.env.CYBOFLOW_RUN_ID`) with no
+ * adapter. `options` is REQUIRED (production always passes it) and the return is a
+ * plain `AsyncGenerator<SDKMessage, void>` — the type the SDK `Query` interface
+ * extends and the only surface the harness async-iterates. The real
+ * `@anthropic-ai/claude-agent-sdk` `query` is assignable to this (its `options` is
+ * optional and its `Query` return extends the generator).
+ */
+export type HarnessQueryFn = (params: {
+  prompt: string | AsyncIterable<SDKUserMessage>;
+  options: Options;
+}) => AsyncGenerator<SDKMessage, void>;
+
+export interface CreateHarnessOptions {
+  /**
+   * Substitute the SDK `query()`. Defaults to the real
+   * `@anthropic-ai/claude-agent-sdk` `query` — so `createHarness()` with no args
+   * exercises a live `claude` exactly as before. Pass a fake (per-run dispatch is
+   * trivial via the stamped `CYBOFLOW_RUN_ID`) to drive the harness deterministically.
+   */
+  query?: HarnessQueryFn;
+}
 
 // ---------------------------------------------------------------------------
 // Spy logger — calls array is unused by the harness itself but available to
@@ -66,14 +103,54 @@ interface ActiveRun {
   queryDone: Promise<void>;
 }
 
+/** process.env (undefined values stripped) plus `CYBOFLOW_RUN_ID = runId`. */
+function envWithRunId(runId: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value === 'string') env[key] = value;
+  }
+  env.CYBOFLOW_RUN_ID = runId;
+  return env;
+}
+
+/**
+ * Insert a minimal session row hosting one run and return its id. `worktree_path`
+ * points at the project's git worktree so RunLauncher.resolveSessionHostedWorktree
+ * can resolve a branch + HEAD from it. Only the NOT-NULL columns are populated;
+ * every other session column takes its schema default.
+ */
+function seedSession(
+  db: Database.Database,
+  projectId: number,
+  worktreePath: string,
+  nameHint: string,
+): string {
+  const sessionId = `sess-${randomUUID()}`;
+  db.prepare(
+    `INSERT INTO sessions (id, name, initial_prompt, worktree_name, worktree_path, project_id)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(sessionId, `${nameHint} session`, `${nameHint} gate run`, nameHint, worktreePath, projectId);
+  return sessionId;
+}
+
 // ---------------------------------------------------------------------------
 // createHarness
 // ---------------------------------------------------------------------------
 
-export async function createHarness(): Promise<CyboflowTestHarness> {
-  // In-memory SQLite DB
-  const db = new Database(':memory:');
-  db.exec(GATE_SCHEMA);
+export async function createHarness(options: CreateHarnessOptions = {}): Promise<CyboflowTestHarness> {
+  // Real migration-replay: a fresh temp-file DB run through the production
+  // DatabaseService.initialize() (schema.sql + every NNN_*.sql migration, in
+  // order, PLUS the imperatively-created `projects`/`sessions` tables that the
+  // .sql files never declare). This replaces the drifted GATE_SCHEMA fixture with
+  // the exact schema WorkflowRegistry.createRun / RunLauncher.launch write against
+  // (substrate, execution_model, model, eval_enabled, session_id, spec_hash, …).
+  const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-gate-db-'));
+  const dbService = new DatabaseService(path.join(dbDir, 'gate.db'));
+  dbService.initialize();
+  const db = dbService.getDb();
+
+  // The SDK query seam (default: the real SDK query).
+  const queryFn: HarnessQueryFn = options.query ?? query;
 
   // Adapt better-sqlite3 to DatabaseLike interface
   const dbLike = dbAdapter(db);
@@ -162,6 +239,11 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
     const sdkOptions: Options = {
       cwd: worktreePath,
       includePartialMessages: true,
+      // Stamp the run id into the subprocess env so an injected registry-backed
+      // fake (fakeSdk.makeFakeQueryFromRegistry) can dispatch per run. A superset
+      // of process.env — behaviorally identical for the real claude spawn, which
+      // otherwise inherits the same env.
+      env: envWithRunId(runId),
       hooks: {
         PreToolUse: [{ hooks: [preToolUseHook] }],
       },
@@ -173,7 +255,7 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
 
     const queryDone = (async () => {
       try {
-        const q = query({ prompt, options: { ...sdkOptions, abortController } });
+        const q = queryFn({ prompt, options: { ...sdkOptions, abortController } });
         for await (const event of q) {
           if (abortController.signal.aborted) break;
           recordEvent(runId, event);
@@ -219,8 +301,14 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
       fs.writeFileSync(wfPathA, `# ${workflowA} workflow\n`, 'utf-8');
       fs.writeFileSync(wfPathB, `# ${workflowB} workflow\n`, 'utf-8');
 
-      // Use project_id=1 for this harness (no projects table in gate schema)
+      // Under the real migration-replay schema `workflows.project_id` carries a FK
+      // to `projects(id)` (the GATE_SCHEMA fixture deliberately omitted it), so a
+      // parent project row must exist before seeding workflows. Idempotent insert
+      // keyed on the projectPath (projects.path is UNIQUE).
       const PROJECT_ID = 1;
+      db.prepare(
+        'INSERT OR IGNORE INTO projects (id, name, path) VALUES (?, ?, ?)',
+      ).run(PROJECT_ID, 'cyboflow-gate', projectPath);
 
       workflowRegistry.seed(PROJECT_ID, [
         { name: workflowA, path: wfPathA },
@@ -250,9 +338,18 @@ export async function createHarness(): Promise<CyboflowTestHarness> {
         stubMcpConfigWriter, stubOrchSocketProvider, stubBridgeScriptResolver, stubNodeResolver,
       );
 
+      // Every run is session-hosted (permission-mode redesign slice 1b): launch
+      // now REQUIRES a sessionId and reuses that session's existing worktree
+      // (resolveSessionHostedWorktree reads sessions.worktree_path). Seed one
+      // session per run pointed at the project's git worktree so the two runs are
+      // independent (the one-running-at-a-time guard is per session) yet share the
+      // git repo the day-3 prompts operate on.
+      const sessionIdA = seedSession(db, PROJECT_ID, projectPath, workflowA);
+      const sessionIdB = seedSession(db, PROJECT_ID, projectPath, workflowB);
+
       const [launchA, launchB] = await Promise.all([
-        runLauncher.launch(wfRowA.id, projectPath),
-        runLauncher.launch(wfRowB.id, projectPath),
+        runLauncher.launch(wfRowA.id, projectPath, undefined, undefined, undefined, sessionIdA),
+        runLauncher.launch(wfRowB.id, projectPath, undefined, undefined, undefined, sessionIdB),
       ]);
 
       // Spawn both SDK queries concurrently
