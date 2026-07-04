@@ -143,6 +143,24 @@ describe('RunCenterPane', () => {
     expect(screen.queryByTestId('run-variant-pill')).not.toBeInTheDocument();
   });
 
+  it('renders the "A/B experiment · Arm <X>" chip when the active run carries experiment_id + experiment_arm', () => {
+    render(
+      <RunCenterPane
+        activeRunId="run-1"
+        phaseState={makePhaseState(DEFINITION)}
+        activeRun={makeRun({ experiment_id: 'exp-1', experiment_arm: 'A' })}
+      />,
+    );
+    expect(screen.getByTestId('run-experiment-chip')).toHaveTextContent('A/B experiment · Arm A');
+  });
+
+  it('omits the experiment chip for a non-experiment run (no experiment_id)', () => {
+    render(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    expect(screen.queryByTestId('run-experiment-chip')).not.toBeInTheDocument();
+  });
+
   it('hosts WorkflowCanvas for a normal run', () => {
     render(
       <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,

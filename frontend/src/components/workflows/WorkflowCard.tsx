@@ -37,6 +37,13 @@ export interface WorkflowCardProps {
   /** Duplicate this workflow into a new editable draft. Wired in P4. */
   onDuplicate?: (entry: WorkflowGalleryEntry) => void;
   /**
+   * Open the A/B test launcher (side-by-side experiment, migration 046/047)
+   * for this workflow. Omitted only hides the button — every workflow can be
+   * A/B tested once it has >=2 variants (the modal itself explains the
+   * "need two variants" state, so the card offers the action unconditionally).
+   */
+  onAbTest?: (entry: WorkflowGalleryEntry) => void;
+  /**
    * Delete this workflow. Only invoked for a DELETABLE card (see `deletable`
    * below) — a global built-in and the __quick__ sentinel never offer Delete,
    * mirroring the registry's `deleteWorkflow` guard. Omitting it hides the button.
@@ -81,6 +88,7 @@ export function WorkflowCard({
   onEdit,
   onDuplicate,
   onDelete,
+  onAbTest,
 }: WorkflowCardProps): React.JSX.Element {
   const { row, definition, meta, lastUsedAt, projectName } = entry;
   const used =
@@ -169,6 +177,11 @@ export function WorkflowCard({
               onClick={() => onDelete(entry)}
             />
           )}
+          <MiniButton
+            label="A/B Test"
+            testId={`workflow-card-ab-test-${row.id}`}
+            onClick={onAbTest !== undefined ? () => onAbTest(entry) : undefined}
+          />
           <MiniButton
             label="Run"
             accent

@@ -68,6 +68,20 @@ export function isPending(t: BacklogTaskItem): boolean {
 }
 
 /**
+ * Whether an entity is currently sandboxed inside a side-by-side A/B experiment
+ * (migration 047 — `experiment_id` stamped on CREATE, cleared only by
+ * `experiments.decide`'s promote path). Server-side `selectProjectBacklog`
+ * already excludes these rows by default, but a client selector is defense in
+ * depth against any read path that fetches entities directly (e.g. a stale
+ * cache, or a future surface that bypasses the server filter) — mirrors
+ * `isPending` / `isDecomposed`, which are likewise both server- and
+ * client-enforced.
+ */
+export function isExperimentSandboxed(t: BacklogTaskItem): boolean {
+  return (t.experiment_id ?? null) !== null;
+}
+
+/**
  * Narrow the full cross-project task list to what the board should render:
  *  - drop items belonging to other projects when `filterProjectId` is set
  *    (children share their epic's project, so the top-level check covers them);
@@ -86,14 +100,14 @@ export function filterTasks(
   filterProjectId: number | null,
   showArchived: boolean,
 ): BacklogTaskItem[] {
-  // A child the board must hide: pending/decomposed always, archived only while
-  // the archived toggle is off.
+  // A child the board must hide: pending/decomposed/experiment-sandboxed
+  // always, archived only while the archived toggle is off.
   const hideChild = (c: BacklogTaskItem): boolean =>
-    isPending(c) || isDecomposed(c) || (!showArchived && isArchived(c));
+    isPending(c) || isDecomposed(c) || isExperimentSandboxed(c) || (!showArchived && isArchived(c));
   const result: BacklogTaskItem[] = [];
   for (const t of tasks) {
     if (filterProjectId !== null && t.project_id !== filterProjectId) continue;
-    if (isDecomposed(t) || isPending(t)) continue;
+    if (isDecomposed(t) || isPending(t) || isExperimentSandboxed(t)) continue;
     if (!showArchived && isArchived(t)) continue;
     if (t.children !== undefined && t.children.some(hideChild)) {
       const children = t.children.filter((c) => !hideChild(c));

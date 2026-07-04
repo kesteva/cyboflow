@@ -11,6 +11,7 @@ import {
   isArchived,
   isDecomposed,
   isPending,
+  isExperimentSandboxed,
   filterTasks,
   countArchived,
   unifiedStages,
@@ -118,6 +119,14 @@ describe('isPending', () => {
   });
 });
 
+describe('isExperimentSandboxed', () => {
+  it('is true only when experiment_id is a non-null string', () => {
+    expect(isExperimentSandboxed(item())).toBe(false);
+    expect(isExperimentSandboxed(item({ experiment_id: null }))).toBe(false);
+    expect(isExperimentSandboxed(item({ experiment_id: 'exp-1' }))).toBe(true);
+  });
+});
+
 describe('filterTasks', () => {
   it('narrows to the filter project; null keeps all projects', () => {
     const tasks = [
@@ -154,6 +163,27 @@ describe('filterTasks', () => {
     expect(filterTasks([approved, pendingTask, pendingEpic], null, true).map((t) => t.id)).toEqual([
       'TASK-1',
     ]);
+  });
+
+  it('drops an experiment-sandboxed top-level item UNCONDITIONALLY — even with showArchived on', () => {
+    const visible = item({ id: 'IDEA-1', type: 'idea' });
+    const sandboxed = item({ id: 'IDEA-2', type: 'idea', experiment_id: 'exp-1' });
+    expect(filterTasks([visible, sandboxed], null, false).map((t) => t.id)).toEqual(['IDEA-1']);
+    expect(filterTasks([visible, sandboxed], null, true).map((t) => t.id)).toEqual(['IDEA-1']);
+  });
+
+  it('filters an experiment-sandboxed child out of an epic; rollups recomputed on the copy', () => {
+    const children = [
+      item({ id: 'TASK-c1', parent_epic_id: 'EPIC-1' }),
+      item({ id: 'TASK-c2', parent_epic_id: 'EPIC-1', experiment_id: 'exp-1' }),
+    ];
+    const epic = item({ id: 'EPIC-1', type: 'epic', children, childCount: 2, pendingTasks: 2 });
+    const [filtered] = filterTasks([epic], null, true);
+    expect(filtered).not.toBe(epic);
+    expect(filtered.children?.map((c) => c.id)).toEqual(['TASK-c1']);
+    expect(filtered.childCount).toBe(1);
+    // store object untouched
+    expect(epic.children).toHaveLength(2);
   });
 
   it('drops an archived epic together with its whole subtree unless showArchived', () => {

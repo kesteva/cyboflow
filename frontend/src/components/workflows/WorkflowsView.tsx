@@ -37,6 +37,7 @@ import { GalleryNew, type GalleryNewTemplate } from './GalleryNew';
 import { WorkflowsProjectFilter } from './WorkflowsProjectFilter';
 import { WorkflowEditorModal } from '../cyboflow/WorkflowEditorModal';
 import { AgentEditorModal } from '../cyboflow/agents/AgentEditorModal';
+import { ABTestLaunchModal } from '../cyboflow/ABTestLaunchModal';
 import type { WorkflowGalleryEntry, AgentGalleryEntry } from '../../stores/workflowsStore';
 import type { WorkflowDefinition, PermissionMode } from '../../../../shared/types/workflows';
 
@@ -199,6 +200,13 @@ export function WorkflowsView(): React.JSX.Element {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const deleteInFlightRef = useRef(false);
 
+  // ── A/B test launcher (Slice B thin launch UI) ──────────────────────────────
+  // The card's target workflow + the resolved launch project (mirrors
+  // onEditWorkflow's fallback for a GLOBAL flow with no project of its own).
+  const [abTestTarget, setAbTestTarget] = useState<{ projectId: number; workflowId: string } | null>(
+    null,
+  );
+
   /**
    * Resolve the project the New / cross-project actions target (v1):
    * the active `projectFilter` when set, else the first enumerated project.
@@ -327,6 +335,17 @@ export function WorkflowsView(): React.JSX.Element {
     })();
   };
 
+  // Open the A/B test launcher for a card. The launch project mirrors
+  // onEditWorkflow's fallback for a GLOBAL flow (project_id null, migration
+  // 030): the card's own project, else the resolved target project. With no
+  // project resolvable the launcher cannot open, so no-op (mirrors the New
+  // cards' no-project no-op).
+  const onAbTestWorkflow = (entry: WorkflowGalleryEntry): void => {
+    const targetProjectId = entry.row.project_id ?? resolveTargetProjectId();
+    if (targetProjectId === null) return;
+    setAbTestTarget({ projectId: targetProjectId, workflowId: entry.row.id });
+  };
+
   const onNewWorkflow = (): void => {
     const targetProjectId = resolveTargetProjectId();
     if (targetProjectId === null) return; // No projects — no-op.
@@ -415,6 +434,7 @@ export function WorkflowsView(): React.JSX.Element {
             onEditWorkflow={onEditWorkflow}
             onDuplicateWorkflow={onDuplicateWorkflow}
             onDeleteWorkflow={onDeleteWorkflow}
+            onAbTestWorkflow={onAbTestWorkflow}
             onNewWorkflow={onNewWorkflow}
             onEditAgent={onEditAgent}
             onNewAgent={onNewAgent}
@@ -528,6 +548,16 @@ export function WorkflowsView(): React.JSX.Element {
             </ModalFooter>
           </div>
         </Modal>
+      )}
+
+      {/* A/B test launcher (Slice B thin launch UI). */}
+      {abTestTarget !== null && (
+        <ABTestLaunchModal
+          isOpen
+          projectId={abTestTarget.projectId}
+          workflowId={abTestTarget.workflowId}
+          onClose={() => setAbTestTarget(null)}
+        />
       )}
 
       {/* Agent editor (edit or create). */}

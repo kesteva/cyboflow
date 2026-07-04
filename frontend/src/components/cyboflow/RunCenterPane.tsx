@@ -228,6 +228,34 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
             Variant: {activeRun.variant_label}
           </div>
         )}
+        {/* A/B side-by-side experiment chip (migration 047, slice B thin launch
+            UI) — reads the denormalized workflow_runs.experiment_id/experiment_arm
+            off the active run row. Absent for a non-experiment run. Deliberately
+            minimal (label + arm only); the full banner + "View comparison" link
+            is slice C's WorkflowSummaryPanel work. */}
+        {activeRun?.experiment_id && activeRun.experiment_arm && (
+          <div
+            data-testid="run-experiment-chip"
+            title={`A/B experiment · Arm ${activeRun.experiment_arm}`}
+            style={{
+              flexShrink: 0,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '0 11px',
+              fontSize: '10.5px',
+              fontWeight: 600,
+              letterSpacing: '-.005em',
+              color: 'var(--color-text-secondary)',
+              background: 'var(--color-bg-secondary)',
+              borderBottom: '1px solid var(--color-border-primary)',
+              borderLeft: '1px solid var(--color-border-primary)',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            A/B experiment · Arm {activeRun.experiment_arm}
+          </div>
+        )}
       </div>
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>{renderActiveTab()}</div>
       <TerminalDock

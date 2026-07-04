@@ -37,6 +37,7 @@ import { create } from 'zustand';
 import type { inferRouterOutputs } from '@trpc/server';
 import { trpc } from '../trpc/client';
 import type { AppRouter } from '../../../shared/types/trpc';
+import type { ExperimentArm } from '../../../shared/types/experiments';
 import { useCyboflowStore } from './cyboflowStore';
 
 // ---------------------------------------------------------------------------
@@ -74,6 +75,17 @@ const TERMINAL_RUN_STATUSES = new Set<string>(['completed', 'failed', 'canceled'
 export interface ActiveRunRow extends WorkflowRunListRow {
   /** Human-readable workflow name (e.g. "planner"), resolved from workflow_id. */
   workflowName: string;
+  /**
+   * Side-by-side experiment id (migration 047) — soft link to experiments.id.
+   * OPTIONAL, additive widening (mirrors `variant_label?` above): `runs.list`'s
+   * SQL projection (listRunsHandler) does not select this column yet, so it is
+   * `undefined` until that lands — RunCenterPane's experiment chip degrades
+   * silently (stays hidden) rather than drifting from the real payload shape.
+   * NULL/undefined for every non-experiment (or not-yet-surfaced) run.
+   */
+  experiment_id?: string | null;
+  /** Which arm of the experiment this run drives; same caveat as `experiment_id?` above. */
+  experiment_arm?: ExperimentArm | null;
 }
 
 export interface ActiveRunsState {
