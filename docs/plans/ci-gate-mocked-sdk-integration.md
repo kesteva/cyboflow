@@ -120,3 +120,12 @@
 1. **Quarantine within 24h.** A test that fails twice on *unrelated* PRs (i.e. the failure is not caused by the PR's own change) is renamed to the `*.quarantine.*` suffix within 24 hours, with a tracking task filed. This removes it from the blocking gate immediately so it stops taxing every unrelated PR.
 2. **Fix within one week.** The tracking task carries a one-week SLA to root-cause and fix (or delete) the test. A quarantined test is not a permanent parking spot — an unfixable test is deleted, not left to rot.
 3. **Promote back after two green nightlies.** Once fixed, the test is promoted back into the blocking suite (drop the `.quarantine` suffix) only after it has run green in the `flake-watch` job on **two consecutive nightlies** — the same bar `e2e.yml` uses before flipping the smoke tier to blocking.
+
+---
+
+## Follow-ups (recorded during implementation + review, 2026-07-03)
+
+- **Tier-3 write-side lifecycle coverage.** The `headlessRun` harness mirrors the M5 day-gate harness: it drives the injected `query()` through its own spawn loop, writing `workflow_runs.status` transitions and `raw_events` rows itself. The REAL code exercised per scenario is: WorkflowRegistry/RunLauncher run creation, ApprovalRouter/ReviewItemRouter co-writes, chokepoint routers, `ModelAvailabilityService`, `rollupRunUsage`, `WorkflowController`/`recoverActiveStateOrphans` (programmatic scenarios), and the full `TypedEventNarrowing`+`MessageProjection` read pipeline. NOT exercised: `RunExecutor.execute()`'s terminal seam and `RawEventsSink` write-side persistence (only `substrateParity.itest.ts` invokes a `RunExecutor` subclass, with stand-in managers; `modelFallback.itest.ts` constructs the real `ClaudeCodeManager` under a module mock). A follow-up milestone should extend the harness to run the real `RunExecutor` + `ClaudeCodeManager` beneath the fake query so status/count assertions in `happyPath`/`terminalError` stop round-tripping harness-written state.
+- **Re-record-and-diff canary** — TODO comment in `e2e.yml`; needs recorder/scrubber tooling (consistent-id map preserving `tool_use`↔`tool_result` pairing).
+- **M8 MCP-over-socket subprocess canary** — deferred as planned.
+- **headlessRun `makeCanUseTool` divergences** (recorded, accepted): no `isToolAllowed` allowlist fast-path; swallows non-`RunNotRunningError` errors where production rethrows. Fold in if the harness gains real-`ClaudeCodeManager` mode.
