@@ -43,9 +43,12 @@ export interface DefaultProgrammaticRunnerDeps {
    * build the ON-DEMAND monitor brain (triage + chat answer). When present the
    * monitor is registered in `MonitorRegistry` and wired into the host so a required
    * step's exhausted failure is triaged WITH full history and its rationale renders
-   * in the run's Chat pane. Absent ⇒ no monitor: exhausted required failures
-   * 'escalate' to the human review queue (the default, behavior-identical to the old
-   * ReviewQueueSupervisor). Opt-in via config `programmaticSupervisor: 'sdk'`.
+   * in the run's Chat pane. Absent — or returning undefined for this run — ⇒ no
+   * monitor: exhausted required failures 'escalate' to the human review queue (the
+   * default, behavior-identical to the old ReviewQueueSupervisor). Opt-in via config
+   * `programmaticSupervisor: 'sdk'`, which the production factory reads AT RUN START
+   * (returning undefined when 'review-queue') so a settings toggle applies to the
+   * next run without an app restart.
    *
    * The run context's `injectEvent` (Slice B) is threaded as the SECOND arg so the
    * built session OWNS its chat-inject capability (its `converse` renders the human
@@ -56,7 +59,7 @@ export interface DefaultProgrammaticRunnerDeps {
   monitorFactory?: (
     ctx: MonitorContext,
     injectEvent: (event: ClaudeStreamEvent) => void,
-  ) => MonitorSession;
+  ) => MonitorSession | undefined;
   /**
    * Per-step result sink (migration 033). When present, each settled step is
    * persisted (in production via StepResultStore.record) for queryable results +

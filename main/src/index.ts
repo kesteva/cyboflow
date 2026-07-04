@@ -997,10 +997,14 @@ async function initializeServices() {
     // ON-DEMAND monitor (the monitor-unify refactor): the single triage + chat
     // human-seam plane that folds the old Stage 3 supervisor + supervisor-chat
     // planes into one token-frugal `MonitorSession` rendering in the run's existing
-    // Chat pane. Opt-in via config (default 'review-queue'):
-    //   - 'review-queue' → NO factory: exhausted required failures 'escalate' to the
-    //     HUMAN review queue (the host's default; no live SDK call) and the Chat
-    //     composer stays disabled for the run — behavior-identical to before.
+    // Chat pane. Opt-in via config (default 'review-queue'), read PER RUN START —
+    // the factory is always wired but consults `programmaticSupervisor` when the
+    // runner calls it, so a Settings toggle applies to the next run without an app
+    // restart:
+    //   - 'review-queue' → the factory returns undefined: exhausted required
+    //     failures 'escalate' to the HUMAN review queue (the host's default; no
+    //     live SDK call) and the Chat composer stays disabled for the run —
+    //     behavior-identical to before.
     //   - 'sdk' → a `DefaultMonitorSession` over the real on-demand query fns
     //     (monitorQuery.ts) + a HistoryReader bound to cyboflowDb. The session reads
     //     the WHOLE run history ONLY when it must act (triage a failure / answer a
@@ -1010,27 +1014,25 @@ async function initializeServices() {
     //     the monitor's reply into the run's Chat pane (the tRPC `monitor.send` seam).
     //     The runner registers the session in MonitorRegistry so the router reaches
     //     it. NOT headlessly verifiable — it makes a real Claude call (monitorQuery.ts).
-    ...(configManager.getProgrammaticSupervisor() === 'sdk'
-      ? {
-          monitorFactory: ((): ((
-            ctx: MonitorContext,
-            injectEvent: (event: ClaudeStreamEvent) => void,
-          ) => MonitorSession) => {
-            const structuredQuery = makeSdkStructuredQuery(cyboflowLogger);
-            const textQuery = makeSdkTextQuery(cyboflowLogger);
-            const history = new DefaultHistoryReader(cyboflowDb, cyboflowLogger);
-            return (ctx, injectEvent) =>
-              new DefaultMonitorSession({
-                ctx,
-                history,
-                structuredQuery,
-                textQuery,
-                injectEvent,
-                logger: cyboflowLogger,
-              });
-          })(),
-        }
-      : {}),
+    monitorFactory: ((): ((
+      ctx: MonitorContext,
+      injectEvent: (event: ClaudeStreamEvent) => void,
+    ) => MonitorSession | undefined) => {
+      const structuredQuery = makeSdkStructuredQuery(cyboflowLogger);
+      const textQuery = makeSdkTextQuery(cyboflowLogger);
+      const history = new DefaultHistoryReader(cyboflowDb, cyboflowLogger);
+      return (ctx, injectEvent) => {
+        if (configManager.getProgrammaticSupervisor() !== 'sdk') return undefined;
+        return new DefaultMonitorSession({
+          ctx,
+          history,
+          structuredQuery,
+          textQuery,
+          injectEvent,
+          logger: cyboflowLogger,
+        });
+      };
+    })(),
     // Host-driven fan-out lane substrate (generalize-parallel-fan-out): builds a
     // per-run FanOutDriver bound to the run's batch_id so the WorkflowController can
     // resolve a fanOut step's item set + drive a sprint lane per item ON THE
