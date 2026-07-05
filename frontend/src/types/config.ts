@@ -1,6 +1,7 @@
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 
 export interface AppConfig {
   gitRepoPath: string;
@@ -21,6 +22,11 @@ export interface AppConfig {
   // 'programmatic'). Floors to 'orchestrated' when unset; the interactive
   // substrate always hard-pins 'orchestrated' regardless of this value.
   defaultExecutionModel?: ExecutionModel;
+  // Global default for where QUICK sessions work ('worktree' | 'in-place').
+  // Floors to 'worktree' when unset. The launch wizard's Advanced "Workspace"
+  // tri-state overrides it per launch; workflow-host sessions always pin
+  // 'worktree' regardless (ensureSessionForLaunch).
+  quickSessionWorktreeMode?: QuickSessionWorktreeMode;
   // Global on/off for the code-review eval (the K=3 Opus jury pass fired at a
   // built-in flow's human-review step). Absent/undefined = ENABLED. A per-run
   // Configure override (workflow_runs.eval_enabled) outranks this; NULL inherits it.

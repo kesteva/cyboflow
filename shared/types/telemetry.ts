@@ -61,6 +61,7 @@ export interface TelemetryEventMap {
   permission_mode_changed: { mode: PermissionMode };
   substrate_default_changed: { substrate: CliSubstrate };
   execution_model_default_changed: { executionModel: 'orchestrated' | 'programmatic' };
+  quick_worktree_mode_default_changed: { mode: 'worktree' | 'in-place' };
   theme_changed: { theme: 'paper' | 'light' | 'dark' };
   update_applied: { variant: 'stable' | 'dev' };
 }

@@ -1,6 +1,7 @@
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
+import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 
 export interface AppConfig {
   verbose?: boolean;
@@ -28,6 +29,12 @@ export interface AppConfig {
   // ignored on the interactive substrate (which hard-pins 'orchestrated'). NOT seeded into the
   // constructor defaults, so existing config.json files stay byte-identical.
   defaultExecutionModel?: ExecutionModel;
+  // Global default for where QUICK sessions work ('worktree' | 'in-place').
+  // Read via getQuickSessionWorktreeMode() (floor 'worktree') by the
+  // sessions:create-quick handler when the request omits worktreeMode. NOT
+  // seeded into constructor defaults, so existing config.json files stay
+  // byte-identical.
+  quickSessionWorktreeMode?: QuickSessionWorktreeMode;
   // Global on/off for the code-review eval (the K=3 Opus jury pass fired at the
   // sprint-review => human-review boundary). Absent/undefined = ENABLED (the eval
   // costs a real Opus jury pass per built-in flow run reaching human-review; users
@@ -105,6 +112,8 @@ export interface UpdateConfigRequest {
   defaultAgentPermissionMode?: PermissionMode;
   // Global default execution model for new SDK workflow runs ('orchestrated' | 'programmatic').
   defaultExecutionModel?: ExecutionModel;
+  // Global default for where QUICK sessions work (see AppConfig.quickSessionWorktreeMode).
+  quickSessionWorktreeMode?: QuickSessionWorktreeMode;
   // Global on/off for the code-review eval (see AppConfig.codeReviewEvalEnabled).
   codeReviewEvalEnabled?: boolean;
   // On-disk location for COMMITTED-artifact manifests (see AppConfig.artifactCommitDir).

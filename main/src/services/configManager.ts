@@ -4,6 +4,11 @@ import type { AppConfig } from '../types/config';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
+import {
+  type QuickSessionWorktreeMode,
+  DEFAULT_QUICK_SESSION_WORKTREE_MODE,
+  isQuickSessionWorktreeMode,
+} from '../../../shared/types/worktreeMode';
 import { DEFAULT_ARTIFACT_COMMIT_DIR } from '../../../shared/types/artifacts';
 import fs from 'fs/promises';
 import { readFileSync } from 'node:fs';
@@ -324,6 +329,21 @@ export class ConfigManager extends EventEmitter {
    */
   getDefaultExecutionModel(): ExecutionModel | null {
     return this.config.defaultExecutionModel ?? null;
+  }
+
+  /**
+   * Global default for where QUICK sessions work: 'worktree' (dedicated git
+   * worktree, the isolation every other feature assumes) or 'in-place' (work
+   * directly in the project checkout — sessions.in_place, migration 046).
+   * Floors to 'worktree' when unset OR when the persisted value is not a valid
+   * mode (config.json is user-editable). Read by the sessions:create-quick
+   * handler when the request omits worktreeMode; the wizard's per-launch
+   * Advanced override outranks it. NOT seeded into the constructor defaults,
+   * so existing config.json files stay byte-identical.
+   */
+  getQuickSessionWorktreeMode(): QuickSessionWorktreeMode {
+    const value = this.config.quickSessionWorktreeMode;
+    return isQuickSessionWorktreeMode(value) ? value : DEFAULT_QUICK_SESSION_WORKTREE_MODE;
   }
 
   /**
