@@ -11,6 +11,7 @@ import type { Session } from '../types/session';
 import type { ToolPanel } from '../../../shared/types/panels';
 import type { DatabaseService } from '../database/database';
 import type { Project } from '../database/models';
+import { getCurrentBranch } from './gitPlumbingCommands';
 
 /**
  * Generate a deterministic session name from a prompt string.
@@ -64,6 +65,13 @@ interface CreateSessionJob {
   toolType?: 'claude' | 'none';
   commitMode?: 'structured' | 'checkpoint' | 'disabled';
   commitModeSettings?: string; // JSON string of CommitModeSettings
+  /**
+   * In-place session (migration 046): skip worktree provisioning and run the
+   * session DIRECTLY in the project checkout (sessions.in_place = 1). When set the
+   * processor uses targetProject.path as the worktreePath and never calls
+   * worktreeManager.createWorktree. Absent/false = the default worktree-backed flow.
+   */
+  inPlace?: boolean;
   claudeConfig?: {
     model?: string;
     permissionMode?: 'approve' | 'ignore';
@@ -135,7 +143,7 @@ export class TaskQueue {
     const sessionConcurrency = isLinux ? 1 : 5;
 
     this.sessionQueue.process(sessionConcurrency, async (job) => {
-      const { prompt, worktreeTemplate, index, permissionMode, projectId, baseBranch, autoCommit, toolType, claudeConfig } = job.data;
+      const { prompt, worktreeTemplate, index, permissionMode, projectId, baseBranch, autoCommit, toolType, claudeConfig, inPlace } = job.data;
       const { sessionManager, worktreeManager } = this.options;
 
       // Processing session creation job - verbose debug logging removed
@@ -195,7 +203,27 @@ export class TaskQueue {
         worktreeName = uniqueWorktreeName;
 
 
-        const { worktreePath, baseCommit, baseBranch: actualBaseBranch } = await worktreeManager.createWorktree(targetProject.path, worktreeName, undefined, baseBranch, targetProject.worktree_folder || undefined);
+        // In-place sessions (migration 046) work DIRECTLY in the project checkout —
+        // no dedicated worktree is provisioned. worktreePath is the project path, and
+        // the base commit/branch are read from that live checkout (both fail-soft:
+        // a repo with no commits yet or an unreadable ref leaves them undefined,
+        // mirroring the worktree path's optional base fields). Everything downstream
+        // (ensureUniqueNames, ensureDiffPanel, emitSessionCreated, build script) is
+        // identical — running the build script in the project root is acceptable here.
+        let worktreePath: string;
+        let baseCommit: string | undefined;
+        let actualBaseBranch: string | undefined;
+        if (inPlace) {
+          worktreePath = targetProject.path;
+          try {
+            baseCommit = await worktreeManager.getHeadCommit(targetProject.path);
+          } catch {
+            baseCommit = undefined;
+          }
+          actualBaseBranch = getCurrentBranch(targetProject.path) ?? undefined;
+        } else {
+          ({ worktreePath, baseCommit, baseBranch: actualBaseBranch } = await worktreeManager.createWorktree(targetProject.path, worktreeName, undefined, baseBranch, targetProject.worktree_folder || undefined));
+        }
 
         const session = await sessionManager.createSession(
           sessionName,
@@ -211,7 +239,8 @@ export class TaskQueue {
           baseCommit,
           actualBaseBranch,
           job.data.commitMode,
-          job.data.commitModeSettings
+          job.data.commitModeSettings,
+          inPlace
         );
 
         // Attach claudeConfig to the session object for the panel creation in events.ts

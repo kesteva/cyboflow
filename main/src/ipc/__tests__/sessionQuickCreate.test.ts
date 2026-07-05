@@ -241,8 +241,10 @@ function makeServices(opts?: {
     archiveProgressManager: undefined,
     // Demo-mode probe used by the eager-spawn + sessions:input interactive
     // branches (gates the real PTY spawn/relay). Off in these tests so the live
-    // interactive path runs as before.
-    configManager: { isDemoMode: () => false },
+    // interactive path runs as before. getQuickSessionWorktreeMode (migration 046)
+    // is read by create-quick to decide worktree vs in-place — floored to 'worktree'
+    // here so these tests exercise the ordinary worktree-backed path.
+    configManager: { isDemoMode: () => false, getQuickSessionWorktreeMode: () => 'worktree' },
     cyboflow: {
       workflowRegistry: fakeWorkflowRegistry,
       runLauncher: {},

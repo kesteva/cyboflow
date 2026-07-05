@@ -30,6 +30,8 @@ import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
 import { pruneSessionOnlyArtifacts } from '../orchestrator/artifactLifecycle';
 import { isCliSubstrate } from '../../../shared/types/substrate';
+import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
+import { resolveSubstrate } from '../orchestrator/substrateResolver';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 import { InteractiveSettingsWriter } from '../services/panels/claude/interactiveSettingsWriter';
 import { encodeCwd } from '../services/panels/claude/transcript/encodeCwd';
@@ -452,16 +454,56 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const requestedModel = typeof request.claudeConfig?.model === 'string' ? request.claudeConfig.model : undefined;
       const requestedFastMode = request.claudeConfig?.fastMode === true;
 
+      // Resolve where this quick session works (migration 046): the per-launch
+      // request wins when valid, otherwise the global Settings default (which
+      // floors to 'worktree'). An in-place session skips worktree provisioning
+      // and runs directly in the project checkout.
+      const worktreeMode = isQuickSessionWorktreeMode(request.worktreeMode)
+        ? request.worktreeMode
+        : configManager.getQuickSessionWorktreeMode();
+      const inPlace = worktreeMode === 'in-place';
+
+      // In-place sessions are SDK-ONLY. The interactive PTY substrate writes a
+      // PreToolUse hook into `<worktree>/.claude/settings.json` (interactiveSettingsWriter);
+      // for an in-place session that worktree IS the user's real checkout, so the
+      // spawn would mutate a possibly-tracked file. Pre-resolve the substrate the
+      // sentinel run WOULD get (mirrors WorkflowRegistry.createRun: a forced pin —
+      // demo → 'sdk', the interactivePtyOnly lock → 'interactive' — outranks the
+      // override ladder) and reject BEFORE creating anything if it would be
+      // interactive. (createRun's demo-honors-interactive carve-out is deliberately
+      // NOT mirrored: it only fires in demo mode, where no real REPL spawns and no
+      // real checkout is touched.)
+      if (inPlace) {
+        const forcedSubstrate = configManager.getForcedSubstrate?.() ?? null;
+        const effectiveSubstrate = forcedSubstrate ?? resolveSubstrate({
+          requestedSubstrate,
+          globalDefaultSubstrate: configManager.getDefaultSubstrate(),
+          env: process.env,
+        });
+        if (effectiveSubstrate === 'interactive') {
+          return {
+            success: false,
+            error: 'In-place quick sessions require the SDK runtime. Choose the SDK runtime, or use a worktree-backed session.',
+          };
+        }
+      }
+
       const job = await taskQueue.createSession({
         prompt: '',
         worktreeTemplate: branchName,
         projectId: targetProject.id,
         folderId: request.folderId,
         baseBranch: request.baseBranch,
-        autoCommit: request.autoCommit,
+        // In-place sessions share the user's real checkout, so checkpoint
+        // auto-commit (a `git add -A` in the session cwd) must never run — it
+        // would sweep the user's unrelated dirty files. Force it off here (the
+        // request's own autoCommit/commitMode are ignored for in-place) and rely
+        // on the executionTracker backstop (§5) for later per-session edits.
+        autoCommit: inPlace ? false : request.autoCommit,
         toolType,
-        commitMode: request.commitMode,
+        commitMode: inPlace ? 'disabled' : request.commitMode,
         commitModeSettings: request.commitModeSettings,
+        inPlace,
         claudeConfig: request.claudeConfig
       });
 
@@ -474,9 +516,21 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // until the matching session arrives or the timeout fires.
       const session = await new Promise<import('../types/session').Session>((resolve, reject) => {
         const suffixed = new RegExp(`/${branchName}-\\d+$`);
+        // In-place sessions (migration 046) have worktreePath === the project
+        // path, never `/${branchName}`, so the path match above can never fire for
+        // them and the promise would time out. Fall back to the session NAME:
+        // TaskQueue sets it to the worktree template (branchName); ensureUniqueNames
+        // may append a ` <n>` (name) / `-<n>` (worktree) suffix on a same-name
+        // collision. Scoped to in-place so normal worktree sessions keep matching
+        // by path exactly as before.
+        const nameSuffixed = new RegExp(`^${branchName}[ -]\\d+$`);
         const onCreated = (createdSession: import('../types/session').Session) => {
           const wt = createdSession.worktreePath ?? '';
-          const matches = wt.endsWith(`/${branchName}`) || suffixed.test(wt);
+          const name = createdSession.name ?? '';
+          const matches =
+            wt.endsWith(`/${branchName}`) ||
+            suffixed.test(wt) ||
+            (inPlace && (name === branchName || nameSuffixed.test(name)));
           if (!matches) return;
           clearTimeout(timeout);
           sessionManager.removeListener('session-created', onCreated);
@@ -871,8 +925,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const cleanupCallback = async () => {
         let cleanupMessage = '';
         
-        // Clean up the worktree if session has one (but not for main repo sessions)
-        if (dbSession.worktree_name && dbSession.project_id && !dbSession.is_main_repo) {
+        // Clean up the worktree if session has one, but NOT for main-repo sessions
+        // (singleton dashboard) or in-place sessions (migration 046) — an in-place
+        // session's worktree_path IS the user's real checkout, which must never be
+        // torn down by `git worktree remove`.
+        if (dbSession.worktree_name && dbSession.project_id && !dbSession.is_main_repo && !dbSession.in_place) {
           const project = databaseService.getProject(dbSession.project_id);
           if (project) {
             try {
@@ -925,8 +982,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         }
       };
 
-      // Queue the cleanup task if we have worktree cleanup to do
-      if (dbSession.worktree_name && dbSession.project_id && !dbSession.is_main_repo) {
+      // Queue the cleanup task if we have worktree cleanup to do. In-place
+      // sessions (migration 046) have no worktree to remove — route them to the
+      // immediate artifact-only cleanup instead of a bogus "cleaning worktree"
+      // progress task (the callback's own guard would skip the removal anyway).
+      if (dbSession.worktree_name && dbSession.project_id && !dbSession.is_main_repo && !dbSession.in_place) {
         const project = databaseService.getProject(dbSession.project_id);
         if (project && archiveProgressManager) {
           archiveProgressManager.addTask(
