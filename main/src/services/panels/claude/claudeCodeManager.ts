@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { randomUUID } from 'crypto';
 import { app } from 'electron';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
@@ -52,6 +53,15 @@ import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelPro
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
 import type { FastModeState, FastModeStateNotice } from '../../../../../shared/types/panels';
 import { isPermissionMode, type PermissionMode } from '../../../../../shared/types/workflows';
+
+/**
+ * PreToolUse hook timeout in SECONDS (SDK HookCallbackMatcher.timeout unit).
+ * Human gates (AskUserQuestion sign-off, permission approvals) legitimately sit
+ * unanswered for a long time; the CLI's default hook timeout is 600s, which
+ * killed a ship run's final sign-off gate after exactly 10 minutes (2026-07-05).
+ * 24h is effectively "wait for the human" without being literally unbounded.
+ */
+const PRE_TOOL_USE_HOOK_TIMEOUT_SECONDS = 86_400;
 
 /**
  * MODEL-ELIGIBILITY GUARD for native auto-mode.
@@ -1568,7 +1578,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
     return {
       hooks: {
-        PreToolUse: [{ hooks: [hook] }],
+        PreToolUse: [{ hooks: [hook], timeout: PRE_TOOL_USE_HOOK_TIMEOUT_SECONDS }],
       },
       canUseTool: this.makeCanUseTool(gateRunId, allowRules),
     };
@@ -1781,6 +1791,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * failed: ZodError …" tool_result (NOT a denial; the agent then loops, retrying
    * the tool). So echo the reviewer's modified input when present, else the original
    * tool `input` unchanged:
+   *   - AskUserQuestion → QuestionRouter (see below), NEVER ApprovalRouter;
    *   - allowlist short-circuit (defense-in-depth: honor user/project grants even on
    *     the auto path) → { behavior: 'allow', updatedInput: input };
    *   - allow → { behavior: 'allow', updatedInput: decision.updatedInput ?? input };
@@ -1793,11 +1804,58 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * hook (the classifier auto-allows a benign Task dispatch, so canUseTool would
    * never fire for it).
    *
+   * AskUserQuestion FALL-THROUGH FIX (2026-07-05 production bug): the
+   * PreToolUse hook (makeDynamicPreToolUseHook) routes AskUserQuestion to
+   * QuestionRouter and awaits the human's answer, which can legitimately take
+   * far longer than the CLI's default 600s hook timeout (see
+   * PRE_TOOL_USE_HOOK_TIMEOUT_SECONDS). Before that constant was raised, a gate
+   * left unanswered for 10 minutes would time out the hook, and the CLI fell
+   * through to THIS callback — which, with no special case, treated
+   * AskUserQuestion as an ordinary permission request and sent it to
+   * ApprovalRouter, which has no pending approval for a question gate and
+   * denies with 'Run not active'. So canUseTool now special-cases
+   * AskUserQuestion FIRST (before the allowlist check) and routes it through
+   * QuestionRouter.requestQuestion, mirroring routeAskUserQuestion: on success,
+   * `{ behavior: 'allow', updatedInput: { questions, answers, ...annotations } }`;
+   * on ANY error (including RunNotRunningError), a deny with a
+   * retry-oriented message — never routed to ApprovalRouter.
+   *
    * MUTUAL EXCLUSION: canUseTool ⊥ permissionPromptToolName (the SDK throws at
    * runtime if both are set). cyboflow sets permissionPromptToolName NOWHERE.
    */
   private makeCanUseTool(gateRunId: string, allowRules: MergedPermissionRules): CanUseTool {
+    const loggerLike = makeLoggerLike(this.logger);
     return async (toolName, input, _opts): Promise<PermissionResult> => {
+      // AskUserQuestion is a content question, not a permission request — route it
+      // through QuestionRouter BEFORE the allowlist/ApprovalRouter path (see the
+      // AskUserQuestion FALL-THROUGH FIX note above). CanUseTool's options carry no
+      // tool_use_id, so synthesize one for the router's pending-answer keying.
+      if (toolName === 'AskUserQuestion') {
+        const { questions } = input as unknown as { questions: QuestionPayload[] };
+        const toolUseId = `canusetool-${randomUUID()}`;
+        try {
+          const answer = await QuestionRouter.getInstance().requestQuestion(
+            gateRunId,
+            toolUseId,
+            questions,
+            () => {}, // socketReply is a no-op on the SDK path (the decision arrives via the gate)
+          );
+          return {
+            behavior: 'allow',
+            updatedInput: {
+              questions,
+              answers: answer.answers,
+              ...(answer.annotations ? { annotations: answer.annotations } : {}),
+            },
+          };
+        } catch (err) {
+          loggerLike.error(
+            `[ClaudeCodeManager] canUseTool AskUserQuestion routing failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+          return { behavior: 'deny', message: 'Question gate unavailable — retry AskUserQuestion' };
+        }
+      }
+
       // Defense-in-depth: honor the user/project allowlist even on the auto path.
       // `updatedInput: input` echoes the original tool input unchanged — MANDATORY
       // on the allow branch (the CLI's can_use_tool response schema requires a

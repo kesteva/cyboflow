@@ -347,6 +347,128 @@ describe('ClaudeCodeManager canUseTool — auto-mode prompting (ApprovalDecision
 });
 
 // ---------------------------------------------------------------------------
+// canUseTool — AskUserQuestion routes to QuestionRouter, NEVER ApprovalRouter.
+//
+// Production bug (2026-07-05): the CLI's default 600s PreToolUse hook timeout
+// killed a long-unanswered AskUserQuestion sign-off gate; the CLI then fell
+// through to canUseTool, which (before this fix) had no AskUserQuestion special
+// case and routed it through the allowlist/ApprovalRouter path — ApprovalRouter
+// has no pending approval for a question gate, so it denied with 'Run not
+// active'. canUseTool now special-cases AskUserQuestion FIRST, mirroring
+// routeAskUserQuestion (the hook's own AskUserQuestion path).
+// ---------------------------------------------------------------------------
+
+describe('ClaudeCodeManager canUseTool — AskUserQuestion routes to QuestionRouter', () => {
+  let db: Database.Database;
+  let logger: LoggerSpy;
+  let mgr: TestableClaudeCodeManager;
+  let requestApproval: ReturnType<typeof vi.fn>;
+  let approvalSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    db = buildModeDb();
+    logger = makeProdLoggerSpy();
+    const adapter = dbAdapter(db);
+    ApprovalRouter.initialize(adapter);
+    QuestionRouter.initialize(adapter);
+    mgr = new TestableClaudeCodeManager(
+      createMockSessionManager(),
+      logger as unknown as Logger,
+      makeConfigManager(),
+      db,
+    );
+    requestApproval = vi.fn().mockResolvedValue({ behavior: 'allow' as const });
+    approvalSpy = vi
+      .spyOn(ApprovalRouter, 'getInstance')
+      .mockReturnValue({ requestApproval } as unknown as ApprovalRouter);
+  });
+
+  afterEach(() => {
+    approvalSpy.mockRestore();
+    ApprovalRouter._resetForTesting();
+    QuestionRouter._resetForTesting();
+    db.close();
+    vi.clearAllMocks();
+  });
+
+  /** Build options for an auto-supported run so canUseTool is directly reachable. */
+  async function autoOpts(
+    runId: string,
+    sessionUuid: string,
+    managerOverride?: TestableClaudeCodeManager,
+  ): Promise<Options> {
+    seedRunSession(db, runId, sessionUuid, 'auto');
+    return (managerOverride ?? mgr).publicBuildSdkOptions({
+      panelId: 'panel', sessionId: sessionUuid, worktreePath: '/tmp/w', prompt: 'go',
+      runId, model: 'sonnet',
+    });
+  }
+
+  const fakeQuestions = [
+    {
+      question: 'Which approach?',
+      header: 'Approach',
+      multiSelect: false,
+      options: [{ label: 'TDD', description: 'Test-driven' }],
+    },
+  ];
+
+  it('AskUserQuestion → QuestionRouter.requestQuestion → allow + updatedInput{questions, answers}', async () => {
+    const requestQuestion = vi.fn().mockResolvedValue({ answers: { 'Which approach?': 'TDD' } });
+    const questionSpy = vi
+      .spyOn(QuestionRouter, 'getInstance')
+      .mockReturnValue({ requestQuestion } as unknown as QuestionRouter);
+
+    const opts = await autoOpts('run-ask', 'sess-ask');
+    const res = await callCanUseTool(opts, 'AskUserQuestion', { questions: fakeQuestions });
+
+    expect(requestQuestion).toHaveBeenCalledTimes(1);
+    // gateRunId is the run id + a synthesized 'canusetool-<uuid>' toolUseId (the
+    // CanUseTool options carry no tool_use_id, unlike the PreToolUse hook input).
+    expect(requestQuestion).toHaveBeenCalledWith(
+      'run-ask', expect.stringMatching(/^canusetool-/), fakeQuestions, expect.any(Function),
+    );
+    expect(res).toEqual({
+      behavior: 'allow',
+      updatedInput: { questions: fakeQuestions, answers: { 'Which approach?': 'TDD' } },
+    });
+    // The key assertion for the production bug: AskUserQuestion never reaches
+    // ApprovalRouter, so it can never surface the bogus 'Run not active' deny.
+    expect(requestApproval).not.toHaveBeenCalled();
+
+    questionSpy.mockRestore();
+  });
+
+  it('AskUserQuestion → QuestionRouter rejects with RunNotRunningError → deny retry message, ApprovalRouter untouched', async () => {
+    const requestQuestion = vi.fn().mockRejectedValue(new RunNotRunningError('run-ask-dead'));
+    const questionSpy = vi
+      .spyOn(QuestionRouter, 'getInstance')
+      .mockReturnValue({ requestQuestion } as unknown as QuestionRouter);
+
+    // Pass undefined logger so makeLoggerLike falls back to the console shim
+    // (which has .error()) — the prod spy (makeProdLoggerSpy) only implements
+    // warn/info/verbose, matching the same workaround used by the sibling
+    // routeAskUserQuestion error-path test in claudeCodeManagerWiring.test.ts.
+    const errPathMgr = new TestableClaudeCodeManager(
+      createMockSessionManager(),
+      undefined,
+      makeConfigManager(),
+      db,
+    );
+    const opts = await autoOpts('run-ask-dead', 'sess-ask-dead', errPathMgr);
+    const res = await callCanUseTool(opts, 'AskUserQuestion', { questions: fakeQuestions });
+
+    expect(res).toEqual({
+      behavior: 'deny',
+      message: 'Question gate unavailable — retry AskUserQuestion',
+    });
+    expect(requestApproval).not.toHaveBeenCalled();
+
+    questionSpy.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // canUseTool — installed unconditionally + INERT in hook-decided modes
 // ---------------------------------------------------------------------------
 

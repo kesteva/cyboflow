@@ -23,7 +23,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type Database from 'better-sqlite3';
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKMessage, HookCallbackMatcher } from '@anthropic-ai/claude-agent-sdk';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../../orchestrator/questionRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
@@ -517,6 +517,36 @@ describe('TASK-758: AskUserQuestion wiring', () => {
 
     expect(fakeSdk.lastOptions).toBeDefined();
     expect(capturedOptions()?.toolConfig?.askUserQuestion?.previewFormat).toBe('markdown');
+  });
+
+  // ─── PreToolUse hook timeout (production bug: 600s CLI default killed a ────
+  // ─── 10-minute-unanswered human gate, falling through to canUseTool) ───────
+
+  it('composeHookOptions carries a PreToolUse matcher timeout of 86400s (24h), not the CLI 600s default', async () => {
+    const sessionManager = createMockSessionManager();
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      logger as unknown as Logger,
+      {
+        getSystemPromptAppend: vi.fn(() => undefined),
+        getConfig: vi.fn(() => ({ verbose: false })),
+      } as unknown as import('../../../configManager').ConfigManager,
+      db,
+    );
+
+    await mgr.spawnCliProcess({
+      panelId: 'panel-hook-timeout',
+      sessionId: 'session-hook-timeout',
+      worktreePath: '/tmp/test',
+      prompt: 'test PreToolUse hook timeout',
+      permissionMode: 'ignore',
+    });
+
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    const matchers = fakeSdk.lastOptions?.hooks?.PreToolUse as HookCallbackMatcher[] | undefined;
+    expect(matchers).toBeDefined();
+    expect(matchers?.[0]?.timeout).toBe(86_400);
   });
 
   // ─── routeAskUserQuestion happy path: updatedInput shape ─────────────────
