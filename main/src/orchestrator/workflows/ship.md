@@ -40,10 +40,11 @@ The pattern for every phase:
    to the database via the `cyboflow_*` tools. **Subagents never write cyboflow
    state — that is your job**, so single-writer invariants hold.
 
-**Hold the task ids in context.** There is no list-tasks tool. As you create each
-task you MUST remember its id and title so you can present the full set at
-`approve-plan` and pass the approved subset to materialize. Do not lose track of
-them between phases.
+**Hold the task ids in context.** As you create each task you MUST remember its
+id and title so you can present the full set at `approve-plan` and pass the
+approved subset to materialize. Do not lose track of them between phases. Before
+creating a new idea, check the existing backlog with `cyboflow_list_tasks` /
+`cyboflow_get_task` so you don't mint a duplicate of something already there.
 
 ### Phase 1 — Plan
 

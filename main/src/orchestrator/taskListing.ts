@@ -669,6 +669,30 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
 }
 
 /**
+ * Resolve a display ref (e.g. 'TASK-014', 'IDEA-009', 'EPIC-002') to its opaque
+ * backlog id, scoped to `projectId` so a ref belonging to another project can
+ * never resolve here (the caller — cyboflow_get_task's handler — treats a miss
+ * as not_found, never leaking cross-project existence). Table identity is the
+ * discriminator (migration 015): tries ideas -> epics -> tasks in turn and
+ * returns the first hit. Returns null when no table has a matching
+ * (project_id, ref) row.
+ *
+ * @param db        - Narrow DatabaseLike interface.
+ * @param projectId - The project the ref must belong to.
+ * @param ref       - The display ref to resolve (e.g. 'TASK-014').
+ */
+export function resolveBacklogRef(db: DatabaseLike, projectId: number, ref: string): string | null {
+  const tables = ['ideas', 'epics', 'tasks'] as const;
+  for (const table of tables) {
+    const row = db
+      .prepare(`SELECT id FROM ${table} WHERE project_id = ? AND ref = ?`)
+      .get(projectId, ref) as { id: string } | undefined;
+    if (row) return row.id;
+  }
+  return null;
+}
+
+/**
  * Return the full backlog as a nested tree:
  *   - Epics carry their child tasks under `children` (ASC by created_at), plus
  *     `childCount` and `pendingTasks` (children not yet done).

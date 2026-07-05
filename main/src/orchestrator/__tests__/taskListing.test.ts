@@ -18,6 +18,7 @@ import {
   selectTaskById,
   selectIdeaDecomposition,
   boardsForProject,
+  resolveBacklogRef,
 } from '../taskListing';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
@@ -485,5 +486,37 @@ describe('taskListing — dependency overlay', () => {
     const a = selectTaskById(dbAdapter(db), 'tsk_a')!;
     expect(a.readyToWork).toBe(false);
     expect(a.blockedBy).toEqual([{ taskId: 'tsk_b', ref: 'TASK-002', title: 'Title TASK-002' }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveBacklogRef (cyboflow_get_task's ref-resolution helper)
+// ---------------------------------------------------------------------------
+
+describe('taskListing — resolveBacklogRef', () => {
+  it('resolves an idea ref, an epic ref, and a task ref to their opaque ids', () => {
+    const db = buildDb();
+    const { ideaId, epicId, taskId } = seedFixture(db);
+
+    expect(resolveBacklogRef(dbAdapter(db), 1, 'IDEA-001')).toBe(ideaId);
+    expect(resolveBacklogRef(dbAdapter(db), 1, 'EPIC-001')).toBe(epicId);
+    expect(resolveBacklogRef(dbAdapter(db), 1, 'TASK-001')).toBe(taskId);
+  });
+
+  it('returns null for a ref that does not exist in any table', () => {
+    const db = buildDb();
+    seedFixture(db);
+
+    expect(resolveBacklogRef(dbAdapter(db), 1, 'TASK-999')).toBeNull();
+  });
+
+  it('does not resolve a ref that belongs to a different project', () => {
+    const db = buildDb();
+    seedFixture(db); // project 1: IDEA-001 / EPIC-001 / TASK-001
+    seedSecondProject(db); // project 2: IDEA-101 / TASK-101
+
+    // The ref exists, but scoped to project 1 it must not resolve project 2's row.
+    expect(resolveBacklogRef(dbAdapter(db), 1, 'IDEA-101')).toBeNull();
+    expect(resolveBacklogRef(dbAdapter(db), 2, 'IDEA-101')).not.toBeNull();
   });
 });

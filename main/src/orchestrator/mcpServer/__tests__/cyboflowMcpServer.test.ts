@@ -505,6 +505,107 @@ describe('cyboflowMcpServer CallTool cyboflow_resolve_finding validation', () =>
 // cyboflow_create_task / cyboflow_update_task — the body param (planner spec path)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// cyboflow_list_tasks / cyboflow_get_task — declaration + CallTool validation
+// ---------------------------------------------------------------------------
+
+describe('cyboflowMcpServer ListTools read-only backlog tools', () => {
+  it('declares cyboflow_list_tasks and cyboflow_get_task alongside the existing tools', async () => {
+    const tools = await listTools();
+    const names = tools.map((t) => t.name);
+    expect(names).toContain('cyboflow_list_tasks');
+    expect(names).toContain('cyboflow_get_task');
+    expect(names).toEqual(
+      expect.arrayContaining([
+        'cyboflow_create_task',
+        'cyboflow_update_task',
+        'cyboflow_set_task_stage',
+        'cyboflow_add_task_dependency',
+        'cyboflow_list_tasks',
+        'cyboflow_get_task',
+      ]),
+    );
+  });
+
+  it('cyboflow_list_tasks declares three optional filters and no required fields', async () => {
+    const tools = await listTools();
+    const tool = tools.find((t) => t.name === 'cyboflow_list_tasks');
+    expect(tool).toBeDefined();
+    const schema = tool!.inputSchema;
+    expect(schema.required).toEqual([]);
+    expect(schema.properties['task_type'].enum).toEqual(['idea', 'epic', 'task']);
+    expect(schema.properties['include_archived'].type).toBe('boolean');
+    expect(schema.properties['include_done'].type).toBe('boolean');
+  });
+
+  it('cyboflow_list_tasks documents that it is read-only and returns compact items', async () => {
+    const tools = await listTools();
+    const tool = tools.find((t) => t.name === 'cyboflow_list_tasks');
+    const description = tool!.description.toLowerCase();
+    expect(description).toContain('read-only');
+    expect(description).toContain('compact');
+    expect(description).toContain('cyboflow_get_task');
+  });
+
+  it('cyboflow_get_task requires task_id and documents id-or-ref + read-only + project scoping', async () => {
+    const tools = await listTools();
+    const tool = tools.find((t) => t.name === 'cyboflow_get_task');
+    expect(tool).toBeDefined();
+    const schema = tool!.inputSchema;
+    expect(schema.required).toEqual(['task_id']);
+    expect(schema.properties['task_id'].type).toBe('string');
+    const description = tool!.description.toLowerCase();
+    expect(description).toContain('read-only');
+    expect(description).toContain('ref');
+  });
+});
+
+describe('cyboflowMcpServer CallTool cyboflow_list_tasks validation', () => {
+  it('rejects an out-of-enum task_type', async () => {
+    expect(await callTool('cyboflow_list_tasks', { task_type: 'sprint' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+  });
+
+  it('rejects a non-boolean include_archived / include_done', async () => {
+    expect(await callTool('cyboflow_list_tasks', { include_archived: 'yes' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+    expect(await callTool('cyboflow_list_tasks', { include_done: 1 })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+  });
+
+  it('passes validation with no args and with every optional field set, reaching the dispatch path', async () => {
+    const empty = await callTool('cyboflow_list_tasks', {});
+    expect(empty['error']).not.toBe('invalid_arguments');
+
+    const full = await callTool('cyboflow_list_tasks', {
+      task_type: 'task',
+      include_archived: true,
+      include_done: true,
+    });
+    expect(full['error']).not.toBe('invalid_arguments');
+  });
+});
+
+describe('cyboflowMcpServer CallTool cyboflow_get_task validation', () => {
+  it('rejects a missing or empty task_id', async () => {
+    expect(await callTool('cyboflow_get_task', {})).toMatchObject({ error: 'invalid_arguments' });
+    expect(await callTool('cyboflow_get_task', { task_id: '' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+  });
+
+  it('passes validation with a valid task_id (opaque id or ref) and reaches the dispatch path', async () => {
+    const byId = await callTool('cyboflow_get_task', { task_id: 'tsk_abc' });
+    expect(byId['error']).not.toBe('invalid_arguments');
+
+    const byRef = await callTool('cyboflow_get_task', { task_id: 'TASK-014' });
+    expect(byRef['error']).not.toBe('invalid_arguments');
+  });
+});
+
 describe('cyboflowMcpServer create/update task body param', () => {
   it('declares an optional string body on both create_task and update_task', async () => {
     const tools = await listTools();

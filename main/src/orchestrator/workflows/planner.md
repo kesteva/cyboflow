@@ -43,9 +43,12 @@ The pattern for every phase:
      spec as `body` and the one-line caption as `summary`). **Never** call
      `cyboflow_create_task` for an idea that already exists — that creates a
      duplicate card.
-   - If NO `# Selected idea` block is present: create the idea via
-     `cyboflow_create_task(task_type='idea', body=<full spec>, summary=<one-line
-     caption>)` (one row per distinct idea; a broad prompt may yield more than one).
+   - If NO `# Selected idea` block is present: check first with
+     `cyboflow_list_tasks(task_type='idea')` + `cyboflow_get_task` on any close
+     match, so you don't create a duplicate for an idea already on the backlog.
+     Otherwise create the idea via `cyboflow_create_task(task_type='idea',
+     body=<full spec>, summary=<one-line caption>)` (one row per distinct idea; a
+     broad prompt may yield more than one).
    If it returns `## Open questions`, ask them with **AskUserQuestion**, then
    re-delegate to `cyboflow-context` with the answers folded in.
 2. **research** (optional) → when the idea needs external context, delegate to

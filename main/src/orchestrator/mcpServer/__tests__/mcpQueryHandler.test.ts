@@ -1389,6 +1389,282 @@ describe('McpQueryHandler', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Read-only backlog listing — mcp-list-tasks / mcp-get-task. Both reuse
+  // resolveTaskRunContext (project scope only; the actor it returns is unused
+  // for reads) and never write. Uses its own migration-backed DB seeded with
+  // TWO projects BEFORE the migrations run so BOTH get a default board +
+  // stages (014's seed is a one-time INSERT ... SELECT FROM projects) — the
+  // cross-project guard test needs project 2 to have a real board to host an
+  // entity.
+  // -------------------------------------------------------------------------
+
+  describe('read-only backlog listing (mcp-list-tasks / mcp-get-task)', () => {
+    function buildListDb(): Database.Database {
+      const db = new Database(':memory:');
+      db.pragma('foreign_keys = ON');
+      db.exec(`
+        CREATE TABLE projects (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          name TEXT NOT NULL,
+          path TEXT NOT NULL UNIQUE,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+      `);
+      db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/lp1');
+      db.prepare('INSERT INTO projects (id, name, path) VALUES (2, ?, ?)').run('Proj Two', '/tmp/lp2');
+
+      const migDir = join(__dirname, '..', '..', '..', 'database', 'migrations');
+      db.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+      db.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
+      db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
+      db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
+      db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
+      db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
+      db.exec(readFileSync(join(migDir, '042_collapse_board.sql'), 'utf-8'));
+      return db;
+    }
+
+    function listSeedRun(db: Database.Database, runId: string, projectId = 1): void {
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-list', ?, 'sprint', '{}')`,
+      ).run(projectId);
+      db.prepare(
+        `INSERT INTO workflow_runs
+           (id, workflow_id, project_id, status, current_step_id, steps_snapshot_json)
+         VALUES (?, 'wf-list', ?, 'running', 'plan', ?)`,
+      ).run(runId, projectId, JSON.stringify({ plan: 'planner' }));
+    }
+
+    let listDb: Database.Database;
+    let listHandler: McpQueryHandler;
+
+    beforeEach(() => {
+      listDb = buildListDb();
+      TaskChangeRouter.initialize(dbAdapter(listDb));
+      listHandler = new McpQueryHandler(dbAdapter(listDb));
+    });
+
+    afterEach(() => {
+      TaskChangeRouter._resetForTesting();
+      taskChangeEvents.removeAllListeners();
+    });
+
+    /** Create an entity via the real mcp-create-task handler; returns its id + ref. */
+    async function createEntity(
+      runId: string,
+      title: string,
+      taskType?: 'idea' | 'epic' | 'task',
+    ): Promise<{ id: string; ref: string }> {
+      const { socket, writes } = makeSocketDouble();
+      await listHandler.handleMessage(
+        {
+          type: 'mcp-create-task',
+          requestId: `lc-${title}`,
+          runId,
+          title,
+          ...(taskType !== undefined ? { taskType } : {}),
+        },
+        socket,
+      );
+      const data = parseLastWrite(writes).data as { task_id: string; ref: string };
+      return { id: data.task_id, ref: data.ref };
+    }
+
+    describe('mcp-list-tasks', () => {
+      it('happy path: returns compact items for every entity in the project, with total + hidden_count=0', async () => {
+        listSeedRun(listDb, 'run-list-1');
+        const idea = await createEntity('run-list-1', 'An idea');
+        const task = await createEntity('run-list-1', 'A task', 'task');
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-list-tasks', requestId: 'lt-1', runId: 'run-list-1' },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as {
+          tasks: Array<Record<string, unknown>>;
+          total: number;
+          hidden_count: number;
+        };
+        expect(data.total).toBe(2);
+        expect(data.hidden_count).toBe(0);
+
+        const ideaItem = data.tasks.find((t) => t['id'] === idea.id)!;
+        expect(ideaItem).toMatchObject({
+          id: idea.id,
+          ref: idea.ref,
+          type: 'idea',
+          title: 'An idea',
+          archived: false,
+          decomposed: false,
+          approved: false,
+          is_done: false,
+        });
+        // Compact shape deliberately excludes body / inFlow / children.
+        expect(ideaItem['body']).toBeUndefined();
+        expect(ideaItem['inFlow']).toBeUndefined();
+        expect(ideaItem['children']).toBeUndefined();
+
+        const taskItem = data.tasks.find((t) => t['id'] === task.id)!;
+        expect(taskItem['type']).toBe('task');
+        expect(taskItem['blocked_by']).toEqual([]);
+        expect(taskItem['ready_to_work']).toBe(true);
+      });
+
+      it('hides archived items by default and reports hidden_count; include_archived surfaces them', async () => {
+        listSeedRun(listDb, 'run-list-2');
+        const idea = await createEntity('run-list-2', 'Archived idea');
+        await createEntity('run-list-2', 'Visible idea');
+        listDb.prepare('UPDATE ideas SET archived_at = ? WHERE id = ?').run('2026-01-01T00:00:00.000Z', idea.id);
+
+        const defaultRes = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-list-tasks', requestId: 'lt-2a', runId: 'run-list-2' },
+          defaultRes.socket,
+        );
+        const defaultData = parseLastWrite(defaultRes.writes).data as {
+          tasks: unknown[];
+          total: number;
+          hidden_count: number;
+        };
+        expect(defaultData.total).toBe(1);
+        expect(defaultData.hidden_count).toBe(1);
+
+        const includeRes = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-list-tasks', requestId: 'lt-2b', runId: 'run-list-2', includeArchived: true },
+          includeRes.socket,
+        );
+        const includeData = parseLastWrite(includeRes.writes).data as {
+          tasks: Array<{ id: string; archived: boolean }>;
+          total: number;
+          hidden_count: number;
+        };
+        expect(includeData.total).toBe(2);
+        expect(includeData.hidden_count).toBe(0);
+        expect(includeData.tasks.find((t) => t.id === idea.id)?.archived).toBe(true);
+      });
+
+      it('filters by task_type', async () => {
+        listSeedRun(listDb, 'run-list-3');
+        await createEntity('run-list-3', 'An idea');
+        const task = await createEntity('run-list-3', 'A task', 'task');
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-list-tasks', requestId: 'lt-3', runId: 'run-list-3', taskType: 'task' },
+          socket,
+        );
+        const data = parseLastWrite(writes).data as { tasks: Array<{ id: string; type: string }> };
+        expect(data.tasks).toHaveLength(1);
+        expect(data.tasks[0]).toMatchObject({ id: task.id, type: 'task' });
+      });
+
+      it('rejects an unknown runId with "run_not_found"', async () => {
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-list-tasks', requestId: 'lt-4', runId: 'does-not-exist' },
+          socket,
+        );
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toBe('run_not_found');
+      });
+    });
+
+    describe('mcp-get-task', () => {
+      it('fetches a task by its opaque id, including the full body and excluding inFlow', async () => {
+        listSeedRun(listDb, 'run-get-1');
+        const created = await createEntity('run-get-1', 'Spec idea');
+        // Fold a body onto it so the full-projection assertion has something to check.
+        await listHandler.handleMessage(
+          {
+            type: 'mcp-update-task',
+            requestId: 'lu-1',
+            runId: 'run-get-1',
+            taskId: created.id,
+            body: '## Idea spec\n\ndetail',
+          },
+          makeSocketDouble().socket,
+        );
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-1', runId: 'run-get-1', taskId: created.id },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { task: Record<string, unknown> };
+        expect(data.task['id']).toBe(created.id);
+        expect(data.task['ref']).toBe(created.ref);
+        expect(data.task['body']).toBe('## Idea spec\n\ndetail');
+        expect(data.task['inFlow']).toBeUndefined();
+      });
+
+      it('fetches the same task by its display ref', async () => {
+        listSeedRun(listDb, 'run-get-2');
+        const created = await createEntity('run-get-2', 'Ref idea');
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-2', runId: 'run-get-2', taskId: created.ref },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { task: Record<string, unknown> };
+        expect(data.task['id']).toBe(created.id);
+      });
+
+      it('returns "not_found" for a ref that does not exist', async () => {
+        listSeedRun(listDb, 'run-get-3');
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-3', runId: 'run-get-3', taskId: 'TASK-999' },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toBe('not_found');
+      });
+
+      it('returns "not_found" (never leaks the entity) when the id belongs to a DIFFERENT project', async () => {
+        // Seed project 2's entity DIRECTLY — project 2 has a real board/stages
+        // (seeded before the migrations ran, see buildListDb) — bypassing the
+        // chokepoint since no run is bound to project 2 in this test.
+        const otherIdeaId = 'ide_other_proj';
+        listDb
+          .prepare(
+            `INSERT INTO ideas (id, project_id, ref, title, board_id, stage_id, created_at)
+             VALUES (?, 2, 'IDEA-001', 'Other project idea', 'board-2-default', 'stage-board-2-default-1', '2026-01-01T00:00:00.000Z')`,
+          )
+          .run(otherIdeaId);
+
+        listSeedRun(listDb, 'run-get-4', 1); // bound to project 1
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-4', runId: 'run-get-4', taskId: otherIdeaId },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(false);
+        expect(response.error).toBe('not_found');
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // 7. mcp-report-finding — NON-BLOCKING review-item create via ReviewItemRouter.
   // -------------------------------------------------------------------------
 

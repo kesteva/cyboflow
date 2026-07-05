@@ -255,6 +255,32 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
+        name: 'cyboflow_list_tasks',
+        description:
+          "List the backlog (ideas/epics/tasks) for THIS run's project. Read-only and run-bound (no project argument — the project is derived from CYBOFLOW_RUN_ID). Returns COMPACT items WITHOUT their markdown body — use cyboflow_get_task to fetch one item's full body by the id or ref this tool returns. By default archived items and done/retired items are hidden; opt in with include_archived / include_done. Use this before cyboflow_create_task to check whether an idea/task already exists and avoid creating a duplicate.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            task_type: { type: 'string', enum: ['idea', 'epic', 'task'], description: 'Optional filter to one entity type; omit to list all three' },
+            include_archived: { type: 'boolean', description: 'Optional; include archived items (archived_at set). Defaults to false.' },
+            include_done: { type: 'boolean', description: "Optional; include done/retired items (isDone, or a decomposed idea). Defaults to false." },
+          },
+          required: [],
+        },
+      },
+      {
+        name: 'cyboflow_get_task',
+        description:
+          "Fetch ONE backlog entity with its FULL markdown body, by opaque id OR display ref (e.g. IDEA-009, EPIC-002, TASK-014) — pass a ref straight from cyboflow_list_tasks, it is resolved automatically. Read-only, scoped to THIS run's project: an id/ref that belongs to another project is reported as not_found.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            task_id: { type: 'string', description: 'Opaque backlog id OR display ref (e.g. TASK-014) to fetch (required)' },
+          },
+          required: ['task_id'],
+        },
+      },
+      {
         name: 'cyboflow_update_sprint_task',
         description:
           "Report per-task progress for THIS sprint run's task lanes (the structured per-task progress rail). The lane is run-bound: the batch is derived from CYBOFLOW_RUN_ID's workflow_runs.batch_id (a run launched without a sprint task batch is rejected with error sprint_lane_requires_batch_run). At least one of status / current_step is required. status='integrated' means the task is complete AND committed in the session worktree. This does NOT move the task on the board (board stages are orchestrator-derived) and does NOT pause the run.",
@@ -811,6 +837,63 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const queryParams: Record<string, unknown> = { taskId: task_id, dependsOnTaskId: depends_on_task_id };
       if (kind !== undefined) queryParams['dependencyKind'] = kind;
       return executeMcpQuery('mcp-add-task-dependency', queryParams);
+    }
+
+    case 'cyboflow_list_tasks': {
+      const args = (request.params.arguments ?? {}) as {
+        task_type?: unknown;
+        include_archived?: unknown;
+        include_done?: unknown;
+      };
+      const { task_type, include_archived, include_done } = args;
+      if (task_type !== undefined && task_type !== 'idea' && task_type !== 'epic' && task_type !== 'task') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "task_type: 'idea' | 'epic' | 'task' (optional)" }),
+            },
+          ],
+        };
+      }
+      if (include_archived !== undefined && typeof include_archived !== 'boolean') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'include_archived: boolean (optional)' }),
+            },
+          ],
+        };
+      }
+      if (include_done !== undefined && typeof include_done !== 'boolean') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'include_done: boolean (optional)' }),
+            },
+          ],
+        };
+      }
+      const queryParams: Record<string, unknown> = {};
+      if (task_type !== undefined) queryParams['taskType'] = task_type;
+      if (include_archived !== undefined) queryParams['includeArchived'] = include_archived;
+      if (include_done !== undefined) queryParams['includeDone'] = include_done;
+      return executeMcpQuery('mcp-list-tasks', queryParams);
+    }
+
+    case 'cyboflow_get_task': {
+      const args = (request.params.arguments ?? {}) as { task_id?: unknown };
+      const { task_id } = args;
+      if (typeof task_id !== 'string' || task_id.length === 0) {
+        return {
+          content: [
+            { type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected: 'task_id: string' }) },
+          ],
+        };
+      }
+      return executeMcpQuery('mcp-get-task', { taskId: task_id });
     }
 
     case 'cyboflow_update_sprint_task': {

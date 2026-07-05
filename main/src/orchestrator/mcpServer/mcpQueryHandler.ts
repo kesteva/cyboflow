@@ -59,6 +59,7 @@ import type { TaskChange, TaskActor, TaskDependencyKind } from '../taskChangeRou
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
 import type { ReviewActor, ReviewItemCreate, ReviewItemTriage } from '../reviewItemRouter';
 import { selectFindingForSeed } from '../reviewItemListing';
+import { selectProjectBacklog, selectTaskById, resolveBacklogRef } from '../taskListing';
 import { ArtifactRouter, ArtifactError } from '../artifactRouter';
 import type { ArtifactActor } from '../artifactRouter';
 import type { ArtifactType } from '../../../../shared/types/artifacts';
@@ -68,7 +69,7 @@ import type { SprintBatchTaskStatus, SprintLaneStepId } from '../../../../shared
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import { runStatusEvents } from '../trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../../shared/types/cyboflow';
-import type { Priority, TaskType } from '../../../../shared/types/tasks';
+import type { BacklogTaskItem, Priority, TaskType } from '../../../../shared/types/tasks';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import type {
   FindingPayload,
@@ -144,6 +145,34 @@ export type McpQueryMessage =
       dependsOnTaskId: string;
       /** Edge kind; defaults to 'blocking' at the chokepoint. */
       dependencyKind?: TaskDependencyKind;
+    }
+  | {
+      /**
+       * READ-ONLY: list the backlog (ideas/epics/tasks) for THIS run's project.
+       * Run-bound (no project argument — derived from CYBOFLOW_RUN_ID). Filters
+       * apply after flattening selectProjectBacklog's tree (see handleListTasks).
+       */
+      type: 'mcp-list-tasks';
+      requestId: string;
+      runId: string;
+      /** Optional filter to one entity type; omitted = all three. */
+      taskType?: TaskType;
+      /** Include archived items (archived_at set). Defaults to false. */
+      includeArchived?: boolean;
+      /** Include done/retired items (isDone or decomposed_at set). Defaults to false. */
+      includeDone?: boolean;
+    }
+  | {
+      /**
+       * READ-ONLY: fetch ONE backlog entity (with its full body) by opaque id OR
+       * display ref (e.g. 'TASK-014'). Run-bound project-scoped — see
+       * handleGetTask for the id/ref resolution order and the cross-project guard.
+       */
+      type: 'mcp-get-task';
+      requestId: string;
+      runId: string;
+      /** Opaque backlog id OR display ref (e.g. 'TASK-014', 'IDEA-009'). */
+      taskId: string;
     }
   | {
       type: 'mcp-update-sprint-task';
@@ -412,6 +441,14 @@ export class McpQueryHandler {
           break;
         case 'mcp-add-task-dependency':
           await this.handleAddTaskDependency(msg, client);
+          break;
+        case 'mcp-list-tasks':
+          // Read-only: projects + flattens selectProjectBacklog's tree. Never writes.
+          this.handleListTasks(msg, client);
+          break;
+        case 'mcp-get-task':
+          // Read-only: id-then-ref resolution + cross-project guard. Never writes.
+          this.handleGetTask(msg, client);
           break;
         case 'mcp-update-sprint-task':
           this.handleUpdateSprintTask(msg, client);
@@ -1047,6 +1084,211 @@ export class McpQueryHandler {
       requestId,
       ok: false,
       error: 'task_change_failed',
+    });
+  }
+
+  // --------------------------------------------------------------------------
+  // Read-only backlog listing (cyboflow_list_tasks / cyboflow_get_task)
+  //
+  // Both reuse resolveTaskRunContext for project scoping (the actor it also
+  // returns is unused here — these paths never write). Neither ever calls
+  // TaskChangeRouter or mutates any table; they read exclusively through the
+  // shared taskListing.ts projection so the shape can never drift from the
+  // tasks tRPC router's own reads.
+  // --------------------------------------------------------------------------
+
+  /**
+   * The compact projection cyboflow_list_tasks returns per item — deliberately
+   * WITHOUT `body` / `inFlow` / `children` (an agent enumerating the backlog
+   * does not need the full markdown spec or the live-run overlay for every
+   * row; cyboflow_get_task fetches one item's full body on demand).
+   */
+  private static toCompactTask(item: BacklogTaskItem): Record<string, unknown> {
+    return {
+      id: item.id,
+      ref: item.ref,
+      type: item.type,
+      title: item.title,
+      summary: item.summary,
+      priority: item.priority,
+      stage_id: item.stage_id,
+      stage_position: item.stage_position,
+      parent_epic_id: item.parent_epic_id,
+      originating_idea_id: item.originating_idea_id,
+      archived: item.archived_at !== null,
+      decomposed: item.decomposed_at !== null,
+      approved: item.approved_at !== null,
+      is_done: item.isDone,
+      awaiting_review: item.awaitingReview,
+      // Only tasks carry a computed dependency overlay (selectProjectBacklog
+      // applies it to type='task' rows only); ideas/epics are never blocked,
+      // so an absent overlay defaults to "ready" rather than "unknown".
+      ready_to_work: item.readyToWork ?? true,
+      blocked_by: (item.blockedBy ?? []).map((dep) => dep.ref),
+      version: item.version,
+      updated_at: item.updated_at,
+    };
+  }
+
+  /**
+   * Project a full BacklogTaskItem for cyboflow_get_task, EXCLUDING `inFlow`
+   * (an internal live-run overlay with no stable external contract). Every
+   * other field — including `body`, `blockedBy`/`relatedTo`/`readyToWork`, and
+   * (for an epic) `children`/`childCount`/`pendingTasks` — passes through
+   * unchanged.
+   */
+  private static toFullTask(item: BacklogTaskItem): Record<string, unknown> {
+    return {
+      id: item.id,
+      project_id: item.project_id,
+      type: item.type,
+      ref: item.ref,
+      title: item.title,
+      summary: item.summary,
+      body: item.body,
+      priority: item.priority,
+      repo: item.repo,
+      parent_epic_id: item.parent_epic_id,
+      originating_idea_id: item.originating_idea_id,
+      scope: item.scope,
+      board_id: item.board_id,
+      stage_id: item.stage_id,
+      archived_at: item.archived_at,
+      decomposed_at: item.decomposed_at,
+      approved_at: item.approved_at,
+      version: item.version,
+      stage_position: item.stage_position,
+      awaitingReview: item.awaitingReview,
+      isDone: item.isDone,
+      blockedBy: item.blockedBy,
+      relatedTo: item.relatedTo,
+      readyToWork: item.readyToWork,
+      children: item.children,
+      childCount: item.childCount,
+      pendingTasks: item.pendingTasks,
+      created_at: item.created_at,
+      updated_at: item.updated_at,
+    };
+  }
+
+  /**
+   * List the backlog for THIS run's project — read-only, run-bound (no project
+   * argument; resolveTaskRunContext derives it from CYBOFLOW_RUN_ID).
+   *
+   * Reads via selectProjectBacklog (the SAME projection the tasks tRPC router
+   * uses), then FLATTENS its one-level tree (top-level items + every epic's
+   * `children`) into a single array — the compact shape has no nesting.
+   *
+   * Filter semantics (applied after flattening):
+   *   - archived_at set          -> hidden unless includeArchived.
+   *   - isDone===true OR
+   *     decomposed_at set        -> hidden unless includeDone (a decomposed
+   *                                  idea is retired off the board, which is
+   *                                  its own flavor of "done").
+   *   - taskType                 -> keep only that entity type.
+   * `hidden_count` is the number of items the filters removed (from the flat,
+   * pre-filter count) so a caller passing no filters and seeing a smaller list
+   * than expected knows to reach for include_archived / include_done.
+   */
+  private handleListTasks(
+    msg: Extract<McpQueryMessage, { type: 'mcp-list-tasks' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = this.resolveTaskRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: ctx.error,
+      });
+      return;
+    }
+
+    const tree = selectProjectBacklog(this.db, ctx.projectId);
+    const flat: BacklogTaskItem[] = [];
+    for (const item of tree) {
+      flat.push(item);
+      if (item.type === 'epic' && item.children) {
+        flat.push(...item.children);
+      }
+    }
+
+    const includeArchived = msg.includeArchived ?? false;
+    const includeDone = msg.includeDone ?? false;
+
+    const filtered = flat.filter((item) => {
+      if (item.archived_at !== null && !includeArchived) return false;
+      const isDoneOrRetired = item.isDone === true || item.decomposed_at !== null;
+      if (isDoneOrRetired && !includeDone) return false;
+      if (msg.taskType !== undefined && item.type !== msg.taskType) return false;
+      return true;
+    });
+
+    const tasks = filtered.map((item) => McpQueryHandler.toCompactTask(item));
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: {
+        tasks,
+        total: tasks.length,
+        hidden_count: flat.length - tasks.length,
+      },
+    });
+  }
+
+  /**
+   * Fetch ONE backlog entity with its full body, by opaque id OR display ref
+   * (e.g. 'TASK-014') — read-only, project-scoped to THIS run.
+   *
+   * Resolution order: try selectTaskById(taskId) first (an opaque id wins
+   * outright); when that misses, resolve taskId as a display ref scoped to
+   * this run's project via resolveBacklogRef, then re-select by the resolved
+   * id. Either path that still comes back null, OR resolves to an item whose
+   * project_id does not match this run's project, replies 'not_found' — the
+   * cross-project case is deliberately indistinguishable from a genuine miss
+   * so this tool can never be used to probe another project's backlog.
+   */
+  private handleGetTask(
+    msg: Extract<McpQueryMessage, { type: 'mcp-get-task' }>,
+    client: net.Socket,
+  ): void {
+    const ctx = this.resolveTaskRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: ctx.error,
+      });
+      return;
+    }
+
+    let item = selectTaskById(this.db, msg.taskId);
+    if (!item) {
+      const resolvedId = resolveBacklogRef(this.db, ctx.projectId, msg.taskId);
+      if (resolvedId) {
+        item = selectTaskById(this.db, resolvedId);
+      }
+    }
+
+    if (!item || item.project_id !== ctx.projectId) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'not_found',
+      });
+      return;
+    }
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { task: McpQueryHandler.toFullTask(item) },
     });
   }
 
