@@ -581,9 +581,12 @@ All outbound telemetry is anonymized and gated in `main/src/services/telemetry/`
   (`frontend/src/utils/telemetry.ts`) where `TelemetryEvent` is a fixed union and `props` are
   scalar/enum only — never repo names, prompts, file paths, or free text. New events extend the
   union. Routed over the `telemetry:track` fire-and-forget IPC channel → `trackUsage`.
-- **Environment gating** (`environment.ts`): `local` (pnpm dev / unstamped local `.dmg`) gets no
-  usage and no errors; `dev` / `stable` (release-stamped via `CYBOFLOW_BUILD_ENV`) get both. Keep
-  the telemetry `environment` token distinct from the updater/About `variant` token.
+- **Environment gating** (`environment.ts`): every packaged build is stamped by
+  `inject-build-info.js` — `CYBOFLOW_BUILD_ENV` (`stable`/`dev`/`local`) wins when set, otherwise
+  the build variant (`build:mac*` → `stable`, `build:mac:dev*` → `dev`) — so hand-built tester
+  `.dmg`s report a filterable environment. `local` = pnpm dev, an explicit local stamp, or a
+  pre-fix artifact. Keep the telemetry `environment` token distinct from the updater/About
+  `variant` token.
 - **Telemetry must NEVER throw into app code** — every entry point is try/caught and is a no-op
   when the SDK or its credential is absent. Creds resolve from the runtime env var
   (`SENTRY_DSN` / `APTABASE_APP_KEY`, for `pnpm dev`) OR, when absent, from the keys baked into

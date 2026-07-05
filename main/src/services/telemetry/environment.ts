@@ -3,23 +3,26 @@
  * pure mapping below is unit-testable in plain Node (the impure reader that
  * touches `app` / the filesystem lives in ./index).
  *
- *   - 'local'  — `pnpm dev` (unpackaged) OR an unstamped local `build:mac` .dmg.
- *   - 'dev'    — the "Cyboflow Dev" release .dmg: the dev build distributed for
- *                active testing before a stable release.
- *   - 'stable' — the stable release .dmg.
+ *   - 'local'  — `pnpm dev` (unpackaged), an explicit CYBOFLOW_BUILD_ENV=local
+ *                build, or a pre-fix .dmg built before the variant-based stamp.
+ *   - 'dev'    — a "Cyboflow Dev" variant .dmg (build:mac:dev* / release:mac:dev).
+ *   - 'stable' — a stable-variant .dmg (build:mac* / release:mac).
  *
- * Only the release pipeline (`release:mac` / `release:mac:dev`) stamps a
- * 'stable' / 'dev' environment into buildInfo.json. Usage metrics fire ONLY for
- * release builds ('dev' or 'stable'); Sentry tags every event with this
- * environment so the Dev-channel testing builds are filterable from stable.
+ * scripts/inject-build-info.js stamps EVERY packaged build: CYBOFLOW_BUILD_ENV
+ * ('stable' | 'dev' | 'local') wins when set (the release pipeline sets it),
+ * otherwise the stamp follows the build VARIANT — so a hand-built `build:mac`
+ * .dmg handed to a tester reports 'stable', not 'local' (the 0.1.14 lesson:
+ * its Sentry events hid under the same bucket as pnpm-dev runs). Sentry tags
+ * every event with this environment so channels are filterable.
  */
 export type TelemetryEnvironment = 'local' | 'dev' | 'stable';
 
 /**
  * Pure mapping from packaged-state + buildInfo contents to the environment.
- * A packaged build is only treated as a real release when buildInfo.json carries
- * an explicit release stamp; an unstamped packaged build (a local `build:mac`
- * .dmg) is 'local'.
+ * A packaged build reports whatever 'stable'/'dev' stamp buildInfo.json carries
+ * (inject-build-info.js stamps every build from CYBOFLOW_BUILD_ENV or the build
+ * variant); anything else — an explicit 'local' stamp, or a pre-fix artifact
+ * with no recognized stamp — is 'local'.
  */
 export function environmentFromBuildInfo(
   isPackaged: boolean,

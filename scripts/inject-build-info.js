@@ -55,15 +55,26 @@ const buildInfo = {
   // Which app variant this build is: 'stable' (default) or 'dev'. Surfaced in
   // the About dialog and used to confirm the right artifact was built.
   variant: process.env.BUILD_VARIANT === 'dev' ? 'dev' : 'stable',
-  // Telemetry environment. ONLY the release pipeline sets CYBOFLOW_BUILD_ENV
-  // (release:mac -> 'stable', release:mac:dev -> 'dev'). A plain local
-  // `build:mac` .dmg leaves it unset, so it stays 'local' and usage metrics
-  // never fire for it. Distinct from `variant`, which is About-dialog / updater
-  // metadata and is 'stable' even for unreleased local builds.
+  // Telemetry environment. Resolution:
+  //   1. CYBOFLOW_BUILD_ENV ('stable' | 'dev' | 'local') — explicit override.
+  //      The release pipeline sets it (release:mac -> 'stable',
+  //      release:mac:dev -> 'dev'); set 'local' by hand for a throwaway build
+  //      that must not pollute release telemetry.
+  //   2. Otherwise the build VARIANT: 'dev' for build:mac:dev*, else 'stable'.
+  // Every packaged .dmg is distributable in practice, so it must report a
+  // filterable environment. The old default ('local' unless the release
+  // pipeline stamped it) hid tester errors from build:mac artifacts in the
+  // same Sentry bucket as pnpm-dev runs — the 0.1.14 lesson. 'local' now
+  // means: unpackaged pnpm dev, an explicit CYBOFLOW_BUILD_ENV=local build,
+  // or a pre-fix artifact.
   environment:
-    process.env.CYBOFLOW_BUILD_ENV === 'stable' || process.env.CYBOFLOW_BUILD_ENV === 'dev'
+    process.env.CYBOFLOW_BUILD_ENV === 'stable' ||
+    process.env.CYBOFLOW_BUILD_ENV === 'dev' ||
+    process.env.CYBOFLOW_BUILD_ENV === 'local'
       ? process.env.CYBOFLOW_BUILD_ENV
-      : 'local',
+      : process.env.BUILD_VARIANT === 'dev'
+        ? 'dev'
+        : 'stable',
   // Telemetry client credentials, BAKED at build time. A distributed packaged
   // app has none of the build shell's env vars at runtime, so without this the
   // SDKs never get a DSN/key and silently no-op (the cause of "zero usage from

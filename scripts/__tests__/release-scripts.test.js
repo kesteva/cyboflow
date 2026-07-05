@@ -267,6 +267,44 @@ test('inject-build-info → restore-version leaves package.json byte-identical a
   }
 });
 
+// The telemetry-environment stamp matrix: CYBOFLOW_BUILD_ENV wins when set,
+// otherwise the environment FOLLOWS THE VARIANT — a plain `build:mac` .dmg must
+// report 'stable', not 'local', or its tester's Sentry events hide under the
+// same bucket as pnpm-dev runs (the 0.1.14 lesson). Empty-string env vars model
+// "unset" (run() merges process.env, so deletion isn't expressible here; the
+// script's === checks treat '' as unset).
+test('inject-build-info stamps environment from CYBOFLOW_BUILD_ENV, else the variant', () => {
+  const biPath = path.join(REPO_ROOT, 'main', 'dist', 'buildInfo.json');
+  const biExisted = fs.existsSync(biPath);
+  const biBackup = biExisted ? fs.readFileSync(biPath) : null;
+
+  const cases = [
+    // [CYBOFLOW_BUILD_ENV, BUILD_VARIANT, expected environment, expected variant]
+    ['', '', 'stable', 'stable'], // build:mac — the fixed case
+    ['', 'dev', 'dev', 'dev'], // build:mac:dev
+    ['stable', '', 'stable', 'stable'], // release:mac
+    ['dev', 'dev', 'dev', 'dev'], // release:mac:dev
+    ['local', '', 'local', 'stable'], // explicit throwaway-build opt-out
+  ];
+
+  try {
+    for (const [buildEnv, variant, expectedEnv, expectedVariant] of cases) {
+      const inject = run('scripts/inject-build-info.js', [], {
+        CYBOFLOW_BUILD_ENV: buildEnv,
+        BUILD_VARIANT: variant,
+      });
+      assert.equal(inject.status, 0, `inject-build-info failed: ${inject.stderr}`);
+      const buildInfo = JSON.parse(fs.readFileSync(biPath, 'utf-8'));
+      const label = `CYBOFLOW_BUILD_ENV='${buildEnv}' BUILD_VARIANT='${variant}'`;
+      assert.equal(buildInfo.environment, expectedEnv, `${label}: wrong environment`);
+      assert.equal(buildInfo.variant, expectedVariant, `${label}: wrong variant`);
+    }
+  } finally {
+    if (biBackup) fs.writeFileSync(biPath, biBackup);
+    else fs.rmSync(biPath, { force: true });
+  }
+});
+
 function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
 }

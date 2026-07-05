@@ -289,24 +289,31 @@ Opt-out, anonymized. Both SDKs init once at boot from the resolved config (`init
   stack-frame paths reduced to basenames, home dirs → `~`, `server_name`/`extra`/`user`
   dropped, console breadcrumbs dropped — so user source, file paths, repo names, and prompts
   never leave the machine.
-- **Usage — Aptabase** (`@aptabase/electron`, no identifiers). Fires only from **release**
-  builds. Renderer events flow through a typed closed-union helper
+- **Usage — Aptabase** (`@aptabase/electron`, no identifiers). Gated by the config flag
+  (default on for packaged builds, off under `pnpm dev`) plus a baked app key — every event
+  carries the `environment` tag for channel filtering. Renderer events flow through a typed
+  closed-union helper
   (`frontend/src/utils/telemetry.ts` → `trackEvent`) over the fire-and-forget `telemetry:track`
   raw-IPC channel → `main/src/ipc/telemetry.ts` → `trackUsage`. Props are scalar/enum only by
   construction (never user content).
 
 **Environment gating** (`telemetry/environment.ts`, `TelemetryEnvironment = 'local' | 'dev' | 'stable'`)
-resolves from `app.isPackaged` + a release stamp in `buildInfo.json`. Only the release pipeline
-stamps it: `release:mac` → `CYBOFLOW_BUILD_ENV=stable`, `release:mac:dev` → `dev` (consumed by
-`scripts/inject-build-info.js`). This `environment` is telemetry-only and **distinct from the
-`variant` field** (About-dialog/updater metadata), which is `stable` even for unreleased local builds.
+resolves from `app.isPackaged` + the stamp in `buildInfo.json`. `scripts/inject-build-info.js`
+stamps **every** packaged build: `CYBOFLOW_BUILD_ENV` (`stable`/`dev`/`local`) wins when set
+(the release pipeline sets it: `release:mac` → `stable`, `release:mac:dev` → `dev`); otherwise
+the stamp follows the build **variant** (`build:mac:dev*` → `dev`, every other `build:mac*` →
+`stable`) — so a hand-built `.dmg` handed to a tester reports a filterable environment instead
+of hiding under `local` (pre-fix `build:mac` artifacts, e.g. 0.1.14, still report `local`).
+Set `CYBOFLOW_BUILD_ENV=local` explicitly for a throwaway build that must not pollute release
+telemetry. This `environment` is telemetry-only and **distinct from the `variant` field**
+(About-dialog/updater metadata).
 
 | Build | environment | Errors | Usage |
 |---|---|---|---|
 | `pnpm dev` (unpackaged) | `local` | off | off |
-| local `build:mac` `.dmg` (unstamped) | `local` | on (tagged `local`) | off |
-| Cyboflow Dev release (`release:mac:dev`) | `dev` | on (tagged `dev`) | on |
-| stable release (`release:mac`) | `stable` | on (tagged `stable`) | on |
+| explicit `CYBOFLOW_BUILD_ENV=local` `.dmg` (or pre-fix unstamped) | `local` | on (tagged `local`) | on |
+| any `build:mac*` `.dmg` / stable release (`release:mac`) | `stable` | on (tagged `stable`) | on |
+| `build:mac:dev*` `.dmg` / Cyboflow Dev release (`release:mac:dev`) | `dev` | on (tagged `dev`) | on |
 
 Credentials come from env (`SENTRY_DSN`, `APTABASE_APP_KEY`, e.g. `.envrc.local`); a missing key
 disables that SDK. Opt-out lives in config (`telemetry.errorReportingEnabled` /
