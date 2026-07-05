@@ -738,13 +738,21 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // phase commands on the SDK path too (IDEA-013 rung-(ii)). Keyed off the
       // run's workflow_path → quick sessions / custom flows write nothing.
       // worktreePath is recorded by sessionId so cleanupCliResources can remove it.
-      installWorkflowBundle(this.db, this.bundleWriter, runId, options.worktreePath, makeLoggerLike(this.logger));
-      this.bundleWorktrees.set(sessionId, options.worktreePath);
-      // SHARED-BUNDLE refcount: this spawn now relies on the bundle for the rest
-      // of its turn. Increment so a finishing sibling lane (same sessionId) cannot
-      // remove the bundle out from under this one — removeBundleForSession only
-      // strips it when the LAST lane decrements back to 0.
-      this.bundleRefcountBySession.set(sessionId, (this.bundleRefcountBySession.get(sessionId) ?? 0) + 1);
+      //
+      // SKIP entirely for an in-place session (migration 046): its worktree IS the
+      // user's real checkout, and the agent-overlay writer would dirty the real
+      // `.claude/agents`. Leaving bundleWorktrees unset also makes the paired
+      // removeBundleForSession a no-op (it early-returns on a missing entry), so no
+      // teardown touches the real checkout either.
+      if (!dbSession?.in_place) {
+        installWorkflowBundle(this.db, this.bundleWriter, runId, options.worktreePath, makeLoggerLike(this.logger));
+        this.bundleWorktrees.set(sessionId, options.worktreePath);
+        // SHARED-BUNDLE refcount: this spawn now relies on the bundle for the rest
+        // of its turn. Increment so a finishing sibling lane (same sessionId) cannot
+        // remove the bundle out from under this one — removeBundleForSession only
+        // strips it when the LAST lane decrements back to 0.
+        this.bundleRefcountBySession.set(sessionId, (this.bundleRefcountBySession.get(sessionId) ?? 0) + 1);
+      }
 
       // Build SDK options (uses runId for the approval-router hook). Built from
       // effectiveOptions so a lane spawn's stripped resume signals (M5(1)) reach

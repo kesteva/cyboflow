@@ -116,7 +116,17 @@ export class ExecutionTracker extends EventEmitter {
         commitModeSettings.mode = commitMode;
         this.logger?.verbose(`Using legacy autoCommit (${session.autoCommit}) -> commit mode: ${commitMode}`);
       }
-      
+
+      // Belt-and-braces: in-place sessions (migration 046) share the user's real
+      // checkout, so a checkpoint `git add -A` would commit their unrelated dirty
+      // files. create-quick already forces commitMode 'disabled' for them, but this
+      // backstops any later per-session commit-mode edit — an in-place session can
+      // NEVER auto-commit here.
+      if (session?.inPlace) {
+        commitMode = 'disabled';
+        commitModeSettings.mode = 'disabled';
+      }
+
       console.log(`[ExecutionTracker] Final commit mode for session ${sessionId}: ${commitMode}`);
       this.logger?.verbose(`Final commit mode for session ${sessionId}: ${commitMode}`);
       

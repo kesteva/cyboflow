@@ -933,6 +933,11 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // invokable unit instead of a paragraph of prose (IDEA-013 rung-(ii)). Keyed
     // off the run's workflow_path, so a quick session / custom flow with no
     // sibling bundle writes nothing (fail-soft). Removed on teardown.
+    //
+    // No in-place gate needed here (unlike the SDK sibling): in-place sessions
+    // (migration 046) are SDK-only — create-quick rejects an in-place session that
+    // would resolve the interactive substrate — so this seam never runs against a
+    // session whose worktree is the user's real checkout.
     installWorkflowBundle(this.db, this.bundleWriter, runId, worktreePath, this.toLoggerLike(this.logger));
 
     // Write the per-run interactive MCP config (the path buildCommandArgs points
