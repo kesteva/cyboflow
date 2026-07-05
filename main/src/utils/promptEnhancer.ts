@@ -15,7 +15,16 @@ export class PromptEnhancer {
    * @param dbSession The database session object
    * @returns The enhanced prompt with structured commit instructions if applicable
    */
-  enhancePromptForStructuredCommit(prompt: string, dbSession: { id: string; commit_mode?: string; commit_mode_settings?: string }): string {
+  enhancePromptForStructuredCommit(prompt: string, dbSession: { id: string; commit_mode?: string; commit_mode_settings?: string; in_place?: boolean }): string {
+    // In-place sessions (migration 046) share the user's real checkout — the
+    // structured template tells the agent to `git commit` in its cwd, which here
+    // would commit into the user's working copy (and may sweep unrelated dirty
+    // files). Never enhance for them, regardless of the persisted commit_mode
+    // (the commit-mode IPC also rejects the write; this backstops stale rows).
+    if (dbSession?.in_place) {
+      this.logger?.verbose(`Session ${dbSession.id} is in-place — skipping structured commit enhancement`);
+      return prompt;
+    }
     // Check if session has structured commit mode
     if (dbSession?.commit_mode === 'structured') {
       this.logger?.verbose(`Session ${dbSession.id} uses structured commit mode, enhancing prompt`);
@@ -64,7 +73,7 @@ export function getPromptEnhancer(logger?: Logger): PromptEnhancer {
  * @param logger Optional logger
  * @returns The enhanced prompt
  */
-export function enhancePromptForStructuredCommit(prompt: string, dbSession: { id: string; commit_mode?: string; commit_mode_settings?: string }, logger?: Logger): string {
+export function enhancePromptForStructuredCommit(prompt: string, dbSession: { id: string; commit_mode?: string; commit_mode_settings?: string; in_place?: boolean }, logger?: Logger): string {
   const enhancer = getPromptEnhancer(logger);
   return enhancer.enhancePromptForStructuredCommit(prompt, dbSession);
 }

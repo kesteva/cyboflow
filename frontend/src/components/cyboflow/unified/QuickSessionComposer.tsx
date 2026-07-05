@@ -365,7 +365,11 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   // composer (where the SDK-gated model pill never appears). null → no pill.
   const effortLabel = activeSession.effort === 'ultracode' ? 'ultracode' : null;
 
-  const checkpointSlot = !interactive ? (
+  // No commit-mode pill for in-place sessions: they share the user's real
+  // checkout, so auto/structured commits are unavailable (creation forces
+  // 'disabled' and the commit-mode IPC rejects changes — hiding the pill keeps
+  // the UI from promising modes the backend refuses).
+  const checkpointSlot = !interactive && activeSession.inPlace !== true ? (
     <CommitModePill
       sessionId={activeSession.id}
       currentMode={activeSession.commitMode}

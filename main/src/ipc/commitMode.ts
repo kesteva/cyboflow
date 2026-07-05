@@ -36,7 +36,21 @@ export function registerCommitModeHandlers(db: DatabaseService, logger?: Logger,
   ): Promise<void> => {
     try {
       logger?.verbose(`Updating commit mode settings for session ${sessionId}`);
-      
+
+      // In-place sessions (migration 046) share the user's real checkout and are
+      // created with commit_mode 'disabled' — any auto/structured commit there
+      // would land in the user's working copy (checkpoint: `git add -A` sweeps
+      // unrelated dirty files; structured: the prompt template makes the agent
+      // commit). Reject non-'disabled' writes at this chokepoint; the composer
+      // hides the pill for in-place sessions, so this only fires for stale UIs
+      // or programmatic callers.
+      const targetSession = db.getSession(sessionId);
+      if (targetSession?.in_place && settings.mode !== 'disabled') {
+        throw new Error(
+          'In-place sessions work directly in the project checkout — auto/structured commit modes are unavailable.',
+        );
+      }
+
       // Store settings as JSON in the database
       const settingsJson = JSON.stringify(settings);
       
