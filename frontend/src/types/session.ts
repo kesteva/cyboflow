@@ -1,6 +1,7 @@
 import type { TextBlock, ToolUseBlock, ToolResultBlock } from '../../../shared/types/claudeStream';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
+import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 
 // Claude message content types
 /** @deprecated import { TextBlock } from 'shared/types/claudeStream' directly. */
@@ -88,6 +89,15 @@ export interface Session {
   permissionMode?: 'approve' | 'ignore';
   runStartedAt?: string;
   isMainRepo?: boolean;
+  /**
+   * In-place session (sessions.in_place, migration 046): worktreePath IS the
+   * project checkout — no dedicated git worktree exists. DISTINCT from
+   * isMainRepo (the hidden singleton dashboard session): in-place sessions are
+   * ordinary, list-visible quick sessions. They are SDK-only and can never host
+   * a workflow run — launch surfaces must warn + redirect the run into a fresh
+   * worktree-backed session. Mirror of main/src/types/session.ts Session.
+   */
+  inPlace?: boolean;
   displayOrder?: number;
   isFavorite?: boolean;
   autoCommit?: boolean;
@@ -219,6 +229,17 @@ export interface CreateSessionRequest {
    * with the main twin in main/src/types/session.ts (request-parity rule).
    */
   enabledPlugins?: string[];
+  /**
+   * Where the quick session's working tree lives ('worktree' | 'in-place').
+   * Omitted → the global Settings default (quickSessionWorktreeMode, floor
+   * 'worktree'). 'in-place' skips worktree creation and works directly in the
+   * project checkout (sessions.in_place = 1, migration 046); it is SDK-only —
+   * create-quick rejects the combination with an interactive-resolving
+   * substrate. Only honored by sessions:create-quick. Workflow-host session
+   * creation (ensureSessionForLaunch) pins 'worktree' explicitly. KEEP IN SYNC
+   * with the main twin in main/src/types/session.ts (request-parity rule).
+   */
+  worktreeMode?: QuickSessionWorktreeMode;
   projectId?: number;
   folderId?: string;
   baseBranch?: string;

@@ -220,6 +220,7 @@ export class SessionManager extends EventEmitter {
       permissionMode: dbSession.permission_mode,
       runStartedAt: dbSession.run_started_at,
       isMainRepo: dbSession.is_main_repo,
+      inPlace: !!dbSession.in_place,
       projectId: dbSession.project_id, // Add the missing projectId field
       folderId: dbSession.folder_id,
       displayOrder: dbSession.display_order, // Include displayOrder for proper sorting
@@ -315,7 +316,8 @@ export class SessionManager extends EventEmitter {
     baseCommit?: string,
     baseBranch?: string,
     commitMode?: 'structured' | 'checkpoint' | 'disabled',
-    commitModeSettings?: string
+    commitModeSettings?: string,
+    inPlace?: boolean
   ): Promise<Session> {
     return await withLock(`session-creation`, async () => {
       return this.createSessionWithId(
@@ -333,7 +335,8 @@ export class SessionManager extends EventEmitter {
         baseCommit,
         baseBranch,
         commitMode,
-        commitModeSettings
+        commitModeSettings,
+        inPlace
       );
     });
   }
@@ -353,7 +356,8 @@ export class SessionManager extends EventEmitter {
     baseCommit?: string,
     baseBranch?: string,
     commitMode?: 'structured' | 'checkpoint' | 'disabled',
-    commitModeSettings?: string
+    commitModeSettings?: string,
+    inPlace?: boolean
   ): Session {
     // Ensure this session ID isn't already being created
     if (this.activeSessions.has(id) || this.db.getSession(id)) {
@@ -392,6 +396,7 @@ export class SessionManager extends EventEmitter {
       folder_id: folderId,
       permission_mode: permissionMode,
       is_main_repo: isMainRepo,
+      in_place: inPlace,
       auto_commit: autoCommit,
       // Model is now managed at panel level
       base_commit: baseCommit,

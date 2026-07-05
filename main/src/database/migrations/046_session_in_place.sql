@@ -1,0 +1,16 @@
+-- 046_session_in_place.sql
+-- Opt-out worktree isolation for quick sessions ("in-place" sessions).
+--
+-- in_place = 1 marks a session whose worktree_path IS the project checkout —
+-- no dedicated git worktree was created for it. DISTINCT from is_main_repo:
+-- is_main_repo rows are the singleton-per-project dashboard session and are
+-- FILTERED OUT of every session-list query; in_place sessions are ordinary
+-- quick sessions (visible in the rail, non-singleton) that simply skipped
+-- worktree provisioning at the user's request (launch-wizard Advanced toggle
+-- or the quickSessionWorktreeMode Settings default).
+--
+-- Every worktree-mutating path must skip in_place rows exactly as it skips
+-- is_main_repo rows (sessions:delete cleanup, project-deletion sweep), and
+-- RunLauncher refuses to host a workflow run in one (workflows always execute
+-- in an isolated worktree session).
+ALTER TABLE sessions ADD COLUMN in_place BOOLEAN DEFAULT 0;
