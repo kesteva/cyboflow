@@ -197,7 +197,7 @@ ${digestConversation(history.conversation)}
 If it helps, investigate the worktree with your read-only tools (Read/Grep/Glob) before deciding. Then decide ONE triage action and return it as structured output:
 - "retry"    — the failure looks transient/flaky and a fresh attempt is likely to succeed.
 - "escalate" — a human should decide (ambiguous, risky, or needs a judgement call). Prefer this when unsure.
-- "fail"     — the failure is definitive and retrying or human review won't help; end the run.
+- "fail"     — the failure is definitive and retrying won't help; recommend ending the run (a human confirms before it ends).
 
 Return only the structured { decision, rationale } object. The rationale should be 2-4 sentences explaining your reasoning.`;
 }

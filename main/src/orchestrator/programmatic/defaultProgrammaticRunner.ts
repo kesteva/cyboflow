@@ -13,12 +13,13 @@
  *                   thrown orchestrator turn).
  *
  * The monitor-unify refactor folds the old Stage 3 supervisor + supervisor-chat
- * planes into a single ON-DEMAND `MonitorSession` (opt-in via
- * `programmaticSupervisor: 'sdk'`). When a `monitorFactory` is provided the runner
- * builds the monitor for the run, registers it in `MonitorRegistry` (so the tRPC
- * layer / renderer can reach it for chat), and passes both the monitor and the run
- * context's `injectEvent` into the host so triage rationale renders in the run's
- * existing Chat pane. There is NO separate transcript store and NO continuous feed.
+ * planes into a single ON-DEMAND `MonitorSession`, ALWAYS ON for programmatic runs
+ * since the supervisor-role redesign (2026-07-05). When a `monitorFactory` is
+ * provided the runner builds the monitor for the run, registers it in
+ * `MonitorRegistry` (so the tRPC layer / renderer can reach it for chat), and
+ * passes both the monitor and the run context's `injectEvent` into the host so
+ * triage rationale renders in the run's existing Chat pane. There is NO separate
+ * transcript store and NO continuous feed.
  *
  * The stateless collaborators (spawner, reporter, gate) are injected once at the
  * composition root; per-run state is bound inside run().
@@ -44,11 +45,10 @@ export interface DefaultProgrammaticRunnerDeps {
    * monitor is registered in `MonitorRegistry` and wired into the host so a required
    * step's exhausted failure is triaged WITH full history and its rationale renders
    * in the run's Chat pane. Absent — or returning undefined for this run — ⇒ no
-   * monitor: exhausted required failures 'escalate' to the human review queue (the
-   * default, behavior-identical to the old ReviewQueueSupervisor). Opt-in via config
-   * `programmaticSupervisor: 'sdk'`, which the production factory reads AT RUN START
-   * (returning undefined when 'review-queue') so a settings toggle applies to the
-   * next run without an app restart.
+   * monitor: exhausted required failures 'escalate' to the human review queue with a
+   * plain chat note. In production the factory ALWAYS returns a session (the
+   * supervisor-role redesign, 2026-07-05 — the old `programmaticSupervisor` config
+   * opt-in is gone); the undefined arm exists for tests and defensive wiring.
    *
    * The run context's `injectEvent` (Slice B) is threaded as the SECOND arg so the
    * built session OWNS its chat-inject capability (its `converse` renders the human

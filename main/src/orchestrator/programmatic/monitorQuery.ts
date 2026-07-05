@@ -17,9 +17,11 @@
  * timeout we abort the in-flight query and throw (the monitor brain then fails-soft:
  * triage → 'escalate', answer → an apologetic string).
  *
- * ⚠️ NOT live-verifiable headlessly (it makes a real Claude call). It is reached
- * ONLY when the monitor is opted in (config `programmaticSupervisor: 'sdk'`), so the
- * risk is contained — the default review-queue path never imports this.
+ * ⚠️ NOT live-verifiable headlessly (it makes a real Claude call). Since the
+ * supervisor-role redesign (2026-07-05) the monitor is ALWAYS built for
+ * programmatic runs, but this boundary is still only reached on demand — a triage
+ * of an exhausted required failure or a human chat turn; routine progress never
+ * calls it.
  *
  * Standalone-typecheck note: this is the SDK-importing leaf; nothing here imports
  * electron / better-sqlite3 / a concrete service beyond the claude-exe resolver.

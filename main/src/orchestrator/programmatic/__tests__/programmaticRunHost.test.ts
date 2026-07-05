@@ -105,9 +105,52 @@ describe('ProgrammaticRunHost', () => {
     expect(text).toContain('looks ambiguous');
   });
 
-  it("defaults triageFailure to 'escalate' when no monitor is wired (review-queue default)", async () => {
-    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve') });
-    expect(await host.triageFailure(step({ id: 'a' }), ctx, undefined)).toBe('escalate');
+  it("downgrades a monitor 'fail' verdict to 'escalate' — ending a run is the human's call", async () => {
+    const monitor = makeMonitor('fail', 'the branch is unbuildable');
+    const injected: ClaudeStreamEvent[] = [];
+    const host = new ProgrammaticRunHost({
+      runId: 'r',
+      projectId: 1,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      monitor,
+      injectEvent: (e) => injected.push(e),
+    });
+
+    const decision = await host.triageFailure(step({ id: 'a', name: 'Build epics' }), ctx, 'boom');
+
+    expect(decision).toBe('escalate');
+    // The chat turn carries the recommendation + the rationale so the escalation
+    // surfaces in BOTH the chat and the review queue.
+    expect(injected).toHaveLength(1);
+    const ev = injected[0];
+    const text =
+      'type' in ev && ev.type === 'assistant' && Array.isArray(ev.message.content)
+        ? ev.message.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
+        : '';
+    expect(text).toContain('recommends ending the run');
+    expect(text).toContain('the branch is unbuildable');
+  });
+
+  it("defaults triageFailure to 'escalate' with a plain chat note when no monitor is wired", async () => {
+    const injected: ClaudeStreamEvent[] = [];
+    const host = new ProgrammaticRunHost({
+      runId: 'r',
+      projectId: 1,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      injectEvent: (e) => injected.push(e),
+    });
+
+    expect(await host.triageFailure(step({ id: 'a', name: 'Build epics' }), ctx, undefined)).toBe('escalate');
+    // Dual-surface invariant holds even without a brain: the escalation renders in chat too.
+    expect(injected).toHaveLength(1);
+    const ev = injected[0];
+    const text =
+      'type' in ev && ev.type === 'assistant' && Array.isArray(ev.message.content)
+        ? ev.message.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
+        : '';
+    expect(text).toContain('escalated to the review queue');
   });
 
   it("is fail-soft — a throwing monitor.triage defaults to 'escalate' and does not abort the walk", async () => {

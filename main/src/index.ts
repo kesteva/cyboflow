@@ -997,23 +997,20 @@ async function initializeServices() {
     // ON-DEMAND monitor (the monitor-unify refactor): the single triage + chat
     // human-seam plane that folds the old Stage 3 supervisor + supervisor-chat
     // planes into one token-frugal `MonitorSession` rendering in the run's existing
-    // Chat pane. Opt-in via config (default 'review-queue'), read PER RUN START —
-    // the factory is always wired but consults `programmaticSupervisor` when the
-    // runner calls it, so a Settings toggle applies to the next run without an app
-    // restart:
-    //   - 'review-queue' → the factory returns undefined: exhausted required
-    //     failures 'escalate' to the HUMAN review queue (the host's default; no
-    //     live SDK call) and the Chat composer stays disabled for the run —
-    //     behavior-identical to before.
-    //   - 'sdk' → a `DefaultMonitorSession` over the real on-demand query fns
-    //     (monitorQuery.ts) + a HistoryReader bound to cyboflowDb. The session reads
-    //     the WHOLE run history ONLY when it must act (triage a failure / answer a
-    //     human chat turn); it consumes zero tokens during routine progress. The
-    //     run's `injectEvent` (threaded as the 2nd factory arg from the run context,
-    //     Slice B) is owned by the session so its `converse` renders the human turn +
-    //     the monitor's reply into the run's Chat pane (the tRPC `monitor.send` seam).
-    //     The runner registers the session in MonitorRegistry so the router reaches
-    //     it. NOT headlessly verifiable — it makes a real Claude call (monitorQuery.ts).
+    // Chat pane. ALWAYS ON for programmatic runs (the supervisor-role redesign,
+    // 2026-07-05 — the old `programmaticSupervisor` opt-in config is gone): the
+    // supervisor is a Q&A partner the human can query at ANY point in the run, and
+    // escalations surface in BOTH the chat and the human review queue rather than
+    // routing to one or the other. A `DefaultMonitorSession` over the real
+    // on-demand query fns (monitorQuery.ts) + a HistoryReader bound to cyboflowDb.
+    // The session reads the WHOLE run history ONLY when it must act (triage a
+    // failure / answer a human chat turn); it consumes zero tokens during routine
+    // progress. The run's `injectEvent` (threaded as the 2nd factory arg from the
+    // run context, Slice B) is owned by the session so its `converse` renders the
+    // human turn + the monitor's reply into the run's Chat pane (the tRPC
+    // `monitor.send` seam). The runner registers the session in MonitorRegistry so
+    // the router reaches it. NOT headlessly verifiable — it makes a real Claude
+    // call (monitorQuery.ts).
     monitorFactory: ((): ((
       ctx: MonitorContext,
       injectEvent: (event: ClaudeStreamEvent) => void,
@@ -1021,9 +1018,8 @@ async function initializeServices() {
       const structuredQuery = makeSdkStructuredQuery(cyboflowLogger);
       const textQuery = makeSdkTextQuery(cyboflowLogger);
       const history = new DefaultHistoryReader(cyboflowDb, cyboflowLogger);
-      return (ctx, injectEvent) => {
-        if (configManager.getProgrammaticSupervisor() !== 'sdk') return undefined;
-        return new DefaultMonitorSession({
+      return (ctx, injectEvent) =>
+        new DefaultMonitorSession({
           ctx,
           history,
           structuredQuery,
@@ -1031,7 +1027,6 @@ async function initializeServices() {
           injectEvent,
           logger: cyboflowLogger,
         });
-      };
     })(),
     // Host-driven fan-out lane substrate (generalize-parallel-fan-out): builds a
     // per-run FanOutDriver bound to the run's batch_id so the WorkflowController can

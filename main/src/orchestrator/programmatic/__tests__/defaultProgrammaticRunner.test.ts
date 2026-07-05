@@ -183,18 +183,20 @@ describe('DefaultProgrammaticRunner', () => {
     const runner = new DefaultProgrammaticRunner({
       spawner: makeSpawner(() => Promise.reject(new Error('boom'))),
       reporter,
-      gate: gateOf('approve'),
+      gate: gateOf('reject'),
       monitorFactory: () => monitor,
     });
 
-    // The monitor triages 'fail' → the controller fails the run → the runner throws.
-    // The failed run keeps its worktree, so the monitor stays registered for at-rest
-    // chat ("why did it fail?") until the user dismisses it.
+    // The monitor triages 'fail' → the host DOWNGRADES it to 'escalate' (the
+    // supervisor-role redesign: ending a run is the human's call) → the human gate
+    // rejects → the controller fails the run → the runner throws. The failed run
+    // keeps its worktree, so the monitor stays registered for at-rest chat
+    // ("why did it fail?") until the user dismisses it.
     await expect(runner.run(ctxFor(oneStepDef()))).rejects.toThrow("failed at step 'a'");
     expect(MonitorRegistry.getInstance().get('run-1')).toBe(monitor);
   });
 
-  it('does NOT register a monitor when no factory is provided (default review-queue path)', async () => {
+  it('does NOT register a monitor when no factory is provided (defensive wiring; production always provides one)', async () => {
     const runner = new DefaultProgrammaticRunner({ spawner: makeSpawner(), reporter, gate: gateOf('approve') });
     await expect(runner.run(ctxFor(oneStepDef()))).resolves.toBeUndefined();
     expect(MonitorRegistry.getInstance().get('run-1')).toBeUndefined();
