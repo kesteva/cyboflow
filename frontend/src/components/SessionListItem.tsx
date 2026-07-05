@@ -411,6 +411,14 @@ export const SessionListItem = memo(function SessionListItem({ session, isNested
               {!!session.isMainRepo && (
                 <span className="ml-1 text-xs text-interactive">(main)</span>
               )}
+              {!!session.inPlace && (
+                <span
+                  className="ml-1 text-xs text-status-warning"
+                  title="In-place session — works directly in the project checkout, no worktree"
+                >
+                  in-place
+                </span>
+              )}
               {session.runId == null && (
                 <span
                   className="ml-1 text-xs text-text-tertiary"
@@ -573,7 +581,7 @@ export const SessionListItem = memo(function SessionListItem({ session, isNested
         onClose={() => setShowArchiveConfirm(false)}
         onConfirm={handleConfirmArchive}
         title={`Archive Session`}
-        message={`Archive session "${session.name}"? This will:\n\n• Move the session to the archived sessions list\n• Preserve all session history and outputs\n${session.isMainRepo ? '• Close the active Claude Code connection' : `• Remove the git worktree locally (${session.worktreePath?.split('/').pop() || 'worktree'})`}`}
+        message={`Archive session "${session.name}"? This will:\n\n• Move the session to the archived sessions list\n• Preserve all session history and outputs\n${session.isMainRepo ? '• Close the active Claude Code connection' : session.inPlace ? '• Work directly in your project checkout — no worktree will be removed' : `• Remove the git worktree locally (${session.worktreePath?.split('/').pop() || 'worktree'})`}`}
         confirmText="Archive"
         confirmButtonClass="bg-status-warning hover:bg-status-warning-hover text-white"
         icon={<Archive className="w-6 h-6 text-status-warning flex-shrink-0" />}
