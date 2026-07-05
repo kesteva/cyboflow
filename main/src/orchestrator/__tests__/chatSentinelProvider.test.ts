@@ -49,6 +49,13 @@ function buildDb(): Database.Database {
   );
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
+  // createRun also stamps the three immutable visual-verification columns
+  // (migration 046) — verify_enabled / verify_type / verify_chain. Layer the
+  // additive ALTERs on top so the sentinel mint's INSERT resolves; with no
+  // verify config injected every run stamps the DISABLED posture.
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN verify_enabled INTEGER NOT NULL DEFAULT 0');
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN verify_type TEXT');
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN verify_chain TEXT');
   db.exec(`
     CREATE TABLE workflow_revisions (
       id          INTEGER PRIMARY KEY AUTOINCREMENT,
