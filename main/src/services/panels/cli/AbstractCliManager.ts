@@ -7,6 +7,7 @@ import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
+import { captureSeamError } from '../../telemetry';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 
 interface CliProcess {
@@ -135,6 +136,16 @@ export abstract class AbstractCliManager extends EventEmitter {
       // Test CLI availability (with caching)
       const availability = await this.getCachedAvailability();
       if (!availability.available) {
+        // Handled failure — surfaces in the UI but never reaches Sentry's
+        // uncaught-exception integrations. Capture explicitly so a tester's
+        // missing/broken `claude` install (not found on PATH, --version failed)
+        // is visible in error reporting. availability.error may embed a user
+        // path; scrub.ts home-path-redacts the message before send.
+        captureSeamError(
+          'cli-availability',
+          new Error(`${this.getCliToolName()} unavailable: ${availability.error ?? 'unknown error'}`),
+          { cliTool: this.getCliToolName() },
+        );
         await this.handleCliNotAvailable(availability, panelId, sessionId);
         throw new Error(`${this.getCliToolName()} CLI not available: ${availability.error}`);
       }

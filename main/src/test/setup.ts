@@ -22,6 +22,7 @@ vi.mock('electron', () => ({
 // fail to collect. Telemetry is a no-op in tests regardless (never initialized).
 vi.mock('@sentry/electron/main', () => ({
   init: vi.fn(),
+  captureException: vi.fn(),
 }));
 vi.mock('@aptabase/electron/main', () => ({
   initialize: vi.fn(),

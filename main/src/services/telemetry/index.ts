@@ -158,3 +158,30 @@ export function trackUsageFromRenderer(
 export function isSentryActive(): boolean {
   return sentryActive;
 }
+
+/**
+ * Capture a HANDLED error at a named seam. Sentry's default integrations only
+ * see uncaught exceptions / unhandled rejections, so failure paths the app
+ * catches and surfaces in the UI (CLI unavailable, spawn timeouts) are
+ * invisible without an explicit capture like this.
+ *
+ * No-op unless Sentry initialized; never throws into app code.
+ *
+ * Payload rules (see scrub.ts): the `extra` bag is DELETED by scrubSentryEvent,
+ * so context must ride in `tags` — low-cardinality, non-PII values only (seam
+ * names, substrate, platform). Detail belongs in the error MESSAGE, which
+ * beforeSend home-path-redacts automatically.
+ */
+export function captureSeamError(
+  seam: string,
+  error: unknown,
+  tags?: Record<string, string>,
+): void {
+  if (!sentryActive) return;
+  try {
+    const err = error instanceof Error ? error : new Error(String(error));
+    Sentry.captureException(err, { tags: { seam, ...tags } });
+  } catch {
+    // Telemetry must never throw into app code.
+  }
+}

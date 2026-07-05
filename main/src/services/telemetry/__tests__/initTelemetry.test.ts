@@ -7,13 +7,14 @@ import * as path from 'path';
 // Stable spy references shared across vi.resetModules() reloads. vi.hoisted runs
 // before the vi.mock factories below, so the same fns back every reimport of the
 // module under test and we can assert call counts after each initTelemetry().
-const sentry = vi.hoisted(() => ({ init: vi.fn() }));
+const sentry = vi.hoisted(() => ({ init: vi.fn(), captureException: vi.fn() }));
 const aptabase = vi.hoisted(() => ({ initialize: vi.fn(), trackEvent: vi.fn() }));
 
 vi.mock('@sentry/electron/main', () => ({
   init: sentry.init,
+  captureException: sentry.captureException,
   // scrub.ts imports only the Event/Breadcrumb *types* from here (erased at
-  // compile time), so no runtime exports beyond init are needed.
+  // compile time), so no further runtime exports are needed.
 }));
 
 vi.mock('@aptabase/electron/main', () => ({
@@ -65,6 +66,7 @@ describe('initTelemetry gating (Sentry + Aptabase paths)', () => {
   beforeEach(() => {
     vi.resetModules();
     sentry.init.mockClear();
+    sentry.captureException.mockClear();
     aptabase.initialize.mockClear();
     aptabase.trackEvent.mockClear();
     setPackaged(false);
@@ -269,6 +271,54 @@ describe('initTelemetry gating (Sentry + Aptabase paths)', () => {
     initTelemetry(CFG);
     trackUsage('session_created', { kind: 'quick' });
     expect(aptabase.trackEvent).not.toHaveBeenCalled();
+  });
+
+  // ---- captureSeamError gating off the initialized state ----
+
+  it('captureSeamError forwards to Sentry with the seam tag once active', async () => {
+    setPackaged(true);
+    stampBuildInfo('stable');
+    process.env.SENTRY_DSN = 'https://public@example.ingest.sentry.io/1';
+    const { initTelemetry, captureSeamError } = await import('../index');
+    initTelemetry(CFG);
+    const err = new Error('claude executable not found in PATH');
+    captureSeamError('cli-availability', err, { cliTool: 'Claude Code (Interactive)' });
+    expect(sentry.captureException).toHaveBeenCalledWith(err, {
+      tags: { seam: 'cli-availability', cliTool: 'Claude Code (Interactive)' },
+    });
+  });
+
+  it('captureSeamError wraps a non-Error value in an Error', async () => {
+    setPackaged(true);
+    stampBuildInfo('stable');
+    process.env.SENTRY_DSN = 'https://public@example.ingest.sentry.io/1';
+    const { initTelemetry, captureSeamError } = await import('../index');
+    initTelemetry(CFG);
+    captureSeamError('sdk-first-event-timeout', 'no events after 30000ms');
+    const [captured, hint] = sentry.captureException.mock.calls[0];
+    expect(captured).toBeInstanceOf(Error);
+    expect((captured as Error).message).toBe('no events after 30000ms');
+    expect(hint).toEqual({ tags: { seam: 'sdk-first-event-timeout' } });
+  });
+
+  it('captureSeamError is a silent no-op when Sentry never initialized', async () => {
+    setPackaged(false); // no DSN in beforeEach → Sentry never initializes
+    const { initTelemetry, captureSeamError } = await import('../index');
+    initTelemetry(CFG);
+    captureSeamError('cli-availability', new Error('boom'));
+    expect(sentry.captureException).not.toHaveBeenCalled();
+  });
+
+  it('captureSeamError swallows a throwing Sentry.captureException', async () => {
+    setPackaged(true);
+    stampBuildInfo('stable');
+    process.env.SENTRY_DSN = 'https://public@example.ingest.sentry.io/1';
+    sentry.captureException.mockImplementationOnce(() => {
+      throw new Error('transport down');
+    });
+    const { initTelemetry, captureSeamError } = await import('../index');
+    initTelemetry(CFG);
+    expect(() => captureSeamError('cli-availability', new Error('boom'))).not.toThrow();
   });
 
   it('trackUsage swallows a throwing aptabase trackEvent', async () => {

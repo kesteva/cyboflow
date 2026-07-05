@@ -8,6 +8,7 @@ import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
+import { captureSeamError } from '../../telemetry';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../../orchestrator/integrations/installedPlugins';
 import { resolveModelAlias, interactiveModelArg, applyModelAvailabilityFallback } from './modelContext';
@@ -1121,6 +1122,14 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     } catch (discoveryErr) {
       const message = discoveryErr instanceof Error ? discoveryErr.message : String(discoveryErr);
       this.logger?.error(`[InteractiveClaudeManager] transcript discovery failed for panel ${panelId}: ${message}`);
+      // Non-fatal to the session, but this IS the "spawned claude never engaged
+      // the prompt" symptom (session appears hung for DISCOVERY_TIMEOUT_MS,
+      // then no structured pipeline) — report it, since nothing downstream
+      // throws for it.
+      captureSeamError('interactive-transcript-discovery-timeout', discoveryErr, {
+        substrate: 'interactive',
+        timeoutMs: String(DISCOVERY_TIMEOUT_MS),
+      });
     }
 
     // single-writer-per-substrate: the interactive substrate writes

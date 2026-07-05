@@ -1,12 +1,14 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { app } from 'electron';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
 import { readInstalledPluginIds, buildExclusiveEnabledPluginsMap } from '../../../orchestrator/integrations/installedPlugins';
 import { resolveClaudeExecutablePath } from './claudeExecutablePath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
+import { captureSeamError } from '../../telemetry';
 import {
   resolveModelAlias,
   sdkModelAndBetas,
@@ -191,6 +193,16 @@ export function mcpDenyListSdkGuards(disabledMcps: readonly string[]): {
  * Narrowly the 'cyboflow' server only; other MCP servers stay classifier-gated.
  */
 const CYBOFLOW_MCP_TOOL_PREFIX = 'mcp__cyboflow__';
+
+/**
+ * Instrumentation-only watchdog window for the SDK substrate's first query()
+ * event. The SDK surfaces a failed claude subprocess spawn (bad executable
+ * path, auth hang) by yielding NOTHING — no throw, no event — so the session
+ * just looks stuck. When this window elapses with zero events the failure is
+ * reported to Sentry + the log; the turn is NOT aborted (a slow first token on
+ * a long context is legitimate).
+ */
+const SDK_FIRST_EVENT_TIMEOUT_MS = 30_000;
 
 interface ClaudeSpawnOptions {
   panelId: string;
@@ -863,12 +875,29 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // (final) attempt — stashed for spawnCliProcess to reject on. Reset at the top
     // of each attempt so a recovered model-fallback retry never leaves a stale one.
     let terminalError: string | null = null;
+    // First-event watchdog (see SDK_FIRST_EVENT_TIMEOUT_MS): armed per attempt,
+    // cleared by the first event and in the finally. Report-only — never aborts.
+    let firstEventTimer: ReturnType<typeof setTimeout> | null = null;
     try {
       retry: while (true) {
         attempt++;
         terminalError = null;
+        if (firstEventTimer) clearTimeout(firstEventTimer);
+        firstEventTimer = setTimeout(() => {
+          if (abortController.signal.aborted) return;
+          const msg = `SDK query yielded no events within ${SDK_FIRST_EVENT_TIMEOUT_MS}ms — claude subprocess may have failed to start`;
+          this.logger?.error(`[ClaudeCodeManager] ${msg} (panel ${displayPanelId})`);
+          captureSeamError('sdk-first-event-timeout', new Error(msg), {
+            substrate: 'sdk',
+            packaged: String(Boolean(app.isPackaged)),
+          });
+        }, SDK_FIRST_EVENT_TIMEOUT_MS);
         const q = query({ prompt, options: { ...activeOptions, abortController } });
         for await (const event of q) {
+          if (firstEventTimer) {
+            clearTimeout(firstEventTimer);
+            firstEventTimer = null;
+          }
           if (abortController.signal.aborted) break;
 
           // Mid-call graceful fallback: the CLI reports an unusable `--model` as an
@@ -966,6 +995,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
         this.noteModelUnavailabilityFromError(activeOptions.model, errMsg);
       }
     } finally {
+      if (firstEventTimer) {
+        clearTimeout(firstEventTimer);
+        firstEventTimer = null;
+      }
       this.cleanupPipeline(spawnKey);
       // Clear pending approvals and questions under runId — the same id passed to
       // requestApproval() / requestQuestion() via makePreToolUseHook. STAYS on
@@ -1280,6 +1313,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
     if (claudeExecutable) {
       sdkOptions.pathToClaudeCodeExecutable = claudeExecutable;
       this.logger?.info(`[ClaudeCodeManager] Using packaged claude executable: ${claudeExecutable}`);
+    } else if (app.isPackaged) {
+      // Packaged build with NO unpacked binary: the SDK falls back to its own
+      // require.resolve, yielding an asar-internal path whose spawn fails
+      // ENOTDIR with no surfaced error — query() simply never yields (the
+      // silent "session stuck / times out" failure). Report it loudly.
+      const msg = `packaged claude binary missing from app.asar.unpacked (${process.platform}-${process.arch}); SDK spawn will fail silently`;
+      this.logger?.error(`[ClaudeCodeManager] ${msg}`);
+      captureSeamError('sdk-packaged-binary-missing', new Error(msg), { substrate: 'sdk' });
     }
 
     // Native Claude auto-mode is pinned WHENEVER the model supports the
