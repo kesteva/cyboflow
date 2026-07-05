@@ -6,6 +6,40 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.16] — 2026-07-05
+
+### Added
+
+- **Read-only backlog access for flow agents.** Two new MCP tools —
+  `cyboflow_list_tasks` and `cyboflow_get_task` — let a running flow read the
+  entity backlog without any write path.
+- **Execution-model controls.** The launch wizard's **Advanced** options gain a
+  per-run execution-model override (orchestrated vs programmatic), and Settings
+  gains a **default execution model** plus a **programmatic-supervisor** opt-in.
+  The supervisor setting is read at run start, so toggling it takes effect
+  without a restart.
+- **Fast-mode feedback.** The **Fast** pill now warns when a fast-requested
+  turn's opt-in is declined by the CLI, with a one-off toast on the decline.
+- **Spawn-failure telemetry.** Sentry now instruments the missing-`claude`-binary
+  and spawn-timeout seams.
+
+### Fixed
+
+- **Human gates survive long waits.** Gates are kept alive past the CLI's 600s
+  hook timeout, and a dead `AskUserQuestion` gate now **self-heals** instead of
+  wedging the run.
+- Tester `.dmg` builds report their real telemetry environment (derived from the
+  build variant) instead of `local`.
+- The chat column stays usable on narrow windows.
+- Persisted fast-mode is threaded through `panels:continue` respawns.
+- The injected Cyboflow MCP server is marked always-load on both substrates.
+
+### Changed
+
+- Bumped the Claude Agent SDK to **0.3.201** (added a direct `@anthropic-ai/sdk`
+  dependency, MCP SDK to `^1.29`) and added the `seven_day_overage_included`
+  rate-limit literal to the shared unions.
+
 ## [0.1.15] — 2026-07-04
 
 ### Added
