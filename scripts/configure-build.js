@@ -89,16 +89,18 @@ function configureBuild() {
   }
 
   // Lean per-arch packaging. The claude-agent-sdk ships its (~200 MB) native
-  // `claude` CLI as a per-arch package (`…-darwin-arm64` / `…-darwin-x64`). A
-  // cross-arch dev box can have BOTH installed, and electron-builder bundles
-  // node_modules wholesale — so a single-arch build would otherwise also ship
-  // the OTHER arch's (dead-weight, wrong-arch) binary. When BUILD_ARCH names a
-  // single arch, exclude the other arch's package and fail fast if the target
-  // arch's binary is absent (which would silently break the SDK substrate at
-  // runtime). BUILD_ARCH unset / 'universal' leaves files untouched.
+  // `claude` CLI as a per-platform/arch package (`…-darwin-arm64`,
+  // `…-darwin-x64`, `…-linux-*`, `…-win32-*`). electron-builder bundles
+  // node_modules wholesale, and a cross-arch dev box (or a `--force` install
+  // that materializes every optionalDependency — e.g. after an SDK bump) can
+  // have ALL of them present. A macOS DMG only ever needs the single
+  // `darwin-<targetArch>` binary; every other platform/arch package is
+  // dead weight (~230 MB each). When BUILD_ARCH names a single arch, exclude
+  // every foreign Claude binary and fail fast if the target arch's binary is
+  // absent (which would silently break the SDK substrate at runtime).
+  // BUILD_ARCH unset / 'universal' leaves files untouched.
   const targetArch = process.env.BUILD_ARCH;
   if (targetArch === 'arm64' || targetArch === 'x64') {
-    const otherArch = targetArch === 'arm64' ? 'x64' : 'arm64';
     const sdkBase = '@anthropic-ai/claude-agent-sdk';
     const targetBinary = path.join(
       __dirname, '..', 'node_modules', `${sdkBase}-darwin-${targetArch}`, 'claude'
@@ -112,8 +114,20 @@ function configureBuild() {
       );
       process.exit(1);
     }
-    config.files = [...(config.files || []), `!node_modules/${sdkBase}-darwin-${otherArch}/**`];
-    console.log(`Lean packaging: excluding ${sdkBase}-darwin-${otherArch} (target arch ${targetArch}).`);
+    // Every per-platform Claude package except the one we're targeting.
+    const foreignPkgs = [
+      'darwin-arm64', 'darwin-x64',
+      'linux-x64', 'linux-arm64', 'linux-x64-musl', 'linux-arm64-musl',
+      'win32-x64', 'win32-arm64',
+    ].filter((suffix) => suffix !== `darwin-${targetArch}`);
+    config.files = [
+      ...(config.files || []),
+      ...foreignPkgs.map((suffix) => `!node_modules/${sdkBase}-${suffix}/**`),
+    ];
+    console.log(
+      `Lean packaging: keeping only ${sdkBase}-darwin-${targetArch}; ` +
+        `excluding ${foreignPkgs.length} foreign Claude binaries.`
+    );
   }
 
   // Write the environment-adjusted config; package.json stays pristine
