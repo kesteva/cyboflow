@@ -179,6 +179,14 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     cyboflow
   } = services;
 
+  // Session ids already claimed by a `sessions:create-quick` await-matcher.
+  // Same-second concurrent creates share one generated branchName, so every
+  // waiting matcher accepts every resulting session (base + suffixed forms) —
+  // this set makes each session resolvable by exactly ONE caller. Registration
+  // happens once per app, so the set spans all create-quick calls; it grows by
+  // one UUID per quick session for the process lifetime (negligible).
+  const claimedQuickSessionIds = new Set<string>();
+
   // Resolve the single server-side 'claude' panel id an interactive quick session
   // owns (created by sessions:create-quick). Undefined if none exists yet.
   const resolveClaudePanelId = (sessionId: string): string | undefined =>
@@ -457,11 +465,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // Resolve where this quick session works (migration 046): the per-launch
       // request wins when valid, otherwise the global Settings default (which
       // floors to 'worktree'). An in-place session skips worktree provisioning
-      // and runs directly in the project checkout.
-      const worktreeMode = isQuickSessionWorktreeMode(request.worktreeMode)
+      // and runs directly in the project checkout. EXPLICIT vs INHERITED matters
+      // below: only an explicit 'in-place' request may hard-fail on the
+      // SDK-only constraint; an inherited default falls back to 'worktree'.
+      const requestedWorktreeMode = isQuickSessionWorktreeMode(request.worktreeMode)
         ? request.worktreeMode
-        : configManager.getQuickSessionWorktreeMode();
-      const inPlace = worktreeMode === 'in-place';
+        : undefined;
+      let inPlace = (requestedWorktreeMode ?? configManager.getQuickSessionWorktreeMode()) === 'in-place';
 
       // In-place sessions are SDK-ONLY. The interactive PTY substrate writes a
       // PreToolUse hook into `<worktree>/.claude/settings.json` (interactiveSettingsWriter);
@@ -481,10 +491,21 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           env: process.env,
         });
         if (effectiveSubstrate === 'interactive') {
-          return {
-            success: false,
-            error: 'In-place quick sessions require the SDK runtime. Choose the SDK runtime, or use a worktree-backed session.',
-          };
+          if (requestedWorktreeMode === 'in-place') {
+            return {
+              success: false,
+              error: 'In-place quick sessions require the SDK runtime. Choose the SDK runtime, or use a worktree-backed session.',
+            };
+          }
+          // 'in-place' was only INHERITED from the global Settings default — a
+          // preference, not a hard pin. Fall back to a worktree session so
+          // interactive-resolving surfaces keep working (the wizard Ultracode
+          // card hard-pins 'interactive' with no Workspace control, the
+          // PTY-only lock forces it globally, and the no-args quick-session
+          // shortcut surfaces no error UI) instead of every launch dying on
+          // the SDK-only constraint.
+          console.log('[IPC] create-quick: global in-place default + interactive substrate — falling back to a worktree session');
+          inPlace = false;
         }
       }
 
@@ -532,6 +553,16 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             suffixed.test(wt) ||
             (inPlace && (name === branchName || nameSuffixed.test(name)));
           if (!matches) return;
+          // Same-second concurrent create-quick calls share one branchName, and
+          // BOTH matchers accept BOTH resulting sessions (base + `-<n>` suffixed
+          // forms) — without a claim, both callers would resolve to the FIRST
+          // session, orphaning the second with a stuck sentinel. First listener
+          // to see a session claims its id; the other keeps waiting for the
+          // sibling event. (Listeners run synchronously on the same emit, so the
+          // claim is race-free.) Covers the in-place NAME match and the
+          // pre-existing worktree PATH ambiguity alike.
+          if (claimedQuickSessionIds.has(createdSession.id)) return;
+          claimedQuickSessionIds.add(createdSession.id);
           clearTimeout(timeout);
           sessionManager.removeListener('session-created', onCreated);
           resolve(createdSession);
@@ -1033,10 +1064,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         timestamp: new Date()
       });
 
-      // Check if session uses structured commit mode and enhance the input
+      // Check if session uses structured commit mode and enhance the input.
+      // In-place sessions never get the enhancement — the template tells the
+      // agent to `git commit` in its cwd, which for them is the user's real
+      // checkout (mirrors the promptEnhancer chokepoint guard).
       let finalInput = input;
       const dbSession = databaseService.getSession(sessionId);
-      if (dbSession?.commit_mode === 'structured') {
+      if (dbSession?.commit_mode === 'structured' && !dbSession.in_place) {
         console.log(`[IPC] Session ${sessionId} uses structured commit mode, enhancing input`);
         
         // Parse commit mode settings

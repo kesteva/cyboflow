@@ -180,10 +180,17 @@ function makeServices(opts?: {
     toolType: 'claude',
   };
 
+  // Each subscription emits a session with a UNIQUE id (sess-001, sess-002, …),
+  // mirroring production where every create yields a distinct row — the handler's
+  // claimed-session set (same-second dedup) would otherwise starve the second
+  // invoke in double-invoke tests. The first emission keeps 'sess-001', which the
+  // single-invoke assertions reference.
+  let emitCount = 0;
   const fakeSessionManager = {
     on: (_event: string, cb: (s: unknown) => void) => {
       // Fire synchronously so the Promise inside the handler resolves immediately.
-      cb(fakeSession);
+      emitCount += 1;
+      cb(emitCount === 1 ? fakeSession : { ...fakeSession, id: `sess-${String(emitCount).padStart(3, '0')}` });
     },
     removeListener: vi.fn(),
     getSession: vi.fn(() => fakeSession),
@@ -416,9 +423,11 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     // raw request value.
     const stamps = dbRunCalls.filter((c) => c.sql.includes('UPDATE sessions SET substrate'));
     expect(stamps).toHaveLength(2);
+    // The second invoke resolves the SECOND emitted session (the claimed-session
+    // set hands each create-quick caller a distinct session).
     expect(stamps.map((c) => c.args)).toEqual([
       ['sdk', 'sess-001'],
-      ['sdk', 'sess-001'],
+      ['sdk', 'sess-002'],
     ]);
   });
 
@@ -479,9 +488,10 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
 
     const stamps = dbRunCalls.filter((c) => c.sql.includes('UPDATE sessions SET effort'));
     expect(stamps).toHaveLength(2);
+    // Second invoke → second emitted session (claimed-session set dedup).
     expect(stamps.map((c) => c.args)).toEqual([
       [null, 'sess-001'],
-      [null, 'sess-001'],
+      [null, 'sess-002'],
     ]);
   });
 
@@ -564,6 +574,91 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
     expect(fakeRegisterLivePanel).not.toHaveBeenCalled();
     expect(result.data ?? {}).not.toHaveProperty('claudePanelId');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B2. sessions:create-quick handler - worktree mode (migration 046)
+// ---------------------------------------------------------------------------
+
+describe('sessions:create-quick handler - worktree mode (migration 046)', () => {
+  /**
+   * Swap the harness configManager: the makeServices default lacks
+   * getDefaultSubstrate, which the in-place substrate pre-resolution calls
+   * eagerly (only the worktree path skips that branch).
+   */
+  function swapConfigManager(services: AppServices, configManager: Record<string, unknown>): void {
+    (services as unknown as { configManager: Record<string, unknown> }).configManager = configManager;
+  }
+
+  it('rejects an EXPLICIT in-place request when the substrate resolves interactive (SDK-only)', async () => {
+    const { services, fakeTaskQueue } = makeServices();
+    swapConfigManager(services, {
+      isDemoMode: () => false,
+      getQuickSessionWorktreeMode: () => 'worktree',
+      getDefaultSubstrate: () => undefined,
+    });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      worktreeMode: 'in-place',
+      substrate: 'interactive',
+    })) as { success: boolean; error?: string };
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/SDK runtime/);
+    expect(fakeTaskQueue.createSession).not.toHaveBeenCalled();
+  });
+
+  it("falls back to a WORKTREE session when 'in-place' is only inherited from the global default and the substrate resolves interactive", async () => {
+    const { services, fakeTaskQueue } = makeServices();
+    swapConfigManager(services, {
+      isDemoMode: () => false,
+      getQuickSessionWorktreeMode: () => 'in-place',
+      getDefaultSubstrate: () => undefined,
+    });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      substrate: 'interactive',
+    })) as { success: boolean };
+
+    // The global default is a preference, not a hard pin — the Ultracode card,
+    // the PTY-only lock, and the no-args shortcut must keep working.
+    expect(result.success).toBe(true);
+    const callArg = (fakeTaskQueue.createSession as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as Record<string, unknown>;
+    expect(callArg.inPlace).toBe(false);
+  });
+
+  it('threads inPlace + forces commit modes off for an inherited in-place SDK create', async () => {
+    const { services, fakeTaskQueue } = makeServices();
+    swapConfigManager(services, {
+      isDemoMode: () => false,
+      getQuickSessionWorktreeMode: () => 'in-place',
+      getDefaultSubstrate: () => undefined,
+    });
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      autoCommit: true,
+      commitMode: 'checkpoint',
+    })) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    const callArg = (fakeTaskQueue.createSession as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as Record<string, unknown>;
+    // In-place sessions share the user's real checkout: checkpoint auto-commit
+    // must be forced off no matter what the request asked for.
+    expect(callArg.inPlace).toBe(true);
+    expect(callArg.autoCommit).toBe(false);
+    expect(callArg.commitMode).toBe('disabled');
   });
 });
 
