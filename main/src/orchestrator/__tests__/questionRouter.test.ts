@@ -229,9 +229,13 @@ describe('QuestionRouter', () => {
 
   // -------------------------------------------------------------------------
   // Case 3: Two concurrent requestQuestion calls for the same runId are
-  //         serialized by the per-run questionQueues — ordering preserved
+  //         serialized by the per-run questionQueues — the first opens the gate
+  //         and the second SUPERSEDES it (supersede-and-reopen), rather than
+  //         throwing. (Before the self-heal fix the second threw
+  //         RunNotRunningError because the run had already left 'running'; that
+  //         is the exact wedge the fix removes — see the self-heal describe block.)
   // -------------------------------------------------------------------------
-  it('two concurrent requestQuestion calls for the same runId are serialized by the per-run queue', async () => {
+  it('two concurrent requestQuestion calls for the same runId are serialized, second supersedes the first', async () => {
     const db = createTestDb({ includeQuestionsTable: true });
     const adapter = dbAdapter(db);
 
@@ -264,29 +268,42 @@ describe('QuestionRouter', () => {
     ];
 
     // Fire both requestQuestion calls concurrently (don't await).
-    // The first call transitions run to 'awaiting_input'.
-    // The second call should fail with RunNotRunningError (since the first already
-    // moved it out of 'running') — this is the correct serialized behavior.
-    const promise1 = router.requestQuestion(runId, 'tool-use-id-003a', q1, vi.fn());
+    // Serialized by the per-run queue: the first transitions the run to
+    // 'awaiting_input'; the second runs after it commits, finds the run already
+    // awaiting_input, and self-heals — superseding the first gate and opening its own.
+    const socket1 = vi.fn<(a: QuestionAnswer) => void>();
+    const promise1 = router.requestQuestion(runId, 'tool-use-id-003a', q1, socket1);
     const promise2 = router.requestQuestion(runId, 'tool-use-id-003b', q2, vi.fn());
 
     // Wait for both queue tasks to drain.
     await router['getQuestionQueue'](runId).onIdle();
 
-    // Only one questions row should have been inserted (the second was blocked).
-    const questionRows = db
-      .prepare("SELECT id, tool_use_id FROM questions WHERE run_id = ?")
-      .all(runId) as { id: string; tool_use_id: string }[];
+    // The first gate's awaiting caller is resolved with a synthetic empty answer
+    // (never its socketReply), and its question row is superseded (timed_out).
+    const answer1 = await promise1;
+    expect(answer1.answers).toEqual({});
+    expect(socket1).not.toHaveBeenCalled();
 
-    expect(questionRows).toHaveLength(1);
-    expect(questionRows[0].tool_use_id).toBe('tool-use-id-003a');
+    const rowsByTool = new Map(
+      (db.prepare('SELECT id, tool_use_id, status FROM questions WHERE run_id = ?').all(runId) as {
+        id: string;
+        tool_use_id: string;
+        status: string;
+      }[]).map((r) => [r.tool_use_id, r]),
+    );
+    expect(rowsByTool.get('tool-use-id-003a')?.status).toBe('timed_out');
+    expect(rowsByTool.get('tool-use-id-003b')?.status).toBe('pending');
 
-    // Resolve the first question.
-    await router.respond(questionRows[0].id, { answers: { 'First question?': 'Option A' } });
-    await promise1;
+    // The run is still parked at awaiting_input under the live (second) gate.
+    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string }).status).toBe(
+      'awaiting_input',
+    );
 
-    // promise2 should have rejected with RunNotRunningError.
-    await expect(promise2).rejects.toBeInstanceOf(RunNotRunningError);
+    // Answering the second (live) gate resolves it and returns the run to running.
+    const secondId = rowsByTool.get('tool-use-id-003b')!.id;
+    await router.respond(secondId, { answers: { 'Second question?': 'Option C' } });
+    const answer2 = await promise2;
+    expect(answer2.answers).toEqual({ 'Second question?': 'Option C' });
   });
 
   // -------------------------------------------------------------------------
@@ -1691,5 +1708,231 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-d') as { status: string }).status).toBe(
       'running',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Self-healing: a dead/stale gate must not wedge the run at 'awaiting_input'
+// forever. In production the SDK hook awaiting a gate can be killed by the CLI's
+// 600s hook timeout — the gate promise dies but the run stays at
+// 'awaiting_input' with a 'pending' questions row and a live this.pending entry,
+// so every subsequent requestQuestion retry threw RunNotRunningError (status was
+// awaiting_input, not running). requestQuestion now supersedes the stale gate(s)
+// and opens the new one in place, WITHOUT throwing — while still refusing runs
+// that genuinely moved on (awaiting_review / terminal).
+// ---------------------------------------------------------------------------
+
+describe('QuestionRouter self-heals a dead/stale gate (supersede-and-reopen)', () => {
+  // review_items (016) + entity_events (015) are required so the folded decision
+  // review item is written + resolved through the real synchronous helpers.
+  function buildDb(): Database.Database {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    db.exec(`
+      CREATE TABLE projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p-heal');
+    const migDir = join(__dirname, '..', '..', 'database', 'migrations');
+    for (const f of [
+      '006_cyboflow_schema.sql',
+      '007_add_stuck_reason.sql',
+      '010_questions.sql',
+      '011_workflow_step_tracking.sql',
+      '014_native_tasks.sql',
+      '015_entity_model_rebuild.sql',
+      '016_review_items.sql',
+      '017_run_seed_idea.sql',
+    ]) {
+      db.exec(readFileSync(join(migDir, f), 'utf-8'));
+    }
+    return db;
+  }
+
+  const QUESTIONS: QuestionPayload[] = [
+    {
+      question: 'Which path?',
+      header: 'Path',
+      multiSelect: false,
+      options: [{ label: 'A' }, { label: 'B' }],
+    },
+  ];
+
+  function seedHealRun(db: Database.Database, runId: string, status: string): void {
+    db.prepare(
+      `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-h', 1, 'planner', '{}')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status) VALUES (?, 'wf-h', 1, ?)`,
+    ).run(runId, status);
+  }
+
+  interface QuestionRow {
+    id: string;
+    status: string;
+  }
+  function questionByTool(db: Database.Database, toolUseId: string): QuestionRow {
+    return db
+      .prepare('SELECT id, status FROM questions WHERE tool_use_id = ?')
+      .get(toolUseId) as QuestionRow;
+  }
+  function runStatus(db: Database.Database, runId: string): string {
+    return (db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string }).status;
+  }
+  interface ReviewRow {
+    id: string;
+    status: string;
+    resolved_by: string | null;
+    resolution: string | null;
+  }
+  function pendingDecisionReview(db: Database.Database, runId: string): ReviewRow | undefined {
+    return db
+      .prepare(
+        `SELECT id, status, resolved_by, resolution FROM review_items
+          WHERE run_id = ? AND kind = 'decision' AND source = 'question' AND status = 'pending'`,
+      )
+      .get(runId) as ReviewRow | undefined;
+  }
+  function reviewById(db: Database.Database, id: string): ReviewRow {
+    return db
+      .prepare('SELECT id, status, resolved_by, resolution FROM review_items WHERE id = ?')
+      .get(id) as ReviewRow;
+  }
+
+  afterEach(() => {
+    QuestionRouter._resetForTesting();
+  });
+
+  it('supersede-and-reopen: a second requestQuestion while awaiting_input replaces the dead gate instead of throwing', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const router = QuestionRouter.initialize(adapter);
+
+    const runId = 'run-heal-1';
+    seedHealRun(db, runId, 'running');
+
+    // Gate #1 opens — its awaiting hook is (in production) about to be killed.
+    const socket1 = vi.fn<(a: QuestionAnswer) => void>();
+    const p1 = router.requestQuestion(runId, 'tool-heal-1a', QUESTIONS, socket1);
+    await router['getQuestionQueue'](runId).onIdle();
+    expect(runStatus(db, runId)).toBe('awaiting_input');
+    const q1 = questionByTool(db, 'tool-heal-1a');
+    expect(q1.status).toBe('pending');
+    const review1 = pendingDecisionReview(db, runId);
+    expect(review1).toBeDefined();
+    const review1Id = review1!.id;
+
+    // Gate #2 fires while the run is STILL wedged at awaiting_input (the dead
+    // gate's promise was never settled). It must NOT throw.
+    const socket2 = vi.fn<(a: QuestionAnswer) => void>();
+    const p2 = router.requestQuestion(runId, 'tool-heal-1b', QUESTIONS, socket2);
+    await router['getQuestionQueue'](runId).onIdle();
+
+    // Gate #1's awaiting caller is resolved with a synthetic empty answer, and its
+    // socketReply is never invoked (mirrors clearPendingForRun).
+    const answer1 = await p1;
+    expect(answer1.answers).toEqual({});
+    expect(socket1).not.toHaveBeenCalled();
+
+    // Gate #1's DB rows are superseded: question timed_out, review item resolved.
+    expect(questionByTool(db, 'tool-heal-1a').status).toBe('timed_out');
+    const resolvedReview1 = reviewById(db, review1Id);
+    expect(resolvedReview1.status).toBe('resolved');
+    expect(resolvedReview1.resolved_by).toBe('system');
+    expect(resolvedReview1.resolution).toBe('superseded');
+
+    // Gate #2 is now the live gate: pending question + a fresh pending blocking
+    // decision review item; the run is still parked at awaiting_input.
+    const q2 = questionByTool(db, 'tool-heal-1b');
+    expect(q2.status).toBe('pending');
+    const review2 = pendingDecisionReview(db, runId);
+    expect(review2).toBeDefined();
+    expect(review2!.id).not.toBe(review1Id);
+    expect(
+      (db.prepare('SELECT blocking FROM review_items WHERE id = ?').get(review2!.id) as { blocking: number }).blocking,
+    ).toBe(1);
+    expect(runStatus(db, runId)).toBe('awaiting_input');
+
+    // Answering gate #2 resolves the live promise and returns the run to running.
+    await router.respond(q2.id, { answers: { 'Which path?': 'B' } });
+    const answer2 = await p2;
+    expect(answer2.answers).toEqual({ 'Which path?': 'B' });
+    expect(questionByTool(db, 'tool-heal-1b').status).toBe('answered');
+    expect(runStatus(db, runId)).toBe('running');
+  });
+
+  it('still refuses a run that genuinely moved on (awaiting_review / terminal) with RunNotRunningError', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const router = QuestionRouter.initialize(adapter);
+
+    // A run parked in awaiting_review (moved past the gate) must never have a gate
+    // re-opened under it.
+    seedHealRun(db, 'run-heal-2a', 'awaiting_review');
+    await expect(
+      router.requestQuestion('run-heal-2a', 'tool-heal-2a', QUESTIONS, vi.fn()),
+    ).rejects.toBeInstanceOf(RunNotRunningError);
+    // No gate materialized.
+    expect(db.prepare("SELECT COUNT(*) AS n FROM questions WHERE run_id = 'run-heal-2a'").get()).toEqual({ n: 0 });
+
+    // A terminal run likewise refuses.
+    seedHealRun(db, 'run-heal-2b', 'completed');
+    await expect(
+      router.requestQuestion('run-heal-2b', 'tool-heal-2b', QUESTIONS, vi.fn()),
+    ).rejects.toBeInstanceOf(RunNotRunningError);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM questions WHERE run_id = 'run-heal-2b'").get()).toEqual({ n: 0 });
+  });
+
+  it('orphan-row sweep: an awaiting_input run with a stale pending question + review item (no in-memory entry) is healed', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const router = QuestionRouter.initialize(adapter);
+
+    const runId = 'run-heal-3';
+    // Simulate a run left wedged by a PREVIOUS process: awaiting_input with an
+    // orphan pending question row + folded decision review item, and NO
+    // this.pending entry (a fresh QuestionRouter has an empty map).
+    seedHealRun(db, runId, 'awaiting_input');
+    const orphanQid = 'orphan-q-3';
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO questions (id, run_id, tool_use_id, questions_json, status, created_at)
+       VALUES (?, ?, 'orphan-tool-3', '[]', 'pending', ?)`,
+    ).run(orphanQid, runId, now);
+    const orphanReviewId = 'rvw_orphan_3';
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, entity_type, entity_id, kind, status, blocking,
+          title, body, severity, source, payload_json, created_at, updated_at, resolved_by, resolution)
+       VALUES (?, 1, ?, NULL, NULL, 'decision', 'pending', 1, 'Stale gate', NULL, NULL, 'question', NULL, ?, ?, NULL, NULL)`,
+    ).run(orphanReviewId, runId, now, now);
+
+    // A fresh gate request heals the orphan state (no in-memory entry to supersede).
+    const p = router.requestQuestion(runId, 'tool-heal-3', QUESTIONS, vi.fn());
+    await router['getQuestionQueue'](runId).onIdle();
+
+    // The orphan rows are swept: question timed_out, review item resolved.
+    expect((db.prepare('SELECT status FROM questions WHERE id = ?').get(orphanQid) as { status: string }).status).toBe(
+      'timed_out',
+    );
+    const orphanReview = reviewById(db, orphanReviewId);
+    expect(orphanReview.status).toBe('resolved');
+    expect(orphanReview.resolved_by).toBe('system');
+    expect(orphanReview.resolution).toBe('superseded');
+
+    // The new gate is live: pending question + a fresh pending decision review item.
+    const q = questionByTool(db, 'tool-heal-3');
+    expect(q.status).toBe('pending');
+    expect(pendingDecisionReview(db, runId)).toBeDefined();
+    expect(runStatus(db, runId)).toBe('awaiting_input');
+
+    // Clean up the awaiting promise.
+    await router.respond(q.id, { answers: { 'Which path?': 'A' } });
+    await p;
   });
 });

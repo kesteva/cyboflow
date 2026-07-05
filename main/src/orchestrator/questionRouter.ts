@@ -272,14 +272,33 @@ export class QuestionRouter extends EventEmitter {
    *
    * Atomically:
    *  1. UPDATEs workflow_runs.status → 'awaiting_input' (guarded: only if
-   *     current status = 'running').  Throws RunNotRunningError if changes = 0.
+   *     current status = 'running').
    *  2. INSERTs a row into questions (status = 'pending').
    *
    * Both writes share a single db.transaction() so they are
    * either both committed or both rolled back.
    *
-   * The mutation is submitted via the per-run p-queue so it is serialized
-   * with any concurrent status changes for the same run.
+   * GUARD FAILURE (the running→awaiting_input UPDATE hits changes = 0):
+   *  - If the run is NOT at 'awaiting_input' (awaiting_review, paused, stuck, or
+   *    any terminal state) → throw RunNotRunningError, exactly as before. A run
+   *    that has moved on must never have a gate re-opened under it.
+   *  - If the run IS already at 'awaiting_input' → SELF-HEAL rather than throw. A
+   *    prior gate for this run is dead or being replaced (in production the SDK
+   *    hook that awaited it was killed by the CLI's 600s hook timeout, leaving the
+   *    run wedged at 'awaiting_input' with a 'pending' questions row and a live
+   *    this.pending entry that no retry could ever clear — every subsequent
+   *    requestQuestion threw RunNotRunningError). Supersede the stale gate(s) and
+   *    open the new one in the same transaction: mark every prior pending question
+   *    for the run 'timed_out', resolve each folded decision review_item as
+   *    'superseded' (both the in-memory entries AND any orphan DB rows with no
+   *    in-memory entry), then INSERT the new question + co-write its review_item.
+   *    workflow_runs stays at 'awaiting_input' (correct while a gate is open).
+   *    After the commit each superseded entry's promise resolves with a synthetic
+   *    empty answer (never the old socketReply), mirroring clearPendingForRun.
+   *
+   * The mutation is submitted via the per-run p-queue so it is serialized with any
+   * concurrent respond() / status change for the same run — a concurrent respond()
+   * for a superseded question finds its this.pending entry gone and no-ops.
    *
    * Returns a Promise<QuestionAnswer> that resolves when respond() is called.
    *
@@ -322,9 +341,21 @@ export class QuestionRouter extends EventEmitter {
     });
 
     let reviewItemId: string | null = null;
+    // Populated by the transaction's self-heal branch (empty on the fresh path):
+    // the prior pending gates this request supersedes, settled AFTER the commit.
+    let supersededEntries: Array<{ questionId: string; entry: PendingEntry }> = [];
+    // Review-item ids that actually transitioned pending→resolved during the
+    // self-heal (in-memory folds + orphan sweep), for the post-commit emits.
+    let resolvedSupersededReviewItemIds: string[] = [];
 
     await this.getQuestionQueue(runId).add(async () => {
-      // Atomic: UPDATE workflow_runs + INSERT questions in one transaction.
+      // Reset per-attempt (the closure captures the outer refs).
+      supersededEntries = [];
+      resolvedSupersededReviewItemIds = [];
+
+      // Atomic: UPDATE workflow_runs + INSERT questions in one transaction. On a
+      // running→awaiting_input guard miss the transaction either throws (the run
+      // moved on) or self-heals a dead/stale gate in place (see method doc).
       const txn = this.db.transaction(() => {
         const updateStmt = this.db.prepare(
           `UPDATE workflow_runs SET status = 'awaiting_input', updated_at = ?
@@ -333,7 +364,67 @@ export class QuestionRouter extends EventEmitter {
         const updateResult = updateStmt.run(now, runId) as { changes: number };
 
         if (updateResult.changes === 0) {
-          throw new RunNotRunningError(runId);
+          const statusRow = this.db
+            .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+            .get(runId) as { status?: unknown } | undefined;
+          const status = typeof statusRow?.status === 'string' ? statusRow.status : undefined;
+          // Only an already-open gate is self-healable. Anything else (the run
+          // moved to awaiting_review / paused / a terminal state, or vanished)
+          // must still refuse — never re-open a gate under a run that moved on.
+          if (status !== 'awaiting_input') {
+            throw new RunNotRunningError(runId);
+          }
+
+          // SELF-HEAL: supersede every prior gate for this run, then open the new
+          // one below. Collect the in-memory entries first (deletion + promise
+          // resolution happen AFTER the commit so a rollback leaves the map intact).
+          for (const [priorId, entry] of this.pending.entries()) {
+            if (entry.request.runId === runId) {
+              supersededEntries.push({ questionId: priorId, entry });
+              // Fold the prior question's DB row + review item inside THIS txn.
+              this.db
+                .prepare(
+                  `UPDATE questions SET status = 'timed_out', answered_at = ?
+                   WHERE id = ? AND status = 'pending'`,
+                )
+                .run(now, priorId);
+              if (entry.reviewItemId !== null) {
+                const resolved = resolveReviewItemById(
+                  this.db,
+                  entry.reviewItemId,
+                  'system',
+                  'superseded',
+                  now,
+                  runId,
+                );
+                if (resolved !== null) resolvedSupersededReviewItemIds.push(resolved);
+              }
+            }
+          }
+
+          // Orphan sweep — a same-process hook death leaves the DB rows behind with
+          // NO in-memory entry (the common case). Timeout any lingering pending
+          // question rows and resolve any lingering pending question-sourced
+          // decision review_items for the run. Defensive for a pre-016 DB (no
+          // review_items table).
+          this.db
+            .prepare(
+              `UPDATE questions SET status = 'timed_out', answered_at = ?
+               WHERE run_id = ? AND status = 'pending'`,
+            )
+            .run(now, runId);
+          if (hasReviewItemsTable(this.db)) {
+            const orphanRows = this.db
+              .prepare(
+                `SELECT id FROM review_items
+                  WHERE run_id = ? AND kind = 'decision' AND source = 'question' AND status = 'pending'`,
+              )
+              .all(runId) as { id: string }[];
+            for (const orphan of orphanRows) {
+              const resolved = resolveReviewItemById(this.db, orphan.id, 'system', 'superseded', now, runId);
+              if (resolved !== null) resolvedSupersededReviewItemIds.push(resolved);
+            }
+          }
         }
 
         const insertStmt = this.db.prepare(
@@ -355,8 +446,21 @@ export class QuestionRouter extends EventEmitter {
         });
       });
 
-      // Execute the transaction — throws RunNotRunningError on guard failure.
+      // Execute the transaction — throws RunNotRunningError on a non-healable
+      // guard miss (the run moved on).
       (txn as () => void)();
+
+      // Post-commit: settle the superseded gates FIRST (resolve their awaiting
+      // callers with a synthetic empty answer, never the old socketReply — mirror
+      // clearPendingForRun), then open the new gate.
+      for (const { questionId: priorId, entry } of supersededEntries) {
+        this.pending.delete(priorId);
+        entry.resolve({ answers: {} });
+        this.emit('questionAnswered', { questionId: priorId, status: 'timed_out' });
+      }
+      for (const oldReviewItemId of resolvedSupersededReviewItemIds) {
+        emitReviewItemChangedById(this.db, oldReviewItemId, 'resolved');
+      }
 
       this.pending.set(questionId, {
         request,
@@ -372,7 +476,8 @@ export class QuestionRouter extends EventEmitter {
       // Renderer signals AFTER the commit — the review-item co-write bypasses
       // the ReviewItemRouter chokepoint (it must share this transaction), so
       // the project-scoped delta (queue chip / landing inbox) and the
-      // run-status change are re-issued here.
+      // run-status change are re-issued here. Re-emitting the unchanged
+      // 'awaiting_input' on the self-heal path keeps the renderer synced.
       if (reviewItemId !== null) emitReviewItemChangedById(this.db, reviewItemId, 'created');
       runStatusEvents.emit('changed', { runId, status: 'awaiting_input' } satisfies RunStatusChangedEvent);
     });
