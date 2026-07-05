@@ -2043,7 +2043,9 @@ function enqueueIntegrationDb(): ReturnType<typeof createTestDb> {
       worktree_path TEXT,
       base_branch TEXT,
       run_id TEXT,
-      substrate TEXT
+      substrate TEXT,
+      in_place BOOLEAN DEFAULT 0,
+      is_main_repo BOOLEAN DEFAULT 0
     )
   `);
   return db;

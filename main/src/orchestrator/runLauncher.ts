@@ -586,11 +586,29 @@ export class RunLauncher {
     sessionId: string,
   ): Promise<{ worktreePath: string; branchName: string }> {
     const sessionRow = this.db
-      .prepare('SELECT worktree_path, base_branch FROM sessions WHERE id = ?')
-      .get(sessionId) as { worktree_path: string | null; base_branch: string | null } | undefined;
+      .prepare('SELECT worktree_path, base_branch, in_place, is_main_repo FROM sessions WHERE id = ?')
+      .get(sessionId) as
+      | {
+          worktree_path: string | null;
+          base_branch: string | null;
+          in_place: number | null;
+          is_main_repo: number | null;
+        }
+      | undefined;
 
     if (!sessionRow) {
       throw new Error(`RunLauncher.launch: session ${sessionId} not found (cannot host run ${runId})`);
+    }
+    // Workflow runs ALWAYS execute in an isolated worktree session. An in-place
+    // session (migration 046) shares the user's real checkout, and the singleton
+    // is_main_repo dashboard session has no dedicated worktree either — neither can
+    // host a run without mutating unrelated tracked files. This single seam covers
+    // runs.start / runs.restart / programmatic callers; the __quick__ sentinel never
+    // traverses launch, so quick sessions (in-place or not) are unaffected.
+    if (sessionRow.in_place || sessionRow.is_main_repo) {
+      throw new Error(
+        `RunLauncher.launch: session ${sessionId} works directly in the project checkout (in-place) — workflow runs require an isolated worktree session`,
+      );
     }
     if (!sessionRow.worktree_path) {
       throw new Error(

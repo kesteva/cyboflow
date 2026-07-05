@@ -76,7 +76,9 @@ function sessionHostedDb(): Database.Database {
       worktree_path TEXT,
       base_branch TEXT,
       run_id TEXT,
-      substrate TEXT
+      substrate TEXT,
+      in_place BOOLEAN DEFAULT 0,
+      is_main_repo BOOLEAN DEFAULT 0
     )
   `);
   return db;
@@ -1653,7 +1655,9 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
         worktree_path TEXT,
         base_branch TEXT,
         run_id TEXT,
-        substrate TEXT
+        substrate TEXT,
+        in_place BOOLEAN DEFAULT 0,
+        is_main_repo BOOLEAN DEFAULT 0
       )
     `);
     return db;
@@ -1691,6 +1695,49 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
 
     return { registry, workflowId, createRunSpy };
   }
+
+  it('refuses to host a run in an in-place session (migration 046 guard)', async () => {
+    await withTempDir('runlauncher-session-', async (tmpDir) => {
+      const db = makeSessionDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      // An in-place session carries a REAL worktree_path (the project checkout), so
+      // it is the in_place flag — not a missing worktree — that must block the launch.
+      db.prepare(
+        "INSERT INTO sessions (id, worktree_path, base_branch, run_id, in_place) VALUES ('sess-inplace', ?, 'main', NULL, 1)",
+      ).run(join(tmpDir, 'project-checkout'));
+
+      const { registry, workflowId } = makeSessionRegistry(db, 'sprint', cannedRunId);
+
+      const createDeterministicWorktree = vi.fn();
+      const getProjectMainBranch = vi.fn().mockResolvedValue('main');
+      const fakeWorktree = {
+        createDeterministicWorktree,
+        getProjectMainBranch,
+        getHeadCommit: vi.fn().mockResolvedValue('abc123def456'),
+      } as unknown as WorktreeManager;
+
+      const launcher = new RunLauncher(
+        adapter, registry, fakeWorktree, logger,
+        fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver,
+      );
+
+      await expect(
+        launcher.launch(workflowId, tmpDir, undefined, undefined, undefined, 'sess-inplace'),
+      ).rejects.toThrow(/works directly in the project checkout \(in-place\)/);
+
+      // The guard fires inside resolveSessionHostedWorktree (after createRun queued
+      // the row), so the run is marked failed and NO worktree is ever provisioned.
+      interface RunRow { status: string }
+      const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(cannedRunId) as RunRow;
+      expect(row.status).toBe('failed');
+      expect(createDeterministicWorktree).not.toHaveBeenCalled();
+      // The guard is reached BEFORE the branch resolution.
+      expect(getProjectMainBranch).not.toHaveBeenCalled();
+    });
+  });
 
   it('reuses the session worktree, stamps session_id + base_sha, dual-writes sessions.run_id, and does NOT create a worktree', async () => {
     await withTempDir('runlauncher-session-', async (tmpDir) => {
