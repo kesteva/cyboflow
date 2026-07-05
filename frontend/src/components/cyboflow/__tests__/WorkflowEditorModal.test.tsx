@@ -395,8 +395,10 @@ describe('WorkflowEditorModal — edit mode', () => {
     // A dirty edit-mode run persists via updateSpec before starting.
     expect(mockUpdateSpec).toHaveBeenCalledOnce();
     // Phase 3: the run launches INSIDE a session. With none active, the helper
-    // creates one (createQuick → 'session-quick-001') and threads its id.
-    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1 });
+    // creates one (createQuick → 'session-quick-001') and threads its id. The
+    // worktree mode is pinned — a flow-host session ignores the global in-place
+    // default (migration 046).
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1, worktreeMode: 'worktree' });
     expect(mockRunStart).toHaveBeenCalledWith({
       workflowId: EDIT_WORKFLOW_ID,
       projectId: 1,

@@ -36,6 +36,7 @@ import {
   useDynamicWorkflowsForSession,
 } from '../../stores/dynamicWorkflowStore';
 import { DynamicWorkflowPanel } from './DynamicWorkflowPanel';
+import { ConfirmDialog } from '../ConfirmDialog';
 import type { Session } from '../../types/session';
 
 interface QuickSessionCanvasProps {
@@ -168,11 +169,19 @@ export function QuickSessionCanvas({
   onAddWorkflowToNewSession,
 }: QuickSessionCanvasProps) {
   const metrics = useSessionMetrics(session);
-  const { launch, isLaunching, error: launchError } = useLaunchWorkflow(projectId);
   // Interactive (PTY) sessions can't host a second workflow inside their live
   // REPL (descoped) — every add-a-workflow click routes to the confirm + config
   // flow that launches in a SEPARATE session instead of the fast-lane launch.
   const isInteractive = session.substrate === 'interactive';
+  // In-place (or main-repo) sessions work directly in the project checkout — a
+  // workflow run can never execute there, so it must land in a fresh
+  // worktree-backed session. Chip clicks confirm in-canvas then continue the
+  // normal chip flow (idea/batch gates included) with forceNew; "Browse all"
+  // defers to CyboflowRoot's confirm + force-new picker (same lane as PTY).
+  const isRawCheckout = session.inPlace === true || session.isMainRepo === true;
+  const { launch, isLaunching, error: launchError } = useLaunchWorkflow(projectId, {
+    forceNew: isRawCheckout,
+  });
 
   // Detected Claude Code dynamic workflows (the Workflow tool / `ultracode`)
   // launched by THIS session's agent — rendered prominently above the picker.
@@ -219,6 +228,10 @@ export function QuickSessionCanvas({
   // Sprint pre-launch task gate (parallel sprint): a sprint click opens the
   // multi-task picker first, then launches ONE seeded run with the taskIds.
   const [sprintIdForGate, setSprintIdForGate] = useState<string | null>(null);
+  // In-place add-a-workflow confirm: a chip click on an in-place session first
+  // confirms the run will open in a NEW worktree-backed session, holding the
+  // chosen row until the user confirms (then the normal chip flow continues).
+  const [pendingRawCheckoutRow, setPendingRawCheckoutRow] = useState<WorkflowRow | null>(null);
   const [addHovered, setAddHovered] = useState(false);
   const [browseHovered, setBrowseHovered] = useState(false);
 
@@ -255,6 +268,29 @@ export function QuickSessionCanvas({
     return def?.phases[0]?.color ?? 'var(--color-text-tertiary)';
   }, []);
 
+  // Route a chosen workflow chip to its launch path: Planner/Ship are idea-gated,
+  // Sprint is task-batch-gated (open the matching picker); other workflows launch
+  // directly. Shared by the direct chip click and the in-place confirm's continue
+  // path — for an in-place session the launch hook is forceNew, so either way the
+  // run lands in a fresh worktree-backed session.
+  const routeWorkflowChip = useCallback(
+    (row: WorkflowRow) => {
+      // Ship (planner ⊕ sprint in one run) is IDEA-seeded like the planner, so it
+      // shares the idea gate (the task-subset choice happens later, at the in-run
+      // approve-plan gate).
+      if (row.name === 'planner' || row.name === 'ship') {
+        setPlannerIdForGate(row.id);
+        return;
+      }
+      if (row.name === 'sprint') {
+        setSprintIdForGate(row.id);
+        return;
+      }
+      void launch(row.id);
+    },
+    [launch],
+  );
+
   const handleWorkflowClick = useCallback(
     (row: WorkflowRow) => {
       if (isLaunching) return;
@@ -266,21 +302,15 @@ export function QuickSessionCanvas({
         onAddWorkflowToNewSession?.();
         return;
       }
-      // Planner is idea-gated, Sprint is task-batch-gated — open the matching
-      // picker; other workflows launch directly. Ship (planner ⊕ sprint in one
-      // run) is IDEA-seeded like the planner, so it shares the idea gate (the
-      // task-subset choice happens later, at the in-run approve-plan gate).
-      if (row.name === 'planner' || row.name === 'ship') {
-        setPlannerIdForGate(row.id);
+      // In-place session: a workflow can't run on the raw checkout — confirm the
+      // run will open in a NEW isolated session first, then continue the chip flow.
+      if (isRawCheckout) {
+        setPendingRawCheckoutRow(row);
         return;
       }
-      if (row.name === 'sprint') {
-        setSprintIdForGate(row.id);
-        return;
-      }
-      void launch(row.id);
+      routeWorkflowChip(row);
     },
-    [isLaunching, launch, isInteractive, onAddWorkflowToNewSession],
+    [isLaunching, isInteractive, isRawCheckout, onAddWorkflowToNewSession, routeWorkflowChip],
   );
 
   const handleIdeaPicked = useCallback(
@@ -704,7 +734,7 @@ export function QuickSessionCanvas({
             <button
               type="button"
               data-testid="quick-session-browse-all"
-              onClick={isInteractive ? () => onAddWorkflowToNewSession?.() : onBrowseAll}
+              onClick={isInteractive || isRawCheckout ? () => onAddWorkflowToNewSession?.() : onBrowseAll}
               onMouseEnter={() => setBrowseHovered(true)}
               onMouseLeave={() => setBrowseHovered(false)}
               style={{
@@ -755,6 +785,26 @@ export function QuickSessionCanvas({
           substrate={DEFAULT_SUBSTRATE}
           onClose={() => setSprintIdForGate(null)}
           onPicked={handleBatchPicked}
+        />
+      )}
+
+      {/* In-place add-a-workflow confirm — a workflow can't run on the raw project
+          checkout, so confirm it will open in a new, isolated session before
+          continuing the chip flow (which launches with forceNew). */}
+      {pendingRawCheckoutRow !== null && (
+        <ConfirmDialog
+          isOpen
+          onClose={() => setPendingRawCheckoutRow(null)}
+          onConfirm={() => {
+            const row = pendingRawCheckoutRow;
+            setPendingRawCheckoutRow(null);
+            if (row !== null) routeWorkflowChip(row);
+          }}
+          title="Workflows run in their own worktree"
+          message="This session works directly in the project checkout, so it can't host a workflow run. The workflow will open in a new session with an isolated worktree — this one stays open and untouched."
+          confirmText="Open in new session"
+          cancelText="Cancel"
+          confirmButtonClass="bg-interactive hover:bg-interactive-hover text-text-on-interactive"
         />
       )}
     </div>

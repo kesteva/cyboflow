@@ -10,6 +10,11 @@
  *   1b. When the selected session is BUSY (an active run already executes in it),
  *      does NOT reuse it — creates a fresh session instead. Regression guard for
  *      "RunLauncher.launch: session <id> already has a running workflow".
+ *   1c. When the selected session is IN-PLACE (works directly in the project
+ *      checkout), does NOT reuse it even when free — a workflow can never run on
+ *      the raw checkout, so it falls through to a fresh worktree-backed session.
+ *      Every created session pins worktreeMode:'worktree' (ignores the global
+ *      in-place default).
  *   2. SDK response (no claudePanelId) → creates Claude + Terminal panels.
  *   3. Interactive response (claudePanelId present, e.g. under the global
  *      PTY-only lock) → SKIPS the manual Claude panel (the server eagerly
@@ -22,10 +27,15 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
 
-const { mockCreateQuick, mockCreatePanel, mockGetState } = vi.hoisted(() => ({
+const { mockCreateQuick, mockCreatePanel, mockGetState, mockSessionGetState } = vi.hoisted(() => ({
   mockCreateQuick: vi.fn(),
   mockCreatePanel: vi.fn(),
   mockGetState: vi.fn<() => { selectedSessionId: string | null }>(() => ({ selectedSessionId: null })),
+  // Only the `sessions` array (id + inPlace/isMainRepo flags) is read by the
+  // raw-checkout guard; default to an empty list (the selection is not in-place).
+  mockSessionGetState: vi.fn<
+    () => { sessions: Array<{ id: string; inPlace?: boolean; isMainRepo?: boolean }> }
+  >(() => ({ sessions: [] })),
 }));
 
 vi.mock('../api', () => ({
@@ -38,6 +48,10 @@ vi.mock('../../services/panelApi', () => ({
 
 vi.mock('../../stores/cyboflowStore', () => ({
   useCyboflowStore: { getState: mockGetState },
+}));
+
+vi.mock('../../stores/sessionStore', () => ({
+  useSessionStore: { getState: mockSessionGetState },
 }));
 
 import { ensureSessionForLaunch } from '../ensureSessionForLaunch';
@@ -61,8 +75,10 @@ beforeEach(() => {
   mockCreateQuick.mockReset();
   mockCreatePanel.mockReset();
   mockGetState.mockReset();
+  mockSessionGetState.mockReset();
 
   mockGetState.mockReturnValue({ selectedSessionId: null });
+  mockSessionGetState.mockReturnValue({ sessions: [] });
   mockCreatePanel.mockResolvedValue({ id: 'panel-001' });
   // Default: SDK quick session (no eager claude panel).
   mockCreateQuick.mockResolvedValue({
@@ -96,7 +112,9 @@ describe('ensureSessionForLaunch', () => {
     const id = await ensureSessionForLaunch(7, { forceNew: true });
 
     expect(id).toBe('sess-new');
-    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7 });
+    // A flow-host session always pins worktreeMode:'worktree' so it ignores the
+    // global in-place default (a workflow run needs an isolated worktree).
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7, worktreeMode: 'worktree' });
     expect(mockCreatePanel).toHaveBeenCalled();
   });
 
@@ -109,7 +127,22 @@ describe('ensureSessionForLaunch', () => {
 
     // Fell through to the create-quick path rather than reusing the busy session.
     expect(id).toBe('sess-new');
-    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7 });
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7, worktreeMode: 'worktree' });
+    expect(mockCreatePanel).toHaveBeenCalled();
+  });
+
+  it('does NOT reuse an IN-PLACE selected session — creates a fresh worktree-backed session', async () => {
+    mockGetState.mockReturnValue({ selectedSessionId: 'sess-inplace' });
+    // The selection is FREE (no active run), but it works directly in the project
+    // checkout (in_place) — a workflow can never run there, so reuse is skipped and
+    // a fresh worktree-backed session is created instead. Mirrors the backend guard.
+    useActiveRunsStore.setState({ runsByProject: {} });
+    mockSessionGetState.mockReturnValue({ sessions: [{ id: 'sess-inplace', inPlace: true }] });
+
+    const id = await ensureSessionForLaunch(7);
+
+    expect(id).toBe('sess-new');
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7, worktreeMode: 'worktree' });
     expect(mockCreatePanel).toHaveBeenCalled();
   });
 
@@ -117,7 +150,7 @@ describe('ensureSessionForLaunch', () => {
     const id = await ensureSessionForLaunch(7);
 
     expect(id).toBe('sess-new');
-    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7 });
+    expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 7, worktreeMode: 'worktree' });
     expect(mockCreatePanel).toHaveBeenCalledTimes(2);
     expect(mockCreatePanel).toHaveBeenNthCalledWith(1, { sessionId: 'sess-new', type: 'claude' });
     expect(mockCreatePanel).toHaveBeenNthCalledWith(2, {

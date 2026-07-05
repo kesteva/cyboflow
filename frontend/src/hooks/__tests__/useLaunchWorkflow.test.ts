@@ -52,7 +52,9 @@ describe('useLaunchWorkflow', () => {
     });
 
     expect(runId).toBe('run-9');
-    expect(mockEnsureSession).toHaveBeenCalledWith(7);
+    // forceNew defaults to false (reuse the current selection) and is always
+    // threaded into ensureSessionForLaunch.
+    expect(mockEnsureSession).toHaveBeenCalledWith(7, { forceNew: false });
     expect(mockStartMutate).toHaveBeenCalledWith({
       workflowId: 'wf-sprint',
       projectId: 7,
@@ -65,6 +67,16 @@ describe('useLaunchWorkflow', () => {
     });
     expect(useCyboflowStore.getState().activeRunId).toBe('run-9');
     expect(useCyboflowStore.getState().selectedSessionId).toBe('session-1');
+  });
+
+  it('threads forceNew:true into ensureSessionForLaunch when the hook opts in', async () => {
+    // In-place / main-repo host sessions must never absorb the current selection —
+    // the canvas passes forceNew so the run lands in a fresh worktree-backed session.
+    const { result } = renderHook(() => useLaunchWorkflow(7, { forceNew: true }));
+    await act(async () => {
+      await result.current.launch('wf-sprint');
+    });
+    expect(mockEnsureSession).toHaveBeenCalledWith(7, { forceNew: true });
   });
 
   it('threads seed.ideaId into the mutation when provided (Planner gate)', async () => {

@@ -38,12 +38,22 @@
  * workflow" fast lane — `useLaunchWorkflow` (the QuickSessionCanvas workflow
  * chips) and its "Browse all" picker — and the blueprint editor's "Run with
  * modifications", which re-runs the active run's edited workflow in place.
+ *
+ * IN-PLACE SAFETY: a workflow run may NEVER execute on the raw project checkout,
+ * so the reuse short-circuit additionally SKIPS any selected session that is
+ * `inPlace` (works directly in the checkout, migration 046) or `isMainRepo` (the
+ * dashboard singleton), falling through to a fresh worktree-backed session. And
+ * every session this helper CREATES pins `worktreeMode: 'worktree'` explicitly, so
+ * a flow-host session ignores the global in-place default. This mirrors the
+ * backend RunLauncher guard that rejects a run targeting an in-place session, and
+ * makes every launch surface safe even where no warning modal is shown.
  */
 import { API } from './api';
 import { panelApi } from '../services/panelApi';
 import { trackEvent } from './telemetry';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import { useActiveRunsStore } from '../stores/activeRunsStore';
+import { useSessionStore } from '../stores/sessionStore';
 
 export interface EnsureSessionForLaunchOptions {
   /** Always create a fresh session, never reuse the current selection. */
@@ -71,11 +81,18 @@ export async function ensureSessionForLaunch(
   if (sel && !opts.forceNew) {
     const activeRuns = useActiveRunsStore.getState().runsByProject[projectId] ?? [];
     const selectionIsBusy = activeRuns.some((run) => run.session_id === sel);
-    if (!selectionIsBusy) return sel;
+    // Workflows may never run on the raw checkout: an in-place session (or the
+    // main-repo singleton) can't host a run, so skip reuse and fall through to a
+    // fresh worktree-backed session. Mirrors the backend RunLauncher guard.
+    const selectedSession = useSessionStore.getState().sessions.find((s) => s.id === sel);
+    const selectionIsRawCheckout = selectedSession?.inPlace === true || selectedSession?.isMainRepo === true;
+    if (!selectionIsBusy && !selectionIsRawCheckout) return sel;
   }
 
-  // Otherwise create a fresh quick session for this launch.
-  const result = await API.sessions.createQuick({ prompt: '', projectId });
+  // Otherwise create a fresh quick session for this launch. Pin the worktree mode
+  // explicitly so a flow-host session ignores the global in-place default — a
+  // workflow run always needs an isolated worktree.
+  const result = await API.sessions.createQuick({ prompt: '', projectId, worktreeMode: 'worktree' });
   if (!result.success || !result.data) {
     throw new Error(result.error ?? 'Failed to create session for launch');
   }

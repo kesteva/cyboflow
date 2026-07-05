@@ -43,7 +43,17 @@ export interface UseLaunchWorkflowResult {
 
 export function useLaunchWorkflow(
   projectId: number,
-  opts?: { onLaunched?: (runId: string) => void },
+  opts?: {
+    onLaunched?: (runId: string) => void;
+    /**
+     * Always create a fresh worktree-backed session for the run rather than
+     * reusing the current selection. Set by the QuickSessionCanvas when its
+     * session is in-place (works directly in the checkout) or the main repo — a
+     * workflow can never run on the raw checkout, so it must land in a new
+     * isolated session. Threaded to ensureSessionForLaunch.
+     */
+    forceNew?: boolean;
+  },
 ): UseLaunchWorkflowResult {
   const [isLaunching, setIsLaunching] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -54,6 +64,7 @@ export function useLaunchWorkflow(
   const inFlightRef = useRef(false);
 
   const onLaunched = opts?.onLaunched;
+  const forceNew = opts?.forceNew ?? false;
   const globalPermissionMode =
     useConfigStore((state) => state.config?.defaultAgentPermissionMode) ?? 'default';
   // Global forced-substrate pin (demo 'sdk' wins, else PTY-only lock 'interactive',
@@ -70,7 +81,9 @@ export function useLaunchWorkflow(
       try {
         // Launch INTO the active session (the resting quick session), reusing
         // its worktree — ensureSessionForLaunch returns selectedSessionId when set.
-        const sessionId = await ensureSessionForLaunch(projectId);
+        // `forceNew` (in-place / main-repo host session) skips that reuse and
+        // creates a fresh worktree-backed session instead.
+        const sessionId = await ensureSessionForLaunch(projectId, { forceNew });
         const base = {
           workflowId,
           projectId,
@@ -105,7 +118,7 @@ export function useLaunchWorkflow(
         inFlightRef.current = false;
       }
     },
-    [projectId, globalPermissionMode, forced, onLaunched],
+    [projectId, globalPermissionMode, forced, onLaunched, forceNew],
   );
 
   return { launch, isLaunching, error };

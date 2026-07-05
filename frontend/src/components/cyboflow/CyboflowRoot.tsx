@@ -466,9 +466,12 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         </Modal>
       )}
 
-      {/* Add-a-workflow confirm (interactive/PTY session) — a second workflow is
-          descoped from the live-REPL session, so confirm the launch will be in a
-          new, separate session, then open the picker with forceNewSession set. */}
+      {/* Add-a-workflow confirm — a workflow can't run inside this session, so
+          confirm the launch will be in a new, separate worktree-backed session,
+          then open the picker with forceNewSession set. The reason differs by
+          session kind: an in-place session works directly in the raw checkout;
+          an interactive (PTY) session already hosts a live REPL. Same dialog,
+          copy parameterized by reason. */}
       <ConfirmDialog
         isOpen={addWorkflowConfirmOpen}
         onClose={() => setAddWorkflowConfirmOpen(false)}
@@ -477,9 +480,13 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
           setPickerForceNew(true);
           setIsPickerOpen(true);
         }}
-        title="Start workflow in a new session?"
-        message="This is an interactive (PTY) session, which can't host a second workflow alongside its live terminal. The workflow will start in a new, separate session — this one stays open and untouched. Next you'll choose the workflow and its settings (permissions, SDK vs. PTY)."
-        confirmText="Choose workflow"
+        title={effectiveSession?.inPlace ? 'Workflows run in their own worktree' : 'Start workflow in a new session?'}
+        message={
+          effectiveSession?.inPlace
+            ? "This session works directly in the project checkout, so it can't host a workflow run. The workflow will open in a new session with an isolated worktree — this one stays open and untouched. Next you'll choose the workflow and its settings (permissions, SDK vs. PTY)."
+            : "This is an interactive (PTY) session, which can't host a second workflow alongside its live terminal. The workflow will start in a new, separate session — this one stays open and untouched. Next you'll choose the workflow and its settings (permissions, SDK vs. PTY)."
+        }
+        confirmText={effectiveSession?.inPlace ? 'Open in new session' : 'Choose workflow'}
         cancelText="Cancel"
         confirmButtonClass="bg-interactive hover:bg-interactive-hover text-text-on-interactive"
       />

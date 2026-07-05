@@ -723,7 +723,9 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
     // loaded CI runners headroom (the default 1s expired once on GitHub Actions
     // while the chain was still settling).
     await waitFor(() => {
-      expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1 });
+      // worktreeMode is pinned — a flow-host session ignores the global in-place
+      // default (migration 046).
+      expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1, worktreeMode: 'worktree' });
     }, { timeout: 5000 });
     await waitFor(() => {
       expect(panelApi.createPanel).toHaveBeenCalledWith({ sessionId: 'session-quick-001', type: 'claude' });
