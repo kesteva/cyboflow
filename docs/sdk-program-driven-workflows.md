@@ -36,13 +36,15 @@ history (the `raw_events` transcript via `selectRunUnifiedMessages` + the
 `step_results` timeline) ONLY when it must act — (a) a required step exhausts its
 retries → **triage** (retry/escalate/fail, with its rationale injected into the
 Chat pane), or (b) a human types a chat turn → **answer**. There is no continuous
-feed. Default (`programmaticSupervisor !== 'sdk'`): NO monitor is wired — every
-exhausted required failure `escalate`s to the human review queue (behavior-identical
-to the old `ReviewQueueSupervisor`) and the Chat composer stays disabled. Opt-in
-`programmaticSupervisor: 'sdk'` wires a `DefaultMonitorSession` over two fakeable
-query fns (`monitorQuery.ts`, the SOLE `@anthropic-ai/claude-agent-sdk` importer in
-the programmatic plane); its live SDK calls are not headlessly verified (unit-tested
-behind fakeable boundaries). The tRPC contract is `cyboflow.monitor`
+feed. The monitor is now ALWAYS wired for every programmatic run (no config
+opt-in): it is a Q&A partner that can auto-retry transient step failures, but it
+cannot unilaterally fail a run — a `fail` verdict is downgraded to `escalate`, so
+every exhausted required failure still reaches the human review queue AND is
+surfaced as a turn in the run's Chat pane (dual-surfaced, not either/or). The
+monitor is a `DefaultMonitorSession` over two fakeable query fns (`monitorQuery.ts`,
+the SOLE `@anthropic-ai/claude-agent-sdk` importer in the programmatic plane); its
+live SDK calls are not headlessly verified (unit-tested behind fakeable boundaries).
+The tRPC contract is `cyboflow.monitor`
 (`isActive` / `send` / `stepResults`); `send` delegates to `MonitorSession.converse`
 (inject the human turn → answer over the whole history → inject the reply), and the
 turns surface via the run's normal stream → `raw_events` → `runs.listUnifiedMessages`
@@ -212,14 +214,14 @@ through the router" rule. Only the *actor* differs.
   error)`, consulted when a REQUIRED step exhausts its retry+loopback budget. Triage
   verdicts: `retry` (bounded re-run), `escalate` (open a human gate → approve=skip&
   advance / revise=retry / reject=fail / abort=cancel), `fail` (terminal).
-  `ProgrammaticRunHost.triageFailure` routes to an OPTIONAL `MonitorSession` when one
-  is wired, else returns `escalate` (the default — behavior-identical to the old
-  `ReviewQueueSupervisor`). There is NO continuous monitor feed: routine step
-  progress stays in the stepper; the chat carries conversation + the monitor's triage
-  rationale (injected as an assistant turn). `ConfigManager.getProgrammaticSupervisor()`
-  (`'review-queue'` default | `'sdk'`) selects whether a monitor factory is wired in
-  `index.ts`.
-- **On-demand monitor brain — landed (opt-in, live SDK unverified).** A single
+  `ProgrammaticRunHost.triageFailure` routes to the `MonitorSession`, which is
+  ALWAYS wired for a programmatic run (no config opt-in). A `fail` verdict is never
+  terminal on its own — it is downgraded to `escalate`, so every exhausted required
+  failure reaches the human review queue AND is surfaced in the run's Chat pane.
+  There is NO continuous monitor feed: routine step progress stays in the stepper;
+  the chat carries conversation + the monitor's triage rationale (injected as an
+  assistant turn).
+- **On-demand monitor brain — landed, ALWAYS wired (live SDK unverified).** A single
   `DefaultMonitorSession` (`monitor.ts`) is BOTH the triage brain and the chat human
   seam. It holds no accumulated feed: each act reads the WHOLE run history fresh — the
   `raw_events` transcript (`selectRunUnifiedMessages`) + the `step_results` timeline
@@ -232,7 +234,7 @@ through the router" rule. Only the *actor* differs.
   programmatic plane); the brain + prompts + parse are pure / fakeable, fail-soft
   (triage → `escalate`, answer → an apology, empty answer → a placeholder turn).
   `MonitorRegistry` holds the per-run session (registered by `DefaultProgrammaticRunner`
-  while the walk runs). Opt-in (`programmaticSupervisor: 'sdk'`).
+  while the walk runs). Always registered for every programmatic run.
 - **Chat surface — the run's EXISTING unified Chat pane (no dock).** Monitor and user
   turns are injected as synthetic `ClaudeStreamEvent`s through a per-run persisting
   event bridge (`runExecutor.executeProgrammatic` → `injectEvent`), so they persist to
@@ -367,7 +369,8 @@ false positives). Clusters and resolutions:
   `monitor.isActive` on run status); `CyboflowRoot.tsx` — the dock mount removed.
 - `main/src/orchestrator/{cancelRunHandler,humanStepManager}.ts` — cancel wiring +
   `clearPendingForRun`. `main/src/services/configManager.ts` +
-  `main/src/types/config.ts` — `defaultExecutionModel` + `programmaticSupervisor` rungs.
+  `main/src/types/config.ts` — `defaultExecutionModel` rung (the monitor is always
+  wired for programmatic runs; no separate config rung selects it).
 - **Deleted by the monitor-unify refactor:** `programmatic/{supervisor,sdkSupervisor,
   supervisorChat,supervisorChatBackend,sdkStructuredQuery}.ts`, the
   `cyboflow.supervisorChat` router, and the frontend

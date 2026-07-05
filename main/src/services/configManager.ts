@@ -327,19 +327,6 @@ export class ConfigManager extends EventEmitter {
   }
 
   /**
-   * Whether a PROGRAMMATIC run wires the ON-DEMAND monitor (the monitor-unify
-   * refactor; supersedes the old Stage 3 supervisor + supervisor-chat planes — the
-   * key/value are kept unchanged so existing config.json files stay byte-identical).
-   * Floors to 'review-queue' (no monitor: exhausted required failures escalate to the
-   * human review queue, the Chat composer stays disabled — no live SDK call) when
-   * unset; 'sdk' opts into the on-demand monitor (triage + chat in the run's Chat
-   * pane). NOT seeded into the constructor defaults.
-   */
-  getProgrammaticSupervisor(): 'review-queue' | 'sdk' {
-    return this.config.programmaticSupervisor ?? 'review-queue';
-  }
-
-  /**
    * On-disk location for COMMITTED-artifact manifests, written when the user
    * explicitly commits an artifact (FEATURE #3 durability snapshot). A RELATIVE
    * value resolves against the owning project's ROOT (durable across worktree

@@ -24,9 +24,9 @@
  *                       is hidden by default and revealed with ⌃G.
  *
  *   workflow-monitor  — an SDK run with an ACTIVE on-demand monitor (the
- *                       monitor-unify refactor; gated on config
- *                       `programmaticSupervisor: 'sdk'`). The input is ENABLED so
- *                       the user can query the monitor; Send →
+ *                       monitor-unify refactor; the monitor is ALWAYS registered
+ *                       for a programmatic run — no config opt-in). The input is
+ *                       ENABLED so the user can query the monitor; Send →
  *                       `trpc.cyboflow.monitor.send.mutate`. The user's turn + the
  *                       monitor's reply arrive via the unified stream (injected
  *                       server-side → raw_events → streamEvents live-refresh →
@@ -194,13 +194,11 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
   }, [isInteractive]);
 
   // -- on-demand monitor gate (monitor-unify) -------------------------------
-  // An SDK programmatic run can carry an active monitor session (gated on config
-  // `programmaticSupervisor: 'sdk'`); when it does, the run-chat composer is
-  // ENABLED so the user can query the monitor and its reply renders in the same
-  // unified Chat pane. The default review-queue path (no monitor) resolves
-  // inactive and the composer stays disabled exactly as before. The probe is gated
-  // on `substrate === 'sdk'` so the quick / interactive / orchestrated send paths
-  // are never touched.
+  // Every SDK programmatic run always carries an active monitor session (no
+  // config opt-in); when it does, the run-chat composer is ENABLED so the user
+  // can query the monitor and its reply renders in the same unified Chat pane.
+  // The probe is gated on `substrate === 'sdk'` so the quick / interactive /
+  // orchestrated send paths are never touched.
   //
   // We RE-PROBE on the run's status (not just on runId), because the monitor
   // session is registered only while the controller walks the DAG (registered at

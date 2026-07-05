@@ -21,10 +21,6 @@ export interface AppConfig {
   // 'programmatic'). Floors to 'orchestrated' when unset; the interactive
   // substrate always hard-pins 'orchestrated' regardless of this value.
   defaultExecutionModel?: ExecutionModel;
-  // How PROGRAMMATIC runs triage exhausted failures + answer mid-run chat:
-  // 'review-queue' (default · escalate to the human review queue, no live SDK
-  // call) or 'sdk' (on-demand monitor agent, chattable from the run's Chat pane).
-  programmaticSupervisor?: 'review-queue' | 'sdk';
   // Global on/off for the code-review eval (the K=3 Opus jury pass fired at a
   // built-in flow's human-review step). Absent/undefined = ENABLED. A per-run
   // Configure override (workflow_runs.eval_enabled) outranks this; NULL inherits it.
