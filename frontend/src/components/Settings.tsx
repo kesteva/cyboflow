@@ -7,6 +7,7 @@ import { trackEvent } from '../utils/telemetry';
 import type { AppConfig } from '../types/config';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { useConfigStore } from '../stores/configStore';
 import {
   Sun,
@@ -56,6 +57,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Global default execution model for new SDK runs: 'orchestrated' (default) or
   // 'programmatic' (the in-process WorkflowController host walks the run's DAG).
   const [defaultExecutionModel, setDefaultExecutionModel] = useState<ExecutionModel>('orchestrated');
+  // Default workspace for NEW quick sessions: 'worktree' (default · isolated git
+  // worktree) or 'in-place' (work directly in the project checkout). A per-session
+  // override lives in the launch wizard's Advanced options.
+  const [quickSessionWorktreeMode, setQuickSessionWorktreeMode] = useState<QuickSessionWorktreeMode>('worktree');
   // Global code-review-eval toggle (default ON) — the K=3 Opus jury pass fired at
   // a built-in flow's human-review step. A per-run Configure override outranks it.
   const [codeReviewEvalEnabled, setCodeReviewEvalEnabled] = useState(true);
@@ -114,6 +119,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setDefaultAgentPermissionMode(data.defaultAgentPermissionMode ?? 'default');
       setInteractivePtyOnly(data.interactivePtyOnly ?? false);
       setDefaultExecutionModel(data.defaultExecutionModel ?? 'orchestrated');
+      setQuickSessionWorktreeMode(data.quickSessionWorktreeMode ?? 'worktree');
       setCodeReviewEvalEnabled(data.codeReviewEvalEnabled ?? true);
       setErrorReportingEnabled(data.telemetry?.errorReportingEnabled ?? true);
       setUsageMetricsEnabled(data.telemetry?.usageMetricsEnabled ?? true);
@@ -156,6 +162,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         defaultAgentPermissionMode,
         interactivePtyOnly,
         defaultExecutionModel,
+        quickSessionWorktreeMode,
         codeReviewEvalEnabled,
         // Empty field → undefined → the getter floors to the default (config.json
         // stays free of the key). A set value is trimmed before persisting.
@@ -440,6 +447,44 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                   run always includes a chat supervisor you can query mid-run; escalations always go to
                   the human review queue and are also surfaced in chat. Only affects SDK runs started
                   after you save — the interactive terminal substrate always runs orchestrated.
+                </p>
+              </SettingsSection>
+
+              <SettingsSection
+                title="Quick Sessions"
+                description="Where a new quick session works — an isolated git worktree or your project checkout"
+                icon={<FolderOpen className="w-4 h-4" />}
+              >
+                <div className="flex flex-col gap-1.5">
+                  {([
+                    { mode: 'worktree', label: 'Own worktree (default)', hint: 'Isolated git worktree' },
+                    { mode: 'in-place', label: 'Project checkout (in place)', hint: 'Work directly in your checkout' },
+                  ] as const).map(({ mode, label, hint }) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => {
+                        setQuickSessionWorktreeMode(mode);
+                        trackEvent('quick_worktree_mode_default_changed', { mode });
+                      }}
+                      aria-pressed={quickSessionWorktreeMode === mode}
+                      className={`flex items-center justify-between gap-3 px-3 py-2 rounded-button border transition-colors text-left ${
+                        quickSessionWorktreeMode === mode
+                          ? 'border-interactive bg-interactive-surface'
+                          : 'border-border-secondary bg-surface-secondary hover:bg-surface-hover'
+                      }`}
+                    >
+                      <span className="text-text-primary font-medium text-sm">{label}</span>
+                      <span className="text-xs text-text-tertiary">{hint}</span>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-text-tertiary mt-2">
+                  "Project checkout (in place)" starts new quick sessions directly in your working copy —
+                  no worktree, no isolation. It is SDK-only (the interactive terminal substrate is
+                  unavailable), and a workflow launched from an in-place session opens in a separate
+                  worktree-backed session. Only affects sessions created after you save; you can override
+                  this per session in the launch wizard's Advanced options.
                 </p>
               </SettingsSection>
 
