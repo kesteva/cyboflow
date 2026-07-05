@@ -86,6 +86,7 @@ import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME } from './workflowMeta';
 import type { WorkflowCardMeta } from './workflowMeta';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
+import type { QuickSessionWorktreeMode } from '../../../../../shared/types/worktreeMode';
 import { trackEvent } from '../../../utils/telemetry';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
 import type { TelemetryFlow } from '../../../../../shared/types/telemetry';
@@ -249,6 +250,14 @@ export default function SessionStartWizard(): React.JSX.Element {
   // hard-pin 'orchestrated' inside the resolver, so the override only matters on
   // the SDK substrate. Default 'inherit' keeps launches byte-identical.
   const [executionModelOverride, setExecutionModelOverride] = useState<'inherit' | ExecutionModel>('inherit');
+  // Advanced (Configure ③, QUICK only): per-session workspace override. 'inherit'
+  // → omit `worktreeMode` (createQuick floors to the global quickSessionWorktreeMode
+  // Settings default); an explicit choice threads into useQuickSession →
+  // sessions.in_place (migration 046). 'in-place' is SDK-only, so it is disabled
+  // under the interactive substrate — and if the user flips to interactive while
+  // 'in-place' is selected it resets to 'inherit' (see the SubstrateSelector
+  // onChange). Default 'inherit' keeps launches byte-identical.
+  const [worktreeModeOverride, setWorktreeModeOverride] = useState<'inherit' | QuickSessionWorktreeMode>('inherit');
   // Advanced (Configure ③, quick only): per-session MCP DENY set + plugin
   // selection, chosen at session start (NOT a mid-conversation toggle — enforced
   // at the first spawn). Threaded into createQuick; collapsed by default.
@@ -614,6 +623,9 @@ export default function SessionStartWizard(): React.JSX.Element {
         isOpusModel(model) && fastMode,
         disabledMcpServers,
         pluginSelection,
+        // Workspace override (Advanced) — 'inherit' omits it (server floors to the
+        // global default); an explicit choice threads into sessions.in_place.
+        worktreeModeOverride !== 'inherit' ? worktreeModeOverride : undefined,
       );
       return;
     }
@@ -660,7 +672,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       return;
     }
     void launchRun(selection.workflowId);
-  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, substrate, model, fastMode, disabledMcpServers, enabledPlugins, pluginBaseline]);
+  }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, substrate, model, fastMode, disabledMcpServers, enabledPlugins, pluginBaseline, worktreeModeOverride]);
 
   const handleIdeaPicked = useCallback(
     (ideaId: string) => {
@@ -897,7 +909,14 @@ export default function SessionStartWizard(): React.JSX.Element {
             {selection.kind !== 'ultracode' && (
               <SubstrateSelector
                 value={substrate}
-                onChange={setSubstrate}
+                onChange={(s) => {
+                  setSubstrate(s);
+                  // In-place quick sessions are SDK-only — drop an in-place
+                  // workspace override when switching to the interactive substrate.
+                  if (s === 'interactive' && worktreeModeOverride === 'in-place') {
+                    setWorktreeModeOverride('inherit');
+                  }
+                }}
                 id="wizard-substrate"
                 caveatsTestId="wizard-substrate-caveats"
               />
@@ -953,6 +972,54 @@ export default function SessionStartWizard(): React.JSX.Element {
                         </span>
                       </div>
                       <PluginTogglePill selected={enabledPlugins} onChange={setEnabledPlugins} />
+                    </div>
+
+                    {/* Workspace — where this quick session's working tree lives.
+                        'Use global setting' omits worktreeMode (createQuick floors to
+                        the Settings default); 'In place' skips worktree creation and
+                        works directly in the checkout (sessions.in_place, migration
+                        046). In-place is SDK-only, so it is disabled under the
+                        interactive substrate. */}
+                    <div className="flex flex-col gap-2">
+                      <div className="flex flex-col gap-0.5">
+                        <span className="text-sm font-medium text-text-primary">Workspace</span>
+                        <span className="text-xs text-text-tertiary">
+                          In place works directly in your checkout — no isolation, and workflows launched from the session open in a separate worktree-backed session
+                        </span>
+                      </div>
+                      <div className="flex gap-1.5" role="radiogroup" aria-label="Workspace">
+                        {([
+                          { value: 'inherit', label: 'Use global setting', testid: 'wizard-worktree-inherit', disabled: false },
+                          { value: 'worktree', label: 'Own worktree', testid: 'wizard-worktree-worktree', disabled: false },
+                          {
+                            value: 'in-place',
+                            label: 'In place (project checkout)',
+                            testid: 'wizard-worktree-inplace',
+                            disabled: substrate === 'interactive',
+                          },
+                        ] as const).map(({ value, label, testid, disabled }) => (
+                          <button
+                            key={value}
+                            type="button"
+                            role="radio"
+                            aria-checked={worktreeModeOverride === value}
+                            aria-disabled={disabled}
+                            disabled={disabled}
+                            onClick={() => setWorktreeModeOverride(value)}
+                            data-testid={testid}
+                            title={disabled ? 'In place requires the SDK runtime' : undefined}
+                            className={cn(
+                              'flex-1 rounded-button border px-2 py-1.5 text-xs font-medium transition-colors',
+                              worktreeModeOverride === value
+                                ? 'border-interactive bg-interactive-surface text-text-primary'
+                                : 'border-border-secondary bg-bg-primary text-text-secondary hover:bg-surface-hover',
+                              disabled && 'cursor-not-allowed opacity-50 hover:bg-bg-primary',
+                            )}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   </div>
                 )}

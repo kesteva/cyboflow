@@ -330,6 +330,96 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Workspace tri-state (quick only) — the wizard's Advanced "Workspace" control
+// pins where a quick session's working tree lives ('inherit' = global default,
+// 'worktree', or 'in-place'). In-place is SDK-only, so it is disabled under the
+// interactive substrate and an in-place selection resets to 'inherit' when the
+// substrate flips to interactive. The choice threads into createQuick.
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — Workspace tri-state (quick)', () => {
+  it('renders the Workspace tri-state (default inherit) inside quick Advanced', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    // The tri-state lives in the collapsed Advanced section — expand it first.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-advanced-toggle'));
+    });
+
+    expect(screen.getByTestId('wizard-worktree-inherit')).toBeInTheDocument();
+    expect(screen.getByTestId('wizard-worktree-worktree')).toBeInTheDocument();
+    expect(screen.getByTestId('wizard-worktree-inplace')).toBeInTheDocument();
+    // Default selection is 'inherit' (launch stays byte-identical).
+    expect(screen.getByTestId('wizard-worktree-inherit')).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('disables the in-place option under the interactive substrate', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-advanced-toggle'));
+    });
+
+    // SDK default → in-place is selectable.
+    expect(screen.getByTestId('wizard-worktree-inplace')).not.toBeDisabled();
+
+    // Switch to the interactive substrate → in-place is SDK-only, so it disables.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select CLI substrate'), {
+        target: { value: 'interactive' },
+      });
+    });
+    expect(screen.getByTestId('wizard-worktree-inplace')).toBeDisabled();
+    expect(screen.getByTestId('wizard-worktree-inplace')).toHaveAttribute('aria-disabled', 'true');
+  });
+
+  it('threads worktreeMode:"in-place" into a quick launch when selected', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-advanced-toggle'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-worktree-inplace'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: 1, worktreeMode: 'in-place' }),
+    );
+  });
+
+  it('resets an in-place override to inherit when the substrate flips to interactive', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-advanced-toggle'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-worktree-inplace'));
+    });
+    expect(screen.getByTestId('wizard-worktree-inplace')).toHaveAttribute('aria-checked', 'true');
+
+    // Flipping to interactive drops the SDK-only in-place override back to inherit.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select CLI substrate'), {
+        target: { value: 'interactive' },
+      });
+    });
+    expect(screen.getByTestId('wizard-worktree-inherit')).toHaveAttribute('aria-checked', 'true');
+
+    // The launch therefore omits worktreeMode (inherit the global default).
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    expect(mockCreateQuick).toHaveBeenCalledOnce();
+    expect(mockCreateQuick.mock.calls[0]?.[0]).not.toHaveProperty('worktreeMode');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Launch threading
 // ---------------------------------------------------------------------------
 describe('SessionStartWizard — step ③ launch threading', () => {

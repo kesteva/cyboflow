@@ -27,6 +27,7 @@ import { trackEvent } from '../utils/telemetry';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
+import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 
 interface UseQuickSessionOptions {
   projectId: number | null;
@@ -47,6 +48,11 @@ interface UseQuickSessionReturn {
    * fast-mode toggle, default off) are persisted on the claude panel — directly
    * for the frontend-created SDK panel, and via the createQuick request for the
    * interactive eager spawn — so the per-turn respawn (sessions:input) applies them.
+   *
+   * `worktreeMode` ('worktree' | 'in-place') threads the wizard's Workspace choice
+   * into createQuick; omitted → the server floors to the global default. 'in-place'
+   * skips worktree creation and works directly in the project checkout (SDK-only —
+   * create-quick rejects it under an interactive-resolving substrate).
    */
   start: (
     agentPermissionMode?: PermissionMode,
@@ -56,6 +62,7 @@ interface UseQuickSessionReturn {
     fastMode?: boolean,
     disabledMcpServers?: string[],
     enabledPlugins?: string[],
+    worktreeMode?: QuickSessionWorktreeMode,
   ) => Promise<void>;
   isStarting: boolean;
   error: string | null;
@@ -74,6 +81,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
       fastMode?: boolean,
       disabledMcpServers?: string[],
       enabledPlugins?: string[],
+      worktreeMode?: QuickSessionWorktreeMode,
     ): Promise<void> => {
       if (opts.projectId === null || isStarting) return;
 
@@ -105,6 +113,10 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           // INCLUDING `[]` ("disable everything"); forward that distinction as-is.
           ...(disabledMcpServers && disabledMcpServers.length > 0 ? { disabledMcpServers } : {}),
           ...(enabledPlugins !== undefined ? { enabledPlugins } : {}),
+          // Workspace choice (wizard Advanced) → sessions.in_place (migration 046).
+          // Only sent when explicitly chosen; omitted → the server floors to the
+          // global quickSessionWorktreeMode default.
+          ...(worktreeMode ? { worktreeMode } : {}),
         });
 
         if (!result.success || !result.data) {
