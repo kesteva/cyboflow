@@ -332,9 +332,9 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
 // ---------------------------------------------------------------------------
 // Workspace tri-state (quick only) — the wizard's Advanced "Workspace" control
 // pins where a quick session's working tree lives ('inherit' = global default,
-// 'worktree', or 'in-place'). In-place is SDK-only, so it is disabled under the
-// interactive substrate and an in-place selection resets to 'inherit' when the
-// substrate flips to interactive. The choice threads into createQuick.
+// 'worktree', or 'in-place'). Both substrates support in-place (the interactive
+// gate rides the inline --settings flag), so the option is never disabled and
+// survives a substrate flip. The choice threads into createQuick.
 // ---------------------------------------------------------------------------
 describe('SessionStartWizard — Workspace tri-state (quick)', () => {
   it('renders the Workspace tri-state (default inherit) inside quick Advanced', async () => {
@@ -353,7 +353,7 @@ describe('SessionStartWizard — Workspace tri-state (quick)', () => {
     expect(screen.getByTestId('wizard-worktree-inherit')).toHaveAttribute('aria-checked', 'true');
   });
 
-  it('disables the in-place option under the interactive substrate', async () => {
+  it('keeps the in-place option enabled under the interactive substrate (inline --settings gate)', async () => {
     await renderLockedWizard();
     await selectQuickAndConfigure();
     await act(async () => {
@@ -363,14 +363,13 @@ describe('SessionStartWizard — Workspace tri-state (quick)', () => {
     // SDK default → in-place is selectable.
     expect(screen.getByTestId('wizard-worktree-inplace')).not.toBeDisabled();
 
-    // Switch to the interactive substrate → in-place is SDK-only, so it disables.
+    // Interactive substrate → still selectable (no SDK-only constraint).
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Select CLI substrate'), {
         target: { value: 'interactive' },
       });
     });
-    expect(screen.getByTestId('wizard-worktree-inplace')).toBeDisabled();
-    expect(screen.getByTestId('wizard-worktree-inplace')).toHaveAttribute('aria-disabled', 'true');
+    expect(screen.getByTestId('wizard-worktree-inplace')).not.toBeDisabled();
   });
 
   it('threads worktreeMode:"in-place" into a quick launch when selected', async () => {
@@ -391,7 +390,7 @@ describe('SessionStartWizard — Workspace tri-state (quick)', () => {
     );
   });
 
-  it('resets an in-place override to inherit when the substrate flips to interactive', async () => {
+  it('preserves an in-place override across a substrate flip to interactive (threads worktreeMode into the launch)', async () => {
     await renderLockedWizard();
     await selectQuickAndConfigure();
     await act(async () => {
@@ -402,20 +401,21 @@ describe('SessionStartWizard — Workspace tri-state (quick)', () => {
     });
     expect(screen.getByTestId('wizard-worktree-inplace')).toHaveAttribute('aria-checked', 'true');
 
-    // Flipping to interactive drops the SDK-only in-place override back to inherit.
+    // Flipping to interactive no longer resets the choice — in-place works there.
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Select CLI substrate'), {
         target: { value: 'interactive' },
       });
     });
-    expect(screen.getByTestId('wizard-worktree-inherit')).toHaveAttribute('aria-checked', 'true');
+    expect(screen.getByTestId('wizard-worktree-inplace')).toHaveAttribute('aria-checked', 'true');
 
-    // The launch therefore omits worktreeMode (inherit the global default).
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
     });
     expect(mockCreateQuick).toHaveBeenCalledOnce();
-    expect(mockCreateQuick.mock.calls[0]?.[0]).not.toHaveProperty('worktreeMode');
+    expect(mockCreateQuick.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ worktreeMode: 'in-place', substrate: 'interactive' }),
+    );
   });
 });
 

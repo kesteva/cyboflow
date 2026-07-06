@@ -481,10 +481,10 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 </div>
                 <p className="text-xs text-text-tertiary mt-2">
                   "Project checkout (in place)" starts new quick sessions directly in your working copy —
-                  no worktree, no isolation. It is SDK-only (the interactive terminal substrate is
-                  unavailable), and a workflow launched from an in-place session opens in a separate
-                  worktree-backed session. Only affects sessions created after you save; you can override
-                  this per session in the launch wizard's Advanced options.
+                  no worktree, no isolation. It works with both the SDK and interactive terminal runtimes,
+                  commit automation stays off, and a workflow launched from an in-place session opens in a
+                  separate worktree-backed session. Only affects sessions created after you save; you can
+                  override this per session in the launch wizard's Advanced options.
                 </p>
               </SettingsSection>
 
