@@ -23,13 +23,18 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type Database from 'better-sqlite3';
-import type { SDKMessage, HookCallbackMatcher } from '@anthropic-ai/claude-agent-sdk';
+import type { SDKMessage, SDKUserMessage, HookCallbackMatcher } from '@anthropic-ai/claude-agent-sdk';
 import { ApprovalRouter } from '../../../../orchestrator/approvalRouter';
 import { QuestionRouter } from '../../../../orchestrator/questionRouter';
 import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter';
 import { makeProdLoggerSpy } from '../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
 import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
-import { createModuleFakeSdk, sdkResultSuccess, type FakeQueryParams } from '../../../../test/fakes/fakeSdk';
+import {
+  createModuleFakeSdk,
+  sdkResultSuccess,
+  readInitialPromptText,
+  type FakeQueryParams,
+} from '../../../../test/fakes/fakeSdk';
 import { ClaudeCodeManager } from '../claudeCodeManager';
 import { CliManagerFactory } from '../../../cliManagerFactory';
 import type { SessionManager } from '../../../sessionManager';
@@ -227,6 +232,46 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
 
     const append = capturedOptions()?.systemPrompt?.append;
     expect(append === undefined || append === null).toBe(true);
+  });
+
+  it('drives query() in streaming-input mode: prompt is an AsyncIterable whose first message carries finalPrompt, and it completes after the fake emits result', async () => {
+    // SDK 0.3.201 regression fix: flow turns MUST pass an AsyncIterable prompt (not
+    // a bare string) so stdin stays open for the AskUserQuestion / canUseTool gate.
+    const sessionManager = createMockSessionManager();
+    const mgr = new ClaudeCodeManager(
+      sessionManager,
+      logger as unknown as Logger,
+      {
+        getSystemPromptAppend: vi.fn(() => undefined),
+        getConfig: vi.fn(() => ({ verbose: false })),
+      } as unknown as import('../../../configManager').ConfigManager,
+      db,
+    );
+
+    await mgr.spawnCliProcess({
+      panelId: 'panel-stream-1',
+      sessionId: 'session-stream-1',
+      worktreePath: '/tmp/test',
+      prompt: 'stream this prompt',
+      permissionMode: 'ignore',
+    });
+    await new Promise<void>((r) => setTimeout(r, 0));
+
+    // query() received a streaming-input iterable, NOT a bare string.
+    const prompt = fakeSdk.lastPrompt;
+    expect(prompt).toBeDefined();
+    expect(typeof prompt).not.toBe('string');
+
+    // Its FIRST yielded message carries the finalPrompt verbatim (promptEnhancer is
+    // mocked to identity in this file, so finalPrompt === the request prompt).
+    const streamed = prompt as AsyncIterable<SDKUserMessage>;
+    expect(await readInitialPromptText(streamed)).toBe('stream this prompt');
+
+    // The iterable COMPLETES after the turn: production released the input gate when
+    // the fake emitted its terminal `result`, so a pull past the initial message
+    // returns done (the generator returned → stdin would close → CLI exits).
+    const settled = await streamed[Symbol.asyncIterator]().next();
+    expect(settled.done).toBe(true);
   });
 
   it('constructor throws TypeError when db is undefined (no silent degraded mode)', () => {

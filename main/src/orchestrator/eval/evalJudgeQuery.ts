@@ -101,6 +101,13 @@ export function makeEvalJudgeQuery(
   return async ({ prompt, schema, cwd, model, signal }) => {
     const { controller, didTimeOut, cleanup } = makeDeadline(timeoutMs, signal);
     try {
+      // Single-shot STRING prompt (not streaming-input): this is a bounded,
+      // read-only Q&A with JUDGE_ALLOWED_TOOLS only — no AskUserQuestion or any
+      // interactive canUseTool "ask" — so it never needs stdin held open for
+      // control roundtrips, and closing stdin after the message lets the CLI exit
+      // cleanly on its own. (Contrast claudeCodeManager's flow turns, which MUST
+      // stream input to keep the AskUserQuestion gate alive; see
+      // services/panels/claude/streamingPromptInput.ts.)
       const q = query({
         prompt,
         options: {

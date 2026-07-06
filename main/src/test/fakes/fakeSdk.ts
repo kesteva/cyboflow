@@ -338,6 +338,30 @@ export interface FakeQueryParams {
 export type FakeQueryFn = (params: FakeQueryParams) => AsyncGenerator<SDKMessage, void>;
 
 /**
+ * Read the initial prompt text `query()` was driven with, tolerating BOTH shapes:
+ * a bare string (the legacy single-shot path — monitor/eval queries) or the
+ * streaming-input `AsyncIterable<SDKUserMessage>` production now uses for flow
+ * turns (`createStreamingPromptInput`), whose FIRST yielded message carries the
+ * prompt. Pulls exactly one message and returns — it does NOT drain the iterable,
+ * so the generator's post-yield gate stays parked (production closes it at turn
+ * end). Throws if the stream is empty or the first message is not a plain-text
+ * user message. Test-only helper for asserting the prompt reached `query()`.
+ */
+export async function readInitialPromptText(
+  prompt: string | AsyncIterable<SDKUserMessage>,
+): Promise<string> {
+  if (typeof prompt === 'string') return prompt;
+  const iterator = prompt[Symbol.asyncIterator]();
+  const first = await iterator.next();
+  if (first.done) throw new Error('fakeSdk.readInitialPromptText: streamed prompt yielded no message');
+  const content = first.value.message.content;
+  if (typeof content !== 'string') {
+    throw new Error('fakeSdk.readInitialPromptText: first streamed message content is not plain text');
+  }
+  return content;
+}
+
+/**
  * Resolve the run id `ClaudeCodeManager` stamped into the SDK options. NOTE
  * (deviation from the plan): the manager does NOT put `CYBOFLOW_RUN_ID` on the
  * top-level `options.env` — it stamps it into the `cyboflow` MCP-server entry's
@@ -630,6 +654,15 @@ export interface ModuleFakeSdk {
   readonly query: FakeQueryFn;
   readonly lastOptions: FakeQueryOptions | undefined;
   readonly calls: readonly FakeQueryOptions[];
+  /**
+   * The `prompt` argument of the latest `query()` call — a bare string (legacy
+   * single-shot path) or the streaming-input `AsyncIterable<SDKUserMessage>`
+   * production now passes for flow turns. Captured passively (the iterable is NOT
+   * drained), so a test can assert the prompt reached `query()` via
+   * {@link readInitialPromptText}.
+   */
+  readonly lastPrompt: string | AsyncIterable<SDKUserMessage> | undefined;
+  readonly prompts: readonly (string | AsyncIterable<SDKUserMessage>)[];
   setImplementation(fn: FakeQueryFn): void;
   setScenario(source: ScenarioSource): void;
   setMessages(messages: readonly SDKMessage[]): void;
@@ -641,11 +674,15 @@ export function createModuleFakeSdk(defaultSource?: ScenarioSource): ModuleFakeS
   const initialImpl = defaultSource ? toFakeQueryFn(defaultSource) : emptyImpl;
   let impl = initialImpl;
   let last: FakeQueryOptions | undefined;
+  let lastPromptValue: string | AsyncIterable<SDKUserMessage> | undefined;
   const calls: FakeQueryOptions[] = [];
+  const prompts: (string | AsyncIterable<SDKUserMessage>)[] = [];
 
   const query: FakeQueryFn = (params) => {
     last = params.options;
+    lastPromptValue = params.prompt;
     calls.push(params.options);
+    prompts.push(params.prompt);
     return impl(params);
   };
 
@@ -656,6 +693,12 @@ export function createModuleFakeSdk(defaultSource?: ScenarioSource): ModuleFakeS
     },
     get calls() {
       return calls;
+    },
+    get lastPrompt() {
+      return lastPromptValue;
+    },
+    get prompts() {
+      return prompts;
     },
     setImplementation(fn: FakeQueryFn) {
       impl = fn;
@@ -669,7 +712,9 @@ export function createModuleFakeSdk(defaultSource?: ScenarioSource): ModuleFakeS
     reset() {
       impl = initialImpl;
       last = undefined;
+      lastPromptValue = undefined;
       calls.length = 0;
+      prompts.length = 0;
     },
   };
 }

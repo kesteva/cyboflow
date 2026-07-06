@@ -43,6 +43,7 @@ import type { PermissionPayload } from '../../../../../shared/types/reviews';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { WorkflowBundleWriter } from './workflowBundleWriter';
 import { installWorkflowBundle } from './workflowBundleInstall';
+import { createStreamingPromptInput } from './streamingPromptInput';
 import { withLock } from '../../../utils/mutex';
 import { enhancePromptForStructuredCommit } from '../../../utils/promptEnhancer';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
@@ -123,6 +124,16 @@ function resultErrorText(event: unknown): string | null {
   const e = event as { type?: unknown; is_error?: unknown; result?: unknown };
   if (e.type !== 'result' || e.is_error !== true) return null;
   return typeof e.result === 'string' ? e.result : '';
+}
+
+/**
+ * True for ANY terminal `result` event (success OR error). Marks turn end so the
+ * streaming-input generator can release its stdin gate and let the CLI exit —
+ * distinct from {@link terminalResultError}, which only fires on fatal results.
+ */
+function isResultEvent(event: unknown): boolean {
+  if (typeof event !== 'object' || event === null) return false;
+  return (event as { type?: unknown }).type === 'result';
 }
 
 /**
@@ -902,88 +913,118 @@ export class ClaudeCodeManager extends AbstractCliManager {
             packaged: String(Boolean(app.isPackaged)),
           });
         }, SDK_FIRST_EVENT_TIMEOUT_MS);
-        const q = query({ prompt, options: { ...activeOptions, abortController } });
-        for await (const event of q) {
-          if (firstEventTimer) {
-            clearTimeout(firstEventTimer);
-            firstEventTimer = null;
-          }
-          if (abortController.signal.aborted) break;
-
-          // Mid-call graceful fallback: the CLI reports an unusable `--model` as an
-          // is_error RESULT event (never a throw), so it lands here, not in the
-          // catch. On the FIRST attempt only, mark the guarded model unavailable
-          // (greys the pickers) and retry THIS turn with the fallback model,
-          // DISCARDING the error result so the user sees the fallback's answer.
-          if (attempt === 1) {
-            const fb = this.modelUnavailableFallback(activeOptions.model, event);
-            if (fb) {
-              this.logger?.warn(
-                `[ClaudeCodeManager] model '${activeOptions.model}' unavailable mid-call; retrying panel ${displayPanelId} with '${fb.model}'.`,
-              );
-              // Tell the renderer this run swapped models mid-turn so the composer
-              // can update its model pill and show a one-off toast (the persistent
-              // grey-out is driven separately by the availability 'changed' push).
-              this.emit('model-fallback', {
-                panelId: displayPanelId,
-                sessionId,
-                unavailableAlias: fb.guarded.alias,
-                unavailableLabel: fb.guarded.label,
-                fallbackAlias: fb.guarded.fallbackAlias,
-              });
-              activeOptions = { ...activeOptions, model: fb.model, betas: fb.betas.length > 0 ? fb.betas : undefined };
-              runClaudeSessionCaptured = false;
-              continue retry;
+        // Streaming-input mode (SDK 0.3.201): drive query() with an AsyncIterable
+        // that yields `prompt` then PARKS, keeping the CLI's stdin open so
+        // can_use_tool control roundtrips (AskUserQuestion + every interactive
+        // permission "ask") can be answered over the input stream. A bare string
+        // prompt closes stdin after the first message, which made every such gate
+        // fail with "Stream closed" and killed all human gates on the SDK
+        // substrate (regressed by the 0.2→0.3 bump). The input is released — the
+        // generator returns, stdin closes, the CLI exits — on the terminal
+        // `result` event (see the isResultEvent close below), on ANY loop exit
+        // (the finally), and on abort (the listener). Closing on `result` is
+        // load-bearing: without it the CLI waits for more input and this
+        // `for await` never drains.
+        const promptInput = createStreamingPromptInput(prompt);
+        const closeInputOnAbort = (): void => promptInput.close();
+        abortController.signal.addEventListener('abort', closeInputOnAbort, { once: true });
+        try {
+          const q = query({ prompt: promptInput.stream, options: { ...activeOptions, abortController } });
+          for await (const event of q) {
+            if (firstEventTimer) {
+              clearTimeout(firstEventTimer);
+              firstEventTimer = null;
             }
+            if (abortController.signal.aborted) break;
+
+            // Mid-call graceful fallback: the CLI reports an unusable `--model` as an
+            // is_error RESULT event (never a throw), so it lands here, not in the
+            // catch. On the FIRST attempt only, mark the guarded model unavailable
+            // (greys the pickers) and retry THIS turn with the fallback model,
+            // DISCARDING the error result so the user sees the fallback's answer.
+            if (attempt === 1) {
+              const fb = this.modelUnavailableFallback(activeOptions.model, event);
+              if (fb) {
+                this.logger?.warn(
+                  `[ClaudeCodeManager] model '${activeOptions.model}' unavailable mid-call; retrying panel ${displayPanelId} with '${fb.model}'.`,
+                );
+                // Tell the renderer this run swapped models mid-turn so the composer
+                // can update its model pill and show a one-off toast (the persistent
+                // grey-out is driven separately by the availability 'changed' push).
+                this.emit('model-fallback', {
+                  panelId: displayPanelId,
+                  sessionId,
+                  unavailableAlias: fb.guarded.alias,
+                  unavailableLabel: fb.guarded.label,
+                  fallbackAlias: fb.guarded.fallbackAlias,
+                });
+                activeOptions = { ...activeOptions, model: fb.model, betas: fb.betas.length > 0 ? fb.betas : undefined };
+                runClaudeSessionCaptured = false;
+                continue retry;
+              }
+            }
+
+            // Forward to EventRouter / RawEventsSink pipeline via validated narrowing.
+            const typed = this.narrowing.narrow(event);
+
+            // Persist the run's SDK session_id from its first system/init event.
+            if (!runClaudeSessionCaptured) {
+              const captured = this.captureRunClaudeSessionId(runId, event);
+              if (captured) runClaudeSessionCaptured = true;
+            }
+
+            // Surface the CLI's per-turn fast_mode_state (system/init + result
+            // events) so the composer's Fast pill reflects whether fast mode
+            // actually engaged — the entitlement check or a cooldown can decline
+            // a requested opt-in silently.
+            this.captureFastModeState(displayPanelId, sessionId, event, activeOptions);
+
+            // Step G — native auto-mode visibility. When the auto classifier (or any
+            // non-interactive deny) short-circuits a tool call, the SDK emits a
+            // system/permission_denied message. Fold it into the review inbox as a
+            // NON-BLOCKING row so the user can SEE what auto denied. The run is never
+            // paused on this — fire-and-forget, errors are swallowed.
+            this.maybeFoldAutoDenyVisibility(runId, event);
+
+            try {
+              router.emitForRun(runId, typed);
+            } catch (routerErr) {
+              this.logger?.warn(`[ClaudeCodeManager] EventRouter emit error: ${routerErr instanceof Error ? routerErr.message : String(routerErr)}`);
+            }
+
+            // Forward to AbstractAIPanelManager via 'output' event. Re-attributed to
+            // displayPanelId so a fan-out lane's output lands under the run panel.
+            this.emit('output', {
+              panelId: displayPanelId,
+              sessionId,
+              type: 'json',
+              data: event,
+              timestamp: new Date()
+            });
+
+            // Detect a TERMINAL turn failure surfaced as an is_error RESULT event
+            // (usage limit / auth / execution error). Placed AFTER the fallback check
+            // above (which `continue retry`s past it), so a recovered model-unavailable
+            // result never counts. `error_max_turns` is excluded as recoverable. The
+            // event is still forwarded as output so the "Session Error" stays visible.
+            const resultErr = terminalResultError(event);
+            if (resultErr !== null) terminalError = resultErr;
+
+            // Turn is over: release the input gate so the CLI stops waiting for more
+            // input and exits, letting this for-await drain. Placed AFTER the
+            // fallback `continue retry` above so a model-unavailable result never
+            // closes the input for the retry attempt (that attempt spawns a fresh
+            // promptInput). Idempotent with the finally + abort closes.
+            if (isResultEvent(event)) promptInput.close();
           }
-
-          // Forward to EventRouter / RawEventsSink pipeline via validated narrowing.
-          const typed = this.narrowing.narrow(event);
-
-          // Persist the run's SDK session_id from its first system/init event.
-          if (!runClaudeSessionCaptured) {
-            const captured = this.captureRunClaudeSessionId(runId, event);
-            if (captured) runClaudeSessionCaptured = true;
-          }
-
-          // Surface the CLI's per-turn fast_mode_state (system/init + result
-          // events) so the composer's Fast pill reflects whether fast mode
-          // actually engaged — the entitlement check or a cooldown can decline
-          // a requested opt-in silently.
-          this.captureFastModeState(displayPanelId, sessionId, event, activeOptions);
-
-          // Step G — native auto-mode visibility. When the auto classifier (or any
-          // non-interactive deny) short-circuits a tool call, the SDK emits a
-          // system/permission_denied message. Fold it into the review inbox as a
-          // NON-BLOCKING row so the user can SEE what auto denied. The run is never
-          // paused on this — fire-and-forget, errors are swallowed.
-          this.maybeFoldAutoDenyVisibility(runId, event);
-
-          try {
-            router.emitForRun(runId, typed);
-          } catch (routerErr) {
-            this.logger?.warn(`[ClaudeCodeManager] EventRouter emit error: ${routerErr instanceof Error ? routerErr.message : String(routerErr)}`);
-          }
-
-          // Forward to AbstractAIPanelManager via 'output' event. Re-attributed to
-          // displayPanelId so a fan-out lane's output lands under the run panel.
-          this.emit('output', {
-            panelId: displayPanelId,
-            sessionId,
-            type: 'json',
-            data: event,
-            timestamp: new Date()
-          });
-
-          // Detect a TERMINAL turn failure surfaced as an is_error RESULT event
-          // (usage limit / auth / execution error). Placed AFTER the fallback check
-          // above (which `continue retry`s past it), so a recovered model-unavailable
-          // result never counts. `error_max_turns` is excluded as recoverable. The
-          // event is still forwarded as output so the "Session Error" stays visible.
-          const resultErr = terminalResultError(event);
-          if (resultErr !== null) terminalError = resultErr;
+          break; // iterator drained without triggering a fallback retry
+        } finally {
+          // Close on ANY loop exit (clean drain, break, thrown error, or a
+          // `continue retry` fallback) so a parked generator never strands the
+          // CLI's stdin. Idempotent with the result-event and abort closes.
+          promptInput.close();
+          abortController.signal.removeEventListener('abort', closeInputOnAbort);
         }
-        break; // iterator drained without triggering a fallback retry
       }
     } catch (err) {
       if (abortController.signal.aborted) {

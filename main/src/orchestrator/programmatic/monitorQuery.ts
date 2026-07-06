@@ -137,6 +137,11 @@ export function makeSdkStructuredQuery(
   return async ({ prompt, schema, cwd, model, signal }) => {
     const { controller, didTimeOut, cleanup } = makeDeadline(timeoutMs, signal);
     try {
+      // Single-shot STRING prompt (not streaming-input): a bounded, read-only
+      // triage query with MONITOR_ALLOWED_TOOLS only — no AskUserQuestion or any
+      // interactive canUseTool "ask" — so it needs no stdin held open for control
+      // roundtrips and terminates cleanly after the result. (Flow turns in
+      // claudeCodeManager MUST stream input; see streamingPromptInput.ts.)
       const q = query({
         prompt,
         options: {
@@ -190,6 +195,9 @@ export function makeSdkTextQuery(
     // `error_max_turns`) can still return whatever the monitor had already said.
     let answer = '';
     try {
+      // Single-shot STRING prompt (not streaming-input): same rationale as the
+      // structured query above — read-only, no interactive tools, terminates on
+      // its own. See streamingPromptInput.ts for the flow-turn streaming case.
       const q = query({
         prompt,
         options: {
