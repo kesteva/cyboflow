@@ -108,7 +108,17 @@ export default function LandingHome({ focusQueue = false }: LandingHomeProps): R
     return projects.filter((project) => !busy.has(project.id)).length;
   }, [runs, projects]);
 
-  const waitingCount = approvalsCount + reviewItems.length;
+  // Runs drained to `awaiting_review` are waiting on the user (merge/dismiss).
+  // A clean drain mints NO review_item, so without counting them here the home
+  // would fall through to 'caught-up'/'all-active' and never mount the queue that
+  // surfaces them (TypeGroupedQueue renders only in the 'reviews' state). They are
+  // NOT blocking a sprint, so they feed waitingCount but not blockingCount.
+  const readyToReviewCount = useMemo(
+    () => runs.filter((run) => run.status === 'awaiting_review').length,
+    [runs],
+  );
+
+  const waitingCount = approvalsCount + reviewItems.length + readyToReviewCount;
   const blockingCount =
     countApprovals(blockingApprovalItems) +
     reviewItems.filter((it) => it.blocking).length;

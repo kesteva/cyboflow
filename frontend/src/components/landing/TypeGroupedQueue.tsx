@@ -27,9 +27,15 @@ import { ReviewItemCard } from '../ReviewQueue/ReviewItemCard';
 import type { QueueItem } from '../../utils/reviewQueueSelectors';
 import type { ReviewItem } from '../../../../shared/types/reviews';
 import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
-import { useAggregatedReviewItems, useRunProjectMap } from '../../stores/landingStore';
+import type { ActiveRunRow } from '../../stores/activeRunsStore';
+import {
+  useAggregatedReviewItems,
+  useAggregatedRuns,
+  useRunProjectMap,
+} from '../../stores/landingStore';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
+import { formatElapsed } from '../../utils/homeClassify';
 
 // ---------------------------------------------------------------------------
 // QueueItem id/runId helpers (mirrors ReviewQueueView)
@@ -139,6 +145,62 @@ function ReviewItemRow({ item }: { item: ReviewItem }): React.JSX.Element {
   );
 }
 
+/** Wall-clock refresh cadence for the "waiting" elapsed counter (mirrors ActiveAgentCard). */
+const ELAPSED_TICK_MS = 30_000;
+
+/**
+ * A single run that has drained to `awaiting_review` — finished work waiting for
+ * the user to merge or dismiss. Unlike the permission/decision/human_task rows no
+ * agent is halted, so the card is a calm "ready" state (steady green dot, no
+ * pulse) rather than a blocked one. Elapsed is measured from `updated_at` (when
+ * the run transitioned to awaiting_review) via a per-row ~30s clock, matching the
+ * ActiveAgentCard pattern so the count stays deterministic/testable.
+ */
+function ReadyToReviewRow({ run }: { run: ActiveRunRow }): React.JSX.Element {
+  const [nowMs, setNowMs] = React.useState<number>(() => Date.now());
+  React.useEffect(() => {
+    const id = setInterval(() => setNowMs(Date.now()), ELAPSED_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
+
+  const waiting = formatElapsed(run.updated_at, nowMs);
+
+  return (
+    <div>
+      <div className="border border-border-primary bg-surface-primary p-3 transition-colors hover:border-border-emphasized">
+        <div className="flex items-center gap-2">
+          <span
+            aria-hidden="true"
+            className="h-1.5 w-1.5 shrink-0 rounded-full bg-status-success"
+          />
+          <span
+            className="truncate font-bold text-text-primary"
+            style={{ fontSize: '13px' }}
+            title={run.workflowName}
+          >
+            {run.workflowName}
+          </span>
+          <span className="eyebrow ml-auto shrink-0 border border-border-emphasized px-1.5 py-0.5 text-status-success">
+            ready
+          </span>
+        </div>
+        <div
+          className="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-1 text-text-tertiary"
+          style={{ fontSize: '11px' }}
+        >
+          {run.branch_name !== null && (
+            <span className="truncate text-status-success" title={run.branch_name}>
+              ⌥ {run.branch_name}
+            </span>
+          )}
+          <span>waiting {waiting}</span>
+        </div>
+      </div>
+      <OpenSessionLink runId={run.id} projectId={run.project_id} />
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Public component
 // ---------------------------------------------------------------------------
@@ -171,14 +233,27 @@ export function TypeGroupedQueue(): React.JSX.Element {
     [reviewItems],
   );
 
+  // Ready-to-review group: runs that have drained to `awaiting_review` — finished
+  // work waiting for the user to merge or dismiss. A clean drain mints no
+  // review_item, so this is the ONLY landing surface that catches such runs.
+  const runs = useAggregatedRuns();
+  const readyToReviewRuns = React.useMemo(
+    () => runs.filter((run) => run.status === 'awaiting_review'),
+    [runs],
+  );
+
   const hasAny =
-    permissionItems.length > 0 || decisionItems.length > 0 || humanTaskItems.length > 0;
+    permissionItems.length > 0 ||
+    decisionItems.length > 0 ||
+    humanTaskItems.length > 0 ||
+    readyToReviewRuns.length > 0;
 
   if (!hasAny) {
     return (
       <div className="py-16 text-center text-sm text-text-muted">
         <b className="mb-1.5 block text-base text-text-primary">No pending reviews</b>
-        New checkpoints land here as agents pause for permission, a decision, or a task.
+        New checkpoints land here as agents pause for permission, a decision, or a task —
+        or finish and wait for your review.
       </div>
     );
   }
@@ -228,6 +303,20 @@ export function TypeGroupedQueue(): React.JSX.Element {
           />
           {humanTaskItems.map((it) => (
             <ReviewItemRow key={it.id} item={it} />
+          ))}
+        </section>
+      )}
+
+      {readyToReviewRuns.length > 0 && (
+        <section data-testid="queue-group-ready-to-review">
+          <GroupHeader
+            swatchClass="bg-status-success"
+            name="Ready to review"
+            count={readyToReviewRuns.length}
+            descriptor="Runs finished — merge or dismiss the work"
+          />
+          {readyToReviewRuns.map((run) => (
+            <ReadyToReviewRow key={run.id} run={run} />
           ))}
         </section>
       )}
