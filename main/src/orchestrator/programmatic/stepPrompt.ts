@@ -25,6 +25,20 @@
  * faithfully persisting EVERY item the subagent returns (a recurring failure mode:
  * collapsing real dependency edges to "none").
  *
+ * ARTIFACT FOLLOW-UP: on the orchestrated plane, `workflows/planner.md` tells the
+ * top-level agent what to do with a step's deliverable AFTER its subagent returns
+ * (e.g. "read the prototype URL and call `cyboflow_report_artifact`") — but that
+ * prose lives in the top-level flow file, which the programmatic plane never
+ * loads (each step here is its own fresh, narrowly-scoped agent turn with no
+ * access to the flow's full prose). Without an equivalent instruction inlined
+ * into the step prompt itself, a step whose `outputArtifact` needs an explicit
+ * follow-up (ui-prototype, arch-design) silently never produces one on
+ * programmatic runs: the subagent returns its section faithfully, but nothing
+ * ever reports it, so the artifact tab stays empty forever (2026-07-06,
+ * empty-ui-prototype-tab incident). `composeStepPrompt` now owns mirroring that
+ * per-step follow-up via `artifactFollowUp` below — see its doc comment for which
+ * atypes need one and why most don't.
+ *
  * Pure: no fs / DB / Date / randomness — output depends only on its args, so it
  * is trivially testable. Human-gate steps never reach here (the controller
  * resolves them via the host's human-gate path, not the runner).
@@ -54,6 +68,36 @@ export interface ComposeStepPromptArgs {
   taskScope?: string;
 }
 
+/**
+ * Per-atype "report the artifact yourself" addendum for steps whose
+ * `outputArtifact` needs an explicit agent follow-up once its subagent returns.
+ * Mirrors the equivalent prose in `workflows/planner.md` written for the
+ * orchestrated top-level agent — there is no top-level agent on the
+ * programmatic plane, so `composeStepPrompt` inlines the same instruction into
+ * the scoped step prompt instead.
+ *
+ * NOT every `outputArtifact` atype needs one: 'idea-spec' and
+ * 'decomposed-stories' mint automatically by re-deriving from the entity DB
+ * once the step's own `cyboflow_*` writes land as part of "do the work" (step
+ * 1 of the numbered list above) — no separate reporting action exists for
+ * those, so adding an addendum would just be prompt noise. Only 'ui-prototype'
+ * and 'arch-design' have a deliverable that lives OUTSIDE that entity write (a
+ * served localhost URL; a subagent-returned section that must be folded into
+ * the idea body by hand) — those need to be told explicitly. Any future atype
+ * defaults to no addendum (the `default` branch) unless it is proven to need
+ * one and added here deliberately.
+ */
+function artifactFollowUp(outputArtifact: NonNullable<WorkflowStep['outputArtifact']>): string {
+  switch (outputArtifact.atype) {
+    case 'ui-prototype':
+      return `\n\n## Artifact to report\n\nWhen your \`cyboflow-ui-prototype\` subagent returns its \`## Prototype\` section, it includes a \`URL: http://localhost:<port>/\` line. Extract that URL and call \`cyboflow_report_artifact\` yourself with \`atype: 'ui-prototype'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"url": "<the url>"}\` — that call is the ONLY thing that mints this run's UI-prototype tab. Skipping it leaves the tab permanently empty.`;
+    case 'arch-design':
+      return `\n\n## Artifact to report\n\nWhen your \`cyboflow-architecture\` subagent returns its \`## Architecture design\` section, fold it into the IDEA's body yourself via \`cyboflow_update_task\`: if the body already has an \`## Architecture design\` section, REPLACE that section (never stack a second copy); otherwise append it. The arch-design deliverable tab derives from the body automatically, so you do not report an artifact for this step.`;
+    default:
+      return '';
+  }
+}
+
 export function composeStepPrompt(args: ComposeStepPromptArgs): string {
   const { step, workflowName, attempt } = args;
   const retryNote =
@@ -68,6 +112,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     args.taskScope !== undefined && args.taskScope.trim().length > 0
       ? `\n\n# Sprint tasks\n\n${args.taskScope.trim()}\n\nThese are the EXACT tasks in scope for this sprint — the cyboflow database is their source of truth. When this step needs the task set (e.g. dependency analysis or per-task work), use THIS list and pass it to your subagent; do NOT hunt for task files in the worktree to discover scope (cyboflow keeps no task files on disk, so you will find none and wrongly conclude there is nothing to do).`
       : '';
+  const artifactNote = step.outputArtifact !== undefined ? artifactFollowUp(step.outputArtifact) : '';
 
   return `You are executing **one step** of the "${workflowName}" workflow in this git worktree.
 
@@ -79,5 +124,5 @@ Do ONLY this step:
 2. **Commit atomically.** Make ONE git commit for this step (\`<type>: <what changed>\`), staging only the files this step touched.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${artifactNote}${retryNote}`;
 }

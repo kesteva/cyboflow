@@ -115,4 +115,87 @@ describe('composeStepPrompt', () => {
     });
     expect(out).not.toContain('# Sprint tasks');
   });
+
+  // -------------------------------------------------------------------------
+  // Artifact follow-up — the programmatic plane has no top-level agent to read
+  // planner.md's "after your subagent returns, report/fold this" prose, so
+  // composeStepPrompt must inline the same instruction per outputArtifact atype
+  // or the artifact silently never gets minted. 2026-07-06.
+  // -------------------------------------------------------------------------
+
+  it('instructs a ui-prototype step to extract the URL and call cyboflow_report_artifact', () => {
+    const out = composeStepPrompt({
+      step: step({
+        id: 'ui-prototype',
+        name: 'UI prototype',
+        agent: 'ui-prototype',
+        outputArtifact: { atype: 'ui-prototype', label: 'UI prototype' },
+      }),
+      workflowName: 'planner',
+      attempt: 1,
+    });
+    expect(out).toContain('## Artifact to report');
+    expect(out).toContain('cyboflow_report_artifact');
+    expect(out).toContain("atype: 'ui-prototype'");
+    expect(out).toContain('"UI prototype"');
+    expect(out).toContain('{"url": "<the url>"}');
+  });
+
+  it('instructs an architecture step to fold the section into the idea body via cyboflow_update_task, not report_artifact', () => {
+    const out = composeStepPrompt({
+      step: step({
+        id: 'architecture',
+        name: 'Architecture design',
+        agent: 'architecture',
+        outputArtifact: { atype: 'arch-design', label: 'Architecture design' },
+      }),
+      workflowName: 'planner',
+      attempt: 1,
+    });
+    expect(out).toContain('## Artifact to report');
+    expect(out).toContain('cyboflow_update_task');
+    expect(out).toContain('## Architecture design');
+    expect(out).toContain('REPLACE that section');
+    expect(out).not.toContain('report_artifact');
+  });
+
+  it('adds no artifact addendum for an outputArtifact atype that mints without a follow-up (idea-spec)', () => {
+    const out = composeStepPrompt({
+      step: step({
+        id: 'context',
+        name: 'Get context on user idea',
+        agent: 'context',
+        outputArtifact: { atype: 'idea-spec', label: 'Idea spec' },
+      }),
+      workflowName: 'planner',
+      attempt: 1,
+    });
+    expect(out).not.toContain('## Artifact to report');
+  });
+
+  it('adds no artifact addendum when the step has no outputArtifact at all', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'approve-idea', name: 'Approve idea spec', agent: 'human' }),
+      workflowName: 'planner',
+      attempt: 1,
+    });
+    expect(out).not.toContain('## Artifact to report');
+  });
+
+  it('composes the artifact addendum correctly with the fan-out item context variant', () => {
+    const out = composeStepPrompt({
+      step: step({
+        id: 'ui-prototype',
+        name: 'UI prototype',
+        agent: 'ui-prototype',
+        outputArtifact: { atype: 'ui-prototype', label: 'UI prototype' },
+      }),
+      workflowName: 'planner',
+      attempt: 1,
+      item: { id: 'IDEA-1', over: 'ideas' },
+    });
+    expect(out).toContain('PARALLEL fan-out');
+    expect(out).toContain('## Artifact to report');
+    expect(out).toContain('cyboflow_report_artifact');
+  });
 });
