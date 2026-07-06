@@ -26,6 +26,12 @@ describe('isSystemicStepError', () => {
     ['invalid api key', 'Invalid API Key provided'],
     ['401 unauthorized', '401 Unauthorized'],
     ['oauth token expired', 'OAuth token has expired'],
+    [
+      'real mid-run Anthropic authentication_error shape',
+      'API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
+    ],
+    ['authentication_error subtype alone', 'authentication_error: invalid credentials'],
+    ['invalid x-api-key phrasing', 'invalid x-api-key'],
   ];
 
   it.each(positives)('matches: %s', (_label, error) => {
@@ -41,6 +47,7 @@ describe('isSystemicStepError', () => {
     ['model 404', 'Request failed with status code 404: model not available'],
     ['controller execution bound text', 'Step exceeded the execution bound of 30 minutes'],
     ['error_max_turns-ish text', 'error_max_turns: the step hit its max turn allowance'],
+    ['ordinary text mentioning authentication alone (no error/failed word)', 'Please check your authentication settings'],
   ];
 
   it.each(negatives)('does not match: %s', (_label, error) => {

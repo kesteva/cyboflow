@@ -98,6 +98,18 @@ const SYSTEMIC_PATTERNS: SystemicPattern[] = [
     name: 'auth-oauth-expired',
     pattern: /oauth token has expired/i,
   },
+  {
+    // The real mid-run Anthropic shape: `API Error: 401
+    // {"type":"error","error":{"type":"authentication_error","message":"..."}}`
+    // — neither 'authentication failed' nor a bare '401' (no 'unauthorized' word)
+    // matches the patterns above.
+    name: 'auth-authentication-error-type',
+    pattern: /authentication[\s_-]*error/i,
+  },
+  {
+    name: 'auth-invalid-x-api-key',
+    pattern: /invalid x-api-key/i,
+  },
 ];
 
 /**
