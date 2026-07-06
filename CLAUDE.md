@@ -2,6 +2,16 @@
 
 cyboflow is a self-contained Electron desktop app for running AI coding flows in parallel against the same project, isolated via git worktrees. It ships four built-in flows — **Planner**, **Sprint**, **Compound**, and **Ship** — whose prompt bodies live in app source (`main/src/orchestrator/workflows/planner.md` + `sprint.md` + `compound.md` + `ship.md`). It is a fork of [Crystal](https://github.com/stravu/crystal) (`stravu/crystal@0.3.5`) currently being narrowed and rebuilt — see `docs/cyboflow_system_design.md` for the target scope and `docs/ARCHITECTURE.md` for the current component layout.
 
+## Two layers: running INSIDE cyboflow vs. working ON cyboflow
+
+Agents in this repo usually run *inside* a cyboflow session while editing cyboflow's *source code* (dogfooding). Keep the layers separate:
+
+- **Default stance: you are working ON the codebase.** Words like "task", "idea", "run", "sprint", "finding" in a request refer to product concepts (code, schema, features) unless the user clearly means their live backlog.
+- **The `cyboflow_*` MCP tools operate the LIVE app instance hosting you.** They write real rows to the user's actual backlog/review-queue database — there is no test fixture behind them. Call them only when the user explicitly asks to touch the backlog ("add this to the backlog", "file a finding"). NEVER call them to test or debug entity-model / MCP / router code — use `pnpm test:unit` and the fake-SDK harness instead.
+- Sentences in this file describing what "flow agents" do (e.g. writing entities via MCP tools) document the **product's built-in flows** — they are design context, not instructions to you.
+- Env vars like `CYBOFLOW_RUN_ID` being present just means you are hosted by the app; it does not change how you treat the repo.
+- If a request is genuinely ambiguous between layers ("create a task for X"), ask instead of guessing.
+
 ## Entity model + review queue
 
 The DB-canonical backlog is a **3-table entity model** — `ideas` / `epics` / `tasks` (migration 015), each with its own columns + a single markdown `body`, sharing **one 12-stage board** (union view; terminal `Decomposed` stage for retired ideas). A polymorphic `entity_events` log replaces the old task-scoped `task_events`. ALL entity writes funnel through the single chokepoint `TaskChangeRouter.applyChange` (`main/src/orchestrator/taskChangeRouter.ts`) — nothing UPDATEs those tables directly. A unified **`review_items`** inbox (migration 016) backs the review queue (`kind in finding|permission|decision|human_task`, per-item `blocking`, soft polymorphic entity link); all its writes go through `ReviewItemRouter`. The flow agents write the entity model exclusively via the `cyboflow_*` MCP tools — never markdown state files. The built-in flow names are `CYBOFLOW_WORKFLOW_NAMES` (`['planner','sprint','compound','ship']`) in `shared/types/workflows.ts` (type `CyboflowWorkflowName`, guard `isCyboflowWorkflowName`); `compound` was rebuilt natively from the preserved prose (launched from the Insights view), while the dropped `prune` flow keeps its prose under `docs/workflows-future/`. See `docs/ARCHITECTURE.md` "Data Model" and `docs/CODE-PATTERNS.md` for the chokepoint patterns.
