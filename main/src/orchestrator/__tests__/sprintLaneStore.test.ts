@@ -280,18 +280,31 @@ describe('SprintLaneStore', () => {
       expect(laneTaskIds(batchId)).toEqual(['tsk_ready']);
     });
 
-    it('rejects a selection with zero eligible tasks (bad_request)', () => {
+    it('rejects candidates that ALL fail eligibility with no_eligible_tasks + a why message', () => {
       seedReadyTask(rdb, 'tsk_pending', 'TASK-001', 'Pending', { approved: false });
       try {
         rstore.createForRun(1, 'sdk', ['tsk_pending']);
         expect.unreachable('should have thrown');
       } catch (err) {
         expect(err).toBeInstanceOf(SprintLaneError);
-        expect((err as SprintLaneError).code).toBe('bad_request');
+        // Distinct code (not the generic bad_request) so the MCP seam can map it to
+        // 'ship_no_tasks_to_materialize' with a reason.
+        expect((err as SprintLaneError).code).toBe('no_eligible_tasks');
+        expect((err as SprintLaneError).message).toMatch(/1 candidate task\(s\) exist but none are sprint-eligible/);
+        expect((err as SprintLaneError).message).toMatch(/approve-plan gate/);
       }
       // No batch or lanes were written.
       expect(rdb.prepare('SELECT COUNT(*) AS n FROM sprint_batches').get()).toEqual({ n: 0 });
       expect(rdb.prepare('SELECT COUNT(*) AS n FROM sprint_batch_tasks').get()).toEqual({ n: 0 });
+    });
+
+    it('still rejects a truly EMPTY selection with bad_request (not no_eligible_tasks)', () => {
+      try {
+        rstore.createForRun(1, 'sdk', []);
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect((err as SprintLaneError).code).toBe('bad_request');
+      }
     });
 
     it('drops a candidate id with no tasks row (inner JOIN)', () => {

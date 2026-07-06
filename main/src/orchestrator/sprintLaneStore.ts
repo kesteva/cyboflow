@@ -102,7 +102,7 @@ export function sprintLaneChannel(runId: string): string {
 // Errors
 // ---------------------------------------------------------------------------
 
-export type SprintLaneErrorCode = 'lane_not_found' | 'bad_request';
+export type SprintLaneErrorCode = 'lane_not_found' | 'bad_request' | 'no_eligible_tasks';
 
 /** Discriminated error for all lane-write rejections. */
 export class SprintLaneError extends Error {
@@ -206,10 +206,20 @@ export class SprintLaneStore {
     // empty result is rejected with a clear SprintLaneError.
     const eligibleTaskIds = this.filterEligibleTaskIds(projectId, uniqueTaskIds);
     if (eligibleTaskIds.length === 0) {
-      throw new SprintLaneError(
-        'bad_request',
-        'createForRun: no sprint-eligible tasks in selection (each must be approved + at "Ready for development" or later, not archived/done/won\'t-do)',
-      );
+      // Candidates EXIST but every one failed the eligibility guard — almost always
+      // because the approve-plan gate has not promoted them yet (approved_at NULL =
+      // pending draft). Surface a distinct code (mapped to 'ship_no_tasks_to_materialize'
+      // at the MCP seam) with a WHY message, NOT the generic 'bad_request' — do not
+      // weaken the guard itself.
+      const reason =
+        `createForRun: ${uniqueTaskIds.length} candidate task(s) exist but none are sprint-eligible — ` +
+        'likely the approve-plan gate has not promoted them (each must be approved + at ' +
+        '"Ready for development" or later, not archived/done/won\'t-do)';
+      this.logger?.warn('[SprintLaneStore] all candidate tasks ineligible', {
+        projectId,
+        candidates: uniqueTaskIds.length,
+      });
+      throw new SprintLaneError('no_eligible_tasks', reason);
     }
 
     const batchId = randomUUID().replace(/-/g, '');

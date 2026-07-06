@@ -287,8 +287,9 @@ describe('McpQueryHandler.handleCreateSprintBatch', () => {
     expect(parseLastWrite(intSock.writes).error).toBe('ship_batch_too_large');
 
     // sdk (default): 11 <= 15 → cap PASSES; these event-only ids have no eligible
-    // tasks rows, so createForRun's Q1 filter empties the set → 'bad_request' — a
-    // DIFFERENT rejection, proving the sdk cap did not trip at 11.
+    // tasks rows, so createForRun's Q1 filter empties the set → 'ship_no_tasks_to_materialize'
+    // (createForRun's 'no_eligible_tasks' mapped at the MCP seam) — a DIFFERENT
+    // rejection, proving the sdk cap did not trip at 11.
     seedRun(db, { runId: 'run-sdk', substrate: 'sdk' });
     for (let i = 0; i < 11; i++) seedCreatedTaskEventOnly(db, 'run-sdk', `s${i}`);
     const sdkSock = makeSocketDouble();
@@ -296,13 +297,14 @@ describe('McpQueryHandler.handleCreateSprintBatch', () => {
     const sdkRes = parseLastWrite(sdkSock.writes);
     expect(sdkRes.ok).toBe(false);
     expect(sdkRes.error).not.toBe('ship_batch_too_large');
-    expect(sdkRes.error).toBe('bad_request');
+    expect(sdkRes.error).toBe('ship_no_tasks_to_materialize');
   });
 
-  it('a createForRun throw (all tasks ineligible) rolls back: no batch minted, no orphan stamp', async () => {
+  it('all candidates ineligible → ship_no_tasks_to_materialize (mapped from no_eligible_tasks), rolls back', async () => {
     seedRun(db, { runId: 'run-1' });
     // Created but INELIGIBLE (approved_at NULL, stage pos 1) → passes empty/cap
-    // guards but createForRun's Q1 filter drops all → SprintLaneError('bad_request').
+    // guards but createForRun's Q1 filter drops all → SprintLaneError('no_eligible_tasks')
+    // → mapped to the ship-facing 'ship_no_tasks_to_materialize' code with a why message.
     seedCreatedTask(db, 'run-1', 'tsk_a', 'TASK-001', false);
 
     const { socket, writes } = makeSocketDouble();
@@ -310,10 +312,29 @@ describe('McpQueryHandler.handleCreateSprintBatch', () => {
 
     const res = parseLastWrite(writes);
     expect(res.ok).toBe(false);
-    expect(res.error).toBe('bad_request');
+    expect(res.error).toBe('ship_no_tasks_to_materialize');
     // The transaction rolled back — no batch row and the stamp is still NULL.
     expect(batchCount(db)).toBe(0);
     expect(batchIdOf(db, 'run-1')).toBeNull();
+  });
+
+  it('accepts DISPLAY REFS in taskIds — resolves TASK-NNN → opaque id before the intersection', async () => {
+    seedRun(db, { runId: 'run-1' });
+    seedCreatedTask(db, 'run-1', 'tsk_a', 'TASK-001', true);
+    seedCreatedTask(db, 'run-1', 'tsk_b', 'TASK-002', true);
+
+    const { socket, writes } = makeSocketDouble();
+    // Mix of a display ref (TASK-002) and an opaque id (tsk_a) — both must resolve
+    // to the created opaque ids and materialize; the ref no longer silently drops.
+    await handler.handleMessage(
+      { type: 'mcp-create-sprint-batch', requestId: 'b-1', runId: 'run-1', taskIds: ['TASK-002', 'tsk_a'] },
+      socket,
+    );
+
+    const res = parseLastWrite(writes);
+    expect(res.ok).toBe(true);
+    const batchId = (res.data as { batch_id: string }).batch_id;
+    expect(laneTaskIds(db, batchId)).toEqual(['tsk_a', 'tsk_b']);
   });
 
   it('rejects the orchestrator sentinel run before any write (task_write_requires_real_run)', async () => {

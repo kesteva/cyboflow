@@ -1383,6 +1383,22 @@ export class McpQueryHandler {
    */
   private writeSprintLaneError(client: net.Socket, requestId: string, err: unknown): void {
     if (err instanceof SprintLaneError) {
+      // A createForRun 'no_eligible_tasks' (candidates exist but all failed the
+      // eligibility guard) surfaces as the SAME ship-facing code the empty-set path
+      // uses, so the ship agent gets one actionable signal. The WHY detail rides in
+      // err.message (logged here — the wire response carries only the code string).
+      if (err.code === 'no_eligible_tasks') {
+        this.logger?.warn('[Cyboflow MCP Query] create-sprint-batch: no eligible tasks', {
+          detail: err.message,
+        });
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId,
+          ok: false,
+          error: 'ship_no_tasks_to_materialize',
+        });
+        return;
+      }
       this.writeResponse(client, {
         type: 'mcp-query-response',
         requestId,
@@ -1492,12 +1508,22 @@ export class McpQueryHandler {
         }
 
         // 3. SUBSET — intersect the passed ids with the run's created tasks (drop
-        // any id the run did not create); fall back to the full created set.
+        // any id the run did not create); fall back to the full created set. The
+        // agent may pass DISPLAY REFS (e.g. 'TASK-034'), which never equal the opaque
+        // 'tsk_' ids in the created set — so resolve each passed handle ref-or-id →
+        // opaque id BEFORE the intersection (parity with add_task_dependency /
+        // update_sprint_task ref resolution via resolveBacklogRef). An opaque id that
+        // is already in the created set is kept as-is; anything else is resolved as a
+        // display ref (project-scoped) and re-tested, so a real ref matches and a
+        // bogus handle still drops out.
         const createdTaskIds = listRunCreatedTaskIds(this.db, msg.runId);
         let taskIds: string[];
         if (msg.taskIds && msg.taskIds.length > 0) {
           const createdSet = new Set(createdTaskIds);
-          taskIds = [...new Set(msg.taskIds)].filter((id) => createdSet.has(id));
+          const resolved = [...new Set(msg.taskIds)].map((handle) =>
+            createdSet.has(handle) ? handle : (resolveBacklogRef(this.db, ctx.projectId, handle) ?? handle),
+          );
+          taskIds = resolved.filter((id) => createdSet.has(id));
         } else {
           taskIds = createdTaskIds;
         }
