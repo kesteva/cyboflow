@@ -34,8 +34,17 @@ export interface ReviewItemActionsState {
    * Resolve a review item. Returns `{ resumed }` on success (resumed=true when a
    * blocking, run-bound item triggered an aggregate-unblock auto-resume), or null
    * on error.
+   *
+   * `outcome` makes a programmatic human-gate verdict explicit: 'approve' resolves
+   * + reveals the run's drafts (approve-plan) and resumes; 'reject' tears down the
+   * rejected drafts and lets the controller end the run 'rejected' (no resume).
+   * Omit it for non-gate resolves (findings / human tasks).
    */
-  resolve: (projectId: number, reviewItemId: string, resolution?: string) => Promise<{ resumed: boolean } | null>;
+  resolve: (
+    projectId: number,
+    reviewItemId: string,
+    opts?: { resolution?: string; outcome?: 'approve' | 'reject' },
+  ) => Promise<{ resumed: boolean } | null>;
   /**
    * Accept a finding whose proposedTarget is a manual ('docs' | 'prompt') edit:
    * resolve it with a 'triaged:accepted-<target>' note (built via
@@ -74,7 +83,7 @@ export function useReviewItemActions(): ReviewItemActionsState {
     async (
       projectId: number,
       reviewItemId: string,
-      resolution?: string,
+      opts?: { resolution?: string; outcome?: 'approve' | 'reject' },
     ): Promise<{ resumed: boolean } | null> => {
       setError(null);
       setPendingItemId(reviewItemId);
@@ -82,7 +91,8 @@ export function useReviewItemActions(): ReviewItemActionsState {
         const result = await trpc.cyboflow.reviewItems.resolve.mutate({
           projectId,
           reviewItemId,
-          ...(resolution !== undefined ? { resolution } : {}),
+          ...(opts?.resolution !== undefined ? { resolution: opts.resolution } : {}),
+          ...(opts?.outcome !== undefined ? { outcome: opts.outcome } : {}),
         });
         return { resumed: result.resumed };
       } catch (err: unknown) {
@@ -101,7 +111,7 @@ export function useReviewItemActions(): ReviewItemActionsState {
       reviewItemId: string,
       target: 'docs' | 'prompt',
     ): Promise<{ resumed: boolean } | null> =>
-      resolve(projectId, reviewItemId, acceptedResolution(target)),
+      resolve(projectId, reviewItemId, { resolution: acceptedResolution(target) }),
     [resolve],
   );
 

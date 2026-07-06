@@ -118,10 +118,21 @@ describe('ReviewItemCard', () => {
     expect(screen.queryByTestId('blocking-badge')).not.toBeInTheDocument();
   });
 
-  it('decision Approve resolves the item (flow advancement)', async () => {
+  it('decision Approve resolves the item with outcome=approve (flow advancement)', async () => {
     render(<ReviewItemCard item={makeItem('decision', { id: 'rvw_dec', blocking: true })} />);
     fireEvent.click(screen.getByTestId('decision-resolve'));
-    await waitFor(() => expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_dec' }));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_dec', outcome: 'approve' }),
+    );
+  });
+
+  it('decision Reject resolves the item with outcome=reject (no dismiss)', async () => {
+    render(<ReviewItemCard item={makeItem('decision', { id: 'rvw_dec_r', blocking: true })} />);
+    fireEvent.click(screen.getByTestId('decision-reject'));
+    await waitFor(() =>
+      expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_dec_r', outcome: 'reject' }),
+    );
+    expect(mockDismiss).not.toHaveBeenCalled();
   });
 
   it('finding Promote mints a task via promoteToTask', async () => {

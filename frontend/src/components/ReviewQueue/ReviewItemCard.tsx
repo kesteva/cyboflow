@@ -125,6 +125,20 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
     });
   };
 
+  // Explicit programmatic human-gate verdict (approve-plan / approve-idea /
+  // approve-design). 'approve' resolves + reveals the run's drafts and resumes;
+  // 'reject' tears down rejected drafts and lets the controller end the run
+  // 'rejected'. Both route through reviewItems.resolve via the `outcome` field so
+  // the WorkflowController's parseGateVerdict is deterministic, not a free-text sniff.
+  const handleGateDecision = (outcome: 'approve' | 'reject'): void => {
+    void resolve(item.project_id, item.id, { outcome }).then((r) => {
+      if (r !== null) {
+        trackEvent('review_item_resolved', { kind: item.kind, action: outcome, blocking: item.blocking });
+        onResolved?.();
+      }
+    });
+  };
+
   const handleDismiss = (): void => {
     void dismiss(item.project_id, item.id).then((ok) => {
       if (ok) {
@@ -218,13 +232,15 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
             </Button>
           );
         }
-        // Resolving auto-resumes the paused run (aggregate-unblock).
+        // Explicit gate verdict via reviewItems.resolve `outcome`. Approve reveals
+        // the run's drafts (approve-plan) + auto-resumes; Reject tears down rejected
+        // drafts and ends the run 'rejected' (no resume).
         return (
           <>
-            <Button variant="primary" size="sm" disabled={busy} onClick={handleResolve} data-testid="decision-resolve">
+            <Button variant="primary" size="sm" disabled={busy} onClick={() => handleGateDecision('approve')} data-testid="decision-resolve">
               Approve &amp; resume
             </Button>
-            <Button variant="secondary" size="sm" disabled={busy} onClick={handleDismiss}>
+            <Button variant="secondary" size="sm" disabled={busy} onClick={() => handleGateDecision('reject')} data-testid="decision-reject">
               Reject
             </Button>
           </>

@@ -21,7 +21,7 @@
  *  6. promoteToTask is rejected (BAD_REQUEST) when entity_id is already set.
  *  7. promoteToTask is rejected (NOT_FOUND) for an unknown item.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { TRPCError } from '@trpc/server';
 import { readFileSync } from 'node:fs';
@@ -32,6 +32,7 @@ import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { ReviewItemRouter } from '../../../reviewItemRouter';
 import { TaskChangeRouter } from '../../../taskChangeRouter';
 import { HumanStepManager } from '../../../humanStepManager';
+import { QuestionRouter } from '../../../questionRouter';
 import type { DatabaseLike } from '../../../types';
 
 // ---------------------------------------------------------------------------
@@ -83,14 +84,17 @@ function buildCaller(): {
   ReviewItemRouter.initialize(adapter);
   TaskChangeRouter.initialize(adapter);
   HumanStepManager.initialize(adapter);
+  QuestionRouter.initialize(adapter);
   const caller = appRouter.createCaller(createContext({ db: adapter }));
   return { caller, db, adapter };
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   ReviewItemRouter._resetForTesting();
   TaskChangeRouter._resetForTesting();
   HumanStepManager._resetForTesting();
+  QuestionRouter._resetForTesting();
 });
 
 describe('cyboflow.reviewItems.list / get', () => {
@@ -637,5 +641,105 @@ describe('cyboflow.reviewItems.promoteToTask (two-chokepoint seam)', () => {
     await expect(
       caller.cyboflow.reviewItems.promoteToTask({ projectId: 1, reviewItemId: created.reviewItemId }),
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'CONFLICT');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FIX 1 — programmatic human-gate `outcome` wiring
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.reviewItems.resolve — programmatic human-gate outcome', () => {
+  /** Seed a plan-gated run (awaiting_review) + a blocking gate:human-step decision item. */
+  function seedGate(
+    db: Database.Database,
+    opts: { runId: string; stepId: string },
+  ): { reviewItemId: string } {
+    db.prepare(`INSERT INTO workflows (id, project_id, name) VALUES ('wf-ship', 1, 'ship')`).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, branch_name, status, policy_json)
+       VALUES (?, 'wf-ship', 1, '/w/s', 'b/s', 'awaiting_review', '{}')`,
+    ).run(opts.runId);
+    const reviewItemId = `rvw_gate_${opts.stepId}`;
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, entity_type, entity_id, kind, status, blocking,
+          title, body, severity, source, payload_json, created_at, updated_at, resolved_by, resolution)
+       VALUES (?, 1, ?, NULL, NULL, 'decision', 'pending', 1, ?, NULL, NULL, ?, NULL, ?, ?, NULL, NULL)`,
+    ).run(reviewItemId, opts.runId, `Human gate: ${opts.stepId}`, `gate:human-step:${opts.stepId}`, now, now);
+    return { reviewItemId };
+  }
+
+  it('approve on approve-plan reveals drafts (promotePendingDraftsForRun) + resumes', async () => {
+    const { caller, db } = buildCaller();
+    const reveal = vi
+      .spyOn(QuestionRouter.prototype, 'promotePendingDraftsForRun')
+      .mockResolvedValue(undefined);
+    const del = vi.spyOn(TaskChangeRouter.prototype, 'deleteRunCreatedEntities').mockResolvedValue(undefined);
+    const { reviewItemId } = seedGate(db, { runId: 'run-ap', stepId: 'approve-plan' });
+
+    const res = await caller.cyboflow.reviewItems.resolve({
+      projectId: 1,
+      reviewItemId,
+      outcome: 'approve',
+    });
+
+    expect(reveal).toHaveBeenCalledWith('run-ap');
+    expect(del).not.toHaveBeenCalled();
+    expect(res.resumed).toBe(true);
+    const row = db
+      .prepare('SELECT status, resolution FROM review_items WHERE id = ?')
+      .get(reviewItemId) as { status: string; resolution: string };
+    expect(row.status).toBe('resolved');
+    expect(row.resolution).toBe('approve'); // deterministic verdict for parseGateVerdict
+    const run = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-ap') as { status: string };
+    expect(run.status).toBe('running'); // aggregate-unblock resumed it
+  });
+
+  it('reject on approve-plan deletes drafts + does NOT resume (controller owns terminal)', async () => {
+    const { caller, db } = buildCaller();
+    const reveal = vi
+      .spyOn(QuestionRouter.prototype, 'promotePendingDraftsForRun')
+      .mockResolvedValue(undefined);
+    const del = vi.spyOn(TaskChangeRouter.prototype, 'deleteRunCreatedEntities').mockResolvedValue(undefined);
+    const { reviewItemId } = seedGate(db, { runId: 'run-rj', stepId: 'approve-plan' });
+
+    const res = await caller.cyboflow.reviewItems.resolve({
+      projectId: 1,
+      reviewItemId,
+      outcome: 'reject',
+    });
+
+    expect(del).toHaveBeenCalledWith(1, 'run-rj');
+    expect(reveal).not.toHaveBeenCalled();
+    expect(res.resumed).toBe(false);
+    const row = db
+      .prepare('SELECT status, resolution FROM review_items WHERE id = ?')
+      .get(reviewItemId) as { status: string; resolution: string };
+    expect(row.status).toBe('resolved');
+    expect(row.resolution).toBe('reject'); // parseGateVerdict -> 'reject'
+    const run = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-rj') as { status: string };
+    expect(run.status).toBe('awaiting_review'); // NOT resumed
+  });
+
+  it('approve on a NON-approve-plan gate (approve-idea) resumes but does NOT reveal', async () => {
+    const { caller, db } = buildCaller();
+    const reveal = vi
+      .spyOn(QuestionRouter.prototype, 'promotePendingDraftsForRun')
+      .mockResolvedValue(undefined);
+    const { reviewItemId } = seedGate(db, { runId: 'run-ai', stepId: 'approve-idea' });
+
+    const res = await caller.cyboflow.reviewItems.resolve({
+      projectId: 1,
+      reviewItemId,
+      outcome: 'approve',
+    });
+
+    expect(reveal).not.toHaveBeenCalled();
+    expect(res.resumed).toBe(true);
+    const row = db.prepare('SELECT resolution FROM review_items WHERE id = ?').get(reviewItemId) as {
+      resolution: string;
+    };
+    expect(row.resolution).toBe('approve');
   });
 });

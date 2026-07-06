@@ -48,7 +48,7 @@ describe('useReviewItemActions', () => {
 
     let res: { resumed: boolean } | null = null;
     await act(async () => {
-      res = await result.current.resolve(7, 'rvw_1', 'looks good');
+      res = await result.current.resolve(7, 'rvw_1', { resolution: 'looks good' });
     });
 
     expect(mockResolve).toHaveBeenCalledWith({
@@ -60,6 +60,21 @@ describe('useReviewItemActions', () => {
     // pendingItemId resets after the mutation settles.
     expect(result.current.pendingItemId).toBeNull();
     expect(result.current.error).toBeNull();
+  });
+
+  it('resolve forwards an explicit gate outcome', async () => {
+    mockResolve.mockResolvedValue({ reviewItemId: 'rvw_g', resumed: true });
+    const { result } = renderHook(() => useReviewItemActions());
+
+    await act(async () => {
+      await result.current.resolve(3, 'rvw_g', { outcome: 'approve' });
+    });
+
+    expect(mockResolve).toHaveBeenCalledWith({
+      projectId: 3,
+      reviewItemId: 'rvw_g',
+      outcome: 'approve',
+    });
   });
 
   it('resolve omits resolution when not provided', async () => {

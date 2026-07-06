@@ -41,8 +41,31 @@ import {
 } from '../../reviewItemRouter';
 import { TaskChangeRouter, TaskChangeError } from '../../taskChangeRouter';
 import { HumanStepManager } from '../../humanStepManager';
+import { QuestionRouter } from '../../questionRouter';
 import { eventToAsyncIterable } from './events';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../../../../shared/types/cyboflow';
+
+// ---------------------------------------------------------------------------
+// Programmatic human-gate constants (mirror humanStepManager + questionRouter).
+// ---------------------------------------------------------------------------
+
+/** Source prefix stamped on a programmatic human-gate decision review_item. */
+const HUMAN_GATE_SOURCE_PREFIX = 'gate:human-step:';
+/** The plan-review gate whose Approve REVEALS the run's pending draft entities. */
+const APPROVE_PLAN_STEP_ID = 'approve-plan';
+
+/**
+ * The step id encoded in a `gate:human-step:<stepId>` source, or null when the
+ * source is not a programmatic human-gate decision item. Used by the resolve
+ * mutation to decide whether an explicit approve/reject outcome must drive the
+ * Q1 reveal (approve-plan approve) or the draft-decline cleanup (approve-plan
+ * reject) BEFORE the gate item resolves and the WorkflowController advances.
+ */
+function humanGateStepId(kind: string | undefined, source: string | null | undefined): string | null {
+  if (kind !== 'decision' || typeof source !== 'string') return null;
+  if (!source.startsWith(HUMAN_GATE_SOURCE_PREFIX)) return null;
+  return source.slice(HUMAN_GATE_SOURCE_PREFIX.length) || null;
+}
 
 // ---------------------------------------------------------------------------
 // Error mapping
@@ -289,6 +312,23 @@ export const reviewItemsRouter = router({
    * blocking review_item remains for that run (a permission gate or a sibling
    * decision still open keeps the run paused). The chokepoint owns the audit +
    * renderer emit; the resume is a follow-on transition.
+   *
+   * PROGRAMMATIC HUMAN GATE (`outcome`): a `gate:human-step:<step>` decision item
+   * backs a programmatic run's human gate — the WorkflowController is awaiting its
+   * resolution on reviewItemChangeEvents and maps the stored `resolution` string
+   * to an approve/reject verdict (humanGate.parseGateVerdict). The optional
+   * `outcome` makes that verdict EXPLICIT (the card no longer relies on free text)
+   * and, on the approve-plan gate, drives the SAME side effects the orchestrated
+   * AskUserQuestion path runs, BEFORE the item resolves (so they win the race with
+   * the controller advancing to the next step):
+   *   - outcome 'approve' on approve-plan → QuestionRouter.promotePendingDraftsForRun
+   *     REVEALS the run's PENDING draft epics/tasks (stamps approved_at) so the very
+   *     next step (ship's create-sprint-batch) sees sprint-eligible tasks.
+   *   - outcome 'reject' on approve-plan → TaskChangeRouter.deleteRunCreatedEntities
+   *     tears down the rejected drafts (mirrors deletePendingDraftsOnPlanDecline);
+   *     the run is NOT auto-resumed (the controller owns the terminal 'rejected').
+   * For a non-approve-plan gate (approve-idea / approve-design) the outcome only
+   * threads the verdict — no reveal, no draft delete.
    */
   resolve: protectedProcedure
     .input(
@@ -296,6 +336,13 @@ export const reviewItemsRouter = router({
         projectId: z.number().int().positive(),
         reviewItemId: z.string().min(1),
         resolution: z.string().nullable().optional(),
+        /**
+         * Explicit gate verdict for a `gate:human-step:*` decision item. When
+         * present it drives the stored resolution (so parseGateVerdict is
+         * deterministic, not a free-text sniff) AND the approve-plan reveal /
+         * decline. Meaningless (but harmless) for non-gate items.
+         */
+        outcome: z.enum(['approve', 'reject']).optional(),
       }),
     )
     .mutation(
@@ -304,26 +351,56 @@ export const reviewItemsRouter = router({
         ctx,
       }): Promise<{ reviewItemId: string; resumed: boolean; runStatus?: string }> => {
         const db = requireDb(ctx.db, 'resolve');
-        // Read the item's run binding + blocking flag BEFORE resolving (the resolve
-        // does not change either) so we know whether to apply aggregate-unblock.
+        // Read the item's run binding + blocking flag + gate provenance BEFORE
+        // resolving (the resolve changes none of them) so we know whether to apply
+        // aggregate-unblock and whether an explicit outcome drives gate side effects.
         const before = db
-          .prepare('SELECT run_id AS runId, blocking FROM review_items WHERE id = ? AND project_id = ?')
-          .get(input.reviewItemId, input.projectId) as { runId?: string | null; blocking?: number } | undefined;
+          .prepare(
+            'SELECT run_id AS runId, blocking, kind, source FROM review_items WHERE id = ? AND project_id = ?',
+          )
+          .get(input.reviewItemId, input.projectId) as
+          | { runId?: string | null; blocking?: number; kind?: string; source?: string | null }
+          | undefined;
 
         assertNotOpenQuestionGate(db, input.reviewItemId, input.projectId);
 
+        const gateStepId = humanGateStepId(before?.kind, before?.source);
+        // The stored resolution the WorkflowController parses into its verdict. An
+        // explicit outcome wins over free text (deterministic verdict); otherwise
+        // the caller's free-text resolution is passed through unchanged.
+        const resolution = input.outcome !== undefined ? input.outcome : input.resolution;
+
         try {
+          // Approve-plan side effects run BEFORE the resolve so they beat the
+          // controller (the chokepoint's post-commit 'resolved' emit is what makes
+          // it advance). Both are fail-soft + idempotent, so awaiting them here can
+          // never strand the resolve.
+          if (gateStepId === APPROVE_PLAN_STEP_ID && before?.runId) {
+            if (input.outcome === 'approve') {
+              await QuestionRouter.getInstance().promotePendingDraftsForRun(before.runId);
+            } else if (input.outcome === 'reject') {
+              await TaskChangeRouter.getInstance()
+                .deleteRunCreatedEntities(input.projectId, before.runId)
+                .catch(() => {
+                  /* self-gated + best-effort — never block the reject resolve */
+                });
+            }
+          }
+
           const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
             op: 'resolve',
             actor: 'user',
             reviewItemId: input.reviewItemId,
-            ...(input.resolution !== undefined ? { resolution: input.resolution } : {}),
+            ...(resolution !== undefined ? { resolution } : {}),
           });
 
-          // Aggregate-unblock auto-resume for a blocking, run-bound item.
+          // Aggregate-unblock auto-resume for a blocking, run-bound item. An
+          // explicit REJECT never auto-resumes: the programmatic controller owns
+          // the terminal 'rejected' transition, so resuming the run as if
+          // approved would be wrong.
           let resumed = false;
           let runStatus: string | undefined;
-          if (before?.blocking === 1 && before.runId) {
+          if (before?.blocking === 1 && before.runId && input.outcome !== 'reject') {
             resumed = await HumanStepManager.getInstance().maybeResumeRun(before.runId);
             if (!resumed) {
               // The resume is a guarded awaiting_review -> running UPDATE, so a
