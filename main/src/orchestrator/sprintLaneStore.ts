@@ -703,4 +703,50 @@ export class SprintLaneStore {
     }
     this.logger?.info('[SprintLaneStore] batch terminal', { batchId, status });
   }
+
+  // --------------------------------------------------------------------------
+  // reopenBatch — un-terminal a FAILED batch for retry (retryRunHandler)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Un-terminal a batch that was marked 'failed' back to 'running' (clearing
+   * completed_at), so a successful RETRY's completion close-out can re-stamp it
+   * terminal via markBatchTerminal (which is otherwise a guaranteed no-op on an
+   * already-terminal row). Status-guarded to 'failed' ONLY: a completed or
+   * canceled batch is IMMUTABLE — reviving a canceled batch would violate cancel
+   * semantics, and a completed one has nothing to retry. Mirrors
+   * markBatchTerminal's guarded-UPDATE style; like every batch-status change it
+   * emits NOTHING (only logs) — batch status is polled via listLanes/read paths,
+   * not the sprintLaneEvents channel.
+   *
+   * Fail-soft: never throws. Returns the number of rows changed — 1 on a revive,
+   * 0 when the batch is missing, already 'running', terminal-non-failed
+   * (completed/canceled), or anything errors (logged at 'warn').
+   */
+  reopenBatch(batchId: string): number {
+    try {
+      const now = new Date().toISOString();
+      const result = this.db
+        .prepare(
+          `UPDATE sprint_batches
+              SET status = 'running', completed_at = NULL, updated_at = ?
+            WHERE id = ? AND status = 'failed'`,
+        )
+        .run(now, batchId);
+      if (result.changes === 0) {
+        this.logger?.debug('[SprintLaneStore] reopenBatch no-op (batch missing or not failed)', {
+          batchId,
+        });
+        return 0;
+      }
+      this.logger?.info('[SprintLaneStore] batch reopened for retry', { batchId });
+      return result.changes;
+    } catch (err) {
+      this.logger?.warn('[SprintLaneStore] reopenBatch failed (fail-soft)', {
+        batchId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return 0;
+    }
+  }
 }

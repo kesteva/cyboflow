@@ -1892,10 +1892,9 @@ app.whenReady().then(async () => {
       runExecutor,
       emitRunStatusChanged: (runId, status) =>
         runStatusEvents.emit('changed', { runId, status }),
-      completedStepIds: (runId) =>
-        StepResultStore.tryGetInstance()?.completedStepIds(runId) ?? [],
       listStepResults: (runId) => StepResultStore.tryGetInstance()?.listForRun(runId) ?? [],
       resetFailedLanes: (batchId) => SprintLaneStore.getInstance().resetFailedLanes(batchId),
+      reopenBatch: (batchId) => SprintLaneStore.getInstance().reopenBatch(batchId),
       logger: loggerLike,
     };
     setRetryRunDeps(retryRunDepsBag);
@@ -1905,10 +1904,40 @@ app.whenReady().then(async () => {
     // retry action through the SAME retryRunHandler + deps bag as the tRPC
     // mutation, mapping the discriminated result onto a chat-friendly
     // ok/message pair the monitor injects as a follow-up turn.
+    //
+    // not_retryable fallback: a run PARKED on a live systemic pause (usage-limit
+    // item) is awaiting_review WITH an active walk, so retryRunHandler refuses
+    // it — but "retry the step" is exactly what resolving the pause item does
+    // (ReviewQueueSystemicPauseGate settles 'retry' and the walk re-runs the
+    // interrupted step without burning budget). Probe for that item and resolve
+    // it through the ReviewItemRouter chokepoint; only when no pause item exists
+    // is the refusal surfaced to the user.
     monitorRetryStep = async (runId, stepId) => {
       const result = await retryRunHandler(runId, stepId, retryRunDepsBag);
       if ('delivered' in result) {
         return { ok: true, message: `Retrying the run from step '${result.stepId}'.` };
+      }
+      if (result.reason === 'not_retryable') {
+        try {
+          const pauseItem = await HumanStepManager.getInstance().findPendingSystemicPauseItem(runId);
+          if (pauseItem) {
+            await ReviewItemRouter.getInstance().applyReviewItem(pauseItem.projectId, {
+              op: 'resolve',
+              actor: 'orchestrator',
+              reviewItemId: pauseItem.reviewItemId,
+              resolution: 'retry now (via monitor)',
+            });
+            return {
+              ok: true,
+              message: 'Resolved the usage-limit pause — the run is resuming from the interrupted step.',
+            };
+          }
+        } catch (err) {
+          loggerLike.warn('[Main] monitor retry_step pause-resolution fallback failed', {
+            runId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
       const messages: Record<string, string> = {
         not_found: 'Run not found.',

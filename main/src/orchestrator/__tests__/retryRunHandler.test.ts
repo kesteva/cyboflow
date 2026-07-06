@@ -48,6 +48,23 @@ const BASIC_SPEC = JSON.stringify({
   ],
 });
 
+/** Three plain steps (no fanOut) — for the done+skipped skip-set test. */
+const THREE_STEP_SPEC = JSON.stringify({
+  id: 'test-wf-3',
+  phases: [
+    {
+      id: 'phase-1',
+      label: 'Phase 1',
+      color: '#111111',
+      steps: [
+        { id: 'step-a', name: 'Step A', agent: 'agent-a' },
+        { id: 'step-b', name: 'Step B', agent: 'agent-b' },
+        { id: 'step-c', name: 'Step C', agent: 'agent-c' },
+      ],
+    },
+  ],
+});
+
 function makeDb(): Database.Database {
   return createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
 }
@@ -128,9 +145,9 @@ function makeDeps(
   executor: RetryRunExecutorLike,
   opts?: {
     runQueues?: RunQueueRegistry;
-    completedStepIds?: (runId: string) => string[];
     listStepResults?: (runId: string) => Array<{ stepId: string; outcome: string }>;
     resetFailedLanes?: ReturnType<typeof vi.fn>;
+    reopenBatch?: ReturnType<typeof vi.fn>;
     logger?: RetryRunDeps['logger'];
   },
 ): RetryRunDeps & { emitRunStatusChanged: ReturnType<typeof vi.fn> } {
@@ -140,9 +157,9 @@ function makeDeps(
     runQueues: opts?.runQueues ?? new RunQueueRegistry(),
     runExecutor: executor,
     emitRunStatusChanged,
-    completedStepIds: opts?.completedStepIds ?? (() => []),
     listStepResults: opts?.listStepResults ?? (() => []),
     resetFailedLanes: opts?.resetFailedLanes,
+    reopenBatch: opts?.reopenBatch,
     logger: opts?.logger,
   };
 }
@@ -263,6 +280,7 @@ describe('retryRunHandler — guard matrix', () => {
               batch_id: null,
               workflow_name: 'test-workflow',
               spec_json: BASIC_SPEC,
+              updated_at: '2026-01-01T00:00:00.000Z',
             }),
             all: (...params: unknown[]) => stmt.all(...params),
           };
@@ -357,7 +375,10 @@ describe('retryRunHandler — completed-set exclusion', () => {
     const executor = makeFakeExecutor();
     const deps = makeDeps(dbAdapter(db), executor, {
       runQueues,
-      completedStepIds: () => ['step-a', 'step-b'],
+      listStepResults: () => [
+        { stepId: 'step-a', outcome: 'done' },
+        { stepId: 'step-b', outcome: 'done' },
+      ],
     });
 
     const result = await retryRunHandler(runId, undefined, deps);
@@ -375,13 +396,43 @@ describe('retryRunHandler — completed-set exclusion', () => {
     const executor = makeFakeExecutor();
     const deps = makeDeps(dbAdapter(db), executor, {
       runQueues,
-      completedStepIds: () => ['step-b'],
+      listStepResults: () => [{ stepId: 'step-b', outcome: 'done' }],
     });
 
     const result = await retryRunHandler(runId, undefined, deps);
 
     expect(result).toEqual({ delivered: true, stepId: 'step-b' });
     expect(executor.setPendingCompletedSteps).not.toHaveBeenCalled();
+    await waitForRedrive(runQueues, runId);
+    db.close();
+  });
+
+  it('the skip set contains ONLY the done ids (minus target) — SKIPPED rows are re-run', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    // step-b was SKIPPED (e.g. sprint-verify skipped by the incomplete-sprint
+    // gate); step-a + step-c are done; the retry target is step-c.
+    const { runId } = seedProgrammaticRun(db, {
+      status: 'failed',
+      specJson: THREE_STEP_SPEC,
+      currentStepId: 'step-c',
+    });
+    const executor = makeFakeExecutor();
+    const deps = makeDeps(dbAdapter(db), executor, {
+      runQueues,
+      listStepResults: () => [
+        { stepId: 'step-a', outcome: 'done' },
+        { stepId: 'step-b', outcome: 'skipped' },
+        { stepId: 'step-c', outcome: 'done' },
+      ],
+    });
+
+    const result = await retryRunHandler(runId, 'step-c', deps);
+
+    expect(result).toEqual({ delivered: true, stepId: 'step-c' });
+    // Only the 'done' rows minus the target fast-forward. step-b (skipped) is
+    // absent → it will be re-run; step-c (target) is excluded.
+    expect(executor.setPendingCompletedSteps).toHaveBeenCalledWith(runId, ['step-a']);
     await waitForRedrive(runQueues, runId);
     db.close();
   });
@@ -520,6 +571,182 @@ describe('retryRunHandler — delivery mechanics', () => {
       '[retryRun] execute() rejected after starting flip',
       expect.objectContaining({ runId }),
     );
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Pre-flight (no-enqueue) discipline + stale-guard TOCTOU race
+//
+// The immediately-refusable cases are decided from a pre-flight read WITHOUT
+// enqueueing anything on the per-run queue — a run parked at a human gate HOLDS
+// that queue, so an in-queue guard would wedge the mutation behind the live walk
+// (and, on drain to a healthy rest, spuriously revive it). The revive UPDATE
+// additionally asserts the pre-flight updated_at snapshot to close the residual
+// TOCTOU (any queue activity moving the row on → { noOp: race }).
+// ---------------------------------------------------------------------------
+
+describe('retryRunHandler — pre-flight (no-enqueue) discipline', () => {
+  it('a live-gate refusal (awaiting_review + active executor) returns WITHOUT enqueueing on the run queue', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const getOrCreateSpy = vi.spyOn(runQueues, 'getOrCreate');
+    const { runId } = seedProgrammaticRun(db, { status: 'awaiting_review', currentStepId: 'step-a' });
+    const executor = makeFakeExecutor({ activeExecution: true });
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues });
+
+    const result = await retryRunHandler(runId, undefined, deps);
+
+    expect(result).toEqual({ noOp: true, reason: 'not_retryable' });
+    // Nothing was enqueued — the guard ran entirely from the pre-flight read
+    // (otherwise it would wedge behind the live walk holding the queue).
+    expect(getOrCreateSpy).not.toHaveBeenCalled();
+    expect(executor.execute).not.toHaveBeenCalled();
+    db.close();
+  });
+
+  it('a RUNNING run (live walk holds the queue) refuses WITHOUT enqueueing on the run queue', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const getOrCreateSpy = vi.spyOn(runQueues, 'getOrCreate');
+    const { runId } = seedProgrammaticRun(db, { status: 'running', currentStepId: 'step-a' });
+    const executor = makeFakeExecutor({ activeExecution: true });
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues });
+
+    const result = await retryRunHandler(runId, undefined, deps);
+
+    expect(result).toEqual({ noOp: true, reason: 'not_retryable' });
+    expect(getOrCreateSpy).not.toHaveBeenCalled();
+    expect(executor.execute).not.toHaveBeenCalled();
+    db.close();
+  });
+
+  it('a not_found refusal returns WITHOUT enqueueing on the run queue', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const getOrCreateSpy = vi.spyOn(runQueues, 'getOrCreate');
+    const executor = makeFakeExecutor();
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues });
+
+    const result = await retryRunHandler('no-such-run', undefined, deps);
+
+    expect(result).toEqual({ noOp: true, reason: 'not_found' });
+    expect(getOrCreateSpy).not.toHaveBeenCalled();
+    db.close();
+  });
+
+  it('stale-guard race: updated_at moves between pre-flight and task execution → { noOp: race }, no revive', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedProgrammaticRun(db, { status: 'failed', currentStepId: 'step-a' });
+    // Deterministic starting updated_at so the snapshot ≠ the post-bump value.
+    db.prepare('UPDATE workflow_runs SET updated_at = ? WHERE id = ?').run('2020-01-01T00:00:00.000Z', runId);
+
+    // Adapter that bumps updated_at on the FIRST run-row read (the pre-flight),
+    // AFTER the snapshot is taken — simulating concurrent queue activity moving
+    // the row on before the Phase-1 revive runs.
+    const real = dbAdapter(db);
+    let bumped = false;
+    const adapter: DatabaseLike = {
+      prepare: (sql: string): PreparedStatement => {
+        const stmt = real.prepare(sql);
+        if (sql.includes('FROM workflow_runs r') && sql.includes('JOIN workflows w')) {
+          return {
+            run: (...params: unknown[]) => stmt.run(...params),
+            get: (...params: unknown[]) => {
+              const row = stmt.get(...params);
+              if (!bumped) {
+                bumped = true;
+                db.prepare('UPDATE workflow_runs SET updated_at = ? WHERE id = ?').run(
+                  '2099-01-01T00:00:00.000Z',
+                  runId,
+                );
+              }
+              return row;
+            },
+            all: (...params: unknown[]) => stmt.all(...params),
+          };
+        }
+        return stmt;
+      },
+      transaction: real.transaction.bind(real),
+    };
+
+    const executor = makeFakeExecutor();
+    const deps = makeDeps(adapter, executor, { runQueues });
+    const result = await retryRunHandler(runId, undefined, deps);
+
+    expect(result).toEqual({ noOp: true, reason: 'race' });
+    expect(executor.execute).not.toHaveBeenCalled();
+    expect(deps.emitRunStatusChanged).not.toHaveBeenCalled();
+    // The run was NOT revived — still failed.
+    const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(row.status).toBe('failed');
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Batch reopen — un-terminal the sprint_batches row on retry (UNCONDITIONAL for
+// any run carrying a batch_id, NOT only fanOut targets).
+// ---------------------------------------------------------------------------
+
+describe('retryRunHandler — batch reopen', () => {
+  it('calls reopenBatch when batch_id is present AND the target step declares fanOut', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedRun(db, { status: 'failed', workflowName: 'sprint' });
+    setExecutionModel(db, runId, 'programmatic');
+    setBatchId(db, runId, 'batch-1');
+    setCurrentStepId(db, runId, 'execute-tasks');
+
+    const executor = makeFakeExecutor();
+    const reopenBatch = vi.fn<(batchId: string) => number>().mockReturnValue(1);
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues, reopenBatch });
+
+    const result = await retryRunHandler(runId, undefined, deps);
+
+    expect(result).toEqual({ delivered: true, stepId: 'execute-tasks' });
+    expect(reopenBatch).toHaveBeenCalledWith('batch-1');
+    await waitForRedrive(runQueues, runId);
+    db.close();
+  });
+
+  it('calls reopenBatch when batch_id is present even if the target step has NO fanOut', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedProgrammaticRun(db, { status: 'failed', currentStepId: 'step-a', batchId: 'batch-1' });
+
+    const executor = makeFakeExecutor();
+    const reopenBatch = vi.fn<(batchId: string) => number>().mockReturnValue(1);
+    const resetFailedLanes = vi.fn<(batchId: string) => number>().mockReturnValue(0);
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues, reopenBatch, resetFailedLanes });
+
+    const result = await retryRunHandler(runId, undefined, deps);
+
+    expect(result).toEqual({ delivered: true, stepId: 'step-a' });
+    // UNCONDITIONAL: the batch was marked failed regardless of which step failed.
+    expect(reopenBatch).toHaveBeenCalledWith('batch-1');
+    // Non-fanOut target → the fan-out lane reset is NOT called, but reopen still is.
+    expect(resetFailedLanes).not.toHaveBeenCalled();
+    await waitForRedrive(runQueues, runId);
+    db.close();
+  });
+
+  it('does NOT call reopenBatch when batch_id is absent', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedProgrammaticRun(db, { status: 'failed', currentStepId: 'step-a' });
+
+    const executor = makeFakeExecutor();
+    const reopenBatch = vi.fn<(batchId: string) => number>().mockReturnValue(0);
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues, reopenBatch });
+
+    const result = await retryRunHandler(runId, undefined, deps);
+
+    expect(result).toEqual({ delivered: true, stepId: 'step-a' });
+    expect(reopenBatch).not.toHaveBeenCalled();
+    await waitForRedrive(runQueues, runId);
     db.close();
   });
 });

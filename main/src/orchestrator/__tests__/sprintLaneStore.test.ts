@@ -797,6 +797,60 @@ describe('SprintLaneStore', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // reopenBatch — un-terminal a FAILED batch for retry (retryRunHandler)
+  // ---------------------------------------------------------------------------
+
+  describe('reopenBatch', () => {
+    it('revives a failed batch to running and clears completed_at', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      store.markBatchTerminal(batchId, 'failed');
+      const before = db.prepare('SELECT status, completed_at FROM sprint_batches WHERE id = ?').get(batchId) as {
+        status: string;
+        completed_at: string | null;
+      };
+      expect(before.status).toBe('failed');
+      expect(before.completed_at).not.toBeNull();
+
+      const changed = store.reopenBatch(batchId);
+
+      expect(changed).toBe(1);
+      const after = db.prepare('SELECT status, completed_at FROM sprint_batches WHERE id = ?').get(batchId) as {
+        status: string;
+        completed_at: string | null;
+      };
+      expect(after.status).toBe('running');
+      expect(after.completed_at).toBeNull();
+    });
+
+    it('is a no-op (returns 0) on a completed batch — complete immutability preserved', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      store.markBatchTerminal(batchId, 'completed');
+      expect(store.reopenBatch(batchId)).toBe(0);
+      const batch = db.prepare('SELECT status FROM sprint_batches WHERE id = ?').get(batchId) as { status: string };
+      expect(batch.status).toBe('completed');
+    });
+
+    it('is a no-op (returns 0) on a canceled batch — cancel semantics preserved', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      store.markBatchTerminal(batchId, 'canceled');
+      expect(store.reopenBatch(batchId)).toBe(0);
+      const batch = db.prepare('SELECT status FROM sprint_batches WHERE id = ?').get(batchId) as { status: string };
+      expect(batch.status).toBe('canceled');
+    });
+
+    it('is a no-op (returns 0) on an already-running batch', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      expect(store.reopenBatch(batchId)).toBe(0);
+      const batch = db.prepare('SELECT status FROM sprint_batches WHERE id = ?').get(batchId) as { status: string };
+      expect(batch.status).toBe('running');
+    });
+
+    it('is a no-op (returns 0) on a missing batch', () => {
+      expect(store.reopenBatch('no-such-batch')).toBe(0);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Singleton lifecycle
   // ---------------------------------------------------------------------------
 
