@@ -147,6 +147,14 @@ describe('ReviewItemCard', () => {
     await waitFor(() => expect(mockDismiss).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_ht' }));
   });
 
+  it('a dynamic-workflow human_task offers ONLY Dismiss (no Resolve / Promote)', async () => {
+    render(<ReviewItemCard item={makeItem('human_task', { id: 'rvw_dyn', source: 'dynamic_workflow' })} />);
+    expect(screen.queryByText('Resolve')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('promote-to-task')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText('Dismiss'));
+    await waitFor(() => expect(mockDismiss).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_dyn' }));
+  });
+
   it('permission Approve reuses the approval resolution path (folded approvalId)', async () => {
     const item = makeItem(
       'permission',

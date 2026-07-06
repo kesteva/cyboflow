@@ -19,7 +19,10 @@
  *                  paused run auto-resumes (FLOW ADVANCEMENT). Surfaces "Approve"
  *                  (resolve) / "Reject" (dismiss).
  *   - human_task — a free-form action item (blocking per-item). Triage:
- *                  Resolve / Dismiss / Promote to task.
+ *                  Resolve / Dismiss / Promote to task. A dynamic-workflow
+ *                  finished/stalled notification (source = 'dynamic_workflow')
+ *                  is informational — the work already ran — so it offers only
+ *                  Dismiss.
  *
  * A blocking badge renders on any item with `blocking === true`. The card owns
  * no validation — every action delegates to a chokepoint via the actions hook
@@ -31,6 +34,7 @@ import { formatAge } from '../../utils/approvalFormatters';
 import { trackEvent } from '../../utils/telemetry';
 import { trpc } from '../../trpc/client';
 import type { ReviewItem, ReviewItemKind, FindingProposedTarget } from '../../../../shared/types/reviews';
+import { DYNAMIC_WORKFLOW_REVIEW_SOURCE } from '../../../../shared/types/dynamicWorkflows';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
@@ -246,6 +250,16 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
           </>
         );
       case 'human_task':
+        // A dynamic-workflow completion notice has no follow-up work to track:
+        // Resolve and Promote-to-task would imply an action item where there is
+        // none, so acknowledging (Dismiss) is the only triage.
+        if (item.source === DYNAMIC_WORKFLOW_REVIEW_SOURCE) {
+          return (
+            <Button variant="secondary" size="sm" disabled={busy} onClick={handleDismiss}>
+              Dismiss
+            </Button>
+          );
+        }
         return (
           <>
             <Button variant="primary" size="sm" disabled={busy} onClick={handleResolve}>
