@@ -516,6 +516,51 @@ describe('WorkflowController', () => {
 
       expect(runner.calls.map((x) => x.id)).toEqual(['c']);
     });
+
+    // ── Defect 1: the resume skip set must NOT mask a DELIBERATE revisit ─────────
+    it('re-runs a loopback target that is in the injected completed set (no no-op jump)', async () => {
+      // p1: a, b(loopback→a). 'a' completed pre-restart (in the skip set); 'b' fails
+      // once then jumps to a. WITHOUT the purge, the jump lands on the still-marked
+      // 'a', skips it, and burns budget as a no-op. WITH the purge, 'a' re-runs.
+      const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b', loopback: 'a' })])]);
+      const runner = makeRunner({ b: [{ status: 'failed' }] }); // first b fails; rerun b ok
+
+      const result = await new WorkflowController(runner, makeHost()).run(
+        'r', d, undefined, undefined, new Set(['a']),
+      );
+
+      expect(result.outcome).toBe('completed');
+      // 'a' skipped initially (in the set); b fails+jumps → a PURGED & re-runs → b ok.
+      expect(runner.calls.map((x) => x.id)).toEqual(['b', 'a', 'b']);
+    });
+
+    it("re-runs a gate's revise loopback region even when its steps are in the completed set", async () => {
+      // p1: a, b (agent), gate(human, loopback→a). Simulate resume-after-pause: a & b
+      // were done pre-restart (in the skip set); the gate re-attaches to its still
+      // pending review item (NOT in the set — a pending gate is not "completed") and
+      // revises once. The revise must PURGE a & b so the revisited region re-runs,
+      // and the gate must RE-PRESENT after the revisit (defect 1b — else the gate is
+      // silently bypassed on resume).
+      const d = def([
+        phase('p1', [
+          step({ id: 'a' }),
+          step({ id: 'b' }),
+          step({ id: 'gate', agent: 'human', human: true, loopback: 'a' }),
+        ]),
+      ]);
+      const runner = makeRunner();
+      const host = makeHost({ gate: ['revise', 'approve'] });
+
+      const result = await new WorkflowController(runner, host).run(
+        'r', d, undefined, undefined, new Set(['a', 'b']),
+      );
+
+      expect(result.outcome).toBe('completed');
+      // First pass: a & b skipped (in the set); gate revises → purge → a & b re-run.
+      expect(runner.calls.map((x) => x.id)).toEqual(['a', 'b']);
+      // The gate re-presented after the revisit (revise, then approve).
+      expect(host.gateCalls).toEqual(['gate', 'gate']);
+    });
   });
 
   // ── per-step result recording (Stage 3, migration 033) ───────────────────────

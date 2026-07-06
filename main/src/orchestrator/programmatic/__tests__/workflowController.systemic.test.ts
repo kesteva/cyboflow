@@ -245,6 +245,26 @@ describe('WorkflowController — systemic-pause seam', () => {
     expect(pauseCalls.length).toBe(MAX_SYSTEMIC_PAUSES);
   });
 
+  // (g2) STICKY giveup: once the human gave up, a later systemic re-failure of the
+  // SAME step must NOT re-park (no fresh blocking pause item per remaining attempt).
+  it("does not re-park a step after the human gave up — the giveup is sticky across attempts", async () => {
+    const d = def([phase('p1', [step({ id: 'a', retries: 1 })])]);
+    // retries:1 ⇒ two attempts; BOTH fail systemically. The first parks (giveup); the
+    // second must fall straight through the normal failure path, NOT park again.
+    const runner = makeRunner({ a: [systemicFail(), systemicFail()] });
+    const { host, pauseCalls } = makeSystemicHost({ verdicts: ['giveup'] }); // no triage ⇒ fail
+
+    const result = await new WorkflowController(runner, host).run('r', d);
+
+    // Normal failure path (triage absent ⇒ hard fail).
+    expect(result.outcome).toBe('failed');
+    expect(result.failedStepId).toBe('a');
+    // Parked EXACTLY once despite the second systemic attempt.
+    expect(pauseCalls.length).toBe(1);
+    // Both attempts ran (the giveup did not short-circuit the retry budget).
+    expect(runner.calls.map((c) => c.id)).toEqual(['a', 'a']);
+  });
+
   // ── fan-out ────────────────────────────────────────────────────────────────
   describe('fan-out', () => {
     /** Runner that fails item t1 systemically on its FIRST inner call, ok otherwise. */
@@ -326,6 +346,35 @@ describe('WorkflowController — systemic-pause seam', () => {
       expect(result.failedStepId).toBe('execute');
       expect(pauseCalls.length).toBe(1);
       expect(driver.lanes.some((l) => l.status === 'integrated' && l.itemId === 't1')).toBe(false);
+    });
+
+    // (k) STICKY giveup across WAVES: two waves hit systemic on the SAME outer step,
+    // but the giveup latch suppresses the second wave's re-park ⇒ ONE pause total.
+    it("parks the fan-out only ONCE across waves after a systemic giveup (sticky)", async () => {
+      // t3 succeeds; t1 & t2 fail systemically. t2 depends on t3, so it lands in a
+      // LATER wave than t1 — a second systemic hit on the same outer step. Without a
+      // sticky latch this would mint a second blocking pause item.
+      const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+      const base = makeFanOutDriver(['t1', 't2', 't3']);
+      const driver: FanOutDriver = { ...base, dependencies: () => new Map([['t2', ['t3']]]) };
+      const runner: StepRunner = {
+        async runStep(_s, ctx) {
+          const id = ctx.item?.id;
+          return id === 't1' || id === 't2' ? systemicFail('overloaded') : { status: 'ok' };
+        },
+      };
+      const { host, pauseCalls } = makeSystemicHost({ verdicts: ['giveup', 'giveup'] });
+      host.fanOut = driver;
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      // Parked EXACTLY once across both waves (the sticky latch stopped the second).
+      expect(pauseCalls.length).toBe(1);
+      // t1 & t2 gave up (failed); t3 integrated.
+      const failed = base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId);
+      expect(new Set(failed)).toEqual(new Set(['t1', 't2']));
+      expect(base.lanes.some((l) => l.status === 'integrated' && l.itemId === 't3')).toBe(true);
     });
   });
 });

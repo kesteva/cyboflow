@@ -120,6 +120,23 @@ export class WorkflowController {
     // MAX_SYSTEMIC_PAUSES; the SAME map keys both the single-step retry loop and the
     // fan-out wave-park path (a fanOut outer step keys on its own step.id).
     const systemicPauses = new Map<string, number>();
+    // Per-step-id STICKY giveup latch. Once the human GAVE UP on a systemic pause
+    // for a step (verdict 'giveup'), that decision is final for the rest of the run:
+    // subsequent systemic re-failures of the SAME step (another in-place attempt, or
+    // a later fan-out wave on the same outer step) must NOT re-park and mint a fresh
+    // blocking pause item — that would force the human to dismiss once per remaining
+    // attempt, contradicting the pause item's "Dismiss to stop waiting — the step
+    // then fails normally" contract. The SAME set keys both the single-step retry
+    // loop and the fan-out wave-park path (keyed on the outer step id).
+    const systemicGiveUps = new Set<string>();
+    // Crash-resume skip set, copied into a MUTABLE local. It only fast-forwards PAST
+    // work completed BEFORE the restart; the instant the walk deliberately REVISITS a
+    // region (a loopback jump or a gate revise), that region's pre-restart history no
+    // longer exempts it, so `clearCompletedFrom` PURGES the revisited steps. Without
+    // this a loopback landing on a still-marked step would be skipped (the jump burns
+    // budget as a no-op), and pausing mid-revise then resuming would silently bypass
+    // the revisit steps INCLUDING the human gate itself.
+    const remainingCompleted = new Set<string>(completedStepIds ?? []);
     // Closing-stage gate (2026-06-22): set true when a fan-out step settles with
     // one or more incomplete/failed lanes (the sprint has blocked tasks). While
     // set, the walk skips every subsequent AUTOMATED step (e.g. sprint-verify,
@@ -189,7 +206,9 @@ export class WorkflowController {
 
         // Crash-safe resume: a step that INDIVIDUALLY completed before a restart
         // (persisted done/skipped) is skipped without re-running or re-reporting.
-        if (completedStepIds?.has(step.id)) {
+        // `remainingCompleted` is purged the moment the walk revisits a region, so a
+        // deliberate loopback/revise into pre-restart work re-runs it (see below).
+        if (remainingCompleted.has(step.id)) {
           i += 1;
           continue;
         }
@@ -262,6 +281,7 @@ export class WorkflowController {
               items,
               signal,
               systemicPauses,
+              systemicGiveUps,
             );
             if (fanResult.terminal) {
               // Mark the outer step canceled in the trace before the terminal.
@@ -294,7 +314,7 @@ export class WorkflowController {
                 signal,
                 attempt: 1,
               });
-              const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, steps, i);
+              const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, remainingCompleted, steps, i);
               if (next.terminal) return this.finish(next.result, runId);
               i = next.i;
               continue;
@@ -314,7 +334,7 @@ export class WorkflowController {
         if (isPureHumanGate(step)) {
           this.emit({ kind: 'gate-opened', runId, phaseId: phase.id, stepId: step.id });
           const decision = await this.host.requestHumanGate(step, { ...baseCtx, attempt: 1 });
-          const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, steps, i);
+          const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, remainingCompleted, steps, i);
           if (next.terminal) return this.finish(next.result, runId);
           i = next.i;
           continue;
@@ -352,7 +372,11 @@ export class WorkflowController {
           // Systemic failure: park-and-retry BEFORE the failure touches any budget.
           if (result.status === 'failed' && result.systemic === true && this.host.awaitSystemicPause) {
             const used = systemicPauses.get(step.id) ?? 0;
-            if (used < MAX_SYSTEMIC_PAUSES) {
+            // Park only when budget remains AND the human has not already GIVEN UP on
+            // this step's systemic pause. Once giveup is latched, every subsequent
+            // systemic attempt of this step skips the pause and falls through to the
+            // normal failure path — the human dismissed once, so we honor it once.
+            if (used < MAX_SYSTEMIC_PAUSES && !systemicGiveUps.has(step.id)) {
               systemicPauses.set(step.id, used + 1);
               this.host.log?.(
                 'warn',
@@ -369,9 +393,11 @@ export class WorkflowController {
                 attempt -= 1;
                 continue;
               }
-              // 'giveup' falls through: the failure follows the normal path below.
+              // 'giveup' — latch it so later systemic re-failures of this step do NOT
+              // re-park, then fall through: the failure follows the normal path below.
+              systemicGiveUps.add(step.id);
             }
-            // Budget exhausted also falls through to the normal path below.
+            // Budget exhausted / already gave up also falls through to the normal path.
           }
           lastError = result.error;
         }
@@ -388,7 +414,7 @@ export class WorkflowController {
           if (hasTrailingGate(step)) {
             this.emit({ kind: 'gate-opened', runId, phaseId: phase.id, stepId: step.id });
             const decision = await this.host.requestHumanGate(step, { ...baseCtx, attempt });
-            const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, steps, i, attempt);
+            const next = this.applyGateDecision(decision, step, phase, phase.steps, loopbacks, remainingCompleted, steps, i, attempt);
             if (next.terminal) return this.finish(next.result, runId);
             i = next.i;
             continue;
@@ -404,6 +430,10 @@ export class WorkflowController {
         if (jumped !== null) {
           this.host.log?.('warn', `step '${step.id}' failed; looping back to '${phase.steps[jumped].id}'`);
           this.host.reportStep(step.id, 'done');
+          // Deliberate revisit: the jumped-to region (and this failing step at i >=
+          // jumped) is being redone, so drop it from the resume skip set — otherwise
+          // the jump lands on a still-marked step and is skipped as a no-op.
+          this.clearCompletedFrom(remainingCompleted, phase.steps, jumped);
           i = jumped;
           continue;
         }
@@ -503,6 +533,7 @@ export class WorkflowController {
     items: string[],
     signal: AbortSignal | undefined,
     systemicPauses: Map<string, number>,
+    systemicGiveUps: Set<string>,
   ): Promise<{ terminal: boolean; incompleteCount: number }> {
     const fanOut = step.fanOut;
     const driver = this.host.fanOut;
@@ -675,7 +706,11 @@ export class WorkflowController {
       // those lanes — the condition is environment-level, not a per-task defect.
       if (pausedThisWave.length > 0) {
         const used = systemicPauses.get(step.id) ?? 0;
-        if (this.host.awaitSystemicPause && used < MAX_SYSTEMIC_PAUSES) {
+        // Park only when budget remains AND the human has not already GIVEN UP on
+        // this outer step's systemic pause. Once giveup is latched, a later wave that
+        // re-hits systemic on the SAME outer step skips the pause and fails its paused
+        // lanes directly — no second blocking pause item for the human to dismiss.
+        if (this.host.awaitSystemicPause && used < MAX_SYSTEMIC_PAUSES && !systemicGiveUps.has(step.id)) {
           systemicPauses.set(step.id, used + 1);
           this.host.log?.(
             'warn',
@@ -690,7 +725,9 @@ export class WorkflowController {
             // observe the worktree state rather than in-memory progress.
             continue;
           }
-          // 'giveup' → fall through and fail the still-paused lanes below.
+          // 'giveup' — latch it so a later wave on this outer step does NOT re-park,
+          // then fall through and fail the still-paused lanes below.
+          systemicGiveUps.add(step.id);
         }
         // Seam absent, budget exhausted, or 'giveup': fail each still-paused lane
         // exactly like a blocked lane (driveLane failed + remaining.delete +
@@ -795,6 +832,7 @@ export class WorkflowController {
     phase: WorkflowDefinition['phases'][number],
     phaseSteps: WorkflowStep[],
     loopbacks: Map<string, number>,
+    remainingCompleted: Set<string>,
     steps: StepReport[],
     i: number,
     attempts = 1,
@@ -836,7 +874,31 @@ export class WorkflowController {
     this.host.reportStep(step.id, 'done');
     // A resolvable target ⇒ jump there; otherwise re-present the gate / re-run the
     // step (i unchanged).
-    return { terminal: false, i: targetIndex >= 0 ? targetIndex : i };
+    const nextIndex = targetIndex >= 0 ? targetIndex : i;
+    // Deliberate revisit: drop the revisited region (from nextIndex onward, which
+    // includes this gate on a no-target re-present) from the resume skip set so it
+    // actually re-runs — otherwise a resume mid-revise would fast-forward past the
+    // revisit steps and silently bypass the gate itself.
+    this.clearCompletedFrom(remainingCompleted, phaseSteps, nextIndex);
+    return { terminal: false, i: nextIndex };
+  }
+
+  /**
+   * Purge the resume skip set for a deliberate intra-phase REVISIT: drop every step
+   * at index >= fromIndex (the jumped-to step, this failing/revised step, and every
+   * step between them) so the revisited region re-runs. Invariant: the injected
+   * `completedStepIds` set only fast-forwards PAST work completed before a restart;
+   * the moment the walk deliberately revisits a region, that region's pre-restart
+   * history no longer exempts it from execution.
+   */
+  private clearCompletedFrom(
+    remainingCompleted: Set<string>,
+    phaseSteps: WorkflowStep[],
+    fromIndex: number,
+  ): void {
+    for (let k = fromIndex; k < phaseSteps.length; k++) {
+      remainingCompleted.delete(phaseSteps[k].id);
+    }
   }
 
   /**
