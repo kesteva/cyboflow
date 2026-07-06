@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isAtHumanReviewGate, resolveRunSummaryVariant } from '../useRunSummaryVariant';
+import { isAtHumanReviewGate, isTerminalStepReached, resolveRunSummaryVariant } from '../useRunSummaryVariant';
 import type { UseWorkflowPhaseStateResult } from '../useWorkflowPhaseState';
 import type { WorkflowDefinition, WorkflowStep } from '../../../../shared/types/workflows';
 
@@ -62,6 +62,50 @@ describe('isAtHumanReviewGate', () => {
   });
 });
 
+describe('isTerminalStepReached', () => {
+  it('is false with no definition yet (query unresolved)', () => {
+    expect(isTerminalStepReached(phaseState({ definition: null }))).toBe(false);
+  });
+
+  it("is true when currentStepId is the flow's LAST step", () => {
+    const ps = phaseState({
+      currentStepId: 'human-review',
+      stepStates: [{ stepId: 'human-review', status: 'done' }],
+    });
+    expect(isTerminalStepReached(ps)).toBe(true);
+  });
+
+  it('is true when every known step state is done, regardless of currentStepId', () => {
+    const ps = phaseState({
+      currentStepId: 'execute-tasks',
+      stepStates: [
+        { stepId: 'approve-plan', status: 'done' },
+        { stepId: 'execute-tasks', status: 'done' },
+        { stepId: 'sprint-verify', status: 'done' },
+        { stepId: 'human-review', status: 'done' },
+      ],
+    });
+    expect(isTerminalStepReached(ps)).toBe(true);
+  });
+
+  it('is false at a mid-flow step with concrete non-done step state (the interactive turn-end-rest regression, 2026-07-06)', () => {
+    const ps = phaseState({
+      currentStepId: 'execute-tasks',
+      stepStates: [
+        { stepId: 'approve-plan', status: 'done' },
+        { stepId: 'execute-tasks', status: 'running' },
+        { stepId: 'sprint-verify', status: 'pending' },
+        { stepId: 'human-review', status: 'pending' },
+      ],
+    });
+    expect(isTerminalStepReached(ps)).toBe(false);
+  });
+
+  it('is true with no step-transition data at all (no evidence of an open step)', () => {
+    expect(isTerminalStepReached(phaseState())).toBe(true);
+  });
+});
+
 describe('resolveRunSummaryVariant', () => {
   const idle = phaseState();
   const atGate = phaseState({ currentStepId: 'human-review', stepStates: [{ stepId: 'human-review', status: 'running' }] });
@@ -89,5 +133,47 @@ describe('resolveRunSummaryVariant', () => {
 
   it('→ null (keep the canvas) for a normally-running run', () => {
     expect(resolveRunSummaryVariant('running', false, idle)).toBeNull();
+  });
+
+  it("regression: awaiting_review + endEligible mid-flow with concrete non-done step state → NOT 'complete' (interactive turn-end-rest, 2026-07-06)", () => {
+    const midFlowRunning = phaseState({
+      currentStepId: 'execute-tasks',
+      stepStates: [
+        { stepId: 'approve-plan', status: 'done' },
+        { stepId: 'execute-tasks', status: 'running' },
+        { stepId: 'sprint-verify', status: 'pending' },
+        { stepId: 'human-review', status: 'pending' },
+      ],
+    });
+    expect(resolveRunSummaryVariant('awaiting_review', true, midFlowRunning)).toBeNull();
+  });
+
+  it("→ 'complete' when awaiting_review + endEligible and currentStepId is the flow's LAST step", () => {
+    const atLastStep = phaseState({
+      currentStepId: 'human-review',
+      stepStates: [{ stepId: 'human-review', status: 'done' }],
+    });
+    expect(resolveRunSummaryVariant('awaiting_review', true, atLastStep)).toBe('complete');
+  });
+
+  it("→ 'complete' when awaiting_review + endEligible and every step state is done", () => {
+    const allDone = phaseState({
+      currentStepId: 'execute-tasks',
+      stepStates: [
+        { stepId: 'approve-plan', status: 'done' },
+        { stepId: 'execute-tasks', status: 'done' },
+        { stepId: 'sprint-verify', status: 'done' },
+        { stepId: 'human-review', status: 'done' },
+      ],
+    });
+    expect(resolveRunSummaryVariant('awaiting_review', true, allDone)).toBe('complete');
+  });
+
+  it("→ 'complete' unconditionally for status 'completed' even when phase state is still loading (definition null)", () => {
+    expect(resolveRunSummaryVariant('completed', true, phaseState({ definition: null }))).toBe('complete');
+  });
+
+  it("→ NOT 'complete' for awaiting_review + endEligible while phase state is still loading (definition null)", () => {
+    expect(resolveRunSummaryVariant('awaiting_review', true, phaseState({ definition: null }))).toBeNull();
   });
 });

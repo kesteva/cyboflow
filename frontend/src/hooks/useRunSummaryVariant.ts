@@ -4,8 +4,10 @@
  * already has (run status + live phase state). One panel, three header states:
  *
  *   'failed'   — the run self-terminated on a TERMINAL error (status 'failed').
- *   'complete' — the run is end-eligible: self-terminated 'completed', or RESTED
- *                in awaiting_review with no open gate (useRunEndEligibility).
+ *   'complete' — the run self-terminated 'completed' (unconditional), OR RESTED
+ *                in awaiting_review with no open gate (useRunEndEligibility)
+ *                AND phase state confirms the flow actually reached its LAST
+ *                step (isTerminalStepReached).
  *   'review'   — the run is STILL running but its CURRENT step is the flow's
  *                LAST step and a `human: true` gate that is running: the flow
  *                agent has reached the final Human review and is waiting on its
@@ -23,6 +25,22 @@
  * the WorkflowCanvas renders (definition + currentStepId + stepStates) — no new
  * subscription. Precedence failed > complete > review keeps the states disjoint (a
  * review-gate run is 'running', so it is never also end-eligible or failed).
+ *
+ * WHY awaiting_review alone is not enough (2026-07-06 incident): on the
+ * INTERACTIVE substrate, the backend rests every orchestrated run in
+ * awaiting_review at each assistant turn-end (registerTurnEndRest) — including
+ * turns that end mid-workflow with no open gate (e.g. the agent yields "waiting
+ * for a background agent"). useRunEndEligibility can't tell that apart from a
+ * genuine end-of-walk rest; it only knows there's no pending gate right now. So
+ * `endEligible` alone flashed the 'complete' card while the step timeline still
+ * showed a step running and gates pending. Phase position is the only signal
+ * that discriminates the two, hence isTerminalStepReached below. This is an
+ * interactive-only failure mode: SDK-orchestrated runs only drain into
+ * awaiting_review at the true end of the walk, and programmatic runs rest once
+ * at the end of their walk — neither rests mid-flow the way interactive does.
+ * A residual false negative (the agent under-reports the final step) is
+ * acceptable: useRunEndEligibility and the top-bar End button are deliberately
+ * NOT gated by this — End always stays available as a bail-out.
  */
 import type { UseWorkflowPhaseStateResult } from './useWorkflowPhaseState';
 
@@ -55,11 +73,50 @@ export function isAtHumanReviewGate(
 }
 
 /**
+ * True when phase state confirms the flow's walk has actually reached its end,
+ * as opposed to an interactive turn-end rest landing mid-workflow (see the
+ * module docblock for the 2026-07-06 incident this guards against).
+ *
+ * Order of checks, each a positive signal the walk is done:
+ *   1. No definition loaded yet → false. Transient (query still in flight) —
+ *      keep the canvas rather than flash a wrong card off a stale/empty snapshot.
+ *   2. The flow has no steps at all → true (trivially at the end).
+ *   3. currentStepId is the LAST flat step across all phases → true.
+ *   4. There is at least one step state and every one of them is 'done' → true
+ *      (getPhaseState force-marks all steps done for terminal run statuses, so
+ *      a self-terminated run also satisfies this).
+ *   5. No step-transition data has been observed at all (currentStepId null and
+ *      stepStates empty) → true. There's no positive evidence of an open,
+ *      non-terminal step to withhold 'complete' over, so this falls back to
+ *      trusting endEligible alone (the pre-fix behavior) rather than blocking a
+ *      genuinely rested run on missing telemetry.
+ *
+ * Anything else — a known, non-last currentStepId, or concrete step states that
+ * aren't all 'done' — is the regression case: false.
+ */
+export function isTerminalStepReached(phaseState: UseWorkflowPhaseStateResult): boolean {
+  const { definition, currentStepId, stepStates } = phaseState;
+  if (definition === null) return false;
+
+  const flatSteps = definition.phases.flatMap((p) => p.steps);
+  if (flatSteps.length === 0) return true;
+
+  const lastStepId = flatSteps[flatSteps.length - 1].id;
+  if (currentStepId === lastStepId) return true;
+
+  if (stepStates.length > 0 && stepStates.every((s) => s.status === 'done')) return true;
+
+  if (currentStepId === null && stepStates.length === 0) return true;
+
+  return false;
+}
+
+/**
  * Resolve the summary-panel variant, or null to keep the canvas.
  *
  * @param status        The run's lifecycle status.
  * @param endEligible   Result of useRunEndEligibility (rested-no-gate / self-terminated).
- * @param phaseState    Live phase snapshot (for the review-gate signal).
+ * @param phaseState    Live phase snapshot (for the review-gate and terminal-step signals).
  */
 export function resolveRunSummaryVariant(
   status: string | undefined,
@@ -67,7 +124,13 @@ export function resolveRunSummaryVariant(
   phaseState: UseWorkflowPhaseStateResult,
 ): RunSummaryVariant | null {
   if (status === 'failed') return 'failed';
-  if (endEligible) return 'complete';
+  // 'completed' is unconditional (self-terminated, nothing left to discriminate).
+  // Any other end-eligible status (awaiting_review) additionally requires phase
+  // state to confirm the walk actually reached its last step — see
+  // isTerminalStepReached and the module docblock.
+  if (endEligible && (status === 'completed' || isTerminalStepReached(phaseState))) {
+    return 'complete';
+  }
   if (isAtHumanReviewGate(phaseState, status)) return 'review';
   return null;
 }
