@@ -90,6 +90,14 @@ beforeEach(() => vi.clearAllMocks());
 // ---------------------------------------------------------------------------
 // open()
 // ---------------------------------------------------------------------------
+//
+// NB dogfooding hermeticity: RunShellManager.open() strips inherited
+// CYBOFLOW_RUN_ID / CYBOFLOW_ORCH_SOCKET / CYBOFLOW_RUN_ARTIFACTS_DIR from the
+// spawned env AT THE SOURCE (see runShellManager.ts) rather than merely
+// omitting them from what it explicitly sets. So this suite needs no
+// test-side ambient-env snapshot/strip workaround even when it itself runs
+// inside a cyboflow-hosted agent session (dogfooding) — verified empirically
+// with `CYBOFLOW_RUN_ID=<ambient>` set for the whole file.
 
 describe('RunShellManager.open', () => {
   it('spawns the default shell in the run worktree and reports ok', () => {
