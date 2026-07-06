@@ -8,6 +8,11 @@
  *  - a running session script is stopped BEFORE the project is deleted.
  *  - every session's worktree removal is attempted even when one throws, and the
  *    DB deleteProject runs only AFTER all cleanup attempts.
+ *  - branch close-out: each session's branch (named as the worktree) is
+ *    force-deleted after its worktree removal; a failed worktree removal skips
+ *    that session's branch delete; a PRE-EXISTING checked-out branch
+ *    (base_branch === worktree_name) is preserved; a branch-delete failure
+ *    doesn't abort the sweep.
  *
  * Handlers captured via a stub ipcMain; scriptExecutionTracker + panelManager +
  * the demo-seed modules are module-mocked so project.ts loads in the host-Node
@@ -56,6 +61,7 @@ interface SessRow {
   project_id: number;
   is_main_repo?: boolean;
   worktree_name?: string;
+  base_branch?: string;
   substrate?: string;
   chat_run_id?: string;
 }
@@ -64,11 +70,13 @@ function makeServices(opts: {
   project?: { id: number; name: string; path: string; worktree_folder: string | null } | undefined;
   sessions?: SessRow[];
   removeWorktreeImpl?: (path: string, name: string, folder?: string) => Promise<void>;
+  deleteBranchImpl?: (path: string, branch: string, o?: { force?: boolean }) => Promise<void>;
 }) {
   const project = 'project' in opts ? opts.project : { id: 1, name: 'Proj', path: '/proj', worktree_folder: null };
   const sessions = opts.sessions ?? [];
 
   const removeWorktree = vi.fn(opts.removeWorktreeImpl ?? (async () => {}));
+  const deleteBranch = vi.fn(opts.deleteBranchImpl ?? (async () => {}));
   const deleteProject = vi.fn(() => true);
   const stopRunningScript = vi.fn(async () => {});
 
@@ -85,12 +93,12 @@ function makeServices(opts: {
       closeTerminalSession: vi.fn(async () => {}),
       getAllSessions: vi.fn(async () => []),
     },
-    worktreeManager: { removeWorktree },
+    worktreeManager: { removeWorktree, deleteBranch },
     killLiveSession: vi.fn(async () => {}),
     configManager: { isDemoMode: () => false },
   } as unknown as AppServices;
 
-  return { services, removeWorktree, deleteProject, stopRunningScript };
+  return { services, removeWorktree, deleteBranch, deleteProject, stopRunningScript };
 }
 
 function register(services: AppServices) {
@@ -186,5 +194,76 @@ describe('projects:delete — worktree cleanup resilience + ordering', () => {
     expect(made.removeWorktree).toHaveBeenCalledTimes(1);
     expect(made.removeWorktree.mock.calls[0][1]).toBe('wt-3');
     expect(made.deleteProject).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('projects:delete — branch close-out', () => {
+  it('force-deletes each session branch after its worktree, skipping sessions whose removal failed', async () => {
+    const made = makeServices({
+      project: { id: 1, name: 'Proj', path: '/proj', worktree_folder: null },
+      sessions: [
+        { id: 's1', project_id: 1, is_main_repo: false, worktree_name: 'wt-1', base_branch: 'main' },
+        { id: 's2', project_id: 1, is_main_repo: false, worktree_name: 'wt-2', base_branch: 'main' },
+        { id: 's3', project_id: 1, is_main_repo: false, worktree_name: 'wt-3', base_branch: 'main' },
+      ],
+      // wt-2's worktree removal fails — its (still checked out) branch must be skipped.
+      removeWorktreeImpl: async (_path, name) => {
+        if (name === 'wt-2') throw new Error('worktree locked');
+      },
+    });
+    const handlers = register(made.services);
+
+    const result = (await invoke(handlers, 'projects:delete', '1')) as { success: boolean };
+    expect(result.success).toBe(true);
+
+    const deleted = made.deleteBranch.mock.calls.map((c) => c[1]);
+    expect(deleted).toEqual(['wt-1', 'wt-3']);
+    expect(made.deleteBranch).toHaveBeenCalledWith('/proj', 'wt-1', { force: true });
+    // Each branch delete happens only after its own worktree removal.
+    expect(made.removeWorktree.mock.invocationCallOrder[0]).toBeLessThan(
+      made.deleteBranch.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('preserves a PRE-EXISTING branch a session merely checked out (base_branch === worktree_name)', async () => {
+    const made = makeServices({
+      project: { id: 1, name: 'Proj', path: '/proj', worktree_folder: null },
+      sessions: [
+        { id: 's1', project_id: 1, is_main_repo: false, worktree_name: 'feature-x', base_branch: 'feature-x' },
+        { id: 's2', project_id: 1, is_main_repo: false, worktree_name: 'wt-2', base_branch: 'main' },
+      ],
+    });
+    const handlers = register(made.services);
+
+    await invoke(handlers, 'projects:delete', '1');
+
+    expect(made.removeWorktree).toHaveBeenCalledTimes(2);
+    const deleted = made.deleteBranch.mock.calls.map((c) => c[1]);
+    expect(deleted).toEqual(['wt-2']);
+  });
+
+  it('continues the sweep and still deletes the project when a branch delete throws', async () => {
+    const made = makeServices({
+      project: { id: 1, name: 'Proj', path: '/proj', worktree_folder: null },
+      sessions: [
+        { id: 's1', project_id: 1, is_main_repo: false, worktree_name: 'wt-1', base_branch: 'main' },
+        { id: 's2', project_id: 1, is_main_repo: false, worktree_name: 'wt-2', base_branch: 'main' },
+      ],
+      deleteBranchImpl: async (_path, branch) => {
+        if (branch === 'wt-1') throw new Error('branch delete failed');
+      },
+    });
+    const handlers = register(made.services);
+
+    const result = (await invoke(handlers, 'projects:delete', '1')) as { success: boolean };
+    expect(result.success).toBe(true);
+
+    // Both branch deletes attempted despite the first failing…
+    const deleted = made.deleteBranch.mock.calls.map((c) => c[1]);
+    expect(deleted).toEqual(['wt-1', 'wt-2']);
+    // …and the project row still goes away after all cleanup.
+    expect(made.deleteProject).toHaveBeenCalledTimes(1);
+    const lastBranchOrder = Math.max(...made.deleteBranch.mock.invocationCallOrder);
+    expect(lastBranchOrder).toBeLessThan(made.deleteProject.mock.invocationCallOrder[0]);
   });
 });

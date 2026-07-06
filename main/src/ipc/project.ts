@@ -356,8 +356,26 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
           await worktreeManager.removeWorktree(project.path, session.worktree_name, project.worktree_folder || undefined);
           worktreeCleanupCount++;
         } catch (error) {
-          // Log error but continue with other worktrees
+          // Log error but continue with other worktrees. Skip the branch
+          // delete below too — a branch still checked out in a live worktree
+          // cannot be deleted anyway.
           console.error(`[Main] Failed to remove worktree '${session.worktree_name}' for session ${session.id}:`, error);
+          continue;
+        }
+
+        // Deleting the project discards its sessions' work, so each session's
+        // branch goes with its worktree (mirrors sessions:delete) — session
+        // branches are created AS the worktree name. This also sweeps branches
+        // leaked by sessions dismissed before branch close-out existed (their
+        // worktree removal above is an idempotent no-op). Skip a PRE-EXISTING
+        // branch the session merely checked out (recorded at create time as
+        // base_branch === worktree_name). Fail-soft per branch.
+        if (session.base_branch !== session.worktree_name) {
+          try {
+            await worktreeManager.deleteBranch(project.path, session.worktree_name, { force: true });
+          } catch (error) {
+            console.error(`[Main] Failed to delete branch '${session.worktree_name}' for session ${session.id}:`, error);
+          }
         }
       }
       

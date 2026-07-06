@@ -11,6 +11,10 @@
  *    stamp still proceed.
  *  - the dismissed-outcome stamp runs the guarded `outcome IS NULL` UPDATE
  *    (idempotent — never clobbers a run that already recorded its own outcome).
+ *  - branch close-out: dismissal force-deletes the session's branch (named as
+ *    the worktree) AFTER the worktree removal; a PRE-EXISTING checked-out
+ *    branch (base_branch === worktree_name) is preserved; a branch-delete
+ *    failure is fail-soft; a worktree-removal failure skips the branch delete.
  *
  * Follows the sessionQuickCreate harness: electron/panelManager/database
  * singletons are module-mocked; a fake db records prepared SQL so the stamp
@@ -63,12 +67,16 @@ interface DbRow {
   substrate?: string;
   chat_run_id?: string;
   worktree_name?: string;
+  base_branch?: string;
   project_id?: number;
   is_main_repo?: boolean;
   name?: string;
 }
 
-function makeServices(dbSession: DbRow | undefined, opts?: { cancelThrows?: boolean }) {
+function makeServices(
+  dbSession: DbRow | undefined,
+  opts?: { cancelThrows?: boolean; removeWorktreeThrows?: boolean; deleteBranchThrows?: boolean },
+) {
   const preparedSql: string[] = [];
   const runCalls: Array<{ sql: string; args: unknown[] }> = [];
   let lastSql = '';
@@ -91,11 +99,19 @@ function makeServices(dbSession: DbRow | undefined, opts?: { cancelThrows?: bool
 
   // archiveProgressManager.addTask receives the cleanup callback and runs it —
   // this is what actually invokes worktreeManager.removeWorktree, so ordering
-  // relative to killLiveSession is observable.
-  const removeWorktree = vi.fn(async () => {});
+  // relative to killLiveSession is observable. The promise is captured so
+  // branch close-out tests can await the (fire-and-forget) cleanup
+  // deterministically.
+  const removeWorktree = vi.fn(async () => {
+    if (opts?.removeWorktreeThrows) throw new Error('worktree locked');
+  });
+  const deleteBranch = vi.fn(async () => {
+    if (opts?.deleteBranchThrows) throw new Error('branch delete failed');
+  });
+  let cleanupPromise: Promise<void> | undefined;
   const archiveProgressManager = {
     addTask: vi.fn((_sessionId: string, _name: string, _wt: string, _proj: string, cb: () => Promise<void>) => {
-      void cb();
+      cleanupPromise = cb();
     }),
     updateTaskStatus: vi.fn(),
   };
@@ -116,14 +132,25 @@ function makeServices(dbSession: DbRow | undefined, opts?: { cancelThrows?: bool
       getProject: vi.fn(() => ({ id: dbSession?.project_id ?? 1, name: 'Proj', path: '/proj', worktree_folder: null })),
       getDb: () => fakeDb,
     },
-    worktreeManager: { removeWorktree },
+    worktreeManager: { removeWorktree, deleteBranch },
     killLiveSession,
     archiveProgressManager,
     cyboflow: { cancelHostedRuns },
     configManager: { isDemoMode: () => false },
   } as unknown as AppServices;
 
-  return { services, killLiveSession, archiveSession, cancelHostedRuns, removeWorktree, runCalls, preparedSql };
+  return {
+    services,
+    killLiveSession,
+    archiveSession,
+    cancelHostedRuns,
+    removeWorktree,
+    deleteBranch,
+    archiveProgressManager,
+    awaitCleanup: () => cleanupPromise ?? Promise.resolve(),
+    runCalls,
+    preparedSql,
+  };
 }
 
 function register(services: AppServices) {
@@ -233,5 +260,73 @@ describe('sessions:delete — fail-soft close-out', () => {
     // prevents a regression that would clobber a run's own recorded outcome.
     expect(stamp?.sql).toContain('outcome IS NULL');
     expect(stamp?.args).toEqual(['dismissed', 's1']);
+  });
+});
+
+describe('sessions:delete — branch close-out', () => {
+  const worktreeSession = (overrides?: Partial<DbRow>): DbRow => ({
+    id: 's1',
+    substrate: 'sdk',
+    worktree_name: 'quick-20260706-184013',
+    base_branch: 'main',
+    project_id: 7,
+    is_main_repo: false,
+    name: 'sess',
+    ...overrides,
+  });
+
+  it('force-deletes the session branch (named as the worktree) AFTER the worktree removal', async () => {
+    const made = makeServices(worktreeSession());
+    const handlers = register(made.services);
+
+    const result = (await invoke(handlers, 'sessions:delete', 's1')) as { success: boolean };
+    expect(result.success).toBe(true);
+    await made.awaitCleanup();
+
+    expect(made.deleteBranch).toHaveBeenCalledTimes(1);
+    expect(made.deleteBranch).toHaveBeenCalledWith('/proj', 'quick-20260706-184013', { force: true });
+    // The branch is checked out until the worktree is gone — removal must come first.
+    expect(made.removeWorktree.mock.invocationCallOrder[0]).toBeLessThan(
+      made.deleteBranch.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('preserves a PRE-EXISTING branch the session merely checked out (base_branch === worktree_name)', async () => {
+    const made = makeServices(worktreeSession({ worktree_name: 'feature-x', base_branch: 'feature-x' }));
+    const handlers = register(made.services);
+
+    await invoke(handlers, 'sessions:delete', 's1');
+    await made.awaitCleanup();
+
+    expect(made.removeWorktree).toHaveBeenCalledTimes(1);
+    expect(made.deleteBranch).not.toHaveBeenCalled();
+  });
+
+  it('is fail-soft on a branch-delete failure: cleanup resolves and is never marked failed', async () => {
+    const made = makeServices(worktreeSession(), { deleteBranchThrows: true });
+    const handlers = register(made.services);
+
+    const result = (await invoke(handlers, 'sessions:delete', 's1')) as { success: boolean };
+    expect(result.success).toBe(true);
+    // Must resolve (a rejection here would be an unhandled fire-and-forget error).
+    await made.awaitCleanup();
+
+    expect(made.deleteBranch).toHaveBeenCalledTimes(1);
+    expect(made.archiveProgressManager.updateTaskStatus).not.toHaveBeenCalledWith(
+      's1',
+      'failed',
+      expect.anything(),
+    );
+  });
+
+  it('skips the branch delete entirely when the worktree removal fails (branch still checked out)', async () => {
+    const made = makeServices(worktreeSession(), { removeWorktreeThrows: true });
+    const handlers = register(made.services);
+
+    await invoke(handlers, 'sessions:delete', 's1');
+    await made.awaitCleanup();
+
+    expect(made.removeWorktree).toHaveBeenCalledTimes(1);
+    expect(made.deleteBranch).not.toHaveBeenCalled();
   });
 });

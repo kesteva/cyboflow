@@ -936,6 +936,26 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               await worktreeManager.removeWorktree(project.path, dbSession.worktree_name, project.worktree_folder || undefined);
 
               cleanupMessage += `\x1b[32m✓ Worktree removed successfully\x1b[0m\r\n`;
+
+              // Dismiss discards the session, so its branch goes with the
+              // worktree (mirrors runs.dismiss) — session branches are created
+              // AS the worktree name at createWorktree time, and leaving them
+              // behind litters the repo with orphaned quick-* refs. Force (-D)
+              // because dismissed work is unmerged by definition. Skip a
+              // PRE-EXISTING branch the session merely checked out — recorded
+              // at create time as base_branch === worktree_name — that branch
+              // is the user's, not ours. Fail-soft: a branch-delete failure
+              // must never fail the cleanup task (worktree removal, the part
+              // that blocks re-creation, has already succeeded).
+              if (dbSession.base_branch !== dbSession.worktree_name) {
+                try {
+                  await worktreeManager.deleteBranch(project.path, dbSession.worktree_name, { force: true });
+                  cleanupMessage += `\x1b[32m✓ Branch removed successfully\x1b[0m\r\n`;
+                } catch (branchError) {
+                  console.error(`[Main] Failed to delete branch ${dbSession.worktree_name}:`, branchError);
+                  cleanupMessage += `\x1b[33m⚠ Failed to delete branch (manual cleanup may be needed)\x1b[0m\r\n`;
+                }
+              }
             } catch (worktreeError) {
               // Log the error but don't fail
               console.error(`[Main] Failed to remove worktree ${dbSession.worktree_name}:`, worktreeError);
