@@ -246,6 +246,30 @@ export function UnifiedChatView({
     return () => container.removeEventListener('scroll', handleScroll);
   }, [filteredMessages]);
 
+  // Keep the transcript pinned to the bottom while the user IS at the bottom.
+  // The new-message scroll above is a one-shot against whatever height the
+  // transcript has at that instant — on (re)opening a session the content then
+  // keeps growing (the Task auto-expand effect injects nested sub-agent
+  // transcripts, markdown/diff blocks finish laying out), which strands the
+  // viewport near the top with no further messages to re-trigger a scroll. A
+  // ResizeObserver on the content re-pins on every growth while
+  // `wasAtBottomRef` holds; scrolling up flips that ref via handleScroll above,
+  // so reading history is never fought. (jsdom has no ResizeObserver — guard
+  // matches the rail-width observer below.)
+  useEffect(() => {
+    const container = scrollContainerRef.current;
+    if (!container || typeof ResizeObserver === 'undefined') return;
+    const content = container.firstElementChild;
+    if (!content) return;
+    const observer = new ResizeObserver(() => {
+      if (wasAtBottomRef.current) {
+        container.scrollTop = container.scrollHeight;
+      }
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [isInteractive, loadError, railId]);
+
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, []);
