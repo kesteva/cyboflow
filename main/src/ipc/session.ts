@@ -31,7 +31,6 @@ import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
 import { pruneSessionOnlyArtifacts } from '../orchestrator/artifactLifecycle';
 import { isCliSubstrate } from '../../../shared/types/substrate';
 import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
-import { resolveSubstrate } from '../orchestrator/substrateResolver';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 import { encodeCwd } from '../services/panels/claude/transcript/encodeCwd';
 import { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
@@ -464,49 +463,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // Resolve where this quick session works (migration 046): the per-launch
       // request wins when valid, otherwise the global Settings default (which
       // floors to 'worktree'). An in-place session skips worktree provisioning
-      // and runs directly in the project checkout. EXPLICIT vs INHERITED matters
-      // below: only an explicit 'in-place' request may hard-fail on the
-      // SDK-only constraint; an inherited default falls back to 'worktree'.
+      // and runs directly in the project checkout. BOTH substrates support
+      // in-place: the interactive PTY gate rides the inline `--settings` flag
+      // (resolveInlineGatingHooks — nothing is written into the checkout), and
+      // the spawn skips the remaining worktree-mutating setup (mcpEnabler /
+      // workflow bundle) for in-place sessions.
       const requestedWorktreeMode = isQuickSessionWorktreeMode(request.worktreeMode)
         ? request.worktreeMode
         : undefined;
-      let inPlace = (requestedWorktreeMode ?? configManager.getQuickSessionWorktreeMode()) === 'in-place';
-
-      // In-place sessions are SDK-ONLY. The interactive PTY substrate writes a
-      // PreToolUse hook into `<worktree>/.claude/settings.json` (interactiveSettingsWriter);
-      // for an in-place session that worktree IS the user's real checkout, so the
-      // spawn would mutate a possibly-tracked file. Pre-resolve the substrate the
-      // sentinel run WOULD get (mirrors WorkflowRegistry.createRun: a forced pin —
-      // demo → 'sdk', the interactivePtyOnly lock → 'interactive' — outranks the
-      // override ladder) and reject BEFORE creating anything if it would be
-      // interactive. (createRun's demo-honors-interactive carve-out is deliberately
-      // NOT mirrored: it only fires in demo mode, where no real REPL spawns and no
-      // real checkout is touched.)
-      if (inPlace) {
-        const forcedSubstrate = configManager.getForcedSubstrate?.() ?? null;
-        const effectiveSubstrate = forcedSubstrate ?? resolveSubstrate({
-          requestedSubstrate,
-          globalDefaultSubstrate: configManager.getDefaultSubstrate(),
-          env: process.env,
-        });
-        if (effectiveSubstrate === 'interactive') {
-          if (requestedWorktreeMode === 'in-place') {
-            return {
-              success: false,
-              error: 'In-place quick sessions require the SDK runtime. Choose the SDK runtime, or use a worktree-backed session.',
-            };
-          }
-          // 'in-place' was only INHERITED from the global Settings default — a
-          // preference, not a hard pin. Fall back to a worktree session so
-          // interactive-resolving surfaces keep working (the wizard Ultracode
-          // card hard-pins 'interactive' with no Workspace control, the
-          // PTY-only lock forces it globally, and the no-args quick-session
-          // shortcut surfaces no error UI) instead of every launch dying on
-          // the SDK-only constraint.
-          console.log('[IPC] create-quick: global in-place default + interactive substrate — falling back to a worktree session');
-          inPlace = false;
-        }
-      }
+      const inPlace = (requestedWorktreeMode ?? configManager.getQuickSessionWorktreeMode()) === 'in-place';
 
       const job = await taskQueue.createSession({
         prompt: '',

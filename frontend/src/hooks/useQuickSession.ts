@@ -51,8 +51,8 @@ interface UseQuickSessionReturn {
    *
    * `worktreeMode` ('worktree' | 'in-place') threads the wizard's Workspace choice
    * into createQuick; omitted → the server floors to the global default. 'in-place'
-   * skips worktree creation and works directly in the project checkout (SDK-only —
-   * create-quick rejects it under an interactive-resolving substrate).
+   * skips worktree creation and works directly in the project checkout (both
+   * substrates — the interactive gate needs no checkout writes).
    */
   start: (
     agentPermissionMode?: PermissionMode,

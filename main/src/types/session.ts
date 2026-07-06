@@ -172,11 +172,11 @@ export interface CreateSessionRequest {
    * Omitted → the global Settings default (configManager.
    * getQuickSessionWorktreeMode(), floor 'worktree'). 'in-place' skips worktree
    * creation and works directly in the project checkout (sessions.in_place = 1,
-   * migration 046); it is SDK-only — create-quick rejects the combination with
-   * an interactive-resolving substrate. Only honored by sessions:create-quick.
-   * Workflow-host session creation (ensureSessionForLaunch) pins 'worktree'
-   * explicitly. KEEP IN SYNC with the frontend twin in
-   * frontend/src/types/session.ts (request-parity rule).
+   * migration 046); both substrates support it (the interactive gate rides the
+   * inline `--settings` flag — no checkout writes). Only honored by
+   * sessions:create-quick. Workflow-host session creation
+   * (ensureSessionForLaunch) pins 'worktree' explicitly. KEEP IN SYNC with the
+   * frontend twin in frontend/src/types/session.ts (request-parity rule).
    */
   worktreeMode?: QuickSessionWorktreeMode;
   projectId?: number;

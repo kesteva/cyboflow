@@ -10,11 +10,11 @@
  *                 sessions.in_place = 1, migration 046). Opt-in via the launch
  *                 wizard's Advanced section or the global Settings default.
  *
- * In-place sessions are SDK-only (the interactive substrate writes a PreToolUse
- * hook into `<worktree>/.claude/settings.json`, which for an in-place session
- * would mutate a potentially-tracked file in the user's real checkout) and can
- * NEVER host a workflow run (RunLauncher rejects them; the UI redirects the
- * launch into a fresh worktree-backed session after a warning modal).
+ * In-place sessions run on EITHER substrate (the interactive PTY gate rides the
+ * inline `--settings` flag — resolveInlineGatingHooks — so nothing is written
+ * into the user's checkout) but can NEVER host a workflow run (RunLauncher
+ * rejects them; the UI redirects the launch into a fresh worktree-backed
+ * session after a warning modal).
  *
  * Workflow-hosting sessions always use 'worktree' regardless of the global
  * default — ensureSessionForLaunch pins the mode explicitly.

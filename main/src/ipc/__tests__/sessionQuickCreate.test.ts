@@ -582,16 +582,12 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
 // ---------------------------------------------------------------------------
 
 describe('sessions:create-quick handler - worktree mode (migration 046)', () => {
-  /**
-   * Swap the harness configManager: the makeServices default lacks
-   * getDefaultSubstrate, which the in-place substrate pre-resolution calls
-   * eagerly (only the worktree path skips that branch).
-   */
+  /** Swap the harness configManager for worktree-mode-specific fakes. */
   function swapConfigManager(services: AppServices, configManager: Record<string, unknown>): void {
     (services as unknown as { configManager: Record<string, unknown> }).configManager = configManager;
   }
 
-  it('rejects an EXPLICIT in-place request when the substrate resolves interactive (SDK-only)', async () => {
+  it('creates an IN-PLACE session for an explicit in-place request under the interactive substrate (inline --settings gate — no checkout writes)', async () => {
     const { services, fakeTaskQueue } = makeServices();
     swapConfigManager(services, {
       isDemoMode: () => false,
@@ -607,12 +603,16 @@ describe('sessions:create-quick handler - worktree mode (migration 046)', () => 
       substrate: 'interactive',
     })) as { success: boolean; error?: string };
 
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/SDK runtime/);
-    expect(fakeTaskQueue.createSession).not.toHaveBeenCalled();
+    expect(result.success).toBe(true);
+    const callArg = (fakeTaskQueue.createSession as ReturnType<typeof vi.fn>).mock
+      .calls[0][0] as Record<string, unknown>;
+    expect(callArg.inPlace).toBe(true);
+    // Commit modes stay forced off regardless of substrate.
+    expect(callArg.autoCommit).toBe(false);
+    expect(callArg.commitMode).toBe('disabled');
   });
 
-  it("falls back to a WORKTREE session when 'in-place' is only inherited from the global default and the substrate resolves interactive", async () => {
+  it("honors an INHERITED in-place global default under the interactive substrate (no worktree fallback needed anymore)", async () => {
     const { services, fakeTaskQueue } = makeServices();
     swapConfigManager(services, {
       isDemoMode: () => false,
@@ -627,12 +627,10 @@ describe('sessions:create-quick handler - worktree mode (migration 046)', () => 
       substrate: 'interactive',
     })) as { success: boolean };
 
-    // The global default is a preference, not a hard pin — the Ultracode card,
-    // the PTY-only lock, and the no-args shortcut must keep working.
     expect(result.success).toBe(true);
     const callArg = (fakeTaskQueue.createSession as ReturnType<typeof vi.fn>).mock
       .calls[0][0] as Record<string, unknown>;
-    expect(callArg.inPlace).toBe(false);
+    expect(callArg.inPlace).toBe(true);
   });
 
   it('threads inPlace + forces commit modes off for an inherited in-place SDK create', async () => {
