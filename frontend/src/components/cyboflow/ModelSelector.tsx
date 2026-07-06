@@ -20,6 +20,16 @@ import { useModelAvailability } from '../../stores/modelAvailabilityStore';
 export const DEFAULT_QUICK_MODEL = 'opus';
 
 /**
+ * The Ultracode-launch default model — Fable 5, per product direction (ultracode
+ * is the "most capable, fan work out" mode, so it defaults to the frontier
+ * model). Only seeded when the availability snapshot says Fable is usable; the
+ * wizard falls back to {@link DEFAULT_QUICK_MODEL} otherwise. A mid-run
+ * availability flip is still safe — the spawn seam's
+ * `applyModelAvailabilityFallback` swaps an unavailable Fable to Opus.
+ */
+export const ULTRACODE_DEFAULT_MODEL = 'fable';
+
+/**
  * The workflow-launch default model — Opus, matching quick sessions (per product
  * direction). Threaded into runs.start.mutate({ model }) from the Configure surface
  * and stamped onto workflow_runs.model (migration 037). A run launched without a

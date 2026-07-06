@@ -106,6 +106,20 @@ vi.mock('../../IdeaPickerModal', () => ({
   ),
 }));
 
+// modelAvailabilityStore — controllable Fable availability (default: usable,
+// matching the store's optimistic empty snapshot). Flip
+// `modelAvailability.fableUnavailable` to grey Fable out for a test; the global
+// beforeEach resets it.
+const modelAvailability = vi.hoisted(() => ({ fableUnavailable: false }));
+vi.mock('../../../../stores/modelAvailabilityStore', () => ({
+  useModelAvailability: () => ({
+    isAliasUsable: (alias: string | null | undefined) =>
+      !(modelAvailability.fableUnavailable && alias === 'fable'),
+    unavailableReason: (alias: string | null | undefined) =>
+      modelAvailability.fableUnavailable && alias === 'fable' ? 'Currently unavailable' : null,
+  }),
+}));
+
 // API wrapper — projects (banner) + sessions.createQuick (quick launch).
 vi.mock('../../../../utils/api', () => ({
   API: {
@@ -205,6 +219,14 @@ async function selectQuickAndConfigure(): Promise<void> {
   await screen.findByTestId('wizard-step3');
 }
 
+/** Click the Ultracode card → auto-advances to ③ Configure. */
+async function selectUltracodeAndConfigure(): Promise<void> {
+  await act(async () => {
+    fireEvent.click(screen.getByTestId('ultracode-card'));
+  });
+  await screen.findByTestId('wizard-step3');
+}
+
 beforeEach(() => {
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
@@ -213,6 +235,7 @@ beforeEach(() => {
   });
   mockRunStart.mockClear();
   mockCreateQuick.mockClear();
+  modelAvailability.fableUnavailable = false;
   mockCreateQuick.mockResolvedValue({
     success: true,
     data: { jobId: 'job-001', sessionId: 'session-quick-001', worktreePath: '/tmp/quick-wt', runId: 'run-quick-001' },
@@ -541,6 +564,104 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     expect(mockCreateQuick).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: 1, claudeConfig: { model: 'sonnet', fastMode: false } }),
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ultracode configure + launch — the Ultracode card shares the quick session's
+// Configure controls (model picker + Advanced MCP/plugin disclosure) but pins
+// the interactive substrate (no selector) and defaults the model to Fable when
+// the availability snapshot says it's usable.
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — Ultracode configure + launch', () => {
+  it('shows the model picker (default Fable) + Advanced disclosure, hides substrate + fast mode', async () => {
+    await renderLockedWizard();
+    await selectUltracodeAndConfigure();
+
+    // Model picker defaults to Fable (available in this test) and appears in the
+    // launch summary; fast mode stays QUICK-only even though it's a quick-shaped
+    // launch.
+    const modelSelect = screen.getByLabelText('Select Claude model') as HTMLSelectElement;
+    expect(modelSelect.value).toBe('fable');
+    expect(screen.queryByTestId('wizard-fast-mode-row')).toBeNull();
+
+    // Substrate is pinned to interactive — no selector.
+    expect(screen.queryByLabelText('Select CLI substrate')).toBeNull();
+
+    // Advanced (MCP/plugin) disclosure is offered, same as a quick launch.
+    expect(screen.getByTestId('wizard-advanced-toggle')).toBeInTheDocument();
+    // No blueprint editor (nothing to edit).
+    expect(screen.queryByTestId('wizard-edit-flow')).toBeNull();
+  });
+
+  it('threads model + interactive substrate + ultracode effort into createQuick', async () => {
+    await renderLockedWizard();
+    await selectUltracodeAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).not.toHaveBeenCalled();
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: 1,
+        substrate: 'interactive',
+        effort: 'ultracode',
+        claudeConfig: { model: 'fable', fastMode: false },
+      }),
+    );
+  });
+
+  it('threads an explicit model override into an ultracode launch', async () => {
+    await renderLockedWizard();
+    await selectUltracodeAndConfigure();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select Claude model'), { target: { value: 'sonnet' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        effort: 'ultracode',
+        claudeConfig: { model: 'sonnet', fastMode: false },
+      }),
+    );
+  });
+
+  it('falls back to the Opus default when Fable is unavailable', async () => {
+    modelAvailability.fableUnavailable = true;
+    await renderLockedWizard();
+    await selectUltracodeAndConfigure();
+
+    const modelSelect = screen.getByLabelText('Select Claude model') as HTMLSelectElement;
+    expect(modelSelect.value).toBe('opus');
+  });
+
+  it('re-seeds per-launcher defaults on card bounce, but never clobbers an explicit choice', async () => {
+    await renderLockedWizard();
+
+    // Untouched: ultracode seeds Fable, bouncing back to quick re-seeds Opus.
+    await selectUltracodeAndConfigure();
+    expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('fable');
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-back-to-workflow'));
+    });
+    await selectQuickAndConfigure();
+    expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('opus');
+
+    // Touched: an explicit pick survives a bounce to ultracode.
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select Claude model'), { target: { value: 'sonnet' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-back-to-workflow'));
+    });
+    await selectUltracodeAndConfigure();
+    expect((screen.getByLabelText('Select Claude model') as HTMLSelectElement).value).toBe('sonnet');
   });
 });
 

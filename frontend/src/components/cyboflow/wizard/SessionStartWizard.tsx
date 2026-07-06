@@ -66,7 +66,8 @@ import { TaskBatchPickerModal } from '../TaskBatchPickerModal';
 import { CreateProjectDialog } from '../../CreateProjectDialog';
 import { AgentPermissionModeSelector, PERMISSION_MODE_OPTIONS } from '../AgentPermissionModeSelector';
 import { SubstrateSelector } from '../SubstrateSelector';
-import { ModelSelector, DEFAULT_QUICK_MODEL } from '../ModelSelector';
+import { ModelSelector, DEFAULT_QUICK_MODEL, ULTRACODE_DEFAULT_MODEL } from '../ModelSelector';
+import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
 import { isOpusModel, modelDisplayLabel } from '../unified/ModelPill';
 import { McpTogglePill } from '../unified/McpTogglePill';
 import { PluginTogglePill } from '../unified/PluginTogglePill';
@@ -204,14 +205,37 @@ export default function SessionStartWizard(): React.JSX.Element {
   // (→ sessions.substrate) for quick launches.
   const { mode: permissionMode, setMode: setPermissionMode } = useAgentPermissionMode();
   const [substrate, setSubstrate] = useState<CliSubstrate>(DEFAULT_SUBSTRATE);
-  // Per-launch Claude model for the QUICK session AND workflow runs (Configure ③).
-  // Defaults to Opus (DEFAULT_QUICK_MODEL === DEFAULT_WORKFLOW_MODEL); pinned to a
-  // concrete snapshot at the spawn seam. Quick threads it into useQuickSession;
-  // workflow threads it into runs.start ({ model }) → workflow_runs.model
-  // (migration 037). Fast mode is the premium Opus-only research preview — a
-  // separate opt-in, default OFF, QUICK-only, surfaced only while Opus is selected.
+  // Per-launch Claude model for QUICK, ULTRACODE and workflow launches (Configure
+  // ③). Defaults to Opus (DEFAULT_QUICK_MODEL === DEFAULT_WORKFLOW_MODEL); the
+  // Ultracode card re-seeds Fable when the availability snapshot says it's usable
+  // (see seedDefaultModelFor). Pinned to a concrete snapshot at the spawn seam.
+  // Quick/ultracode thread it into useQuickSession; workflow threads it into
+  // runs.start ({ model }) → workflow_runs.model (migration 037). Fast mode is
+  // the premium Opus-only research preview — a separate opt-in, default OFF,
+  // QUICK-only, surfaced only while Opus is selected.
   const [model, setModel] = useState<string>(DEFAULT_QUICK_MODEL);
   const [fastMode, setFastMode] = useState<boolean>(false);
+  // Whether the user explicitly picked a model this wizard visit. Card selection
+  // seeds a per-launcher DEFAULT (quick/workflow → Opus, ultracode → Fable when
+  // available) but must never clobber an explicit choice when the user bounces
+  // between cards, so seeding is gated on this latch.
+  const modelTouchedRef = useRef(false);
+  const { isAliasUsable } = useModelAvailability();
+  // Seed the per-launcher default model on card selection (no-op once touched).
+  // Fable availability is read optimistically — if the snapshot hasn't arrived
+  // (or flips later), the spawn seam's availability fallback still degrades an
+  // unavailable Fable to Opus, and the picker surfaces the grey-out note.
+  const seedDefaultModelFor = useCallback(
+    (kind: WizardSelection['kind']) => {
+      if (modelTouchedRef.current) return;
+      setModel(
+        kind === 'ultracode' && isAliasUsable(ULTRACODE_DEFAULT_MODEL)
+          ? ULTRACODE_DEFAULT_MODEL
+          : DEFAULT_QUICK_MODEL,
+      );
+    },
+    [isAliasUsable],
+  );
   // Advanced (Configure ③, WORKFLOW only): per-run code-review-eval override.
   // 'inherit' → omit `evalEnabled` (the run inherits the global codeReviewEvalEnabled
   // setting); 'on'/'off' → send true/false → workflow_runs.eval_enabled (migration
@@ -598,7 +622,20 @@ export default function SessionStartWizard(): React.JSX.Element {
       // Ultracode is an interactive session in ultracode mode: pin the substrate
       // to 'interactive' (PTY is required for the live REPL + dynamic-workflow
       // detection) and thread `effort: 'ultracode'` → the ultracode setting.
-      void startQuickSession(permissionMode, 'interactive', 'ultracode');
+      // The Configure model (default Fable when available) + Advanced MCP/plugin
+      // selections thread exactly like a quick launch — the interactive eager
+      // spawn receives the model via claudeConfig and enforces the deny/plugin
+      // sets. Fast mode stays QUICK-only (its toggle never shows here).
+      const pluginSelection = sameStringSet(enabledPlugins, pluginBaseline) ? undefined : enabledPlugins;
+      void startQuickSession(
+        permissionMode,
+        'interactive',
+        'ultracode',
+        model,
+        false,
+        disabledMcpServers,
+        pluginSelection,
+      );
       return;
     }
 
@@ -747,6 +784,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                 selected={selection?.kind === 'quick'}
                 onSelect={() => {
                   setSelection({ kind: 'quick' });
+                  seedDefaultModelFor('quick');
                   setStep(3);
                 }}
               />
@@ -759,6 +797,7 @@ export default function SessionStartWizard(): React.JSX.Element {
               selected={selection?.kind === 'ultracode'}
               onSelect={() => {
                 setSelection({ kind: 'ultracode' });
+                seedDefaultModelFor('ultracode');
                 setStep(3);
               }}
             />
@@ -796,6 +835,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                     // state — it never calls setStep — so the wizard does NOT
                     // auto-jump on load; only a user click advances.
                     setSelection({ kind: 'workflow', workflowId: meta.id });
+                    seedDefaultModelFor('workflow');
                     setStep(3);
                   }}
                 />
@@ -814,22 +854,22 @@ export default function SessionStartWizard(): React.JSX.Element {
                 sole execution authority) for either launch kind. */}
             <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
 
-            {/* Model picker — shown for QUICK and WORKFLOW launches. Quick threads
-                it into useQuickSession (→ the claude panel); workflow threads it
-                into runs.start ({ model }) → workflow_runs.model (migration 037).
-                Hidden for Ultracode, which pins its own interactive model. Fast mode
-                (Opus-only premium research preview) stays QUICK-only. */}
-            {(selection.kind === 'quick' || selection.kind === 'workflow') && (
-              <ModelSelector
-                value={model}
-                onChange={(m) => {
-                  setModel(m);
-                  // Fast mode is Opus-only; drop it when leaving Opus.
-                  if (!isOpusModel(m)) setFastMode(false);
-                }}
-                id="wizard-model"
-              />
-            )}
+            {/* Model picker — shown for ALL launch kinds. Quick + ultracode thread
+                it into useQuickSession (→ the claude panel / interactive eager
+                spawn); workflow threads it into runs.start ({ model }) →
+                workflow_runs.model (migration 037). Ultracode defaults to Fable
+                when available (seedDefaultModelFor). Fast mode (Opus-only premium
+                research preview) stays QUICK-only. */}
+            <ModelSelector
+              value={model}
+              onChange={(m) => {
+                modelTouchedRef.current = true;
+                setModel(m);
+                // Fast mode is Opus-only; drop it when leaving Opus.
+                if (!isOpusModel(m)) setFastMode(false);
+              }}
+              id="wizard-model"
+            />
             {selection.kind === 'quick' && isOpusModel(model) && (
               <div
                 data-testid="wizard-fast-mode-row"
@@ -863,17 +903,18 @@ export default function SessionStartWizard(): React.JSX.Element {
               />
             )}
 
-            {/* Advanced (QUICK, both substrates): MCP / plugin selection. These are
-                a session-START decision — the deny-list is enforced at the first
-                spawn, so toggling mid-conversation was confusing and could leak a
-                disabled server back via the CLI's settingSources auto-load. Both
-                substrates now enforce the selection: SDK (composeMcpServers delete +
-                strictMcpConfig + disallowedTools) and interactive PTY
-                (--disallowed-tools mcp__<srv> + disabledMcpjsonServers +
-                enabledPlugins via --settings), so the controls show for BOTH quick
-                substrates. Collapsed by default; the pills are controlled (no
-                sessionId yet → wizard owns the state and threads it into createQuick). */}
-            {selection.kind === 'quick' && (
+            {/* Advanced (QUICK + ULTRACODE, both substrates): MCP / plugin
+                selection. These are a session-START decision — the deny-list is
+                enforced at the first spawn, so toggling mid-conversation was
+                confusing and could leak a disabled server back via the CLI's
+                settingSources auto-load. Both substrates enforce the selection:
+                SDK (composeMcpServers delete + strictMcpConfig + disallowedTools)
+                and interactive PTY (--disallowed-tools mcp__<srv> +
+                disabledMcpjsonServers + enabledPlugins via --settings) — ultracode
+                is an interactive quick session, so it gets the same controls.
+                Collapsed by default; the pills are controlled (no sessionId yet →
+                wizard owns the state and threads it into createQuick). */}
+            {(selection.kind === 'quick' || selection.kind === 'ultracode') && (
               <div className="rounded-button border border-border-secondary bg-surface-secondary">
                 <button
                   type="button"
@@ -1077,9 +1118,8 @@ export default function SessionStartWizard(): React.JSX.Element {
                     : 'SDK'
                 }
               />
-              {(selection.kind === 'quick' || selection.kind === 'workflow') && (
-                <SummaryRow label="Model" value={modelDisplayLabel(model)} />
-              )}
+              <SummaryRow label="Model" value={modelDisplayLabel(model)} />
+
               {selection.kind === 'quick' && isOpusModel(model) && (
                 <SummaryRow label="Fast mode" value={fastMode ? 'On' : 'Off'} />
               )}
