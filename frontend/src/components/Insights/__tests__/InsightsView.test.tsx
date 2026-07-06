@@ -158,7 +158,7 @@ beforeEach(() => {
   mockGetAll = async () => ({ success: true, data: [] });
   mockWorkflowStats = [];
   mockWorkflowUsage = [];
-  mockReviewSummary = { total: 0, pending: 0, resolved: 0, dismissed: 0, pendingByKind: { finding: 0, permission: 0, decision: 0, human_task: 0 } };
+  mockReviewSummary = { total: 0, pending: 0, resolved: 0, dismissed: 0, pendingByKind: { finding: 0, permission: 0, decision: 0, human_task: 0, notification: 0 } };
   mockQualityFindings = [];
   mockTriageFindings = [];
   mockStepTokens = {};

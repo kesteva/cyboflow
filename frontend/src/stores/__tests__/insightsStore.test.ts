@@ -147,7 +147,7 @@ function makeSummary(): ReviewItemSummary {
     pending: 2,
     resolved: 1,
     dismissed: 0,
-    pendingByKind: { finding: 1, permission: 0, decision: 1, human_task: 0 },
+    pendingByKind: { finding: 1, permission: 0, decision: 1, human_task: 0, notification: 0 },
   };
 }
 

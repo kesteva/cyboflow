@@ -308,7 +308,7 @@ describe('cyboflow.insights.reviewSummary', () => {
     pending: 3,
     resolved: 1,
     dismissed: 1,
-    pendingByKind: { finding: 1, permission: 1, decision: 1, human_task: 0 },
+    pendingByKind: { finding: 1, permission: 1, decision: 1, human_task: 0, notification: 0 },
   };
 
   it('forwards projectId and returns the summary verbatim', async () => {

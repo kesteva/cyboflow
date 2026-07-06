@@ -76,9 +76,9 @@ export function upsertReviewItem(list: ReviewItem[], item: ReviewItem): ReviewIt
 
 /**
  * Flatten the per-project review buckets into a single list of the items the
- * landing home surfaces: pending DECISION + HUMAN_TASK items only. Findings are
- * non-blocking noise here and permission gates belong to the real-time approval
- * queue (useReviewQueueStore), so both are dropped.
+ * landing home surfaces: pending DECISION + HUMAN_TASK + NOTIFICATION items.
+ * Findings are non-blocking noise here and permission gates belong to the
+ * real-time approval queue (useReviewQueueStore), so both are dropped.
  */
 export function flattenPendingReviewItems(
   byProject: Record<number, ReviewItem[]>,
@@ -88,7 +88,7 @@ export function flattenPendingReviewItems(
     for (const item of list) {
       if (
         item.status === 'pending' &&
-        (item.kind === 'decision' || item.kind === 'human_task')
+        (item.kind === 'decision' || item.kind === 'human_task' || item.kind === 'notification')
       ) {
         out.push(item);
       }
@@ -307,9 +307,9 @@ export const useLandingProjects = (): Project[] => useLandingStore((s) => s.proj
 export const useProjectsCount = (): number => useLandingStore((s) => s.projects.length);
 
 /**
- * Pending DECISION + HUMAN_TASK items across all projects. Derived from the
- * stable `reviewItemsByProject` slice via useMemo so it does not return a fresh
- * array reference every render (which would loop the subscriber).
+ * Pending DECISION + HUMAN_TASK + NOTIFICATION items across all projects.
+ * Derived from the stable `reviewItemsByProject` slice via useMemo so it does
+ * not return a fresh array reference every render (which would loop the subscriber).
  */
 export function useAggregatedReviewItems(): ReviewItem[] {
   const byProject = useLandingStore((s) => s.reviewItemsByProject);

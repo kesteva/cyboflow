@@ -380,6 +380,11 @@ export class ReviewItemRouter {
       );
     }
 
+    // ----- notifications are informational: they can NEVER block a run -----
+    if (change.kind === 'notification' && change.blocking) {
+      throw new ReviewItemError('invalid_payload', 'a notification review item cannot be blocking');
+    }
+
     const blocking = change.blocking ? 1 : 0;
     const severity = change.severity ?? null;
     const source = change.source ?? null;

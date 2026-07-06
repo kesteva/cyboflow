@@ -207,8 +207,12 @@ export type McpQueryMessage =
       body: string;
       /** Only meaningful for findings; stored on the row as given. */
       severity?: ReviewItemSeverity;
-      /** Item kind; the MCP tool excludes 'permission' (folded via the approval path). Defaults to 'finding'. */
-      kind?: Exclude<ReviewItemKind, 'permission'>;
+      /**
+       * Item kind; the MCP tool excludes 'permission' (folded via the approval
+       * path) AND 'notification' (orchestrator-minted only — agents cannot file
+       * a notification). Defaults to 'finding'.
+       */
+      kind?: Exclude<ReviewItemKind, 'permission' | 'notification'>;
       /** Whether this item gates run resume; defaults to false (findings are non-blocking). */
       blocking?: boolean;
       /** Soft polymorphic entity link — both must be set together or both omitted. */
@@ -1729,7 +1733,9 @@ export class McpQueryHandler {
       return;
     }
 
-    const kind: Exclude<ReviewItemKind, 'permission'> = msg.kind ?? 'finding';
+    // 'notification' is orchestrator-minted only (agents cannot file one), so the
+    // MCP report_finding tool excludes it alongside 'permission'.
+    const kind: Exclude<ReviewItemKind, 'permission' | 'notification'> = msg.kind ?? 'finding';
 
     // Soft entity-link guard (both set together or both omitted) — surfaced
     // synchronously through writeReviewItemError so the caller gets the SAME

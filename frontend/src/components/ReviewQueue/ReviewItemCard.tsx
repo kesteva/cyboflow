@@ -1,28 +1,28 @@
 /**
  * ReviewItemCard — kind-polymorphic card for the unified review_items inbox.
  *
- * Renders one of the four review-item kinds (finding | permission | decision |
- * human_task) with kind-specific chrome and triage actions:
+ * Renders one of the five review-item kinds (finding | permission | decision |
+ * human_task | notification) with kind-specific chrome and triage actions:
  *
- *   - finding    — a non-blocking observation. Triage: Dismiss / Promote to task.
- *                  When the reporting agent carries an accept-routing hint
- *                  (payload.proposedTarget), the card renders a '→ TARGET' chip
- *                  and makes the primary action CONTEXTUAL: 'backlog' keeps
- *                  Promote-to-task (relabelled 'Accept → task'); 'docs'/'prompt'
- *                  surface an 'Accept' that resolves with 'triaged:accepted-<target>'
- *                  (the human applies the edit). No hint = today's exact actions.
- *   - permission — a real-time PreToolUse/approval gate (blocking). Reuses the
- *                  APPROVAL resolution path: Approve / Reject route to
- *                  cyboflow.approvals.approve / reject via the folded approvalId.
- *   - decision   — an approve-idea / approve-plan gate (blocking). Resolving it
- *                  via reviewItems.resolve triggers aggregate-unblock → the
- *                  paused run auto-resumes (FLOW ADVANCEMENT). Surfaces "Approve"
- *                  (resolve) / "Reject" (dismiss).
- *   - human_task — a free-form action item (blocking per-item). Triage:
- *                  Resolve / Dismiss / Promote to task. A dynamic-workflow
- *                  finished/stalled notification (source = 'dynamic_workflow')
- *                  is informational — the work already ran — so it offers only
- *                  Dismiss.
+ *   - finding      — a non-blocking observation. Triage: Dismiss / Promote to task.
+ *                    When the reporting agent carries an accept-routing hint
+ *                    (payload.proposedTarget), the card renders a '→ TARGET' chip
+ *                    and makes the primary action CONTEXTUAL: 'backlog' keeps
+ *                    Promote-to-task (relabelled 'Accept → task'); 'docs'/'prompt'
+ *                    surface an 'Accept' that resolves with 'triaged:accepted-<target>'
+ *                    (the human applies the edit). No hint = today's exact actions.
+ *   - permission   — a real-time PreToolUse/approval gate (blocking). Reuses the
+ *                    APPROVAL resolution path: Approve / Reject route to
+ *                    cyboflow.approvals.approve / reject via the folded approvalId.
+ *   - decision     — an approve-idea / approve-plan gate (blocking). Resolving it
+ *                    via reviewItems.resolve triggers aggregate-unblock → the
+ *                    paused run auto-resumes (FLOW ADVANCEMENT). Surfaces "Approve"
+ *                    (resolve) / "Reject" (dismiss).
+ *   - human_task   — a free-form action item (blocking per-item). Triage:
+ *                    Resolve / Dismiss / Promote to task.
+ *   - notification — an informational FYI (e.g. a dynamic workflow finished /
+ *                    stalled). The work already ran, so its only triage is
+ *                    Dismiss — no Resolve, no Promote-to-task.
  *
  * A blocking badge renders on any item with `blocking === true`. The card owns
  * no validation — every action delegates to a chokepoint via the actions hook
@@ -34,7 +34,6 @@ import { formatAge } from '../../utils/approvalFormatters';
 import { trackEvent } from '../../utils/telemetry';
 import { trpc } from '../../trpc/client';
 import type { ReviewItem, ReviewItemKind, FindingProposedTarget } from '../../../../shared/types/reviews';
-import { DYNAMIC_WORKFLOW_REVIEW_SOURCE } from '../../../../shared/types/dynamicWorkflows';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
@@ -62,6 +61,7 @@ const KIND_LABEL: Record<ReviewItemKind, string> = {
   permission: 'Permission',
   decision: 'Decision',
   human_task: 'Action',
+  notification: 'Notice',
 };
 
 const KIND_ACCENT: Record<ReviewItemKind, string> = {
@@ -69,6 +69,7 @@ const KIND_ACCENT: Record<ReviewItemKind, string> = {
   permission: 'text-status-error',
   decision: 'text-interactive',
   human_task: 'text-status-warning',
+  notification: 'text-text-tertiary',
 };
 
 interface ReviewItemCardProps {
@@ -249,17 +250,15 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
             </Button>
           </>
         );
+      case 'notification':
+        // An informational FYI — the work already ran, so there is no follow-up
+        // to track. Acknowledging (Dismiss) is the only triage.
+        return (
+          <Button variant="secondary" size="sm" disabled={busy} onClick={handleDismiss}>
+            Dismiss
+          </Button>
+        );
       case 'human_task':
-        // A dynamic-workflow completion notice has no follow-up work to track:
-        // Resolve and Promote-to-task would imply an action item where there is
-        // none, so acknowledging (Dismiss) is the only triage.
-        if (item.source === DYNAMIC_WORKFLOW_REVIEW_SOURCE) {
-          return (
-            <Button variant="secondary" size="sm" disabled={busy} onClick={handleDismiss}>
-              Dismiss
-            </Button>
-          );
-        }
         return (
           <>
             <Button variant="primary" size="sm" disabled={busy} onClick={handleResolve}>

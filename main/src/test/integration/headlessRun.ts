@@ -100,7 +100,7 @@ export interface HeadlessRunHandle {
 export interface ReviewItemRow {
   id: string;
   run_id: string | null;
-  kind: 'finding' | 'permission' | 'decision' | 'human_task';
+  kind: 'finding' | 'permission' | 'decision' | 'human_task' | 'notification';
   status: 'pending' | 'resolved' | 'dismissed';
   blocking: number;
   title: string;

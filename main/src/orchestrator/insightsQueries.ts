@@ -772,7 +772,7 @@ export function selectReviewItemSummary(
     pending: 0,
     resolved: 0,
     dismissed: 0,
-    pendingByKind: { finding: 0, permission: 0, decision: 0, human_task: 0 },
+    pendingByKind: { finding: 0, permission: 0, decision: 0, human_task: 0, notification: 0 },
   };
 
   for (const row of statusRows) {
@@ -803,7 +803,8 @@ export function selectReviewItemSummary(
       row.kind === 'finding' ||
       row.kind === 'permission' ||
       row.kind === 'decision' ||
-      row.kind === 'human_task'
+      row.kind === 'human_task' ||
+      row.kind === 'notification'
     ) {
       summary.pendingByKind[row.kind] = row.count;
     }

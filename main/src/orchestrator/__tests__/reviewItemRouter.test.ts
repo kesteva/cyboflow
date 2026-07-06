@@ -37,7 +37,7 @@ import type { DatabaseLike } from '../types';
 import type { ReviewItemChangedEvent } from '../../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
-// Test DB builder: projects + 006 + 011 + 014 + 015 + 016 + 034.
+// Test DB builder: projects + 006 + 011 + 014 + 015 + 016 + 034 + 046.
 // ---------------------------------------------------------------------------
 
 function buildDb(): Database.Database {
@@ -64,6 +64,8 @@ function buildDb(): Database.Database {
   // 034 adds the finding-triage columns (priority/staged_at/selected) the
   // mutate/approve/set-selected ops read + write.
   db.exec(readFileSync(join(migDir, '034_findings_triage.sql'), 'utf-8'));
+  // 046 widens the kind CHECK to accept the 'notification' kind.
+  db.exec(readFileSync(join(migDir, '046_notification_kind.sql'), 'utf-8'));
   return db;
 }
 
@@ -144,7 +146,7 @@ describe('ReviewItemRouter (unified review inbox)', () => {
   // create — all 4 kinds
   // -------------------------------------------------------------------------
 
-  it.each(['finding', 'permission', 'decision', 'human_task'] as const)(
+  it.each(['finding', 'permission', 'decision', 'human_task', 'notification'] as const)(
     'creates a %s review item (rvw_ id, status=pending, created entity_event)',
     async (kind) => {
       const db = buildDb();
@@ -205,6 +207,41 @@ describe('ReviewItemRouter (unified review inbox)', () => {
     expect(row.severity).toBe('warning');
     expect(row.source).toBe('approval');
     expect(row.run_id).toBe('run-1');
+  });
+
+  it('rejects a blocking notification but creates a non-blocking one fine', async () => {
+    const db = buildDb();
+    const router = ReviewItemRouter.initialize(dbAdapter(db));
+
+    // Blocking notification — informational items can never gate a run.
+    await expect(
+      router.applyReviewItem(1, {
+        op: 'create',
+        actor: 'orchestrator',
+        kind: 'notification',
+        title: 'Dynamic workflow finished',
+        blocking: true,
+      }),
+    ).rejects.toMatchObject({ code: 'invalid_payload' });
+
+    // Non-blocking notification with a payload creates fine.
+    const { reviewItemId } = await router.applyReviewItem(1, {
+      op: 'create',
+      actor: 'orchestrator',
+      kind: 'notification',
+      title: 'Dynamic workflow finished',
+      blocking: false,
+      payload: { kind: 'notification', notificationType: 'dynamic-workflow-finished' },
+    });
+    const row = db
+      .prepare('SELECT kind, blocking, payload_json FROM review_items WHERE id = ?')
+      .get(reviewItemId) as { kind: string; blocking: number; payload_json: string };
+    expect(row.kind).toBe('notification');
+    expect(row.blocking).toBe(0);
+    expect(JSON.parse(row.payload_json)).toEqual({
+      kind: 'notification',
+      notificationType: 'dynamic-workflow-finished',
+    });
   });
 
   // -------------------------------------------------------------------------

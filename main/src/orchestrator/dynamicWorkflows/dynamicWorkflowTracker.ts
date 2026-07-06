@@ -10,7 +10,7 @@
  * run failed. Every state change emits on `dynamicWorkflowEvents` ('changed',
  * DynamicWorkflowChangedEvent) for the tRPC subscription bridge.
  *
- * Finalization creates a non-blocking human_task review item via the
+ * Finalization creates a non-blocking `notification` review item via the
  * ReviewItemRouter chokepoint (source = DYNAMIC_WORKFLOW_REVIEW_SOURCE);
  * `resolveReviewItemsForSession` is the merge/dismiss auto-resolve sweep.
  *
@@ -342,7 +342,7 @@ export class DynamicWorkflowTracker {
         'Audited 4 dimensions across the worktree. 3 findings confirmed (1 correctness, 1 N+1 query, 1 missing validation), 1 dismissed as a false positive. Fixes queued as tasks.';
       state.totals = { agentCount: 4, totalTokens: 31200, totalToolCalls: 46, durationMs: 9500 };
       this.emitChanged(state);
-      this.createReviewItem(state, `Dynamic workflow finished: ${state.name}`);
+      this.createReviewItem(state, `Dynamic workflow finished: ${state.name}`, 'dynamic-workflow-finished');
     }, 9800);
     this.demoTimers.add(finishTimer);
   }
@@ -562,7 +562,7 @@ export class DynamicWorkflowTracker {
     state.completedAt = new Date().toISOString();
     this.tailers.get(state.wfRunId)?.stop();
     this.emitChanged(state);
-    this.createReviewItem(state, `Dynamic workflow finished: ${state.name}`);
+    this.createReviewItem(state, `Dynamic workflow finished: ${state.name}`, 'dynamic-workflow-finished');
   }
 
   /** Stall path: mark failed AND surface a review item so the user is pointed at it. */
@@ -572,15 +572,17 @@ export class DynamicWorkflowTracker {
     state.completedAt = new Date().toISOString();
     this.tailers.get(state.wfRunId)?.stop(); // tailer stopped itself already — idempotent
     this.emitChanged(state);
-    this.createReviewItem(state, `Dynamic workflow stalled: ${state.name}`);
+    this.createReviewItem(state, `Dynamic workflow stalled: ${state.name}`, 'dynamic-workflow-stalled');
   }
 
   /**
-   * Create the non-blocking human_task review item through the ReviewItemRouter
-   * chokepoint. Fail-soft: a sentinel projectId (failed session lookup) skips
-   * creation; getInstance() throwing (uninitialized in tests) logs a WARN.
+   * Create the non-blocking `notification` review item through the
+   * ReviewItemRouter chokepoint (`notificationType` tags whether the workflow
+   * finished or stalled). Fail-soft: a sentinel projectId (failed session
+   * lookup) skips creation; getInstance() throwing (uninitialized in tests)
+   * logs a WARN.
    */
-  private createReviewItem(state: DynamicWorkflowRunState, title: string): void {
+  private createReviewItem(state: DynamicWorkflowRunState, title: string, notificationType: string): void {
     if (state.projectId === PROJECT_ID_SENTINEL) {
       this.logger?.warn(
         `[dynamicWorkflowTracker] skipping review item for ${state.wfRunId} — session lookup failed at launch`,
@@ -600,12 +602,13 @@ export class DynamicWorkflowTracker {
         .applyReviewItem(state.projectId, {
           op: 'create',
           actor: 'orchestrator',
-          kind: 'human_task',
+          kind: 'notification',
           title,
           body: bodyLines.join('\n'),
           blocking: false,
           runId: state.runId,
           source: DYNAMIC_WORKFLOW_REVIEW_SOURCE,
+          payload: { kind: 'notification', notificationType },
         })
         .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);

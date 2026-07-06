@@ -2,11 +2,12 @@
  * Component tests for ReviewItemCard — the kind-polymorphic review_items card.
  *
  * Covers:
- *   - all FOUR kinds render with their kind label.
+ *   - all FIVE kinds render with their kind label.
  *   - the blocking badge renders only when item.blocking === true.
  *   - decision Approve routes to reviewItems.resolve (flow advancement).
  *   - finding/human_task Promote routes to reviewItems.promoteToTask.
  *   - human_task Dismiss routes to reviewItems.dismiss.
+ *   - a notification offers ONLY Dismiss (no Resolve / Promote) → reviewItems.dismiss.
  *   - permission Approve/Reject reuse the approval resolution path
  *     (cyboflow.approvals.approve/reject via the folded approvalId).
  *   - finding accept-routing: a proposedTarget renders the '→ TARGET' chip and
@@ -96,12 +97,13 @@ beforeEach(() => {
 });
 
 describe('ReviewItemCard', () => {
-  it('renders all four kinds with their kind label', () => {
+  it('renders all five kinds with their kind label', () => {
     const kinds: Array<[ReviewItemKind, string]> = [
       ['finding', 'Finding'],
       ['permission', 'Permission'],
       ['decision', 'Decision'],
       ['human_task', 'Action'],
+      ['notification', 'Notice'],
     ];
     for (const [kind, label] of kinds) {
       const { unmount } = render(<ReviewItemCard item={makeItem(kind)} />);
@@ -147,12 +149,13 @@ describe('ReviewItemCard', () => {
     await waitFor(() => expect(mockDismiss).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_ht' }));
   });
 
-  it('a dynamic-workflow human_task offers ONLY Dismiss (no Resolve / Promote)', async () => {
-    render(<ReviewItemCard item={makeItem('human_task', { id: 'rvw_dyn', source: 'dynamic_workflow' })} />);
+  it('a notification renders the Notice label and offers ONLY Dismiss (no Resolve / Promote)', async () => {
+    render(<ReviewItemCard item={makeItem('notification', { id: 'rvw_note', source: 'dynamic_workflow' })} />);
+    expect(screen.getByTestId('review-item-kind')).toHaveTextContent('Notice');
     expect(screen.queryByText('Resolve')).not.toBeInTheDocument();
     expect(screen.queryByTestId('promote-to-task')).not.toBeInTheDocument();
     fireEvent.click(screen.getByText('Dismiss'));
-    await waitFor(() => expect(mockDismiss).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_dyn' }));
+    await waitFor(() => expect(mockDismiss).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_note' }));
   });
 
   it('permission Approve reuses the approval resolution path (folded approvalId)', async () => {

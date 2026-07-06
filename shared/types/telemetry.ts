@@ -42,7 +42,7 @@ export interface TelemetryEventMap {
 
   // ── Tier 2 — human-in-the-loop + feature breadth ────────────────────────────
   review_item_resolved: {
-    kind: 'finding' | 'permission' | 'decision' | 'human_task';
+    kind: 'finding' | 'permission' | 'decision' | 'human_task' | 'notification';
     // 'approve' / 'reject' are the explicit programmatic human-gate verdicts
     // (reviewItems.resolve `outcome`); 'resolve'/'dismiss'/'promote_to_task' are
     // the generic triage actions.

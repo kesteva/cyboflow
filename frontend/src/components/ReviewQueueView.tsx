@@ -1,18 +1,20 @@
 /**
  * ReviewQueueView — the unified human-attention inbox.
  *
- * Surfaces all FOUR review_item kinds alongside the existing real-time approval
+ * Surfaces all FIVE review_item kinds alongside the existing real-time approval
  * (permission) gates:
- *   - permission — rendered from the legacy approval store (real-time PreToolUse
- *                  gates) via PendingApprovalCard, partitioned blocking/pending
- *                  by age. These ARE the permission kind; the review_items slice
- *                  folds them too, so we render permission review_items from the
- *                  approval path only (no double-render).
- *   - decision   — approve-idea / approve-plan gates. Resolving advances the flow
- *                  (aggregate-unblock auto-resume) via reviewItems.resolve.
- *   - human_task — free-form action items (blocking per-item).
- *   - finding    — non-blocking observations, in a SEPARATE collapsible section
- *                  so blocking items stay prominent.
+ *   - permission   — rendered from the legacy approval store (real-time PreToolUse
+ *                    gates) via PendingApprovalCard, partitioned blocking/pending
+ *                    by age. These ARE the permission kind; the review_items slice
+ *                    folds them too, so we render permission review_items from the
+ *                    approval path only (no double-render).
+ *   - decision     — approve-idea / approve-plan gates. Resolving advances the flow
+ *                    (aggregate-unblock auto-resume) via reviewItems.resolve.
+ *   - human_task   — free-form action items (blocking per-item).
+ *   - notification — informational FYIs (never blocking) in their own section;
+ *                    the only triage is Dismiss.
+ *   - finding      — non-blocking observations, in a SEPARATE collapsible section
+ *                    so blocking items stay prominent.
  *
  * Project-scoped review_items come from {@link useReviewItemsSlice} (init on the
  * active projectId). The global approval queue ({@link useReviewQueueStore})
@@ -138,13 +140,14 @@ export default function ReviewQueueView({ projectId = null }: ReviewQueueViewPro
   // it belongs in the prominent Blocking section (with a resolve-and-resume
   // affordance), NOT the collapsed non-blocking Findings section. Non-blocking
   // findings stay Insights-only in spirit (the collapsed section here).
-  const { decisionItems, humanTaskItems, blockingFindingItems, findingItems } = useMemo(() => {
+  const { decisionItems, humanTaskItems, blockingFindingItems, notificationItems, findingItems } = useMemo(() => {
     const pending = reviewItems.filter((it) => it.status === 'pending');
     const findings = pending.filter((it): it is ReviewItem => it.kind === 'finding');
     return {
       decisionItems: pending.filter((it): it is ReviewItem => it.kind === 'decision'),
       humanTaskItems: pending.filter((it): it is ReviewItem => it.kind === 'human_task'),
       blockingFindingItems: findings.filter((it) => it.blocking),
+      notificationItems: pending.filter((it): it is ReviewItem => it.kind === 'notification'),
       findingItems: findings.filter((it) => !it.blocking),
     };
   }, [reviewItems]);
@@ -159,7 +162,10 @@ export default function ReviewQueueView({ projectId = null }: ReviewQueueViewPro
     }
   }, [focusedIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const reviewItemCount = decisionItems.length + humanTaskItems.length + blockingFindingItems.length;
+  // Notifications count toward the total but NEVER toward blocking (they are
+  // informational FYIs — the chokepoint rejects a blocking notification).
+  const reviewItemCount =
+    decisionItems.length + humanTaskItems.length + blockingFindingItems.length + notificationItems.length;
   const totalCount = queue.length + reviewItemCount;
   // Blocking = aged-blocking approvals + any blocking review_item
   // (decision / human_task / blocking finding).
@@ -241,6 +247,17 @@ export default function ReviewQueueView({ projectId = null }: ReviewQueueViewPro
                 </section>
               )}
             </>
+          )}
+
+          {/* Notifications — informational FYIs (never blocking). Their own
+              section so they don't crowd the blocking items; only triage is Dismiss. */}
+          {notificationItems.length > 0 && (
+            <section className="mt-6" data-testid="review-notifications-section">
+              <h3 className="eyebrow mb-2 mt-3 text-text-tertiary">Notifications</h3>
+              {notificationItems.map((it) => (
+                <ReviewItemCard key={it.id} item={it} />
+              ))}
+            </section>
           )}
 
           {/* Findings — a SEPARATE, collapsible section (non-blocking). Kept out

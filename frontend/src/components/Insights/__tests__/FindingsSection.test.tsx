@@ -323,7 +323,7 @@ beforeEach(() => {
       pending: 0,
       resolved: 0,
       dismissed: 0,
-      pendingByKind: { finding: 0, permission: 0, decision: 0, human_task: 0 },
+      pendingByKind: { finding: 0, permission: 0, decision: 0, human_task: 0, notification: 0 },
     },
     qualityFindings: [],
     projectFilter: null,
@@ -429,7 +429,7 @@ describe('FindingsSection — row actions', () => {
       pending: 2,
       resolved: 0,
       dismissed: 0,
-      pendingByKind: { finding: 2, permission: 0, decision: 0, human_task: 0 },
+      pendingByKind: { finding: 2, permission: 0, decision: 0, human_task: 0, notification: 0 },
     };
     render(<FindingsSection />);
     expect(screen.getByTestId('findings-counter-dismissed')).toHaveTextContent('0');

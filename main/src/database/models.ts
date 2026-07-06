@@ -381,7 +381,7 @@ export interface ReviewItemRow {
   run_id: string | null;
   entity_type: 'idea' | 'epic' | 'task' | null;
   entity_id: string | null;
-  kind: 'finding' | 'permission' | 'decision' | 'human_task';
+  kind: 'finding' | 'permission' | 'decision' | 'human_task' | 'notification';
   status: 'pending' | 'resolved' | 'dismissed';
   blocking: number; // 0 | 1
   title: string;

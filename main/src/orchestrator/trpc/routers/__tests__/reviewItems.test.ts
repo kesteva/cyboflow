@@ -62,6 +62,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '034_findings_triage.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '046_notification_kind.sql'), 'utf-8'));
   // workflow_runs.session_id (migration 019) — added directly here: 019's backfill
   // UPDATE reads a `sessions` table this minimal fixture doesn't create, so we add
   // just the column the requireMergedSession merge-gate join needs (mirrors the
@@ -614,6 +615,31 @@ describe('cyboflow.reviewItems.promoteToTask (two-chokepoint seam)', () => {
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
 
     // No task was minted and the item is still pending.
+    const taskCount = (db.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number }).n;
+    expect(taskCount).toBe(0);
+    const item = db.prepare('SELECT status FROM review_items WHERE id = ?').get(created.reviewItemId) as {
+      status: string;
+    };
+    expect(item.status).toBe('pending');
+  });
+
+  it('rejects promotion (BAD_REQUEST) for a notification kind', async () => {
+    const { caller, db } = buildCaller();
+    const created = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create',
+      actor: 'orchestrator',
+      kind: 'notification',
+      title: 'Dynamic workflow finished',
+      payload: { kind: 'notification', notificationType: 'dynamic-workflow-finished' },
+    });
+    await expect(
+      caller.cyboflow.reviewItems.promoteToTask({ projectId: 1, reviewItemId: created.reviewItemId }),
+    ).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof TRPCError && err.code === 'BAD_REQUEST' && err.message.includes('invalid_kind'),
+    );
+
+    // No task minted; the notification is still pending.
     const taskCount = (db.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number }).n;
     expect(taskCount).toBe(0);
     const item = db.prepare('SELECT status FROM review_items WHERE id = ?').get(created.reviewItemId) as {

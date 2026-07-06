@@ -195,6 +195,7 @@ export interface ReviewItemSummary {
     permission: number;
     decision: number;
     human_task: number;
+    notification: number;
   };
 }
 

@@ -7,13 +7,16 @@
  * main/src/orchestrator/reviewItemRouter.ts must all match these shapes
  * field-for-field. entitySchemaParity.test.ts pins ReviewItemRow <-> the table.
  *
- * The review queue is the unified human-attention inbox. Four item kinds funnel
+ * The review queue is the unified human-attention inbox. Five item kinds funnel
  * into one table:
- *   - finding     — non-blocking observation emitted by a Sprint agent (P3).
- *   - permission  — a real-time PreToolUse/approval gate (blocking=true, P4).
- *   - decision    — an approve-idea / approve-plan gate; resolving auto-resumes
- *                   the run subject to aggregate-unblock (blocking=true, P4).
- *   - human_task  — a free-form human action item; blocking per-item.
+ *   - finding      — non-blocking observation emitted by a Sprint agent (P3).
+ *   - permission   — a real-time PreToolUse/approval gate (blocking=true, P4).
+ *   - decision     — an approve-idea / approve-plan gate; resolving auto-resumes
+ *                    the run subject to aggregate-unblock (blocking=true, P4).
+ *   - human_task   — a free-form human action item; blocking per-item.
+ *   - notification — an informational FYI (never blocking; its only triage is
+ *                    dismiss — no resolve, no promote-to-task). Orchestrator-minted
+ *                    only; agents cannot file it via the MCP report_finding tool.
  *
  * Triage = resolve / dismiss / promote-to-task (the last mints a real task
  * through the TaskChangeRouter chokepoint).
@@ -26,8 +29,8 @@
 // Scalar enums
 // ---------------------------------------------------------------------------
 
-/** The four review-item kinds (DB CHECK on review_items.kind). */
-export type ReviewItemKind = 'finding' | 'permission' | 'decision' | 'human_task';
+/** The five review-item kinds (DB CHECK on review_items.kind). */
+export type ReviewItemKind = 'finding' | 'permission' | 'decision' | 'human_task' | 'notification';
 
 /** Lifecycle status (DB CHECK on review_items.status). */
 export type ReviewItemStatus = 'pending' | 'resolved' | 'dismissed';
@@ -159,6 +162,17 @@ export interface HumanTaskPayload {
 }
 
 /**
+ * Notification payload — an informational FYI. `notificationType` is an OPEN
+ * string (like {@link ReviewItemSource}, not a closed union) so a new emitter
+ * can tag its notice without a shared-type edit; consumers treat it as opaque.
+ * Today's values: 'dynamic-workflow-finished' / 'dynamic-workflow-stalled'.
+ */
+export interface NotificationPayload {
+  kind: 'notification';
+  notificationType?: string;
+}
+
+/**
  * Discriminated payload union keyed on `kind`. Persisted as JSON in
  * review_items.payload_json; the discriminant MUST match the row's `kind`
  * column (the ReviewItemRouter asserts this on create).
@@ -167,7 +181,8 @@ export type ReviewItemPayload =
   | FindingPayload
   | PermissionPayload
   | DecisionPayload
-  | HumanTaskPayload;
+  | HumanTaskPayload
+  | NotificationPayload;
 
 // ---------------------------------------------------------------------------
 // Read-model item

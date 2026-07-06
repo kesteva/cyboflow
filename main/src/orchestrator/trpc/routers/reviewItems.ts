@@ -127,7 +127,7 @@ function requireDb(db: DatabaseLike | undefined, where: string): DatabaseLike {
 // Zod input schemas
 // ---------------------------------------------------------------------------
 
-const kindSchema = z.enum(['finding', 'permission', 'decision', 'human_task']);
+const kindSchema = z.enum(['finding', 'permission', 'decision', 'human_task', 'notification']);
 const statusSchema = z.enum(['pending', 'resolved', 'dismissed']);
 
 /**
@@ -530,6 +530,14 @@ export const reviewItemsRouter = router({
         throw new TRPCError({
           code: 'BAD_REQUEST',
           message: `invalid_entity: review item ${input.reviewItemId} is already linked to ${row.entity_type} ${row.entity_id}; cannot promote`,
+        });
+      }
+      // GUARD: a notification is an informational FYI with no follow-up work —
+      // its only triage is dismiss, never promote-to-task.
+      if (row.kind === 'notification') {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'invalid_kind: a notification cannot be promoted to a task',
         });
       }
 

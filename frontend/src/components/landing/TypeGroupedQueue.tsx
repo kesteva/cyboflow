@@ -1,19 +1,22 @@
 /**
  * TypeGroupedQueue — the landing-home review inbox, grouped by item TYPE.
  *
- * Three groups, always in this fixed order, each rendered only when it holds at
- * least one item:
- *   1. PERMISSION  (amber swatch) — real-time PreToolUse/approval gates. These
+ * Groups, always in this fixed order, each rendered only when it holds at least
+ * one item:
+ *   1. PERMISSION    (amber swatch)   — real-time PreToolUse/approval gates. These
  *      come from the APPROVAL path (useReviewQueueView blocking+normal), rendered
  *      via the existing PendingApprovalCard. All approvals are permission-kind.
- *   2. DECISION    (rust swatch)  — approve-idea / approve-plan gates from the
+ *   2. DECISION      (rust swatch)    — approve-idea / approve-plan gates from the
  *      review_items inbox (kind === 'decision'), rendered via ReviewItemCard.
- *   3. HUMAN TASK  (blue swatch)  — free-form action items (kind === 'human_task'),
+ *   3. HUMAN TASK    (blue swatch)    — free-form action items (kind === 'human_task'),
  *      rendered via ReviewItemCard.
+ *   4. READY TO REVIEW (green swatch) — runs drained to awaiting_review.
+ *   5. NOTIFICATION  (neutral swatch) — informational FYIs (kind === 'notification');
+ *      nothing is blocked, so this group renders LAST.
  *
  * Findings are intentionally DROPPED here — the landing aggregation
- * (useAggregatedReviewItems) only surfaces decision + human_task, and findings
- * never count toward any group.
+ * (useAggregatedReviewItems) only surfaces decision + human_task + notification,
+ * and findings never count toward any group.
  *
  * Cards are REUSED verbatim — this component owns only the grouping chrome and a
  * per-row "Open session →" affordance that switches the session workspace to the
@@ -232,6 +235,10 @@ export function TypeGroupedQueue(): React.JSX.Element {
     () => reviewItems.filter((it) => it.kind === 'human_task'),
     [reviewItems],
   );
+  const notificationItems = React.useMemo(
+    () => reviewItems.filter((it) => it.kind === 'notification'),
+    [reviewItems],
+  );
 
   // Ready-to-review group: runs that have drained to `awaiting_review` — finished
   // work waiting for the user to merge or dismiss. A clean drain mints no
@@ -246,7 +253,8 @@ export function TypeGroupedQueue(): React.JSX.Element {
     permissionItems.length > 0 ||
     decisionItems.length > 0 ||
     humanTaskItems.length > 0 ||
-    readyToReviewRuns.length > 0;
+    readyToReviewRuns.length > 0 ||
+    notificationItems.length > 0;
 
   if (!hasAny) {
     return (
@@ -317,6 +325,20 @@ export function TypeGroupedQueue(): React.JSX.Element {
           />
           {readyToReviewRuns.map((run) => (
             <ReadyToReviewRow key={run.id} run={run} />
+          ))}
+        </section>
+      )}
+
+      {notificationItems.length > 0 && (
+        <section data-testid="queue-group-notification">
+          <GroupHeader
+            swatchClass="bg-text-muted"
+            name="Notification"
+            count={notificationItems.length}
+            descriptor="FYI — nothing is blocked"
+          />
+          {notificationItems.map((it) => (
+            <ReviewItemRow key={it.id} item={it} />
           ))}
         </section>
       )}

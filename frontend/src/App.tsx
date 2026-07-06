@@ -53,8 +53,8 @@ function App() {
   const showWorkflows = useNavigationStore((s) => s.workflowsOpen);
   const toggleWorkflows = useNavigationStore((s) => s.toggleWorkflows);
   // Human-review rail badge: pending PERMISSION approvals (global approval
-  // stream) + pending decision/human_task review items aggregated across all
-  // projects from the landing store (init'd app-wide below). Approvals alone
+  // stream) + pending decision/human_task/notification review items aggregated
+  // across all projects from the landing store (init'd app-wide below). Approvals alone
   // missed every queue-backed gate — a planner human gate left the chip at 0
   // while the review pane showed the item.
   const pendingApprovalsCount = useReviewQueueStore((s) => s.queue.length);

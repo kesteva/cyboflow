@@ -3,8 +3,8 @@
  *
  * PROJECT-SCOPED. The legacy {@link useReviewQueueStore} is a global singleton
  * for the real-time approval (permission) gates; this slice owns the broader
- * review_items table (migration 016) — the four kinds finding / permission /
- * decision / human_task — for a single project.
+ * review_items table (migration 016) — the five kinds finding / permission /
+ * decision / human_task / notification — for a single project.
  *
  * ## Re-subscribe on projectId CHANGE (mirrors backlogStore)
  *

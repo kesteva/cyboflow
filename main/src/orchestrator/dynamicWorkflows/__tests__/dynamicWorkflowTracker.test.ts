@@ -25,7 +25,7 @@ import type { DynamicWorkflowChangedEvent } from '../../../../../shared/types/dy
 import type { AssistantEvent, UserEvent } from '../../../../../shared/types/claudeStream';
 
 // ---------------------------------------------------------------------------
-// Test DB builder: projects + minimal sessions + 006/011/014/015/016.
+// Test DB builder: projects + minimal sessions + 006/011/014/015/016/034/046.
 // ---------------------------------------------------------------------------
 
 function buildDb(): Database.Database {
@@ -56,6 +56,10 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+  // 034 adds the finding-triage columns the 046 rebuild copies across; 046 widens
+  // the kind CHECK so the tracker's `notification` items pass the constraint.
+  db.exec(readFileSync(join(migDir, '034_findings_triage.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '046_notification_kind.sql'), 'utf-8'));
 
   // Seed the run hosting the session (review_items.run_id FK) + the session.
   db.prepare(
@@ -170,10 +174,10 @@ describe('DynamicWorkflowTracker', () => {
     router.emitForRun('run-1', userToolResult('tu1', launchText('wabc123', transcriptDir, scriptPath, 'wf_aa11-2b')));
   }
 
-  function pendingReviewItems(): Array<{ title: string; body: string; kind: string; run_id: string; blocking: number; source: string; status: string }> {
+  function pendingReviewItems(): Array<{ title: string; body: string; kind: string; run_id: string; blocking: number; source: string; status: string; payload_json: string | null }> {
     return db
-      .prepare('SELECT title, body, kind, run_id, blocking, source, status FROM review_items')
-      .all() as Array<{ title: string; body: string; kind: string; run_id: string; blocking: number; source: string; status: string }>;
+      .prepare('SELECT title, body, kind, run_id, blocking, source, status, payload_json FROM review_items')
+      .all() as Array<{ title: string; body: string; kind: string; run_id: string; blocking: number; source: string; status: string; payload_json: string | null }>;
   }
 
   // -------------------------------------------------------------------------
@@ -324,11 +328,15 @@ describe('DynamicWorkflowTracker', () => {
     expect(items).toHaveLength(1);
     expect(items[0]).toMatchObject({
       title: 'Dynamic workflow finished: Parallel refactor',
-      kind: 'human_task',
+      kind: 'notification',
       run_id: 'run-1',
       blocking: 0,
       source: DYNAMIC_WORKFLOW_REVIEW_SOURCE,
       status: 'pending',
+    });
+    expect(JSON.parse(items[0].payload_json ?? '{}')).toEqual({
+      kind: 'notification',
+      notificationType: 'dynamic-workflow-finished',
     });
     expect(items[0].body).toContain('All done');
     expect(items[0].body).toContain('3 subagents');
@@ -382,7 +390,13 @@ describe('DynamicWorkflowTracker', () => {
     expect(final?.completedAt).toBeTruthy();
 
     await ReviewItemRouter.getInstance()._queueForProject(1).onIdle();
-    expect(pendingReviewItems()[0].title).toBe('Dynamic workflow stalled: Parallel refactor');
+    const stalled = pendingReviewItems()[0];
+    expect(stalled.title).toBe('Dynamic workflow stalled: Parallel refactor');
+    expect(stalled.kind).toBe('notification');
+    expect(JSON.parse(stalled.payload_json ?? '{}')).toEqual({
+      kind: 'notification',
+      notificationType: 'dynamic-workflow-stalled',
+    });
   });
 
   // -------------------------------------------------------------------------

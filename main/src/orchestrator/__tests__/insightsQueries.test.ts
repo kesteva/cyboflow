@@ -1048,7 +1048,7 @@ describe('selectReviewItemSummary', () => {
       pending: 0,
       resolved: 0,
       dismissed: 0,
-      pendingByKind: { finding: 0, permission: 0, decision: 0, human_task: 0 },
+      pendingByKind: { finding: 0, permission: 0, decision: 0, human_task: 0, notification: 0 },
     });
   });
 
@@ -1058,10 +1058,11 @@ describe('selectReviewItemSummary', () => {
     seedReview(db, { id: 'v3', kind: 'permission', status: 'pending' });
     seedReview(db, { id: 'v4', kind: 'decision', status: 'resolved' });
     seedReview(db, { id: 'v5', kind: 'human_task', status: 'dismissed' });
+    seedReview(db, { id: 'v6', kind: 'notification', status: 'pending' });
 
     const summary = selectReviewItemSummary(dbAdapter(db), null);
-    expect(summary.total).toBe(5);
-    expect(summary.pending).toBe(3);
+    expect(summary.total).toBe(6);
+    expect(summary.pending).toBe(4);
     expect(summary.resolved).toBe(1);
     expect(summary.dismissed).toBe(1);
     expect(summary.pendingByKind).toEqual({
@@ -1069,6 +1070,7 @@ describe('selectReviewItemSummary', () => {
       permission: 1,
       decision: 0, // the only decision is resolved → not pending
       human_task: 0,
+      notification: 1,
     });
   });
 

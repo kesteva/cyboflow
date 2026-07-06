@@ -3,7 +3,7 @@
  *
  * Exercises:
  *   - upsertReviewItem: replace by id / append / remove-on-resolve.
- *   - flattenPendingReviewItems: keeps pending decision + human_task across
+ *   - flattenPendingReviewItems: keeps pending decision + human_task + notification across
  *     multiple projects; drops findings, permission, and non-pending items.
  *
  * The tRPC client is mocked at module level so importing landingStore.ts does
@@ -123,28 +123,30 @@ describe('upsertReviewItem', () => {
 // ---------------------------------------------------------------------------
 
 describe('flattenPendingReviewItems', () => {
-  it('keeps pending decision + human_task across multiple projects', () => {
+  it('keeps pending decision + human_task + notification across multiple projects', () => {
     const byProject: Record<number, ReviewItem[]> = {
       1: [
         makeItem({ id: 'd1', kind: 'decision', project_id: 1 }),
         makeItem({ id: 'h1', kind: 'human_task', project_id: 1 }),
+        makeItem({ id: 'n1', kind: 'notification', project_id: 1 }),
       ],
       2: [makeItem({ id: 'd2', kind: 'decision', project_id: 2 })],
     };
     const out = flattenPendingReviewItems(byProject);
-    expect(out.map((i) => i.id).sort()).toEqual(['d1', 'd2', 'h1']);
+    expect(out.map((i) => i.id).sort()).toEqual(['d1', 'd2', 'h1', 'n1']);
   });
 
-  it('drops findings and permission items', () => {
+  it('drops findings and permission items but keeps notifications', () => {
     const byProject: Record<number, ReviewItem[]> = {
       1: [
         makeItem({ id: 'f1', kind: 'finding' }),
         makeItem({ id: 'p1', kind: 'permission' }),
         makeItem({ id: 'd1', kind: 'decision' }),
+        makeItem({ id: 'n1', kind: 'notification' }),
       ],
     };
     const out = flattenPendingReviewItems(byProject);
-    expect(out.map((i) => i.id)).toEqual(['d1']);
+    expect(out.map((i) => i.id).sort()).toEqual(['d1', 'n1']);
   });
 
   it('drops non-pending decision/human_task items', () => {
