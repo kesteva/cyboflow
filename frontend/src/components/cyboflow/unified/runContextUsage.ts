@@ -33,7 +33,33 @@ function formatTokenCount(count: number): string {
   return count >= 1000 ? `${Math.round(count / 1000)}k` : String(count);
 }
 
-export function deriveRunContextUsage(events: readonly StreamEvent[]): string | null {
+/** The two meter inputs, individually nullable — see deriveRunContextUsageParts. */
+export interface RunContextUsageParts {
+  used: number | null;
+  contextWindow: number | null;
+}
+
+/**
+ * Compose the producer-format string from the two (possibly recovered) numbers.
+ * Null unless BOTH are known — the meter needs numerator and denominator.
+ */
+export function formatContextUsage(
+  used: number | null,
+  contextWindow: number | null,
+): string | null {
+  if (used === null || contextWindow === null || used <= 0 || contextWindow <= 0) return null;
+  const clamped = Math.min(used, contextWindow);
+  const percent = Math.round((clamped / contextWindow) * 100);
+  return `${formatTokenCount(clamped)}/${formatTokenCount(contextWindow)} tokens (${percent}%)`;
+}
+
+/**
+ * Scan the live stream for the two meter inputs SEPARATELY, so a caller can
+ * merge each side with a server-recovered baseline (`runs.contextUsage`) —
+ * the live buffer starts empty on every activation, and the two facts arrive
+ * on different event types at very different rates (see file header).
+ */
+export function deriveRunContextUsageParts(events: readonly StreamEvent[]): RunContextUsageParts {
   let contextWindow = 0;
   let used = 0;
 
@@ -71,8 +97,17 @@ export function deriveRunContextUsage(events: readonly StreamEvent[]): string | 
     }
   }
 
-  if (contextWindow <= 0 || used <= 0) return null;
-  const clamped = Math.min(used, contextWindow);
-  const percent = Math.round((clamped / contextWindow) * 100);
-  return `${formatTokenCount(clamped)}/${formatTokenCount(contextWindow)} tokens (${percent}%)`;
+  return {
+    used: used > 0 ? used : null,
+    contextWindow: contextWindow > 0 ? contextWindow : null,
+  };
+}
+
+/**
+ * Live-only derivation (parts + format in one step). Kept for callers/tests
+ * that have no server baseline to merge.
+ */
+export function deriveRunContextUsage(events: readonly StreamEvent[]): string | null {
+  const parts = deriveRunContextUsageParts(events);
+  return formatContextUsage(parts.used, parts.contextWindow);
 }

@@ -45,6 +45,10 @@ vi.mock('../../../utils/cyboflowApi', () => ({
 // ---------------------------------------------------------------------------
 
 const mockListUnifiedMessages = vi.fn<() => Promise<UnifiedMessage[]>>(async () => []);
+// Ticker backfill (runs.contextUsage) — both facts unknown by default.
+const mockContextUsage = vi.fn<() => Promise<{ usedTokens: number | null; contextWindow: number | null }>>(
+  async () => ({ usedTokens: null, contextWindow: null }),
+);
 // Artifacts feed for the question-card "open in pane" wiring (#8 / #9).
 import type { Artifact } from '../../../../../shared/types/artifacts';
 const mockArtifactsList = vi.fn<() => Promise<Artifact[]>>(async () => []);
@@ -55,6 +59,9 @@ vi.mock('../../../trpc/client', () => ({
       runs: {
         listUnifiedMessages: {
           query: (...args: Parameters<typeof mockListUnifiedMessages>) => mockListUnifiedMessages(...args),
+        },
+        contextUsage: {
+          query: (...args: Parameters<typeof mockContextUsage>) => mockContextUsage(...args),
         },
       },
       artifacts: {

@@ -19,6 +19,7 @@ import { listRunsHandler } from '../../runQueries';
 import { selectRunMessages } from '../../runMessagesListing';
 import { selectRunUnifiedMessages } from '../../runUnifiedMessagesListing';
 import { selectRunRawStreamEvents } from '../../runRawEventsListing';
+import { selectRunContextUsage, type RunContextUsage } from '../../runContextUsageListing';
 import { listRunFiles, readRunFile } from '../../runFileExplorer';
 import { withRunFileErrorMapping } from '../runFileErrors';
 import type { RunFileEntry, RunFileContent, RunGitDiff } from '../../../../../shared/types/runFiles';
@@ -2051,6 +2052,28 @@ export const runsRouter = router({
         });
       }
       return selectRunRawStreamEvents(ctx.db, input.runId);
+    }),
+
+  /**
+   * Return the run's latest token/context-usage facts recovered from
+   * `raw_events` (newest assistant `message.usage` sum + newest result
+   * `contextWindow`), so the Chat meta strip's ticker can BACKFILL on view
+   * (re)entry instead of waiting for fresh live events — the in-memory
+   * `streamEvents` buffer is wiped on every `setActiveRun`, and the
+   * denominator only arrives on step-boundary `result` events, so without
+   * this the meter showed "--" after every view switch. Cheap bounded scans;
+   * see `selectRunContextUsage`.
+   */
+  contextUsage: protectedProcedure
+    .input(z.object({ runId: z.string() }))
+    .query(async ({ ctx, input }): Promise<RunContextUsage> => {
+      if (!ctx.db) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'db not wired into tRPC context',
+        });
+      }
+      return selectRunContextUsage(ctx.db, input.runId);
     }),
 
   // @cyboflow-hidden: the run-keyed File Explorer routes (listFiles / readFile)

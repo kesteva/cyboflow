@@ -50,6 +50,7 @@ vi.mock('../../../trpc/client', () => ({
       runs: {
         list: { query: vi.fn().mockResolvedValue([]) },
         listUnifiedMessages: { query: vi.fn().mockResolvedValue([]) },
+        contextUsage: { query: vi.fn().mockResolvedValue({ usedTokens: null, contextWindow: null }) },
         start: {
           mutate: vi.fn().mockResolvedValue({
             runId: 'run-test-001',

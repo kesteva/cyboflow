@@ -26,7 +26,8 @@ import { MODEL_OPTIONS } from './unified/ModelPill';
 import { API } from '../../utils/api';
 import { InteractiveTerminalView } from './InteractiveTerminalView';
 import { UnifiedChatView } from './unified/UnifiedChatView';
-import { deriveRunContextUsage } from './unified/runContextUsage';
+import { deriveRunContextUsageParts, formatContextUsage } from './unified/runContextUsage';
+import { trpc } from '../../trpc/client';
 import { useUnifiedRunMessages } from './unified/useUnifiedRunMessages';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
@@ -79,10 +80,40 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // contextUsage (the backend extractor skips cyboflow run ids), so we derive it
   // on the renderer from the run's structured stream. Interactive runs put NO
   // events on the structured stream (Q3 store isolation), so they stay "--%".
-  const contextUsage = useMemo(
-    () => (isInteractive ? null : deriveRunContextUsage(streamEvents)),
-    [isInteractive, streamEvents],
-  );
+  //
+  // BASELINE BACKFILL: the live `streamEvents` buffer starts empty on every run
+  // activation, and the meter's denominator only arrives on step-boundary
+  // `result` events — so after any view switch the meter sat at "--" until the
+  // next step completed. Recover both facts from the persisted raw_events via
+  // `runs.contextUsage` once per runId; live values (fresher) win per-side.
+  const [baselineUsage, setBaselineUsage] = useState<{
+    used: number | null;
+    contextWindow: number | null;
+  }>({ used: null, contextWindow: null });
+  useEffect(() => {
+    setBaselineUsage({ used: null, contextWindow: null });
+    if (runId === null || isInteractive) return;
+    let aborted = false;
+    void trpc.cyboflow.runs.contextUsage
+      .query({ runId })
+      .then((r) => {
+        if (!aborted) setBaselineUsage({ used: r.usedTokens, contextWindow: r.contextWindow });
+      })
+      .catch(() => {
+        // Fail-soft: the meter simply stays live-only.
+      });
+    return () => {
+      aborted = true;
+    };
+  }, [runId, isInteractive]);
+  const contextUsage = useMemo(() => {
+    if (isInteractive) return null;
+    const live = deriveRunContextUsageParts(streamEvents);
+    return formatContextUsage(
+      live.used ?? baselineUsage.used,
+      live.contextWindow ?? baselineUsage.contextWindow,
+    );
+  }, [isInteractive, streamEvents, baselineUsage]);
 
   // Messages — run-scoped source. Interactive runs keep the live xterm as the
   // transcript, so the structured fetch is disabled there.
