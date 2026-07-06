@@ -412,16 +412,28 @@ retry the SAME step when it clears; never spend the step's own failure budgets o
   programmatic-only via the new `WorkflowRunListRow.execution_model`). The FOURTH
   sanctioned terminal revive: guarded reset to `'starting'` clearing
   `error_message`/`ended_at`/`outcome`, resume pointers re-armed from
-  `step_results` (target step excluded from the completed set so a SKIPPED step
+  `step_results` (skip set = `outcome === 'done'` rows ONLY, so every SKIPPED
+  step — e.g. sprint-verify/code-review parked by the incomplete-sprint gate —
   re-runs), `execute()` fire-and-forget. A fan-out target first re-queues failed
-  lanes (`SprintLaneStore.resetFailedLanes`) — the driver otherwise skips them as
-  settled. Also valid from a RESTING `awaiting_review` run
-  (`RunExecutor.hasActiveExecution` guards against live walks).
+  lanes (`SprintLaneStore.resetFailedLanes`); ANY run carrying a `batch_id` also
+  gets its `sprint_batches` row un-terminaled (`SprintLaneStore.reopenBatch`,
+  failed→running only) so the retried run's close-out can re-stamp it. Also valid
+  from a RESTING `awaiting_review` run (`RunExecutor.hasActiveExecution` guards
+  against live walks). Queue discipline mirrors pause/cancel: the
+  immediately-refusable guards run in a PRE-FLIGHT read OUTSIDE the per-run queue
+  (a live walk HOLDS that queue — an in-queue guard would wedge the mutation and
+  later spuriously revive a healthy rest), and the revive UPDATE asserts the
+  pre-flight `updated_at` snapshot to close the residual TOCTOU.
 - **Monitor actuation** — `MonitorActions.retryStep` (monitor.ts): with the seam
   wired, `converse` runs a structured `{ reply, action? }` query
   (`MONITOR_CONVERSE_SCHEMA`; act only on an explicit user ask), executes through
   the SAME `retryRunHandler` deps bag as the tRPC mutation, and injects the
-  outcome as a follow-up chat turn. "It's past 2:20, resume" now actually resumes.
+  outcome as a follow-up chat turn. A run PARKED on a live systemic pause is
+  neither failed nor resting, so the host binding (index.ts) falls back on
+  `not_retryable` to resolving the pending `gate:systemic-pause:*` item instead
+  (`HumanStepManager.findPendingSystemicPauseItem` → ReviewItemRouter resolve),
+  which the pause gate settles as a `'retry'` verdict. "It's past 2:20, resume"
+  now actually resumes in BOTH states.
 - **Pause/Resume, programmatic arms** — `pauseRunHandler` signals the walk abort
   (`abortProgrammaticWalk` → `requestProgrammaticCancel`) BEFORE the spawn abort
   so the interrupted step reports `'aborted'` (not a clean `'ok'`), and skips the
@@ -435,3 +447,13 @@ retry the SAME step when it clears; never spend the step's own failure budgets o
   `arch-design`: REPLACE-or-append fold into the idea body). Without it those two
   artifacts never mint on programmatic runs (idea-spec/decomposed-stories are
   unaffected — they re-derive from entity writes).
+
+Hardened by the same-day adversarial review (13 raw → 10 confirmed → 7 distinct):
+the controller's crash-resume skip set is now a MUTABLE local purged whenever the
+walk deliberately REVISITS a region (loopback jump or gate revise) so a
+pause→resume can never fast-forward past a revise loop or silently bypass the
+human gate itself; a systemic `'giveup'` verdict is STICKY per step id (one
+dismiss, no re-park per remaining attempt/wave); the classifier learned the real
+mid-run 401 shape (`authentication_error` / `invalid x-api-key`); and the monitor
+prompt describes both actuation mechanisms honestly instead of advertising a
+retry it could not deliver while paused.
