@@ -33,7 +33,6 @@ import { isCliSubstrate } from '../../../shared/types/substrate';
 import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { resolveSubstrate } from '../orchestrator/substrateResolver';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
-import { InteractiveSettingsWriter } from '../services/panels/claude/interactiveSettingsWriter';
 import { encodeCwd } from '../services/panels/claude/transcript/encodeCwd';
 import { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import { updateSessionAgentPermissionMode } from '../orchestrator/sessionPermissionMode';
@@ -2293,18 +2292,16 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         return { success: false, error: `Invalid agent permission mode: ${String(mode)}` };
       }
       // Funnel through the single session-mode write chokepoint (permission-mode
-      // redesign §3d): persist + runtime mutate + 'session-updated' emit + the
-      // interactive .claude/settings.json next-spawn re-prime. cyboflow.runs.
-      // setPermissionMode + RunLauncher.launch share the SAME chokepoint so every
-      // mode write lands identically on the session. The InteractiveSettingsWriter
-      // is constructed here (electron layer) and injected so the chokepoint stays
-      // free of the services/* graph (standalone-typecheck invariant).
+      // redesign §3d): persist + runtime mutate + 'session-updated' emit.
+      // cyboflow.runs.setPermissionMode + RunLauncher.launch share the SAME
+      // chokepoint so every mode write lands identically on the session. The
+      // interactive substrate needs no spawn-side priming — the PTY gating hook
+      // rides the inline `--settings` flag and is recomputed from the persisted
+      // mode at every spawn.
       const result = updateSessionAgentPermissionMode(
         {
           databaseService,
           sessionManager,
-          configManager,
-          settingsWriter: new InteractiveSettingsWriter(),
         },
         sessionId,
         mode,

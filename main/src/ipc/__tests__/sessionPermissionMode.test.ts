@@ -2,18 +2,16 @@
  * Unit tests for the sessions:update-agent-permission-mode IPC handler (Issue #1).
  *
  * The handler persists sessions.agent_permission_mode (next-turn re-read for the
- * SDK substrate) AND, for the INTERACTIVE substrate, primes the worktree's
- * .claude/settings.json so the NEXT PTY spawn picks up the new gating
- * (relayUserTurn never re-reads the hook). default/acceptEdits keep the wildcard
- * PreToolUse hook (writer.write); auto/dontAsk strip it (writer.remove). The
- * rewrite is demo-gated, worktree-existence-guarded, and fully fail-soft.
- *
- * The InteractiveSettingsWriter and fs.existsSync are mocked so no real worktree
- * is touched; the handler is exercised via the same handler-capture harness as
+ * SDK substrate) and fires session-updated. No settings-file side effect exists
+ * anymore: the interactive PTY gating hook rides the inline `--settings` flag
+ * and is recomputed from the persisted mode at every spawn
+ * (interactiveClaudeManager buildCommandArgs -> resolveInlineGatingHooks), so the
+ * former .claude/settings.json re-prime (and its demo/existence/fail-soft
+ * guards) is gone. Exercised via the same handler-capture harness as
  * sessionQuickCreate.test.ts.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('electron', () => ({
   ipcMain: { handle: vi.fn() },
@@ -38,24 +36,6 @@ vi.mock('../../services/database', () => ({
   databaseService: {
     getSession: vi.fn(() => ({ id: 'sess-001', status: 'running', archived: false })),
   },
-}));
-
-// fs.existsSync gates the rewrite against a torn-down worktree. Default: present.
-const mockExistsSync = vi.fn((_p: string) => true);
-vi.mock('fs', async () => {
-  const actual = await vi.importActual<typeof import('fs')>('fs');
-  return { ...actual, existsSync: (p: string) => mockExistsSync(p) };
-});
-
-// The settings writer is the unit under contract here — stub write/remove.
-const mockWrite = vi.fn();
-const mockRemove = vi.fn();
-vi.mock('../../services/panels/claude/interactiveSettingsWriter', () => ({
-  InteractiveSettingsWriter: vi.fn().mockImplementation(() => ({
-    write: (worktreePath: string, opts?: { permissionMode?: string }) =>
-      mockWrite(worktreePath, opts),
-    remove: (worktreePath: string) => mockRemove(worktreePath),
-  })),
 }));
 
 import { registerSessionHandlers } from '../session';
@@ -133,12 +113,6 @@ function registerWith(services: AppServices) {
   return handlers;
 }
 
-beforeEach(() => {
-  mockExistsSync.mockReset().mockReturnValue(true);
-  mockWrite.mockReset();
-  mockRemove.mockReset();
-});
-
 describe('sessions:update-agent-permission-mode — persist + emit', () => {
   it('rejects an invalid mode without persisting', async () => {
     const { services, fakeDatabaseService } = makeServices({ substrate: 'sdk' });
@@ -173,75 +147,5 @@ describe('sessions:update-agent-permission-mode — persist + emit', () => {
     };
     expect(result.success).toBe(false);
     expect(result.error).toBe('Session not found');
-  });
-});
-
-describe('sessions:update-agent-permission-mode — interactive settings rewrite', () => {
-  it('installs the wildcard hook (writer.write) for default on an interactive session', async () => {
-    const { services } = makeServices({ substrate: 'interactive' });
-    const handlers = registerWith(services);
-    await invoke(handlers, CHANNEL, SESSION_ID, 'default');
-    expect(mockWrite).toHaveBeenCalledWith(WORKTREE, { permissionMode: 'default' });
-    expect(mockRemove).not.toHaveBeenCalled();
-  });
-
-  it('installs the wildcard hook for acceptEdits on an interactive session', async () => {
-    const { services } = makeServices({ substrate: 'interactive' });
-    const handlers = registerWith(services);
-    await invoke(handlers, CHANNEL, SESSION_ID, 'acceptEdits');
-    expect(mockWrite).toHaveBeenCalledWith(WORKTREE, { permissionMode: 'acceptEdits' });
-    expect(mockRemove).not.toHaveBeenCalled();
-  });
-
-  it('removes the hook (writer.remove) for auto on an interactive session', async () => {
-    const { services } = makeServices({ substrate: 'interactive' });
-    const handlers = registerWith(services);
-    await invoke(handlers, CHANNEL, SESSION_ID, 'auto');
-    expect(mockRemove).toHaveBeenCalledWith(WORKTREE);
-    expect(mockWrite).not.toHaveBeenCalled();
-  });
-
-  it('removes the hook for dontAsk on an interactive session', async () => {
-    const { services } = makeServices({ substrate: 'interactive' });
-    const handlers = registerWith(services);
-    await invoke(handlers, CHANNEL, SESSION_ID, 'dontAsk');
-    expect(mockRemove).toHaveBeenCalledWith(WORKTREE);
-    expect(mockWrite).not.toHaveBeenCalled();
-  });
-
-  it('does NOT touch the settings file for an SDK session', async () => {
-    const { services } = makeServices({ substrate: 'sdk' });
-    const handlers = registerWith(services);
-    await invoke(handlers, CHANNEL, SESSION_ID, 'default');
-    expect(mockWrite).not.toHaveBeenCalled();
-    expect(mockRemove).not.toHaveBeenCalled();
-  });
-
-  it('skips the rewrite in demo mode', async () => {
-    const { services } = makeServices({ substrate: 'interactive', isDemoMode: true });
-    const handlers = registerWith(services);
-    await invoke(handlers, CHANNEL, SESSION_ID, 'default');
-    expect(mockWrite).not.toHaveBeenCalled();
-    expect(mockRemove).not.toHaveBeenCalled();
-  });
-
-  it('skips the rewrite (fail-soft) when the worktree no longer exists', async () => {
-    mockExistsSync.mockReturnValue(false);
-    const { services } = makeServices({ substrate: 'interactive' });
-    const handlers = registerWith(services);
-    const result = (await invoke(handlers, CHANNEL, SESSION_ID, 'default')) as { success: boolean };
-    expect(result.success).toBe(true);
-    expect(mockWrite).not.toHaveBeenCalled();
-    expect(mockRemove).not.toHaveBeenCalled();
-  });
-
-  it('still succeeds when the writer throws (never throws across the boundary)', async () => {
-    mockWrite.mockImplementation(() => {
-      throw new Error('disk full');
-    });
-    const { services } = makeServices({ substrate: 'interactive' });
-    const handlers = registerWith(services);
-    const result = (await invoke(handlers, CHANNEL, SESSION_ID, 'default')) as { success: boolean };
-    expect(result.success).toBe(true);
   });
 });

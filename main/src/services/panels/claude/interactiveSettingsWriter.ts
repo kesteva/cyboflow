@@ -1,29 +1,31 @@
 /**
- * interactiveSettingsWriter — writes/removes the cyboflow PreToolUse `'*'` shell
- * hook into a worktree's `.claude/settings.json` for the INTERACTIVE substrate
- * (IDEA-013 S5 / TASK-810, PRIMARY body; Probe A = PASS).
+ * interactiveSettingsWriter — builds the cyboflow PreToolUse `'*'` gating hook
+ * for the INTERACTIVE substrate and removes legacy on-disk copies of it
+ * (IDEA-013 S5 / TASK-810; delivery mechanism revised for in-place sessions).
  *
- * The interactive `claude` substrate has no SDK `hooks` option — gating is wired
- * through the on-disk settings file `claude` reads at launch. This writer adds a
- * single `hooks.PreToolUse` entry with a `'*'` matcher that invokes the compiled
- * `preToolUseShellHook.js` (resolved via the scriptPath.ts dev/asar pattern) with
- * a HIGH timeout so the hook can block for the full human-decision window.
+ * DELIVERY (current): `resolveInlineGatingHooks` returns a `hooks` settings
+ * fragment that interactiveClaudeManager folds into the single inline
+ * `--settings '<json>'` flag it already emits. Probe-verified on CLI 2.1.201
+ * (2026-07-06): a PreToolUse hook supplied at the `--settings` flag tier both
+ * FIRES and BLOCKS (exit 2 stopped the tool call), and flag-tier hooks are
+ * ADDITIVE to file-based hooks (user hooks keep firing). Delivering the gate
+ * inline means NOTHING is written into the working tree — the property that
+ * unlocks in-place sessions (migration 046), whose working tree is the user's
+ * real checkout.
  *
- * Merge-safety is the load-bearing property: the worktree may already contain a
- * USER `.claude/settings.json` (permissions.allow, env, …). `write` adds ONLY the
- * cyboflow `'*'` entry and never clobbers user keys; `remove` strips ONLY that
- * entry (identified by the hook-script path) and leaves everything else intact.
+ * DELIVERY (legacy): older builds wrote the same entry into the worktree's
+ * `.claude/settings.json`. `remove` strips exactly that entry — identified by a
+ * `'*'` matcher invoking `preToolUseShellHook.js` (matched by filename suffix,
+ * so entries written by a different build variant's absolute path still match)
+ * — and preserves every user key. It is called on spawn (so a legacy on-disk
+ * entry cannot DOUBLE-FIRE alongside the inline one) and on teardown.
  *
- * `write` SKIPS entirely when permissionMode is `ignore`/`dontAsk`/`auto` —
- * parity with the SDK's hook opt-out: `ignore`/`dontAsk` mean the user opted out
- * of gating, and `auto` hands gating to NATIVE Claude auto-mode (the model
+ * The gate is SKIPPED entirely when permissionMode is `ignore`/`dontAsk`/`auto`
+ * — parity with the SDK's hook opt-out: `ignore`/`dontAsk` mean the user opted
+ * out of gating, and `auto` hands gating to NATIVE Claude auto-mode (the model
  * classifier reached via `--permission-mode auto`). A PreToolUse shell hook in
  * `auto` would pre-empt the native classifier (hooks run FIRST in the CLI
  * permission order) and silently degrade auto to approve, so it MUST be skipped.
- *
- * The manager-side call sites (interactiveClaudeManager.initializeCliEnvironment
- * → write, cleanupCliResources → remove) land in TASK-808; this file delivers the
- * writer + its tests only.
  *
  * Standalone invariant (mirrors permissionRules.ts / mcpConfigWriter.ts): only
  * `fs`/`path`/`os` plus electron's `app.isPackaged` (mocked in tests) for the
@@ -94,9 +96,14 @@ interface HookCommandEntry {
 }
 
 /** A matcher group: a tool-name matcher plus its ordered hook commands. */
-interface HookMatcherGroup {
+export interface HookMatcherGroup {
   matcher?: string;
   hooks: HookCommandEntry[];
+}
+
+/** The `hooks` settings fragment carried by the inline `--settings` flag. */
+export interface GatingHooksSetting {
+  PreToolUse: HookMatcherGroup[];
 }
 
 /** The `.claude/settings.json` shape we touch — all other keys are preserved verbatim. */
@@ -134,96 +141,83 @@ export interface InteractiveSettingsWriteOptions {
 }
 
 /**
- * Reads `<worktreePath>/.claude/settings.json` if present (fail-soft to `{}` on a
- * missing/unreadable/malformed file), in-place merges the cyboflow PreToolUse
- * `'*'` hook entry without clobbering user keys, and writes it back. Returns the
- * resolved hook-script path that was installed, or null when the write was
- * skipped (ignore/dontAsk/auto mode).
+ * Best-effort: ensure the resolved hook script is executable. The hook is
+ * registered as a BARE-PATH PreToolUse command, so Claude Code execs it via
+ * `/bin/sh` — which needs the execute bit plus the file's `#!/usr/bin/env
+ * node` shebang. `tsc` emits the compiled `.js` at mode 644, so a fresh build (or
+ * a stale dev dist) would otherwise leave the gate non-executable and it fails
+ * OPEN at runtime ("Permission denied", non-blocking → tool proceeds ungated).
+ * Self-heal at the build site. Swallow failures: a packaged read-only bundle
+ * already ships the file +x via the build's `mark-hooks-executable` step, and a
+ * unit test may point `hookDirOverride` at a dir without the compiled file.
+ */
+function ensureHookExecutable(hookScriptPath: string, logger?: LoggerLike): void {
+  try {
+    fs.chmodSync(hookScriptPath, 0o755);
+  } catch (err) {
+    logger?.debug('[Cyboflow InteractiveSettings] could not chmod hook script (non-fatal)', {
+      hookScriptPath,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * Build the cyboflow PreToolUse `'*'` gating hook as a `hooks` settings fragment
+ * for the inline `--settings '<json>'` flag (probe-verified: flag-tier hooks
+ * fire AND block on CLI 2.1.201). Returns null when `permissionMode` opts out of
+ * gating (ignore/dontAsk/auto — see the header). Also self-heals the compiled
+ * hook script's execute bit, exactly as the legacy on-disk write did.
+ */
+export function resolveInlineGatingHooks(
+  opts: InteractiveSettingsWriteOptions = {},
+  logger?: LoggerLike,
+): GatingHooksSetting | null {
+  if (
+    opts.permissionMode === 'ignore' ||
+    opts.permissionMode === 'dontAsk' ||
+    opts.permissionMode === 'auto'
+  ) {
+    logger?.debug('[Cyboflow InteractiveSettings] permissionMode opts out of gating — no inline hook', {
+      permissionMode: opts.permissionMode,
+    });
+    return null;
+  }
+
+  const hookScriptPath = resolveShellHookScriptPath(opts.hookDirOverride);
+  ensureHookExecutable(hookScriptPath, logger);
+  return {
+    PreToolUse: [
+      { matcher: '*', hooks: [{ type: 'command', command: hookScriptPath, timeout: HIGH_TIMEOUT_SECONDS }] },
+    ],
+  };
+}
+
+/**
+ * Removes the LEGACY on-disk cyboflow hook entry from a worktree's
+ * `.claude/settings.json` (older builds wrote the gate there; current builds
+ * deliver it inline via `--settings`). Fail-soft to `{}` on a missing/
+ * unreadable/malformed file; every user key is preserved verbatim.
  */
 export class InteractiveSettingsWriter {
   /**
-   * @param logger Optional structured logger. Passed through for write/skip/
-   *   remove diagnostics (CLAUDE.md optional-logger rule: pass it, don't omit it).
+   * @param logger Optional structured logger. Passed through for skip/remove
+   *   diagnostics (CLAUDE.md optional-logger rule: pass it, don't omit it).
    */
   constructor(private readonly logger?: LoggerLike) {}
-
-  /**
-   * Install the cyboflow PreToolUse `'*'` hook into the worktree settings.
-   *
-   * @returns the installed hook-script path, or null when skipped
-   *   (ignore/dontAsk/auto mode).
-   */
-  write(worktreePath: string, opts: InteractiveSettingsWriteOptions = {}): string | null {
-    if (
-      opts.permissionMode === 'ignore' ||
-      opts.permissionMode === 'dontAsk' ||
-      opts.permissionMode === 'auto'
-    ) {
-      this.logger?.debug('[Cyboflow InteractiveSettings] permissionMode opts out of gating — skipping hook write', {
-        worktreePath,
-        permissionMode: opts.permissionMode,
-      });
-      return null;
-    }
-
-    const hookScriptPath = resolveShellHookScriptPath(opts.hookDirOverride);
-    this.ensureHookExecutable(hookScriptPath);
-    const settingsPath = this.settingsPath(worktreePath);
-    const settings = this.readSettings(settingsPath);
-
-    const hooks = settings.hooks ?? {};
-    const preToolUse = hooks.PreToolUse ?? [];
-
-    // Drop any stale cyboflow entry first (idempotent re-write) — identified by
-    // a '*' matcher whose hooks invoke OUR hook script. User entries (any other
-    // matcher, or a '*' matcher pointing elsewhere) are preserved untouched.
-    const withoutCyboflow = preToolUse.filter((group) => !this.isCyboflowGroup(group, hookScriptPath));
-
-    const cyboflowGroup: HookMatcherGroup = {
-      matcher: '*',
-      hooks: [{ type: 'command', command: hookScriptPath, timeout: HIGH_TIMEOUT_SECONDS }],
-    };
-
-    settings.hooks = {
-      ...hooks,
-      PreToolUse: [...withoutCyboflow, cyboflowGroup],
-    };
-
-    this.writeSettings(settingsPath, settings);
-    this.logger?.debug('[Cyboflow InteractiveSettings] installed PreToolUse shell hook', {
-      worktreePath,
-      hookScriptPath,
-    });
-    return hookScriptPath;
-  }
-
-  /**
-   * Best-effort: ensure the resolved hook script is executable. The hook is
-   * registered as a BARE-PATH PreToolUse command (above), so Claude Code execs it
-   * via `/bin/sh` — which needs the execute bit plus the file's `#!/usr/bin/env
-   * node` shebang. `tsc` emits the compiled `.js` at mode 644, so a fresh build (or
-   * a stale dev dist) would otherwise leave the gate non-executable and it fails
-   * OPEN at runtime ("Permission denied", non-blocking → tool proceeds ungated).
-   * Self-heal at the write site. Swallow failures: a packaged read-only bundle
-   * already ships the file +x via the build's `mark-hooks-executable` step, and a
-   * unit test may point `hookDirOverride` at a dir without the compiled file.
-   */
-  private ensureHookExecutable(hookScriptPath: string): void {
-    try {
-      fs.chmodSync(hookScriptPath, 0o755);
-    } catch (err) {
-      this.logger?.debug('[Cyboflow InteractiveSettings] could not chmod hook script (non-fatal)', {
-        hookScriptPath,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
 
   /**
    * Remove the cyboflow PreToolUse `'*'` hook from the worktree settings,
    * preserving every user key. If removing leaves `hooks.PreToolUse` empty, the
    * empty container is pruned (but sibling hook events / keys are kept). A no-op
    * when the settings file is absent or carries no cyboflow entry.
+   *
+   * Called at BOTH ends of the process lifecycle: on spawn (a legacy on-disk
+   * entry left by an older build would fire IN ADDITION to the inline
+   * `--settings` hook — a double human-approval prompt per tool call) and on
+   * teardown. For an in-place session this touches the user's real
+   * `.claude/settings.json`, but only ever to STRIP a cyboflow-owned entry —
+   * a strict no-op unless one leaked there.
    */
   remove(worktreePath: string, opts: { hookDirOverride?: string } = {}): void {
     const settingsPath = this.settingsPath(worktreePath);
@@ -268,11 +262,20 @@ export class InteractiveSettingsWriter {
     return path.join(worktreePath, '.claude', 'settings.json');
   }
 
-  /** True if `group` is the cyboflow `'*'` group (a hook invoking our script). */
+  /**
+   * True if `group` is the cyboflow `'*'` group (a hook invoking our script).
+   * Matches the exact resolved path OR any command ending in the (cyboflow-
+   * unique) hook filename, so entries written by a DIFFERENT build variant
+   * (dev absolute path vs packaged asar path) are still recognized and
+   * stripped — otherwise a dev-opened worktree would keep a packaged build's
+   * stale entry and the gate would double-fire.
+   */
   private isCyboflowGroup(group: HookMatcherGroup, hookScriptPath: string): boolean {
     if (group.matcher !== '*') return false;
     if (!Array.isArray(group.hooks)) return false;
-    return group.hooks.some((h) => h.type === 'command' && h.command === hookScriptPath);
+    return group.hooks.some(
+      (h) => h.type === 'command' && (h.command === hookScriptPath || h.command.endsWith(HOOK_FILENAME)),
+    );
   }
 
   /** Fail-soft read: a missing/unreadable/malformed file yields `{}`. */

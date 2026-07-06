@@ -836,22 +836,20 @@ describe('cyboflow.runs.cancel (Phase 4a)', () => {
 // ctx.db (createContext({ db }), the includeSubstrate schema carries session_id)
 // and re-routes through the SHARED updateSessionAgentPermissionMode chokepoint,
 // injected here via setSetPermissionModeDeps as a fake whose DatabaseService /
-// SessionManager / InteractiveSettingsWriter are spies. We verify: the session is
-// persisted, 'session-updated' fires, the interactive .claude/settings.json is
-// re-primed, a TERMINAL flow run STILL writes the session (bug #4), and a NULL
-// session_id returns 'not_found' (never 'already_terminal').
+// SessionManager are spies. We verify: the session is persisted,
+// 'session-updated' fires, a TERMINAL flow run STILL writes the session
+// (bug #4), and a NULL session_id returns 'not_found' (never
+// 'already_terminal'). (The former interactive .claude/settings.json re-prime
+// is gone — the PTY gating hook rides the inline `--settings` flag and is
+// recomputed from the persisted mode at every spawn.)
 // ---------------------------------------------------------------------------
 
 /**
  * Build a fake SessionAgentPermissionModeDeps whose collaborators are spies, so
- * tests can assert the four chokepoint side effects without a real sessions table.
- * The interactive re-prime calls the REAL fs.existsSync(worktreePath), so
- * `worktreePath` defaults to an existing dir (os.tmpdir()).
+ * tests can assert the three chokepoint side effects without a real sessions
+ * table.
  */
 function makeFakePermDeps(opts: {
-  substrate?: string;
-  worktreePath?: string;
-  isDemoMode?: boolean;
   updateReturns?: boolean;
 } = {}) {
   const runtimeSession: { id: string; agentPermissionMode: PermissionMode } = {
@@ -859,21 +857,13 @@ function makeFakePermDeps(opts: {
     agentPermissionMode: 'default',
   };
   const updateSession = vi.fn(() => (opts.updateReturns === false ? undefined : { id: 'sess-runtime' }));
-  const dbGetSession = vi.fn(() => ({
-    substrate: opts.substrate,
-    worktree_path: opts.worktreePath ?? os.tmpdir(),
-  }));
   const getSession = vi.fn(() => runtimeSession);
   const emit = vi.fn();
-  const write = vi.fn();
-  const remove = vi.fn();
   const deps: SessionAgentPermissionModeDeps = {
-    databaseService: { updateSession, getSession: dbGetSession },
+    databaseService: { updateSession },
     sessionManager: { getSession, emit },
-    configManager: { isDemoMode: () => opts.isDemoMode ?? false },
-    settingsWriter: { write, remove },
   };
-  return { deps, updateSession, dbGetSession, getSession, emit, write, remove, runtimeSession };
+  return { deps, updateSession, getSession, emit, runtimeSession };
 }
 
 describe('cyboflow.runs.setPermissionMode (Slice 5 — session chokepoint)', () => {
@@ -902,7 +892,7 @@ describe('cyboflow.runs.setPermissionMode (Slice 5 — session chokepoint)', () 
 
   it('(a) running run → { updated: true }: persists the session mode + fires session-updated', async () => {
     const runId = seedRunWithSession('running', 'sess-runtime');
-    const fake = makeFakePermDeps({ substrate: 'sdk' });
+    const fake = makeFakePermDeps();
     setSetPermissionModeDeps(fake.deps);
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
@@ -912,41 +902,11 @@ describe('cyboflow.runs.setPermissionMode (Slice 5 — session chokepoint)', () 
     expect(fake.updateSession).toHaveBeenCalledWith('sess-runtime', { agent_permission_mode: 'auto' });
     expect(fake.emit).toHaveBeenCalledWith('session-updated', expect.anything());
     expect(fake.runtimeSession.agentPermissionMode).toBe('auto');
-    // The SDK substrate never touches the interactive settings file.
-    expect(fake.write).not.toHaveBeenCalled();
-    expect(fake.remove).not.toHaveBeenCalled();
-  });
-
-  it('(a2) interactive session → re-primes .claude/settings.json (writer.write for acceptEdits)', async () => {
-    const worktree = os.tmpdir();
-    const runId = seedRunWithSession('running', 'sess-runtime');
-    const fake = makeFakePermDeps({ substrate: 'interactive', worktreePath: worktree });
-    setSetPermissionModeDeps(fake.deps);
-
-    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
-    const result = await caller.cyboflow.runs.setPermissionMode({ runId, permissionMode: 'acceptEdits' });
-
-    expect(result).toEqual({ updated: true });
-    expect(fake.write).toHaveBeenCalledWith(worktree, { permissionMode: 'acceptEdits' });
-    expect(fake.remove).not.toHaveBeenCalled();
-  });
-
-  it('(a3) interactive session → strips the hook (writer.remove) for dontAsk', async () => {
-    const worktree = os.tmpdir();
-    const runId = seedRunWithSession('running', 'sess-runtime');
-    const fake = makeFakePermDeps({ substrate: 'interactive', worktreePath: worktree });
-    setSetPermissionModeDeps(fake.deps);
-
-    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
-    await caller.cyboflow.runs.setPermissionMode({ runId, permissionMode: 'dontAsk' });
-
-    expect(fake.remove).toHaveBeenCalledWith(worktree);
-    expect(fake.write).not.toHaveBeenCalled();
   });
 
   it('(b) TERMINAL flow run STILL writes the session (bug #4 — no terminal guard)', async () => {
     const runId = seedRunWithSession('completed', 'sess-runtime');
-    const fake = makeFakePermDeps({ substrate: 'sdk' });
+    const fake = makeFakePermDeps();
     setSetPermissionModeDeps(fake.deps);
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
@@ -957,7 +917,7 @@ describe('cyboflow.runs.setPermissionMode (Slice 5 — session chokepoint)', () 
   });
 
   it('(c) unknown run → { noOp: true, reason: not_found }', async () => {
-    const fake = makeFakePermDeps({ substrate: 'sdk' });
+    const fake = makeFakePermDeps();
     setSetPermissionModeDeps(fake.deps);
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
     const result = await caller.cyboflow.runs.setPermissionMode({
@@ -970,7 +930,7 @@ describe('cyboflow.runs.setPermissionMode (Slice 5 — session chokepoint)', () 
 
   it('(c2) run with NULL session_id → not_found (NOT already_terminal)', async () => {
     const runId = seedRunWithSession('running', null);
-    const fake = makeFakePermDeps({ substrate: 'sdk' });
+    const fake = makeFakePermDeps();
     setSetPermissionModeDeps(fake.deps);
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
     const result = await caller.cyboflow.runs.setPermissionMode({ runId, permissionMode: 'acceptEdits' });
@@ -980,7 +940,7 @@ describe('cyboflow.runs.setPermissionMode (Slice 5 — session chokepoint)', () 
 
   it('(c3) resolved session was deleted before the persist → not_found', async () => {
     const runId = seedRunWithSession('running', 'sess-runtime');
-    const fake = makeFakePermDeps({ substrate: 'sdk', updateReturns: false });
+    const fake = makeFakePermDeps({ updateReturns: false });
     setSetPermissionModeDeps(fake.deps);
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
     const result = await caller.cyboflow.runs.setPermissionMode({ runId, permissionMode: 'acceptEdits' });
@@ -1001,7 +961,7 @@ describe('cyboflow.runs.setPermissionMode (Slice 5 — session chokepoint)', () 
 
   it('(e) accepts a paused run (gate is non-terminal)', async () => {
     const runId = seedRunWithSession('paused', 'sess-runtime');
-    const fake = makeFakePermDeps({ substrate: 'sdk' });
+    const fake = makeFakePermDeps();
     setSetPermissionModeDeps(fake.deps);
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
     const result = await caller.cyboflow.runs.setPermissionMode({ runId, permissionMode: 'acceptEdits' });

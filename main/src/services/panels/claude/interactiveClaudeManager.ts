@@ -20,7 +20,7 @@ import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
 import { TranscriptTailSource } from './transcript/transcriptTailSource';
 import type { TranscriptSource, TurnEndMarker } from './transcript/transcriptSource';
-import { InteractiveSettingsWriter } from './interactiveSettingsWriter';
+import { InteractiveSettingsWriter, resolveInlineGatingHooks } from './interactiveSettingsWriter';
 import { InteractiveMcpEnabler } from './interactiveMcpEnabler';
 import type { LoggerLike } from '../../../orchestrator/types';
 import { buildStepReportingAppend } from '../../../orchestrator/prompts/step-reporting-instructions';
@@ -69,32 +69,29 @@ import type { PermissionMode } from '../../../../../shared/types/workflows';
  *   model            : pass `--model X` ONLY when (model && model !== 'auto');
  *                      the DB session_info row uses (model || 'default').
  *                      Mirrors claudeCodeManager.ts:463 / :295.
- *   permissionMode   : 'ignore' (dontAsk / auto-allow) SKIPS writing the gating
- *                      shell hook — matching the SDK's permissionMode==='ignore'
+ *   permissionMode   : 'ignore' (dontAsk / auto-allow) SKIPS the gating shell
+ *                      hook — matching the SDK's permissionMode==='ignore'
  *                      branch that omits the PreToolUse hook
- *                      (claudeCodeManager.ts:446). The hook WRITE body is owned by
- *                      S5/TASK-810 (interactiveSettingsWriter); TASK-819 calls
- *                      `settingsWriter.write(worktreePath, { permissionMode })` on
- *                      spawn and the gating is the WRITER's own opt-out branch —
- *                      'ignore'/'dontAsk' makes write() return null (no hook). The
+ *                      (claudeCodeManager.ts:446). The opt-out branch is owned by
+ *                      resolveInlineGatingHooks (interactiveSettingsWriter.ts) —
+ *                      'ignore'/'dontAsk'/'auto' return null (no hook). The
  *                      manager adds NO second gate (single source of truth).
  *   strictMcpConfig  : threads `--strict-mcp-config` iff strictMcpConfig===true,
  *                      so only the per-run `.mcp.json` servers load and user
  *                      globals cannot interfere with the permission bridge.
  *                      Mirrors claudeCodeManager.ts:188.
- *   settings/hooks   : EXPLICIT decision (TASK-819) — the PreToolUse `'*'` shell-
- *                      approval hook is installed by InteractiveSettingsWriter into
- *                      the worktree's DEFAULT `<worktree>/.claude/settings.json`
- *                      that `claude` reads at launch; NO `--settings` flag is
- *                      emitted. The old `--settings <.cyboflow/interactive-
- *                      settings.json>` flag was dangling (nothing wrote that file →
- *                      NO hook → NO gating) and is dropped. The SDK reads
- *                      settingSources ['user','project'] via its own option; the
- *                      interactive REPL has no settingSources option, so the gate is
- *                      delivered through the on-disk settings file `claude` already
- *                      reads. A future explicit `--settings` MUST target the
- *                      writer's `.claude/settings.json` path, not the empty
- *                      `.cyboflow` file.
+ *   settings/hooks   : the PreToolUse `'*'` shell-approval hook rides the single
+ *                      inline `--settings '<json>'` flag buildCommandArgs already
+ *                      emits (hooks key from resolveInlineGatingHooks). Probe-
+ *                      verified on CLI 2.1.201 (2026-07-06): flag-tier hooks FIRE
+ *                      and BLOCK (exit 2 stopped the tool call) and are ADDITIVE
+ *                      to file-based hooks. This replaces the TASK-819 on-disk
+ *                      write into `<worktree>/.claude/settings.json` — inline
+ *                      delivery writes NOTHING into the working tree, which is
+ *                      what allows in-place sessions (migration 046) on this
+ *                      substrate. spawnCliProcess still calls
+ *                      settingsWriter.remove() so a LEGACY on-disk entry from an
+ *                      older build cannot double-fire alongside the inline one.
  *   resume/isResume  : the legacy boolean `isResume` is still ignored (no
  *                      `--resume` is emitted from it). RESUME of a lost quick
  *                      session is driven by the explicit `resumeSessionId` option
@@ -526,8 +523,8 @@ export class InteractiveClaudeManager extends AbstractCliManager {
 
     // agentPermissionMode 'auto': hand gating to NATIVE Claude auto-mode via the
     // CLI's `--permission-mode auto` flag (host CLI 2.1.163 accepts it). The
-    // wildcard PreToolUse shell hook is NOT installed in this mode (see the
-    // settingsWriter.write call in spawnCliProcess), so the model classifier owns
+    // wildcard PreToolUse shell hook is NOT emitted in this mode (see the
+    // resolveInlineGatingHooks call below), so the model classifier owns
     // the decision and the hook cannot pre-empt it (hooks run FIRST in the CLI
     // permission order — a hook here would silently degrade auto to approve). The
     // flag is pushed INSIDE buildCommandArgs so it lands before the load-bearing
@@ -587,6 +584,26 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       sessionSettings.enabledPlugins = enabledPlugins;
     }
 
+    // The PreToolUse `'*'` shell-approval gate rides this same inline flag
+    // (probe-verified on CLI 2.1.201: flag-tier hooks FIRE and BLOCK, and are
+    // ADDITIVE to file-based hooks — user hooks keep firing). Inline delivery
+    // writes NOTHING into the working tree, which is what allows in-place
+    // sessions (migration 046) on this substrate. The opt-out branch lives in
+    // resolveInlineGatingHooks — the NEW 4-mode `agentPermissionMode` (workflow
+    // runs) takes precedence when set: 'auto'/'dontAsk' skip the hook so native
+    // gating owns the decision ('auto' = the model classifier reached via
+    // `--permission-mode auto` above; a hook would pre-empt it — hooks run FIRST
+    // in the CLI permission order), while 'default'/'acceptEdits' keep it. When
+    // agentPermissionMode is unset (quick/legacy sessions) the legacy
+    // `permissionMode` 'ignore' opt-out is preserved. NO second gate here.
+    const gatingHooks = resolveInlineGatingHooks(
+      { permissionMode: options.agentPermissionMode ?? options.permissionMode },
+      this.toLoggerLike(this.logger),
+    );
+    if (gatingHooks) {
+      sessionSettings.hooks = gatingHooks;
+    }
+
     args.push('--settings', JSON.stringify(sessionSettings));
 
     // Inject the cyboflow MCP stdio entry ONLY when its config file is present on
@@ -601,17 +618,6 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     if (fs.existsSync(mcpConfigPath)) {
       args.push('--mcp-config', mcpConfigPath);
     }
-
-    // No `--settings` flag is emitted (TASK-819 reconciliation): the PreToolUse
-    // shell-approval hook is installed by InteractiveSettingsWriter into the
-    // worktree's DEFAULT `<worktree>/.claude/settings.json` that `claude` reads
-    // at launch — a DIFFERENT path from the dangling `.cyboflow/interactive-
-    // settings.json` this manager used to point `--settings` at (nothing ever
-    // wrote that file, so the hook never loaded → NO gating). Dropping the
-    // dangling flag and letting `claude` pick up the writer-installed hook from
-    // its default settings path is what makes the interactive gate actually
-    // fire. A future explicit `--settings` MUST target the writer's path; do NOT
-    // re-point it at the empty `.cyboflow` file.
 
     return args;
   }
@@ -883,24 +889,26 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // is not initialized (unit tests / early boot).
     DynamicWorkflowTracker.tryGetInstance()?.attachToRouter(router, { runId, sessionId });
 
-    // Install the PreToolUse `'*'` shell-approval hook into the worktree's
-    // default `.claude/settings.json` BEFORE `claude` launches (TASK-819), so the
-    // live interactive REPL gates tool calls for human review. The writer is
-    // idempotent (drops any stale cyboflow entry before re-adding) so a respawn
-    // is safe, and SKIPS internally when its `permissionMode` opt opts out of
-    // gating (interactiveSettingsWriter.ts) — returning null — so NO second gate
-    // is added here (the writer's opt-out branch is the single source of truth).
-    //
-    // The NEW 4-mode `agentPermissionMode` (workflow runs) takes precedence when
-    // set: 'auto'/'dontAsk' make the writer skip the wildcard hook so native
-    // gating owns the decision ('auto' = the model classifier reached via
-    // `--permission-mode auto`; 'dontAsk' = unrestricted), while 'default'/
-    // 'acceptEdits' keep the hook (acceptEdits' Edit/Write/MultiEdit fast-path is
-    // applied in the handler — mcpQueryHandler.ts). When agentPermissionMode is
-    // unset (quick/legacy sessions) the legacy `permissionMode` 'ignore'/'dontAsk'
-    // opt-out is preserved. Synchronous fs; no await needed.
-    const effectiveWriterMode = options.agentPermissionMode ?? options.permissionMode;
-    this.settingsWriter.write(worktreePath, { permissionMode: effectiveWriterMode });
+    // The PreToolUse `'*'` shell-approval hook is delivered INLINE via the
+    // `--settings '<json>'` flag assembled in buildCommandArgs (see the parity
+    // table + resolveInlineGatingHooks) — nothing is written into the working
+    // tree, which is what allows in-place sessions (migration 046) on this
+    // substrate. Here we only STRIP a legacy on-disk entry an OLDER build may
+    // have written into `<worktree>/.claude/settings.json`: flag-tier hooks are
+    // ADDITIVE to file-based hooks, so a surviving legacy entry would make every
+    // tool call prompt for approval TWICE. remove() is merge-safe (user keys
+    // preserved) and a strict no-op when no cyboflow entry is present — in-place
+    // sessions included. Synchronous fs; no await needed.
+    this.settingsWriter.remove(worktreePath);
+
+    // In-place gate for the three worktree-mutating setup writes below (mirrors
+    // the SDK sibling's `!dbSession?.in_place` gate, claudeCodeManager.ts): an
+    // in-place session's "worktree" IS the user's real checkout. Flow steps have
+    // no session row (getDbSession → undefined, RunExecutor invariant) and are
+    // never in-place (RunLauncher.resolveSessionHostedWorktree throws), so they
+    // keep full setup.
+    // Truthiness, not === true: better-sqlite3 surfaces BOOLEAN columns as 0/1.
+    const inPlaceSession = Boolean(sessionRow?.in_place);
 
     // Pre-enable the worktree's project `.mcp.json` MCP servers (TASK-IDEA-030
     // launch fix). The committed project `.mcp.json` (e.g. playwright/maestro)
@@ -914,6 +922,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // SDK substrate injects unconditionally (parity). Runs REGARDLESS of
     // permissionMode (the modal blocks even in ignore mode). Synchronous fs.
     //
+    // SKIPPED for in-place sessions: the union would mutate the user's REAL
+    // `.claude/settings.local.json` (and a per-session deny would persist into
+    // their own claude usage). If the modal appears, the human driving the PTY
+    // answers it — an in-place quick session always has one. Layer-2 deny
+    // (`--disallowed-tools`, buildCommandArgs) still applies in-place.
+    //
     // Per-session MCP DENY (layer 1 — server startup): pass the denied server
     // names so the enabler EXCLUDES them from `enabledMcpjsonServers` AND lists
     // them in `disabledMcpjsonServers`, preventing the disabled servers from
@@ -922,10 +936,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // (mirrors composeMcpServers' `if (name === 'cyboflow') continue`) — the
     // orchestrator-socket server must never be disabled even if a project's
     // `.mcp.json` happens to name a server 'cyboflow'.
-    this.mcpEnabler.enable(
-      worktreePath,
-      this.resolveSessionDisabledMcps(options.sessionId).filter((n) => n !== 'cyboflow'),
-    );
+    if (!inPlaceSession) {
+      this.mcpEnabler.enable(
+        worktreePath,
+        this.resolveSessionDisabledMcps(options.sessionId).filter((n) => n !== 'cyboflow'),
+      );
+    }
 
     // Install the run's co-located `/cyboflow-<phase>` command bundle (+ any
     // subagents) into `<worktree>/.claude/commands` | `.claude/agents` BEFORE
@@ -934,11 +950,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // off the run's workflow_path, so a quick session / custom flow with no
     // sibling bundle writes nothing (fail-soft). Removed on teardown.
     //
-    // No in-place gate needed here (unlike the SDK sibling): in-place sessions
-    // (migration 046) are SDK-only — create-quick rejects an in-place session that
-    // would resolve the interactive substrate — so this seam never runs against a
-    // session whose worktree is the user's real checkout.
-    installWorkflowBundle(this.db, this.bundleWriter, runId, worktreePath, this.toLoggerLike(this.logger));
+    // Gated for in-place sessions (mirrors the SDK sibling): a quick session has
+    // no sibling bundle so this is fail-soft anyway, but the gate keeps the
+    // user's real `.claude/` untouchable by construction, not by coincidence.
+    if (!inPlaceSession) {
+      installWorkflowBundle(this.db, this.bundleWriter, runId, worktreePath, this.toLoggerLike(this.logger));
+    }
 
     // Write the per-run interactive MCP config (the path buildCommandArgs points
     // `--mcp-config` at) BEFORE building args, so the existence-guarded flag is
@@ -1540,8 +1557,9 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   }
 
   /**
-   * Remove the generated `.claude/settings.json` PreToolUse hook entry on teardown
-   * (TASK-819) by delegating to the writer's merge-safe remove for the run's
+   * Strip a LEGACY `.claude/settings.json` PreToolUse hook entry on teardown
+   * (current builds deliver the gate inline via `--settings`; older builds wrote
+   * it on disk) by delegating to the writer's merge-safe remove for the run's
    * worktree. The writer strips ONLY the cyboflow `'*'` entry and preserves all
    * user keys; it is a no-op when the file is absent or carries no cyboflow entry.
    * Resolves the worktree from the still-present interactiveRuns record (the run
@@ -1598,9 +1616,9 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       // prior conversation reopens live — eager resume passes an empty prompt.
       ...(resumeSessionId ? { resumeSessionId } : {}),
       // Quick/legacy interactive sessions resolve their 4-mode agent permission
-      // here (per-session override else global default) — without it the
-      // settings-writer's effectiveWriterMode never sees the 4-mode and ALWAYS
-      // installs the wildcard PreToolUse gate hook, and 'auto' never reaches the
+      // here (per-session override else global default) — without it
+      // resolveInlineGatingHooks never sees the 4-mode and ALWAYS emits the
+      // wildcard PreToolUse gate hook, and 'auto' never reaches the
       // `--permission-mode auto` branch. Workflow runs never hit this path (they
       // call spawnCliProcess directly with agentPermissionMode from the run
       // snapshot). Mirrors the SDK twin's spawnClaudeCode seeding.
@@ -1721,9 +1739,9 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // Carry the session's legacy permission_mode through the restart (twin
     // parity: claudeCodeManager.restartPanelWithHistory reads the DB row — the
     // restart seam has no permissionMode arg) and re-resolve the 4-mode exactly
-    // like startPanel/continuePanel. Without agentPermissionMode the
-    // settings-writer's effectiveWriterMode ALWAYS installs the wildcard
-    // PreToolUse gate on a restarted panel, even for auto/dontAsk sessions.
+    // like startPanel/continuePanel. Without agentPermissionMode
+    // resolveInlineGatingHooks ALWAYS emits the wildcard PreToolUse gate on a
+    // restarted panel, even for auto/dontAsk sessions.
     const permissionMode = this.sessionManager.getDbSession(sessionId)?.permission_mode;
     await this.spawnCliProcess({
       panelId,

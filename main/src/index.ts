@@ -56,7 +56,6 @@ import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
 import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps } from './orchestrator/trpc/routers/runs';
-import { InteractiveSettingsWriter } from './services/panels/claude/interactiveSettingsWriter';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
 import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
@@ -1254,18 +1253,16 @@ async function initializeServices() {
   runQueues = new RunQueueRegistry();
 
   // Shared session-mode write chokepoint deps (permission-mode redesign §3d/§3e /
-  // Slice 5). The SAME four side effects (persist sessions.agent_permission_mode +
-  // 'session-updated' emit + runtime mutate + interactive .claude/settings.json
-  // re-prime) back three callers: the composer pill IPC handler (builds its own
-  // deps from AppServices), runs.setPermissionMode (setSetPermissionModeDeps
-  // below), and RunLauncher.launch (the constructor param below). The
-  // InteractiveSettingsWriter is stateless apart from its logger, so one instance
-  // is shared. The concrete services satisfy the chokepoint's structural deps.
+  // Slice 5). The SAME three side effects (persist sessions.agent_permission_mode
+  // + 'session-updated' emit + runtime mutate) back three callers: the composer
+  // pill IPC handler (builds its own deps from AppServices),
+  // runs.setPermissionMode (setSetPermissionModeDeps below), and
+  // RunLauncher.launch (the constructor param below). The interactive substrate
+  // needs no spawn-side priming: the PTY gating hook rides the inline
+  // `--settings` flag and is recomputed from the persisted mode at every spawn.
   sessionPermissionModeDeps = {
     databaseService,
     sessionManager,
-    configManager,
-    settingsWriter: new InteractiveSettingsWriter(cyboflowLogger),
   };
 
   runLauncher = new RunLauncher(

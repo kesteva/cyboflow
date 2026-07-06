@@ -120,17 +120,11 @@ function makeFakeSessionPermDeps(): {
 } {
   const updateSession = vi.fn(() => ({ id: 'sess-1' }));
   const deps: SessionAgentPermissionModeDeps = {
-    databaseService: {
-      updateSession,
-      // 'sdk' substrate → the chokepoint skips the interactive re-prime branch.
-      getSession: vi.fn(() => ({ substrate: 'sdk', worktree_path: undefined })),
-    },
+    databaseService: { updateSession },
     sessionManager: {
       getSession: vi.fn(() => ({ agentPermissionMode: 'default' as const })),
       emit: vi.fn(),
     },
-    configManager: { isDemoMode: () => false },
-    settingsWriter: { write: vi.fn(), remove: vi.fn() },
   };
   return { deps, updateSession };
 }

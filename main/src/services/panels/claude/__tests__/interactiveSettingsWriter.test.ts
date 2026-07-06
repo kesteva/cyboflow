@@ -1,18 +1,20 @@
 /**
- * Unit tests for InteractiveSettingsWriter (IDEA-013 S5 / TASK-810).
+ * Unit tests for the interactive gating-hook module (IDEA-013 S5 / TASK-810;
+ * delivery mechanism revised to inline `--settings` for in-place sessions).
  *
- * Covers the test_strategy target:
- *   "interactiveSettingsWriter writes a merge-safe '*' PreToolUse entry with a
- *    high timeout, preserves pre-existing user keys, removes only the cyboflow
- *    entry, and skips writing under permissionMode ignore/dontAsk."
+ * Two units under contract:
  *
- * Concretely, per the acceptance criteria:
- *   (a) empty-dir write → a valid settings.json whose hooks.PreToolUse holds a
- *       '*'-matcher entry referencing the hook script with a high timeout;
- *   (b) write into a dir with a pre-existing settings.json (permissions.allow,
- *       env, unrelated hooks) preserves ALL user keys and only adds ours;
- *   (c) remove strips ONLY the cyboflow entry and leaves user keys intact;
- *   (d) permissionMode 'ignore'/'dontAsk' → no write occurs.
+ *   resolveInlineGatingHooks — builds the `hooks` settings fragment the manager
+ *   folds into its inline `--settings '<json>'` flag. Gating modes
+ *   (undefined/'approve'/'default'/'acceptEdits') yield a '*'-matcher entry
+ *   referencing the hook script with the high human-decision timeout; opt-out
+ *   modes ('ignore'/'dontAsk'/'auto') yield null. It never touches the
+ *   filesystem beyond the chmod self-heal on the hook script itself.
+ *
+ *   InteractiveSettingsWriter.remove — strips the LEGACY on-disk entry older
+ *   builds wrote into `<worktree>/.claude/settings.json`, merge-safe (user keys
+ *   preserved), matching by exact resolved path OR the cyboflow-unique hook
+ *   filename suffix (so entries from a different build variant still match).
  *
  * Hermetic: each test uses a fresh os.tmpdir() worktree and a fixed
  * `hookDirOverride` so the resolved hook path is deterministic (the global
@@ -22,7 +24,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { InteractiveSettingsWriter, resolveShellHookScriptPath } from '../interactiveSettingsWriter';
+import {
+  InteractiveSettingsWriter,
+  resolveInlineGatingHooks,
+  resolveShellHookScriptPath,
+} from '../interactiveSettingsWriter';
 import { makeSpyLogger } from '../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
 
 // ---------------------------------------------------------------------------
@@ -64,11 +70,70 @@ function writeUserSettings(worktree: string, settings: Settings): void {
   fs.writeFileSync(settingsPath(worktree), JSON.stringify(settings, null, 2), 'utf8');
 }
 
+/** The cyboflow entry exactly as legacy builds wrote it on disk. */
+function legacyCyboflowGroup(command: string): HookMatcherGroup {
+  return { matcher: '*', hooks: [{ type: 'command', command, timeout: 86_400 }] };
+}
+
 // ---------------------------------------------------------------------------
-// Tests
+// resolveInlineGatingHooks — the inline `--settings` fragment builder
 // ---------------------------------------------------------------------------
 
-describe('InteractiveSettingsWriter', () => {
+describe('resolveInlineGatingHooks', () => {
+  const hookPath = resolveShellHookScriptPath(HOOK_DIR);
+
+  it.each([undefined, 'approve', 'default', 'acceptEdits'] as const)(
+    'gating mode %s → a "*" PreToolUse fragment referencing the hook script with the high timeout',
+    (permissionMode) => {
+      const fragment = resolveInlineGatingHooks(
+        { permissionMode, hookDirOverride: HOOK_DIR },
+        makeSpyLogger(),
+      );
+
+      expect(fragment).not.toBeNull();
+      expect(fragment!.PreToolUse).toHaveLength(1);
+      const group = fragment!.PreToolUse[0];
+      expect(group.matcher).toBe('*');
+      expect(group.hooks).toEqual([{ type: 'command', command: hookPath, timeout: 86_400 }]);
+    },
+  );
+
+  it.each(['ignore', 'dontAsk', 'auto'] as const)(
+    'opt-out mode %s → null (no gate; native/opted-out gating owns the decision)',
+    (permissionMode) => {
+      const fragment = resolveInlineGatingHooks(
+        { permissionMode, hookDirOverride: HOOK_DIR },
+        makeSpyLogger(),
+      );
+      expect(fragment).toBeNull();
+    },
+  );
+
+  it('never creates a settings file in any worktree (inline-only delivery)', () => {
+    const worktree = makeWorktree();
+    try {
+      resolveInlineGatingHooks({ hookDirOverride: HOOK_DIR }, makeSpyLogger());
+      expect(fs.existsSync(settingsPath(worktree))).toBe(false);
+      expect(fs.existsSync(path.join(worktree, '.claude'))).toBe(false);
+    } finally {
+      fs.rmSync(worktree, { recursive: true, force: true });
+    }
+  });
+
+  it('logs the opt-out diagnostic through the provided logger', () => {
+    const logger = makeSpyLogger();
+    resolveInlineGatingHooks({ permissionMode: 'auto', hookDirOverride: HOOK_DIR }, logger);
+    expect(
+      logger.calls.some((c) => c.level === 'debug' && c.message.includes('opts out of gating')),
+    ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// InteractiveSettingsWriter.remove — legacy on-disk entry strip
+// ---------------------------------------------------------------------------
+
+describe('InteractiveSettingsWriter.remove', () => {
   let worktree: string;
   let writer: InteractiveSettingsWriter;
   const hookPath = resolveShellHookScriptPath(HOOK_DIR);
@@ -82,205 +147,100 @@ describe('InteractiveSettingsWriter', () => {
     fs.rmSync(worktree, { recursive: true, force: true });
   });
 
-  // -------------------------------------------------------------------------
-  // (a) empty-dir write
-  // -------------------------------------------------------------------------
-
-  describe('write into an empty worktree', () => {
-    it('creates a valid settings.json with a "*" PreToolUse entry referencing the hook with a high timeout', () => {
-      const installed = writer.write(worktree, { hookDirOverride: HOOK_DIR });
-
-      expect(installed).toBe(hookPath);
-      expect(fs.existsSync(settingsPath(worktree))).toBe(true);
-
-      const settings = readSettings(worktree);
-      const groups = settings.hooks?.PreToolUse ?? [];
-      const cyboflow = groups.find((g) => g.matcher === '*');
-      expect(cyboflow).toBeDefined();
-
-      const cmd = cyboflow!.hooks.find((h) => h.command === hookPath);
-      expect(cmd).toBeDefined();
-      expect(cmd!.type).toBe('command');
-      // High timeout — the hook blocks for the full human-decision window.
-      expect(cmd!.timeout).toBeGreaterThanOrEqual(60 * 5);
+  it('strips ONLY the cyboflow entry and leaves user keys intact', () => {
+    const userHookCmd = '/usr/local/bin/user-hook.sh';
+    writeUserSettings(worktree, {
+      permissions: { allow: ['Bash(ls:*)'] },
+      env: { KEEP: 'me' },
+      hooks: {
+        PreToolUse: [
+          { matcher: 'Edit', hooks: [{ type: 'command', command: userHookCmd }] },
+          legacyCyboflowGroup(hookPath),
+        ],
+      },
     });
 
-    it('is idempotent — a second write does not duplicate the cyboflow entry', () => {
-      writer.write(worktree, { hookDirOverride: HOOK_DIR });
-      writer.write(worktree, { hookDirOverride: HOOK_DIR });
+    writer.remove(worktree, { hookDirOverride: HOOK_DIR });
+    const settings = readSettings(worktree);
 
-      const groups = readSettings(worktree).hooks?.PreToolUse ?? [];
-      const cyboflowGroups = groups.filter(
-        (g) => g.matcher === '*' && g.hooks.some((h) => h.command === hookPath),
-      );
-      expect(cyboflowGroups).toHaveLength(1);
+    // Our entry is gone.
+    const preGroups = settings.hooks?.PreToolUse ?? [];
+    expect(preGroups.some((g) => g.hooks.some((h) => h.command === hookPath))).toBe(false);
+
+    // User keys + the user's PreToolUse entry survive.
+    expect(settings.permissions).toEqual({ allow: ['Bash(ls:*)'] });
+    expect(settings.env).toEqual({ KEEP: 'me' });
+    expect(preGroups).toContainEqual({
+      matcher: 'Edit',
+      hooks: [{ type: 'command', command: userHookCmd }],
     });
   });
 
-  // -------------------------------------------------------------------------
-  // (b) merge-safety against pre-existing user keys
-  // -------------------------------------------------------------------------
-
-  describe('write into a worktree with a pre-existing user settings.json', () => {
-    it('preserves ALL user keys (permissions, env, unrelated hooks) and only adds the cyboflow entry', () => {
-      const userHookCmd = '/usr/local/bin/user-hook.sh';
-      writeUserSettings(worktree, {
-        permissions: { allow: ['Bash(git status:*)'], deny: ['Bash(rm:*)'] },
-        env: { MY_VAR: 'value' },
-        customTopLevel: { nested: true },
-        hooks: {
-          PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: userHookCmd }] }],
-          PreToolUse: [{ matcher: 'Edit', hooks: [{ type: 'command', command: userHookCmd }] }],
-        },
-      });
-
-      writer.write(worktree, { hookDirOverride: HOOK_DIR });
-      const settings = readSettings(worktree);
-
-      // User keys untouched.
-      expect(settings.permissions).toEqual({ allow: ['Bash(git status:*)'], deny: ['Bash(rm:*)'] });
-      expect(settings.env).toEqual({ MY_VAR: 'value' });
-      expect(settings.customTopLevel).toEqual({ nested: true });
-
-      // User's PostToolUse hook event preserved verbatim.
-      expect(settings.hooks?.PostToolUse).toEqual([
-        { matcher: 'Bash', hooks: [{ type: 'command', command: userHookCmd }] },
-      ]);
-
-      // User's existing PreToolUse 'Edit' entry preserved; ours appended.
-      const preGroups = settings.hooks?.PreToolUse ?? [];
-      expect(preGroups).toContainEqual({
-        matcher: 'Edit',
-        hooks: [{ type: 'command', command: userHookCmd }],
-      });
-      const ours = preGroups.find((g) => g.matcher === '*' && g.hooks.some((h) => h.command === hookPath));
-      expect(ours).toBeDefined();
+  it('strips a legacy entry written by a DIFFERENT build variant (matched by hook-filename suffix)', () => {
+    // A packaged build's asar-unpacked absolute path — nothing like this test's
+    // dev-resolved hookPath, but the same trailing filename.
+    const packagedPath =
+      '/Applications/Cyboflow.app/Contents/Resources/app.asar.unpacked/main/dist/main/src/orchestrator/shellHooks/preToolUseShellHook.js';
+    writeUserSettings(worktree, {
+      hooks: { PreToolUse: [legacyCyboflowGroup(packagedPath)] },
     });
 
-    it('does not clobber a user "*" matcher that points at a different command', () => {
-      const userStarCmd = '/usr/local/bin/user-star-hook.sh';
-      writeUserSettings(worktree, {
-        hooks: { PreToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: userStarCmd }] }] },
-      });
+    writer.remove(worktree, { hookDirOverride: HOOK_DIR });
 
-      writer.write(worktree, { hookDirOverride: HOOK_DIR });
-      const preGroups = readSettings(worktree).hooks?.PreToolUse ?? [];
-
-      // The user's '*' entry survives (it points elsewhere) and ours is added.
-      expect(preGroups.some((g) => g.hooks.some((h) => h.command === userStarCmd))).toBe(true);
-      expect(preGroups.some((g) => g.hooks.some((h) => h.command === hookPath))).toBe(true);
-    });
+    const settings = readSettings(worktree);
+    expect(settings.hooks?.PreToolUse).toBeUndefined();
   });
 
-  // -------------------------------------------------------------------------
-  // (c) remove strips only the cyboflow entry
-  // -------------------------------------------------------------------------
-
-  describe('remove', () => {
-    it('strips ONLY the cyboflow entry and leaves user keys intact', () => {
-      const userHookCmd = '/usr/local/bin/user-hook.sh';
-      writeUserSettings(worktree, {
-        permissions: { allow: ['Bash(ls:*)'] },
-        env: { KEEP: 'me' },
-        hooks: { PreToolUse: [{ matcher: 'Edit', hooks: [{ type: 'command', command: userHookCmd }] }] },
-      });
-      writer.write(worktree, { hookDirOverride: HOOK_DIR });
-
-      writer.remove(worktree, { hookDirOverride: HOOK_DIR });
-      const settings = readSettings(worktree);
-
-      // Our entry is gone.
-      const preGroups = settings.hooks?.PreToolUse ?? [];
-      expect(preGroups.some((g) => g.hooks.some((h) => h.command === hookPath))).toBe(false);
-
-      // User keys + the user's PreToolUse entry survive.
-      expect(settings.permissions).toEqual({ allow: ['Bash(ls:*)'] });
-      expect(settings.env).toEqual({ KEEP: 'me' });
-      expect(preGroups).toContainEqual({
-        matcher: 'Edit',
-        hooks: [{ type: 'command', command: userHookCmd }],
-      });
+  it('does NOT strip a user "*" matcher pointing at a different (non-cyboflow) command', () => {
+    const userStarCmd = '/usr/local/bin/user-star-hook.sh';
+    writeUserSettings(worktree, {
+      hooks: {
+        PreToolUse: [
+          { matcher: '*', hooks: [{ type: 'command', command: userStarCmd }] },
+          legacyCyboflowGroup(hookPath),
+        ],
+      },
     });
 
-    it('prunes an empty PreToolUse container when only the cyboflow entry was present, preserving sibling hook events', () => {
-      const userHookCmd = '/usr/local/bin/user-post-hook.sh';
-      writeUserSettings(worktree, {
-        env: { KEEP: 'me' },
-        hooks: { PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: userHookCmd }] }] },
-      });
-      writer.write(worktree, { hookDirOverride: HOOK_DIR });
+    writer.remove(worktree, { hookDirOverride: HOOK_DIR });
+    const preGroups = readSettings(worktree).hooks?.PreToolUse ?? [];
 
-      writer.remove(worktree, { hookDirOverride: HOOK_DIR });
-      const settings = readSettings(worktree);
-
-      // PreToolUse pruned (it held only ours); PostToolUse + env preserved.
-      expect(settings.hooks?.PreToolUse).toBeUndefined();
-      expect(settings.hooks?.PostToolUse).toEqual([
-        { matcher: 'Bash', hooks: [{ type: 'command', command: userHookCmd }] },
-      ]);
-      expect(settings.env).toEqual({ KEEP: 'me' });
-    });
-
-    it('is a no-op when no settings file exists', () => {
-      expect(() => writer.remove(worktree, { hookDirOverride: HOOK_DIR })).not.toThrow();
-      expect(fs.existsSync(settingsPath(worktree))).toBe(false);
-    });
+    expect(preGroups.some((g) => g.hooks.some((h) => h.command === userStarCmd))).toBe(true);
+    expect(preGroups.some((g) => g.hooks.some((h) => h.command === hookPath))).toBe(false);
   });
 
-  // -------------------------------------------------------------------------
-  // (d) permissionMode ignore/dontAsk skips the write
-  // -------------------------------------------------------------------------
-
-  describe('permissionMode skip', () => {
-    it('skips writing under permissionMode "ignore" (no file created)', () => {
-      const result = writer.write(worktree, { permissionMode: 'ignore', hookDirOverride: HOOK_DIR });
-      expect(result).toBeNull();
-      expect(fs.existsSync(settingsPath(worktree))).toBe(false);
+  it('prunes an empty PreToolUse container when only the cyboflow entry was present, preserving sibling hook events', () => {
+    const userHookCmd = '/usr/local/bin/user-post-hook.sh';
+    writeUserSettings(worktree, {
+      env: { KEEP: 'me' },
+      hooks: {
+        PostToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: userHookCmd }] }],
+        PreToolUse: [legacyCyboflowGroup(hookPath)],
+      },
     });
 
-    it('skips writing under permissionMode "dontAsk" (no file created)', () => {
-      const result = writer.write(worktree, { permissionMode: 'dontAsk', hookDirOverride: HOOK_DIR });
-      expect(result).toBeNull();
-      expect(fs.existsSync(settingsPath(worktree))).toBe(false);
-    });
+    writer.remove(worktree, { hookDirOverride: HOOK_DIR });
+    const settings = readSettings(worktree);
 
-    it('skips writing under permissionMode "auto" (native classifier owns gating — no hook to pre-empt it)', () => {
-      const result = writer.write(worktree, { permissionMode: 'auto', hookDirOverride: HOOK_DIR });
-      expect(result).toBeNull();
-      expect(fs.existsSync(settingsPath(worktree))).toBe(false);
-    });
+    // PreToolUse pruned (it held only ours); PostToolUse + env preserved.
+    expect(settings.hooks?.PreToolUse).toBeUndefined();
+    expect(settings.hooks?.PostToolUse).toEqual([
+      { matcher: 'Bash', hooks: [{ type: 'command', command: userHookCmd }] },
+    ]);
+    expect(settings.env).toEqual({ KEEP: 'me' });
+  });
 
-    it('does NOT mutate a pre-existing user settings file under "auto"', () => {
-      writeUserSettings(worktree, { permissions: { allow: ['Bash(ls:*)'] } });
-      const before = fs.readFileSync(settingsPath(worktree), 'utf8');
+  it('is a no-op when no settings file exists', () => {
+    expect(() => writer.remove(worktree, { hookDirOverride: HOOK_DIR })).not.toThrow();
+    expect(fs.existsSync(settingsPath(worktree))).toBe(false);
+  });
 
-      writer.write(worktree, { permissionMode: 'auto', hookDirOverride: HOOK_DIR });
+  it('does NOT rewrite the file when no cyboflow entry is present (byte-identical)', () => {
+    writeUserSettings(worktree, { permissions: { allow: ['Bash(ls:*)'] } });
+    const before = fs.readFileSync(settingsPath(worktree), 'utf8');
 
-      expect(fs.readFileSync(settingsPath(worktree), 'utf8')).toBe(before);
-    });
+    writer.remove(worktree, { hookDirOverride: HOOK_DIR });
 
-    it('still INSTALLS the hook under permissionMode "acceptEdits" (gate stays; edits fast-pathed in the handler)', () => {
-      const result = writer.write(worktree, { permissionMode: 'acceptEdits', hookDirOverride: HOOK_DIR });
-      expect(result).toBe(hookPath);
-      expect(fs.existsSync(settingsPath(worktree))).toBe(true);
-
-      const groups = readSettings(worktree).hooks?.PreToolUse ?? [];
-      expect(groups.some((g) => g.matcher === '*' && g.hooks.some((h) => h.command === hookPath))).toBe(true);
-    });
-
-    it('still INSTALLS the hook under permissionMode "default" (full gate)', () => {
-      const result = writer.write(worktree, { permissionMode: 'default', hookDirOverride: HOOK_DIR });
-      expect(result).toBe(hookPath);
-      expect(fs.existsSync(settingsPath(worktree))).toBe(true);
-    });
-
-    it('does NOT mutate a pre-existing user settings file under "ignore"', () => {
-      writeUserSettings(worktree, { permissions: { allow: ['Bash(ls:*)'] } });
-      const before = fs.readFileSync(settingsPath(worktree), 'utf8');
-
-      writer.write(worktree, { permissionMode: 'ignore', hookDirOverride: HOOK_DIR });
-
-      expect(fs.readFileSync(settingsPath(worktree), 'utf8')).toBe(before);
-    });
+    expect(fs.readFileSync(settingsPath(worktree), 'utf8')).toBe(before);
   });
 });

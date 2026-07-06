@@ -32,6 +32,7 @@ import { dbAdapter } from '../../../../orchestrator/__test_fixtures__/dbAdapter'
 import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchestratorTestDb';
 import { InteractiveClaudeManager } from '../interactiveClaudeManager';
 import { InteractiveSettingsWriter } from '../interactiveSettingsWriter';
+import { InteractiveMcpEnabler } from '../interactiveMcpEnabler';
 import { QUICK_WORKFLOW_NAME } from '../../../../orchestrator/workflowRegistry';
 import { getCyboflowSubdirectory } from '../../../../utils/cyboflowDirectory';
 import type { PermissionMode } from '../../../../../../shared/types/workflows';
@@ -541,24 +542,78 @@ describe('InteractiveClaudeManager', () => {
         });
         expect(args).toContain('--mcp-config');
         expect(args).toContain(mcpConfigPath);
-        // The dangling `--settings <.cyboflow/interactive-settings.json>` FILE
-        // flag is dropped (TASK-819): the PreToolUse hook is installed by the
-        // writer into the worktree's default `.claude/settings.json` that `claude`
-        // reads. A single `--settings <inline-json>` IS emitted to pin fast mode
-        // OFF by default + per-session (so a persisted `/fast` can't leak in); its
-        // value is INLINE JSON, never a settings-file path. No ultracode key for a
-        // plain spawn.
+        // A single `--settings <inline-json>` is emitted carrying ALL
+        // session-only keys: the fast-mode pin (OFF by default + per-session, so
+        // a persisted `/fast` can't leak in) AND the PreToolUse `'*'` gating
+        // hook (inline delivery — probe-verified that flag-tier hooks fire and
+        // block; nothing is written into the worktree). Its value is INLINE
+        // JSON, never a settings-file path. No ultracode key for a plain spawn.
         const settingsIdx = args.indexOf('--settings');
         expect(settingsIdx).toBeGreaterThanOrEqual(0);
         // exactly one --settings flag
         expect(args.filter((a) => a === '--settings')).toHaveLength(1);
-        expect(JSON.parse(args[settingsIdx + 1])).toEqual({
-          fastMode: false,
-          fastModePerSessionOptIn: true,
-        });
+        const inlineSettings = JSON.parse(args[settingsIdx + 1]) as {
+          fastMode: boolean;
+          fastModePerSessionOptIn: boolean;
+          hooks?: { PreToolUse?: { matcher?: string; hooks?: { type?: string; command?: string; timeout?: number }[] }[] };
+        };
+        expect(inlineSettings.fastMode).toBe(false);
+        expect(inlineSettings.fastModePerSessionOptIn).toBe(true);
+        // Default (no opt-out) → the gate rides the flag: '*' matcher, our
+        // compiled hook script, the high human-decision timeout.
+        const gate = inlineSettings.hooks?.PreToolUse?.[0];
+        expect(gate?.matcher).toBe('*');
+        expect(gate?.hooks?.[0]?.type).toBe('command');
+        expect(gate?.hooks?.[0]?.command).toContain('preToolUseShellHook');
+        expect(gate?.hooks?.[0]?.timeout).toBe(86_400);
       } finally {
         fs.rmSync(wt, { recursive: true, force: true });
       }
+    });
+
+    /** Parse the inline --settings JSON out of a built args array. */
+    function inlineSettingsOf(args: string[]): { hooks?: unknown } {
+      const idx = args.indexOf('--settings');
+      expect(idx).toBeGreaterThanOrEqual(0);
+      return JSON.parse(args[idx + 1]) as { hooks?: unknown };
+    }
+
+    it.each(['ignore', 'auto', 'dontAsk'] as const)(
+      'omits the inline gating hook for opt-out mode %s (single opt-out source: resolveInlineGatingHooks)',
+      (mode) => {
+        const args = mgr.callBuildCommandArgs({
+          panelId: 'p1',
+          sessionId: 's1',
+          worktreePath: '/tmp/wt',
+          prompt: 'hi',
+          ...(mode === 'ignore' ? { permissionMode: 'ignore' } : { agentPermissionMode: mode }),
+        });
+        expect(inlineSettingsOf(args).hooks).toBeUndefined();
+      },
+    );
+
+    it('keeps the inline gating hook for acceptEdits (edits fast-pathed in the handler, gate stays)', () => {
+      const args = mgr.callBuildCommandArgs({
+        panelId: 'p1',
+        sessionId: 's1',
+        worktreePath: '/tmp/wt',
+        prompt: 'hi',
+        agentPermissionMode: 'acceptEdits',
+      });
+      expect(inlineSettingsOf(args).hooks).toBeDefined();
+    });
+
+    it('4-mode agentPermissionMode takes precedence over the legacy permissionMode for the gate decision', () => {
+      // legacy 'approve' (gate) + 4-mode 'auto' (no gate) → no gate.
+      const args = mgr.callBuildCommandArgs({
+        panelId: 'p1',
+        sessionId: 's1',
+        worktreePath: '/tmp/wt',
+        prompt: 'hi',
+        permissionMode: 'approve',
+        agentPermissionMode: 'auto',
+      });
+      expect(inlineSettingsOf(args).hooks).toBeUndefined();
     });
   });
 
@@ -704,10 +759,12 @@ describe('InteractiveClaudeManager', () => {
   });
 
   // -------------------------------------------------------------------------
-  // (TASK-819) PreToolUse shell-approval hook: write on spawn + ignore skip.
-  // Real-fs round-trip on a temp worktree exercises the writer's merge.
+  // PreToolUse shell-approval hook: INLINE --settings delivery. Spawn writes
+  // NOTHING into the worktree's .claude/ — it only STRIPS a legacy on-disk
+  // entry (double-fire guard) via settingsWriter.remove. Real-fs round-trip on
+  // a temp worktree exercises the merge-safe strip.
   // -------------------------------------------------------------------------
-  describe('shell-approval hook write on spawn (TASK-819)', () => {
+  describe('shell-approval hook spawn side effects (inline --settings delivery)', () => {
     let db: Database.Database;
     let mgr: TestableInteractiveClaudeManager;
     const worktrees: string[] = [];
@@ -741,8 +798,8 @@ describe('InteractiveClaudeManager', () => {
       vi.clearAllMocks();
     });
 
-    it('installs the PreToolUse \'*\' hook into <worktree>/.claude/settings.json once on spawn, passing the worktree path', async () => {
-      const writeSpy = vi.spyOn(InteractiveSettingsWriter.prototype, 'write');
+    it('writes NOTHING into <worktree>/.claude on spawn — only the legacy strip (remove) runs, once, with the worktree path', async () => {
+      const removeSpy = vi.spyOn(InteractiveSettingsWriter.prototype, 'remove');
       const worktreePath = freshWorktree();
       const spawn = mgr.spawnCliProcess({
         panelId: 'panel-hook',
@@ -752,23 +809,60 @@ describe('InteractiveClaudeManager', () => {
       });
       await waitFor(() => mgr.ptys.length > 0);
 
-      // write() invoked exactly once with the worktree path + permissionMode opts.
-      expect(writeSpy).toHaveBeenCalledTimes(1);
-      expect(writeSpy.mock.calls[0][0]).toBe(worktreePath);
-      expect(writeSpy.mock.calls[0][1]).toEqual({ permissionMode: undefined });
+      // Legacy double-fire guard invoked with the worktree path.
+      expect(removeSpy).toHaveBeenCalledTimes(1);
+      expect(removeSpy.mock.calls[0][0]).toBe(worktreePath);
 
-      // The real writer wrote the cyboflow '*' PreToolUse entry to disk.
-      expect(hasCyboflowHook(readSettings(worktreePath))).toBe(true);
+      // The gate rides the inline --settings flag: NO settings.json is created.
+      expect(readSettings(worktreePath)).toBeUndefined();
 
       mgr.ptys[0].fireExit(0);
       await new Promise((r) => setTimeout(r, 600));
       await spawn;
     });
 
-    it('constructs the writer with a logger PASSED (write/skip diagnostics enabled)', async () => {
-      // A logger whose debug() fires when the writer logs the install. The
-      // manager adapts its Logger (debug -> verbose) to LoggerLike, so a verbose
-      // call on the manager logger proves the shim is wired.
+    it('strips a LEGACY on-disk cyboflow entry from an older build (any path ending in the hook filename) while preserving user keys', async () => {
+      const worktreePath = freshWorktree();
+      const dotClaude = path.join(worktreePath, '.claude');
+      fs.mkdirSync(dotClaude, { recursive: true });
+      fs.writeFileSync(
+        path.join(dotClaude, 'settings.json'),
+        JSON.stringify({
+          permissions: { allow: ['Bash(ls:*)'] },
+          hooks: {
+            PreToolUse: [
+              // A packaged build's absolute path — different from this build's
+              // resolved dev path, but same trailing filename.
+              { matcher: '*', hooks: [{ type: 'command', command: '/Applications/Cyboflow.app/x/preToolUseShellHook.js', timeout: 86400 }] },
+              // A user's own '*' hook pointing elsewhere must survive.
+              { matcher: '*', hooks: [{ type: 'command', command: '/Users/me/my-own-hook.sh' }] },
+            ],
+          },
+        }),
+        'utf8',
+      );
+
+      const spawn = mgr.spawnCliProcess({
+        panelId: 'panel-legacy',
+        sessionId: 'sess-legacy',
+        worktreePath,
+        prompt: 'go',
+      });
+      await waitFor(() => mgr.ptys.length > 0);
+
+      const settings = readSettings(worktreePath);
+      expect(hasCyboflowHook(settings)).toBe(false);
+      expect(settings?.permissions).toEqual({ allow: ['Bash(ls:*)'] });
+      const survivors = settings?.hooks?.PreToolUse ?? [];
+      expect(survivors).toHaveLength(1);
+      expect(survivors[0]?.hooks?.[0]?.command).toBe('/Users/me/my-own-hook.sh');
+
+      mgr.ptys[0].fireExit(0);
+      await new Promise((r) => setTimeout(r, 600));
+      await spawn;
+    });
+
+    it('routes the opt-out diagnostic through the adapted logger (debug -> verbose shim wired)', async () => {
       const logger = createLoggerSpy();
       const m = new TestableInteractiveClaudeManager(
         createMockSessionManager(),
@@ -782,14 +876,15 @@ describe('InteractiveClaudeManager', () => {
         sessionId: 'sess-log',
         worktreePath,
         prompt: 'go',
+        permissionMode: 'ignore',
       });
       await waitFor(() => m.ptys.length > 0);
 
-      // The writer's install-diagnostic routed through the adapted logger
-      // (debug -> verbose). A no-arg writer would have silently no-op'd this.
+      // resolveInlineGatingHooks' opt-out diagnostic routed through the adapted
+      // logger (debug -> verbose). A no-logger call would silently no-op this.
       expect(
         logger.verbose.mock.calls.some(
-          (c) => typeof c[0] === 'string' && c[0].includes('installed PreToolUse shell hook'),
+          (c) => typeof c[0] === 'string' && c[0].includes('opts out of gating'),
         ),
       ).toBe(true);
 
@@ -798,69 +893,47 @@ describe('InteractiveClaudeManager', () => {
       await spawn;
     });
 
-    it('writes NO gating hook when permissionMode === \'ignore\' (writer opt-out consumed, not a manager gate)', async () => {
-      const writeSpy = vi.spyOn(InteractiveSettingsWriter.prototype, 'write');
+    it('in-place session (migration 046): skips mcpEnabler.enable so the user\'s real .claude/settings.local.json is never touched', async () => {
+      const enableSpy = vi.spyOn(InteractiveMcpEnabler.prototype, 'enable');
+      const m = new TestableInteractiveClaudeManager(
+        createMockSessionManager({
+          getDbSession: vi.fn(() => ({ id: 'sess-ip', in_place: 1 })),
+        } as unknown as Parameters<typeof createMockSessionManager>[0]),
+        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(),
+        db,
+      );
       const worktreePath = freshWorktree();
-      const spawn = mgr.spawnCliProcess({
-        panelId: 'panel-ign',
-        sessionId: 'sess-ign',
+      const spawn = m.spawnCliProcess({
+        panelId: 'panel-ip',
+        sessionId: 'sess-ip',
         worktreePath,
         prompt: 'go',
-        permissionMode: 'ignore',
       });
-      await waitFor(() => mgr.ptys.length > 0);
+      await waitFor(() => m.ptys.length > 0);
 
-      // write() is still CALLED (no manager gate) but with permissionMode 'ignore'
-      // — the writer returns null and writes nothing (its own opt-out branch).
-      expect(writeSpy).toHaveBeenCalledTimes(1);
-      expect(writeSpy.mock.calls[0][1]).toEqual({ permissionMode: 'ignore' });
-      expect(writeSpy.mock.results[0].value).toBeNull();
-      expect(hasCyboflowHook(readSettings(worktreePath))).toBe(false);
+      expect(enableSpy).not.toHaveBeenCalled();
+      // And nothing was created under the checkout's .claude/.
+      expect(readSettings(worktreePath)).toBeUndefined();
 
-      mgr.ptys[0].fireExit(0);
+      m.ptys[0].fireExit(0);
       await new Promise((r) => setTimeout(r, 600));
       await spawn;
     });
 
-    it('Step F: agentPermissionMode "auto" drives the writer (skip) and writes NO gating hook (native classifier owns gating)', async () => {
-      const writeSpy = vi.spyOn(InteractiveSettingsWriter.prototype, 'write');
+    it('worktree session (control): mcpEnabler.enable IS called', async () => {
+      const enableSpy = vi.spyOn(InteractiveMcpEnabler.prototype, 'enable');
       const worktreePath = freshWorktree();
       const spawn = mgr.spawnCliProcess({
-        panelId: 'panel-auto',
-        sessionId: 'sess-auto',
+        panelId: 'panel-wt',
+        sessionId: 'sess-wt',
         worktreePath,
         prompt: 'go',
-        agentPermissionMode: 'auto',
       });
       await waitFor(() => mgr.ptys.length > 0);
 
-      // The effective writer mode is the 4-mode agentPermissionMode (precedence
-      // over the legacy permissionMode) — the writer skips and installs nothing.
-      expect(writeSpy).toHaveBeenCalledTimes(1);
-      expect(writeSpy.mock.calls[0][1]).toEqual({ permissionMode: 'auto' });
-      expect(writeSpy.mock.results[0].value).toBeNull();
-      expect(hasCyboflowHook(readSettings(worktreePath))).toBe(false);
-
-      mgr.ptys[0].fireExit(0);
-      await new Promise((r) => setTimeout(r, 600));
-      await spawn;
-    });
-
-    it('Step F: agentPermissionMode "acceptEdits" drives the writer to INSTALL the hook (gate stays; edits fast-pathed in the handler)', async () => {
-      const writeSpy = vi.spyOn(InteractiveSettingsWriter.prototype, 'write');
-      const worktreePath = freshWorktree();
-      const spawn = mgr.spawnCliProcess({
-        panelId: 'panel-ae',
-        sessionId: 'sess-ae',
-        worktreePath,
-        prompt: 'go',
-        agentPermissionMode: 'acceptEdits',
-      });
-      await waitFor(() => mgr.ptys.length > 0);
-
-      expect(writeSpy).toHaveBeenCalledTimes(1);
-      expect(writeSpy.mock.calls[0][1]).toEqual({ permissionMode: 'acceptEdits' });
-      expect(hasCyboflowHook(readSettings(worktreePath))).toBe(true);
+      expect(enableSpy).toHaveBeenCalledTimes(1);
+      expect(enableSpy.mock.calls[0][0]).toBe(worktreePath);
 
       mgr.ptys[0].fireExit(0);
       await new Promise((r) => setTimeout(r, 600));
@@ -948,7 +1021,7 @@ describe('InteractiveClaudeManager', () => {
       void spawn;
     });
 
-    it('removes the generated \'*\' hook on teardown while preserving a pre-seeded user key', async () => {
+    it('strips a legacy \'*\' hook at teardown while preserving a pre-seeded user key (inline delivery writes none itself)', async () => {
       const worktreePath = freshWorktree();
       // Pre-seed a user settings.json with an unrelated key the writer must keep.
       const dotClaude = path.join(worktreePath, '.claude');
@@ -963,10 +1036,27 @@ describe('InteractiveClaudeManager', () => {
       const spawn = mgr.spawnCliProcess({ panelId, sessionId: 'sess-remove', worktreePath, prompt: 'go' });
       await waitFor(() => mgr.fakeSources.length > 0 && mgr.fakeSources[0].started);
 
-      // Spawn installed our '*' hook alongside the user key.
+      // Inline delivery: spawn writes NO hook on disk; the user key is intact.
       const afterSpawn = readSettings(worktreePath);
-      expect(hasCyboflowHook(afterSpawn)).toBe(true);
+      expect(hasCyboflowHook(afterSpawn)).toBe(false);
       expect((afterSpawn as { permissions?: { allow?: string[] } }).permissions?.allow).toEqual(['Bash(ls)']);
+
+      // Simulate a LEGACY on-disk entry appearing mid-session (older build wrote
+      // it before this build took over the worktree) — teardown must strip it.
+      const legacy = readSettings(worktreePath) as Record<string, unknown>;
+      fs.writeFileSync(
+        path.join(dotClaude, 'settings.json'),
+        JSON.stringify({
+          ...legacy,
+          hooks: {
+            PreToolUse: [
+              { matcher: '*', hooks: [{ type: 'command', command: '/old/build/preToolUseShellHook.js', timeout: 86400 }] },
+            ],
+          },
+        }),
+        'utf8',
+      );
+      expect(hasCyboflowHook(readSettings(worktreePath))).toBe(true);
 
       await mgr.killProcess(panelId);
 
