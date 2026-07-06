@@ -3,7 +3,7 @@ import type { Session, SessionOutput, GitStatus, GitCommands } from './session';
 import type { Project } from './project';
 import type { Folder } from './folder';
 import type { SessionCreationPreferences } from '../stores/sessionPreferencesStore';
-import type { ToolPanel, FastModeStateNotice } from '../../../shared/types/panels';
+import type { ToolPanel, FastModeStateNotice, QueuedPanelInput } from '../../../shared/types/panels';
 import type { CreateSessionRequest } from './session';
 import type { AppConfig } from './config';
 import type { ExecutionDiff, GitDiffResult } from './diff';
@@ -352,6 +352,10 @@ interface ElectronAPI {
     // PromptMarker is locally typed; IPCDataResponse for direct .data access
     getPrompts: (panelId: string) => Promise<IPCDataResponse<unknown[]>>;
     continue: (panelId: string, input: string, model?: string) => Promise<IPCResponse<void>>;
+    // Mid-turn input queue ("always allow messaging a running quick session").
+    queueInput: (panelId: string, id: string, text: string) => Promise<IPCResponse<{ queued: boolean }>>;
+    listQueuedInput: (panelId: string) => Promise<IPCResponse<QueuedPanelInput[]>>;
+    dequeueInput: (panelId: string, id: string) => Promise<IPCResponse<{ dequeued: boolean }>>;
     stop: (panelId: string) => Promise<IPCResponse<void>>;
     resizeTerminal: (panelId: string, cols: number, rows: number) => Promise<IPCResponse<void>>;
     sendTerminalInput: (panelId: string, data: string) => Promise<IPCResponse<void>>;

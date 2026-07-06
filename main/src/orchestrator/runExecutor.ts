@@ -1058,6 +1058,24 @@ export class RunExecutor {
   }
 
   /**
+   * Remove one queued message from a run's buffer by its text (click-to-reopen —
+   * "behavior 3": reopening a queued message pulls it back into the composer and
+   * removes it from the queue so it is NOT also delivered at the rest boundary).
+   * queueInput stored the trimmed text, so match on the trimmed input. Returns
+   * true when an entry was removed; deletes the buffer entry when it empties.
+   */
+  dequeueInput(runId: string, text: string): boolean {
+    const buffer = this.queuedInput.get(runId);
+    if (!buffer) return false;
+    const trimmed = text.trim();
+    const idx = buffer.indexOf(trimmed);
+    if (idx === -1) return false;
+    buffer.splice(idx, 1);
+    if (buffer.length === 0) this.queuedInput.delete(runId);
+    return true;
+  }
+
+  /**
    * Drain the per-run queued-input buffer into a single combined follow-up
    * message and hand it to the queuedInputDeliverer as the NEXT turn ("always
    * allow messaging a running flow"). Called at the drained REST seam (both the

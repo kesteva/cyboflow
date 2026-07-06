@@ -525,6 +525,23 @@ export class API {
       if (!isElectron()) throw new Error('Electron API not available');
       return window.electronAPI.panels.continue(panelId, input, model);
     },
+
+    // Mid-turn input queue ("always allow messaging a running quick session").
+    // `id` is the client pending-send id so a later dequeue targets the entry.
+    async queueInput(panelId: string, id: string, text: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.panels.queueInput(panelId, id, text);
+    },
+
+    async listQueuedInput(panelId: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.panels.listQueuedInput(panelId);
+    },
+
+    async dequeueInput(panelId: string, id: string) {
+      if (!isElectron()) throw new Error('Electron API not available');
+      return window.electronAPI.panels.dequeueInput(panelId, id);
+    },
   };
 
   // Claude Panels - specific API for Claude panels

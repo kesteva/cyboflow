@@ -245,7 +245,24 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
           .catch(() => setInput(text));
         return;
       }
-      // SDK: dispatch via the panel handlers, which return the outcome.
+      // SDK, mid-turn: the run is RUNNING, so continuing would destructively abort
+      // the in-flight turn. Instead QUEUE the message (buffered server-side,
+      // delivered at the turn's rest boundary) and show a distinct 'queued' row.
+      // The pending-send id is threaded as the queue entry id so click-to-reopen
+      // can dequeue it precisely.
+      if (running && panelId) {
+        setInput('');
+        const id = addPending(hostKey, text, 'queued');
+        void API.panels
+          .queueInput(panelId, id, text)
+          .then((res) => {
+            if (!res.success || res.data?.queued !== true) setPendingStatus(hostKey, id, 'failed');
+          })
+          .catch(() => setPendingStatus(hostKey, id, 'failed'));
+        return;
+      }
+
+      // SDK, idle: dispatch via the panel handlers, which return the outcome.
       setInput('');
       const id = addPending(hostKey, text, 'sending');
       const dispatch =
@@ -264,6 +281,8 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
       interactive,
       activeSession.id,
       activeSession.status,
+      running,
+      panelId,
       modelId,
       input,
       setInput,

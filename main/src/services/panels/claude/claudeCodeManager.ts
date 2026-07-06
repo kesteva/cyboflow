@@ -52,7 +52,7 @@ import type { TransitionToAwaitingReviewParams } from '../../cyboflow/transition
 import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
 import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelProvider';
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
-import type { FastModeState, FastModeStateNotice } from '../../../../../shared/types/panels';
+import type { FastModeState, FastModeStateNotice, QueuedPanelInput } from '../../../../../shared/types/panels';
 import { isPermissionMode, type PermissionMode } from '../../../../../shared/types/workflows';
 
 /**
@@ -395,6 +395,25 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * the 'fast-mode-state' event; snapshot readable via getFastModeReport.
    */
   private readonly fastModeReports = new Map<string, FastModeStateNotice>();
+
+  /**
+   * Per-panel mid-turn input queue (quick sessions only — "always allow messaging
+   * a running quick session"). A message sent while the panel's SDK turn is
+   * running is buffered here (keyed by panelId) and DELIVERED as one combined
+   * continuation at the turn's rest boundary (never a destructive mid-turn abort).
+   * Mirrors RunExecutor.queuedInput for flow runs. Each entry carries the CLIENT
+   * pending-send id so a later dequeue (click-to-reopen) can target it precisely.
+   */
+  private readonly panelInputQueues = new Map<string, QueuedPanelInput[]>();
+
+  /**
+   * Injected re-drive collaborator for the panel input queue: given a panelId and
+   * the combined queued text, it assembles the continue context (worktree, model,
+   * fast-mode, history) and re-drives continuePanel. Wired at boot by
+   * registerSessionHandlers (session.ts) — the analogue of RunExecutor's
+   * queuedInputDeliverer. Until wired, drain is a no-op.
+   */
+  private panelInputDeliverer: ((panelId: string, text: string) => void) | null = null;
 
   /**
    * Per-spawn pipeline (router → sink), keyed by spawnKey (per-lane for a
@@ -1085,6 +1104,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // awaiters (e.g. cancel) are unaffected.
     if (terminalError !== null && !abortController.signal.aborted) {
       this.terminalErrorBySpawn.set(spawnKey, terminalError);
+    }
+
+    // Turn rest boundary: deliver any mid-turn-queued quick-session input as the
+    // next continuation ("always allow messaging a running quick session"). Only
+    // fires on a NON-abort end (a user cancel should not auto-resume) and only for
+    // a non-fan-out spawn (displayPanelId === spawnKey → a quick panel; a flow
+    // run's panel queue is always empty so this is a no-op there). Deferred inside
+    // maybeDrainPanelInputQueue so this turn's locks release first.
+    if (!abortController.signal.aborted && spawnKey === displayPanelId) {
+      this.maybeDrainPanelInputQueue(displayPanelId);
     }
   }
 
@@ -2228,6 +2257,89 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
   async stopPanel(panelId: string): Promise<void> {
     await this.killProcess(panelId);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Mid-turn input queue (quick sessions — "always allow messaging a running
+  // quick session"). Mirrors RunExecutor.queueInput/drainQueuedInputAtRest for
+  // flow runs. A message sent while the panel's SDK turn is RUNNING is buffered
+  // and delivered as ONE combined continuation at the turn's rest boundary
+  // (never a destructive mid-turn abort). See runSdkQuery's drain call.
+  // ---------------------------------------------------------------------------
+
+  /** Wire the re-drive collaborator (boot). Until set, drain is a no-op. */
+  setPanelInputDeliverer(deliver: (panelId: string, text: string) => void): void {
+    this.panelInputDeliverer = deliver;
+  }
+
+  /**
+   * Buffer a mid-turn chat message for a running quick-session panel. `id` is the
+   * client pending-send id (so a later {@link dequeuePanelInput} can target it).
+   * Blank-after-trim text is ignored. Ordering is preserved (FIFO append).
+   */
+  enqueuePanelInput(panelId: string, id: string, text: string): void {
+    const trimmed = text.trim();
+    if (trimmed === '') return;
+    const q = this.panelInputQueues.get(panelId);
+    if (q) q.push({ id, text: trimmed });
+    else this.panelInputQueues.set(panelId, [{ id, text: trimmed }]);
+  }
+
+  /** Snapshot the panel's queued messages (defensive copy). */
+  listPanelInputQueue(panelId: string): QueuedPanelInput[] {
+    return [...(this.panelInputQueues.get(panelId) ?? [])];
+  }
+
+  /**
+   * Remove one queued message by its client id (click-to-reopen). Returns true
+   * when an entry was removed. Deletes the panel's map entry when it empties.
+   */
+  dequeuePanelInput(panelId: string, id: string): boolean {
+    const q = this.panelInputQueues.get(panelId);
+    if (!q) return false;
+    const idx = q.findIndex((e) => e.id === id);
+    if (idx === -1) return false;
+    q.splice(idx, 1);
+    if (q.length === 0) this.panelInputQueues.delete(panelId);
+    return true;
+  }
+
+  /**
+   * Deliver the panel's queued input NOW if the panel is idle — closes the race
+   * where the turn ended between the composer reading `status==='running'` and the
+   * enqueue landing (the rest-point drain already fired). No-op while running (the
+   * rest-point drain will handle it) or when the queue is empty.
+   */
+  flushPanelInputQueueIfIdle(panelId: string): void {
+    if (this.isPanelRunning(panelId)) return;
+    this.maybeDrainPanelInputQueue(panelId);
+  }
+
+  /**
+   * Drain the panel's queued input as ONE combined continuation via the injected
+   * deliverer. DEFERRED (setImmediate) so the just-finished turn's spawn/continue
+   * locks release before the deliverer re-acquires `claude-continue-<panelId>`
+   * (calling continuePanel synchronously here would deadlock on that lock). The
+   * buffer entry is removed BEFORE dispatch so a re-entrant drain can't
+   * double-deliver. No-op when empty or unwired. Multiple queued messages are
+   * joined with a blank line into the single resumed turn (one SDK --resume).
+   */
+  private maybeDrainPanelInputQueue(panelId: string): void {
+    const q = this.panelInputQueues.get(panelId);
+    if (!q || q.length === 0) return;
+    const deliver = this.panelInputDeliverer;
+    if (!deliver) return;
+    this.panelInputQueues.delete(panelId);
+    const combined = q.map((e) => e.text).join('\n\n');
+    setImmediate(() => {
+      try {
+        deliver(panelId, combined);
+      } catch (err) {
+        this.logger?.warn(
+          `[ClaudeCodeManager] panel-input drain delivery failed for ${panelId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    });
   }
 
   async restartPanelWithHistory(

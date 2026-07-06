@@ -197,6 +197,8 @@ export function setNudgeRunDeps(deps: NudgeRunDeps): void {
 /** Narrow slice of RunExecutor the queueInput mutation drives. */
 export interface QueueInputRunExecutorLike {
   queueInput(runId: string, text: string): void;
+  /** Remove one queued message by text (click-to-reopen — no double delivery). */
+  dequeueInput(runId: string, text: string): boolean;
 }
 
 export interface QueueInputDeps {
@@ -1550,6 +1552,27 @@ export const runsRouter = router({
 
       queueInputDeps.runExecutor.queueInput(input.runId, input.text);
       return { queued: true };
+    }),
+
+  /**
+   * Remove a queued (not-yet-delivered) chat message from a running flow run's
+   * buffer — the flow-run counterpart of panels:dequeue-input. Backs "behavior 3"
+   * (click a queued row → reopen it in the composer AND drop it from the queue, so
+   * it is not also delivered at the turn's rest boundary). Matches by text (the
+   * buffer stores strings). Returns { dequeued } — false when there was no such
+   * queued entry (already drained / never queued), which the caller treats as a
+   * benign no-op.
+   */
+  dequeueInput: protectedProcedure
+    .input(z.object({ runId: z.string().min(1), text: z.string() }))
+    .mutation(async ({ input }): Promise<{ dequeued: boolean }> => {
+      if (!queueInputDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'queueInput dependencies not wired yet. Call setQueueInputDeps() at boot.',
+        });
+      }
+      return { dequeued: queueInputDeps.runExecutor.dequeueInput(input.runId, input.text) };
     }),
 
   /**

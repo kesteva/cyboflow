@@ -16,6 +16,7 @@ const mockSetModel = vi.fn();
 const mockOnModelFallback = vi.fn((_cb: (notice: unknown) => void) => () => {});
 const mockGetFastModeState = vi.fn();
 const mockOnFastModeState = vi.fn((_cb: (notice: unknown) => void) => () => {});
+const mockQueueInput = vi.fn();
 vi.mock('../../../../utils/api', () => ({
   API: {
     sessions: {
@@ -23,6 +24,9 @@ vi.mock('../../../../utils/api', () => ({
       updateAgentPermissionMode: (id: string, mode: string) => mockUpdatePermission(id, mode),
       updateSessionMcps: (...args: unknown[]) => mockUpdateSessionMcps(...args),
       updateSessionPlugins: (...args: unknown[]) => mockUpdateSessionPlugins(...args),
+    },
+    panels: {
+      queueInput: (panelId: string, id: string, text: string) => mockQueueInput(panelId, id, text),
     },
     claudePanels: {
       getModel: (id: string) => mockGetModel(id),
@@ -144,6 +148,7 @@ beforeEach(() => {
   mockPluginsList.mockReset().mockResolvedValue([]);
   mockSetModel.mockReset().mockResolvedValue({ success: true });
   mockOnModelFallback.mockReset().mockReturnValue(() => {});
+  mockQueueInput.mockReset().mockResolvedValue({ success: true, data: { queued: true } });
   usePendingSendStore.setState({ byHost: {}, draftRequest: {} });
 });
 
@@ -467,6 +472,51 @@ describe('QuickSessionComposer — pending-send (optimistic echo)', () => {
       const list = usePendingSendStore.getState().byHost[HOST] ?? [];
       expect(list.some((e) => e.status === 'failed' && e.text === 'will fail')).toBe(true);
     });
+  });
+
+  it('QUEUES via API.panels.queueInput while the session is RUNNING (no destructive continue)', async () => {
+    const cont = vi.fn().mockResolvedValue({ success: true });
+    render(
+      <Harness session={makeSession({ status: 'running' })} interactive={false} handleContinueConversation={cont} />,
+    );
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'mid-turn note' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+
+    await waitFor(() => expect(mockQueueInput).toHaveBeenCalledTimes(1));
+    // The queue entry id is the pending-send id (so reopen can dequeue it).
+    const list = usePendingSendStore.getState().byHost[HOST] ?? [];
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ text: 'mid-turn note', status: 'queued' });
+    expect(mockQueueInput).toHaveBeenCalledWith(HOST, list[0].id, 'mid-turn note');
+    // The mid-turn message must NOT go through the (destructive) continue path.
+    expect(cont).not.toHaveBeenCalled();
+  });
+
+  it('flips a queued entry to failed when the queue call is rejected', async () => {
+    mockQueueInput.mockResolvedValue({ success: true, data: { queued: false } });
+    render(<Harness session={makeSession({ status: 'running' })} interactive={false} />);
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'will not queue' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+
+    await waitFor(() => {
+      const list = usePendingSendStore.getState().byHost[HOST] ?? [];
+      expect(list.some((e) => e.status === 'failed' && e.text === 'will not queue')).toBe(true);
+    });
+  });
+
+  it('uses the CONTINUE path (not the queue) when the session is IDLE', async () => {
+    const cont = vi.fn().mockResolvedValue({ success: true });
+    render(
+      <Harness session={makeSession({ status: 'ready' })} interactive={false} handleContinueConversation={cont} />,
+    );
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'idle send' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+
+    await waitFor(() => expect(cont).toHaveBeenCalledTimes(1));
+    expect(mockQueueInput).not.toHaveBeenCalled();
   });
 
   it('repopulates the composer from a staged draft request (reopen)', async () => {

@@ -336,7 +336,13 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
         interactiveBody={interactiveBody}
         bottomSlot={bottomSlot}
         pendingSends={isInteractive ? undefined : pendingSends}
-        onReopenPending={(entry) => requestReopenPending(panel.id, entry.id)}
+        onReopenPending={(entry) => {
+          // A server-buffered 'queued' entry must also be dequeued so the reopened
+          // message is not ALSO delivered at the turn's rest boundary (behavior 3:
+          // reopen removes it from the queue — no double delivery).
+          if (entry.status === 'queued') void API.panels.dequeueInput(panel.id, entry.id);
+          requestReopenPending(panel.id, entry.id);
+        }}
       />
     </div>
   );

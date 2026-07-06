@@ -229,7 +229,15 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
       railId={runId}
       renderToolCallExtra={renderToolCallExtra}
       pendingSends={isInteractive ? undefined : pendingSends}
-      onReopenPending={(entry) => requestReopenPending(runId, entry.id)}
+      onReopenPending={(entry) => {
+        // A server-buffered 'queued' entry must also be dropped from the run's
+        // queue so the reopened text is not ALSO delivered at the rest boundary
+        // (behavior 3 — no double delivery). Matched by text on the server.
+        if (entry.status === 'queued') {
+          void trpc.cyboflow.runs.dequeueInput.mutate({ runId, text: entry.text });
+        }
+        requestReopenPending(runId, entry.id);
+      }}
       interactiveBody={isInteractive ? <InteractiveTerminalView runId={runId} /> : undefined}
       bottomSlot={
         <>

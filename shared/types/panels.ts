@@ -107,6 +107,18 @@ export interface FastModeStateNotice {
   requestedFast: boolean;
 }
 
+/**
+ * A single mid-turn-queued chat message for a quick-session Claude panel ("always
+ * allow messaging a running quick session"). The `id` is the CLIENT pending-send
+ * id (pendingSendStore), so a dequeue (click-to-reopen) targets this exact entry.
+ * Buffered in ClaudeCodeManager and delivered as one combined continuation at the
+ * turn's rest boundary.
+ */
+export interface QueuedPanelInput {
+  id: string;
+  text: string;
+}
+
 export interface EditorPanelState {
   filePath?: string;              // Currently open file
   content?: string;               // File content (for unsaved changes)

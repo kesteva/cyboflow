@@ -33,6 +33,7 @@ import { isCliSubstrate } from '../../../shared/types/substrate';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 import { InteractiveSettingsWriter } from '../services/panels/claude/interactiveSettingsWriter';
 import { encodeCwd } from '../services/panels/claude/transcript/encodeCwd';
+import { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import { updateSessionAgentPermissionMode } from '../orchestrator/sessionPermissionMode';
 
 /**
@@ -180,6 +181,45 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   // owns (created by sessions:create-quick). Undefined if none exists yet.
   const resolveClaudePanelId = (sessionId: string): string | undefined =>
     panelManager.getPanelsForSession(sessionId).find((p) => p.type === 'claude')?.id;
+
+  // Wire the panel-input-queue re-drive collaborator ("always allow messaging a
+  // running quick session"). At a turn's rest boundary ClaudeCodeManager hands us
+  // the combined queued text; we assemble the continue context exactly like
+  // panels:continue (worktree, per-panel model + fast-mode, conversation history)
+  // and re-drive continuePanel — now on an IDLE panel, so there is no destructive
+  // mid-turn abort. Registered once; a no-op-safe guard skips the PTY manager.
+  if (claudeCodeManager instanceof ClaudeCodeManager) {
+    claudeCodeManager.setPanelInputDeliverer((panelId: string, text: string) => {
+      void (async () => {
+        try {
+          const { claudePanelManager } = require('./claudePanel');
+          if (!claudePanelManager) return;
+          const panel = panelManager.getPanel(panelId);
+          if (!panel || panel.type !== 'claude') return;
+          const session = await sessionManager.getSession(panel.sessionId);
+          if (!session) return;
+          // Persist the queued text as a user turn (parity with panels:continue).
+          sessionManager.addPanelConversationMessage(panelId, 'user', text);
+          const settings = databaseService.getPanelSettings(panelId);
+          const model = typeof settings?.model === 'string' ? settings.model : undefined;
+          const fastMode = settings?.fastMode === true;
+          const conversationHistory = sessionManager.getPanelConversationMessages
+            ? await sessionManager.getPanelConversationMessages(panelId)
+            : await sessionManager.getConversationMessages(panel.sessionId);
+          await claudePanelManager.continuePanel(
+            panelId,
+            session.worktreePath,
+            text,
+            conversationHistory,
+            model,
+            fastMode,
+          );
+        } catch (err) {
+          console.error('[IPC] panel-input queue delivery failed:', err);
+        }
+      })();
+    });
+  }
 
   // Helper function to get CLI manager for a specific tool
   // TODO: This will be used in the future to support multiple CLI tools
@@ -1845,6 +1885,63 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     } catch (error) {
       console.error('Failed to continue panel conversation:', error);
       return { success: false, error: 'Failed to continue panel conversation' };
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Mid-turn input queue ("always allow messaging a running quick session").
+  // A message sent while a quick-session SDK turn is RUNNING is buffered on the
+  // ClaudeCodeManager and delivered as ONE combined continuation at the turn's
+  // rest boundary (see setPanelInputDeliverer above + runSdkQuery's drain call) —
+  // no destructive mid-turn abort. `id` is the client pending-send id so a later
+  // panels:dequeue-input (click-to-reopen) targets the exact entry.
+  // ---------------------------------------------------------------------------
+  ipcMain.handle('panels:queue-input', async (_event, panelId: string, id: string, text: string) => {
+    try {
+      const panelValidation = validatePanelExists(panelId);
+      if (!panelValidation.valid) {
+        logValidationFailure('panels:queue-input', panelValidation);
+        return createValidationError(panelValidation);
+      }
+      if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
+        return { success: false, error: 'Queue not supported on this CLI manager' };
+      }
+      if (typeof text !== 'string' || text.trim() === '') {
+        return { success: false, error: 'Nothing to queue' };
+      }
+      claudeCodeManager.enqueuePanelInput(panelId, id, text);
+      // Race guard: if the turn already ended before this landed, deliver now
+      // instead of stranding the message until the next (never-coming) rest point.
+      claudeCodeManager.flushPanelInputQueueIfIdle(panelId);
+      return { success: true, data: { queued: true } };
+    } catch (error) {
+      console.error('Failed to queue panel input:', error);
+      return { success: false, error: 'Failed to queue panel input' };
+    }
+  });
+
+  ipcMain.handle('panels:list-queued-input', async (_event, panelId: string) => {
+    try {
+      if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
+        return { success: true, data: [] };
+      }
+      return { success: true, data: claudeCodeManager.listPanelInputQueue(panelId) };
+    } catch (error) {
+      console.error('Failed to list queued panel input:', error);
+      return { success: false, error: 'Failed to list queued panel input' };
+    }
+  });
+
+  ipcMain.handle('panels:dequeue-input', async (_event, panelId: string, id: string) => {
+    try {
+      if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
+        return { success: false, error: 'Queue not supported on this CLI manager' };
+      }
+      const removed = claudeCodeManager.dequeuePanelInput(panelId, id);
+      return { success: true, data: { dequeued: removed } };
+    } catch (error) {
+      console.error('Failed to dequeue panel input:', error);
+      return { success: false, error: 'Failed to dequeue panel input' };
     }
   });
 

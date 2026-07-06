@@ -4,7 +4,7 @@ import { exposeElectronTRPC } from 'trpc-electron/main';
 import type { CreateSessionRequest, Session } from './types/session';
 import type { AppConfig, UpdateConfigRequest } from './types/config';
 import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../frontend/src/types/project';
-import type { ToolPanel, FastModeStateNotice } from '../../shared/types/panels';
+import type { ToolPanel, FastModeStateNotice, QueuedPanelInput } from '../../shared/types/panels';
 import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
 
@@ -570,6 +570,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getPrompts: (panelId: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:get-prompts', panelId),
     sendInput: (panelId: string, input: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:send-input', panelId, input),
     continue: (panelId: string, input: string, model?: string): Promise<IPCResponse> => ipcRenderer.invoke('panels:continue', panelId, input, model),
+    // Mid-turn input queue ("always allow messaging a running quick session").
+    queueInput: (panelId: string, id: string, text: string): Promise<IPCResponse<{ queued: boolean }>> =>
+      ipcRenderer.invoke('panels:queue-input', panelId, id, text),
+    listQueuedInput: (panelId: string): Promise<IPCResponse<QueuedPanelInput[]>> =>
+      ipcRenderer.invoke('panels:list-queued-input', panelId),
+    dequeueInput: (panelId: string, id: string): Promise<IPCResponse<{ dequeued: boolean }>> =>
+      ipcRenderer.invoke('panels:dequeue-input', panelId, id),
   },
 
   // Claude Panels - specific API for Claude panels

@@ -3378,6 +3378,31 @@ describe('RunExecutor.queueInput — buffer + drain-at-rest delivery', () => {
     expect(deliverer.deliver).toHaveBeenCalledTimes(1);
   });
 
+  it('dequeueInput removes a buffered line by text so it is NOT delivered at the drain', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const deliverer = makeFakeDeliverer();
+    const executor = makeExecutorWithDeliverer(makeSpawner(), makeRegistry(run, workflow), deliverer);
+
+    executor.queueInput(run.id, 'keep me');
+    executor.queueInput(run.id, 'reopen me');
+    // Reopen (click-to-edit) dequeues one entry — no double delivery.
+    expect(executor.dequeueInput(run.id, 'reopen me')).toBe(true);
+    // Removing a text that isn't queued is a benign no-op.
+    expect(executor.dequeueInput(run.id, 'never queued')).toBe(false);
+
+    await executor.execute(run.id);
+    expect(deliverer.deliver).toHaveBeenCalledTimes(1);
+    expect(deliverer.deliver).toHaveBeenCalledWith(run.id, 'keep me');
+  });
+
+  it('dequeueInput on an empty/absent buffer returns false', () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const executor = makeExecutorWithDeliverer(makeSpawner(), makeRegistry(run, workflow), makeFakeDeliverer());
+    expect(executor.dequeueInput(run.id, 'anything')).toBe(false);
+  });
+
   it('drops queued input at rest when no deliverer is wired (zero-behavior-change floor)', async () => {
     const run = makeWorkflowRunRow({ worktree_path: '/wt' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });
