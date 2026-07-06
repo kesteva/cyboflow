@@ -944,6 +944,19 @@ export class RunExecutor {
   }
 
   /**
+   * True while execute()/executeProgrammatic is between start and
+   * teardownRun for this run — i.e. a live executor still holds it (e.g.
+   * parked at an open human gate, or mid-step). Used by retryRunHandler to
+   * refuse re-driving a run whose walk has NOT actually returned: an
+   * awaiting_review run with an active execution is resting at a LIVE gate,
+   * not a drained walk, and re-driving it would race the gate's own
+   * resolution path.
+   */
+  hasActiveExecution(runId: string): boolean {
+    return this.activePanelIds.has(runId);
+  }
+
+  /**
    * Register the event-driven REST handler for a persistent interactive run
    * (IDEA-030 / TASK-818).
    *

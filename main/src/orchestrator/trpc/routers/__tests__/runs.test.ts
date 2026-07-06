@@ -1083,7 +1083,7 @@ describe('cyboflow.runs.resume (Phase 4b)', () => {
     setResumeRunDeps({
       db: dbAdapter(db),
       runQueues: new RunQueueRegistry(),
-      runExecutor: { setPendingResume, execute },
+      runExecutor: { setPendingResume, setPendingResumeStep: vi.fn(), setPendingCompletedSteps: vi.fn(), execute },
       emitRunStatusChanged,
     });
 
@@ -1111,7 +1111,7 @@ describe('cyboflow.runs.resume (Phase 4b)', () => {
     setResumeRunDeps({
       db: dbAdapter(db),
       runQueues: new RunQueueRegistry(),
-      runExecutor: { setPendingResume: vi.fn(), execute },
+      runExecutor: { setPendingResume: vi.fn(), setPendingResumeStep: vi.fn(), setPendingCompletedSteps: vi.fn(), execute },
       emitRunStatusChanged: vi.fn<ResumeRunDeps['emitRunStatusChanged']>(),
     });
 

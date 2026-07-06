@@ -609,6 +609,73 @@ export class SprintLaneStore {
   }
 
   // --------------------------------------------------------------------------
+  // resetFailedLanes — retry chokepoint (retryRunHandler)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Re-queue every 'failed' lane of a batch back to 'queued' (clearing
+   * current_step_id), so a fan-out RETRY re-dispatches them instead of
+   * instantly re-settling with the same failures. The production fan-out
+   * driver (fanOutDriverFactory.resolveItems, main/src/index.ts) filters OUT
+   * lanes already marked 'integrated' or 'failed' — without this reset, a
+   * retried fanOut step would see zero eligible items for every
+   * previously-failed lane.
+   *
+   * Routes each reset through `updateLane` (rather than a raw batch UPDATE) so
+   * the write + SprintLaneChangedEvent emit pipeline is IDENTICAL to every
+   * other lane mutation (driveLane, deriveLaneFromTaskDispatch) — same
+   * channel, same event shape. `attempts` is left untouched (the next
+   * dispatch's own progress report bumps it).
+   *
+   * The owning run is resolved from `workflow_runs.batch_id` (a batch belongs
+   * to exactly one run — RunLauncher stamps it 1:1 at launch) so the caller
+   * only needs to supply `batchId`, mirroring retryRunHandler's
+   * `RetryRunDeps.resetFailedLanes` signature.
+   *
+   * Fail-soft: never throws. Returns the number of lanes reset, or 0 when
+   * there are no failed lanes, the batch has no owning run, or anything in
+   * between errors (logged at 'warn').
+   */
+  resetFailedLanes(batchId: string): number {
+    try {
+      const failedTaskIds = (
+        this.db
+          .prepare(`SELECT task_id AS taskId FROM sprint_batch_tasks WHERE batch_id = ? AND status = 'failed'`)
+          .all(batchId) as Array<{ taskId: string }>
+      ).map((r) => r.taskId);
+      if (failedTaskIds.length === 0) return 0;
+
+      const runRow = this.db
+        .prepare('SELECT id FROM workflow_runs WHERE batch_id = ?')
+        .get(batchId) as { id: string } | undefined;
+      if (!runRow) {
+        this.logger?.warn('[SprintLaneStore] resetFailedLanes: no owning run for batch (skipped)', {
+          batchId,
+        });
+        return 0;
+      }
+
+      let reset = 0;
+      for (const taskId of failedTaskIds) {
+        this.updateLane({ runId: runRow.id, batchId, taskId, status: 'queued', currentStepId: null });
+        reset += 1;
+      }
+      this.logger?.info('[SprintLaneStore] reset failed fan-out lanes for retry', {
+        batchId,
+        runId: runRow.id,
+        count: reset,
+      });
+      return reset;
+    } catch (err) {
+      this.logger?.warn('[SprintLaneStore] resetFailedLanes failed (fail-soft)', {
+        batchId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return 0;
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // markBatchTerminal — batch close-out
   // --------------------------------------------------------------------------
 

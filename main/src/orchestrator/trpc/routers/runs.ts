@@ -63,6 +63,11 @@ import {
   type ReopenRunDeps,
   type ReopenRunResult,
 } from '../../reopenRunHandler';
+import {
+  retryRunHandler,
+  type RetryRunDeps,
+  type RetryRunResult,
+} from '../../retryRunHandler';
 import { stepTransitionEvents, eventToAsyncIterable, runStatusEvents } from './events';
 import {
   updateSessionAgentPermissionMode,
@@ -237,6 +242,28 @@ let reopenRunDeps: ReopenRunDeps | null = null;
  */
 export function setReopenRunDeps(deps: ReopenRunDeps): void {
   reopenRunDeps = deps;
+}
+
+// ---------------------------------------------------------------------------
+// retryStep dependency bag (retry-from-failed-step)
+//
+// Injected at boot by main/src/index.ts via setRetryRunDeps(), reusing the
+// SAME RunExecutor/RunQueueRegistry instance nudge/resume/reopen use. Until
+// wired the mutation throws METHOD_NOT_SUPPORTED — same pattern as the other
+// dep-bags.
+// ---------------------------------------------------------------------------
+
+let retryRunDeps: RetryRunDeps | null = null;
+
+/**
+ * Wire up the real collaborators for the `retryStep` mutation.
+ *
+ * Called once at boot by main/src/index.ts after the DB, RunQueueRegistry,
+ * RunExecutor, StepResultStore, and SprintLaneStore have been initialized.
+ * Until this is called the mutation throws METHOD_NOT_SUPPORTED.
+ */
+export function setRetryRunDeps(deps: RetryRunDeps): void {
+  retryRunDeps = deps;
 }
 
 // ---------------------------------------------------------------------------
@@ -1604,6 +1631,38 @@ export const runsRouter = router({
         });
       }
       return reopenRunHandler(input.runId, input.text, reopenRunDeps);
+    }),
+
+  /**
+   * Retry a FAILED (or resting awaiting_review) PROGRAMMATIC workflow run at a
+   * chosen or derived step, via the crash-safe resume machinery.
+   *
+   * Revives the run (guarded UPDATE, same sanctioned bypass family as reopen /
+   * boot recovery / reviveQuickRunToRunning) and re-drives it starting at
+   * `input.stepId` when given, else the last failed step, else the run's
+   * current_step_id. Unlike `reopen`/`resume`, this does NOT await the
+   * re-drive — a programmatic walk can rest at a human gate for a long time,
+   * so it returns as soon as the revive lands.
+   *
+   * Returns:
+   *   { delivered: true; stepId }  — the run was revived and re-driven from `stepId`.
+   *   { noOp: true; reason }       — rejected: 'not_found' / 'not_programmatic' /
+   *     'not_retryable' (wrong status, or a live gate is holding an
+   *     awaiting_review run) / 'no_target_step' / 'unknown_step' / 'race'.
+   *
+   * Standalone-typecheck invariant: collaborators are injected via
+   * setRetryRunDeps(). Until wired the mutation throws METHOD_NOT_SUPPORTED.
+   */
+  retryStep: protectedProcedure
+    .input(z.object({ runId: z.string().min(1), stepId: z.string().min(1).optional() }))
+    .mutation(async ({ input }): Promise<RetryRunResult> => {
+      if (!retryRunDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'retry-run deps not wired yet. Call setRetryRunDeps() at boot.',
+        });
+      }
+      return retryRunHandler(input.runId, input.stepId, retryRunDeps);
     }),
 
   /**

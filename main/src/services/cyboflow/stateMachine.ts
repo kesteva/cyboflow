@@ -12,6 +12,18 @@ import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
  * Rationale: the database CHECK constraint enforces "status is one of 10
  * values" but cannot enforce "this transition from A to B is legal".
  * This table is the in-process source of truth.
+ *
+ * `failed` is terminal to THIS state machine — but four sanctioned recovery
+ * paths revive a failed (or, for retry, a resting awaiting_review) run
+ * anyway, via a guarded raw `UPDATE workflow_runs SET status = ...` that
+ * deliberately bypasses `assertTransitionAllowed` rather than widening the
+ * table above: (1) runRecovery.recoverActiveStateOrphans (boot sweep, resets
+ * stranded programmatic runs to 'starting'), (2) reopenRunHandler (SDK-only
+ * failed -> running via --resume), (3) reviveQuickRunToRunning
+ * (transitions.ts — quick-session sentinel run repair), and (4)
+ * retryRunHandler (failed/resting-awaiting_review -> starting at a chosen
+ * step, programmatic-only). Each is a narrow, explicitly-reasoned escape
+ * hatch, not a general exception to terminality.
  */
 export const ALLOWED_TRANSITIONS: Record<
   WorkflowRunStatus,

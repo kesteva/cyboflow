@@ -725,6 +725,78 @@ describe('SprintLaneStore', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // resetFailedLanes — retry chokepoint (retryRunHandler)
+  // ---------------------------------------------------------------------------
+
+  describe('resetFailedLanes', () => {
+    /** Insert the workflow_runs row a batch is 1:1 owned by (RunLauncher stamps batch_id at launch). */
+    function seedOwningRun(batchId: string, runId = 'run-1'): void {
+      const workflowId = `workflow-${runId}`;
+      db.prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, 'test-workflow', '{}')`).run(
+        workflowId,
+      );
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, batch_id) VALUES (?, ?, 1, 'failed', ?)`,
+      ).run(runId, workflowId, batchId);
+    }
+
+    it('re-queues every failed lane to queued (clearing current_step_id), leaving non-failed lanes untouched', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b']);
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'failed', currentStepId: 'implement' });
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_b', status: 'running', currentStepId: 'implement' });
+      seedOwningRun(batchId);
+
+      const count = store.resetFailedLanes(batchId);
+
+      expect(count).toBe(1);
+      const lanes = store.listLanes(batchId);
+      const laneA = lanes.find((l) => l.taskId === 'tsk_a');
+      const laneB = lanes.find((l) => l.taskId === 'tsk_b');
+      expect(laneA?.status).toBe('queued');
+      expect(laneA?.currentStepId).toBeNull();
+      // Untouched — 'tsk_b' was never 'failed'.
+      expect(laneB?.status).toBe('running');
+      expect(laneB?.currentStepId).toBe('implement');
+    });
+
+    it('emits a SprintLaneChangedEvent per reset lane on the owning run channel', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'failed', currentStepId: 'implement' });
+      seedOwningRun(batchId);
+
+      const events: SprintLaneChangedEvent[] = [];
+      sprintLaneEvents.on(sprintLaneChannel('run-1'), (e: SprintLaneChangedEvent) => events.push(e));
+
+      store.resetFailedLanes(batchId);
+
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        runId: 'run-1',
+        batchId,
+        taskId: 'tsk_a',
+        status: 'queued',
+        currentStepId: null,
+      });
+    });
+
+    it('is a no-op (returns 0) when there are no failed lanes', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      seedOwningRun(batchId);
+      expect(store.resetFailedLanes(batchId)).toBe(0);
+    });
+
+    it('fails soft (returns 0, no throw) when the batch has no owning workflow_runs row', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'failed' });
+      // No seedOwningRun call — batch_id has no matching workflow_runs row.
+      expect(store.resetFailedLanes(batchId)).toBe(0);
+      // The lane itself is untouched (the reset never ran).
+      const lane = store.listLanes(batchId)[0];
+      expect(lane.status).toBe('failed');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Singleton lifecycle
   // ---------------------------------------------------------------------------
 
