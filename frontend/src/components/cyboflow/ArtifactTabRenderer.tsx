@@ -78,7 +78,7 @@ function StateRow({ testid, color, text }: { testid: string; color: string; text
 // ---------------------------------------------------------------------------
 function IdeaSpecBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
   const accent = ARTIFACT_COLORS['idea-spec'];
-  const { loading, error, data } = useArtifactData(artifact);
+  const { loading, error, data } = useArtifactData(artifact, projectId);
   const idea = data?.kind === 'idea' ? data.idea : null;
 
   // Render whichever field actually carries the structured markdown spec. The
@@ -154,7 +154,7 @@ function IdeaSpecBody({ artifact, projectId }: { artifact: Artifact; projectId: 
 // ---------------------------------------------------------------------------
 function ArchDesignBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
   const accent = ARTIFACT_COLORS['arch-design'];
-  const { loading, error, data } = useArtifactData(artifact);
+  const { loading, error, data } = useArtifactData(artifact, projectId);
   const idea = data?.kind === 'arch' ? data.idea : null;
   const section = idea ? extractArchDesignSection(idea.body) : null;
 
@@ -326,7 +326,7 @@ function EpicCard({
 
 function DecomposedStoriesBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
   const accent = ARTIFACT_COLORS['decomposed-stories'];
-  const { loading, error, data } = useArtifactData(artifact);
+  const { loading, error, data } = useArtifactData(artifact, projectId);
   const idea = data?.kind === 'stories' ? data.idea : null;
   // The task selected for the detail modal; null = modal closed.
   const [selectedTask, setSelectedTask] = useState<BacklogTaskItem | null>(null);
@@ -392,7 +392,7 @@ function DecomposedStoriesBody({ artifact, projectId }: { artifact: Artifact; pr
 // ---------------------------------------------------------------------------
 function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
   const accent = ARTIFACT_COLORS.screenshots;
-  const { loading, error, data } = useArtifactData(artifact);
+  const { loading, error, data } = useArtifactData(artifact, projectId);
   // `fileNames` is typed string[]|undefined but is laundered through parsePayload
   // (Record<string, unknown>): a malformed payload like {"fileNames":"x.png"} or
   // {"fileNames":{}} leaves it a non-array, so the ?? []-then-.map path would
@@ -502,7 +502,7 @@ function ScreenshotsBody({ artifact, projectId }: { artifact: Artifact; projectI
 // ---------------------------------------------------------------------------
 function CanvasBody({ artifact, projectId }: { artifact: Artifact; projectId: number }): ReactElement {
   const accent = ARTIFACT_COLORS[artifact.atype === 'generic' ? 'generic' : 'ui-prototype'];
-  const { data } = useArtifactData(artifact);
+  const { data } = useArtifactData(artifact, projectId);
   // `url` comes verbatim from agent-supplied payload_json (laundered through
   // parsePayload as Record<string, unknown>), so narrow to a string at runtime.
   const url = data?.kind === 'canvas' && typeof data.payload.url === 'string' ? data.payload.url : undefined;
