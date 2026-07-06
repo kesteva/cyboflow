@@ -65,6 +65,11 @@ function buildDb(): Database.Database {
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
+  // workflow_runs.session_id (migration 019) — added directly here; migration 019
+  // itself backfills from the Crystal-legacy `sessions` table, which this entity
+  // test DB doesn't create. ArtifactRouter's emitChange resolves this column on
+  // every write, so it must exist even though these tests don't assert on it.
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
   return db;
 }
 
@@ -273,6 +278,98 @@ describe('McpQueryHandler artifact handlers', () => {
       const res = parseLastWrite(writes);
       expect(res.ok).toBe(false);
       expect(res.error).toBe('finding_requires_real_run');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // quick-session ('__quick__' sentinel) runs
+  // -------------------------------------------------------------------------
+
+  // Quick sessions have no flow steps driving them — they report artifacts
+  // against their persistent '__quick__' chat sentinel run (sessions.chat_run_id),
+  // a workflow_runs row with a '__quick__'-named workflow and a NULL
+  // current_step_id. Code reading shows neither handler checks workflow name or
+  // kind anywhere, so this locks in the acceptance the UI-side quick-session
+  // artifact surface (center-pane tabs + right-rail Artifacts panel) depends on.
+  describe("quick-session ('__quick__' sentinel) runs", () => {
+    /** Seed a '__quick__'-workflow run with NO current step (chat sentinel shape). */
+    function seedQuickRun(db: Database.Database, runId: string): void {
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-quick', 1, '__quick__', '{}')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, current_step_id, steps_snapshot_json)
+         VALUES (?, 'wf-quick', 1, 'running', NULL, NULL)`,
+      ).run(runId);
+    }
+
+    it('handleReportArtifact succeeds for a __quick__ run, writing the row against the sentinel run id', async () => {
+      seedQuickRun(db, 'quick-1');
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        {
+          type: 'mcp-report-artifact',
+          requestId: 'q-1',
+          runId: 'quick-1',
+          atype: 'idea-spec',
+          label: 'quick chat artifact',
+        },
+        socket,
+      );
+
+      const res = parseLastWrite(writes);
+      expect(res.ok).toBe(true);
+      const data = res.data as { artifactId: string; atype: string };
+      expect(data.atype).toBe('idea-spec');
+      expect(typeof data.artifactId).toBe('string');
+
+      const row = artifactRow(db, data.artifactId);
+      expect(row).toMatchObject({ run_id: 'quick-1', atype: 'idea-spec', label: 'quick chat artifact' });
+      // NULL current_step_id (no flow steps drive a quick session) resolves to
+      // the 'unknown' label, i.e. the same 'agent:unknown' fallback the
+      // handler's ctx.actor === 'linear' coercion produces for any run lacking
+      // step context — not a quick-session-specific code path.
+      expect(artifactEventActor(db, data.artifactId)).toBe('agent:unknown');
+    });
+
+    it("is idempotent per (run, atype) for a __quick__ run: a re-report returns the SAME artifact id", async () => {
+      seedQuickRun(db, 'quick-1');
+      const first = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-report-artifact', requestId: 'q-1', runId: 'quick-1', atype: 'idea-spec', label: 'v1' },
+        first.socket,
+      );
+      const id1 = (parseLastWrite(first.writes).data as { artifactId: string }).artifactId;
+
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-report-artifact', requestId: 'q-2', runId: 'quick-1', atype: 'idea-spec', label: 'v2' },
+        socket,
+      );
+      const id2 = (parseLastWrite(writes).data as { artifactId: string }).artifactId;
+      expect(id2).toBe(id1);
+      expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts').get() as { n: number }).n).toBe(1);
+    });
+
+    it('handleCommitArtifact then succeeds and flips committed for a __quick__ run', async () => {
+      seedQuickRun(db, 'quick-1');
+      const reportSocket = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-report-artifact', requestId: 'q-1', runId: 'quick-1', atype: 'idea-spec', label: 'seed' },
+        reportSocket.socket,
+      );
+      const artifactId = (parseLastWrite(reportSocket.writes).data as { artifactId: string }).artifactId;
+
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        { type: 'mcp-commit-artifact', requestId: 'q-2', runId: 'quick-1', artifactId },
+        socket,
+      );
+
+      const res = parseLastWrite(writes);
+      expect(res.ok).toBe(true);
+      expect(res.data).toEqual({ artifactId, committed: true });
+      expect(artifactRow(db, artifactId)!.committed).toBe(1);
     });
   });
 });
