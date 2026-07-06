@@ -16,7 +16,7 @@
  *
  * Design ref: design_handoff_tabbed_center_pane/README.md "Right rail → Artifacts".
  */
-import { useArtifactsList } from '../../hooks/useArtifactsList';
+import { useArtifactsList, useSessionArtifactsList } from '../../hooks/useArtifactsList';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
 import {
   ARTIFACT_COLORS,
@@ -42,14 +42,27 @@ const AMBER = 'var(--human-border)';
 const LIVE_GLYPH = '◳';
 
 interface ArtifactsPanelProps {
-  runId: string;
+  /**
+   * Exactly ONE of `runId` / `sessionId` is set (the caller's scope):
+   *   - `runId`     — a specific run's deliverables (e.g. an active flow run).
+   *   - `sessionId` — a session's deliverables across ALL its runs (e.g. a
+   *                   quick session with no active flow run, or any caller
+   *                   whose tab store is session-keyed).
+   */
+  runId?: string;
+  sessionId?: string;
   projectId: number;
   /** centerPaneStore key — the run's parent session id (or run id fallback). */
   sessionKey: string;
 }
 
-export function ArtifactsPanel({ runId, projectId, sessionKey }: ArtifactsPanelProps) {
-  const { artifacts } = useArtifactsList(runId, projectId);
+export function ArtifactsPanel({ runId, sessionId, projectId, sessionKey }: ArtifactsPanelProps) {
+  // Both hooks are called unconditionally (Rules of Hooks) — each no-ops
+  // (returns []) on a null input — and we select whichever scope the caller
+  // actually passed.
+  const runScoped = useArtifactsList(runId ?? null, projectId);
+  const sessionScoped = useSessionArtifactsList(sessionId ?? null, projectId);
+  const { artifacts } = sessionId !== undefined ? sessionScoped : runScoped;
   const openArtifactTab = useCenterPaneStore((s) => s.openArtifactTab);
   // Reactive: re-renders when a tab opens/closes so the "open · in tabs" action
   // and the card's opacity stay in sync with the tab strip.

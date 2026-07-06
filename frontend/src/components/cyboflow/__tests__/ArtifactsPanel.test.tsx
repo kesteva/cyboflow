@@ -1,28 +1,34 @@
 /**
  * ArtifactsPanel tests — the right-rail "RUN DELIVERABLES" reopen surface.
  *
- * useArtifactsList is mocked (the live list / subscription is exercised in its
- * own seam); these tests drive the panel's pure rendering + interaction:
+ * useArtifactsList / useSessionArtifactsList are mocked (the live list /
+ * subscription is exercised in its own seam); these tests drive the panel's
+ * pure rendering + interaction:
  *   - grouping headers (Templated deliverables / Live canvases) by atype mode
  *   - per-card status badge (green ✓ in repo / amber session-only)
  *   - clicking a card calls centerPaneStore.openArtifactTab with the right args
  *   - "open · in tabs" action once that atype has a tab in the session
+ *   - dual scope: a `runId` prop uses the run-scoped hook, a `sessionId` prop
+ *     uses the session-scoped one — both are called unconditionally (Rules of
+ *     Hooks) and the panel selects whichever the caller actually passed.
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-// Mock the live-list hook — return a fixed set of artifacts per test.
+// Mock the live-list hooks — return a fixed set of artifacts per test.
 vi.mock('../../../hooks/useArtifactsList', () => ({
   useArtifactsList: vi.fn(),
+  useSessionArtifactsList: vi.fn(),
 }));
 
 import { ArtifactsPanel } from '../ArtifactsPanel';
-import { useArtifactsList } from '../../../hooks/useArtifactsList';
+import { useArtifactsList, useSessionArtifactsList } from '../../../hooks/useArtifactsList';
 import { useCenterPaneStore } from '../../../stores/centerPaneStore';
 import type { Artifact } from '../../../../../shared/types/artifacts';
 
 const mockHook = vi.mocked(useArtifactsList);
+const mockSessionHook = vi.mocked(useSessionArtifactsList);
 
 function makeArtifact(over: Partial<Artifact>): Artifact {
   return {
@@ -77,6 +83,12 @@ const SESSION_KEY = 'sess-1';
 beforeEach(() => {
   mockHook.mockReset();
   mockHook.mockReturnValue({ artifacts: [IDEA, STORIES, PROTO], loaded: true });
+  // The session-scoped hook is called unconditionally too (Rules of Hooks) even
+  // when a test only exercises the runId scope — default it to empty so an
+  // accidental fallback to it would fail loudly (empty state) rather than
+  // silently reusing the run-scoped fixture.
+  mockSessionHook.mockReset();
+  mockSessionHook.mockReturnValue({ artifacts: [], loaded: true });
   // Reset center-pane state (no open artifact tabs).
   useCenterPaneStore.setState({ bySession: {} });
 });
@@ -174,5 +186,17 @@ describe('ArtifactsPanel', () => {
 
     expect(screen.getByTestId('artifacts-panel-empty')).toBeInTheDocument();
     expect(screen.queryByText('Templated deliverables')).not.toBeInTheDocument();
+  });
+
+  it('with a `sessionId` prop (no `runId`), sources artifacts from the session-scoped hook instead', () => {
+    // Deliberately give the run-scoped and session-scoped hooks DIFFERENT
+    // artifact sets so the assertion proves which one actually feeds the panel.
+    mockHook.mockReturnValue({ artifacts: [], loaded: true });
+    mockSessionHook.mockReturnValue({ artifacts: [IDEA], loaded: true });
+
+    render(<ArtifactsPanel sessionId="sess-1" projectId={7} sessionKey={SESSION_KEY} />);
+
+    expect(screen.getByTestId('artifact-card-idea-spec')).toBeInTheDocument();
+    expect(screen.queryByTestId('artifacts-panel-empty')).not.toBeInTheDocument();
   });
 });

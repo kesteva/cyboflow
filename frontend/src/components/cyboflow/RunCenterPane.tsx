@@ -14,7 +14,7 @@
  * terminal dock collapses via display:none and NEVER unmounts RunBottomPane, so
  * the live interactive xterm survives a collapse (see TerminalDock).
  */
-import { useEffect, useRef, type ReactElement } from 'react';
+import { useEffect, type ReactElement } from 'react';
 import { WorkflowCanvas } from './WorkflowCanvas';
 import { SprintSwimlaneCanvas } from './SprintSwimlaneCanvas';
 import { RunBottomPane } from './RunBottomPane';
@@ -23,8 +23,8 @@ import { FileTabRenderer } from './FileTabRenderer';
 import { ArtifactTabRenderer } from './ArtifactTabRenderer';
 import { TerminalDock } from './TerminalDock';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
-import { FLOW_TAB_ID } from '../../../../shared/types/centerPane';
-import { useArtifactsList } from '../../hooks/useArtifactsList';
+import { useArtifactsList, useSessionArtifactsList } from '../../hooks/useArtifactsList';
+import { useArtifactTabsSync } from '../../hooks/useArtifactTabsSync';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
 
@@ -48,9 +48,11 @@ function folderBasename(worktreePath?: string | null): string | undefined {
 }
 
 export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSummary }: RunCenterPaneProps): ReactElement {
+  // The run's parent session, when known (null for legacy parentless runs).
+  const parentSessionId = activeRun?.session_id ?? null;
   // Per-session key: the run's parent session when known, else the run id
   // (legacy parentless runs still get isolated, stable tab state).
-  const sessionKey = activeRun?.session_id ?? activeRunId;
+  const sessionKey = parentSessionId ?? activeRunId;
 
   // The run's project — needed for the artifacts list query + change subscription
   // and threaded into ArtifactTabRenderer. ActiveRunRow extends WorkflowRunListRow
@@ -63,110 +65,26 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
   const toggleTerminal = useCenterPaneStore((s) => s.toggleTerminal);
   const session = useCenterPaneSession(sessionKey);
 
-  // Live artifacts for this run (initial list + ArtifactChanged subscription).
-  // `loaded` flips true once the seed query resolves — the auto-open pass waits
-  // for it so the empty pre-load list never poses as "the run has no artifacts".
-  const { artifacts, loaded } = useArtifactsList(activeRunId, projectId);
+  // Live artifacts feeding the tab store — which MUST be session-scoped, not
+  // run-scoped, because sessionKey above is the run's PARENT SESSION (shared
+  // with QuickSessionCenterPane's own session-keyed tab store). A run-scoped
+  // list only sees this run's rows, so switching the center-pane host between
+  // RunCenterPane and QuickSessionCenterPane (same session, different runs)
+  // would make the OTHER host's artifacts read as "vanished" and get pruned by
+  // useArtifactTabsSync even though their DB rows still exist. Both hooks are
+  // called unconditionally (Rules of Hooks) — each no-ops (returns []) on a
+  // null input — and we select whichever one actually has a live key.
+  const sessionScoped = useSessionArtifactsList(parentSessionId, projectId);
+  const runScoped = useArtifactsList(parentSessionId === null ? activeRunId : null, projectId);
+  const { artifacts, loaded } = parentSessionId !== null ? sessionScoped : runScoped;
 
   useEffect(() => {
     ensureSession(sessionKey);
   }, [ensureSession, sessionKey]);
 
-  // ── Auto-open artifact tabs ────────────────────────────────────────────────
-  // Register a tab for every artifact, and FLIP the center pane to ones genuinely
-  // minted AFTER this pane mounted for the current session (a fresh deliverable
-  // surfaces itself). The pre-existing set surfaced on first load must NOT yank
-  // the user off the Flow tab.
-  //
-  // The DB `is_new` flag CANNOT be trusted for this: it is never written back to
-  // 0, so on app refresh / fresh run re-select `artifacts.list` re-seeds every
-  // prior artifact with isNew===true — which would steal focus on every reload
-  // (exactly what this effect forbids). Instead we treat "new" as purely a
-  // client-session notion: the FIRST sync for a session key marks every artifact
-  // already present as already-seen (so it is opened WITHOUT stealing focus), and
-  // only ids that appear in a LATER sync count as freshly minted and focus.
-  //
-  // The seed pass is GATED on `loaded`: useArtifactsList returns [] while its
-  // seed query is in flight, so without the gate the "initial seed" would be
-  // consumed on that empty pre-load list — then the real artifacts arrive in a
-  // LATER sync and are mistaken for fresh mints, stealing focus to the last one
-  // (the reopen-lands-on-an-artifact bug). Waiting for `loaded` means the initial
-  // seed runs against the actual resolved list.
-  //
-  // centerPaneStore.openArtifactTab ALWAYS focuses the tab it opens/touches —
-  // there is no no-focus "register" action. To open the initial seed without
-  // stealing focus we capture the active tab id before the pass and restore it
-  // afterwards (the Flow tab carries no `isNew`, so focusTab restoring it is a
-  // no-op beyond setting activeTabId).
-  const seenArtifactIds = useRef<Set<string>>(new Set());
-  // Reset the seen-set when the pane switches to a different run/session so a
-  // new run's freshly-minted artifacts focus correctly.
-  const seenForKey = useRef<string | null>(null);
-  useEffect(() => {
-    // Wait for the seed query to resolve before deciding pre-existing vs. fresh
-    // (an empty list while loading must not consume the initial-seed pass).
-    if (!loaded) return;
-    const store = useCenterPaneStore.getState();
-    // The active tab the user is currently on — restored after the initial seed
-    // so pre-existing artifacts open silently (no focus steal).
-    const activeBeforeSeed = store.bySession[sessionKey]?.activeTabId ?? FLOW_TAB_ID;
-
-    const isInitialSeed = seenForKey.current !== sessionKey;
-    if (isInitialSeed) {
-      seenArtifactIds.current = new Set();
-      seenForKey.current = sessionKey;
-    }
-
-    for (const artifact of artifacts) {
-      if (seenArtifactIds.current.has(artifact.id)) continue;
-      seenArtifactIds.current.add(artifact.id);
-      // On the initial seed, every artifact is "pre-existing" — open it but do
-      // NOT steal focus (it is restored below) so first load never yanks the user
-      // off the Flow tab. After the initial seed, an unseen artifact id is
-      // genuinely fresh THIS session: it is content-driven (only minted once it
-      // has content), so we FLIP the center pane to it (focus:true) — the run just
-      // produced a deliverable and the pane surfaces it. The seenArtifactIds guard
-      // means each id flips at most once (no repeated yanking on later syncs).
-      store.openArtifactTab(sessionKey, {
-        atype: artifact.atype,
-        label: artifact.label,
-        artifactId: artifact.id,
-        committed: artifact.committed,
-        isNew: false,
-        ...(isInitialSeed ? {} : { focus: true }),
-      });
-    }
-
-    // Restore focus after the initial seed so opening pre-existing artifacts
-    // never yanks the user off the Flow (or whichever) tab they were on.
-    if (isInitialSeed && artifacts.length > 0) {
-      useCenterPaneStore.getState().focusTab(sessionKey, activeBeforeSeed);
-    }
-  }, [artifacts, sessionKey, loaded]);
-
-  // ── Close tabs whose backing artifact row vanished ─────────────────────────
-  // A pruned / deleted artifact leaves its center-pane tab stranded on a
-  // perpetual "Loading…" state (renderActiveTab can't resolve the row). Close
-  // any artifact tab whose id AND atype no longer appear in the live list.
-  useEffect(() => {
-    // Only prune against a RESOLVED list: while the seed is loading the list is
-    // [] (unknown, not "deleted"), so closing here would wrongly drop valid tabs
-    // on every reopen and re-open them when the seed lands (flicker).
-    if (!loaded) return;
-    const session = useCenterPaneStore.getState().bySession[sessionKey];
-    if (!session) return;
-    for (const tab of session.tabs) {
-      if (tab.kind !== 'artifact') continue;
-      const stillExists =
-        artifacts.some((a) => a.id === tab.artifactId) ||
-        artifacts.some((a) => a.atype === tab.atype);
-      if (!stillExists) {
-        // Drop our memory of the id too, so a re-mint re-opens (and focuses) it.
-        if (tab.artifactId) seenArtifactIds.current.delete(tab.artifactId);
-        useCenterPaneStore.getState().closeTab(sessionKey, tab.id);
-      }
-    }
-  }, [artifacts, sessionKey, loaded]);
+  // Auto-open + prune artifact tabs (shared with QuickSessionCenterPane) — see
+  // useArtifactTabsSync for the focus-steal / loading-vs-deleted-flicker fixes.
+  useArtifactTabsSync(sessionKey, artifacts, loaded);
 
   const activeTab = session.tabs.find((t) => t.id === session.activeTabId) ?? session.tabs[0];
 
@@ -224,8 +142,12 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
         artifacts.find((a) => a.id === activeTab.artifactId) ??
         artifacts.find((a) => a.atype === activeTab.atype);
       if (artifact && projectId !== null) {
+        // The artifact's OWN runId — the list may now be session-scoped (see
+        // above), so a tab's backing row can belong to a DIFFERENT run than
+        // this pane's activeRunId (e.g. a chat-minted artifact from an earlier
+        // quick-session run).
         return (
-          <ArtifactTabRenderer artifact={artifact} projectId={projectId} runId={activeRunId} />
+          <ArtifactTabRenderer artifact={artifact} projectId={projectId} runId={artifact.runId} />
         );
       }
       // Row not loaded yet (chip-opened tab before the list resolves, or the

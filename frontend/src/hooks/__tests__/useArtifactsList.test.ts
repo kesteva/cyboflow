@@ -11,6 +11,10 @@
  *   6. The subscription is unsubscribed on unmount (no leaked listener).
  *   7. A null runId / projectId yields [] and never subscribes.
  *   8. A late seed resolution after unmount/dep-change is dropped (cancelled).
+ *
+ * useSessionArtifactsList (below, own describe block) mirrors the same
+ * lifecycle but seeds from `artifacts.listBySession` and filters the shared
+ * subscription by `event.sessionId` instead of `event.runId`.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
@@ -41,6 +45,11 @@ let lastOnData: OnDataFn | null;
 let unsubscribeSpy: ReturnType<typeof vi.fn>;
 let subscribeSpy: ReturnType<typeof vi.fn>;
 let listQuerySpy: ReturnType<typeof vi.fn>;
+// Separate deferred/spies for useSessionArtifactsList's listBySession seed —
+// kept independent so its own describe block below doesn't fight over the
+// same handles as the run-scoped `list` tests above.
+let sessionSeedDeferred: DeferredSeed;
+let listBySessionQuerySpy: ReturnType<typeof vi.fn>;
 
 vi.mock('../../trpc/client', () => {
   return {
@@ -51,6 +60,12 @@ vi.mock('../../trpc/client', () => {
             query: (...args: unknown[]) => {
               listQuerySpy(...args);
               return seedDeferred.promise;
+            },
+          },
+          listBySession: {
+            query: (...args: unknown[]) => {
+              listBySessionQuerySpy(...args);
+              return sessionSeedDeferred.promise;
             },
           },
           onArtifactChanged: {
@@ -69,7 +84,7 @@ vi.mock('../../trpc/client', () => {
   };
 });
 
-const { useArtifactsList } = await import('../useArtifactsList');
+const { useArtifactsList, useSessionArtifactsList } = await import('../useArtifactsList');
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -77,6 +92,7 @@ const { useArtifactsList } = await import('../useArtifactsList');
 
 const RUN = 'run-aaa';
 const PROJECT = 7;
+const SESSION = 'sess-aaa';
 
 function makeArtifact(overrides: Partial<Artifact> = {}): Artifact {
   return {
@@ -103,6 +119,7 @@ function changedEvent(overrides: Partial<ArtifactChangedEvent> = {}): ArtifactCh
   return {
     projectId: PROJECT,
     runId: RUN,
+    sessionId: SESSION,
     artifactId: artifact?.id ?? 'art-x',
     atype: 'generic',
     action: 'created',
@@ -117,10 +134,12 @@ function changedEvent(overrides: Partial<ArtifactChangedEvent> = {}): ArtifactCh
 
 beforeEach(() => {
   seedDeferred = deferSeed();
+  sessionSeedDeferred = deferSeed();
   lastOnData = null;
   unsubscribeSpy = vi.fn();
   subscribeSpy = vi.fn();
   listQuerySpy = vi.fn();
+  listBySessionQuerySpy = vi.fn();
 });
 
 // ---------------------------------------------------------------------------
@@ -226,6 +245,7 @@ describe('useArtifactsList', () => {
       lastOnData?.({
         projectId: PROJECT,
         runId: RUN,
+        sessionId: SESSION,
         artifactId: 'art-1',
         atype: 'generic',
         action: 'deleted',
@@ -303,5 +323,92 @@ describe('useArtifactsList', () => {
     expect(unsubscribeSpy).toHaveBeenCalledTimes(1); // old sub torn down
     expect(subscribeSpy).toHaveBeenCalledTimes(2); // resubscribed
     expect(listQuerySpy).toHaveBeenLastCalledWith({ runId: 'run-bbb' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// useSessionArtifactsList — same lifecycle, seeded from listBySession and
+// filtered by event.sessionId instead of event.runId.
+// ---------------------------------------------------------------------------
+
+describe('useSessionArtifactsList', () => {
+  it('seeds from listBySession({ sessionId }) rather than list({ runId })', async () => {
+    const { result } = renderHook(() => useSessionArtifactsList(SESSION, PROJECT));
+
+    expect(listBySessionQuerySpy).toHaveBeenCalledWith({ sessionId: SESSION });
+    expect(listQuerySpy).not.toHaveBeenCalled();
+
+    await act(async () => {
+      sessionSeedDeferred.resolve([makeArtifact({ id: 'art-1' })]);
+      await sessionSeedDeferred.promise;
+    });
+    expect(result.current.artifacts.map((a) => a.id)).toEqual(['art-1']);
+    expect(result.current.loaded).toBe(true);
+  });
+
+  it('upserts an event whose sessionId matches', async () => {
+    const { result } = renderHook(() => useSessionArtifactsList(SESSION, PROJECT));
+    await act(async () => {
+      sessionSeedDeferred.resolve([]);
+      await sessionSeedDeferred.promise;
+    });
+
+    act(() => {
+      lastOnData?.(
+        changedEvent({
+          sessionId: SESSION,
+          artifact: makeArtifact({ id: 'art-2', label: 'from this session' }),
+        }),
+      );
+    });
+
+    expect(result.current.artifacts.map((a) => a.id)).toEqual(['art-2']);
+  });
+
+  it('ignores an event whose sessionId does NOT match (even on the shared project channel)', async () => {
+    const { result } = renderHook(() => useSessionArtifactsList(SESSION, PROJECT));
+    await act(async () => {
+      sessionSeedDeferred.resolve([]);
+      await sessionSeedDeferred.promise;
+    });
+
+    act(() => {
+      lastOnData?.(
+        changedEvent({
+          sessionId: 'OTHER-session',
+          artifact: makeArtifact({ id: 'art-foreign', runId: 'run-other' }),
+        }),
+      );
+    });
+
+    expect(result.current.artifacts).toEqual([]);
+  });
+
+  it("removes an artifact on a 'deleted' event for this session", async () => {
+    const { result } = renderHook(() => useSessionArtifactsList(SESSION, PROJECT));
+    await act(async () => {
+      sessionSeedDeferred.resolve([makeArtifact({ id: 'art-1' }), makeArtifact({ id: 'art-2' })]);
+      await sessionSeedDeferred.promise;
+    });
+
+    act(() => {
+      lastOnData?.({
+        projectId: PROJECT,
+        runId: RUN,
+        sessionId: SESSION,
+        artifactId: 'art-1',
+        atype: 'generic',
+        action: 'deleted',
+        artifact: null,
+      });
+    });
+
+    expect(result.current.artifacts.map((a) => a.id)).toEqual(['art-2']);
+  });
+
+  it('reports loaded=false and never seeds when sessionId/projectId is null', () => {
+    const { result } = renderHook(() => useSessionArtifactsList(null, PROJECT));
+    expect(result.current.loaded).toBe(false);
+    expect(listBySessionQuerySpy).not.toHaveBeenCalled();
   });
 });

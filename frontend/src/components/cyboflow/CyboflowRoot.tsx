@@ -424,11 +424,22 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
         </div>
 
         {/* Right rail — always rendered as layout shell (296px fixed, or a thin
-            collapsed strip). Collapse state is lifted here + persisted. */}
+            collapsed strip). Collapse state is lifted here + persisted.
+            quickSessionProjectId lets the Artifacts tab work with no active flow
+            run (mirroring the Diff tab's session fallback) — gated on
+            !isMainRepo because the main-repo session has a panels-only layout
+            (no tabbed center pane), so opening artifact tabs from the rail
+            would target a centerPaneStore key that never renders. (RunRightRail
+            reads the session id itself, from the synchronous selectedSessionId
+            store value, rather than taking it as a prop here — see its own
+            artifacts-scope comment.) */}
         <RunRightRail
           phaseState={phaseState}
           collapsed={railCollapsed}
           onToggleCollapse={handleToggleRail}
+          quickSessionProjectId={
+            effectiveSession && !effectiveSession.isMainRepo ? projectId : null
+          }
         />
       </div>
 

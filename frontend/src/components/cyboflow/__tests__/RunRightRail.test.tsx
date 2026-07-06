@@ -23,6 +23,12 @@
  *   7. The Diff tab mounts RunDiffTabPanel (keyed by the active run) during a run.
  *   8. Whole-rail collapse: collapsed=true renders the thin strip with only an
  *      expand affordance; the expand/collapse chevrons call onToggleCollapse.
+ *   9. Artifacts tab quick-session fallback: with no active run, the
+ *      selectedSessionId store value + quickSessionProjectId prop (threaded by
+ *      CyboflowRoot) render ArtifactsPanel scoped to the session (across ALL
+ *      its runs); without them (or without an active run) the empty state
+ *      directs the user to select a session. An active run whose project id
+ *      hasn't resolved yet never falls through to the quick-session arm.
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, act } from '@testing-library/react';
@@ -78,6 +84,17 @@ vi.mock('../SessionDiffTabPanel', () => ({
   SessionDiffTabPanel: ({ sessionId }: { sessionId: string }) => (
     <div data-testid="session-diff-tab-panel-mock">{sessionId}</div>
   ),
+}));
+
+// The Artifacts tab renders the REAL ArtifactsPanel (its own suite covers its
+// internals) — only its data source is stubbed here so this file never fires
+// the real tRPC artifacts client. Empty list is enough to prove which arm of
+// the tab's three-way branch mounted (ArtifactsPanel's own testid vs. the
+// empty-state div). ArtifactsPanel now calls BOTH the run- and session-scoped
+// hooks unconditionally (Rules of Hooks) and picks one, so both are stubbed.
+vi.mock('../../../hooks/useArtifactsList', () => ({
+  useArtifactsList: () => ({ artifacts: [], loaded: true }),
+  useSessionArtifactsList: () => ({ artifacts: [], loaded: true }),
 }));
 
 // Import after mocks
@@ -138,13 +155,18 @@ beforeEach(() => {
 
 function renderRail(
   phaseState: UseWorkflowPhaseStateResult,
-  opts?: { collapsed?: boolean; onToggleCollapse?: () => void },
+  opts?: {
+    collapsed?: boolean;
+    onToggleCollapse?: () => void;
+    quickSessionProjectId?: number | null;
+  },
 ) {
   return render(
     <RunRightRail
       phaseState={phaseState}
       collapsed={opts?.collapsed ?? false}
       onToggleCollapse={opts?.onToggleCollapse ?? (() => {})}
+      quickSessionProjectId={opts?.quickSessionProjectId}
     />,
   );
 }
@@ -310,6 +332,63 @@ describe('RunRightRail', () => {
     expect(screen.getByTestId('run-right-rail-diff-empty-norun')).toBeInTheDocument();
     expect(screen.queryByTestId('run-diff-tab-panel-mock')).not.toBeInTheDocument();
     expect(screen.queryByTestId('session-diff-tab-panel-mock')).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Artifacts tab — quick-session fallback (mirrors the Diff tab's session
+// fallback). No active flow run, so the tab relies on the synchronous
+// selectedSessionId store value + the quickSessionProjectId prop CyboflowRoot
+// threads in — both session-scoped now (F1 fix: no async-derived
+// quickSessionChatRunId in the mix that could briefly disagree with
+// selectedSessionId across a session switch).
+// ---------------------------------------------------------------------------
+
+describe('RunRightRail — Artifacts tab quick-session fallback', () => {
+  it('with no active run, a selected session, and quickSessionProjectId set, renders ArtifactsPanel scoped to the session', () => {
+    act(() => {
+      useCyboflowStore.setState({ selectedSessionId: 'sess-quick-1' });
+    });
+
+    renderRail(EMPTY_PHASE_STATE, {
+      quickSessionProjectId: 9,
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Artifacts' }));
+
+    expect(screen.getByTestId('artifacts-panel')).toBeInTheDocument();
+    expect(screen.queryByTestId('run-right-rail-artifacts-empty')).not.toBeInTheDocument();
+  });
+
+  it('with quickSessionProjectId null (and no active run), shows the empty state directing to select a session', () => {
+    renderRail(EMPTY_PHASE_STATE);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Artifacts' }));
+
+    const empty = screen.getByTestId('run-right-rail-artifacts-empty');
+    expect(empty).toBeInTheDocument();
+    expect(empty).toHaveTextContent('Select a session to view its artifacts.');
+    expect(screen.queryByTestId('artifacts-panel')).not.toBeInTheDocument();
+  });
+
+  it('an active run whose project id has not resolved yet does NOT fall through to the quick-session arm', () => {
+    // activeRunId is set but no matching row exists in runsByProject, so
+    // activeRunProjectId resolves to null — the quick arm must require
+    // activeRunId === null EXPLICITLY, so this transient state still shows the
+    // empty state rather than briefly borrowing the quick session's artifacts.
+    act(() => {
+      useCyboflowStore.getState().setActiveRun('run-unresolved-project');
+      useCyboflowStore.setState({ selectedSessionId: 'sess-quick-1' });
+    });
+
+    renderRail(EMPTY_PHASE_STATE, {
+      quickSessionProjectId: 9,
+    });
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Artifacts' }));
+
+    expect(screen.getByTestId('run-right-rail-artifacts-empty')).toBeInTheDocument();
+    expect(screen.queryByTestId('artifacts-panel')).not.toBeInTheDocument();
   });
 });
 

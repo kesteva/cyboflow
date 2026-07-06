@@ -41,12 +41,18 @@ vi.mock('../RunBottomPane', () => ({
 // tests don't drag in the tRPC artifacts client. `mockArtifacts` is mutable so
 // the auto-open / strand tests can drive the list the hook returns.
 let mockArtifacts: Artifact[] = [];
-// `mockLoaded` mirrors useArtifactsList's seed-resolved flag. Default true so the
+// `mockLoaded` mirrors the hooks' seed-resolved flag. Default true so the
 // existing synchronous-seed tests behave as "already loaded"; the reopen-race
 // test drives it false→true to reproduce the async seed.
 let mockLoaded = true;
+// RunCenterPane calls BOTH useArtifactsList (run-scoped) and
+// useSessionArtifactsList (session-scoped) unconditionally (Rules of Hooks) and
+// selects one based on whether the run has a known parent session — every test
+// row here sets session_id, so useSessionArtifactsList is the one actually
+// selected, but both are stubbed identically so the choice is transparent.
 vi.mock('../../../hooks/useArtifactsList', () => ({
   useArtifactsList: () => ({ artifacts: mockArtifacts, loaded: mockLoaded }),
+  useSessionArtifactsList: () => ({ artifacts: mockArtifacts, loaded: mockLoaded }),
 }));
 vi.mock('../ArtifactTabRenderer', () => ({
   ArtifactTabRenderer: () => <div data-testid="mock-artifact-tab-renderer" />,

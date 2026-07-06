@@ -14,11 +14,17 @@
  *     is NULL, so it fetches cyboflow.runs.gitDiff, worktree_path-resolved). With no
  *     active run but a selected session it falls back to the session-scoped combined
  *     diff (RunRightRailDiff → CombinedDiffView) — the at-rest experience.
- *   - Artifacts — the "RUN DELIVERABLES" reopen surface (ArtifactsPanel) when
- *     activeRunId is non-null; lists every artifact the run produced so closed
- *     center-pane tabs can be reopened. projectId is resolved from the active run
- *     row in useActiveRunsStore (the row carries project_id) — RunRightRail takes
- *     no extra prop (CyboflowRoot is owned by the orchestrator).
+ *   - Artifacts — the "RUN DELIVERABLES" reopen surface (ArtifactsPanel); lists
+ *     every artifact the run produced so closed center-pane tabs can be reopened.
+ *     Two scopes, mirroring the Diff tab:
+ *       • Active run → run-scoped (projectId resolved from the active run row in
+ *         useActiveRunsStore, which carries project_id).
+ *       • No run but a selected quick session → SESSION-scoped, keyed by
+ *         `selectedSessionId` (the SAME synchronous store value used for both
+ *         `sessionId` and `sessionKey` — no async-derived value in the mix, so
+ *         the two can never briefly disagree the way `quickSessionChatRunId`
+ *         vs. `selectedSessionId` could). `quickSessionProjectId` (threaded in
+ *         by CyboflowRoot) still gates this arm on !isMainRepo.
  *
  * Collapse: the WHOLE rail is collapsible. `collapsed` + `onToggleCollapse` are
  * lifted to CyboflowRoot (persisted to localStorage); when collapsed the rail
@@ -121,9 +127,21 @@ interface RunRightRailProps {
   collapsed: boolean;
   /** Toggle the collapsed state (lifted to + persisted by CyboflowRoot). */
   onToggleCollapse: () => void;
+  /**
+   * The selected quick session's project id, so the Artifacts tab works with
+   * NO active flow run — mirroring the Diff tab's session fallback
+   * (RunDiffTabPanel → SessionDiffTabPanel). Paired with `selectedSessionId`
+   * (read directly from the store below) for the session-scoped ArtifactsPanel.
+   */
+  quickSessionProjectId?: number | null;
 }
 
-export function RunRightRail({ phaseState, collapsed, onToggleCollapse }: RunRightRailProps) {
+export function RunRightRail({
+  phaseState,
+  collapsed,
+  onToggleCollapse,
+  quickSessionProjectId,
+}: RunRightRailProps) {
   const [activeTab, setActiveTab] = useState<TabId>('workflow-progress');
   const activeRunId = useCyboflowStore((s) => s.activeRunId);
   const selectedSessionId = useCyboflowStore((s) => s.selectedSessionId);
@@ -347,19 +365,40 @@ export function RunRightRail({ phaseState, collapsed, onToggleCollapse }: RunRig
             </div>
           )
         ) : (
-          // Artifacts tab — needs an active run AND its resolved project id.
+          // Artifacts tab — two scopes, mirroring the Diff tab:
+          //  • Active run → run-scoped (existing behavior, keyed by the run's
+          //    parent session / run-id fallback).
+          //  • No run but a selected quick session → SESSION-scoped, keyed by
+          //    `selectedSessionId` — the SAME synchronous store value used for
+          //    BOTH `sessionId` and `sessionKey`, which by construction can
+          //    never disagree with itself (unlike the former
+          //    `quickSessionChatRunId`, an async-derived value that could
+          //    briefly lag `selectedSessionId` across a session switch and mint
+          //    a tab in the wrong session's centerPaneStore bucket).
+          //    `activeRunId === null` is required EXPLICITLY so a flow run
+          //    whose project id hasn't resolved yet in activeRunsStore never
+          //    briefly shows the quick session's artifacts (activeRunProjectId
+          //    would be null in that transient window too).
           activeRunId !== null && activeRunProjectId !== null ? (
             <ArtifactsPanel
               runId={activeRunId}
               projectId={activeRunProjectId}
               sessionKey={artifactsSessionKey}
             />
+          ) : activeRunId === null &&
+            quickSessionProjectId != null &&
+            selectedSessionId !== null ? (
+            <ArtifactsPanel
+              sessionId={selectedSessionId}
+              projectId={quickSessionProjectId}
+              sessionKey={selectedSessionId}
+            />
           ) : (
             <div
               data-testid="run-right-rail-artifacts-empty"
               className="p-4 text-sm text-text-secondary"
             >
-              No active run
+              Select a session to view its artifacts.
             </div>
           )
         )}

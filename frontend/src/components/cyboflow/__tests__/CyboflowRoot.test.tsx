@@ -27,12 +27,13 @@ vi.mock('../../../utils/cyboflowApi', () => ({
   },
 }));
 
-// RunCenterPane (mounted in the active-run branch) now drives the artifacts list
-// via the tRPC artifacts client. This suite exercises CyboflowRoot's layout +
-// lifecycle, not artifacts — stub the list hook + the renderer so it doesn't
-// reach the (unmocked) artifacts client.
+// RunCenterPane / QuickSessionCenterPane (mounted in the active-run / resting
+// branches) drive the artifacts list via the tRPC artifacts client. This suite
+// exercises CyboflowRoot's layout + lifecycle, not artifacts — stub BOTH list
+// hooks + the renderer so neither pane reaches the (unmocked) artifacts client.
 vi.mock('../../../hooks/useArtifactsList', () => ({
   useArtifactsList: () => ({ artifacts: [], loaded: true }),
+  useSessionArtifactsList: () => ({ artifacts: [], loaded: true }),
 }));
 vi.mock('../ArtifactTabRenderer', () => ({
   ArtifactTabRenderer: () => <div data-testid="mock-artifact-tab-renderer" />,

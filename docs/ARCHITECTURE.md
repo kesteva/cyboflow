@@ -596,7 +596,23 @@ actually merges — see `recomputeTaskExecutionStage` / `recomputeEpicStage` in 
   (arch-design extracts the idea body's `## Architecture design` section; its mint is
   content-gated on that section existing); auto-minted by
   the orchestrator when a completed step declares `WorkflowStep.outputArtifact`. Session-only
-  (uncommitted) artifacts are dropped on session dismiss; committed ones persist.
+  (uncommitted) artifacts are dropped on session dismiss; committed ones persist. Quick sessions
+  surface artifacts too, with no flow run in play: rows attach to the session's persistent
+  `'__quick__'` chat sentinel run (`sessions.chat_run_id`) rather than a workflow-driven run, and
+  neither MCP handler gates on workflow name or kind.
+
+  Listing is SESSION-scoped wherever the consumer is the center-pane tab store (which is keyed by
+  session, not run): `artifacts.listBySession` (JOINs `workflow_runs` on `session_id`) plus the
+  `ArtifactChangedEvent.sessionId` field (stamped by `ArtifactRouter.emitChange` from
+  `workflow_runs.session_id`, null for a parentless/legacy run) back a `useSessionArtifactsList`
+  frontend hook returning a session's deliverables across ALL its runs — the `'__quick__'` chat
+  sentinel plus any flow runs that session hosted. `QuickSessionCenterPane` and `RunCenterPane`
+  both feed `useArtifactTabsSync` from this session-scoped list (falling back to the run-scoped
+  `useArtifactsList` only when a run's parent session is unknown), so tabs survive the
+  RunCenterPane ↔ QuickSessionCenterPane host switch: a deliverable minted mid-chat, or by an
+  earlier flow run the session hosted, stays reachable in the tab store after that run ends
+  instead of being pruned as "vanished" the moment the host with a narrower, run-scoped list takes
+  over. The right-rail `ArtifactsPanel` mirrors this dual scope (`runId` xor `sessionId` prop).
 
 #### Sprint lanes (migrations 022 + 023)
 
