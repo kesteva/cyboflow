@@ -23,6 +23,7 @@ import { FileTabRenderer } from './FileTabRenderer';
 import { ArtifactTabRenderer } from './ArtifactTabRenderer';
 import { TerminalDock } from './TerminalDock';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
+import { ARTIFACT_COLORS, ARTIFACT_GLYPHS } from '../../../../shared/types/artifacts';
 import { useArtifactsList, useSessionArtifactsList } from '../../hooks/useArtifactsList';
 import { useArtifactTabsSync } from '../../hooks/useArtifactTabsSync';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
@@ -150,11 +151,35 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
           <ArtifactTabRenderer artifact={artifact} projectId={projectId} runId={artifact.runId} />
         );
       }
-      // Row not loaded yet (chip-opened tab before the list resolves, or the
-      // artifact hasn't been minted) — small loading state.
+      // List still resolving (chip-opened tab racing the initial fetch) — a
+      // genuine loading state.
+      if (!loaded) {
+        return (
+          <div className="flex h-full items-center justify-center text-sm text-text-secondary">
+            Loading {activeTab.label}…
+          </div>
+        );
+      }
+      // List loaded and no backing row: the artifact has NOT been minted yet
+      // (a step's "creates ⟨artifact⟩" chip opens tabs eagerly). Render an
+      // explicit not-created-yet state instead of a perpetual fake "Loading…";
+      // the ArtifactChanged subscription fills this tab in live the moment the
+      // producing step reports it.
+      const atype = activeTab.atype ?? 'generic';
       return (
-        <div className="flex h-full items-center justify-center text-sm text-text-secondary">
-          Loading {activeTab.label}…
+        <div
+          data-testid="artifact-tab-not-created"
+          className="flex h-full flex-col items-center justify-center gap-2 px-8 text-center"
+        >
+          <span aria-hidden style={{ fontSize: '30px', color: ARTIFACT_COLORS[atype], opacity: 0.55 }}>
+            {ARTIFACT_GLYPHS[atype]}
+          </span>
+          <span className="text-sm font-semibold text-text-primary">
+            {activeTab.label} hasn&apos;t been created yet
+          </span>
+          <span className="max-w-sm text-xs text-text-secondary">
+            It will appear here as soon as its workflow step produces it.
+          </span>
         </div>
       );
     }

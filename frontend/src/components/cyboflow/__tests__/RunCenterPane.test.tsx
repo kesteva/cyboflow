@@ -283,4 +283,48 @@ describe('RunCenterPane', () => {
     expect(session.tabs.some((t) => t.id === 'flow')).toBe(true);
     expect(session.activeTabId).toBe('flow');
   });
+
+  it('renders a not-created-yet state for a chip-opened tab whose artifact has not been minted', () => {
+    // A step's "creates ⟨artifact⟩" chip opens the tab EAGERLY (atype only, no
+    // artifactId). With the list loaded and no backing row this must render the
+    // explicit empty state — not the perpetual "Loading…" strand.
+    mockArtifacts = [];
+    const { rerender } = render(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    act(() => {
+      useCenterPaneStore.getState().openArtifactTab('sess-1', { atype: 'idea-spec', label: 'Idea spec' });
+    });
+    rerender(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    expect(screen.getByTestId('artifact-tab-not-created')).toBeInTheDocument();
+    expect(screen.getByText(/hasn.t been created yet/)).toBeInTheDocument();
+
+    // An UNRELATED artifact minting must NOT prune the expecting (id-less) tab.
+    act(() => {
+      mockArtifacts = [makeArtifact({ id: 'art-other', atype: 'screenshots' })];
+    });
+    rerender(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    expect(
+      useCenterPaneStore.getState().bySession['sess-1'].tabs.some((t) => t.id === 'art:idea-spec'),
+    ).toBe(true);
+
+    // When ITS artifact mints, the same tab fills in with the real renderer.
+    act(() => {
+      mockArtifacts = [
+        makeArtifact({ id: 'art-other', atype: 'screenshots' }),
+        makeArtifact({ id: 'art-mint', atype: 'idea-spec' }),
+      ];
+    });
+    rerender(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    const session = useCenterPaneStore.getState().bySession['sess-1'];
+    expect(session.activeTabId).toBe('art:idea-spec');
+    expect(screen.getByTestId('mock-artifact-tab-renderer')).toBeInTheDocument();
+    expect(screen.queryByTestId('artifact-tab-not-created')).not.toBeInTheDocument();
+  });
 });

@@ -121,6 +121,10 @@ export function useArtifactTabsSync(sessionKey: string, artifacts: Artifact[], l
     if (!session) return;
     for (const tab of session.tabs) {
       if (tab.kind !== 'artifact') continue;
+      // A tab with NO artifactId was chip-opened for a not-yet-minted artifact
+      // ("creates ⟨artifact⟩" opens eagerly) — it renders the not-created-yet
+      // state and must NOT be pruned; auto-open stamps the id once it mints.
+      if (!tab.artifactId) continue;
       const stillExists =
         artifacts.some((a) => a.id === tab.artifactId) ||
         artifacts.some((a) => a.atype === tab.atype);
