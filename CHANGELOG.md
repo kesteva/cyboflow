@@ -10,6 +10,14 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Added
 
+- **Quick-session artifacts.** Artifacts produced by a quick session now surface
+  in the center pane and the right rail, backed by session-scoped artifact
+  listing.
+- **Always-on programmatic supervisor.** Programmatic runs now always run under
+  a supervisor — live chat on every run, with escalations dual-surfaced to both
+  the chat and the review queue, and no unilateral fail. This replaces the
+  opt-in `programmaticSupervisor` setting (the supervisor is no longer an
+  either/or choice).
 - **Model picker + Advanced settings in the Ultracode launcher.** The Ultracode
   configure step now offers the same model picker and Advanced MCP/plugin
   disclosure as the quick-session launcher, defaulting to **Fable 5** when the
@@ -22,9 +30,27 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 
-- **Artifact tabs live-refresh.** The center-pane artifact tabs (decomposed
-  stories / idea spec / architecture design) now update as their underlying
-  entities change, instead of going stale until the tab is closed and reopened.
+- **AskUserQuestion gates work on SDK 0.3.201.** SDK flow turns are now driven in
+  streaming-input mode so human `AskUserQuestion` gates fire reliably after the
+  0.3.201 bump.
+- **Mid-turn quick-session messages are queued** instead of aborting the running
+  turn, with a client-side pending-send model for the chat composers.
+- **Programmatic run gating.** Programmatic runs are blocked on pending blocking
+  findings (now surfaced), and the Q1 reveal is wired into the programmatic
+  approve-plan gate via an explicit outcome.
+- **Run token/context ticker** is backfilled from `raw_events`, so it survives
+  view switches instead of resetting.
+- **Stream-IPC stability.** Stopped leaking stream-IPC listeners and no longer
+  wipe `streamEvents` when re-selecting the same run.
+- **Reopened-session transcripts** stay pinned to the bottom while content
+  hydrates.
+- **Artifact tabs.** They live-refresh as their underlying entities change
+  (decomposed stories / idea spec / architecture design), and a tab opened
+  before its artifact mints now shows a *not-created-yet* state instead of an
+  empty/spinning tab.
+- **`create_sprint_batch`** gains ref-or-id resolution and a no-eligible-tasks
+  diagnostic; no-op review-item resumes are surfaced and the approvals MCP tool
+  description de-confused.
 - **Worktree shells no longer inherit run-scoped env.** A run's shell no longer
   leaks the app's own `CYBOFLOW_RUN_ID` / orchestrator socket / artifacts-dir
   variables when Cyboflow is launched from inside a Cyboflow session — which
