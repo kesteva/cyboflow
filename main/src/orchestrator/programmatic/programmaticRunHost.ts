@@ -29,9 +29,18 @@
 import type { WorkflowStep } from '../../../../shared/types/workflows';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { LoggerLike } from '../types';
-import type { ControllerHost, ControllerStepContext, FanOutDriver, HumanGateDecision, StepReport, TriageDecision } from './types';
+import type {
+  ControllerHost,
+  ControllerStepContext,
+  FanOutDriver,
+  HumanGateDecision,
+  StepReport,
+  SystemicPauseVerdict,
+  TriageDecision,
+} from './types';
 import type { HumanGateResolver } from './humanGate';
 import type { BlockingItemsResolver } from './blockingItemsGate';
+import type { SystemicPauseResolver } from './systemicPauseGate';
 import type { MonitorSession } from './monitor';
 import { buildAssistantTextEvent } from './syntheticEvents';
 
@@ -56,6 +65,17 @@ export interface ProgrammaticRunHostArgs {
    * for tests / any host built without it).
    */
   blockingGate?: BlockingItemsResolver;
+  /**
+   * Optional SYSTEMIC-pause gate (the 2026-07-06 planner-incident fix). When
+   * present the host routes a systemic step failure (usage/session/rate limit,
+   * provider overload, auth — `StepRunResult.systemic === true`) here to
+   * park-and-retry: it opens a BLOCKING 'decision' pause item, parks the run, and
+   * settles 'retry' (condition cleared) / 'giveup' (human dismissed → normal
+   * failure path) / 'canceled' (run canceled while parked). Absent ⇒
+   * `awaitSystemicPause` returns 'giveup' — byte-identical to a world without the
+   * seam (the systemic failure follows the normal step-failure path).
+   */
+  systemicGate?: SystemicPauseResolver;
   /**
    * The ON-DEMAND monitor (the monitor-unify refactor). When present, the host
    * routes `triageFailure` to `monitor.triage` (which reads the WHOLE run history
@@ -123,6 +143,51 @@ export class ProgrammaticRunHost implements ControllerHost {
   async awaitBlockingReviewItems(runId: string, signal?: AbortSignal): Promise<'proceed' | 'canceled'> {
     if (!this.args.blockingGate) return 'proceed';
     return this.args.blockingGate.awaitClear({ runId, projectId: this.args.projectId, signal });
+  }
+
+  /**
+   * Systemic-pause seam (the 2026-07-06 planner-incident fix). Consulted when a
+   * step attempt fails with `StepRunResult.systemic === true` (usage/session/rate
+   * limit, provider overload, auth), BEFORE the failure consumes the retry budget
+   * / optional-skip / loopback / triage. Delegates to the injected systemicGate:
+   * it parks the run behind a BLOCKING pause item and settles 'retry' (cleared) /
+   * 'giveup' (dismissed → normal failure path) / 'canceled' (canceled while parked).
+   * A run built WITHOUT a gate returns 'giveup' — byte-identical to a world without
+   * the seam. Mirrors triageFailure's try/catch + logging: a broken gate must never
+   * strand the run, so any throw defaults to 'giveup'. The pause + resume/dismiss
+   * transitions are surfaced in the run's Chat pane as monitor turns.
+   */
+  async awaitSystemicPause(
+    step: WorkflowStep,
+    ctx: ControllerStepContext,
+    error: string | undefined,
+  ): Promise<SystemicPauseVerdict> {
+    if (!this.args.systemicGate) return 'giveup';
+    this.injectMonitorTurn(
+      `⏸ Run paused — step **${step.name}** hit a systemic failure (${(error ?? 'no error text').slice(0, 200)}). It will auto-resume when the limit resets, or resolve the pause item in the review queue to retry now.`,
+    );
+    try {
+      const verdict = await this.args.systemicGate.awaitClear({
+        runId: this.args.runId,
+        projectId: this.args.projectId,
+        step,
+        error,
+        signal: ctx.signal,
+      });
+      if (verdict === 'retry') this.injectMonitorTurn(`▶ Resuming — retrying step **${step.name}**.`);
+      if (verdict === 'giveup')
+        this.injectMonitorTurn(`⏭ Pause dismissed — step **${step.name}** now follows its normal failure handling.`);
+      return verdict;
+    } catch (err) {
+      // A broken gate must never strand the run — default to 'giveup' so the
+      // systemic failure follows the normal step-failure path.
+      this.args.logger?.warn('[ProgrammaticRunHost] systemic-pause gate failed; giving up', {
+        runId: this.args.runId,
+        stepId: step.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return 'giveup';
+    }
   }
 
   /**

@@ -5,6 +5,7 @@ import type { HumanGateResolver } from '../humanGate';
 import { MonitorRegistry, type MonitorContext, type MonitorSession } from '../monitor';
 import type { ClaudeSpawnerLike, ClaudeSpawnerOptions, ProgrammaticRunContext } from '../../runExecutor';
 import type { FanOutDriver } from '../types';
+import type { SystemicPauseResolver } from '../systemicPauseGate';
 import type { WorkflowDefinition, WorkflowRow, WorkflowRunRow } from '../../../../../shared/types/workflows';
 
 function makeSpawner(impl?: () => Promise<void>): ClaudeSpawnerLike {
@@ -264,6 +265,35 @@ describe('DefaultProgrammaticRunner', () => {
 
     await expect(runner.run(ctxFor(oneStepDef()))).resolves.toBeUndefined();
     expect(fanOutDriverFactory).not.toHaveBeenCalled();
+  });
+
+  // ── Systemic-pause gate wiring (the 2026-07-06 planner-incident fix) ────────
+  it('threads the systemicGate into the host so a systemic step failure routes through it', async () => {
+    // A spawner whose turn dies on a usage-limit error ⇒ SpawnStepRunner stamps the
+    // result systemic:true ⇒ the controller consults host.awaitSystemicPause, which
+    // delegates to the threaded gate. 'giveup' falls through to the normal failure
+    // path; a no-monitor 'escalate' + an APPROVE gate skips the step and the run
+    // completes (proving the gate was reached AND that giveup is byte-identical).
+    const awaitClear = vi.fn<(req: unknown) => Promise<'retry' | 'giveup' | 'canceled'>>().mockResolvedValue('giveup');
+    const systemicGate: SystemicPauseResolver = { awaitClear };
+
+    const runner = new DefaultProgrammaticRunner({
+      spawner: makeSpawner(() => Promise.reject(new Error('Claude AI usage limit reached'))),
+      reporter,
+      gate: gateOf('approve'),
+      systemicGate,
+    });
+
+    await expect(runner.run(ctxFor(oneStepDef()))).resolves.toBeUndefined();
+
+    expect(awaitClear).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run-1',
+        projectId: 1,
+        step: expect.objectContaining({ id: 'a' }),
+        error: expect.stringContaining('usage limit'),
+      }),
+    );
   });
 
   // ── Sprint task-scope grounding (2026-06-22) ────────────────────────────────

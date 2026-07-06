@@ -41,6 +41,16 @@ import { runStatusEvents } from './trpc/routers/events';
 /** Provenance source stamped on a human-gate decision review_item. */
 const HUMAN_GATE_SOURCE = 'gate:human-step';
 
+/**
+ * Provenance prefix stamped on a systemic-pause decision review_item (the
+ * canonical constant is `SYSTEMIC_PAUSE_SOURCE` in
+ * programmatic/systemicPauseGate.ts — duplicated here as a bare literal to keep
+ * this module free of a `programmatic/` import). Cancel-path cleanup
+ * (clearPendingForRun) must dismiss these pause items too, so a canceled run does
+ * not strand an orphan "Run paused" decision row in the review queue.
+ */
+const SYSTEMIC_PAUSE_SOURCE = 'gate:systemic-pause';
+
 export class HumanStepManager {
   private static instance: HumanStepManager | null = null;
 
@@ -303,10 +313,12 @@ export class HumanStepManager {
    * called from the cancel path so a canceled run does not strand an orphan
    * "Human gate" decision row in the review queue.
    *
-   * Marks each pending `decision` row with our gate provenance as 'dismissed'
-   * (resolved_by 'system', resolution 'canceled') and emits a 'dismissed' delta
-   * so the queue/landing subscriptions update. It does NOT resume the run (cancel
-   * owns the terminal transition) and is fail-soft on a missing table. NOTE: the
+   * Marks each pending `decision` row with EITHER gate provenance — the human-gate
+   * source (`gate:human-step:*`) OR the systemic-pause source
+   * (`gate:systemic-pause:*`) — as 'dismissed' (resolved_by 'system', resolution
+   * 'canceled') and emits a 'dismissed' delta so the queue/landing subscriptions
+   * update. It does NOT resume the run (cancel owns the terminal transition) and is
+   * fail-soft on a missing table. NOTE: the
    * IN-MEMORY gate Promise (ReviewQueueHumanGate) is settled separately and
    * synchronously by the run's AbortSignal (RunExecutor.requestProgrammaticCancel)
    * BEFORE this runs, so the 'dismissed' event here is purely DB/queue cleanup and
@@ -327,9 +339,9 @@ export class HumanStepManager {
         .prepare(
           `SELECT id FROM review_items
             WHERE run_id = ? AND kind = 'decision' AND status = 'pending'
-              AND source LIKE ?`,
+              AND (source LIKE ? OR source LIKE ?)`,
         )
-        .all(runId, `${HUMAN_GATE_SOURCE}:%`) as Array<{ id: string }>;
+        .all(runId, `${HUMAN_GATE_SOURCE}:%`, `${SYSTEMIC_PAUSE_SOURCE}:%`) as Array<{ id: string }>;
       if (pending.length === 0) return 0;
 
       let dismissed = 0;
@@ -354,16 +366,28 @@ export class HumanStepManager {
    * Find the id of an ALREADY-pending human-gate decision item for (runId, stepId),
    * or null (crash-safe resume). Used by ReviewQueueHumanGate to re-attach to a
    * gate that openHumanGate reports as already open after a restart re-drives a run
-   * parked at it. Read-only; no transition.
+   * parked at it. Read-only; no transition. Delegates to the source-generic
+   * findPendingItemBySource with this run's human-gate source.
    */
   async findPendingGate(runId: string, stepId: string): Promise<string | null> {
+    return this.findPendingItemBySource(runId, this.sourceForStep(stepId));
+  }
+
+  /**
+   * Find the id of an ALREADY-pending blocking `decision` review item for
+   * (runId, source), or null. The source-generic form of findPendingGate: any
+   * gate that mints a per-source blocking decision item (human gate, systemic
+   * pause) re-attaches through this on a crash-safe resume. Read-only; no
+   * transition. Fail-soft when the inbox table is absent.
+   */
+  async findPendingItemBySource(runId: string, source: string): Promise<string | null> {
     if (!hasReviewItemsTable(this.db)) return null;
     const row = this.db
       .prepare(
         `SELECT id FROM review_items
           WHERE run_id = ? AND kind = 'decision' AND status = 'pending' AND source = ? LIMIT 1`,
       )
-      .get(runId, this.sourceForStep(stepId)) as { id?: string } | undefined;
+      .get(runId, source) as { id?: string } | undefined;
     return row?.id ?? null;
   }
 

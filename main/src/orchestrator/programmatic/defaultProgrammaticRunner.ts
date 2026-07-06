@@ -34,6 +34,7 @@ import { SpawnStepRunner } from './spawnStepRunner';
 import { ProgrammaticRunHost, type StepReporter } from './programmaticRunHost';
 import type { HumanGateResolver } from './humanGate';
 import type { BlockingItemsResolver } from './blockingItemsGate';
+import type { SystemicPauseResolver } from './systemicPauseGate';
 import { MonitorRegistry, type MonitorContext, type MonitorSession } from './monitor';
 
 export interface DefaultProgrammaticRunnerDeps {
@@ -47,6 +48,16 @@ export interface DefaultProgrammaticRunnerDeps {
    * parking for review items (byte-identical to today).
    */
   blockingGate?: BlockingItemsResolver;
+  /**
+   * Systemic-pause gate (the 2026-07-06 planner-incident fix). Threaded verbatim
+   * into every run's ProgrammaticRunHost so a systemic step failure (usage/session/
+   * rate limit, provider overload, auth) PARKS the run behind a blocking pause item
+   * and re-runs the step once the condition clears (a human resolve or the
+   * auto-resume timer) WITHOUT consuming the step's retry/skip/loopback/triage
+   * budgets — instead of burning them and failing the whole run. Absent ⇒ systemic
+   * failures follow the normal failure path (byte-identical to today).
+   */
+  systemicGate?: SystemicPauseResolver;
   /**
    * Per-run monitor factory (the monitor-unify refactor). Called once per run to
    * build the ON-DEMAND monitor brain (triage + chat answer). When present the
@@ -162,6 +173,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       reporter: this.deps.reporter,
       gate: this.deps.gate,
       ...(this.deps.blockingGate ? { blockingGate: this.deps.blockingGate } : {}),
+      ...(this.deps.systemicGate ? { systemicGate: this.deps.systemicGate } : {}),
       ...(monitor ? { monitor } : {}),
       injectEvent: ctx.injectEvent,
       ...(this.deps.stepResultRecorder ? { recordStepResult: this.deps.stepResultRecorder } : {}),

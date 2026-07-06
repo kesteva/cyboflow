@@ -4,7 +4,8 @@ import type { HumanGateResolver } from '../humanGate';
 import type { MonitorSession } from '../monitor';
 import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
-import type { ControllerStepContext, FanOutDriver } from '../types';
+import type { ControllerStepContext, FanOutDriver, SystemicPauseVerdict } from '../types';
+import type { SystemicPauseResolver } from '../systemicPauseGate';
 
 function step(p: Partial<WorkflowStep> & { id: string }): WorkflowStep {
   return { name: p.id, agent: 'human', mcps: [], retries: 0, ...p };
@@ -216,5 +217,96 @@ describe('ProgrammaticRunHost', () => {
   it('host.fanOut is undefined when no driver is injected (the controller never fans out)', () => {
     const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve') });
     expect(host.fanOut).toBeUndefined();
+  });
+
+  // ── Systemic-pause seam (the 2026-07-06 planner-incident fix) ────────────────
+  it("awaitSystemicPause returns 'giveup' and injects nothing when no gate is wired", async () => {
+    const injected: ClaudeStreamEvent[] = [];
+    const host = new ProgrammaticRunHost({
+      runId: 'r',
+      projectId: 1,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      injectEvent: (e) => injected.push(e),
+    });
+
+    expect(await host.awaitSystemicPause(step({ id: 'a', name: 'Build epics' }), ctx, 'usage limit reached')).toBe(
+      'giveup',
+    );
+    // Byte-identical to a world without the seam — no chat turn.
+    expect(injected).toHaveLength(0);
+  });
+
+  it("delegates awaitSystemicPause with run/project/step/error/signal and injects the pause + resume turns on 'retry'", async () => {
+    const awaitClear = vi.fn<(req: unknown) => Promise<SystemicPauseVerdict>>().mockResolvedValue('retry');
+    const systemicGate: SystemicPauseResolver = { awaitClear };
+    const injected: ClaudeStreamEvent[] = [];
+    const signal = new AbortController().signal;
+    const host = new ProgrammaticRunHost({
+      runId: 'run-9',
+      projectId: 7,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      systemicGate,
+      injectEvent: (e) => injected.push(e),
+    });
+
+    const verdict = await host.awaitSystemicPause({ ...step({ id: 'a', name: 'Build epics' }) }, { ...ctx, signal }, 'usage limit reached');
+
+    expect(verdict).toBe('retry');
+    expect(awaitClear).toHaveBeenCalledWith({
+      runId: 'run-9',
+      projectId: 7,
+      step: expect.objectContaining({ id: 'a' }),
+      error: 'usage limit reached',
+      signal,
+    });
+    // Two chat turns: the pause note, then the resume note.
+    const texts = injected.map((ev) =>
+      'type' in ev && ev.type === 'assistant' && Array.isArray(ev.message.content)
+        ? ev.message.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
+        : '',
+    );
+    expect(texts).toHaveLength(2);
+    expect(texts[0]).toContain('Run paused');
+    expect(texts[0]).toContain('Build epics');
+    expect(texts[1]).toContain('Resuming');
+  });
+
+  it("injects the pause + dismissed turns on 'giveup'", async () => {
+    const systemicGate: SystemicPauseResolver = { awaitClear: vi.fn().mockResolvedValue('giveup') };
+    const injected: ClaudeStreamEvent[] = [];
+    const host = new ProgrammaticRunHost({
+      runId: 'r',
+      projectId: 1,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      systemicGate,
+      injectEvent: (e) => injected.push(e),
+    });
+
+    expect(await host.awaitSystemicPause(step({ id: 'a', name: 'Build epics' }), ctx, 'rate limit')).toBe('giveup');
+    const texts = injected.map((ev) =>
+      'type' in ev && ev.type === 'assistant' && Array.isArray(ev.message.content)
+        ? ev.message.content.map((b) => (b.type === 'text' ? b.text : '')).join('')
+        : '',
+    );
+    expect(texts).toHaveLength(2);
+    expect(texts[1]).toContain('dismissed');
+  });
+
+  it("is fail-soft — a throwing systemic gate defaults to 'giveup' and does not abort the walk", async () => {
+    const systemicGate: SystemicPauseResolver = {
+      awaitClear: vi.fn().mockRejectedValue(new Error('gate boom')),
+    };
+    const host = new ProgrammaticRunHost({
+      runId: 'r',
+      projectId: 1,
+      reporter: makeReporter(),
+      gate: makeGate('approve'),
+      systemicGate,
+    });
+
+    expect(await host.awaitSystemicPause(step({ id: 'a' }), ctx, 'boom')).toBe('giveup');
   });
 });

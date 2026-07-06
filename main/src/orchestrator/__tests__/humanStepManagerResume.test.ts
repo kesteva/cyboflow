@@ -200,3 +200,64 @@ describe('HumanStepManager.findPendingGate', () => {
     expect(await mgr.findPendingGate('run-x', 'plan-review')).toBeNull();
   });
 });
+
+describe('HumanStepManager.findPendingItemBySource (source-generic gate lookup)', () => {
+  it('round-trips a pending decision item id for an arbitrary source (e.g. systemic-pause)', async () => {
+    const db = buildReviewInboxDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-s', 'awaiting_review');
+    const id = seedBlockingReviewItem(db, {
+      id: 'rvw_sys',
+      runId: 'run-s',
+      kind: 'decision',
+      source: 'gate:systemic-pause:build-epics',
+    });
+
+    expect(await mgr.findPendingItemBySource('run-s', 'gate:systemic-pause:build-epics')).toBe(id);
+    // A non-matching source (or run) finds nothing.
+    expect(await mgr.findPendingItemBySource('run-s', 'gate:systemic-pause:other')).toBeNull();
+    expect(await mgr.findPendingItemBySource('run-none', 'gate:systemic-pause:build-epics')).toBeNull();
+  });
+
+  it('findPendingGate delegates to it (unchanged human-gate behavior)', async () => {
+    const db = buildReviewInboxDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-g', 'running');
+    const opened = await mgr.openHumanGate('run-g', 'plan-review', 'Plan review');
+
+    expect(await mgr.findPendingItemBySource('run-g', 'gate:human-step:plan-review')).toBe(opened);
+  });
+});
+
+describe('HumanStepManager.clearPendingForRun (systemic-pause cleanup)', () => {
+  it('dismisses a pending systemic-pause decision row on the cancel path', async () => {
+    const db = buildReviewInboxDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-c', 'awaiting_review');
+    seedBlockingReviewItem(db, {
+      id: 'rvw_sys',
+      runId: 'run-c',
+      kind: 'decision',
+      source: 'gate:systemic-pause:a',
+    });
+
+    const dismissed = await mgr.clearPendingForRun('run-c');
+
+    expect(dismissed).toBe(1);
+    const row = db.prepare('SELECT status FROM review_items WHERE id = ?').get('rvw_sys') as { status: string };
+    expect(row.status).toBe('dismissed');
+  });
+
+  it('dismisses BOTH human-gate and systemic-pause decision rows in one clear', async () => {
+    const db = buildReviewInboxDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-c', 'awaiting_review');
+    // A human gate + a systemic pause both pending for the same run.
+    seedBlockingReviewItem(db, { id: 'rvw_gate', runId: 'run-c', kind: 'decision', source: 'gate:human-step:plan-review' });
+    seedBlockingReviewItem(db, { id: 'rvw_sys', runId: 'run-c', kind: 'decision', source: 'gate:systemic-pause:a' });
+
+    expect(await mgr.clearPendingForRun('run-c')).toBe(2);
+    expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get('rvw_gate') as { status: string }).status).toBe('dismissed');
+    expect((db.prepare('SELECT status FROM review_items WHERE id = ?').get('rvw_sys') as { status: string }).status).toBe('dismissed');
+  });
+});
