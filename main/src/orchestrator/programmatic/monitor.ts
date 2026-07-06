@@ -254,8 +254,8 @@ The user asks:
 ${question}
 
 Capabilities:
-- You may attach AT MOST ONE action per reply, and ONLY when the user EXPLICITLY asks for it — a retry, a resume, or a re-run of a failed or skipped step (for example, after a usage-limit reset).
-- Action "retry_step": set \`stepId\` to the exact step id from the timeline above when the user names a step or the timeline makes clear which step failed/skipped; omit \`stepId\` to default to the run's failed step. The HOST validates the run's state (it must be failed or resting) and reports the outcome back to the user — you never claim the retry succeeded yourself.
+- You may attach AT MOST ONE action per reply, and ONLY when the user EXPLICITLY asks for it — a retry, a resume, or a re-run of a failed or skipped step. This covers two cases: a FAILED or RESTING run, where it revives the run at the failed/skipped step; and a run currently PAUSED on a usage-limit item, where the host resolves that pause instead. Either way the host picks the right mechanism for the run's actual state and reports back which one happened.
+- Action "retry_step": set \`stepId\` to the exact step id from the timeline above when the user names a step or the timeline makes clear which step failed/skipped; omit \`stepId\` to default to the run's failed step. The HOST validates the run's state and reports the outcome back to the user — you never claim the retry succeeded yourself.
 - For a pure question (no explicit retry/resume/re-run request), return no action.
 
 Answer concisely and concretely, grounding your reply in the run's history above. You have read-only tools (Read/Grep/Glob) for inspecting the worktree — use them when needed to answer accurately.
@@ -349,6 +349,13 @@ export interface MonitorActions {
    * step. Host-validated (run must be failed/resting) and host-executed via the
    * production `retryRunHandler`; the monitor brain never validates or executes
    * this itself — it only requests it and relays the host's reported outcome.
+   *
+   * A run PARKED on a live systemic pause (awaiting_review with an active
+   * executor) is neither failed nor resting, so `retryRunHandler` alone would
+   * reject it as not-retryable. The host binding (index.ts, parent-owned) falls
+   * back in that case to resolving the pending pause review item instead — same
+   * requested action, the host picks whichever mechanism actually applies to the
+   * run's current state and reports back which one happened.
    */
   retryStep(stepId?: string): Promise<MonitorActionResult>;
 }

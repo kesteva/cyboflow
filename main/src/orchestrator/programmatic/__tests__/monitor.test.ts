@@ -264,6 +264,9 @@ describe('buildActionAnswerPrompt', () => {
     expect(p).toContain('tasks'); // step timeline
     expect(p).toContain('finished analyze'); // conversation digest
     expect(p).not.toContain('do NOT try to run, edit, or re-order steps');
+    expect(p).not.toContain('(for example, after a usage-limit reset)');
+    expect(p).toContain('PAUSED on a usage-limit item');
+    expect(p).toContain('host resolves that pause');
   });
 });
 
