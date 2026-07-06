@@ -6,6 +6,30 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.17] — 2026-07-06
+
+### Added
+
+- **Model picker + Advanced settings in the Ultracode launcher.** The Ultracode
+  configure step now offers the same model picker and Advanced MCP/plugin
+  disclosure as the quick-session launcher, defaulting to **Fable 5** when the
+  availability check says it's usable (falling back to Opus otherwise).
+- **"Ready to review" queue category.** A run that drains cleanly to
+  *awaiting_review* now surfaces in its own **Ready to review** group on the
+  home/review queue. Previously such a run minted no review item and was
+  misfiled as *blocked*, so a finished sprint could silently disappear from the
+  home while the queue read "all caught up."
+
+### Fixed
+
+- **Artifact tabs live-refresh.** The center-pane artifact tabs (decomposed
+  stories / idea spec / architecture design) now update as their underlying
+  entities change, instead of going stale until the tab is closed and reopened.
+- **Worktree shells no longer inherit run-scoped env.** A run's shell no longer
+  leaks the app's own `CYBOFLOW_RUN_ID` / orchestrator socket / artifacts-dir
+  variables when Cyboflow is launched from inside a Cyboflow session — which
+  could point a shell-launched `claude` at the wrong run's MCP context.
+
 ## [0.1.16] — 2026-07-05
 
 ### Added
