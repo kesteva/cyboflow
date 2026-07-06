@@ -603,6 +603,44 @@ describe('InteractiveClaudeManager', () => {
       expect(inlineSettingsOf(args).hooks).toBeDefined();
     });
 
+    it('points --mcp-config at the APP DATA dir path for an in-place session (never the checkout)', () => {
+      const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-appdir-args-'));
+      const prevCyboflowDir = process.env.CYBOFLOW_DIR;
+      process.env.CYBOFLOW_DIR = appDir;
+      const wt = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-buildargs-ip-'));
+      try {
+        const inPlaceMgr = new TestableInteractiveClaudeManager(
+          createMockSessionManager({
+            getDbSession: vi.fn(() => ({ id: 's-ip', in_place: 1 })),
+          } as unknown as Parameters<typeof createMockSessionManager>[0]),
+          createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+          createMockConfigManager(),
+          db,
+        );
+        const appConfigPath = path.join(appDir, 'interactive-mcp', 's-ip.json');
+        fs.mkdirSync(path.dirname(appConfigPath), { recursive: true });
+        fs.writeFileSync(appConfigPath, JSON.stringify({ mcpServers: {} }), 'utf8');
+        // A stale worktree-located config must NOT win for in-place.
+        fs.mkdirSync(path.join(wt, '.cyboflow'), { recursive: true });
+        fs.writeFileSync(path.join(wt, '.cyboflow', 'interactive-mcp.json'), '{}', 'utf8');
+
+        const args = inPlaceMgr.callBuildCommandArgs({
+          panelId: 'p1',
+          sessionId: 's-ip',
+          worktreePath: wt,
+          prompt: 'hi',
+        });
+        expect(args).toContain('--mcp-config');
+        expect(args).toContain(appConfigPath);
+        expect(args).not.toContain(path.join(wt, '.cyboflow', 'interactive-mcp.json'));
+      } finally {
+        if (prevCyboflowDir === undefined) delete process.env.CYBOFLOW_DIR;
+        else process.env.CYBOFLOW_DIR = prevCyboflowDir;
+        fs.rmSync(appDir, { recursive: true, force: true });
+        fs.rmSync(wt, { recursive: true, force: true });
+      }
+    });
+
     it('4-mode agentPermissionMode takes precedence over the legacy permissionMode for the gate decision', () => {
       // legacy 'approve' (gate) + 4-mode 'auto' (no gate) → no gate.
       const args = mgr.callBuildCommandArgs({
@@ -919,6 +957,56 @@ describe('InteractiveClaudeManager', () => {
       m.ptys[0].fireExit(0);
       await new Promise((r) => setTimeout(r, 600));
       await spawn;
+    });
+
+    it('in-place session with an orch socket: MCP config goes to the APP DATA dir — zero writes in the checkout, no exclude append, removed on teardown', async () => {
+      const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cyboflow-appdir-'));
+      const prevCyboflowDir = process.env.CYBOFLOW_DIR;
+      process.env.CYBOFLOW_DIR = appDir;
+      try {
+        const worktreePath = freshWorktree();
+        // Real git checkout so an exclude append (the bug) would be observable.
+        execSync('git init -q', { cwd: worktreePath });
+
+        const m = new TestableInteractiveClaudeManager(
+          createMockSessionManager({
+            getDbSession: vi.fn(() => ({ id: 'sess-ip2', in_place: 1 })),
+          } as unknown as Parameters<typeof createMockSessionManager>[0]),
+          createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+          createMockConfigManager(),
+          db,
+        );
+        m.setOrchSocketPath('/tmp/orch.sock');
+
+        const panelId = 'panel-ip-mcp';
+        const spawn = m.spawnCliProcess({ panelId, sessionId: 'sess-ip2', worktreePath, prompt: 'go' });
+        await waitFor(() => m.fakeSources.length > 0 && m.fakeSources[0].started);
+
+        // The config landed in the app data dir, keyed by sessionId…
+        const appConfigPath = path.join(appDir, 'interactive-mcp', 'sess-ip2.json');
+        expect(fs.existsSync(appConfigPath)).toBe(true);
+        const written = JSON.parse(fs.readFileSync(appConfigPath, 'utf8')) as {
+          mcpServers?: { cyboflow?: { env?: Record<string, string> } };
+        };
+        expect(written.mcpServers?.cyboflow?.env?.CYBOFLOW_ORCH_SOCKET).toBe('/tmp/orch.sock');
+
+        // …and the user's checkout was NOT touched: no .cyboflow dir, no
+        // .git/info/exclude append.
+        expect(fs.existsSync(path.join(worktreePath, '.cyboflow'))).toBe(false);
+        const excludePath = path.join(worktreePath, '.git', 'info', 'exclude');
+        const exclude = fs.existsSync(excludePath) ? fs.readFileSync(excludePath, 'utf8') : '';
+        expect(exclude).not.toContain('.cyboflow/');
+
+        // Teardown deletes the app-dir config (nothing else will ever sweep it).
+        await m.killProcess(panelId);
+        expect(fs.existsSync(appConfigPath)).toBe(false);
+
+        void spawn;
+      } finally {
+        if (prevCyboflowDir === undefined) delete process.env.CYBOFLOW_DIR;
+        else process.env.CYBOFLOW_DIR = prevCyboflowDir;
+        fs.rmSync(appDir, { recursive: true, force: true });
+      }
     });
 
     it('worktree session (control): mcpEnabler.enable IS called', async () => {

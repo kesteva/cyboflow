@@ -612,14 +612,34 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // orchestrator socket is injected. Emitting `--mcp-config` at a MISSING path
     // makes claude exit 1 ("Invalid MCP configuration: MCP config file not found")
     // and the run never advances past 'running' — the S5/TASK-810 gap this guard
-    // closes. When no socket is present (quick sessions) the file is absent and
+    // closes. When no socket was present at write time the file is absent and
     // the flag is omitted so the REPL still launches.
-    const mcpConfigPath = path.join(options.worktreePath, '.cyboflow', 'interactive-mcp.json');
+    const mcpConfigPath = this.interactiveMcpConfigPath(options.worktreePath, options.sessionId);
     if (fs.existsSync(mcpConfigPath)) {
       args.push('--mcp-config', mcpConfigPath);
     }
 
     return args;
+  }
+
+  /**
+   * Resolve where the per-run interactive MCP config lives. Worktree sessions
+   * keep it inside the worktree (`<worktree>/.cyboflow/interactive-mcp.json`,
+   * covered by the `.git/info/exclude` append and deleted with the worktree).
+   * In-place sessions (migration 046) must cause ZERO writes inside the user's
+   * real checkout, so theirs lives in the app data dir instead, keyed by
+   * sessionId (stable across respawns; removed on teardown). Flow steps have no
+   * session row (getDbSession → undefined) and are never in-place, so they
+   * always take the worktree branch. Shared by writeInteractiveMcpConfig (the
+   * writer) and buildCommandArgs (the `--mcp-config` flag) so the two can never
+   * disagree.
+   */
+  protected interactiveMcpConfigPath(worktreePath: string, sessionId: string): string {
+    const inPlace = Boolean(this.sessionManager.getDbSession(sessionId)?.in_place);
+    if (inPlace) {
+      return path.join(getCyboflowSubdirectory('interactive-mcp'), `${sessionId}.json`);
+    }
+    return path.join(worktreePath, '.cyboflow', 'interactive-mcp.json');
   }
 
   /**
@@ -632,14 +652,18 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * the interactive REPL needs it as an on-disk file because `claude
    * --mcp-config` reads a path.
    *
-   * Writes ONLY when an orchestrator socket has been injected (a workflow run).
-   * For quick sessions with no socket there is no server to declare, so the file
-   * is not written and buildCommandArgs omits the `--mcp-config` flag — claude
-   * would otherwise exit 1 on the missing file. If the node executable cannot be
-   * resolved we warn and skip the entry rather than ship a broken `command`
-   * (same fail-soft as composeMcpServers).
+   * The orchestrator socket is injected at BOOT (index.ts setOrchSocketPath),
+   * so this writes for EVERY interactive spawn — workflow runs AND quick
+   * sessions alike (quick sessions use the cyboflow MCP read tools too). The
+   * `!orchSocketPath` early-return only fires in tests / pre-wiring boot. The
+   * file's location comes from interactiveMcpConfigPath: inside the worktree
+   * normally, in the app data dir for in-place sessions (whose "worktree" is
+   * the user's real checkout — invariant: zero writes inside it). The
+   * `.git/info/exclude` append is likewise skipped for in-place. If the node
+   * executable cannot be resolved we warn and skip the entry rather than ship
+   * a broken `command` (same fail-soft as composeMcpServers).
    */
-  protected async writeInteractiveMcpConfig(worktreePath: string, runId: string): Promise<void> {
+  protected async writeInteractiveMcpConfig(worktreePath: string, runId: string, sessionId: string): Promise<void> {
     if (!this.orchSocketPath) return;
 
     let nodeCmd: string;
@@ -671,9 +695,8 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       },
     };
 
-    const dir = path.join(worktreePath, '.cyboflow');
-    const configPath = path.join(dir, 'interactive-mcp.json');
-    fs.mkdirSync(dir, { recursive: true });
+    const configPath = this.interactiveMcpConfigPath(worktreePath, sessionId);
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
     fs.writeFileSync(configPath, JSON.stringify(config, null, 2), 'utf-8');
     this.logger?.info(`[InteractiveClaudeManager] wrote interactive MCP config: ${configPath}`);
 
@@ -683,7 +706,12 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // WORKTREE-LOCAL exclude file (resolved via `git rev-parse --git-path` —
     // linked worktrees keep theirs under .git/worktrees/<name>/info/), never
     // the repo's .gitignore, so the fix itself produces no diff noise.
-    this.ensureWorktreeExcludesCyboflowDir(worktreePath);
+    // In-place sessions skip this: their config lives OUTSIDE the checkout (no
+    // .cyboflow/ to hide) and the append would mutate the user's real
+    // .git/info/exclude.
+    if (configPath.startsWith(path.join(worktreePath, '.cyboflow'))) {
+      this.ensureWorktreeExcludesCyboflowDir(worktreePath);
+    }
   }
 
   /**
@@ -962,7 +990,8 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // emitted. Closes the S5/TASK-810 gap that left `claude` exiting 1 on a
     // missing `--mcp-config` file (the interactive REPL needs an on-disk config;
     // the SDK path injects the same `cyboflow` server in-process).
-    await this.writeInteractiveMcpConfig(worktreePath, runId);
+    // (In-place sessions get theirs in the app data dir — never the checkout.)
+    await this.writeInteractiveMcpConfig(worktreePath, runId, sessionId);
 
     // Build args + env via the abstract hooks.
     const args = this.buildCommandArgs({ ...options, runId });
@@ -1524,6 +1553,24 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // removeGeneratedSettings — strips ONLY cyboflow files, leaves the user's own
     // agents/commands intact). Resolved from the still-present run record.
     if (run?.worktreePath) this.bundleWriter.remove(run.worktreePath);
+
+    // In-place sessions keep their interactive MCP config in the APP DATA dir
+    // (never the checkout — interactiveMcpConfigPath); delete it here since no
+    // worktree removal will ever sweep it. Worktree sessions' config dies with
+    // the worktree, and the guard below keeps this from ever unlinking inside
+    // one. Fail-soft: a leftover json in the app dir is harmless.
+    if (run?.worktreePath && run.sessionId) {
+      const mcpConfigPath = this.interactiveMcpConfigPath(run.worktreePath, run.sessionId);
+      if (!mcpConfigPath.startsWith(run.worktreePath)) {
+        try {
+          fs.rmSync(mcpConfigPath, { force: true });
+        } catch (err) {
+          this.logger?.warn(
+            `[InteractiveClaudeManager] could not remove interactive MCP config ${mcpConfigPath}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    }
 
     // Dispose the pipeline (router + sink) for the run.
     const pipeline = this.pipelines.get(panelId);
