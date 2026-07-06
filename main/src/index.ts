@@ -41,13 +41,16 @@ import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
 import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blockingItemsGate';
+import { ReviewQueueSystemicPauseGate } from './orchestrator/programmatic/systemicPauseGate';
 import {
   DefaultMonitorSession,
   DefaultHistoryReader,
   MonitorRegistry,
+  type MonitorActionResult,
   type MonitorContext,
   type MonitorSession,
 } from './orchestrator/programmatic/monitor';
+import { retryRunHandler, type RetryRunDeps } from './orchestrator/retryRunHandler';
 import { makeSdkStructuredQuery, makeSdkTextQuery } from './orchestrator/programmatic/monitorQuery';
 import { StepResultStore } from './orchestrator/stepResultStore';
 import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
@@ -55,7 +58,7 @@ import { dockBadgeService } from './services/dockBadgeService';
 import { appRouter } from './orchestrator/trpc/router';
 import { createContext } from './orchestrator/trpc/context';
 import { attachOrchestratorTrpc } from './orchestrator/trpc/ipcAdapter';
-import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps } from './orchestrator/trpc/routers/runs';
+import { setCancelAndRestartDeps, setCancelRunDeps, setPauseRunDeps, setResumeRunDeps, setReopenRunDeps, setRetryRunDeps, setStartRunDeps, setRunCloseoutDeps, setNudgeRunDeps, setQueueInputDeps, setRelayDeps, setRunShellDeps, setSprintLaneDeps, setSetPermissionModeDeps } from './orchestrator/trpc/routers/runs';
 import type { SessionAgentPermissionModeDeps } from './orchestrator/sessionPermissionMode';
 import { nudgeRunHandler } from './orchestrator/nudgeRunHandler';
 import { RunShellManager } from './services/runShellManager';
@@ -145,6 +148,14 @@ let runLauncher: RunLauncher;
 // Module-scoped so the tRPC boot wiring block (setNudgeRunDeps) can reach the
 // same RunExecutor instance built in initializeServices().
 let runExecutor: RunExecutor;
+// Monitor-actuation seam (retry_step): bound in the tRPC dep-wiring block —
+// where db/runQueues/runExecutor are all live — to the SAME retryRunHandler
+// chokepoint the runs.retryStep mutation uses. The monitorFactory (built earlier,
+// in initializeServices) closes over this holder so a monitor session can execute
+// a validated retry at any point in a run's life. Null until wired → the action
+// reports "not wired" instead of acting.
+let monitorRetryStep: ((runId: string, stepId?: string) => Promise<MonitorActionResult>) | null =
+  null;
 // Module-scoped (permission-mode redesign §3d / Slice 5) so the tRPC boot wiring
 // block (setSetPermissionModeDeps) can reach the SAME shared session-mode write
 // chokepoint deps the RunLauncher was constructed with in initializeServices().
@@ -1005,6 +1016,56 @@ async function initializeServices() {
       reviewItemProjectChannel,
       cyboflowLogger,
     ),
+    // Systemic-pause gate (the 2026-07-06 planner incident): a step failing with
+    // a usage/session/rate-limit-class error PARKS the run behind a blocking
+    // 'decision' item ("resolve to retry now, dismiss to give up") and
+    // auto-resumes at the parsed limit-reset time, instead of burning the step's
+    // retry / optional-skip / triage budgets on a condition no retry can fix.
+    // Item writes ride the ReviewItemRouter chokepoint (orchestrator actor);
+    // park/resume rides the SAME HumanStepManager primitives as the blocking
+    // gate, so a systemic pause participates in aggregate-unblock.
+    systemicGate: new ReviewQueueSystemicPauseGate({
+      items: {
+        findPending: (runId, source) =>
+          HumanStepManager.getInstance().findPendingItemBySource(runId, source),
+        create: async ({ runId, projectId, title, body, source }) => {
+          const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(
+            projectId,
+            {
+              op: 'create',
+              actor: 'orchestrator',
+              kind: 'decision',
+              title,
+              body,
+              blocking: true,
+              source,
+              runId,
+            },
+          );
+          return reviewItemId;
+        },
+        resolve: async ({ projectId, reviewItemId, resolution }) => {
+          await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
+            op: 'resolve',
+            actor: 'orchestrator',
+            reviewItemId,
+            resolution,
+          });
+        },
+        dismiss: async ({ projectId, reviewItemId, resolution }) => {
+          await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
+            op: 'dismiss',
+            actor: 'orchestrator',
+            reviewItemId,
+            resolution,
+          });
+        },
+      },
+      parker: HumanStepManager.getInstance(),
+      events: reviewItemChangeEvents,
+      channelFor: reviewItemProjectChannel,
+      logger: cyboflowLogger,
+    }),
     // ON-DEMAND monitor (the monitor-unify refactor): the single triage + chat
     // human-seam plane that folds the old Stage 3 supervisor + supervisor-chat
     // planes into one token-frugal `MonitorSession` rendering in the run's existing
@@ -1036,6 +1097,19 @@ async function initializeServices() {
           structuredQuery,
           textQuery,
           injectEvent,
+          // Monitor-actuation seam: the retry_step action executes through the
+          // SAME retryRunHandler chokepoint as runs.retryStep, bound lazily via
+          // the module-scoped holder (the RunExecutor does not exist yet at
+          // monitorFactory construction time — see monitorRetryStep's docblock).
+          actions: {
+            retryStep: (stepId) =>
+              monitorRetryStep
+                ? monitorRetryStep(ctx.runId, stepId)
+                : Promise.resolve({
+                    ok: false,
+                    message: 'Retry is not wired yet — try again in a moment.',
+                  }),
+          },
           logger: cyboflowLogger,
         });
     })(),
@@ -1753,6 +1827,12 @@ app.whenReady().then(async () => {
       db,
       runQueues,
       stopLiveRun: (runId: string) => substrateFacade.abort(runId),
+      // PROGRAMMATIC pause: signal the WorkflowController walk (the handler
+      // enforces walk-first ordering, BEFORE stopLiveRun) so the interrupted
+      // step reports 'aborted' — not a clean 'ok' — and the walk stops spawning
+      // subsequent steps while the row parks in 'paused'. Synchronous; a no-op
+      // for orchestrated runs (no entry in the executor's aborts map).
+      abortProgrammaticWalk: (runId: string) => runExecutor.requestProgrammaticCancel(runId),
       clearPendingApprovalsForRun: (runId: string) =>
         ApprovalRouter.getInstance().clearPendingForRun(runId),
       clearPendingQuestionsForRun: (runId: string) =>
@@ -1773,6 +1853,11 @@ app.whenReady().then(async () => {
       db,
       runQueues,
       runExecutor,
+      // PROGRAMMATIC resume: persisted done/skipped step ids (migration 033) so
+      // the re-driven WorkflowController skips completed steps and resumes at
+      // the interrupted one. Unused by the orchestrated --resume arm.
+      completedStepIds: (runId: string) =>
+        StepResultStore.tryGetInstance()?.completedStepIds(runId) ?? [],
       emitRunStatusChanged: (runId, status) =>
         runStatusEvents.emit('changed', { runId, status }),
       logger: loggerLike,
@@ -1793,6 +1878,49 @@ app.whenReady().then(async () => {
       logger: loggerLike,
     });
     console.log('[Main] runs.reopen deps wired');
+
+    // Retry-from-step revives a FAILED (or resting awaiting_review) PROGRAMMATIC
+    // run at a chosen/derived step via the crash-safe resume machinery — the
+    // fourth sanctioned terminal revive (stateMachine.ts rationale). Shares the
+    // SAME RunExecutor + runStatusEvents channel as resume/reopen; step_results
+    // reads ride StepResultStore; the fan-out lane reset rides SprintLaneStore so
+    // a retried fan-out step re-dispatches its failed lanes instead of skipping
+    // them as settled.
+    const retryRunDepsBag: RetryRunDeps = {
+      db,
+      runQueues,
+      runExecutor,
+      emitRunStatusChanged: (runId, status) =>
+        runStatusEvents.emit('changed', { runId, status }),
+      completedStepIds: (runId) =>
+        StepResultStore.tryGetInstance()?.completedStepIds(runId) ?? [],
+      listStepResults: (runId) => StepResultStore.tryGetInstance()?.listForRun(runId) ?? [],
+      resetFailedLanes: (batchId) => SprintLaneStore.getInstance().resetFailedLanes(batchId),
+      logger: loggerLike,
+    };
+    setRetryRunDeps(retryRunDepsBag);
+    console.log('[Main] runs.retryStep deps wired');
+
+    // Monitor-actuation binding (retry_step): route the monitor's validated
+    // retry action through the SAME retryRunHandler + deps bag as the tRPC
+    // mutation, mapping the discriminated result onto a chat-friendly
+    // ok/message pair the monitor injects as a follow-up turn.
+    monitorRetryStep = async (runId, stepId) => {
+      const result = await retryRunHandler(runId, stepId, retryRunDepsBag);
+      if ('delivered' in result) {
+        return { ok: true, message: `Retrying the run from step '${result.stepId}'.` };
+      }
+      const messages: Record<string, string> = {
+        not_found: 'Run not found.',
+        not_programmatic: 'Only programmatic runs support step retry.',
+        not_retryable: "The run isn't in a retryable state — it must be failed or resting.",
+        no_target_step: 'No failed step to retry — name the step id to re-run.',
+        unknown_step: `Step '${stepId ?? ''}' is not part of this workflow.`,
+        race: 'The run changed state mid-retry — try again.',
+      };
+      return { ok: false, message: messages[result.reason] ?? `Retry refused (${result.reason}).` };
+    };
+    console.log('[Main] monitor retry_step action wired');
 
     setStartRunDeps({
       runLauncher,
