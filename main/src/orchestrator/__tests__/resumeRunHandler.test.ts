@@ -24,16 +24,26 @@ import type { DatabaseLike, PreparedStatement } from '../types';
 // Fixtures
 // ---------------------------------------------------------------------------
 
-/** A fake executor that records setPendingResume + execute calls. */
-function makeFakeExecutor(opts?: { executeRejects?: boolean }): ResumeRunExecutorLike & {
+/**
+ * A fake executor that records setPendingResume / setPendingResumeStep /
+ * setPendingCompletedSteps + execute calls. `executeNeverResolves` returns a
+ * promise that never settles — used to prove the programmatic arm returns
+ * `delivered` WITHOUT awaiting the (potentially days-long) walk.
+ */
+function makeFakeExecutor(opts?: { executeRejects?: boolean; executeNeverResolves?: boolean }): ResumeRunExecutorLike & {
   setPendingResume: ReturnType<typeof vi.fn>;
+  setPendingResumeStep: ReturnType<typeof vi.fn>;
+  setPendingCompletedSteps: ReturnType<typeof vi.fn>;
   execute: ReturnType<typeof vi.fn>;
 } {
   const setPendingResume = vi.fn<(runId: string) => void>();
+  const setPendingResumeStep = vi.fn<(runId: string, stepId: string) => void>();
+  const setPendingCompletedSteps = vi.fn<(runId: string, stepIds: readonly string[]) => void>();
   const execute = vi.fn<(runId: string) => Promise<void>>().mockImplementation(async () => {
     if (opts?.executeRejects) throw new Error('boom');
+    if (opts?.executeNeverResolves) await new Promise<void>(() => {});
   });
-  return { setPendingResume, execute };
+  return { setPendingResume, setPendingResumeStep, setPendingCompletedSteps, execute };
 }
 
 /**
@@ -51,6 +61,20 @@ function setSubstrate(db: Database.Database, runId: string, substrate: 'sdk' | '
 
 function setSession(db: Database.Database, runId: string, sessionId: string | null): void {
   db.prepare('UPDATE workflow_runs SET claude_session_id = ? WHERE id = ?').run(sessionId, runId);
+}
+
+/** Stamp a run's execution model (defaults to 'orchestrated' from the column DEFAULT). */
+function setExecutionModel(
+  db: Database.Database,
+  runId: string,
+  model: 'orchestrated' | 'programmatic',
+): void {
+  db.prepare('UPDATE workflow_runs SET execution_model = ? WHERE id = ?').run(model, runId);
+}
+
+/** Set current_step_id (the coarse resume-at pointer Pause preserved). */
+function setCurrentStep(db: Database.Database, runId: string, stepId: string): void {
+  db.prepare('UPDATE workflow_runs SET current_step_id = ? WHERE id = ?').run(stepId, runId);
 }
 
 /** Build deps with an emit spy + the given executor. */
@@ -226,6 +250,115 @@ describe('resumeRunHandler — delivery', () => {
     // The run was still flipped to running (the executor owns the terminal state).
     const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
     expect(row.status).toBe('running');
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// PROGRAMMATIC arm — step-pointer re-drive, fire-and-forget delivery
+// ---------------------------------------------------------------------------
+
+describe('resumeRunHandler — programmatic arm', () => {
+  it('arms both step pointers + fire-and-forget re-drives, returns delivered WITHOUT awaiting execute', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'paused' });
+    setSubstrate(db, runId, 'sdk');
+    setExecutionModel(db, runId, 'programmatic');
+    setCurrentStep(db, runId, 'tasks');
+    // claude_session_id stays NULL — programmatic resume is step-pointer based.
+
+    const runQueues = new RunQueueRegistry();
+    // execute() NEVER resolves — proves delivery does NOT await the (days-long) walk.
+    const executor = makeFakeExecutor({ executeNeverResolves: true });
+    const deps: ResumeRunDeps = {
+      ...makeDeps(dbAdapter(db), executor, runQueues),
+      completedStepIds: () => ['context', 'research'],
+    };
+
+    const result = await resumeRunHandler(runId, deps);
+
+    // Delivered immediately even though execute() is still pending forever.
+    expect(result).toEqual({ delivered: true });
+    // Both crash-safe pointers armed BEFORE the re-drive (synchronous, already called).
+    expect(executor.setPendingResumeStep).toHaveBeenCalledWith(runId, 'tasks');
+    expect(executor.setPendingCompletedSteps).toHaveBeenCalledWith(runId, ['context', 'research']);
+    // The orchestrated --resume path was NOT taken.
+    expect(executor.setPendingResume).not.toHaveBeenCalled();
+    // Status was flipped to running by the guarded UPDATE.
+    const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    expect(row.status).toBe('running');
+    // execute() is driven via the per-run queue (flush by waiting for the enqueued task).
+    await vi.waitFor(() => expect(executor.execute).toHaveBeenCalledWith(runId));
+    db.close();
+  });
+
+  it('null current_step_id + no completed steps → neither pointer set, still delivered + re-driven', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'paused' });
+    setSubstrate(db, runId, 'sdk');
+    setExecutionModel(db, runId, 'programmatic');
+    // current_step_id stays NULL; no completedStepIds dep supplied.
+
+    const runQueues = new RunQueueRegistry();
+    const executor = makeFakeExecutor();
+    const result = await resumeRunHandler(runId, makeDeps(dbAdapter(db), executor, runQueues));
+
+    expect(result).toEqual({ delivered: true });
+    expect(executor.setPendingResumeStep).not.toHaveBeenCalled();
+    expect(executor.setPendingCompletedSteps).not.toHaveBeenCalled();
+    expect(executor.setPendingResume).not.toHaveBeenCalled();
+    // Still re-driven via the queue.
+    await vi.waitFor(() => expect(executor.execute).toHaveBeenCalledWith(runId));
+    db.close();
+  });
+
+  it('null claude_session_id → delivered (no_session guard skipped for programmatic)', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'paused' });
+    setSubstrate(db, runId, 'sdk');
+    setExecutionModel(db, runId, 'programmatic');
+    setCurrentStep(db, runId, 'context');
+    // claude_session_id NULL: the guard that blocks orchestrated resume must NOT fire.
+
+    const runQueues = new RunQueueRegistry();
+    const executor = makeFakeExecutor();
+    const result = await resumeRunHandler(runId, makeDeps(dbAdapter(db), executor, runQueues));
+
+    expect(result).toEqual({ delivered: true });
+    expect(executor.setPendingResumeStep).toHaveBeenCalledWith(runId, 'context');
+    await vi.waitFor(() => expect(executor.execute).toHaveBeenCalledWith(runId));
+    db.close();
+  });
+
+  it('execute() rejection on the fire-and-forget re-drive only logs (still delivered)', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'paused' });
+    setSubstrate(db, runId, 'sdk');
+    setExecutionModel(db, runId, 'programmatic');
+    setCurrentStep(db, runId, 'tasks');
+
+    const loggerErrors: Array<{ msg: string; ctx: Record<string, unknown> }> = [];
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn((msg: string, ctx?: Record<string, unknown>) => {
+        loggerErrors.push({ msg, ctx: ctx ?? {} });
+      }),
+      debug: vi.fn(),
+    };
+
+    const runQueues = new RunQueueRegistry();
+    const executor = makeFakeExecutor({ executeRejects: true });
+    const deps: ResumeRunDeps = { ...makeDeps(dbAdapter(db), executor, runQueues), logger };
+
+    const result = await resumeRunHandler(runId, deps);
+
+    // The rejection does NOT change the delivery result (there is no return to fail).
+    expect(result).toEqual({ delivered: true });
+    // The queued re-drive eventually runs, rejects, and logs under [resumeRun].
+    await vi.waitFor(() => expect(loggerErrors.length).toBeGreaterThanOrEqual(1));
+    expect(loggerErrors[0].msg).toContain('[resumeRun]');
+    expect(loggerErrors[0].ctx['runId']).toBe(runId);
     db.close();
   });
 });

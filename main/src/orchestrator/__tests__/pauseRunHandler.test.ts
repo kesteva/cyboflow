@@ -37,6 +37,7 @@ interface OrderSpy {
   clearPendingApprovalsForRun: ReturnType<typeof vi.fn>;
   clearPendingQuestionsForRun: ReturnType<typeof vi.fn>;
   stopLiveRun: ReturnType<typeof vi.fn>;
+  abortProgrammaticWalk: ReturnType<typeof vi.fn>;
   emitRunStatusChanged: ReturnType<typeof vi.fn>;
 }
 
@@ -53,6 +54,10 @@ function makeOrderSpy(): OrderSpy {
     stopLiveRun: vi.fn(async (_runId: string) => {
       calls.push('stopLiveRun');
     }),
+    abortProgrammaticWalk: vi.fn((_runId: string): boolean => {
+      calls.push('abortProgrammaticWalk');
+      return true;
+    }),
     emitRunStatusChanged: vi.fn((_runId: string, _status: 'paused') => {
       calls.push('emitRunStatusChanged');
     }),
@@ -68,10 +73,20 @@ function makeDeps(
     db: dbAdapter(db),
     runQueues,
     stopLiveRun: spy.stopLiveRun,
+    abortProgrammaticWalk: spy.abortProgrammaticWalk,
     clearPendingApprovalsForRun: spy.clearPendingApprovalsForRun,
     clearPendingQuestionsForRun: spy.clearPendingQuestionsForRun,
     emitRunStatusChanged: spy.emitRunStatusChanged,
   };
+}
+
+/** Stamp a run's execution model (defaults to 'orchestrated' from the column DEFAULT). */
+function setExecutionModel(
+  db: Database.Database,
+  runId: string,
+  model: 'orchestrated' | 'programmatic',
+): void {
+  db.prepare('UPDATE workflow_runs SET execution_model = ? WHERE id = ?').run(model, runId);
 }
 
 /**
@@ -394,6 +409,87 @@ describe('pauseRunHandler (SDK-only run Pause — Phase 4b)', () => {
 
     expect(result).toEqual({ success: true });
     expect(getRun(db, runId).status).toBe('paused');
+  });
+
+  // -------------------------------------------------------------------------
+  // PROGRAMMATIC runs — walk-abort seam + no_session guard skipped
+  // -------------------------------------------------------------------------
+
+  it('programmatic run with a null claude_session_id is pausable (no_session guard skipped)', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    setSubstrate(db, runId, 'sdk');
+    setExecutionModel(db, runId, 'programmatic');
+    // claude_session_id stays NULL — irrelevant to a programmatic (step-pointer) resume.
+
+    const result = await pauseRunHandler(runId, makeDeps(db, spy, runQueues));
+
+    expect(result).toEqual({ success: true });
+    expect(getRun(db, runId).status).toBe('paused');
+    // The DAG walk was signalled and the SDK spawn aborted.
+    expect(spy.abortProgrammaticWalk).toHaveBeenCalledWith(runId);
+    expect(spy.stopLiveRun).toHaveBeenCalledWith(runId);
+    expect(spy.emitRunStatusChanged).toHaveBeenCalledWith(runId, 'paused');
+  });
+
+  it('programmatic happy path: aborts the DAG walk BEFORE stopLiveRun, parks paused, emits', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    setSubstrate(db, runId, 'sdk');
+    setExecutionModel(db, runId, 'programmatic');
+    setSession(db, runId, 'sess-prog'); // present but unused by the programmatic path
+    db.prepare('UPDATE workflow_runs SET current_step_id = ? WHERE id = ?').run('tasks', runId);
+
+    const result = await pauseRunHandler(runId, makeDeps(db, spy, runQueues));
+
+    expect(result).toEqual({ success: true });
+
+    // The walk AbortSignal MUST fire before the spawn abort so the interrupted step
+    // observes an aborted signal and reports 'aborted' (not a clean 'ok').
+    expect(spy.abortProgrammaticWalk).toHaveBeenCalledWith(runId);
+    expect(spy.stopLiveRun).toHaveBeenCalledWith(runId);
+    expect(spy.calls.indexOf('abortProgrammaticWalk')).toBeLessThan(spy.calls.indexOf('stopLiveRun'));
+
+    // Guarded UPDATE still parks the run + PRESERVES the resume anchors.
+    const row = getRun(db, runId);
+    expect(row.status).toBe('paused');
+    expect(row.current_step_id).toBe('tasks');
+    expect(row.ended_at).toBeNull();
+    expect(spy.emitRunStatusChanged).toHaveBeenCalledWith(runId, 'paused');
+  });
+
+  it('programmatic run degrades to stopLiveRun-only when abortProgrammaticWalk is absent', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    setSubstrate(db, runId, 'sdk');
+    setExecutionModel(db, runId, 'programmatic');
+    // Deps WITHOUT the optional walk-abort dep (older wiring / degraded path).
+    const deps: PauseRunDeps = {
+      db: dbAdapter(db),
+      runQueues,
+      stopLiveRun: spy.stopLiveRun,
+      clearPendingApprovalsForRun: spy.clearPendingApprovalsForRun,
+      clearPendingQuestionsForRun: spy.clearPendingQuestionsForRun,
+      emitRunStatusChanged: spy.emitRunStatusChanged,
+    };
+
+    const result = await pauseRunHandler(runId, deps);
+
+    expect(result).toEqual({ success: true });
+    expect(getRun(db, runId).status).toBe('paused');
+    // Only the universal spawn abort ran; the walk-abort seam was unavailable.
+    expect(spy.stopLiveRun).toHaveBeenCalledWith(runId);
+    expect(spy.abortProgrammaticWalk).not.toHaveBeenCalled();
+  });
+
+  it('programmatic run parked in awaiting_review (at a gate) is pausable + aborts the walk', async () => {
+    const { runId } = seedRun(db, { status: 'awaiting_review' });
+    setSubstrate(db, runId, 'sdk');
+    setExecutionModel(db, runId, 'programmatic');
+
+    const result = await pauseRunHandler(runId, makeDeps(db, spy, runQueues));
+
+    expect(result).toEqual({ success: true });
+    expect(getRun(db, runId).status).toBe('paused');
+    expect(spy.abortProgrammaticWalk).toHaveBeenCalledWith(runId);
+    expect(spy.emitRunStatusChanged).toHaveBeenCalledWith(runId, 'paused');
   });
 
   // -------------------------------------------------------------------------
