@@ -103,23 +103,29 @@ export class RunShellManager {
     if (!cwd) return { ok: false, reason: 'no_worktree' };
 
     const shellInfo = ShellDetector.getDefaultShell();
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      PATH: getShellPath(),
+      TERM: 'xterm-256color',
+      COLORTERM: 'truecolor',
+      LANG: process.env.LANG || 'en_US.UTF-8',
+      WORKTREE_PATH: cwd,
+    };
+    // This is the USER's shell — it must carry no run-scoped cyboflow context, or
+    // any `claude` the user launches in it would target a run's MCP context. Never
+    // set here, AND strip inherited values: when the app itself was launched from
+    // inside a cyboflow session (dogfooding via `pnpm dev` in a session shell),
+    // process.env carries the OUTER run's ids. The worktree path is the only
+    // cyboflow breadcrumb a plain shell needs.
+    delete env.CYBOFLOW_RUN_ID;
+    delete env.CYBOFLOW_ORCH_SOCKET;
+    delete env.CYBOFLOW_RUN_ARTIFACTS_DIR;
     const ptyProcess = this.spawn(shellInfo.path, shellInfo.args || [], {
       name: 'xterm-color',
       cols: 80,
       rows: 30,
       cwd,
-      env: {
-        ...process.env,
-        PATH: getShellPath(),
-        TERM: 'xterm-256color',
-        COLORTERM: 'truecolor',
-        LANG: process.env.LANG || 'en_US.UTF-8',
-        WORKTREE_PATH: cwd,
-        // NB: deliberately NOT setting CYBOFLOW_RUN_ID here. This is the USER's
-        // shell — leaking the run id would make any `claude` the user launches
-        // target this run's MCP context. The worktree path is the only cyboflow
-        // breadcrumb a plain shell needs.
-      },
+      env,
     });
 
     const shell: RunShell = { pty: ptyProcess, runId, terminalId, worktreePath: cwd, backlog: '' };

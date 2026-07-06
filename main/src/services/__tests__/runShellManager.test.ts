@@ -108,6 +108,33 @@ describe('RunShellManager.open', () => {
     expect(mgr.isOpen('run-1')).toBe(true);
   });
 
+  it('strips INHERITED run-scoped cyboflow env vars from the user shell', () => {
+    // Dogfooding: when the app itself is launched from inside a cyboflow session
+    // (`pnpm dev` in a session shell), process.env carries the OUTER run's
+    // context. The user shell must strip it — a `claude` launched there would
+    // otherwise target that run's MCP context.
+    const seeded = {
+      CYBOFLOW_RUN_ID: 'outer-run',
+      CYBOFLOW_ORCH_SOCKET: '/tmp/outer.sock',
+      CYBOFLOW_RUN_ARTIFACTS_DIR: '/tmp/outer-artifacts',
+    } as const;
+    const previous = new Map(Object.keys(seeded).map((k) => [k, process.env[k]] as const));
+    Object.assign(process.env, seeded);
+    try {
+      const { mgr, spawns } = makeHarness({ worktree: '/wt/run-1' });
+      expect(mgr.open('run-1')).toEqual({ ok: true });
+      const env = spawns[0].options.env ?? {};
+      expect(env.CYBOFLOW_RUN_ID).toBeUndefined();
+      expect(env.CYBOFLOW_ORCH_SOCKET).toBeUndefined();
+      expect(env.CYBOFLOW_RUN_ARTIFACTS_DIR).toBeUndefined();
+    } finally {
+      for (const [key, value] of previous) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   it('is idempotent — a second open for a live shell does not re-spawn', () => {
     const { mgr, spawns } = makeHarness();
     expect(mgr.open('run-1')).toEqual({ ok: true });
