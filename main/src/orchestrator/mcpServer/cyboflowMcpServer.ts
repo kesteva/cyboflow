@@ -146,7 +146,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_list_pending_approvals',
         description:
-          'Return the cross-run review queue: all approvals currently pending across every running workflow in this Cyboflow workspace. Read-only.',
+          'Return all pending TOOL-PERMISSION approvals (canUseTool gates) across every running workflow in this Cyboflow workspace. Read-only. NOTE: this surface does NOT include human question/decision gates — an AskUserQuestion gate (e.g. approve-idea) lives in the questions surface and renders as an inline card in the run chat, so an empty result here does not mean no human gate is pending.',
         inputSchema: { type: 'object', properties: {}, required: [] },
       },
       {

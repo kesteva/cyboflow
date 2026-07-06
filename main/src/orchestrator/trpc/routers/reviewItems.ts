@@ -298,34 +298,56 @@ export const reviewItemsRouter = router({
         resolution: z.string().nullable().optional(),
       }),
     )
-    .mutation(async ({ input, ctx }): Promise<{ reviewItemId: string; resumed: boolean }> => {
-      const db = requireDb(ctx.db, 'resolve');
-      // Read the item's run binding + blocking flag BEFORE resolving (the resolve
-      // does not change either) so we know whether to apply aggregate-unblock.
-      const before = db
-        .prepare('SELECT run_id AS runId, blocking FROM review_items WHERE id = ? AND project_id = ?')
-        .get(input.reviewItemId, input.projectId) as { runId?: string | null; blocking?: number } | undefined;
+    .mutation(
+      async ({
+        input,
+        ctx,
+      }): Promise<{ reviewItemId: string; resumed: boolean; runStatus?: string }> => {
+        const db = requireDb(ctx.db, 'resolve');
+        // Read the item's run binding + blocking flag BEFORE resolving (the resolve
+        // does not change either) so we know whether to apply aggregate-unblock.
+        const before = db
+          .prepare('SELECT run_id AS runId, blocking FROM review_items WHERE id = ? AND project_id = ?')
+          .get(input.reviewItemId, input.projectId) as { runId?: string | null; blocking?: number } | undefined;
 
-      assertNotOpenQuestionGate(db, input.reviewItemId, input.projectId);
+        assertNotOpenQuestionGate(db, input.reviewItemId, input.projectId);
 
-      try {
-        const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
-          op: 'resolve',
-          actor: 'user',
-          reviewItemId: input.reviewItemId,
-          ...(input.resolution !== undefined ? { resolution: input.resolution } : {}),
-        });
+        try {
+          const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
+            op: 'resolve',
+            actor: 'user',
+            reviewItemId: input.reviewItemId,
+            ...(input.resolution !== undefined ? { resolution: input.resolution } : {}),
+          });
 
-        // Aggregate-unblock auto-resume for a blocking, run-bound item.
-        let resumed = false;
-        if (before?.blocking === 1 && before.runId) {
-          resumed = await HumanStepManager.getInstance().maybeResumeRun(before.runId);
+          // Aggregate-unblock auto-resume for a blocking, run-bound item.
+          let resumed = false;
+          let runStatus: string | undefined;
+          if (before?.blocking === 1 && before.runId) {
+            resumed = await HumanStepManager.getInstance().maybeResumeRun(before.runId);
+            if (!resumed) {
+              // The resume is a guarded awaiting_review -> running UPDATE, so a
+              // run in any OTHER state no-ops. Legitimate when a sibling blocking
+              // item is still pending; a ZOMBIE when the run sits 'running' with
+              // a dead session (seen 2026-07-06: an agent-filed fallback decision
+              // item on a run whose AskUserQuestion gate never committed). Never
+              // let that stay silent — report the actual status to the log and
+              // the caller.
+              const runRow = db
+                .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+                .get(before.runId) as { status?: string } | undefined;
+              runStatus = runRow?.status;
+              console.warn(
+                `[reviewItems.resolve] blocking item ${reviewItemId} resolved for run ${before.runId} but the run did NOT resume (status='${runStatus ?? 'unknown'}'; resume only fires from awaiting_review with no other pending blocking items)`,
+              );
+            }
+          }
+          return { reviewItemId, resumed, ...(runStatus !== undefined ? { runStatus } : {}) };
+        } catch (err) {
+          rethrowAsTRPCError(err);
         }
-        return { reviewItemId, resumed };
-      } catch (err) {
-        rethrowAsTRPCError(err);
-      }
-    }),
+      },
+    ),
 
   /**
    * Dismiss a review item (triage — cruft). Forwards op='dismiss' as actor='user'.
