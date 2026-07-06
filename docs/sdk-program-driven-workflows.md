@@ -379,3 +379,59 @@ false positives). Clusters and resolutions:
   `trpc/routers/__tests__/monitor.test.ts`, the inject case in `runExecutor.test.ts`,
   user-text projection in `messageProjection.test.ts` + `syntheticEvents.test.ts`,
   triage/abort cases across the suites, and `clearPendingForRun` in `reviewItemFold.test.ts`.
+
+## Failure recovery (2026-07-06) — systemic pause, retry-from-step, monitor actuation
+
+Landed after a planner run hit a session limit mid-walk and the orchestrator
+marched past the failed step (triage-escalate's resolve-means-approve skipped it),
+with no way to re-run it afterward. Four planks, one principle: a SYSTEMIC failure
+(usage/session/rate limit, overload, auth) is an environment condition — pause and
+retry the SAME step when it clears; never spend the step's own failure budgets on it.
+
+- **Classifier** — `programmatic/systemicError.ts`: `isSystemicStepError` (named
+  regex table over the raw SDK result/error text) + `parseLimitResetDelayMs`
+  (epoch-suffix `…|1751234567`, `resets 2:20pm` wall-clock, ISO). `SpawnStepRunner`
+  stamps `StepRunResult.systemic`.
+- **Controller seam** — `ControllerHost.awaitSystemicPause` (types.ts), consulted
+  BEFORE retries/optional-skip/loopback/triage. `'retry'` re-runs without consuming
+  the attempt budget (bounded by `MAX_SYSTEMIC_PAUSES` per step id); `'giveup'`
+  falls through to the normal failure path; `'canceled'` ends the walk. Fan-out
+  lanes bubble `'systemic'` (no lane-fail), the wave loop parks once and
+  re-dispatches the paused lanes on `'retry'`. `parseGateVerdict` now maps
+  `'retry'` → `'revise'` so a human answering any gate with "retry" re-runs
+  instead of approve-and-skip.
+- **Pause gate** — `programmatic/systemicPauseGate.ts`
+  (`ReviewQueueSystemicPauseGate`): blocking `decision` item
+  (`gate:systemic-pause:<stepId>`, "resolve to retry now / dismiss to give up"),
+  parks via the SAME HumanStepManager primitives as the blocking-items gate, and
+  arms an auto-resume timer at the parsed reset time + 60s that resolves its own
+  item (`auto-retry: usage limit reset`). Cancel dismisses the item
+  (`clearPendingForRun` now also sweeps `gate:systemic-pause:%`).
+- **Retry-from-step** — `retryRunHandler.ts` + `runs.retryStep` (+ the
+  "Retry failed step" CTA on the failed-run `WorkflowSummaryPanel`,
+  programmatic-only via the new `WorkflowRunListRow.execution_model`). The FOURTH
+  sanctioned terminal revive: guarded reset to `'starting'` clearing
+  `error_message`/`ended_at`/`outcome`, resume pointers re-armed from
+  `step_results` (target step excluded from the completed set so a SKIPPED step
+  re-runs), `execute()` fire-and-forget. A fan-out target first re-queues failed
+  lanes (`SprintLaneStore.resetFailedLanes`) — the driver otherwise skips them as
+  settled. Also valid from a RESTING `awaiting_review` run
+  (`RunExecutor.hasActiveExecution` guards against live walks).
+- **Monitor actuation** — `MonitorActions.retryStep` (monitor.ts): with the seam
+  wired, `converse` runs a structured `{ reply, action? }` query
+  (`MONITOR_CONVERSE_SCHEMA`; act only on an explicit user ask), executes through
+  the SAME `retryRunHandler` deps bag as the tRPC mutation, and injects the
+  outcome as a follow-up chat turn. "It's past 2:20, resume" now actually resumes.
+- **Pause/Resume, programmatic arms** — `pauseRunHandler` signals the walk abort
+  (`abortProgrammaticWalk` → `requestProgrammaticCancel`) BEFORE the spawn abort
+  so the interrupted step reports `'aborted'` (not a clean `'ok'`), and skips the
+  orchestrated-only `no_session` guard; `resumeRunHandler` forks by model — the
+  programmatic arm re-arms `setPendingResumeStep(current_step_id)` +
+  `setPendingCompletedSteps(step_results)` and re-drives fire-and-forget (the walk
+  can park at gates for days; never await it in a mutation).
+- **Step-prompt artifact follow-up** — `composeStepPrompt` now inlines the
+  per-atype deliverable follow-up `planner.md` gives the orchestrated top-level
+  agent (`ui-prototype`: extract the served URL + `cyboflow_report_artifact`;
+  `arch-design`: REPLACE-or-append fold into the idea body). Without it those two
+  artifacts never mint on programmatic runs (idea-spec/decomposed-stories are
+  unaffected — they re-derive from entity writes).
