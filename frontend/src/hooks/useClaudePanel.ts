@@ -218,12 +218,21 @@ export const useClaudePanel = (
     }
   }, [isActive, activeSession?.id, outputLoadState, loadOutputContent, panelId]);
 
-  const handleSendInput = async (attachedImages?: AttachedImage[], attachedTexts?: AttachedText[]) => {
-    if (!input.trim() || !activeSession) {
-      return;
+  // Dispatch a message to the panel. The composer owns the draft (it clears the
+  // input INSTANTLY on submit and tracks a pending-send entry), so these handlers
+  // no longer read/clear `input` and no longer restore it on failure — they take
+  // the text explicitly and RETURN the dispatch outcome so the composer can flip
+  // its pending entry to 'failed' instead of silently stuffing text back.
+  const handleSendInput = async (
+    text: string,
+    attachedImages?: AttachedImage[],
+    attachedTexts?: AttachedText[],
+  ): Promise<{ success: boolean; error?: string }> => {
+    if (!text.trim() || !activeSession) {
+      return { success: false, error: 'Nothing to send' };
     }
-    
-    let finalInput = input;
+
+    let finalInput = text;
     
     // Check if we have compacted context to inject
     if (contextCompacted && compactedContext) {
@@ -281,28 +290,22 @@ export const useClaudePanel = (
       finalInput = `${finalInput}${attachmentsMessage}`;
     }
     
-    // Clear the composer the moment we dispatch (before the send round-trip) so
-    // the UI reflects the send immediately, instead of holding the typed text
-    // until the response returns; restore the draft if the dispatch fails.
-    const draft = input;
-    setInput('');
     const response = await API.panels.sendInput(panelId, `${finalInput}\n`);
-    if (!response.success) {
-      setInput(draft);
-    }
+    return { success: response.success, error: response.error };
   };
 
   const handleContinueConversation = async (
+    text: string,
     attachedImages?: AttachedImage[],
     attachedTexts?: AttachedText[],
     modelOverride?: string
-  ) => {
-    if (!input.trim() || !activeSession) return;
-    
+  ): Promise<{ success: boolean; error?: string }> => {
+    if (!text.trim() || !activeSession) return { success: false, error: 'Nothing to send' };
+
     // Mark that we're continuing a conversation to prevent output reload
     isContinuingConversationRef.current = true;
-    
-    let finalInput = input;
+
+    let finalInput = text;
     
     // Check if we have compacted context to inject
     if (contextCompacted && compactedContext) {
@@ -360,16 +363,9 @@ export const useClaudePanel = (
       finalInput = `${finalInput}${attachmentsMessage}`;
     }
     
-    // Clear the composer the moment we dispatch (before the send round-trip) so
-    // the UI reflects the send immediately, instead of holding the typed text
-    // until the response returns; restore the draft if the dispatch fails.
-    const draft = input;
-    setInput('');
     const response = await API.panels.continue(panelId, finalInput, modelOverride);
-    if (!response.success) {
-      setInput(draft);
-    }
-    // Output will be loaded automatically when session status changes
+    // Output will be loaded automatically when session status changes.
+    return { success: response.success, error: response.error };
   };
 
   const handleTerminalCommand = async () => {

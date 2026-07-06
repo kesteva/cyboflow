@@ -29,6 +29,7 @@ import { UnifiedChatView } from './unified/UnifiedChatView';
 import { deriveRunContextUsageParts, formatContextUsage } from './unified/runContextUsage';
 import { trpc } from '../../trpc/client';
 import { useUnifiedRunMessages } from './unified/useUnifiedRunMessages';
+import { usePendingSendStore } from '../../stores/pendingSendStore';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useQuestionStore } from '../../stores/questionStore';
@@ -118,6 +119,16 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // Messages — run-scoped source. Interactive runs keep the live xterm as the
   // transcript, so the structured fetch is disabled there.
   const { messages, loadError } = useUnifiedRunMessages(runId, !isInteractive);
+
+  // Pending-send (optimistic echo) — keyed by runId (the flow host key + railId).
+  // Reconcile against the run transcript so a 'sending'/'queued' row is dropped
+  // once the real user turn appears in the stream.
+  const pendingSends = usePendingSendStore((s) => (runId != null ? s.byHost[runId] : undefined));
+  const reconcilePending = usePendingSendStore((s) => s.reconcile);
+  const requestReopenPending = usePendingSendStore((s) => s.requestReopen);
+  useEffect(() => {
+    if (runId != null) reconcilePending(runId, messages);
+  }, [messages, runId, reconcilePending]);
 
   // -------------------------------------------------------------------------
   // Run artifacts → question-card "open in pane" affordances (#8 / #9).
@@ -217,6 +228,8 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
       contextUsage={contextUsage}
       railId={runId}
       renderToolCallExtra={renderToolCallExtra}
+      pendingSends={isInteractive ? undefined : pendingSends}
+      onReopenPending={(entry) => requestReopenPending(runId, entry.id)}
       interactiveBody={isInteractive ? <InteractiveTerminalView runId={runId} /> : undefined}
       bottomSlot={
         <>

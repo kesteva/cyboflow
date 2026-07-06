@@ -37,6 +37,8 @@ import { ChatMetaStrip } from './ChatMetaStrip';
 import type { ChatMode, ChatTransport, FlowRunStatus } from './useChatVisibility';
 import { ChatTranscript } from '../../chat/ChatTranscript';
 import { PromptNavigation, type PromptMarker } from '../../panels/claude/PromptNavigation';
+import { PendingSendRow } from './PendingSendRow';
+import type { PendingSend } from '../../../stores/pendingSendStore';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
 import type { RichOutputSettings } from '../../panels/ai/AbstractAIPanel';
 
@@ -111,6 +113,16 @@ export interface UnifiedChatViewProps {
   bottomSlot?: ReactNode;
   /** Stable id for the (controlled) prompt rail — runId for runs, panelId for quick. */
   railId?: string;
+
+  // -- pending sends (optimistic echo) -------------------------------------
+  /**
+   * Client-side pending-send entries for this host, rendered pinned between the
+   * transcript and the composer. The host selects these from `pendingSendStore`
+   * (keyed by the same id as `railId`) and reconciles them against `messages`.
+   */
+  pendingSends?: PendingSend[];
+  /** Reopen a 'queued'/'failed' pending row — repopulate the composer + remove. */
+  onReopenPending?: (entry: PendingSend) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +146,8 @@ export function UnifiedChatView({
   renderToolCallExtra,
   bottomSlot,
   railId = 'unified-chat',
+  pendingSends,
+  onReopenPending,
 }: UnifiedChatViewProps): ReactElement {
   const isInteractive = transport === 'interactive';
 
@@ -394,6 +408,13 @@ export function UnifiedChatView({
           branchName={branchName}
           contextUsage={contextUsage}
         />
+
+        {/* Optimistic-echo strip — pinned above the composer. Interactive (PTY)
+            hosts own their live xterm transcript and never reconcile, so no rows
+            are passed there. */}
+        {pendingSends && pendingSends.length > 0 && (
+          <PendingSendRow entries={pendingSends} onReopen={onReopenPending ?? (() => {})} />
+        )}
 
         {bottomSlot}
       </div>

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { Session } from '../../../types/session';
 import { API } from '../../../utils/api';
-import type { IPCResponse } from '../../../utils/api';
+import { usePendingSendStore } from '../../../stores/pendingSendStore';
 import { CommitModePill } from '../../CommitModeToggle';
 import { ModelPill, isOpusModel, modelDisplayLabel, MODEL_OPTIONS } from './ModelPill';
 import { FastModePill } from './FastModePill';
@@ -31,13 +31,20 @@ export interface QuickSessionComposerProps {
   input: string;
   setInput: (v: string) => void;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
-  /** SDK send handlers (panel-scoped). */
-  handleSendInput: (images?: AttachedImage[], texts?: AttachedText[]) => void;
+  /** SDK send handlers (panel-scoped). Take the message text explicitly and
+   *  RETURN the dispatch outcome so the composer can settle its pending-send
+   *  entry (the composer owns clearing the draft, not these). */
+  handleSendInput: (
+    text: string,
+    images?: AttachedImage[],
+    texts?: AttachedText[],
+  ) => Promise<{ success: boolean; error?: string }>;
   handleContinueConversation: (
+    text: string,
     images?: AttachedImage[],
     texts?: AttachedText[],
     modelOverride?: string,
-  ) => void;
+  ) => Promise<{ success: boolean; error?: string }>;
   handleStopSession?: () => void;
   handleCompactContext?: () => void;
   hasConversationHistory?: boolean;
@@ -89,6 +96,24 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
   const transport = interactive ? 'interactive' : 'sdk';
   const running = activeSession.status === 'running';
   const updateSession = useSessionStore((s) => s.updateSession);
+
+  // Pending-send (optimistic echo). Keyed by the panel id — the same key the host
+  // (ClaudePanel) uses as railId and reconciles against the transcript.
+  const hostKey = panelId ?? activeSession.id;
+  const addPending = usePendingSendStore((s) => s.addPending);
+  const setPendingStatus = usePendingSendStore((s) => s.setStatus);
+  const draftRequest = usePendingSendStore((s) => s.draftRequest[hostKey]);
+  const clearDraftRequest = usePendingSendStore((s) => s.clearDraftRequest);
+
+  // Reopen a queued/failed pending row: the store stages its text here; pull it
+  // back into the composer draft, then ack so a later reopen of identical text
+  // fires again (nonce-keyed).
+  useEffect(() => {
+    if (!draftRequest) return;
+    setInput(draftRequest.text);
+    clearDraftRequest(hostKey);
+    textareaRef.current?.focus();
+  }, [draftRequest, hostKey, setInput, clearDraftRequest, textareaRef]);
 
   // Read-only model display (set at session start; mid-session change deferred).
   // The model lives on the panel settings, not the Session row, so we fetch it.
@@ -196,21 +221,58 @@ export function QuickSessionComposer(props: QuickSessionComposerProps): React.Re
     ptyOpen,
   });
 
+  // The send NEVER gates the composer's busy state: we push a pending-send entry
+  // (the in-chat "sending" indication), clear the input INSTANTLY, and let the
+  // dispatch promise settle only the entry's fate (reconciled away when the real
+  // turn lands, or flipped to 'failed' on rejection). onSubmit returns without
+  // awaiting the turn, so the composer is immediately ready for the next message.
   const onSubmit = useCallback(
-    async (atts: ComposerAttachments) => {
+    (atts: ComposerAttachments) => {
+      const text = input;
+      if (!text.trim()) return;
+      // Interactive (PTY) relay: the live xterm IS the transcript, so there is no
+      // structured user turn to reconcile against and no pending row is rendered
+      // (ClaudePanel passes pendingSends=undefined for the interactive substrate).
+      // Clear instantly; on the rare relay failure restore the draft — unlike the
+      // SDK path there is no transcript echo, so restoring can't double-render.
       if (interactive) {
-        const result: IPCResponse<void> = await API.sessions.sendInput(activeSession.id, input);
-        if (result.success) setInput('');
+        setInput('');
+        void API.sessions
+          .sendInput(activeSession.id, text)
+          .then((result) => {
+            if (!result.success) setInput(text);
+          })
+          .catch(() => setInput(text));
         return;
       }
-      // SDK: the handlers read the shared `input` and clear it themselves.
-      if (activeSession.status === 'waiting') {
-        handleSendInput(atts.images, atts.texts);
-      } else {
-        handleContinueConversation(atts.images, atts.texts, modelId ?? undefined);
-      }
+      // SDK: dispatch via the panel handlers, which return the outcome.
+      setInput('');
+      const id = addPending(hostKey, text, 'sending');
+      const dispatch =
+        activeSession.status === 'waiting'
+          ? handleSendInput(text, atts.images, atts.texts)
+          : handleContinueConversation(text, atts.images, atts.texts, modelId ?? undefined);
+      // Promise.resolve tolerates a non-promise return (e.g. a test stub);
+      // `res && res.success === false` only flips on an explicit failure result.
+      void Promise.resolve(dispatch)
+        .then((res) => {
+          if (res && res.success === false) setPendingStatus(hostKey, id, 'failed');
+        })
+        .catch(() => setPendingStatus(hostKey, id, 'failed'));
     },
-    [interactive, activeSession.id, activeSession.status, modelId, input, setInput, handleSendInput, handleContinueConversation],
+    [
+      interactive,
+      activeSession.id,
+      activeSession.status,
+      modelId,
+      input,
+      setInput,
+      hostKey,
+      addPending,
+      setPendingStatus,
+      handleSendInput,
+      handleContinueConversation,
+    ],
   );
 
   const effectiveMode =

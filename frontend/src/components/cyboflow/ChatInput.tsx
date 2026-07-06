@@ -55,6 +55,7 @@ import { modelDisplayLabel } from './unified/ModelPill';
 import { useModelAvailability } from '../../stores/modelAvailabilityStore';
 import { guardedModelByAlias } from '../../../../shared/types/modelAvailability';
 import { resolveChatVisibility } from './unified/useChatVisibility';
+import { usePendingSendStore } from '../../stores/pendingSendStore';
 
 /**
  * Delay (ms) between relaying the message body and the separate '\r' that submits
@@ -168,6 +169,21 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
   const [sendError, setSendError] = useState<string | null>(null);
   const [isSending, setIsSending] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Pending-send (optimistic echo) — keyed by runId (the flow host key + railId).
+  // The async structured-transcript sends (monitor / nudge / reopen / queueInput)
+  // push a pending entry the moment they dispatch; a failure flips it to 'failed'
+  // and a queued send shows 'queued', both click-to-reopen.
+  const addPending = usePendingSendStore((s) => s.addPending);
+  const setPendingStatus = usePendingSendStore((s) => s.setStatus);
+  const draftRequest = usePendingSendStore((s) => (runId != null ? s.draftRequest[runId] : undefined));
+  const clearDraftRequest = usePendingSendStore((s) => s.clearDraftRequest);
+  useEffect(() => {
+    if (runId == null || !draftRequest) return;
+    setText(draftRequest.text);
+    clearDraftRequest(runId);
+    textareaRef.current?.focus();
+  }, [draftRequest, runId, clearDraftRequest]);
 
   const substrate = activeRun?.substrate === 'interactive' ? 'interactive' : 'sdk';
   const isInteractive = substrate === 'interactive';
@@ -318,21 +334,26 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
         console.warn('[ChatInput] workflow-monitor mode but runId is null at send time');
         return;
       }
-      // Query the run's on-demand monitor. NO optimistic insert: the server
-      // injects the user's turn AND the monitor's reply into the unified stream,
-      // which the run-chat refetches off the streamEvents delta (RunChatView), so
-      // both render there. We only clear the composer on a confirmed delivery.
-      setIsSending(true);
+      // Query the run's on-demand monitor. The server injects the user's turn AND
+      // the monitor's reply into the unified stream (rendered from the streamEvents
+      // delta), so the pending 'sending' row reconciles away when the user turn
+      // lands. Clear instantly; flip to 'failed' if the monitor is gone.
+      const body = text;
+      setText('');
       setSendError(null);
-      try {
-        const result = await trpc.cyboflow.monitor.send.mutate({ runId, text });
-        if (result.delivered) setText('');
-        else setSendError('The monitor is no longer active for this run.');
-      } catch (err: unknown) {
-        setSendError(err instanceof Error ? err.message : 'Send failed');
-      } finally {
-        setIsSending(false);
-      }
+      const id = addPending(runId, body, 'sending');
+      void trpc.cyboflow.monitor.send
+        .mutate({ runId, text: body })
+        .then((result) => {
+          if (!result.delivered) {
+            setPendingStatus(runId, id, 'failed');
+            setSendError('The monitor is no longer active for this run.');
+          }
+        })
+        .catch((err: unknown) => {
+          setPendingStatus(runId, id, 'failed');
+          setSendError(err instanceof Error ? err.message : 'Send failed');
+        });
       return;
     }
 
@@ -351,17 +372,25 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
         console.warn('[ChatInput] workflow-idle nudge but runId is null at send time');
         return;
       }
-      setIsSending(true);
+      // Nudge re-drives the rested run; the follow-up turn re-renders the user's
+      // text in the transcript, so the 'sending' row reconciles away. Clear
+      // instantly; a no-op reason (blocked / not_idle / …) flips it to 'failed'.
+      const body = text;
+      setText('');
       setSendError(null);
-      try {
-        const result = await trpc.cyboflow.runs.nudge.mutate({ runId, text });
-        if ('delivered' in result) setText('');
-        else setSendError(nudgeReasonMessage(result.reason));
-      } catch (err: unknown) {
-        setSendError(err instanceof Error ? err.message : 'Nudge failed');
-      } finally {
-        setIsSending(false);
-      }
+      const id = addPending(runId, body, 'sending');
+      void trpc.cyboflow.runs.nudge
+        .mutate({ runId, text: body })
+        .then((result) => {
+          if (!('delivered' in result)) {
+            setPendingStatus(runId, id, 'failed');
+            setSendError(nudgeReasonMessage(result.reason));
+          }
+        })
+        .catch((err: unknown) => {
+          setPendingStatus(runId, id, 'failed');
+          setSendError(err instanceof Error ? err.message : 'Nudge failed');
+        });
       return;
     }
 
@@ -370,17 +399,22 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
         console.warn('[ChatInput] workflow-idle reopen but runId is null at send time');
         return;
       }
-      setIsSending(true);
+      const body = text;
+      setText('');
       setSendError(null);
-      try {
-        const result = await trpc.cyboflow.runs.reopen.mutate({ runId, text });
-        if ('delivered' in result) setText('');
-        else setSendError(reopenReasonMessage(result.reason));
-      } catch (err: unknown) {
-        setSendError(err instanceof Error ? err.message : 'Reopen failed');
-      } finally {
-        setIsSending(false);
-      }
+      const id = addPending(runId, body, 'sending');
+      void trpc.cyboflow.runs.reopen
+        .mutate({ runId, text: body })
+        .then((result) => {
+          if (!('delivered' in result)) {
+            setPendingStatus(runId, id, 'failed');
+            setSendError(reopenReasonMessage(result.reason));
+          }
+        })
+        .catch((err: unknown) => {
+          setPendingStatus(runId, id, 'failed');
+          setSendError(err instanceof Error ? err.message : 'Reopen failed');
+        });
       return;
     }
 
@@ -391,20 +425,25 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
       }
       // "Always allow messaging a running flow": the SDK run is mid-turn, so the
       // message is QUEUED (runs.queueInput) and delivered at the next turn
-      // boundary — NOT relayed live and NOT a nudge (which only re-drives a rested
-      // run). Clear the composer on a confirmed queue; surface the no-op reason
-      // (terminal / not_running / …) otherwise so the text is retained for retry.
-      setIsSending(true);
+      // boundary. The pending row shows 'queued' (distinct, click-to-reopen) and
+      // reconciles when the drained turn finally renders the text; a no-op reason
+      // (terminal / not_running / …) flips it to 'failed'.
+      const body = text;
+      setText('');
       setSendError(null);
-      try {
-        const result = await trpc.cyboflow.runs.queueInput.mutate({ runId, text });
-        if ('queued' in result) setText('');
-        else setSendError(queueInputReasonMessage(result.reason));
-      } catch (err: unknown) {
-        setSendError(err instanceof Error ? err.message : 'Queue failed');
-      } finally {
-        setIsSending(false);
-      }
+      const id = addPending(runId, body, 'queued');
+      void trpc.cyboflow.runs.queueInput
+        .mutate({ runId, text: body })
+        .then((result) => {
+          if (!('queued' in result)) {
+            setPendingStatus(runId, id, 'failed');
+            setSendError(queueInputReasonMessage(result.reason));
+          }
+        })
+        .catch((err: unknown) => {
+          setPendingStatus(runId, id, 'failed');
+          setSendError(err instanceof Error ? err.message : 'Queue failed');
+        });
     }
   };
 

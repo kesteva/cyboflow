@@ -14,6 +14,7 @@ import { QuickSessionComposer } from '../../cyboflow/unified/QuickSessionCompose
 import { UnifiedChatView } from '../../cyboflow/unified/UnifiedChatView';
 import { useUnifiedPanelMessages } from '../../cyboflow/unified/useUnifiedPanelMessages';
 import { SessionActionToast } from '../../cyboflow/SessionActionToast';
+import { usePendingSendStore } from '../../../stores/pendingSendStore';
 
 // Sessions whose open-time resume prompt the user explicitly declined ("Start
 // fresh") this app run. Module-level so the decision survives ClaudePanel
@@ -195,6 +196,16 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // substrate, whose live xterm owns the conversation surface.
   const { messages, loadError } = useUnifiedPanelMessages(panel.id, !isInteractive);
 
+  // Pending-send (optimistic echo) — keyed by panel.id (the same id passed as
+  // railId + the QuickSessionComposer hostKey). Reconcile against the transcript
+  // so a 'sending'/'queued' row is dropped once its real user turn appears.
+  const pendingSends = usePendingSendStore((s) => s.byHost[panel.id]);
+  const reconcilePending = usePendingSendStore((s) => s.reconcile);
+  const requestReopenPending = usePendingSendStore((s) => s.requestReopen);
+  useEffect(() => {
+    reconcilePending(panel.id, messages);
+  }, [messages, panel.id, reconcilePending]);
+
   if (!activeSession || !paneSession) {
     return (
       <div className="flex-1 flex items-center justify-center text-text-secondary">
@@ -324,6 +335,8 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
         railId={panel.id}
         interactiveBody={interactiveBody}
         bottomSlot={bottomSlot}
+        pendingSends={isInteractive ? undefined : pendingSends}
+        onReopenPending={(entry) => requestReopenPending(panel.id, entry.id)}
       />
     </div>
   );

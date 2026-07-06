@@ -82,6 +82,7 @@ vi.mock('../../../CommitModeToggle', () => ({
 }));
 
 import { QuickSessionComposer } from '../QuickSessionComposer';
+import { usePendingSendStore } from '../../../../stores/pendingSendStore';
 import type { Session } from '../../../../types/session';
 
 function makeSession(over: Partial<Session> = {}): Session {
@@ -143,6 +144,7 @@ beforeEach(() => {
   mockPluginsList.mockReset().mockResolvedValue([]);
   mockSetModel.mockReset().mockResolvedValue({ success: true });
   mockOnModelFallback.mockReset().mockReturnValue(() => {});
+  usePendingSendStore.setState({ byHost: {}, draftRequest: {} });
 });
 
 describe('QuickSessionComposer — SDK', () => {
@@ -431,5 +433,53 @@ describe('QuickSessionComposer — agent permission pill (Issue #1)', () => {
         'Permission mode updated — applies when the terminal restarts',
       ),
     );
+  });
+});
+
+describe('QuickSessionComposer — pending-send (optimistic echo)', () => {
+  const HOST = 'panel-1'; // Harness passes panelId="panel-1"
+
+  it('pushes a sending pending entry and clears the input on submit (SDK)', async () => {
+    render(<Harness session={makeSession({ status: 'ready' })} interactive={false} />);
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'kick it off' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+
+    await waitFor(() => {
+      const list = usePendingSendStore.getState().byHost[HOST] ?? [];
+      expect(list).toHaveLength(1);
+      expect(list[0]).toMatchObject({ text: 'kick it off', status: 'sending' });
+    });
+    // Input clears instantly (the send never gates the composer).
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+  });
+
+  it('flips the pending entry to failed when the dispatch reports failure', async () => {
+    const cont = vi.fn().mockResolvedValue({ success: false, error: 'boom' });
+    render(
+      <Harness session={makeSession({ status: 'ready' })} interactive={false} handleContinueConversation={cont} />,
+    );
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'will fail' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true });
+
+    await waitFor(() => {
+      const list = usePendingSendStore.getState().byHost[HOST] ?? [];
+      expect(list.some((e) => e.status === 'failed' && e.text === 'will fail')).toBe(true);
+    });
+  });
+
+  it('repopulates the composer from a staged draft request (reopen)', async () => {
+    render(<Harness session={makeSession({ status: 'ready' })} interactive={false} />);
+    act(() => {
+      // Simulate a reopen: stage a draft request for this host.
+      const id = usePendingSendStore.getState().addPending(HOST, 'bring me back', 'failed');
+      usePendingSendStore.getState().requestReopen(HOST, id);
+    });
+    await waitFor(() =>
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('bring me back'),
+    );
+    // The request is acked (cleared) after consumption.
+    expect(usePendingSendStore.getState().draftRequest[HOST]).toBeUndefined();
   });
 });

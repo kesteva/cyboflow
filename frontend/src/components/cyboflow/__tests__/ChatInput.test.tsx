@@ -119,6 +119,7 @@ import { useCyboflowStore } from '../../../stores/cyboflowStore';
 import { useQuestionStore } from '../../../stores/questionStore';
 import { useActiveRunsStore } from '../../../stores/activeRunsStore';
 import { useSessionStore } from '../../../stores/sessionStore';
+import { usePendingSendStore } from '../../../stores/pendingSendStore';
 import { trpc } from '../../../trpc/client';
 import type { Question } from '../../../../../shared/types/questions';
 import type { ActiveRunRow } from '../../../stores/activeRunsStore';
@@ -137,6 +138,7 @@ beforeEach(() => {
     useQuestionStore.getState().replaceAll([]);
     useActiveRunsStore.setState({ runsByProject: {} });
     useSessionStore.setState({ sessions: [], activeMainRepoSession: null });
+    usePendingSendStore.setState({ byHost: {}, draftRequest: {} });
   });
 
   mockSendInput.mockClear();
@@ -405,7 +407,7 @@ describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
     });
   });
 
-  it('surfaces the noOp reason and keeps the text when the nudge is ignored', async () => {
+  it('surfaces the noOp reason and clears the text (pending row → failed) when the nudge is ignored', async () => {
     vi.mocked(trpc.cyboflow.runs.nudge.mutate).mockResolvedValue({ noOp: true, reason: 'blocked' });
 
     render(<ChatInput runId={RUN_ID} />);
@@ -420,8 +422,12 @@ describe('ChatInput — workflow-idle nudge (awaiting_review)', () => {
         'Resolve the blocking review item(s) for this run first.',
       );
     });
-    // Text retained so the user can retry once the gate clears.
-    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('try anyway');
+    // New contract: the input clears INSTANTLY on send; the failed dispatch is
+    // surfaced as a 'failed' pending-send entry (reopenable), not by stuffing the
+    // text back into the composer.
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    const failed = usePendingSendStore.getState().byHost[RUN_ID] ?? [];
+    expect(failed.some((e) => e.status === 'failed' && e.text === 'try anyway')).toBe(true);
   });
 
   it('ENABLES the input (queue, not nudge) for a RUNNING idle SDK run', async () => {
@@ -775,7 +781,7 @@ describe('ChatInput — workflow-monitor composer (monitor-unify)', () => {
     expect(vi.mocked(trpc.cyboflow.runs.nudge.mutate)).not.toHaveBeenCalled();
   });
 
-  it('surfaces an error and keeps the text when the monitor is no longer active', async () => {
+  it('surfaces an error and clears the text (pending row → failed) when the monitor is no longer active', async () => {
     vi.mocked(trpc.cyboflow.monitor.isActive.query).mockResolvedValue({ active: true });
     vi.mocked(trpc.cyboflow.monitor.send.mutate).mockResolvedValue({ delivered: false });
     activate();
@@ -789,7 +795,11 @@ describe('ChatInput — workflow-monitor composer (monitor-unify)', () => {
     await waitFor(() => {
       expect(screen.getByRole('alert')).toHaveTextContent('The monitor is no longer active for this run.');
     });
-    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('still there?');
+    // New contract: input clears instantly; the failed dispatch becomes a
+    // reopenable 'failed' pending-send entry rather than restoring the text.
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    const failed = usePendingSendStore.getState().byHost[RUN_ID] ?? [];
+    expect(failed.some((e) => e.status === 'failed' && e.text === 'still there?')).toBe(true);
   });
 
   it('does NOT take the monitor composer when isActive resolves inactive (falls back to the running-queue path)', async () => {
@@ -943,7 +953,7 @@ describe('ChatInput — SDK running queue ("always allow messaging a running flo
     expect(screen.getByRole('button', { name: 'Queue' })).toBeInTheDocument();
   });
 
-  it('surfaces the noOp reason and keeps the text when queueInput is rejected', async () => {
+  it('surfaces the noOp reason and clears the text (pending row → failed) when queueInput is rejected', async () => {
     vi.mocked(trpc.cyboflow.runs.queueInput.mutate).mockResolvedValue({ noOp: true, reason: 'terminal' });
     activate();
     render(<ChatInput runId={RUN_ID} />);
@@ -955,7 +965,11 @@ describe('ChatInput — SDK running queue ("always allow messaging a running flo
     await waitFor(() => {
       expect(screen.getByRole('alert')).toHaveTextContent('This run has ended and cannot receive messages.');
     });
-    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('too late?');
+    // New contract: input clears instantly; the rejected queue becomes a
+    // reopenable 'failed' pending-send entry.
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    const failed = usePendingSendStore.getState().byHost[RUN_ID] ?? [];
+    expect(failed.some((e) => e.status === 'failed' && e.text === 'too late?')).toBe(true);
   });
 
   it('an ACTIVE monitor still wins (queries the monitor, not the queue path)', async () => {
