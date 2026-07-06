@@ -4,12 +4,16 @@ import {
   MonitorRegistry,
   buildTriagePrompt,
   buildAnswerPrompt,
+  buildActionAnswerPrompt,
   parseTriageAdvice,
+  parseConverseOutput,
   MONITOR_TRIAGE_SCHEMA,
+  MONITOR_CONVERSE_SCHEMA,
   type HistoryReader,
   type MonitorContext,
   type MonitorHistory,
   type MonitorSession,
+  type MonitorActions,
 } from '../monitor';
 import type { StructuredQueryFn, TextQueryFn } from '../monitorQuery';
 import type { WorkflowStep } from '../../../../../shared/types/workflows';
@@ -203,6 +207,66 @@ describe('DefaultMonitorSession.answer', () => {
   });
 });
 
+describe('parseConverseOutput', () => {
+  it('parses a reply with no action', () => {
+    expect(parseConverseOutput({ reply: 'hello' })).toEqual({ reply: 'hello' });
+  });
+
+  it('parses a reply with a valid retry_step action (with and without stepId)', () => {
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'retry_step', stepId: 'tasks' } })).toEqual({
+      reply: 'ok',
+      action: { kind: 'retry_step', stepId: 'tasks' },
+    });
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'retry_step' } })).toEqual({
+      reply: 'ok',
+      action: { kind: 'retry_step' },
+    });
+  });
+
+  it('drops an unknown action kind', () => {
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'delete_everything' } })).toEqual({ reply: 'ok' });
+  });
+
+  it('drops a malformed action (non-string stepId, non-object action)', () => {
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'retry_step', stepId: 42 } })).toEqual({ reply: 'ok' });
+    expect(parseConverseOutput({ reply: 'ok', action: 'retry_step' })).toEqual({ reply: 'ok' });
+    expect(parseConverseOutput({ reply: 'ok', action: null })).toEqual({ reply: 'ok' });
+  });
+
+  it('never throws: missing/non-string reply falls back to empty string', () => {
+    expect(parseConverseOutput(null)).toEqual({ reply: '' });
+    expect(parseConverseOutput('garbage')).toEqual({ reply: '' });
+    expect(parseConverseOutput({})).toEqual({ reply: '' });
+    expect(parseConverseOutput({ reply: 42 })).toEqual({ reply: '' });
+  });
+});
+
+describe('MONITOR_CONVERSE_SCHEMA', () => {
+  it('requires reply, makes action optional, and enforces the retry_step kind enum', () => {
+    expect(MONITOR_CONVERSE_SCHEMA.required).toEqual(['reply']);
+    expect(MONITOR_CONVERSE_SCHEMA.additionalProperties).toBe(false);
+    const props = MONITOR_CONVERSE_SCHEMA.properties as Record<string, Record<string, unknown>>;
+    expect(props.action.additionalProperties).toBe(false);
+    const actionProps = props.action.properties as Record<string, { enum?: string[] }>;
+    expect(actionProps.kind.enum).toEqual(['retry_step']);
+  });
+});
+
+describe('buildActionAnswerPrompt', () => {
+  it('includes the capabilities contract, the retry_step action, and the question', () => {
+    const history: MonitorHistory = {
+      conversation: [assistantMsg('finished analyze')],
+      steps: [stepRow({ stepId: 'tasks', outcome: 'failed', error: 'boom' })],
+    };
+    const p = buildActionAnswerPrompt(ctx, 'retry the failed step please', history);
+    expect(p).toContain('retry_step');
+    expect(p).toContain('retry the failed step please');
+    expect(p).toContain('tasks'); // step timeline
+    expect(p).toContain('finished analyze'); // conversation digest
+    expect(p).not.toContain('do NOT try to run, edit, or re-order steps');
+  });
+});
+
 describe('DefaultMonitorSession.converse', () => {
   it('injects the user turn, answers, then injects the reply (in that order)', async () => {
     const { reader } = fakeHistory({ conversation: [], steps: [] });
@@ -334,6 +398,190 @@ describe('DefaultMonitorSession.converse', () => {
       { role: 'user', text: 'second' },
       { role: 'assistant', text: 'r2' },
     ]);
+  });
+});
+
+/** Collect injected turns as { role, text } pairs, in order. */
+function collectInjected(): { injectEvent: (event: unknown) => void; injected: Array<{ role: string; text: string }> } {
+  const injected: Array<{ role: string; text: string }> = [];
+  const injectEvent = (event: unknown): void => {
+    const e = event as { message: { role: string; content: Array<{ type: string; text?: string }> } };
+    injected.push({ role: e.message.role, text: e.message.content.find((b) => b.type === 'text')?.text ?? '' });
+  };
+  return { injectEvent, injected };
+}
+
+describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', () => {
+  it('with no actions wired, converse uses textQuery exactly as before (structuredQuery untouched)', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const textQuery: TextQueryFn = vi.fn().mockResolvedValue('plain answer');
+    const structuredQuery: StructuredQueryFn = vi.fn();
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery, injectEvent });
+
+    const reply = await session.converse('what happened?');
+
+    expect(reply).toBe('plain answer');
+    expect(structuredQuery).not.toHaveBeenCalled();
+    expect(textQuery).toHaveBeenCalledTimes(1);
+    expect(injected).toEqual([
+      { role: 'user', text: 'what happened?' },
+      { role: 'assistant', text: 'plain answer' },
+    ]);
+  });
+
+  it('with actions wired and a plain reply (no action), runs the action-capable structured query and does NOT call retryStep', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({ reply: 'the run is on step 3' });
+    const textQuery: TextQueryFn = vi.fn();
+    const retryStep = vi.fn<MonitorActions['retryStep']>();
+    const actions: MonitorActions = { retryStep };
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({
+      ctx,
+      history: reader,
+      structuredQuery,
+      textQuery,
+      injectEvent,
+      actions,
+    });
+
+    const reply = await session.converse('what step are we on?');
+
+    expect(reply).toBe('the run is on step 3');
+    expect(textQuery).not.toHaveBeenCalled();
+    const args = (structuredQuery as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(args.schema).toBe(MONITOR_CONVERSE_SCHEMA);
+    expect(args.prompt).toContain('retry_step');
+    expect(retryStep).not.toHaveBeenCalled();
+    expect(injected).toEqual([
+      { role: 'user', text: 'what step are we on?' },
+      { role: 'assistant', text: 'the run is on step 3' },
+    ]);
+  });
+
+  it('a retry_step action calls retryStep(stepId) and injects a ▶-prefixed success turn; the returned reply is unchanged', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ reply: 'retrying tasks now.', action: { kind: 'retry_step', stepId: 'tasks' } });
+    const retryStep = vi.fn<MonitorActions['retryStep']>().mockResolvedValue({ ok: true, message: 'run resumed from tasks' });
+    const actions: MonitorActions = { retryStep };
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({
+      ctx,
+      history: reader,
+      structuredQuery,
+      textQuery: vi.fn(),
+      injectEvent,
+      actions,
+    });
+
+    const reply = await session.converse('please retry the tasks step');
+
+    expect(reply).toBe('retrying tasks now.');
+    expect(retryStep).toHaveBeenCalledTimes(1);
+    expect(retryStep).toHaveBeenCalledWith('tasks');
+    expect(injected).toEqual([
+      { role: 'user', text: 'please retry the tasks step' },
+      { role: 'assistant', text: 'retrying tasks now.' },
+      { role: 'assistant', text: '▶ run resumed from tasks' },
+    ]);
+  });
+
+  it('a retry_step action resolving ok:false injects a ⚠-prefixed turn', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ reply: 'attempting retry.', action: { kind: 'retry_step' } });
+    const retryStep = vi.fn<MonitorActions['retryStep']>().mockResolvedValue({ ok: false, message: 'run is not failed or resting' });
+    const actions: MonitorActions = { retryStep };
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({
+      ctx,
+      history: reader,
+      structuredQuery,
+      textQuery: vi.fn(),
+      injectEvent,
+      actions,
+    });
+
+    await session.converse('retry it');
+
+    expect(retryStep).toHaveBeenCalledWith(undefined);
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '⚠ run is not failed or resting' });
+  });
+
+  it('a throwing retryStep fails soft: injects a generic warning turn, converse still resolves with the reply', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ reply: 'retrying now.', action: { kind: 'retry_step', stepId: 'tasks' } });
+    const retryStep = vi.fn<MonitorActions['retryStep']>().mockRejectedValue(new Error('handler exploded'));
+    const actions: MonitorActions = { retryStep };
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({
+      ctx,
+      history: reader,
+      structuredQuery,
+      textQuery: vi.fn(),
+      injectEvent,
+      actions,
+    });
+
+    const reply = await session.converse('retry the tasks step');
+
+    expect(reply).toBe('retrying now.');
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '⚠ The retry action failed unexpectedly.' });
+  });
+
+  it('malformed structured output (no reply) renders NO_ANSWER; a malformed action is dropped and retryStep is never called', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ action: { kind: 'retry_step', stepId: 42 } });
+    const retryStep = vi.fn<MonitorActions['retryStep']>();
+    const actions: MonitorActions = { retryStep };
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({
+      ctx,
+      history: reader,
+      structuredQuery,
+      textQuery: vi.fn(),
+      injectEvent,
+      actions,
+    });
+
+    const reply = await session.converse('retry it');
+
+    expect(reply).toBe('I could not produce an answer for that.');
+    expect(retryStep).not.toHaveBeenCalled();
+    expect(injected).toEqual([
+      { role: 'user', text: 'retry it' },
+      { role: 'assistant', text: 'I could not produce an answer for that.' },
+    ]);
+  });
+
+  it('a throwing structuredQuery fails soft to ANSWER_FAILED with no action attempted', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockRejectedValue(new Error('sdk down'));
+    const retryStep = vi.fn<MonitorActions['retryStep']>();
+    const actions: MonitorActions = { retryStep };
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({
+      ctx,
+      history: reader,
+      structuredQuery,
+      textQuery: vi.fn(),
+      injectEvent,
+      actions,
+    });
+
+    const reply = await session.converse('retry it');
+
+    expect(reply.toLowerCase()).toContain('sorry');
+    expect(retryStep).not.toHaveBeenCalled();
+    expect(injected.at(-1)?.text.toLowerCase()).toContain('sorry');
   });
 });
 
