@@ -105,8 +105,15 @@ export function subscribeToStreamEvents({
     }
     onEvent(payload);
   };
-  electron.on(channel, handler);
-  return () => electron.off(channel, handler);
+  // Prefer the disposer `on` returns: `off(channel, handler)` cannot match the
+  // preload-side wrapper (function identity is lost across the contextBridge)
+  // and silently leaked one listener per (re)subscribe — duplicated appends and
+  // multiple live counters in the debug log. Fallback kept for older preloads.
+  const dispose = electron.on(channel, handler);
+  return () => {
+    if (typeof dispose === 'function') dispose();
+    else electron.off(channel, handler);
+  };
 }
 
 /**
@@ -140,8 +147,12 @@ export function subscribeToPtyBytes({
   const handler = (...args: unknown[]) => {
     onData(args[0] as string);
   };
-  electron.on(channel, handler);
-  return () => electron.off(channel, handler);
+  // Prefer the disposer `on` returns — see subscribeToStreamEvents.
+  const dispose = electron.on(channel, handler);
+  return () => {
+    if (typeof dispose === 'function') dispose();
+    else electron.off(channel, handler);
+  };
 }
 
 /**
@@ -168,8 +179,12 @@ export function subscribeToShellBytes({
   const handler = (...args: unknown[]) => {
     onData(args[0] as string);
   };
-  electron.on(channel, handler);
-  return () => electron.off(channel, handler);
+  // Prefer the disposer `on` returns — see subscribeToStreamEvents.
+  const dispose = electron.on(channel, handler);
+  return () => {
+    if (typeof dispose === 'function') dispose();
+    else electron.off(channel, handler);
+  };
 }
 
 /**

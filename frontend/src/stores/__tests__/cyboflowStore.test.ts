@@ -172,7 +172,34 @@ describe('cyboflowStore subscription lifecycle', () => {
     expect(state.streamEvents[0]).toEqual(testEvent);
   });
 
-  it('(6) setActiveRun replaces the old subscription when called twice in a row (idempotency)', () => {
+  it('(6) setActiveRun for the SAME run keeps the subscription and streamEvents (no wipe)', () => {
+    const unsub1 = vi.fn();
+    let capturedOnEvent: ((e: StreamEvent) => void) | undefined;
+    mockSubscribe.mockImplementationOnce(({ onEvent }: { onEvent: (e: StreamEvent) => void }) => {
+      capturedOnEvent = onEvent;
+      return unsub1;
+    });
+
+    useCyboflowStore.getState().setActiveRun('run-001');
+    capturedOnEvent!({
+      type: 'unknown',
+      payload: { unrecognized_field: 'xyz' },
+      timestamp: '2026-05-20T00:00:00Z',
+    });
+    expect(useCyboflowStore.getState().streamEvents).toHaveLength(1);
+
+    useCyboflowStore.getState().setActiveRun('run-001'); // same runId again
+
+    // The channel is runId-keyed, so the existing subscription is still correct:
+    // no teardown, no resubscribe, and — critically — no streamEvents wipe (a
+    // wipe blanked the context-% meter until fresh events trickled in).
+    expect(unsub1).not.toHaveBeenCalled();
+    expect(mockSubscribe).toHaveBeenCalledTimes(1);
+    expect(useCyboflowStore.getState().streamEvents).toHaveLength(1);
+    expect(useCyboflowStore.getState().activeRunId).toBe('run-001');
+  });
+
+  it('(6b) setActiveRun for a DIFFERENT run replaces the subscription and wipes streamEvents', () => {
     const unsub1 = vi.fn();
     const unsub2 = vi.fn();
     mockSubscribe
@@ -180,13 +207,12 @@ describe('cyboflowStore subscription lifecycle', () => {
       .mockReturnValueOnce(unsub2);
 
     useCyboflowStore.getState().setActiveRun('run-001');
-    useCyboflowStore.getState().setActiveRun('run-001'); // same runId again
+    useCyboflowStore.getState().setActiveRun('run-002');
 
-    // First subscription torn down, second started.
     expect(unsub1).toHaveBeenCalledOnce();
     expect(mockSubscribe).toHaveBeenCalledTimes(2);
-    // State should reflect the second setActiveRun.
-    expect(useCyboflowStore.getState().activeRunId).toBe('run-001');
+    expect(useCyboflowStore.getState().activeRunId).toBe('run-002');
+    expect(useCyboflowStore.getState().streamEvents).toHaveLength(0);
   });
 
   // -------------------------------------------------------------------------

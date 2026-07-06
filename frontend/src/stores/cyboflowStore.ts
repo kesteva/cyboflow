@@ -121,12 +121,20 @@ interface CyboflowState {
   appendStreamEvent: (event: StreamEvent) => void;
 }
 
-export const useCyboflowStore = create<CyboflowState>((set) => ({
+export const useCyboflowStore = create<CyboflowState>((set, get) => ({
   activeRunId: null,
   selectedSessionId: null,
   streamEvents: [],
 
   setActiveRun: (runId, parentSessionId) => {
+    // Re-selecting the ALREADY-active run must not wipe streamEvents or restart
+    // the subscription — the channel is runId-keyed, so the existing listener is
+    // still correct, and a wipe would blank every streamEvents-derived surface
+    // (context-% meter, Data Stream tab) until fresh events trickle in.
+    if (get().activeRunId === runId) {
+      set({ selectedSessionId: parentSessionId ?? null });
+      return;
+    }
     // Start the IPC subscription BEFORE updating state so the renderer is
     // subscribed before any React re-render may cause timing issues.
     // Points selectedSessionId at the run's parent session so the File

@@ -623,7 +623,7 @@ const electronListenerWrappers = new Map<
 contextBridge.exposeInMainWorld('electron', {
   openExternal: (url: string) => ipcRenderer.invoke('openExternal', url),
   invoke: (channel: string, ...args: unknown[]) => ipcRenderer.invoke(channel, ...args),
-  on: (channel: string, callback: (...args: unknown[]) => void) => {
+  on: (channel: string, callback: (...args: unknown[]) => void): (() => void) | undefined => {
     const validChannels: string[] = [];
     if (validChannels.includes(channel) || channel.startsWith('cyboflow:stream:') || channel.startsWith('cyboflow:pty:') || channel.startsWith('cyboflow:shell:')) {
       const wrapper = (_event: Electron.IpcRendererEvent, ...args: unknown[]) => callback(...args);
@@ -632,7 +632,21 @@ contextBridge.exposeInMainWorld('electron', {
       }
       electronListenerWrappers.get(channel)!.set(callback, wrapper);
       ipcRenderer.on(channel, wrapper);
+      // Return a disposer bound to THIS wrapper. Function identity is NOT
+      // preserved across the contextBridge (the renderer's callback arrives here
+      // as a fresh proxy on every call), so `off(channel, callback)` cannot find
+      // the wrapper in the Map and silently leaks the listener — the renderer
+      // MUST prefer this disposer over `off`.
+      return () => {
+        ipcRenderer.removeListener(channel, wrapper);
+        const inner = electronListenerWrappers.get(channel);
+        if (inner) {
+          inner.delete(callback);
+          if (inner.size === 0) electronListenerWrappers.delete(channel);
+        }
+      };
     }
+    return undefined;
   },
   off: (channel: string, callback: (...args: unknown[]) => void) => {
     const validChannels: string[] = [];

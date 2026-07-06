@@ -423,8 +423,12 @@ interface ElectronInterface {
   openExternal: (url: string) => Promise<void>;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC bridge that returns different types based on channel
   invoke: (channel: string, ...args: unknown[]) => Promise<any>;
+  // Returns a disposer that removes the exact registered wrapper. Prefer it over
+  // `off`: function identity is not preserved across the contextBridge, so
+  // `off(channel, callback)` cannot match the wrapper and silently leaks.
+  // `undefined` is returned for channels the preload does not bridge.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC event callback that receives different argument types
-  on: (channel: string, callback: (...args: any[]) => void) => void;
+  on: (channel: string, callback: (...args: any[]) => void) => (() => void) | undefined;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Generic IPC event callback that receives different argument types
   off: (channel: string, callback: (...args: any[]) => void) => void;
 }
