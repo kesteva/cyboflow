@@ -622,9 +622,17 @@ export class ArtifactRouter {
     action: ArtifactChangeAction,
     artifact: Artifact | null,
   ): void {
+    // Resolve the run's parent session so session-scoped consumers (the
+    // session-keyed center-pane tab store) can filter this project-wide
+    // channel without knowing every run id up front. A PK lookup on a single
+    // row — cheap enough not to cache, and this emit path is not hot.
+    const runRow = this.db
+      .prepare('SELECT session_id AS sessionId FROM workflow_runs WHERE id = ?')
+      .get(runId) as { sessionId: string | null } | undefined;
     artifactChangeEvents.emit(artifactProjectChannel(projectId), {
       projectId,
       runId,
+      sessionId: runRow?.sessionId ?? null,
       artifactId,
       atype,
       action,

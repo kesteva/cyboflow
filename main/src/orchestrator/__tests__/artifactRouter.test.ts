@@ -20,6 +20,8 @@
  *    AND emits NOTHING.
  *  - the payload_json delta reflects the real before/after (null/present/cleared),
  *    not a constant sentinel.
+ *  - emitChange stamps event.sessionId from the run's workflow_runs.session_id
+ *    (null for a legacy/parentless run, the run's parent session id otherwise).
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -66,29 +68,40 @@ function buildDb(): Database.Database {
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
+  // workflow_runs.session_id (migration 019) — added directly here; migration 019
+  // itself backfills from the Crystal-legacy `sessions` table, which this entity
+  // test DB doesn't create. We only need the column so emitChange's session_id
+  // resolution (`SELECT session_id FROM workflow_runs WHERE id = ?`) has
+  // something to select.
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
   return db;
 }
 
-function seedRun(db: Database.Database, runId: string): void {
+function seedRun(db: Database.Database, runId: string, sessionId: string | null = null): void {
   db.prepare(
     `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'planner', '{}')`,
   ).run();
   db.prepare(
-    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
-     VALUES (?, 'wf-1', 1, 'running', 'default')`,
-  ).run(runId);
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id)
+     VALUES (?, 'wf-1', 1, 'running', 'default', ?)`,
+  ).run(runId, sessionId);
 }
 
 /** Seed a workflow + run under an arbitrary project (for cross-project tests). */
-function seedRunInProject(db: Database.Database, runId: string, projectId: number): void {
+function seedRunInProject(
+  db: Database.Database,
+  runId: string,
+  projectId: number,
+  sessionId: string | null = null,
+): void {
   const wfId = `wf-p${projectId}`;
   db.prepare(
     `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES (?, ?, 'planner', '{}')`,
   ).run(wfId, projectId);
   db.prepare(
-    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
-     VALUES (?, ?, ?, 'running', 'default')`,
-  ).run(runId, wfId, projectId);
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id)
+     VALUES (?, ?, ?, 'running', 'default', ?)`,
+  ).run(runId, wfId, projectId, sessionId);
 }
 
 function countEvents(db: Database.Database, artifactId: string): number {
@@ -131,6 +144,30 @@ describe('ArtifactRouter', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ projectId: 1, runId: 'run-1', action: 'created', atype: 'idea-spec' });
     expect(events[0].artifact?.committed).toBe(false);
+    // seedRun leaves session_id NULL (a legacy/parentless run) — emitChange must
+    // resolve that as null, not throw or omit the field.
+    expect(events[0].sessionId).toBeNull();
+  });
+
+  it('emitted events carry sessionId resolved from the run\'s workflow_runs.session_id', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-with-session', 'sess-parent-1');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+
+    const events: ArtifactChangedEvent[] = [];
+    artifactChangeEvents.on(artifactProjectChannel(1), (e: ArtifactChangedEvent) => events.push(e));
+
+    await router.apply(1, {
+      op: 'create',
+      runId: 'run-with-session',
+      atype: 'idea-spec',
+      label: 'IDEA-018 · wizard',
+      actor: 'agent:idea-extractor',
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0].runId).toBe('run-with-session');
+    expect(events[0].sessionId).toBe('sess-parent-1');
   });
 
   it('create is idempotent per (run, atype) — upserts, no duplicate row', async () => {

@@ -198,6 +198,14 @@ export type ArtifactChangeAction = 'created' | 'updated' | 'committed' | 'delete
 export interface ArtifactChangedEvent {
   projectId: number;
   runId: string;
+  /**
+   * The run's parent session (`workflow_runs.session_id`), or null for a
+   * parentless/legacy run. Lets session-scoped consumers (the session-keyed
+   * center-pane tab store — see `useSessionArtifactsList`) filter the
+   * project-wide channel to "my session's runs" without knowing every run id
+   * that session has ever hosted up front.
+   */
+  sessionId: string | null;
   artifactId: string;
   atype: ArtifactType;
   action: ArtifactChangeAction;

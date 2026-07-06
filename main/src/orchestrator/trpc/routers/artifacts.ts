@@ -4,6 +4,8 @@
  * Typed tRPC contract for the renderer's run-artifact surface (center-pane tabs +
  * right-rail Artifacts panel):
  *   - list                : query        -> Artifact[] (a run's deliverables)
+ *   - listBySession       : query        -> Artifact[] (a session's deliverables
+ *                                            across ALL its runs)
  *   - get                 : query        -> Artifact | null
  *   - commit              : mutation     -> { artifactId } (persist to repo)
  *   - onArtifactChanged   : subscription -> ArtifactChangedEvent (project-scoped)
@@ -69,6 +71,30 @@ export const artifactsRouter = router({
       const rows = db
         .prepare(`SELECT * FROM artifacts WHERE ${clauses.join(' AND ')} ORDER BY created_at ASC, id ASC`)
         .all(...params) as ArtifactDbRow[];
+      return rows.map((r) => ArtifactRouter.shapeRow(r));
+    }),
+
+  /**
+   * List a SESSION's artifacts across ALL its runs (oldest first) — the
+   * '__quick__' chat sentinel plus any flow runs the session hosted. Backs the
+   * session-keyed center-pane tab store (useSessionArtifactsList) so tabs
+   * survive the RunCenterPane <-> QuickSessionCenterPane host switch: each host
+   * shares the same centerPaneStore session key, but a run-scoped list only
+   * sees ITS run's rows, so switching hosts made the other host's artifacts
+   * read as "vanished" and get pruned even though their DB rows still exist.
+   */
+  listBySession: protectedProcedure
+    .input(z.object({ sessionId: z.string().min(1) }))
+    .query(async ({ input, ctx }): Promise<Artifact[]> => {
+      const db = requireDb(ctx.db, 'listBySession');
+      const rows = db
+        .prepare(
+          `SELECT a.* FROM artifacts a
+           JOIN workflow_runs wr ON wr.id = a.run_id
+           WHERE wr.session_id = ?
+           ORDER BY a.created_at ASC, a.id ASC`,
+        )
+        .all(input.sessionId) as ArtifactDbRow[];
       return rows.map((r) => ArtifactRouter.shapeRow(r));
     }),
 

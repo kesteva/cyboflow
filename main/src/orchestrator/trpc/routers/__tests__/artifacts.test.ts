@@ -5,8 +5,11 @@
  * SQLite DB (projects + 006/011/014/015/016/035, so workflow_runs / entity_events
  * / artifacts all exist) and the real ArtifactRouter chokepoint singleton (reset
  * between tests). Focus:
- *   - list  : WHERE construction (with / without the committed filter) + ORDER +
- *             shapeRow mapping (numeric flags → booleans).
+ *   - list         : WHERE construction (with / without the committed filter) +
+ *                    ORDER + shapeRow mapping (numeric flags → booleans).
+ *   - listBySession: JOINs workflow_runs on session_id — returns artifacts across
+ *                    TWO different runs sharing one session, excludes another
+ *                    session's run, and shapes rows identically to `list`.
  *   - get   : shaped row / null on miss.
  *   - commit: forwards op='commit', actor='user', optional payloadJson; ArtifactError
  *             codes surface as the mapped TRPCError (esp. already_committed→CONFLICT)
@@ -59,18 +62,27 @@ function buildDb(): Database.Database {
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
+  // workflow_runs.session_id (migration 019) — added directly here; migration 019
+  // itself backfills from the Crystal-legacy `sessions` table, which this entity
+  // test DB doesn't create. We only need the column for listBySession's JOIN.
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
   return db;
 }
 
-function seedRunInProject(db: Database.Database, runId: string, projectId: number): void {
+function seedRunInProject(
+  db: Database.Database,
+  runId: string,
+  projectId: number,
+  sessionId: string | null = null,
+): void {
   const wfId = `wf-p${projectId}`;
   db.prepare(
     `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES (?, ?, 'planner', '{}')`,
   ).run(wfId, projectId);
   db.prepare(
-    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot)
-     VALUES (?, ?, ?, 'running', 'default')`,
-  ).run(runId, wfId, projectId);
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id)
+     VALUES (?, ?, ?, 'running', 'default', ?)`,
+  ).run(runId, wfId, projectId, sessionId);
 }
 
 /** Insert a raw artifact row (controls created_at so ORDER is deterministic). */
@@ -181,6 +193,85 @@ describe('cyboflow.artifacts.list', () => {
     await expect(caller.cyboflow.artifacts.list({ runId: 'run-1' })).rejects.toSatisfy(
       (e: unknown) => e instanceof TRPCError && e.code === 'PRECONDITION_FAILED',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listBySession
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.artifacts.listBySession', () => {
+  it("returns artifacts across TWO different runs sharing one session_id, oldest-first, shapeRow-mapped", async () => {
+    const { caller, db } = buildCaller();
+    // Two runs (e.g. the '__quick__' chat sentinel + a later flow run) hosted by
+    // the SAME session — this is exactly what QuickSessionCenterPane / RunCenterPane
+    // need: a session's deliverables regardless of which run produced them.
+    seedRunInProject(db, 'run-quick-chat-1', 1, 'sess-shared');
+    seedRunInProject(db, 'run-flow-1', 1, 'sess-shared');
+    insertArtifact(db, {
+      id: 'art_from_chat',
+      runId: 'run-quick-chat-1',
+      atype: 'generic',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    insertArtifact(db, {
+      id: 'art_from_flow',
+      runId: 'run-flow-1',
+      atype: 'idea-spec',
+      committed: true,
+      createdAt: '2026-01-02T00:00:00.000Z',
+    });
+
+    const out = await caller.cyboflow.artifacts.listBySession({ sessionId: 'sess-shared' });
+    expect(out.map((a) => a.id)).toEqual(['art_from_chat', 'art_from_flow']);
+    // Same shapeRow mapper as `list` — numeric flags mapped to booleans.
+    expect(out[0].committed).toBe(false);
+    expect(out[1].committed).toBe(true);
+    expect(out[1].runId).toBe('run-flow-1');
+  });
+
+  it("excludes another session's run", async () => {
+    const { caller, db } = buildCaller();
+    seedRunInProject(db, 'run-mine', 1, 'sess-mine');
+    seedRunInProject(db, 'run-other', 1, 'sess-other');
+    insertArtifact(db, {
+      id: 'art_mine',
+      runId: 'run-mine',
+      atype: 'generic',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    insertArtifact(db, {
+      id: 'art_other',
+      runId: 'run-other',
+      atype: 'generic',
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const out = await caller.cyboflow.artifacts.listBySession({ sessionId: 'sess-mine' });
+    expect(out.map((a) => a.id)).toEqual(['art_mine']);
+  });
+
+  it('shapes rows identically to `list` (same mapper, same fields)', async () => {
+    const { caller, db } = buildCaller();
+    seedRunInProject(db, 'run-1', 1, 'sess-shared');
+    insertArtifact(db, {
+      id: 'art_x',
+      runId: 'run-1',
+      atype: 'idea-spec',
+      committed: true,
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+
+    const viaList = await caller.cyboflow.artifacts.list({ runId: 'run-1' });
+    const viaSession = await caller.cyboflow.artifacts.listBySession({ sessionId: 'sess-shared' });
+    expect(viaSession).toEqual(viaList);
+  });
+
+  it('throws PRECONDITION_FAILED when ctx.db is unwired', async () => {
+    const { caller } = buildCaller(false);
+    await expect(
+      caller.cyboflow.artifacts.listBySession({ sessionId: 'sess-1' }),
+    ).rejects.toSatisfy((e: unknown) => e instanceof TRPCError && e.code === 'PRECONDITION_FAILED');
   });
 });
 
@@ -347,6 +438,7 @@ describe('cyboflow.artifacts.onArtifactChanged', () => {
     const mkEvent = (projectId: number): ArtifactChangedEvent => ({
       projectId,
       runId: 'run-1',
+      sessionId: null,
       artifactId: `art_${projectId}`,
       atype: 'generic',
       action: 'created',

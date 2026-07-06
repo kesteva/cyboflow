@@ -88,6 +88,11 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '042_collapse_board.sql'), 'utf-8'));
   // 045 widens the artifacts.atype CHECK to include 'arch-design'.
   db.exec(readFileSync(join(migDir, '045_arch_design_atype.sql'), 'utf-8'));
+  // workflow_runs.session_id (migration 019) — added directly here; migration 019
+  // itself backfills from the Crystal-legacy `sessions` table, which this entity
+  // test DB doesn't create. ArtifactRouter's emitChange resolves this column on
+  // every write, so it must exist even though these tests don't assert on it.
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
   return db;
 }
 
