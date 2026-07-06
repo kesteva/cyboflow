@@ -66,7 +66,7 @@ interface CreateSessionJob {
   commitMode?: 'structured' | 'checkpoint' | 'disabled';
   commitModeSettings?: string; // JSON string of CommitModeSettings
   /**
-   * In-place session (migration 046): skip worktree provisioning and run the
+   * In-place session (migration 047): skip worktree provisioning and run the
    * session DIRECTLY in the project checkout (sessions.in_place = 1). When set the
    * processor uses targetProject.path as the worktreePath and never calls
    * worktreeManager.createWorktree. Absent/false = the default worktree-backed flow.
@@ -203,7 +203,7 @@ export class TaskQueue {
         worktreeName = uniqueWorktreeName;
 
 
-        // In-place sessions (migration 046) work DIRECTLY in the project checkout —
+        // In-place sessions (migration 047) work DIRECTLY in the project checkout —
         // no dedicated worktree is provisioned. worktreePath is the project path, and
         // the base commit/branch are read from that live checkout (both fail-soft:
         // a repo with no commits yet or an unreadable ref leaves them undefined,

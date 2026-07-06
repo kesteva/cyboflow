@@ -21,7 +21,7 @@ export interface Session {
   runStartedAt?: string;
   isMainRepo?: boolean;
   /**
-   * In-place session (sessions.in_place, migration 046): worktreePath IS the
+   * In-place session (sessions.in_place, migration 047): worktreePath IS the
    * project checkout — no dedicated git worktree exists. DISTINCT from
    * isMainRepo (the hidden singleton dashboard session): in-place sessions are
    * ordinary, list-visible quick sessions. They run on either substrate (the
@@ -174,7 +174,7 @@ export interface CreateSessionRequest {
    * Omitted → the global Settings default (configManager.
    * getQuickSessionWorktreeMode(), floor 'worktree'). 'in-place' skips worktree
    * creation and works directly in the project checkout (sessions.in_place = 1,
-   * migration 046); both substrates support it (the interactive gate rides the
+   * migration 047); both substrates support it (the interactive gate rides the
    * inline `--settings` flag — no checkout writes). Only honored by
    * sessions:create-quick. Workflow-host session creation
    * (ensureSessionForLaunch) pins 'worktree' explicitly. KEEP IN SYNC with the

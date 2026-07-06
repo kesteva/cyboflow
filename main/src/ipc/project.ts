@@ -329,7 +329,7 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
       let worktreeCleanupCount = 0;
       for (const session of allProjectSessions) {
         // Skip sessions that are main repo, don't have worktrees, or work in-place
-        // (migration 046 — worktree_path IS the user's real checkout, so there is no
+        // (migration 047 — worktree_path IS the user's real checkout, so there is no
         // dedicated worktree to remove; tearing it down would delete the project).
         if (session.is_main_repo || !session.worktree_name || session.in_place) {
           continue;

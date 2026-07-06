@@ -90,7 +90,7 @@ export interface Session {
   /** Set to true for sessions created outside any workflow flow (TASK-787 / IDEA-027). */
   is_quick?: boolean;
   /**
-   * In-place session (migration 046): worktree_path IS the project checkout —
+   * In-place session (migration 047): worktree_path IS the project checkout —
    * no dedicated git worktree exists. DISTINCT from is_main_repo (the hidden
    * singleton dashboard session): in_place sessions are ordinary, list-visible
    * quick sessions. Worktree-mutating paths (sessions:delete cleanup, project
@@ -151,7 +151,7 @@ export interface CreateSessionData {
   folder_id?: string;
   permission_mode?: 'approve' | 'ignore';
   is_main_repo?: boolean;
-  /** In-place session (migration 046) — see Session.in_place. */
+  /** In-place session (migration 047) — see Session.in_place. */
   in_place?: boolean;
   display_order?: number;
   auto_commit?: boolean;

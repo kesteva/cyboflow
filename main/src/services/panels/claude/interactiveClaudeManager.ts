@@ -88,7 +88,7 @@ import type { PermissionMode } from '../../../../../shared/types/workflows';
  *                      to file-based hooks. This replaces the TASK-819 on-disk
  *                      write into `<worktree>/.claude/settings.json` — inline
  *                      delivery writes NOTHING into the working tree, which is
- *                      what allows in-place sessions (migration 046) on this
+ *                      what allows in-place sessions (migration 047) on this
  *                      substrate. spawnCliProcess still calls
  *                      settingsWriter.remove() so a LEGACY on-disk entry from an
  *                      older build cannot double-fire alongside the inline one.
@@ -588,7 +588,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // (probe-verified on CLI 2.1.201: flag-tier hooks FIRE and BLOCK, and are
     // ADDITIVE to file-based hooks — user hooks keep firing). Inline delivery
     // writes NOTHING into the working tree, which is what allows in-place
-    // sessions (migration 046) on this substrate. The opt-out branch lives in
+    // sessions (migration 047) on this substrate. The opt-out branch lives in
     // resolveInlineGatingHooks — the NEW 4-mode `agentPermissionMode` (workflow
     // runs) takes precedence when set: 'auto'/'dontAsk' skip the hook so native
     // gating owns the decision ('auto' = the model classifier reached via
@@ -626,7 +626,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * Resolve where the per-run interactive MCP config lives. Worktree sessions
    * keep it inside the worktree (`<worktree>/.cyboflow/interactive-mcp.json`,
    * covered by the `.git/info/exclude` append and deleted with the worktree).
-   * In-place sessions (migration 046) must cause ZERO writes inside the user's
+   * In-place sessions (migration 047) must cause ZERO writes inside the user's
    * real checkout, so theirs lives in the app data dir instead, keyed by
    * sessionId (stable across respawns; removed on teardown). Flow steps have no
    * session row (getDbSession → undefined) and are never in-place, so they
@@ -920,7 +920,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // The PreToolUse `'*'` shell-approval hook is delivered INLINE via the
     // `--settings '<json>'` flag assembled in buildCommandArgs (see the parity
     // table + resolveInlineGatingHooks) — nothing is written into the working
-    // tree, which is what allows in-place sessions (migration 046) on this
+    // tree, which is what allows in-place sessions (migration 047) on this
     // substrate. Here we only STRIP a legacy on-disk entry an OLDER build may
     // have written into `<worktree>/.claude/settings.json`: flag-tier hooks are
     // ADDITIVE to file-based hooks, so a surviving legacy entry would make every

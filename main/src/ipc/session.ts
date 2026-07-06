@@ -460,7 +460,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const requestedModel = typeof request.claudeConfig?.model === 'string' ? request.claudeConfig.model : undefined;
       const requestedFastMode = request.claudeConfig?.fastMode === true;
 
-      // Resolve where this quick session works (migration 046): the per-launch
+      // Resolve where this quick session works (migration 047): the per-launch
       // request wins when valid, otherwise the global Settings default (which
       // floors to 'worktree'). An in-place session skips worktree provisioning
       // and runs directly in the project checkout. BOTH substrates support
@@ -501,7 +501,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // until the matching session arrives or the timeout fires.
       const session = await new Promise<import('../types/session').Session>((resolve, reject) => {
         const suffixed = new RegExp(`/${branchName}-\\d+$`);
-        // In-place sessions (migration 046) have worktreePath === the project
+        // In-place sessions (migration 047) have worktreePath === the project
         // path, never `/${branchName}`, so the path match above can never fire for
         // them and the promise would time out. Fall back to the session NAME:
         // TaskQueue sets it to the worktree template (branchName); ensureUniqueNames
@@ -921,7 +921,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         let cleanupMessage = '';
         
         // Clean up the worktree if session has one, but NOT for main-repo sessions
-        // (singleton dashboard) or in-place sessions (migration 046) — an in-place
+        // (singleton dashboard) or in-place sessions (migration 047) — an in-place
         // session's worktree_path IS the user's real checkout, which must never be
         // torn down by `git worktree remove`.
         if (dbSession.worktree_name && dbSession.project_id && !dbSession.is_main_repo && !dbSession.in_place) {
@@ -978,7 +978,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       };
 
       // Queue the cleanup task if we have worktree cleanup to do. In-place
-      // sessions (migration 046) have no worktree to remove — route them to the
+      // sessions (migration 047) have no worktree to remove — route them to the
       // immediate artifact-only cleanup instead of a bogus "cleaning worktree"
       // progress task (the callback's own guard would skip the removal anyway).
       if (dbSession.worktree_name && dbSession.project_id && !dbSession.is_main_repo && !dbSession.in_place) {

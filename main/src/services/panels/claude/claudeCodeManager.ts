@@ -739,7 +739,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // run's workflow_path → quick sessions / custom flows write nothing.
       // worktreePath is recorded by sessionId so cleanupCliResources can remove it.
       //
-      // SKIP entirely for an in-place session (migration 046): its worktree IS the
+      // SKIP entirely for an in-place session (migration 047): its worktree IS the
       // user's real checkout, and the agent-overlay writer would dirty the real
       // `.claude/agents`. Leaving bundleWorktrees unset also makes the paired
       // removeBundleForSession a no-op (it early-returns on a missing entry), so no

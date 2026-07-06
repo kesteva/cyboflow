@@ -7,7 +7,7 @@
  *                 assumes.
  * - 'in-place'  — no worktree is created; the session works DIRECTLY in the
  *                 project checkout (sessions.worktree_path == project.path,
- *                 sessions.in_place = 1, migration 046). Opt-in via the launch
+ *                 sessions.in_place = 1, migration 047). Opt-in via the launch
  *                 wizard's Advanced section or the global Settings default.
  *
  * In-place sessions run on EITHER substrate (the interactive PTY gate rides the

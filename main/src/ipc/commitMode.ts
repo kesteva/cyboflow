@@ -37,7 +37,7 @@ export function registerCommitModeHandlers(db: DatabaseService, logger?: Logger,
     try {
       logger?.verbose(`Updating commit mode settings for session ${sessionId}`);
 
-      // In-place sessions (migration 046) share the user's real checkout and are
+      // In-place sessions (migration 047) share the user's real checkout and are
       // created with commit_mode 'disabled' — any auto/structured commit there
       // would land in the user's working copy (checkpoint: `git add -A` sweeps
       // unrelated dirty files; structured: the prompt template makes the agent

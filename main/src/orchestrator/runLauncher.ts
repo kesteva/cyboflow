@@ -600,7 +600,7 @@ export class RunLauncher {
       throw new Error(`RunLauncher.launch: session ${sessionId} not found (cannot host run ${runId})`);
     }
     // Workflow runs ALWAYS execute in an isolated worktree session. An in-place
-    // session (migration 046) shares the user's real checkout, and the singleton
+    // session (migration 047) shares the user's real checkout, and the singleton
     // is_main_repo dashboard session has no dedicated worktree either — neither can
     // host a run without mutating unrelated tracked files. This single seam covers
     // runs.start / runs.restart / programmatic callers; the __quick__ sentinel never

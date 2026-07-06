@@ -724,7 +724,7 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
     // while the chain was still settling).
     await waitFor(() => {
       // worktreeMode is pinned — a flow-host session ignores the global in-place
-      // default (migration 046).
+      // default (migration 047).
       expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1, worktreeMode: 'worktree' });
     }, { timeout: 5000 });
     await waitFor(() => {

@@ -16,7 +16,7 @@ export class PromptEnhancer {
    * @returns The enhanced prompt with structured commit instructions if applicable
    */
   enhancePromptForStructuredCommit(prompt: string, dbSession: { id: string; commit_mode?: string; commit_mode_settings?: string; in_place?: boolean }): string {
-    // In-place sessions (migration 046) share the user's real checkout — the
+    // In-place sessions (migration 047) share the user's real checkout — the
     // structured template tells the agent to `git commit` in its cwd, which here
     // would commit into the user's working copy (and may sweep unrelated dirty
     // files). Never enhance for them, regardless of the persisted commit_mode

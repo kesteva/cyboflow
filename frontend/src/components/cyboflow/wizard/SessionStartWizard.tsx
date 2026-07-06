@@ -253,7 +253,7 @@ export default function SessionStartWizard(): React.JSX.Element {
   // Advanced (Configure ③, QUICK only): per-session workspace override. 'inherit'
   // → omit `worktreeMode` (createQuick floors to the global quickSessionWorktreeMode
   // Settings default); an explicit choice threads into useQuickSession →
-  // sessions.in_place (migration 046). Both substrates support 'in-place' (the
+  // sessions.in_place (migration 047). Both substrates support 'in-place' (the
   // interactive gate rides the inline `--settings` flag — no checkout writes).
   // Default 'inherit' keeps launches byte-identical.
   const [worktreeModeOverride, setWorktreeModeOverride] = useState<'inherit' | QuickSessionWorktreeMode>('inherit');
@@ -970,7 +970,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                         'Use global setting' omits worktreeMode (createQuick floors to
                         the Settings default); 'In place' skips worktree creation and
                         works directly in the checkout (sessions.in_place, migration
-                        046). Available on both substrates — the interactive gate
+                        047). Available on both substrates — the interactive gate
                         rides the inline --settings flag, no checkout writes. */}
                     <div className="flex flex-col gap-2">
                       <div className="flex flex-col gap-0.5">

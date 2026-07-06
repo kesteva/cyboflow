@@ -117,7 +117,7 @@ export class ExecutionTracker extends EventEmitter {
         this.logger?.verbose(`Using legacy autoCommit (${session.autoCommit}) -> commit mode: ${commitMode}`);
       }
 
-      // Belt-and-braces: in-place sessions (migration 046) share the user's real
+      // Belt-and-braces: in-place sessions (migration 047) share the user's real
       // checkout, so a checkpoint `git add -A` would commit their unrelated dirty
       // files. create-quick already forces commitMode 'disabled' for them, but this
       // backstops any later per-session commit-mode edit — an in-place session can

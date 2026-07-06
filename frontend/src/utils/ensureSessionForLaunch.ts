@@ -41,7 +41,7 @@
  *
  * IN-PLACE SAFETY: a workflow run may NEVER execute on the raw project checkout,
  * so the reuse short-circuit additionally SKIPS any selected session that is
- * `inPlace` (works directly in the checkout, migration 046) or `isMainRepo` (the
+ * `inPlace` (works directly in the checkout, migration 047) or `isMainRepo` (the
  * dashboard singleton), falling through to a fresh worktree-backed session. And
  * every session this helper CREATES pins `worktreeMode: 'worktree'` explicitly, so
  * a flow-host session ignores the global in-place default. This mirrors the

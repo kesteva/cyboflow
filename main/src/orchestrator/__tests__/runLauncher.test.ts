@@ -1690,7 +1690,7 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
     return { registry, workflowId, createRunSpy };
   }
 
-  it('refuses to host a run in an in-place session (migration 046 guard)', async () => {
+  it('refuses to host a run in an in-place session (migration 047 guard)', async () => {
     await withTempDir('runlauncher-session-', async (tmpDir) => {
       const db = makeSessionDb();
       const adapter = dbAdapter(db);

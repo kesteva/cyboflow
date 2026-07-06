@@ -10,7 +10,7 @@
  * FIRES and BLOCKS (exit 2 stopped the tool call), and flag-tier hooks are
  * ADDITIVE to file-based hooks (user hooks keep firing). Delivering the gate
  * inline means NOTHING is written into the working tree — the property that
- * unlocks in-place sessions (migration 046), whose working tree is the user's
+ * unlocks in-place sessions (migration 047), whose working tree is the user's
  * real checkout.
  *
  * DELIVERY (legacy): older builds wrote the same entry into the worktree's

@@ -931,7 +931,7 @@ describe('InteractiveClaudeManager', () => {
       await spawn;
     });
 
-    it('in-place session (migration 046): skips mcpEnabler.enable so the user\'s real .claude/settings.local.json is never touched', async () => {
+    it('in-place session (migration 047): skips mcpEnabler.enable so the user\'s real .claude/settings.local.json is never touched', async () => {
       const enableSpy = vi.spyOn(InteractiveMcpEnabler.prototype, 'enable');
       const m = new TestableInteractiveClaudeManager(
         createMockSessionManager({

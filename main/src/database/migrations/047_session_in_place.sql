@@ -1,4 +1,4 @@
--- 046_session_in_place.sql
+-- 047_session_in_place.sql
 -- Opt-out worktree isolation for quick sessions ("in-place" sessions).
 --
 -- in_place = 1 marks a session whose worktree_path IS the project checkout —

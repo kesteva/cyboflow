@@ -334,7 +334,7 @@ export class ConfigManager extends EventEmitter {
   /**
    * Global default for where QUICK sessions work: 'worktree' (dedicated git
    * worktree, the isolation every other feature assumes) or 'in-place' (work
-   * directly in the project checkout — sessions.in_place, migration 046).
+   * directly in the project checkout — sessions.in_place, migration 047).
    * Floors to 'worktree' when unset OR when the persisted value is not a valid
    * mode (config.json is user-editable). Read by the sessions:create-quick
    * handler when the request omits worktreeMode; the wizard's per-launch

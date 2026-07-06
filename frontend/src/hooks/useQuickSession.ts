@@ -113,7 +113,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           // INCLUDING `[]` ("disable everything"); forward that distinction as-is.
           ...(disabledMcpServers && disabledMcpServers.length > 0 ? { disabledMcpServers } : {}),
           ...(enabledPlugins !== undefined ? { enabledPlugins } : {}),
-          // Workspace choice (wizard Advanced) → sessions.in_place (migration 046).
+          // Workspace choice (wizard Advanced) → sessions.in_place (migration 047).
           // Only sent when explicitly chosen; omitted → the server floors to the
           // global quickSessionWorktreeMode default.
           ...(worktreeMode ? { worktreeMode } : {}),

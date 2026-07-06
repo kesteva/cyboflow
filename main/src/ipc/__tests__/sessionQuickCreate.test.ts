@@ -248,7 +248,7 @@ function makeServices(opts?: {
     archiveProgressManager: undefined,
     // Demo-mode probe used by the eager-spawn + sessions:input interactive
     // branches (gates the real PTY spawn/relay). Off in these tests so the live
-    // interactive path runs as before. getQuickSessionWorktreeMode (migration 046)
+    // interactive path runs as before. getQuickSessionWorktreeMode (migration 047)
     // is read by create-quick to decide worktree vs in-place — floored to 'worktree'
     // here so these tests exercise the ordinary worktree-backed path.
     configManager: { isDemoMode: () => false, getQuickSessionWorktreeMode: () => 'worktree' },
@@ -578,10 +578,10 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
 });
 
 // ---------------------------------------------------------------------------
-// B2. sessions:create-quick handler - worktree mode (migration 046)
+// B2. sessions:create-quick handler - worktree mode (migration 047)
 // ---------------------------------------------------------------------------
 
-describe('sessions:create-quick handler - worktree mode (migration 046)', () => {
+describe('sessions:create-quick handler - worktree mode (migration 047)', () => {
   /** Swap the harness configManager for worktree-mode-specific fakes. */
   function swapConfigManager(services: AppServices, configManager: Record<string, unknown>): void {
     (services as unknown as { configManager: Record<string, unknown> }).configManager = configManager;

@@ -1,5 +1,5 @@
 /**
- * ConfigManager.quickSessionWorktreeMode coverage (migration 046 — opt-out
+ * ConfigManager.quickSessionWorktreeMode coverage (migration 047 — opt-out
  * worktree isolation for quick sessions).
  *
  * This suite proves the getter contract:
