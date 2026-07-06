@@ -9,6 +9,7 @@ const runEvalQuery = vi.fn();
 const reviewItemsListQuery = vi.fn();
 const relayInputMutate = vi.fn();
 const restartMutate = vi.fn();
+const retryStepMutate = vi.fn();
 const showError = vi.fn();
 
 vi.mock('../../../trpc/client', () => ({
@@ -22,6 +23,7 @@ vi.mock('../../../trpc/client', () => ({
       runs: {
         relayInput: { mutate: (...a: unknown[]) => relayInputMutate(...a) },
         restart: { mutate: (...a: unknown[]) => restartMutate(...a) },
+        retryStep: { mutate: (...a: unknown[]) => retryStepMutate(...a) },
       },
     },
   },
@@ -98,6 +100,8 @@ beforeEach(() => {
   relayInputMutate.mockResolvedValue({ success: true });
   restartMutate.mockReset();
   restartMutate.mockResolvedValue({ runId: 'run-2', worktreePath: '/w', branchName: 'b' });
+  retryStepMutate.mockReset();
+  retryStepMutate.mockResolvedValue({ delivered: true, stepId: 'step-1' });
   showError.mockReset();
 });
 
@@ -220,6 +224,39 @@ describe('WorkflowSummaryPanel', () => {
     // Close out is always available; Restart requires the swap handler.
     expect(await screen.findByTestId('run-summary-close-out')).toBeInTheDocument();
     expect(screen.queryByTestId('run-summary-restart')).not.toBeInTheDocument();
+  });
+
+  // ---- Retry failed step (failed + programmatic state only) -----------------
+
+  it('shows the Retry-failed-step CTA for a failed programmatic run', async () => {
+    renderPanel({ variant: 'failed', executionModel: 'programmatic' });
+    expect(await screen.findByTestId('run-summary-retry-step')).toBeInTheDocument();
+  });
+
+  it('hides the Retry-failed-step CTA for an orchestrated run', async () => {
+    renderPanel({ variant: 'failed', executionModel: 'orchestrated' });
+    await screen.findByTestId('run-summary-failed-ctas');
+    expect(screen.queryByTestId('run-summary-retry-step')).not.toBeInTheDocument();
+  });
+
+  it('hides the Retry-failed-step CTA when executionModel is not provided', async () => {
+    renderPanel({ variant: 'failed' });
+    await screen.findByTestId('run-summary-failed-ctas');
+    expect(screen.queryByTestId('run-summary-retry-step')).not.toBeInTheDocument();
+  });
+
+  it('calls runs.retryStep with the runId when the Retry CTA is clicked', async () => {
+    renderPanel({ variant: 'failed', executionModel: 'programmatic' });
+    fireEvent.click(await screen.findByTestId('run-summary-retry-step'));
+    await waitFor(() => expect(retryStepMutate).toHaveBeenCalledWith({ runId: 'run-1' }));
+    expect(showError).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a no-op retry as an error', async () => {
+    retryStepMutate.mockResolvedValue({ noOp: true, reason: 'not_retryable' });
+    renderPanel({ variant: 'failed', executionModel: 'programmatic' });
+    fireEvent.click(await screen.findByTestId('run-summary-retry-step'));
+    await waitFor(() => expect(showError).toHaveBeenCalled());
   });
 
   it('shows a no-usage note when the run recorded zero tokens', async () => {

@@ -117,6 +117,14 @@ interface WorkflowSummaryPanelProps {
   status?: string;
   /** 'sdk' | 'interactive' — the secondary CTA shows for interactive only. */
   substrate?: string;
+  /**
+   * 'orchestrated' | 'programmatic' (workflow_runs.execution_model) — the
+   * failed-state "Retry failed step" CTA (runs.retryStep, crash-safe resume
+   * at the SAME row) is programmatic-only; orchestrated runs have no
+   * step-boundary resume target, so the CTA is hidden for them (and when
+   * absent/undefined, e.g. a caller that hasn't threaded the field yet).
+   */
+  executionModel?: string | null;
   /** Human label for the finished flow (workflow name or run id fallback). */
   workflowLabel: string;
   /**
@@ -148,8 +156,10 @@ interface WorkflowSummaryPanelProps {
  *   - 'complete' → "Workflow complete": PRIMARY "Complete workflow" (runs.end via
  *     RunEndDialog); INTERACTIVE-ONLY "Request changes" (runs.relayInput into the
  *     live PTY — SDK runs have no live process, so it is hidden for them).
- *   - 'failed' → "Workflow failed": surfaces the failure reason; PRIMARY
- *     "Restart flow" (runs.restart, same session/worktree); secondary "Close out"
+ *   - 'failed' → "Workflow failed": surfaces the failure reason; PROGRAMMATIC-ONLY
+ *     "Retry failed step" (runs.retryStep, crash-safe resume of the SAME run row
+ *     at the failed step) leads when offered; PRIMARY "Restart flow" (runs.restart,
+ *     mints a new run in the same session/worktree); secondary "Close out"
  *     (runs.end is a no-op on a terminal run, so this is pure navigation).
  *   - 'review' → "Ready for review": the run is STILL running at an open human gate,
  *     so the summary — including the eval score, which lands exactly at this step —
@@ -163,6 +173,7 @@ export function WorkflowSummaryPanel({
   projectId,
   status,
   substrate,
+  executionModel,
   workflowLabel,
   variant = 'complete',
   errorMessage,
@@ -184,10 +195,13 @@ export function WorkflowSummaryPanel({
   const [sent, setSent] = useState(false);
   // "Restart flow" busy latch (failed state only).
   const [restarting, setRestarting] = useState(false);
+  // "Retry failed step" busy latch (failed + programmatic state only).
+  const [retrying, setRetrying] = useState(false);
 
   const isInteractive = substrate === 'interactive';
   const isFailed = variant === 'failed';
   const isReview = variant === 'review';
+  const isProgrammatic = executionModel === 'programmatic';
 
   useEffect(() => {
     let alive = true;
@@ -335,6 +349,36 @@ export function WorkflowSummaryPanel({
     }
   };
 
+  const handleRetryStep = async (): Promise<void> => {
+    if (retrying) return;
+    setRetrying(true);
+    try {
+      // runs.retryStep revives the SAME run row at the failed step via the
+      // crash-safe resume machinery (unlike runs.restart, which mints a new
+      // run) — programmatic runs only. On delivery the revived run emits
+      // status events that swap this panel away via the store refresh, so
+      // there is nothing further to do here beyond leaving `retrying` latched.
+      const result = await trpc.cyboflow.runs.retryStep.mutate({ runId });
+      if ('noOp' in result) {
+        const message =
+          result.reason === 'not_retryable'
+            ? 'This run is not in a retryable state.'
+            : result.reason === 'no_target_step'
+              ? 'No failed step to retry.'
+              : `The failed step could not be retried (${result.reason}).`;
+        useErrorStore.getState().showError({ title: 'Retry failed', error: message });
+        setRetrying(false);
+        return;
+      }
+    } catch (err: unknown) {
+      useErrorStore.getState().showError({
+        title: 'Retry failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      setRetrying(false);
+    }
+  };
+
   // Header treatment per variant (icon + accent + title). One panel, three states.
   const header =
     variant === 'failed'
@@ -470,6 +514,19 @@ export function WorkflowSummaryPanel({
       <div className="mt-auto pt-5">
         {isReview ? null : isFailed ? (
           <div className="flex items-center gap-2" data-testid="run-summary-failed-ctas">
+            {isProgrammatic && (
+              <button
+                type="button"
+                data-testid="run-summary-retry-step"
+                onClick={() => void handleRetryStep()}
+                disabled={retrying}
+                className="inline-flex items-center gap-1.5 rounded-button bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+                title="Resume this same run at the failed step via crash-safe resume"
+              >
+                <RotateCcw size={15} />
+                {retrying ? 'Retrying…' : 'Retry failed step'}
+              </button>
+            )}
             {onRestarted && (
               <button
                 type="button"

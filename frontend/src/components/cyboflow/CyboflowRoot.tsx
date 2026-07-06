@@ -358,6 +358,9 @@ export function CyboflowRoot({ projectId }: CyboflowRootProps) {
                       projectId={projectId}
                       status={activeRun?.status}
                       substrate={activeRun?.substrate}
+                      // Gates the programmatic-only "Retry failed step" CTA
+                      // (runs.retryStep); NULL on legacy pre-032 rows hides it.
+                      executionModel={activeRun?.execution_model ?? null}
                       workflowLabel={activeRun?.workflowName ?? activeRunId}
                       variant={summaryVariant}
                       errorMessage={activeRun?.error_message}

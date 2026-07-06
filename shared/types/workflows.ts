@@ -187,6 +187,14 @@ export interface WorkflowRunListRow {
    */
   model?: string | null;
   /**
+   * Execution model stamped at creation (migration 032): 'programmatic' runs are
+   * host-driven DAG walks, 'orchestrated' runs are single agent turns. Surfaced on
+   * the list row so the failed-run summary can gate its "Retry failed step" CTA
+   * (runs.retryStep is programmatic-only). Optional + additive, mirroring
+   * `substrate?` (fixtures unaffected). NULL on legacy pre-032 rows.
+   */
+  execution_model?: 'orchestrated' | 'programmatic' | null;
+  /**
    * Per-run agent permission mode (resolved + stamped at creation by
    * permissionModeResolver, mutable at runtime via runs.setPermissionMode — ISSUE
    * #2). Surfaced on the list row so the run composer's PermissionModePill can
