@@ -273,8 +273,16 @@ export const reviewItemsRouter = router({
         // catastrophic-cap item) the moment it lands, emptying the summary
         // drill-down and hiding it from the blocking count. Exempt them so they
         // surface (and gate) even on a terminal run; the human still dismisses them.
+        //
+        // BLOCKING FINDINGS (ri.kind='finding' AND ri.blocking=1) are ALSO exempt:
+        // a blocking finding gates a run until the human triages it, so it must reach
+        // the Review Queue (same rationale as the eval exemption). Scoped to findings
+        // ONLY — the orphan-hide still drops an un-actionable blocking permission /
+        // decision gate on a terminal run (there is no live run to resume, so it must
+        // not clutter the queue or inflate the blocking count). Non-blocking findings
+        // stay Insights-only via the frontend's separate collapsed section.
         clauses.push(
-          `NOT (ri.status = 'pending' AND ri.staged_at IS NULL AND ri.run_id IS NOT NULL AND r.status IN ${TERMINAL_RUN_STATUSES_SQL_IN} AND ri.source NOT LIKE 'agent:eval%')`,
+          `NOT (ri.status = 'pending' AND ri.staged_at IS NULL AND ri.run_id IS NOT NULL AND r.status IN ${TERMINAL_RUN_STATUSES_SQL_IN} AND ri.source NOT LIKE 'agent:eval%' AND NOT (ri.kind = 'finding' AND ri.blocking = 1))`,
         );
       }
       const rows = db
@@ -428,6 +436,12 @@ export const reviewItemsRouter = router({
 
   /**
    * Dismiss a review item (triage — cruft). Forwards op='dismiss' as actor='user'.
+   *
+   * AGGREGATE-UNBLOCK (mirrors resolve): dismissing a BLOCKING, run-bound item
+   * (e.g. a blocking finding the programmatic controller parked on) also clears it
+   * from the pending-blocking count, so the run must auto-resume once no other
+   * blocking item remains — otherwise dismissing the last blocking finding would
+   * strand the parked run forever.
    */
   dismiss: protectedProcedure
     .input(
@@ -437,8 +451,11 @@ export const reviewItemsRouter = router({
         resolution: z.string().nullable().optional(),
       }),
     )
-    .mutation(async ({ input, ctx }): Promise<{ reviewItemId: string }> => {
+    .mutation(async ({ input, ctx }): Promise<{ reviewItemId: string; resumed: boolean }> => {
       const db = requireDb(ctx.db, 'dismiss');
+      const before = db
+        .prepare('SELECT run_id AS runId, blocking FROM review_items WHERE id = ? AND project_id = ?')
+        .get(input.reviewItemId, input.projectId) as { runId?: string | null; blocking?: number } | undefined;
       assertNotOpenQuestionGate(db, input.reviewItemId, input.projectId);
       try {
         const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
@@ -447,7 +464,11 @@ export const reviewItemsRouter = router({
           reviewItemId: input.reviewItemId,
           ...(input.resolution !== undefined ? { resolution: input.resolution } : {}),
         });
-        return { reviewItemId };
+        let resumed = false;
+        if (before?.blocking === 1 && before.runId) {
+          resumed = await HumanStepManager.getInstance().maybeResumeRun(before.runId);
+        }
+        return { reviewItemId, resumed };
       } catch (err) {
         rethrowAsTRPCError(err);
       }

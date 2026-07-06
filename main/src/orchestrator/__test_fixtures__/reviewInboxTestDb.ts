@@ -72,7 +72,7 @@ export function seedBlockingReviewItem(
   args: {
     id: string;
     runId: string;
-    kind: 'permission' | 'decision';
+    kind: 'permission' | 'decision' | 'finding' | 'human_task';
     status?: 'pending' | 'resolved' | 'dismissed';
     source?: string;
     payloadJson?: string | null;

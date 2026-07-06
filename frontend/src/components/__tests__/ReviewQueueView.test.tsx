@@ -5,11 +5,14 @@ import ReviewQueueView from '../ReviewQueueView';
 import { ErrorBoundary } from '../ErrorBoundary';
 import type { Approval } from '../../../../shared/types/approvals';
 import type { QueueItem } from '../../utils/reviewQueueSelectors';
+import type { ReviewItem, ReviewItemKind } from '../../../../shared/types/reviews';
 import { useReviewQueueSlice } from '../../stores/reviewQueueSlice';
 
 // Mutable state shared between mock factory and test helpers
 let mockQueue: Approval[] = [];
 const mockInit = vi.fn(() => () => {});
+// Project-scoped review_items the (mocked) reviewItemsSlice returns.
+let mockReviewItems: ReviewItem[] = [];
 
 // Default view: map each approval to a single non-blocking QueueItem
 function buildView(): { blocking: QueueItem[]; normal: QueueItem[] } {
@@ -79,6 +82,48 @@ vi.mock('../ReviewQueue/PendingApprovalCard', () => ({
   },
 }));
 
+// Mock the project-scoped review_items slice — return items from the mutable var
+// and stub init() to a no-op cleanup (avoids the real trpc list/subscribe path).
+vi.mock('../../stores/reviewItemsSlice', () => {
+  const useReviewItemsSlice = (selector: (s: { items: ReviewItem[] }) => unknown) =>
+    selector({ items: mockReviewItems });
+  useReviewItemsSlice.getState = () => ({ init: () => () => {} });
+  return { useReviewItemsSlice };
+});
+
+// Mock ReviewItemCard to a minimal stub exposing kind/blocking/id so partition +
+// counting assertions don't depend on the real card's chrome.
+vi.mock('../ReviewQueue/ReviewItemCard', () => ({
+  ReviewItemCard: ({ item }: { item: ReviewItem }) => (
+    <div data-testid="review-item" data-kind={item.kind} data-blocking={String(item.blocking)} data-id={item.id} />
+  ),
+}));
+
+function makeRI(kind: ReviewItemKind, id: string, blocking: boolean): ReviewItem {
+  return {
+    id,
+    project_id: 5,
+    run_id: 'run-x',
+    entity_type: null,
+    entity_id: null,
+    kind,
+    status: 'pending',
+    blocking,
+    title: `${kind} ${id}`,
+    body: null,
+    severity: null,
+    priority: null,
+    staged_at: null,
+    selected: false,
+    source: null,
+    payload: null,
+    created_at: '2026-01-01T00:00:00.000Z',
+    updated_at: '2026-01-01T00:00:00.000Z',
+    resolved_by: null,
+    resolution: null,
+  };
+}
+
 // Fixture approval for onboarding dismissal tests
 const onboardingApproval: Approval = {
   id: 'onb-1',
@@ -94,6 +139,7 @@ const onboardingApproval: Approval = {
 describe('ReviewQueueView', () => {
   beforeEach(() => {
     mockQueue = [];
+    mockReviewItems = [];
     capturedOnDecide = undefined;
     mockInit.mockClear();
     // Reset the slice's runStatusMap so tests start from a clean state.
@@ -270,6 +316,34 @@ describe('ReviewQueueView', () => {
     await waitFor(() => {
       expect(screen.queryByRole('status')).not.toBeInTheDocument();
     });
+  });
+
+  // ---------------------------------------------------------------------------
+  // FIX 2 — blocking findings surface in the Blocking section + are counted
+  // ---------------------------------------------------------------------------
+
+  it('renders a BLOCKING finding in the Blocking section and counts it as blocking', () => {
+    mockReviewItems = [makeRI('finding', 'rvw_bf', true)];
+    render(<ReviewQueueView projectId={5} />);
+
+    const blockingSection = screen.getByTestId('review-blocking-section');
+    const card = screen.getByTestId('review-item');
+    expect(blockingSection).toContainElement(card);
+    expect(card).toHaveAttribute('data-kind', 'finding');
+    expect(card).toHaveAttribute('data-blocking', 'true');
+    // Counted as blocking (1) and does NOT appear in the collapsed Findings section.
+    expect(screen.getByTestId('review-blocking-count')).toHaveTextContent('1 blocking');
+    expect(screen.queryByTestId('review-findings-section')).not.toBeInTheDocument();
+  });
+
+  it('keeps a NON-blocking finding in the collapsed Findings section (not blocking)', () => {
+    mockReviewItems = [makeRI('finding', 'rvw_nbf', false)];
+    render(<ReviewQueueView projectId={5} />);
+
+    expect(screen.getByTestId('review-findings-section')).toBeInTheDocument();
+    expect(screen.queryByTestId('review-blocking-section')).not.toBeInTheDocument();
+    expect(screen.getByTestId('review-blocking-count')).toHaveTextContent('0 blocking');
+    expect(screen.getByTestId('review-finding-count')).toHaveTextContent('1 findings');
   });
 });
 

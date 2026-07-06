@@ -172,6 +172,19 @@ export class WorkflowController {
           continue;
         }
 
+        // Blocking-review-items checkpoint: park before starting this step if the
+        // PREVIOUS step left a pending BLOCKING review item (e.g. a blocking finding
+        // the agent recorded). The host parks the run awaiting_review and awaits the
+        // item(s) clearing, then resumes — so the pipeline can't march past a defect
+        // the human must clear. Absent host seam (tests / non-programmatic) ⇒ no
+        // parking (fast no-op). A cancel while parked ends the walk 'canceled'.
+        if (this.host.awaitBlockingReviewItems) {
+          const gate = await this.host.awaitBlockingReviewItems(runId, signal);
+          if (gate === 'canceled' || signal?.aborted) {
+            return this.finish({ outcome: 'canceled', steps, failedStepId: step.id }, runId);
+          }
+        }
+
         // Closing-stage gate: the sprint has incomplete/blocked tasks (a fan-out
         // settled with failed lanes). Skip every subsequent AUTOMATED step and go
         // straight to the next human gate. A human-gated step (pure gate or an

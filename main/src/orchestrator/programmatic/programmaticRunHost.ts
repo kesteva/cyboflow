@@ -31,6 +31,7 @@ import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { LoggerLike } from '../types';
 import type { ControllerHost, ControllerStepContext, FanOutDriver, HumanGateDecision, StepReport, TriageDecision } from './types';
 import type { HumanGateResolver } from './humanGate';
+import type { BlockingItemsResolver } from './blockingItemsGate';
 import type { MonitorSession } from './monitor';
 import { buildAssistantTextEvent } from './syntheticEvents';
 
@@ -47,6 +48,14 @@ export interface ProgrammaticRunHostArgs {
   projectId: number;
   reporter: StepReporter;
   gate: HumanGateResolver;
+  /**
+   * Optional blocking-review-items checkpoint (Fix: blocking findings must block).
+   * When present the host parks the run at each step boundary while a pending
+   * blocking review_item exists (e.g. a blocking finding) and awaits it clearing.
+   * Absent ⇒ the controller never parks for review items (byte-identical to today
+   * for tests / any host built without it).
+   */
+  blockingGate?: BlockingItemsResolver;
   /**
    * The ON-DEMAND monitor (the monitor-unify refactor). When present, the host
    * routes `triageFailure` to `monitor.triage` (which reads the WHOLE run history
@@ -104,6 +113,16 @@ export class ProgrammaticRunHost implements ControllerHost {
       step,
       signal: ctx.signal,
     });
+  }
+
+  /**
+   * Step-boundary checkpoint: park the run while a pending BLOCKING review_item
+   * exists (e.g. a blocking finding), then resume. Delegates to the injected
+   * blockingGate; a run built without one proceeds immediately (fast no-op).
+   */
+  async awaitBlockingReviewItems(runId: string, signal?: AbortSignal): Promise<'proceed' | 'canceled'> {
+    if (!this.args.blockingGate) return 'proceed';
+    return this.args.blockingGate.awaitClear({ runId, projectId: this.args.projectId, signal });
   }
 
   /**

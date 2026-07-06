@@ -241,6 +241,18 @@ export interface ControllerHost {
    */
   fanOut?: FanOutDriver;
 
+  /**
+   * Optional blocking-review-items checkpoint. The controller calls this at each
+   * step boundary (BEFORE it begins the next step) so a run PARKS when the agent
+   * recorded a PENDING BLOCKING review_item (e.g. a blocking finding) during the
+   * previous step. The production host parks the run awaiting_review and awaits the
+   * item(s) clearing, then resumes and returns 'proceed'; 'canceled' when the run
+   * was canceled while parked. Absent (tests / non-programmatic) ⇒ the controller
+   * never parks for review items (today's behavior). Fail-soft is the host's
+   * responsibility; the controller only branches on the returned verdict.
+   */
+  awaitBlockingReviewItems?(runId: string, signal?: AbortSignal): Promise<'proceed' | 'canceled'>;
+
   /** Optional structured log sink; absent ⇒ the controller stays silent. */
   log?(level: 'info' | 'warn', message: string): void;
 }

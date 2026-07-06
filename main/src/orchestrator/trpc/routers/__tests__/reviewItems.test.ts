@@ -743,3 +743,60 @@ describe('cyboflow.reviewItems.resolve — programmatic human-gate outcome', () 
     expect(row.resolution).toBe('approve');
   });
 });
+
+// ---------------------------------------------------------------------------
+// FIX 2 — blocking findings block programmatic runs + surface in the queue
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.reviewItems — blocking findings', () => {
+  function seedRunAndFinding(
+    db: Database.Database,
+    opts: { runId: string; runStatus: string; blocking: boolean; findingId: string; source?: string },
+  ): void {
+    db.prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name) VALUES ('wf-p', 1, 'planner')`).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, branch_name, status, policy_json)
+       VALUES (?, 'wf-p', 1, '/w', 'b', ?, '{}')`,
+    ).run(opts.runId, opts.runStatus);
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, entity_type, entity_id, kind, status, blocking,
+          title, body, severity, source, payload_json, created_at, updated_at, resolved_by, resolution)
+       VALUES (?, 1, ?, NULL, NULL, 'finding', 'pending', ?, 'A finding', 'body', 'error', ?, NULL, ?, ?, NULL, NULL)`,
+    ).run(opts.findingId, opts.runId, opts.blocking ? 1 : 0, opts.source ?? 'agent:executor', now, now);
+  }
+
+  it('dismiss of a blocking, run-bound finding auto-resumes the parked run', async () => {
+    const { caller, db } = buildCaller();
+    seedRunAndFinding(db, { runId: 'run-bf', runStatus: 'awaiting_review', blocking: true, findingId: 'rvw_bf' });
+
+    const res = await caller.cyboflow.reviewItems.dismiss({ projectId: 1, reviewItemId: 'rvw_bf' });
+
+    expect(res.resumed).toBe(true);
+    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-bf') as { status: string }).status).toBe(
+      'running',
+    );
+  });
+
+  it('list surfaces a blocking finding even when its bound run went terminal', async () => {
+    const { caller, db } = buildCaller();
+    // Blocking finding on a FAILED run — the orphan-hide exempts blocking items.
+    seedRunAndFinding(db, { runId: 'run-t', runStatus: 'failed', blocking: true, findingId: 'rvw_block' });
+    // Non-blocking finding on the same terminal run — hidden by the orphan-hide.
+    seedRunAndFinding(db, { runId: 'run-t2', runStatus: 'failed', blocking: false, findingId: 'rvw_nonblock' });
+
+    const items = await caller.cyboflow.reviewItems.list({ projectId: 1, status: 'pending' });
+    const ids = items.map((i) => i.id);
+    expect(ids).toContain('rvw_block');
+    expect(ids).not.toContain('rvw_nonblock');
+  });
+
+  it('list surfaces a blocking finding on a running run (baseline)', async () => {
+    const { caller, db } = buildCaller();
+    seedRunAndFinding(db, { runId: 'run-run', runStatus: 'running', blocking: true, findingId: 'rvw_r' });
+
+    const items = await caller.cyboflow.reviewItems.list({ projectId: 1, status: 'pending' });
+    expect(items.map((i) => i.id)).toContain('rvw_r');
+  });
+});

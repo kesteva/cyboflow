@@ -259,6 +259,22 @@ describe('ReviewItemCard', () => {
     expect(mockResolve).not.toHaveBeenCalled();
   });
 
+  it('a BLOCKING finding renders Resolve & resume (routes to resolve, no outcome)', async () => {
+    render(<ReviewItemCard item={makeItem('finding', { id: 'rvw_bf', blocking: true })} />);
+    // Blocking findings get a distinct resolve-and-resume affordance (not the
+    // accept-routing legacy actions).
+    expect(screen.getByTestId('finding-resolve')).toHaveTextContent('Resolve');
+    expect(screen.queryByTestId('accept-finding')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('finding-resolve'));
+    await waitFor(() => expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_bf' }));
+  });
+
+  it('a non-blocking finding does NOT render the resolve-and-resume affordance', () => {
+    render(<ReviewItemCard item={makeItem('finding', { id: 'rvw_nbf', blocking: false })} />);
+    expect(screen.queryByTestId('finding-resolve')).not.toBeInTheDocument();
+    expect(screen.getByTestId('promote-to-task')).toBeInTheDocument();
+  });
+
   it('a finding with NO proposedTarget renders the legacy actions unchanged', () => {
     render(<ReviewItemCard item={makeItem('finding', { id: 'rvw_legacy' })} />);
     expect(screen.queryByTestId('proposed-target-chip')).not.toBeInTheDocument();

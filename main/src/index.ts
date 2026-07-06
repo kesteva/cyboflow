@@ -40,6 +40,7 @@ import { resolveArtifactCommitDir } from './orchestrator/artifactSnapshot';
 import { HumanStepManager } from './orchestrator/humanStepManager';
 import { DefaultProgrammaticRunner } from './orchestrator/programmatic/defaultProgrammaticRunner';
 import { ReviewQueueHumanGate } from './orchestrator/programmatic/humanGate';
+import { ReviewQueueBlockingItemsGate } from './orchestrator/programmatic/blockingItemsGate';
 import {
   DefaultMonitorSession,
   DefaultHistoryReader,
@@ -989,6 +990,17 @@ async function initializeServices() {
         void buildStepTransitionEvent(runId, stepId, status, cyboflowDb, cyboflowLogger),
     },
     gate: new ReviewQueueHumanGate(
+      HumanStepManager.getInstance(),
+      reviewItemChangeEvents,
+      reviewItemProjectChannel,
+      cyboflowLogger,
+    ),
+    // Blocking-review-items checkpoint: parks a programmatic run at each step
+    // boundary while a PENDING BLOCKING review_item exists (e.g. a blocking finding
+    // the agent recorded), awaits it clearing on reviewItemChangeEvents, then
+    // resumes. Reuses HumanStepManager for the park/resume/count primitives so the
+    // same aggregate-unblock invariant governs both gate decisions and findings.
+    blockingGate: new ReviewQueueBlockingItemsGate(
       HumanStepManager.getInstance(),
       reviewItemChangeEvents,
       reviewItemProjectChannel,

@@ -117,6 +117,46 @@ describe('WorkflowController', () => {
     ]);
   });
 
+  it('calls awaitBlockingReviewItems before each step and proceeds on "proceed"', async () => {
+    const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' })])]);
+    const runner = makeRunner();
+    const host = makeHost();
+    const gateCalls: string[] = [];
+    const hostWithCheckpoint: ControllerHost = {
+      ...host,
+      awaitBlockingReviewItems: async () => {
+        gateCalls.push('checkpoint');
+        return 'proceed';
+      },
+    };
+
+    const result = await new WorkflowController(runner, hostWithCheckpoint).run('r', d);
+
+    expect(result.outcome).toBe('completed');
+    // Checkpoint fires once before each of the two steps.
+    expect(gateCalls).toEqual(['checkpoint', 'checkpoint']);
+    expect(runner.calls.map((c) => c.id)).toEqual(['a', 'b']);
+  });
+
+  it('ends the walk canceled when a blocking-items checkpoint returns "canceled"', async () => {
+    const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' })])]);
+    const runner = makeRunner();
+    const host = makeHost();
+    let call = 0;
+    const hostWithCheckpoint: ControllerHost = {
+      ...host,
+      // proceed for step 'a', then cancel before step 'b'.
+      awaitBlockingReviewItems: async () => (call++ === 0 ? 'proceed' : 'canceled'),
+    };
+
+    const result = await new WorkflowController(runner, hostWithCheckpoint).run('r', d);
+
+    expect(result.outcome).toBe('canceled');
+    expect(result.failedStepId).toBe('b');
+    // 'a' ran; 'b' never did (parked-then-canceled before it started).
+    expect(runner.calls.map((c) => c.id)).toEqual(['a']);
+  });
+
   it('retries an agent step in place up to retries+1 attempts and then completes', async () => {
     const d = def([phase('p1', [step({ id: 'a', retries: 2 })])]);
     // Fail, fail, ok → succeeds on the 3rd attempt (within budget of 3).

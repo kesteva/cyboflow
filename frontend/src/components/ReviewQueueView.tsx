@@ -133,12 +133,19 @@ export default function ReviewQueueView({ projectId = null }: ReviewQueueViewPro
   // Partition the review_items by kind/status. Pending only — triaged items drop
   // out of the inbox. Permission items are rendered via the approval path above,
   // so they are excluded here to avoid a double-render.
-  const { decisionItems, humanTaskItems, findingItems } = useMemo(() => {
+  //
+  // Findings split by `blocking`: a BLOCKING finding parked a programmatic run, so
+  // it belongs in the prominent Blocking section (with a resolve-and-resume
+  // affordance), NOT the collapsed non-blocking Findings section. Non-blocking
+  // findings stay Insights-only in spirit (the collapsed section here).
+  const { decisionItems, humanTaskItems, blockingFindingItems, findingItems } = useMemo(() => {
     const pending = reviewItems.filter((it) => it.status === 'pending');
+    const findings = pending.filter((it): it is ReviewItem => it.kind === 'finding');
     return {
       decisionItems: pending.filter((it): it is ReviewItem => it.kind === 'decision'),
       humanTaskItems: pending.filter((it): it is ReviewItem => it.kind === 'human_task'),
-      findingItems: pending.filter((it): it is ReviewItem => it.kind === 'finding'),
+      blockingFindingItems: findings.filter((it) => it.blocking),
+      findingItems: findings.filter((it) => !it.blocking),
     };
   }, [reviewItems]);
 
@@ -152,11 +159,14 @@ export default function ReviewQueueView({ projectId = null }: ReviewQueueViewPro
     }
   }, [focusedIndex]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const reviewItemCount = decisionItems.length + humanTaskItems.length;
+  const reviewItemCount = decisionItems.length + humanTaskItems.length + blockingFindingItems.length;
   const totalCount = queue.length + reviewItemCount;
-  // Blocking = aged-blocking approvals + any blocking review_item (decision/human_task).
+  // Blocking = aged-blocking approvals + any blocking review_item
+  // (decision / human_task / blocking finding).
   const blockingReviewItems =
-    decisionItems.filter((it) => it.blocking).length + humanTaskItems.filter((it) => it.blocking).length;
+    decisionItems.filter((it) => it.blocking).length +
+    humanTaskItems.filter((it) => it.blocking).length +
+    blockingFindingItems.length;
   const blockingCount = blocking.length + blockingReviewItems;
   const isEmpty = totalCount === 0 && findingItems.length === 0;
 
@@ -188,8 +198,11 @@ export default function ReviewQueueView({ projectId = null }: ReviewQueueViewPro
             </div>
           ) : (
             <>
-              {/* Blocking approvals (aged) + blocking decisions/human-tasks. */}
-              {(blocking.length > 0 || decisionItems.length > 0 || humanTaskItems.length > 0) && (
+              {/* Blocking approvals (aged) + blocking decisions/human-tasks/findings. */}
+              {(blocking.length > 0 ||
+                decisionItems.length > 0 ||
+                humanTaskItems.length > 0 ||
+                blockingFindingItems.length > 0) && (
                 <section data-testid="review-blocking-section">
                   <h3 className="eyebrow mb-2 mt-3 text-status-error">Blocking</h3>
                   {blocking.map((item, i) => (
@@ -205,6 +218,9 @@ export default function ReviewQueueView({ projectId = null }: ReviewQueueViewPro
                     <ReviewItemCard key={it.id} item={it} />
                   ))}
                   {humanTaskItems.map((it) => (
+                    <ReviewItemCard key={it.id} item={it} />
+                  ))}
+                  {blockingFindingItems.map((it) => (
                     <ReviewItemCard key={it.id} item={it} />
                   ))}
                 </section>

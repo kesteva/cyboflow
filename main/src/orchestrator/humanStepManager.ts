@@ -220,6 +220,51 @@ export class HumanStepManager {
   }
 
   /**
+   * True when the run has at least one PENDING blocking review_item (any kind —
+   * decision gate, permission, human_task, OR a blocking finding). The programmatic
+   * blocking-items checkpoint (BlockingReviewItemsGate) reads this to decide whether
+   * a step boundary must park the run. Fail-soft: 0 (no gate) when the inbox table
+   * is absent.
+   */
+  hasPendingBlockingItems(runId: string): boolean {
+    if (!hasReviewItemsTable(this.db)) return false;
+    return countPendingBlockingReviewItems(this.db, runId) > 0;
+  }
+
+  /**
+   * Park a RUNNING programmatic run in awaiting_review because a PENDING blocking
+   * review_item exists for it (e.g. a blocking finding recorded mid-step). Unlike
+   * openHumanGate this does NOT co-write a decision item — the blocking item that
+   * triggered the park already exists. Guarded `WHERE status='running'` so it never
+   * disturbs a run that is already parked/terminal, and a no-op when the run has no
+   * pending blocking items (a benign race where they cleared first). Serialized on
+   * the SAME per-run queue as the gate transitions. Emits the awaiting_review
+   * run-status delta on a real transition.
+   *
+   * @returns true when the run actually transitioned running -> awaiting_review.
+   */
+  async parkForBlockingReview(runId: string): Promise<boolean> {
+    if (!hasReviewItemsTable(this.db)) return false;
+    return (await this.getQueue(runId).add(() => {
+      // Only park when there is genuinely something blocking (avoid parking a run
+      // whose blocking items cleared between the caller's check and this task).
+      if (countPendingBlockingReviewItems(this.db, runId) === 0) return false;
+      const now = new Date().toISOString();
+      const info = this.db
+        .prepare(
+          `UPDATE workflow_runs SET status = 'awaiting_review', updated_at = ?
+            WHERE id = ? AND status = 'running'`,
+        )
+        .run(now, runId) as { changes: number };
+      const parked = info.changes > 0;
+      if (parked) {
+        runStatusEvents.emit('changed', { runId, status: 'awaiting_review' } satisfies RunStatusChangedEvent);
+      }
+      return parked;
+    })) as boolean;
+  }
+
+  /**
    * Aggregate-unblock auto-resume — the resume HALF of resolveHumanGate, used by
    * the reviewItems tRPC router AFTER the item has already been resolved through
    * the ReviewItemRouter chokepoint (so the chokepoint owns the audit + emit, and

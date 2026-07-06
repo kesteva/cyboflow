@@ -261,6 +261,26 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
         );
       case 'finding':
       default:
+        // A BLOCKING finding parked a programmatic run (Fix: blocking findings must
+        // block). It needs a resolve affordance that clears it from the run's
+        // pending-blocking count and auto-resumes: Resolve (resolve → aggregate-
+        // unblock resume) + Dismiss (dismiss → aggregate-unblock resume). Non-blocking
+        // findings keep the legacy accept-routing actions below.
+        if (item.blocking) {
+          return (
+            <>
+              <Button variant="primary" size="sm" disabled={busy} onClick={handleResolve} data-testid="finding-resolve">
+                Resolve &amp; resume
+              </Button>
+              <Button variant="secondary" size="sm" disabled={busy} onClick={handleDismiss}>
+                Dismiss
+              </Button>
+              <Button variant="secondary" size="sm" disabled={busy} onClick={handlePromote} data-testid="promote-to-task">
+                Promote to task
+              </Button>
+            </>
+          );
+        }
         // Contextual primary action driven by the accept-routing hint:
         //   - no hint            → legacy Dismiss / Promote to task (unchanged).
         //   - 'backlog'          → Promote-to-task, relabelled 'Accept → task'.

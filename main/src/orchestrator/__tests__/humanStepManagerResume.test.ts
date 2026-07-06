@@ -127,6 +127,48 @@ describe('HumanStepManager.maybeResumeRun (reviewItems.resolve drive path)', () 
   });
 });
 
+describe('HumanStepManager.parkForBlockingReview + hasPendingBlockingItems', () => {
+  it('parks a RUNNING run in awaiting_review when a blocking finding is pending + emits changed', async () => {
+    const db = buildReviewInboxDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-p', 'running');
+    seedBlockingReviewItem(db, { id: 'rvw_f', runId: 'run-p', kind: 'finding' });
+
+    expect(mgr.hasPendingBlockingItems('run-p')).toBe(true);
+    const events = await captureStatusEvents('run-p', async () => {
+      const parked = await mgr.parkForBlockingReview('run-p');
+      expect(parked).toBe(true);
+    });
+    expect(runStatus(db, 'run-p')).toBe('awaiting_review');
+    expect(events).toEqual([{ runId: 'run-p', status: 'awaiting_review' }]);
+  });
+
+  it('is a no-op (false, no emit) when the run has no pending blocking items', async () => {
+    const db = buildReviewInboxDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-p', 'running');
+
+    expect(mgr.hasPendingBlockingItems('run-p')).toBe(false);
+    const events = await captureStatusEvents('run-p', async () => {
+      const parked = await mgr.parkForBlockingReview('run-p');
+      expect(parked).toBe(false);
+    });
+    expect(runStatus(db, 'run-p')).toBe('running');
+    expect(events).toEqual([]);
+  });
+
+  it('does NOT park a run that is not running (guarded WHERE status=running)', async () => {
+    const db = buildReviewInboxDb();
+    const mgr = HumanStepManager.initialize(dbAdapter(db));
+    seedInboxRun(db, 'run-p', 'awaiting_review');
+    seedBlockingReviewItem(db, { id: 'rvw_f', runId: 'run-p', kind: 'finding' });
+
+    const parked = await mgr.parkForBlockingReview('run-p');
+    expect(parked).toBe(false);
+    expect(runStatus(db, 'run-p')).toBe('awaiting_review');
+  });
+});
+
 describe('HumanStepManager.findPendingGate', () => {
   it('round-trips the pending gate id for (runId, stepId)', async () => {
     const db = buildReviewInboxDb();

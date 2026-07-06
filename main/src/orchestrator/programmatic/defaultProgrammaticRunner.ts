@@ -33,12 +33,20 @@ import { WorkflowController } from './workflowController';
 import { SpawnStepRunner } from './spawnStepRunner';
 import { ProgrammaticRunHost, type StepReporter } from './programmaticRunHost';
 import type { HumanGateResolver } from './humanGate';
+import type { BlockingItemsResolver } from './blockingItemsGate';
 import { MonitorRegistry, type MonitorContext, type MonitorSession } from './monitor';
 
 export interface DefaultProgrammaticRunnerDeps {
   spawner: ClaudeSpawnerLike;
   reporter: StepReporter;
   gate: HumanGateResolver;
+  /**
+   * Blocking-review-items checkpoint (Fix: blocking findings must block). Threaded
+   * verbatim into every run's ProgrammaticRunHost so the controller parks the run
+   * at each step boundary while a pending blocking review_item exists. Absent ⇒ no
+   * parking for review items (byte-identical to today).
+   */
+  blockingGate?: BlockingItemsResolver;
   /**
    * Per-run monitor factory (the monitor-unify refactor). Called once per run to
    * build the ON-DEMAND monitor brain (triage + chat answer). When present the
@@ -153,6 +161,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       projectId: ctx.run.project_id,
       reporter: this.deps.reporter,
       gate: this.deps.gate,
+      ...(this.deps.blockingGate ? { blockingGate: this.deps.blockingGate } : {}),
       ...(monitor ? { monitor } : {}),
       injectEvent: ctx.injectEvent,
       ...(this.deps.stepResultRecorder ? { recordStepResult: this.deps.stepResultRecorder } : {}),
