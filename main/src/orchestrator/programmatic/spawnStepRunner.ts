@@ -16,7 +16,11 @@
  * AbortSignal: if it fired, the result is 'aborted' (the controller ends the walk
  * with a 'canceled' outcome) — distinct from a genuine 'failed' turn that retries
  * / loops back. A signal already aborted BEFORE the spawn short-circuits to
- * 'aborted' without spawning.
+ * 'aborted' without spawning. A genuine (non-canceled) failure is additionally
+ * classified via isSystemicStepError: when the error text signals an
+ * environment-level condition (usage/session/rate limit, provider overload,
+ * auth) the result is stamped `systemic: true` so the controller parks-and-waits
+ * on that condition instead of burning the step's retry/optional/loopback budget.
  *
  * Constructed per-run by DefaultProgrammaticRunner with the run's panel/session/
  * worktree bound, then invoked once per step by the WorkflowController.
@@ -26,6 +30,7 @@ import type { ClaudeSpawnerLike } from '../runExecutor';
 import type { LoggerLike } from '../types';
 import type { StepRunner, StepRunResult, ControllerStepContext } from './types';
 import { composeStepPrompt } from './stepPrompt';
+import { isSystemicStepError } from './systemicError';
 import type { WorkflowStep } from '../../../../shared/types/workflows';
 
 /** Per-run spawn parameters bound when the runner is constructed. */
@@ -102,7 +107,10 @@ export class SpawnStepRunner implements StepRunner {
         stepId: step.id,
         error,
       });
-      return { status: 'failed', error };
+      // Stamp systemic:true when the error text is an environment-level condition
+      // (usage/rate limit, overload, auth) so the controller parks-and-retries
+      // rather than consuming this step's retry/optional/loopback/triage budget.
+      return { status: 'failed', error, ...(isSystemicStepError(error) ? { systemic: true } : {}) };
     }
   }
 }

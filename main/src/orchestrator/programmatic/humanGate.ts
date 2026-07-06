@@ -62,14 +62,20 @@ export interface HumanGateOpener {
  * Map a free-text review-item `resolution` to the three-way gate verdict.
  *
  * Convention (mirrors questionRouter's isApproveAnswer string-sniffing): an
- * explicit 'reject' or 'revise' anywhere in the resolution selects that verdict;
- * anything else — including an empty note — is an APPROVE, because resolving the
- * blocking gate item IS the human's act of approval unless they said otherwise.
+ * explicit 'reject', 'revise', or 'retry' anywhere in the resolution selects a
+ * verdict; anything else — including an empty note — is an APPROVE, because
+ * resolving the blocking gate item IS the human's act of approval unless they
+ * said otherwise. 'retry' is an ALIAS for 'revise': a human answering a gate /
+ * escalation with "retry" means re-run this step, never approve-and-skip it — so
+ * it must route through the revise (loop-back / re-run) path, not approve.
+ * Precedence: 'reject' first (a rejection wins over any revise/retry phrasing in
+ * the same note), then 'revise', then 'retry' → 'revise', else approve.
  */
 export function parseGateVerdict(resolution: string | null | undefined): HumanGateDecision {
   const r = (resolution ?? '').trim().toLowerCase();
   if (r.includes('reject')) return 'reject';
   if (r.includes('revise')) return 'revise';
+  if (r.includes('retry')) return 'revise';
   return 'approve';
 }
 

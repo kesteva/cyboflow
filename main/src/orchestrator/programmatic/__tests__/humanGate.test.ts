@@ -22,6 +22,13 @@ describe('parseGateVerdict', () => {
     expect(parseGateVerdict('REJECT')).toBe('reject');
     expect(parseGateVerdict('reject then revise')).toBe('reject');
   });
+
+  it("treats 'retry' as an alias for 'revise' (re-run, never approve-and-skip)", () => {
+    expect(parseGateVerdict('please retry')).toBe('revise');
+    expect(parseGateVerdict('RETRY')).toBe('revise');
+    // reject still wins over a retry mention in the same note.
+    expect(parseGateVerdict('reject — do not retry')).toBe('reject');
+  });
 });
 
 describe('ReviewQueueHumanGate', () => {

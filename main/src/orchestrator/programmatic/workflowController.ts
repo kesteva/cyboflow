@@ -45,6 +45,19 @@ import type {
 export const MAX_STEP_LOOPBACKS = 5;
 
 /**
+ * Maximum number of SYSTEMIC park-and-retry cycles allowed per step id across a
+ * whole run. A systemic failure (usage/session/rate limit, provider overload,
+ * auth) parks the run via `ControllerHost.awaitSystemicPause` and re-runs the
+ * step WITHOUT consuming its retry/optional/loopback/triage budget — so unlike
+ * those budgets this is NOT a normal failure allowance. Each cycle already
+ * requires a human resolution OR a limit-reset timer to un-park, so this bound is
+ * only a runaway backstop against a pathological condition that never clears (or
+ * a host that resolves the pause instantly in a loop): once exhausted, the
+ * systemic failure falls through to the normal failure path.
+ */
+export const MAX_SYSTEMIC_PAUSES = 10;
+
+/**
  * A step is a PURE human gate (no agent work) when its agent is the dedicated
  * human-gate agent. A step that names a REAL agent AND also sets `human === true`
  * (e.g. the planner's `context` step) is an AGENT step WITH a trailing human
@@ -101,6 +114,12 @@ export class WorkflowController {
     // Per-step-id triage-retry counters (Stage 3) — bounds 'retry' triage verdicts
     // and escalation-gate 'revise' re-runs so a flapping step can never spin.
     const triageRetries = new Map<string, number>();
+    // Per-step-id systemic park-and-retry counters — bounds how many times a step
+    // (or a fan-out outer step) may park on a systemic condition and re-run without
+    // consuming its retry/optional/loopback/triage budget. Capped at
+    // MAX_SYSTEMIC_PAUSES; the SAME map keys both the single-step retry loop and the
+    // fan-out wave-park path (a fanOut outer step keys on its own step.id).
+    const systemicPauses = new Map<string, number>();
     // Closing-stage gate (2026-06-22): set true when a fan-out step settles with
     // one or more incomplete/failed lanes (the sprint has blocked tasks). While
     // set, the walk skips every subsequent AUTOMATED step (e.g. sprint-verify,
@@ -145,6 +164,9 @@ export class WorkflowController {
       // ≤ (2*MAX_STEP_LOOPBACKS*n + 1)*n visits. The bound MUST include BOTH
       // budgets or a step that both loops back AND triage-retries trips this
       // defensive throw falsely. Exceeding it means a real logic bug — fail loud.
+      // Systemic park-and-retry cycles (awaitSystemicPause → 'retry') do NOT affect
+      // this bound: like an in-place retry they live INSIDE one while-iteration and
+      // never advance `i`, so no additional headroom is needed here.
       const maxExecutions = (2 * MAX_STEP_LOOPBACKS * n + 1) * n + n + 1;
       let executions = 0;
 
@@ -239,6 +261,7 @@ export class WorkflowController {
               { runId, phaseId: phase.id, stepIndex: i, signal },
               items,
               signal,
+              systemicPauses,
             );
             if (fanResult.terminal) {
               // Mark the outer step canceled in the trace before the terminal.
@@ -299,6 +322,17 @@ export class WorkflowController {
 
         // ── Agent step (optionally with a trailing human checkpoint) ─────────
         // In-place retries up to (retries + 1) attempts.
+        //
+        // Systemic-failure invariant: a failed attempt whose result is stamped
+        // `systemic === true` (an environment-level condition — usage/session/rate
+        // limit, provider overload, auth) NEVER consumes this step's retry budget
+        // and NEVER triggers optional-skip / loopback / triage. Instead it parks the
+        // run via `host.awaitSystemicPause` (bounded per step id by
+        // MAX_SYSTEMIC_PAUSES) and, once the condition clears, re-runs the SAME
+        // attempt. The step's normal failure budgets are reserved exclusively for
+        // step-specific defects; they only apply once the human GAVE UP on the pause
+        // ('giveup') or the pause budget is exhausted, at which point the systemic
+        // result falls through the ordinary failure path below unchanged.
         const maxAttempts = step.retries + 1;
         let attempt = 0;
         let lastError: string | undefined;
@@ -314,6 +348,30 @@ export class WorkflowController {
           if (result.status === 'aborted') {
             aborted = true;
             break;
+          }
+          // Systemic failure: park-and-retry BEFORE the failure touches any budget.
+          if (result.status === 'failed' && result.systemic === true && this.host.awaitSystemicPause) {
+            const used = systemicPauses.get(step.id) ?? 0;
+            if (used < MAX_SYSTEMIC_PAUSES) {
+              systemicPauses.set(step.id, used + 1);
+              this.host.log?.(
+                'warn',
+                `step '${step.id}' hit a systemic failure; pausing the run: ${result.error ?? '(no error text)'}`,
+              );
+              const verdict = await this.host.awaitSystemicPause(step, { ...baseCtx, attempt }, result.error);
+              if (verdict === 'canceled' || signal?.aborted) {
+                aborted = true;
+                break;
+              }
+              if (verdict === 'retry') {
+                // Re-run the SAME attempt WITHOUT consuming the retry budget: undo
+                // this iteration's `attempt += 1` so the next iteration re-numbers it.
+                attempt -= 1;
+                continue;
+              }
+              // 'giveup' falls through: the failure follows the normal path below.
+            }
+            // Budget exhausted also falls through to the normal path below.
           }
           lastError = result.error;
         }
@@ -427,6 +485,16 @@ export class WorkflowController {
    * simplification on two axes: NO same-file serialization within a wave, and inner
    * `loopback` is parsed/validated upstream but NOT re-driven here (both reserved for
    * a future revision).
+   *
+   * Systemic failures: an inner step failing with `systemic === true` (env-level:
+   * usage/rate limit, overload, auth) is NOT that lane's defect — it does NOT fail
+   * the lane (nor skip an optional inner step). Instead driveItem bubbles it up as
+   * 'systemic'; the wave loop keeps the paused item in `remaining` and parks the
+   * WHOLE fan-out via `host.awaitSystemicPause` (bounded per outer step id by
+   * `systemicPauses`/MAX_SYSTEMIC_PAUSES). On 'retry' the paused items re-dispatch;
+   * on 'giveup' / seam-absent / budget-exhausted they are failed like a blocked
+   * lane. `systemicPauses` is the SAME run-level map the single-step path uses,
+   * keyed here on the outer step id.
    */
   private async runFanOut(
     runId: string,
@@ -434,6 +502,7 @@ export class WorkflowController {
     baseCtx: { runId: string; phaseId: string; stepIndex: number; signal?: AbortSignal },
     items: string[],
     signal: AbortSignal | undefined,
+    systemicPauses: Map<string, number>,
   ): Promise<{ terminal: boolean; incompleteCount: number }> {
     const fanOut = step.fanOut;
     const driver = this.host.fanOut;
@@ -442,15 +511,20 @@ export class WorkflowController {
 
     const inner = fanOut.inner;
     const allowedStepIds: readonly string[] = inner.map((s) => s.id);
+    // Captures the LAST systemic error text seen across any lane in a wave, so the
+    // wave-park path can surface it on the awaitSystemicPause call.
+    let lastSystemicError: string | undefined;
 
     /**
      * Walk ONE item through the inner chain. Fail-soft per inner step:
      *  - required inner failure (or abort) → mark the lane (failed) + stop;
      *  - optional inner failure → skip that inner step, continue the lane;
+     *  - SYSTEMIC inner failure (env-level) → do NOT fail/skip the lane; capture the
+     *    error and return 'systemic' so the wave loop parks the whole fan-out;
      *  - all inner steps ok → mark the lane 'integrated'.
      * Returns 'aborted' when the signal fired mid-walk so the wave can short out.
      */
-    const driveItem = async (itemId: string): Promise<'done' | 'failed' | 'aborted'> => {
+    const driveItem = async (itemId: string): Promise<'done' | 'failed' | 'aborted' | 'systemic'> => {
       driver.driveLane({
         runId,
         itemId,
@@ -487,6 +561,14 @@ export class WorkflowController {
 
         if (result.status === 'aborted') return 'aborted';
         if (result.status === 'failed') {
+          // Systemic (env-level) failure: NOT this lane's defect. Do not fail the
+          // lane and do not skip even an optional inner step — bubble up so the wave
+          // loop parks the whole fan-out and re-dispatches once the condition clears.
+          if (result.systemic === true) {
+            lastSystemicError = result.error;
+            this.host.log?.('warn', `fan-out item '${itemId}': step '${innerStep.id}' hit a systemic failure; pausing`);
+            return 'systemic';
+          }
           if (innerStep.optional === true) {
             this.host.log?.('warn', `fan-out item '${itemId}': optional step '${innerStep.id}' failed; skipping`);
             continue;
@@ -571,7 +653,14 @@ export class WorkflowController {
       const wave = ready.slice(0, SPRINT_BATCH_CAP);
       const outcomes = await Promise.all(wave.map((itemId) => driveItem(itemId)));
       if (outcomes.includes('aborted') || signal?.aborted) return { terminal: true, incompleteCount };
+      // Settle each lane. A 'systemic' lane is NEITHER integrated NOR failed: it
+      // STAYS in `remaining` (uncounted) so it re-dispatches after the pause clears.
+      const pausedThisWave: string[] = [];
       wave.forEach((itemId, idx) => {
+        if (outcomes[idx] === 'systemic') {
+          pausedThisWave.push(itemId);
+          return; // leave in `remaining`
+        }
         remaining.delete(itemId);
         if (outcomes[idx] === 'failed') {
           failed.add(itemId);
@@ -580,6 +669,36 @@ export class WorkflowController {
           integrated.add(itemId);
         }
       });
+
+      // One or more lanes parked on a SYSTEMIC condition. Park the WHOLE fan-out on
+      // it (bounded per outer step id by MAX_SYSTEMIC_PAUSES) rather than failing
+      // those lanes — the condition is environment-level, not a per-task defect.
+      if (pausedThisWave.length > 0) {
+        const used = systemicPauses.get(step.id) ?? 0;
+        if (this.host.awaitSystemicPause && used < MAX_SYSTEMIC_PAUSES) {
+          systemicPauses.set(step.id, used + 1);
+          this.host.log?.(
+            'warn',
+            `fan-out '${step.id}' hit a systemic failure on ${pausedThisWave.length} lane(s); pausing the run: ${lastSystemicError ?? '(no error text)'}`,
+          );
+          const verdict = await this.host.awaitSystemicPause(step, { ...baseCtx, attempt: 1 }, lastSystemicError);
+          if (verdict === 'canceled' || signal?.aborted) return { terminal: true, incompleteCount };
+          if (verdict === 'retry') {
+            // Un-park: the still-in-`remaining` items re-dispatch on the next loop.
+            // v1 simplification: driveItem restarts a paused lane from inner step 0
+            // (re-running any already-passed inner steps) — safe because step agents
+            // observe the worktree state rather than in-memory progress.
+            continue;
+          }
+          // 'giveup' → fall through and fail the still-paused lanes below.
+        }
+        // Seam absent, budget exhausted, or 'giveup': fail each still-paused lane
+        // exactly like a blocked lane (driveLane failed + remaining.delete +
+        // failed.add + incompleteCount += 1).
+        for (const itemId of pausedThisWave) {
+          if (remaining.has(itemId)) markBlocked(itemId, 'systemic failure — gave up waiting');
+        }
+      }
     }
 
     return { terminal: false, incompleteCount };
