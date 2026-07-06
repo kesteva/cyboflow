@@ -43,6 +43,16 @@ export interface StepRunResult {
   summary?: string;
   /** Failure detail when status === 'failed' (surfaced on escalation). */
   error?: string;
+  /**
+   * True when the failure is SYSTEMIC — an environment-level condition (usage /
+   * session / rate limit, provider overload, auth) that no retry of THIS step can
+   * fix until it clears. Classified by the runner (see systemicError.ts). The
+   * controller routes a systemic failure to `ControllerHost.awaitSystemicPause`
+   * (park + retry after clear) instead of consuming the step's retry budget,
+   * optional-skip, loopback, or triage — those are for step-specific defects.
+   * Absent/false ⇒ a normal step failure (today's behavior).
+   */
+  systemic?: boolean;
 }
 
 /**
@@ -109,6 +119,20 @@ export interface StepRunner {
  *                  judges the failure definitive; never the host's default.
  */
 export type TriageDecision = 'retry' | 'escalate' | 'fail';
+
+/**
+ * Verdict of a SYSTEMIC pause (usage/session/rate-limit park — see
+ * `ControllerHost.awaitSystemicPause` and StepRunResult.systemic):
+ *   - 'retry'    — the condition cleared (human resolved the pause item, or the
+ *                  auto-resume timer fired at the limit-reset time); re-run the
+ *                  SAME step WITHOUT consuming its retry budget.
+ *   - 'giveup'   — the human dismissed the pause (stop waiting); the failure then
+ *                  follows the NORMAL step-failure path (retries left → re-attempt,
+ *                  else optional-skip / loopback / triage) — byte-identical to a
+ *                  world without the systemic seam.
+ *   - 'canceled' — the run was canceled while parked; end the walk 'canceled'.
+ */
+export type SystemicPauseVerdict = 'retry' | 'giveup' | 'canceled';
 
 /** Kinds of run/step lifecycle event the controller can emit on its monitor feed. */
 export type SupervisorEventKind =
@@ -252,6 +276,25 @@ export interface ControllerHost {
    * responsibility; the controller only branches on the returned verdict.
    */
   awaitBlockingReviewItems?(runId: string, signal?: AbortSignal): Promise<'proceed' | 'canceled'>;
+
+  /**
+   * Optional SYSTEMIC-pause seam. Consulted when a step attempt fails with
+   * `StepRunResult.systemic === true` (usage/session/rate limit, provider
+   * overload, auth) — BEFORE the failure consumes the step's retry budget or
+   * triggers optional-skip / loopback / triage. The production host opens a
+   * BLOCKING 'decision' review item ("resolve to retry now, dismiss to give up"),
+   * parks the run awaiting_review, and settles on human resolution OR an
+   * auto-resume timer at the parsed limit-reset time. Bounded by
+   * MAX_SYSTEMIC_PAUSES per step id. Absent (tests / hosts built without the
+   * gate) ⇒ systemic failures follow the normal failure path (today's behavior).
+   * Fail-soft is the host's responsibility; the controller only branches on the
+   * returned verdict.
+   */
+  awaitSystemicPause?(
+    step: WorkflowStep,
+    ctx: ControllerStepContext,
+    error: string | undefined,
+  ): Promise<SystemicPauseVerdict>;
 
   /** Optional structured log sink; absent ⇒ the controller stays silent. */
   log?(level: 'info' | 'warn', message: string): void;
