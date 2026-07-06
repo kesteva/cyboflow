@@ -93,9 +93,11 @@ export interface Session {
    * In-place session (sessions.in_place, migration 046): worktreePath IS the
    * project checkout — no dedicated git worktree exists. DISTINCT from
    * isMainRepo (the hidden singleton dashboard session): in-place sessions are
-   * ordinary, list-visible quick sessions. They are SDK-only and can never host
-   * a workflow run — launch surfaces must warn + redirect the run into a fresh
-   * worktree-backed session. Mirror of main/src/types/session.ts Session.
+   * ordinary, list-visible quick sessions. They run on either substrate (the
+   * interactive gate rides the inline `--settings` flag — no checkout writes)
+   * and can never host a workflow run — launch surfaces must warn + redirect
+   * the run into a fresh worktree-backed session. Mirror of
+   * main/src/types/session.ts Session.
    */
   inPlace?: boolean;
   displayOrder?: number;

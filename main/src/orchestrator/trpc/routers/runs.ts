@@ -323,8 +323,8 @@ export function setStartRunDeps(deps: StartRunDeps): void {
 // write chokepoint (updateSessionAgentPermissionMode): the mode lives on
 // sessions.agent_permission_mode (the execution SoT), NOT on
 // workflow_runs.permission_mode_snapshot (demoted to a launch-time audit value).
-// The chokepoint's collaborators (DatabaseService / SessionManager / ConfigManager
-// / InteractiveSettingsWriter) are services, so they are injected at boot by
+// The chokepoint's collaborators (DatabaseService / SessionManager) are
+// services, so they are injected at boot by
 // main/src/index.ts via setSetPermissionModeDeps() — the SAME deps object the
 // RunLauncher receives. Until wired the mutation throws METHOD_NOT_SUPPORTED.
 // ---------------------------------------------------------------------------
@@ -1226,12 +1226,14 @@ export const runsRouter = router({
    * is demoted to a launch-time audit value and is NO LONGER written here.
    *
    * Re-routed through the SHARED session-mode write chokepoint
-   * (updateSessionAgentPermissionMode), so this mutation fires the SAME four side
-   * effects as the composer pill (sessions:update-agent-permission-mode) and the
-   * launch picker: persist sessions.agent_permission_mode + 'session-updated'
-   * emit (the session-store-derived pill refreshes, no respawn) + runtime mutate +
-   * the interactive .claude/settings.json next-spawn re-prime. A raw UPDATE would
-   * skip the pill refresh and the interactive re-prime.
+   * (updateSessionAgentPermissionMode), so this mutation fires the SAME three
+   * side effects as the composer pill (sessions:update-agent-permission-mode)
+   * and the launch picker: persist sessions.agent_permission_mode +
+   * 'session-updated' emit (the session-store-derived pill refreshes, no
+   * respawn) + runtime mutate. A raw UPDATE would skip the pill refresh. (The
+   * interactive substrate needs no settings-file re-prime: the PTY gating hook
+   * rides the inline `--settings` flag and is recomputed from the persisted
+   * mode at every spawn.)
    *
    * NO terminal-status guard for the session write (this is the #4
    * chat-after-terminal-flow case): the owning session is resolved from the run

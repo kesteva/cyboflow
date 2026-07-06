@@ -147,7 +147,7 @@ export class RunLauncher {
      * `requestedPermissionMode`, the launcher writes that mode to the HOST session
      * via updateSessionAgentPermissionMode (the SAME chokepoint the composer pill +
      * runs.setPermissionMode use) — persist + 'session-updated' emit + runtime
-     * mutate + interactive .claude/settings.json re-prime. When omitted (legacy
+     * mutate. When omitted (legacy
      * call sites / tests that predate the chokepoint), the session-mode write is
      * silently skipped — backward-compatible. The launch picker permanently sets
      * the host session's mode; when no explicit mode is supplied the session's mode
