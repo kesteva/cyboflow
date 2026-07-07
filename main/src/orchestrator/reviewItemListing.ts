@@ -291,6 +291,34 @@ export function resolveReviewItemById(
 }
 
 /**
+ * Dismiss a pending review item by id (idempotent). Used by cancel-path cleanup
+ * for folded human-gate/systemic-pause decisions. No-op when the table is absent
+ * or the row is not pending.
+ *
+ * @returns the dismissed review-item id, or null when nothing pending matched.
+ */
+export function dismissReviewItemById(
+  db: DatabaseLike,
+  reviewItemId: string,
+  resolvedBy: string,
+  resolution: string | null,
+  now: string,
+  runId?: string | null,
+): string | null {
+  if (!hasReviewItemsTable(db)) return null;
+  return transitionReviewItemRow(
+    db,
+    reviewItemId,
+    'dismissed',
+    'dismissed',
+    resolvedBy,
+    resolution,
+    now,
+    runId ?? null,
+  );
+}
+
+/**
  * Guarded UPDATE (status='pending' → 'resolved') + a 'resolved' entity_events
  * delta. Caller is responsible for the table-existence guard. Returns the id on
  * a real transition, null when changes===0 (already terminal / concurrent).
@@ -303,26 +331,43 @@ function resolveReviewItemRow(
   now: string,
   runId: string | null,
 ): string | null {
-  const info = db
-    .prepare(
-      `UPDATE review_items
-          SET status = 'resolved', resolved_by = ?, resolution = ?, updated_at = ?
-        WHERE id = ? AND status = 'pending'`,
-    )
-    .run(resolvedBy, resolution, now, reviewItemId) as { changes: number };
-  if (info.changes === 0) return null;
-
-  insertReviewEvent(
+  return transitionReviewItemRow(
     db,
     reviewItemId,
     'resolved',
-    runId,
-    [
-      { field: 'status', from: 'pending', to: 'resolved' },
-      ...(resolution !== null ? [{ field: 'resolution', from: null, to: resolution }] : []),
-    ],
+    'resolved',
+    resolvedBy,
+    resolution,
     now,
+    runId,
   );
+}
+
+function transitionReviewItemRow(
+  db: DatabaseLike,
+  reviewItemId: string,
+  status: 'resolved' | 'dismissed',
+  eventKind: 'resolved' | 'dismissed',
+  resolvedBy: string,
+  resolution: string | null,
+  now: string,
+  runId: string | null,
+): string | null {
+  const info = db
+    .prepare(
+      `UPDATE review_items
+          SET status = ?, resolved_by = ?, resolution = ?, updated_at = ?
+        WHERE id = ? AND status = 'pending'`,
+    )
+    .run(status, resolvedBy, resolution, now, reviewItemId) as { changes: number };
+  if (info.changes === 0) return null;
+
+  const deltas: FieldDelta[] = [{ field: 'status', from: 'pending', to: status }];
+  if (resolution !== null) {
+    deltas.push({ field: 'resolution', from: null, to: resolution });
+  }
+
+  insertReviewEvent(db, reviewItemId, eventKind, runId, deltas, now);
   return reviewItemId;
 }
 

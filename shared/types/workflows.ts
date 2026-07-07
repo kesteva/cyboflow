@@ -217,15 +217,14 @@ export interface WorkflowRunListRow {
 }
 
 /**
- * The three user-facing built-in flows in cyboflow v1.
+ * The four user-facing built-in flows in cyboflow v1.
  *
- * Narrowed from the historical SoloFlow set of five: `planner` + `sprint` ship,
- * `compound` was rebuilt cyboflow-native (mines merged runs for learnings →
- * tasks + review-queue items via the `cyboflow_*` MCP tools, never `.soloflow/`
- * files), and the remaining `soloflow` / `prune` flows keep their prose under
- * `docs/workflows-future/` for a future rebuild. The internal `__quick__`
- * sentinel is NOT a member here — it is filtered out of the picker and handled
- * separately by the quick-session pipeline.
+ * Narrowed from the historical SoloFlow set of five: `planner`, `sprint`,
+ * `compound`, and `ship` are cyboflow-native flows that write via the
+ * `cyboflow_*` MCP tools, never `.soloflow/` files. The dropped `prune` flow
+ * keeps its prose under `docs/workflows-future/` for a future rebuild. The
+ * internal `__quick__` sentinel is NOT a member here — it is filtered out of the
+ * picker and handled separately by the quick-session pipeline.
  *
  * A parallel sprint is a SINGLE session-hosted `sprint` run seeded with N task
  * ids: the sprint ORCHESTRATOR AGENT analyzes the task dependency DAG itself,

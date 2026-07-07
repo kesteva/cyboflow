@@ -246,6 +246,14 @@ describe('HumanStepManager.clearPendingForRun (systemic-pause cleanup)', () => {
     expect(dismissed).toBe(1);
     const row = db.prepare('SELECT status FROM review_items WHERE id = ?').get('rvw_sys') as { status: string };
     expect(row.status).toBe('dismissed');
+    const event = db
+      .prepare(
+        `SELECT kind FROM entity_events
+          WHERE entity_type = 'review_item' AND entity_id = ?
+          ORDER BY seq DESC LIMIT 1`,
+      )
+      .get('rvw_sys') as { kind: string };
+    expect(event.kind).toBe('dismissed');
   });
 
   it('dismisses BOTH human-gate and systemic-pause decision rows in one clear', async () => {

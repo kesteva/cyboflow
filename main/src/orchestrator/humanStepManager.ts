@@ -32,6 +32,7 @@ import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
 import {
   coWriteDecisionReviewItem,
   resolveReviewItemById,
+  dismissReviewItemById,
   countPendingBlockingReviewItems,
   hasReviewItemsTable,
 } from './reviewItemListing';
@@ -346,16 +347,10 @@ export class HumanStepManager {
 
       let dismissed = 0;
       for (const { id } of pending) {
-        const info = this.db
-          .prepare(
-            `UPDATE review_items
-                SET status = 'dismissed', resolved_by = 'system', resolution = 'canceled', updated_at = ?
-              WHERE id = ? AND status = 'pending'`,
-          )
-          .run(now, id) as { changes: number };
-        if (info.changes > 0) {
+        const dismissedId = dismissReviewItemById(this.db, id, 'system', 'canceled', now, runId);
+        if (dismissedId !== null) {
           dismissed += 1;
-          emitReviewItemChangedById(this.db, id, 'dismissed');
+          emitReviewItemChangedById(this.db, dismissedId, 'dismissed');
         }
       }
       return dismissed;

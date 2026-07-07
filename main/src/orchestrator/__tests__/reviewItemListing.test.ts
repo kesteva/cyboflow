@@ -15,6 +15,7 @@ import {
   hasReviewItemsTable,
   resolvePermissionReviewItem,
   resolveReviewItemById,
+  dismissReviewItemById,
   countPendingBlockingReviewItems,
   selectPendingBlockingReviewItems,
   selectFindingForSeed,
@@ -119,6 +120,43 @@ describe('resolveReviewItemById — double-resolve', () => {
     expect(
       resolveReviewItemById(dbAdapter(db), 'nope', 'user', null, new Date().toISOString()),
     ).toBeNull();
+  });
+});
+
+describe('dismissReviewItemById — event parity', () => {
+  it('dismisses the pending item and records a dismissed entity_event', () => {
+    const db = buildReviewInboxDb();
+    seedInboxRun(db, 'run-1', 'awaiting_review');
+    seedBlockingReviewItem(db, { id: 'rvw_cancel', runId: 'run-1', kind: 'decision' });
+
+    const dismissed = dismissReviewItemById(
+      dbAdapter(db),
+      'rvw_cancel',
+      'system',
+      'canceled',
+      new Date().toISOString(),
+      'run-1',
+    );
+
+    expect(dismissed).toBe('rvw_cancel');
+    expect(
+      (db.prepare('SELECT status FROM review_items WHERE id = ?').get('rvw_cancel') as { status: string }).status,
+    ).toBe('dismissed');
+    const event = db
+      .prepare(
+        `SELECT kind, actor, run_id AS runId, changes_json AS changesJson
+           FROM entity_events
+          WHERE entity_type = 'review_item' AND entity_id = ?
+          ORDER BY seq DESC LIMIT 1`,
+      )
+      .get('rvw_cancel') as { kind: string; actor: string; runId: string | null; changesJson: string };
+    expect(event.kind).toBe('dismissed');
+    expect(event.actor).toBe('orchestrator');
+    expect(event.runId).toBe('run-1');
+    expect(JSON.parse(event.changesJson)).toEqual([
+      { field: 'status', from: 'pending', to: 'dismissed' },
+      { field: 'resolution', from: null, to: 'canceled' },
+    ]);
   });
 });
 

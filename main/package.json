@@ -1,7 +1,7 @@
 {
   "name": "main",
   "version": "0.1.18",
-  "description": "Electron main process for Claude Code Commander",
+  "description": "Electron main process for Cyboflow",
   "main": "dist/main/src/index.js",
   "type": "commonjs",
   "scripts": {
