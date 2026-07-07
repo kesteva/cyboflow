@@ -34,9 +34,11 @@ vi.mock('../../../stores/variantsStore', () => ({
   useWorkflowVariants: mockUseWorkflowVariants,
 }));
 
-const { mockStartSideBySide, mockTasksGet } = vi.hoisted(() => ({
+const { mockStartSideBySide, mockTasksGet, mockTasksList, mockBoardsForProject } = vi.hoisted(() => ({
   mockStartSideBySide: vi.fn(),
   mockTasksGet: vi.fn(),
+  mockTasksList: vi.fn(),
+  mockBoardsForProject: vi.fn(),
 }));
 vi.mock('../../../trpc/client', () => ({
   trpc: {
@@ -46,6 +48,8 @@ vi.mock('../../../trpc/client', () => ({
       },
       tasks: {
         get: { query: mockTasksGet },
+        list: { query: mockTasksList },
+        boardsForProject: { query: mockBoardsForProject },
       },
     },
   },
@@ -98,6 +102,7 @@ vi.mock('../../../stores/navigationStore', () => ({
 
 import { ABTestLaunchModal } from '../ABTestLaunchModal';
 import { BASELINE_VARIANT_SENTINEL } from '../../../../../shared/types/experiments';
+import type { BacklogTaskItem, Board } from '../../../../../shared/types/tasks';
 
 function makeVariant(overrides: Partial<WorkflowVariantRow> = {}): WorkflowVariantRow {
   return {
@@ -120,12 +125,16 @@ beforeEach(() => {
   mockUseWorkflowVariants.mockReset();
   mockStartSideBySide.mockReset();
   mockTasksGet.mockReset();
+  mockTasksList.mockReset();
+  mockBoardsForProject.mockReset();
   mockBootstrapArmSessionPanels.mockReset();
   mockSetActiveRun.mockReset();
   mockSetActiveProjectId.mockReset();
   mockGoToSession.mockReset();
 
   mockTasksGet.mockResolvedValue(null);
+  mockTasksList.mockResolvedValue([]);
+  mockBoardsForProject.mockResolvedValue([]);
   mockBootstrapArmSessionPanels.mockResolvedValue(undefined);
   mockStartSideBySide.mockResolvedValue({
     experimentId: 'exp-1',
@@ -143,7 +152,7 @@ describe('ABTestLaunchModal — no pickable variants', () => {
       error: null,
     });
     render(
-      <ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" onClose={vi.fn()} />,
+      <ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />,
     );
     expect(screen.getByTestId('ab-test-insufficient-variants')).toBeInTheDocument();
     expect(screen.queryByTestId('ab-test-variant-a')).not.toBeInTheDocument();
@@ -162,7 +171,7 @@ describe('ABTestLaunchModal — exactly one pickable variant (baseline vs varian
   });
 
   it('renders selects (not the explainer), seeded to baseline (A) vs the variant (B), submit enabled', () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     expect(screen.queryByTestId('ab-test-insufficient-variants')).not.toBeInTheDocument();
     const selectA = screen.getByTestId('ab-test-variant-a') as HTMLSelectElement;
     const selectB = screen.getByTestId('ab-test-variant-b') as HTMLSelectElement;
@@ -175,7 +184,7 @@ describe('ABTestLaunchModal — exactly one pickable variant (baseline vs varian
   });
 
   it('submit calls startSideBySide with the baseline sentinel for arm A', async () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     fireEvent.click(screen.getByTestId('ab-test-submit'));
 
     await waitFor(() => expect(mockStartSideBySide).toHaveBeenCalledTimes(1));
@@ -188,7 +197,7 @@ describe('ABTestLaunchModal — exactly one pickable variant (baseline vs varian
   });
 
   it('picking baseline for BOTH arms disables submit and shows the different-arms hint', () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     // Set arm B to baseline too — now A === B === baseline.
     fireEvent.change(screen.getByTestId('ab-test-variant-b'), {
       target: { value: BASELINE_VARIANT_SENTINEL },
@@ -214,7 +223,7 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
   });
 
   it('renders both selects, seeded to the first two distinct pickable variants; excludes paused/retired', () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     const selectA = screen.getByTestId('ab-test-variant-a') as HTMLSelectElement;
     const selectB = screen.getByTestId('ab-test-variant-b') as HTMLSelectElement;
     expect(selectA.value).toBe('a');
@@ -226,7 +235,7 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
   });
 
   it('picking the same variant for both arms disables submit and shows the hint', () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
     fireEvent.change(screen.getByTestId('ab-test-variant-b'), { target: { value: 'a' } });
     expect(screen.getByTestId('ab-test-same-variant-hint')).toBeInTheDocument();
     expect(screen.getByTestId('ab-test-submit')).toBeDisabled();
@@ -234,7 +243,7 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
 
   it('seedless submit: mutate is called with no seedIdeaId key', async () => {
     const onClose = vi.fn();
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" onClose={onClose} />);
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
 
     fireEvent.click(screen.getByTestId('ab-test-submit'));
 
@@ -245,7 +254,7 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
   });
 
   it('seeded submit: picking a seed idea threads seedIdeaId into the mutate call', async () => {
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" onClose={vi.fn()} />);
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
 
     fireEvent.click(screen.getByTestId('ab-test-add-seed-idea'));
     fireEvent.click(screen.getByText('pick IDEA-1'));
@@ -265,7 +274,7 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
 
   it('on success: bootstraps arm A panels, sets active run/project, navigates to session, and closes', async () => {
     const onClose = vi.fn();
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" onClose={onClose} />);
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
 
     fireEvent.click(screen.getByTestId('ab-test-submit'));
 
@@ -279,7 +288,7 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
   it('mutation failure surfaces the typed backend error and does not navigate', async () => {
     mockStartSideBySide.mockRejectedValue(new Error('the two arms must use different variants'));
     const onClose = vi.fn();
-    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" onClose={onClose} />);
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={onClose} />);
 
     fireEvent.click(screen.getByTestId('ab-test-submit'));
 
@@ -290,5 +299,108 @@ describe('ABTestLaunchModal — >=2 pickable variants', () => {
     expect(mockBootstrapArmSessionPanels).not.toHaveBeenCalled();
     expect(mockSetActiveRun).not.toHaveBeenCalled();
     expect(mockGoToSession).not.toHaveBeenCalled();
+  });
+
+  it('planner (non-sprint) shows the seed-idea picker and NOT the seed-task picker', () => {
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="planner" onClose={vi.fn()} />);
+    expect(screen.getByTestId('ab-test-add-seed-idea')).toBeInTheDocument();
+    expect(screen.queryByTestId('ab-test-seed-tasks')).not.toBeInTheDocument();
+  });
+});
+
+describe('ABTestLaunchModal — sprint (task-driven) workflow', () => {
+  function eligibleTask(id: string, ref: string, title: string): BacklogTaskItem {
+    return {
+      id,
+      ref,
+      title,
+      type: 'task',
+      approved_at: '2026-01-01T00:00:00.000Z',
+      archived_at: null,
+      stage_position: 6,
+      stage_id: 'stage-ready',
+      inFlow: [],
+      children: [],
+    } as unknown as BacklogTaskItem;
+  }
+  const boards = [
+    { stages: [{ id: 'stage-ready', is_terminal: false }, { id: 'stage-done', is_terminal: true }] },
+  ] as unknown as Board[];
+
+  beforeEach(() => {
+    mockUseWorkflowVariants.mockReturnValue({
+      variants: [
+        makeVariant({ id: 'a', label: 'Variant A', status: 'active' }),
+        makeVariant({ id: 'b', label: 'Variant B', status: 'draft' }),
+      ],
+      loaded: true,
+      loading: false,
+      error: null,
+    });
+    mockBoardsForProject.mockResolvedValue(boards);
+  });
+
+  it('renders the seed-task multi-select (not the idea picker) and keeps only eligible tasks', async () => {
+    mockTasksList.mockResolvedValue([
+      eligibleTask('t1', 'TSK-1', 'First task'),
+      eligibleTask('t2', 'TSK-2', 'Second task'),
+      // Ineligible: unapproved.
+      { ...eligibleTask('t3', 'TSK-3', 'Pending'), approved_at: null } as unknown as BacklogTaskItem,
+      // Ineligible: terminal (done) stage.
+      { ...eligibleTask('t4', 'TSK-4', 'Done'), stage_id: 'stage-done' } as unknown as BacklogTaskItem,
+    ]);
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="sprint" onClose={vi.fn()} />);
+
+    // Seed-task section is shown; the idea picker is NOT.
+    expect(await screen.findByTestId('ab-test-seed-tasks')).toBeInTheDocument();
+    expect(screen.queryByTestId('ab-test-add-seed-idea')).not.toBeInTheDocument();
+
+    // Only the two eligible tasks are listed.
+    expect(await screen.findByTestId('ab-test-seed-task-item-t1')).toBeInTheDocument();
+    expect(screen.getByTestId('ab-test-seed-task-item-t2')).toBeInTheDocument();
+    expect(screen.queryByTestId('ab-test-seed-task-item-t3')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('ab-test-seed-task-item-t4')).not.toBeInTheDocument();
+  });
+
+  it('submit is disabled until >=1 task is selected (hint shown), then carries seedTaskIds', async () => {
+    mockTasksList.mockResolvedValue([eligibleTask('t1', 'TSK-1', 'First'), eligibleTask('t2', 'TSK-2', 'Second')]);
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="sprint" onClose={vi.fn()} />);
+
+    await screen.findByTestId('ab-test-seed-task-item-t1');
+    // No task selected → submit disabled + required hint.
+    expect(screen.getByTestId('ab-test-submit')).toBeDisabled();
+    expect(screen.getByTestId('ab-test-seed-task-required-hint')).toBeInTheDocument();
+
+    // Select one task → submit enabled, hint gone.
+    fireEvent.click(screen.getByLabelText('Select TSK-1'));
+    expect(screen.getByTestId('ab-test-submit')).not.toBeDisabled();
+    expect(screen.queryByTestId('ab-test-seed-task-required-hint')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('ab-test-submit'));
+    await waitFor(() => expect(mockStartSideBySide).toHaveBeenCalledTimes(1));
+    const args = mockStartSideBySide.mock.calls[0][0];
+    expect(args).toEqual({
+      projectId: 1,
+      workflowId: 'wf-1',
+      variantAId: 'a',
+      variantBId: 'b',
+      seedTaskIds: ['t1'],
+    });
+    // Never carries a seedIdeaId on the sprint path.
+    expect('seedIdeaId' in args).toBe(false);
+  });
+
+  it('select-all seeds up to the cap and submit carries all selected ids', async () => {
+    mockTasksList.mockResolvedValue([
+      eligibleTask('t1', 'TSK-1', 'First'),
+      eligibleTask('t2', 'TSK-2', 'Second'),
+    ]);
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="sprint" onClose={vi.fn()} />);
+    await screen.findByTestId('ab-test-seed-task-item-t1');
+
+    fireEvent.click(screen.getByTestId('ab-test-select-all-tasks'));
+    fireEvent.click(screen.getByTestId('ab-test-submit'));
+    await waitFor(() => expect(mockStartSideBySide).toHaveBeenCalledTimes(1));
+    expect(mockStartSideBySide.mock.calls[0][0].seedTaskIds.sort()).toEqual(['t1', 't2']);
   });
 });

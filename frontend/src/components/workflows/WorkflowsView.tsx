@@ -203,7 +203,7 @@ export function WorkflowsView(): React.JSX.Element {
   // ── A/B test launcher (Slice B thin launch UI) ──────────────────────────────
   // The card's target workflow + the resolved launch project (mirrors
   // onEditWorkflow's fallback for a GLOBAL flow with no project of its own).
-  const [abTestTarget, setAbTestTarget] = useState<{ projectId: number; workflowId: string } | null>(
+  const [abTestTarget, setAbTestTarget] = useState<{ projectId: number; workflowId: string; workflowName: string } | null>(
     null,
   );
 
@@ -343,7 +343,7 @@ export function WorkflowsView(): React.JSX.Element {
   const onAbTestWorkflow = (entry: WorkflowGalleryEntry): void => {
     const targetProjectId = entry.row.project_id ?? resolveTargetProjectId();
     if (targetProjectId === null) return;
-    setAbTestTarget({ projectId: targetProjectId, workflowId: entry.row.id });
+    setAbTestTarget({ projectId: targetProjectId, workflowId: entry.row.id, workflowName: entry.row.name });
   };
 
   const onNewWorkflow = (): void => {
@@ -556,6 +556,7 @@ export function WorkflowsView(): React.JSX.Element {
           isOpen
           projectId={abTestTarget.projectId}
           workflowId={abTestTarget.workflowId}
+          workflowName={abTestTarget.workflowName}
           onClose={() => setAbTestTarget(null)}
         />
       )}

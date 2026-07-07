@@ -6,11 +6,19 @@
  * reusing {@link pickableVariants} from variantSelectorLogic) OR the "Current
  * workflow (baseline)" sentinel ({@link BASELINE_VARIANT_SENTINEL}) — so a
  * workflow with a SINGLE variant can be tested head-to-head against the live
- * workflow (the primary use case; one variant seeds A=baseline, B=variant). Plus
- * an OPTIONAL seed idea (via the shared {@link IdeaPickerModal} — already excludes
- * decomposed ideas, migration 017), then submits `experiments.startSideBySide`.
+ * workflow (the primary use case; one variant seeds A=baseline, B=variant).
  * A !== B is enforced with a disabled submit button + an inline hint (both arms
  * cannot be the baseline).
+ *
+ * SEED, by workflow kind:
+ *   - The task-driven `sprint` workflow REQUIRES seed tasks: an inline multi-select
+ *     task checklist (SAME data source + eligibility filter as TaskBatchPickerModal
+ *     — approved + Ready-for-dev-or-later, non-terminal, not archived; experiment-
+ *     tagged rows are already hidden server-side) submits `seedTaskIds`. Each arm
+ *     clones the selection so the normal sprint machinery runs in the sandbox. At
+ *     least one task is required (a task-less sprint arm is meaningless).
+ *   - Every OTHER workflow keeps the OPTIONAL seed idea (via the shared
+ *     {@link IdeaPickerModal}), submitting `seedIdeaId`.
  *
  * On success: navigates straight to arm A's session/run (mirrors
  * SessionStartWizard's launch → setActiveRun → setActiveProjectId → goToSession
@@ -19,12 +27,14 @@
  * WITHOUT panels, unlike `sessions:create-quick`. Arm B stays headless; slice
  * C's compare view is where it surfaces.
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';
 import { trpc } from '../../trpc/client';
 import { useWorkflowVariants } from '../../stores/variantsStore';
 import { pickableVariants } from './variantSelectorLogic';
 import { BASELINE_VARIANT_SENTINEL } from '../../../../shared/types/experiments';
+import { SPRINT_BATCH_MAX_TASKS } from '../../../../shared/types/sprintBatch';
+import type { BacklogTaskItem, Board } from '../../../../shared/types/tasks';
 import { IdeaPickerModal } from './IdeaPickerModal';
 import { bootstrapArmSessionPanels } from '../../utils/bootstrapArmSessionPanels';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -34,15 +44,29 @@ export interface ABTestLaunchModalProps {
   isOpen: boolean;
   projectId: number;
   workflowId: string;
+  /**
+   * The workflow's built-in name. `sprint` is the only task-driven flow (v1): it
+   * swaps the seed-idea picker for the required seed-task multi-select.
+   */
+  workflowName: string;
   onClose: () => void;
 }
+
+/**
+ * The A/B seed-task cap. The experiment defaults to the 'sdk' substrate (the
+ * modal has no substrate picker), and startExperiment enforces the same cap
+ * server-side; the picker disables checkboxes past it (defense in depth).
+ */
+const SEED_TASK_CAP = SPRINT_BATCH_MAX_TASKS.sdk;
 
 export function ABTestLaunchModal({
   isOpen,
   projectId,
   workflowId,
+  workflowName,
   onClose,
 }: ABTestLaunchModalProps): React.JSX.Element {
+  const isSprint = workflowName === 'sprint';
   const { variants, loaded } = useWorkflowVariants(workflowId);
   const options = pickableVariants(variants);
 
@@ -51,6 +75,10 @@ export function ABTestLaunchModal({
   const [seedIdeaId, setSeedIdeaId] = useState<string | null>(null);
   const [seedIdeaLabel, setSeedIdeaLabel] = useState<string | null>(null);
   const [ideaPickerOpen, setIdeaPickerOpen] = useState(false);
+  // Sprint seed-task multi-select (mirrors TaskBatchPickerModal's data + filter).
+  const [seedTasks, setSeedTasks] = useState<BacklogTaskItem[]>([]);
+  const [selectedTaskIds, setSelectedTaskIds] = useState<Set<string>>(new Set());
+  const [tasksLoading, setTasksLoading] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const startInFlightRef = useRef(false);
@@ -77,12 +105,77 @@ export function ABTestLaunchModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, loaded, workflowId]);
 
+  // Sprint seed-task load (only for the task-driven sprint workflow). Loads the
+  // project's tasks + boards and keeps ONLY the sprint-eligible ones, EXACTLY as
+  // TaskBatchPickerModal + the runs.start pre-check do: type==='task', approved
+  // (approved_at !== null), NOT archived, at a ready-or-later NON-terminal stage
+  // (stage_position >= 6 && the stage is not terminal). Experiment-tagged clones
+  // are already excluded server-side by the backlog list.
+  useEffect(() => {
+    if (!isOpen || !isSprint) return;
+    let cancelled = false;
+    setTasksLoading(true);
+    setError(null);
+    Promise.all([
+      trpc.cyboflow.tasks.list.query({ projectId }),
+      trpc.cyboflow.tasks.boardsForProject.query({ projectId }),
+    ])
+      .then(([rows, boards]) => {
+        if (cancelled) return;
+        const terminalStageIds = new Set<string>(
+          boards.flatMap((b: Board) => b.stages.filter((s) => s.is_terminal).map((s) => s.id)),
+        );
+        // Tasks with a parent epic are nested under the epic's `children`; flatten
+        // epics first so epic-owned tasks are seedable too.
+        const flattened = rows.flatMap((r) => (r.type === 'epic' ? (r.children ?? []) : [r]));
+        const eligible = flattened.filter(
+          (r) =>
+            r.type === 'task' &&
+            r.approved_at !== null &&
+            r.archived_at === null &&
+            r.stage_position >= 6 &&
+            !terminalStageIds.has(r.stage_id),
+        );
+        setSeedTasks(eligible);
+        // Prune any prior selection to what's still eligible + not in-flight.
+        const eligibleSet = new Set(eligible.filter((t) => t.inFlow.length === 0).map((t) => t.id));
+        setSelectedTaskIds((prev) => new Set(Array.from(prev).filter((id) => eligibleSet.has(id))));
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load tasks');
+      })
+      .finally(() => {
+        if (!cancelled) setTasksLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, isSprint, projectId]);
+
   const reset = (): void => {
     setSeedIdeaId(null);
     setSeedIdeaLabel(null);
+    setSelectedTaskIds(new Set());
     setError(null);
     setIsStarting(false);
     seededForWorkflowId.current = null;
+  };
+
+  // Eligible (selectable) seed tasks: not already in-flight in another run.
+  const selectableTasks = useMemo(() => seedTasks.filter((t) => t.inFlow.length === 0), [seedTasks]);
+  const atTaskCap = selectedTaskIds.size >= SEED_TASK_CAP;
+
+  const toggleTask = (taskId: string): void => {
+    setSelectedTaskIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(taskId)) next.delete(taskId);
+      else if (next.size < SEED_TASK_CAP) next.add(taskId);
+      return next;
+    });
+  };
+
+  const selectAllTasks = (): void => {
+    setSelectedTaskIds(new Set(selectableTasks.slice(0, SEED_TASK_CAP).map((t) => t.id)));
   };
 
   const handleClose = (): void => {
@@ -104,8 +197,14 @@ export function ABTestLaunchModal({
       .catch(() => {});
   };
 
+  // A sprint experiment additionally REQUIRES >=1 seed task (a task-less sprint arm
+  // has nothing to run); every other workflow's seed idea stays optional.
   const canSubmit =
-    variantAId !== '' && variantBId !== '' && variantAId !== variantBId && !isStarting;
+    variantAId !== '' &&
+    variantBId !== '' &&
+    variantAId !== variantBId &&
+    !isStarting &&
+    (!isSprint || selectedTaskIds.size > 0);
 
   const handleStart = async (): Promise<void> => {
     if (!canSubmit || startInFlightRef.current) return;
@@ -118,7 +217,11 @@ export function ABTestLaunchModal({
         workflowId,
         variantAId,
         variantBId,
-        ...(seedIdeaId !== null ? { seedIdeaId } : {}),
+        ...(isSprint
+          ? { seedTaskIds: Array.from(selectedTaskIds) }
+          : seedIdeaId !== null
+            ? { seedIdeaId }
+            : {}),
       });
 
       // Bootstrap arm A's panels (server created the session headless), then
@@ -203,36 +306,114 @@ export function ABTestLaunchModal({
                 </p>
               )}
 
-              <div className="flex flex-col gap-1.5 border-t border-dashed border-border-primary pt-3">
-                <span className="text-xs font-medium text-text-secondary">Seed idea (optional)</span>
-                {seedIdeaId === null ? (
-                  <button
-                    type="button"
-                    onClick={() => setIdeaPickerOpen(true)}
-                    data-testid="ab-test-add-seed-idea"
-                    className="self-start rounded-button border border-border-primary bg-bg-primary px-2.5 py-1 text-xs font-medium text-text-primary hover:bg-bg-hover"
-                  >
-                    Add a seed idea
-                  </button>
-                ) : (
-                  <div className="flex items-center gap-2 text-xs text-text-secondary">
-                    <span className="truncate" data-testid="ab-test-seed-idea-label">
-                      {seedIdeaLabel}
+              {isSprint ? (
+                <div
+                  className="flex flex-col gap-1.5 border-t border-dashed border-border-primary pt-3"
+                  data-testid="ab-test-seed-tasks"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-medium text-text-secondary">
+                      Seed tasks (required) · selected{' '}
+                      <span className="font-semibold text-text-primary">{selectedTaskIds.size}</span>/{SEED_TASK_CAP}
                     </span>
                     <button
                       type="button"
-                      onClick={() => {
-                        setSeedIdeaId(null);
-                        setSeedIdeaLabel(null);
-                      }}
-                      data-testid="ab-test-clear-seed-idea"
-                      className="text-text-tertiary underline hover:text-text-primary"
+                      onClick={selectAllTasks}
+                      disabled={selectableTasks.length === 0}
+                      data-testid="ab-test-select-all-tasks"
+                      className="rounded-button border border-border-primary bg-bg-primary px-2 py-1 text-xs font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      Remove
+                      Select all eligible
                     </button>
                   </div>
-                )}
-              </div>
+                  <p className="text-xs text-text-tertiary">
+                    Each arm runs a private copy of the selected tasks; the winner's
+                    outcome folds back onto your originals.
+                  </p>
+                  {tasksLoading && <p className="text-xs text-text-secondary">Loading tasks…</p>}
+                  {!tasksLoading && seedTasks.length === 0 && (
+                    <p className="text-xs text-text-secondary" data-testid="ab-test-no-seed-tasks">
+                      No sprint-eligible tasks. Each task must be approved and at "Ready for
+                      development" or later (not archived, done, or won't-do).
+                    </p>
+                  )}
+                  {!tasksLoading && seedTasks.length > 0 && (
+                    <ul className="flex max-h-52 flex-col gap-1 overflow-y-auto" data-testid="ab-test-seed-task-list">
+                      {seedTasks.map((t) => {
+                        const inFlight = t.inFlow.length > 0;
+                        const checked = selectedTaskIds.has(t.id);
+                        const disabled = inFlight || (!checked && atTaskCap);
+                        return (
+                          <li key={t.id}>
+                            <label
+                              data-testid={`ab-test-seed-task-item-${t.id}`}
+                              className={`flex items-start gap-2 rounded-button border px-2 py-1.5 text-sm ${
+                                disabled
+                                  ? 'cursor-not-allowed border-border-primary bg-bg-secondary opacity-60'
+                                  : 'cursor-pointer border-border-primary bg-bg-primary hover:bg-bg-hover'
+                              }`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                disabled={disabled}
+                                onChange={() => toggleTask(t.id)}
+                                aria-label={`Select ${t.ref}`}
+                                className="mt-0.5"
+                              />
+                              <span className="flex flex-1 items-center gap-2">
+                                <span className="font-medium text-text-primary">{t.ref}</span>
+                                <span className="truncate text-text-secondary">{t.title}</span>
+                                {inFlight && (
+                                  <span className="rounded-full bg-bg-tertiary px-1.5 py-0.5 text-[10px] font-medium text-text-tertiary">
+                                    in flight
+                                  </span>
+                                )}
+                              </span>
+                            </label>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  {!tasksLoading && seedTasks.length > 0 && selectedTaskIds.size === 0 && (
+                    <p className="text-xs text-status-error" role="alert" data-testid="ab-test-seed-task-required-hint">
+                      Select at least one task to compare.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-col gap-1.5 border-t border-dashed border-border-primary pt-3">
+                  <span className="text-xs font-medium text-text-secondary">Seed idea (optional)</span>
+                  {seedIdeaId === null ? (
+                    <button
+                      type="button"
+                      onClick={() => setIdeaPickerOpen(true)}
+                      data-testid="ab-test-add-seed-idea"
+                      className="self-start rounded-button border border-border-primary bg-bg-primary px-2.5 py-1 text-xs font-medium text-text-primary hover:bg-bg-hover"
+                    >
+                      Add a seed idea
+                    </button>
+                  ) : (
+                    <div className="flex items-center gap-2 text-xs text-text-secondary">
+                      <span className="truncate" data-testid="ab-test-seed-idea-label">
+                        {seedIdeaLabel}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSeedIdeaId(null);
+                          setSeedIdeaLabel(null);
+                        }}
+                        data-testid="ab-test-clear-seed-idea"
+                        className="text-text-tertiary underline hover:text-text-primary"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )}
             </>
           )}
 
