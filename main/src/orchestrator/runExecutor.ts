@@ -800,36 +800,9 @@ export class RunExecutor {
       }
 
       // (b) PERSIST+PUBLISH injected monitor turns: a PER-RUN bridge over a
-      // dedicated EventEmitter (monitor-unify seam). These synthetic 'output'
-      // events (triage rationale, chat exchanges) are produced by NOTHING else, so
-      // this bridge runs with skipPersistence:false to own their raw_events
-      // persistence AND render them live. Kept on a separate source/handle from the
-      // facade bridge so the two streams never collide. Gated on publisher && db
-      // (tests construct RunExecutor without them) — when absent, injectEvent is a
-      // no-op for the run (mirrors the base method's guard).
-      let injectEvent: (event: ClaudeStreamEvent) => void = () => {};
-      if (this.publisher && this.db) {
-        const progSource = new EventEmitter();
-        this.progSources.set(runId, progSource);
-        const progBridge = bridgeEventsImpl({
-          runId,
-          source: progSource,
-          publisher: this.publisher,
-          db: this.db,
-          logger: this.logger,
-          skipPersistence: false,
-        });
-        this.progBridges.set(runId, progBridge);
-        injectEvent = (event: ClaudeStreamEvent): void => {
-          progSource.emit('output', {
-            panelId: runId,
-            sessionId: runId,
-            type: 'json',
-            data: event,
-            timestamp: new Date().toISOString(),
-          });
-        };
-      }
+      // dedicated EventEmitter (monitor-unify seam). See ensureProgInjectEvent()
+      // for the bridge construction (shared with the lazy-rehydration seam).
+      const injectEvent = this.ensureProgInjectEvent(runId);
 
       await this.onLifecycleTransition(runId, 'pre_spawn');
 
@@ -920,6 +893,62 @@ export class RunExecutor {
       progSource.removeAllListeners();
       this.progSources.delete(runId);
     }
+  }
+
+  /**
+   * Ensure (idempotently) the programmatic monitor's PERSIST+PUBLISH inject
+   * bridge exists for `runId` and return its `injectEvent` fn. Shared by
+   * executeProgrammatic() (the live-walk path, called once per turn) AND
+   * monitorRehydration.ts's `ensureInjectBridge` dep (reviving a monitor for a
+   * run with no live execution after an app restart) — a run already holding a
+   * live bridge (mid-walk, or already rehydrated) reuses its existing
+   * progSource/progBridge instead of creating a second one, so
+   * disposeMonitorResources() always tears down exactly one bridge per run.
+   * Falls back to a no-op injectEvent when publisher/db are unavailable (tests
+   * construct RunExecutor without them).
+   */
+  private ensureProgInjectEvent(runId: string): (event: ClaudeStreamEvent) => void {
+    const existingSource = this.progSources.get(runId);
+    if (!existingSource) {
+      if (!this.publisher || !this.db) {
+        return () => {};
+      }
+      const progSource = new EventEmitter();
+      this.progSources.set(runId, progSource);
+      const progBridge = bridgeEventsImpl({
+        runId,
+        source: progSource,
+        publisher: this.publisher,
+        db: this.db,
+        logger: this.logger,
+        skipPersistence: false,
+      });
+      this.progBridges.set(runId, progBridge);
+    }
+    const source = this.progSources.get(runId)!;
+    return (event: ClaudeStreamEvent): void => {
+      source.emit('output', {
+        panelId: runId,
+        sessionId: runId,
+        type: 'json',
+        data: event,
+        timestamp: new Date().toISOString(),
+      });
+    };
+  }
+
+  /**
+   * Ensure a programmatic run has a MONITOR inject bridge and return its
+   * injectEvent fn — the public seam `monitorRehydration.ts`'s
+   * `ensureInjectBridge` dep is wired to (composition root), so a lazily
+   * REHYDRATED monitor session (reviving a run's chat after an app restart) can
+   * still render + persist its `converse` turns exactly like a live run's
+   * monitor. Delegates to `ensureProgInjectEvent`, so it is idempotent with the
+   * live executeProgrammatic() path: a run mid-walk (or already rehydrated)
+   * reuses its existing bridge rather than creating a second one.
+   */
+  ensureMonitorInjectBridge(runId: string): (event: ClaudeStreamEvent) => void {
+    return this.ensureProgInjectEvent(runId);
   }
 
   /**

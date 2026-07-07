@@ -66,6 +66,8 @@ import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { setReviewItemsRunProbe } from './orchestrator/trpc/routers/reviewItems';
+import { setMonitorRehydrator } from './orchestrator/trpc/routers/monitor';
+import { createMonitorRehydrator } from './orchestrator/programmatic/monitorRehydration';
 import { handoverRunHandler, type HandoverRunDeps } from './orchestrator/handoverRunHandler';
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
@@ -164,6 +166,19 @@ let monitorRetryStep: ((runId: string, stepId?: string) => Promise<MonitorAction
 // wired → the action reports "not wired" instead of acting.
 let monitorSwitchToOrchestrated:
   | ((runId: string, reason: string) => Promise<MonitorActionResult>)
+  | null = null;
+// Monitor-session construction closure (monitor lazy-rehydration): assigned when
+// the monitorFactory is built in initializeServices() and reused by the lazy
+// rehydrator wired in the tRPC dep-wiring block, so a session REVIVED after an
+// app restart (monitorRehydration.ts) is byte-identical in shape — same query
+// fns, history reader, and actuation bag — to one built at run start. Null until
+// initializeServices runs (the rehydrator is wired later, so it never observes
+// null in practice; its wiring throws defensively if it does).
+let buildMonitorSession:
+  | ((
+      ctx: MonitorContext,
+      injectEvent: ((event: ClaudeStreamEvent) => void) | undefined,
+    ) => MonitorSession)
   | null = null;
 // Module-scoped (permission-mode redesign §3d / Slice 5) so the tRPC boot wiring
 // block (setSetPermissionModeDeps) can reach the SAME shared session-mode write
@@ -1099,7 +1114,13 @@ async function initializeServices() {
       const structuredQuery = makeSdkStructuredQuery(cyboflowLogger);
       const textQuery = makeSdkTextQuery(cyboflowLogger);
       const history = new DefaultHistoryReader(cyboflowDb, cyboflowLogger);
-      return (ctx, injectEvent) =>
+      // Also published to the module-scoped buildMonitorSession holder so the
+      // lazy monitor rehydrator (wired in the tRPC dep-wiring block) builds
+      // byte-identical sessions when reviving a run's chat after an app restart.
+      const buildSession = (
+        ctx: MonitorContext,
+        injectEvent: ((event: ClaudeStreamEvent) => void) | undefined,
+      ): MonitorSession =>
         new DefaultMonitorSession({
           ctx,
           history,
@@ -1128,6 +1149,8 @@ async function initializeServices() {
           },
           logger: cyboflowLogger,
         });
+      buildMonitorSession = buildSession;
+      return buildSession;
     })(),
     // Host-driven fan-out lane substrate (generalize-parallel-fan-out): builds a
     // per-run FanOutDriver bound to the run's batch_id so the WorkflowController can
@@ -2024,6 +2047,34 @@ app.whenReady().then(async () => {
       return { ok: false, message: messages[result.reason] ?? `Handover refused (${result.reason}).` };
     };
     console.log('[Main] monitor switch_to_orchestrated action wired');
+
+    // Lazy monitor rehydration: after an app restart the in-process
+    // MonitorRegistry is empty, and boot recovery only re-drives
+    // starting/running/awaiting_review runs (re-registering their monitors as a
+    // side effect) — a run already failed/paused/canceled/completed at boot
+    // would keep a silently dead monitor chat. On a registry miss the monitor
+    // router consults this rehydrator: it revives the session from the
+    // workflow_runs row via the SAME construction closure the run used at start
+    // (buildMonitorSession) and recreates the persisting inject bridge through
+    // RunExecutor.ensureMonitorInjectBridge so converse turns still render into
+    // the Chat pane and persist to raw_events. Refusal matrix (non-sdk,
+    // non-programmatic, missing row/worktree) lives in monitorRehydration.ts.
+    setMonitorRehydrator(
+      createMonitorRehydrator({
+        db,
+        ensureInjectBridge: (runId) => runExecutor.ensureMonitorInjectBridge(runId),
+        buildSession: (ctx, injectEvent) => {
+          if (!buildMonitorSession) {
+            // Unreachable in practice: initializeServices() assigns the holder
+            // before this wiring block runs; the router treats a throw as a miss.
+            throw new Error('buildMonitorSession not initialized before rehydrator wiring');
+          }
+          return buildMonitorSession(ctx, injectEvent);
+        },
+        logger: loggerLike,
+      }),
+    );
+    console.log('[Main] monitor lazy rehydrator wired');
 
     setStartRunDeps({
       runLauncher,

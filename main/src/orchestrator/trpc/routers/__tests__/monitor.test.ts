@@ -14,15 +14,20 @@
  * The MonitorRegistry + StepResultStore singletons are reset before each test so
  * registration state never bleeds across cases.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { appRouter } from '../../router';
 import { createContext } from '../../context';
 import { MonitorRegistry, type MonitorSession } from '../../../programmatic/monitor';
 import { StepResultStore } from '../../../stepResultStore';
+import { setMonitorRehydrator, _resetMonitorRehydratorForTesting } from '../monitor';
 
 beforeEach(() => {
   MonitorRegistry._resetForTesting();
   StepResultStore._resetForTesting();
+});
+
+afterEach(() => {
+  _resetMonitorRehydratorForTesting();
 });
 
 /** A fully-faked monitor session (no SDK) with a `converse` that records its calls. */
@@ -101,5 +106,71 @@ describe('cyboflow.monitor.stepResults', () => {
     const caller = appRouter.createCaller(createContext());
     const result = await caller.cyboflow.monitor.stepResults({ runId: 'run-1' });
     expect(result).toEqual([]);
+  });
+});
+
+describe('lazy monitor rehydration (setMonitorRehydrator)', () => {
+  it('isActive rehydrates on a registry miss when the rehydrator revives a session', async () => {
+    const session = makeMonitorSession();
+    setMonitorRehydrator({ rehydrate: vi.fn().mockReturnValue(session) });
+    const caller = appRouter.createCaller(createContext());
+
+    const result = await caller.cyboflow.monitor.isActive({ runId: 'run-1' });
+
+    expect(result).toEqual({ active: true });
+  });
+
+  it('send rehydrates on a registry miss and delivers to the revived session', async () => {
+    const session = makeMonitorSession();
+    const rehydrate = vi.fn().mockReturnValue(session);
+    setMonitorRehydrator({ rehydrate });
+    const caller = appRouter.createCaller(createContext());
+
+    const result = await caller.cyboflow.monitor.send({ runId: 'run-1', text: 'still there?' });
+
+    expect(result).toEqual({ delivered: true });
+    expect(rehydrate).toHaveBeenCalledWith('run-1');
+    expect(session.converse).toHaveBeenCalledWith('still there?');
+  });
+
+  it('an unset rehydrator preserves legacy miss behavior ({active:false} / {delivered:false})', async () => {
+    // No setMonitorRehydrator call in this test — the module-level rehydrator
+    // stays null (afterEach also resets it defensively between tests).
+    const caller = appRouter.createCaller(createContext());
+
+    expect(await caller.cyboflow.monitor.isActive({ runId: 'run-1' })).toEqual({ active: false });
+    expect(await caller.cyboflow.monitor.send({ runId: 'run-1', text: 'hi' })).toEqual({ delivered: false });
+  });
+
+  it('a rehydrator that refuses (returns null) preserves legacy miss behavior', async () => {
+    setMonitorRehydrator({ rehydrate: vi.fn().mockReturnValue(null) });
+    const caller = appRouter.createCaller(createContext());
+
+    expect(await caller.cyboflow.monitor.isActive({ runId: 'run-1' })).toEqual({ active: false });
+    expect(await caller.cyboflow.monitor.send({ runId: 'run-1', text: 'hi' })).toEqual({ delivered: false });
+  });
+
+  it('a throwing rehydrator is fail-soft: treated as a miss, never surfaces to the caller', async () => {
+    setMonitorRehydrator({
+      rehydrate: vi.fn().mockImplementation(() => {
+        throw new Error('rehydration boom');
+      }),
+    });
+    const caller = appRouter.createCaller(createContext());
+
+    await expect(caller.cyboflow.monitor.isActive({ runId: 'run-1' })).resolves.toEqual({ active: false });
+    await expect(caller.cyboflow.monitor.send({ runId: 'run-1', text: 'hi' })).resolves.toEqual({
+      delivered: false,
+    });
+  });
+
+  it('does not consult the rehydrator when the registry already has a live session', async () => {
+    MonitorRegistry.getInstance().register('run-1', makeMonitorSession());
+    const rehydrate = vi.fn();
+    setMonitorRehydrator({ rehydrate });
+    const caller = appRouter.createCaller(createContext());
+
+    expect(await caller.cyboflow.monitor.isActive({ runId: 'run-1' })).toEqual({ active: true });
+    expect(rehydrate).not.toHaveBeenCalled();
   });
 });

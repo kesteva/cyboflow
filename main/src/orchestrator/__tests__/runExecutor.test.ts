@@ -463,6 +463,115 @@ describe('RunExecutor.executeProgrammatic — inject seam (monitor-unify)', () =
   });
 });
 
+describe('RunExecutor.ensureMonitorInjectBridge (lazy monitor rehydration seam)', () => {
+  /**
+   * monitorRehydration.ts's `ensureInjectBridge` dep is wired to this method so a
+   * REHYDRATED monitor (a run with NO live execution — e.g. after an app
+   * restart) can still render + persist its `converse` turns. Calling it
+   * directly (no execute() walk) must build a working persisting bridge from
+   * scratch, exactly like the live executeProgrammatic() path does.
+   */
+  it('builds a working persisting bridge for a run with no live execution', () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const published: Array<{ runId: string; type: string }> = [];
+    const publisher: StreamEventPublisher = {
+      publish(runId, envelope) {
+        published.push({ runId, type: (envelope as { type: string }).type });
+      },
+    };
+    const db = makeRawEventsDb();
+
+    const executor = new TestableRunExecutor(makeSpawner(), registry, makeSpyLogger(), undefined, undefined, publisher, db);
+
+    const injectEvent = executor.ensureMonitorInjectBridge(run.id);
+    injectEvent(buildAssistantTextEvent('rehydrated turn'));
+
+    expect(countRawEvents(db, run.id)).toBe(1);
+    expect(published.filter((e) => e.runId === run.id).length).toBe(1);
+  });
+
+  /**
+   * Idempotency: two calls for the SAME run must share one underlying
+   * EventEmitter/bridge, not create a second one. Proven by disposing once and
+   * confirming BOTH returned injectors go dead — a non-idempotent
+   * implementation would overwrite the map on the second call, leaving the
+   * first injector's (now orphaned) bridge still live and undisposed.
+   */
+  it('is idempotent: two calls share one bridge, disposed together by one disposeMonitorResources', () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const published: Array<{ runId: string; type: string }> = [];
+    const publisher: StreamEventPublisher = {
+      publish(runId, envelope) {
+        published.push({ runId, type: (envelope as { type: string }).type });
+      },
+    };
+    const db = makeRawEventsDb();
+
+    const executor = new TestableRunExecutor(makeSpawner(), registry, makeSpyLogger(), undefined, undefined, publisher, db);
+
+    const inject1 = executor.ensureMonitorInjectBridge(run.id);
+    const inject2 = executor.ensureMonitorInjectBridge(run.id);
+
+    inject2(buildAssistantTextEvent('via inject2'));
+    expect(countRawEvents(db, run.id)).toBe(1);
+
+    executor.disposeMonitorResources(run.id);
+    inject1(buildAssistantTextEvent('after dispose via inject1'));
+    expect(countRawEvents(db, run.id)).toBe(1); // unchanged — inject1 shared the same (now-disposed) bridge
+  });
+
+  /**
+   * The LIVE-RUN path: a run mid-walk (or resting post-drain, chat-at-rest)
+   * already has its progSource/progBridge from executeProgrammatic(). A
+   * rehydration-style call for that SAME run must reuse it rather than
+   * building a second bridge.
+   */
+  it('reuses the existing bridge for a run already driven by executeProgrammatic', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const published: Array<{ runId: string; type: string }> = [];
+    const publisher: StreamEventPublisher = {
+      publish(runId, envelope) {
+        published.push({ runId, type: (envelope as { type: string }).type });
+      },
+    };
+    const db = withModeJoinSurface(makeRawEventsDb());
+    const runner: ProgrammaticRunner = { run: vi.fn(() => Promise.resolve()) };
+
+    const executor = new TestableRunExecutor(
+      makeSpawner(), registry, makeSpyLogger(),
+      undefined, undefined, publisher, db, undefined, undefined, undefined, undefined, undefined, runner,
+    );
+
+    await executor.execute(run.id); // walk drains; the live progSource/progBridge survive (chat-at-rest)
+
+    const rehydratedInject = executor.ensureMonitorInjectBridge(run.id);
+    rehydratedInject(buildAssistantTextEvent('post-rest rehydrated turn'));
+
+    expect(countRawEvents(db, run.id)).toBe(1);
+    expect(published.filter((e) => e.runId === run.id).length).toBe(1);
+
+    // disposeMonitorResources tears down the ONE shared bridge, not a leaked second one.
+    executor.disposeMonitorResources(run.id);
+    rehydratedInject(buildAssistantTextEvent('after close-out'));
+    expect(countRawEvents(db, run.id)).toBe(1); // unchanged
+  });
+});
+
 describe('RunExecutor.execute — default getPrompt sentinel', () => {
   it('(d) default getPrompt throws NOT_IMPLEMENTED when no promptReader injected', async () => {
     const run = makeWorkflowRunRow();

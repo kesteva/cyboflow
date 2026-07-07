@@ -15,29 +15,94 @@
  * (the default review-queue mode, a terminal run) resolves fail-soft
  * (`{ delivered: false }` / `{ active: false }` / `[]`).
  *
+ * LAZY REHYDRATION (monitor lazy-rehydration): after an app restart the
+ * MonitorRegistry is empty, so a registry MISS here does not necessarily mean the
+ * run has no monitor — its session object simply did not survive the restart (the
+ * monitor itself is stateless per call; nothing else needs restoring). The
+ * composition root wires a `MonitorRehydrator` via `setMonitorRehydrator`; on a
+ * registry miss `isActive`/`send` consult it and, when it revives a session
+ * (registering it as a side effect), proceed as if the registry had hit. Unset /
+ * null rehydrator or a rehydrator that returns null (refused — see
+ * monitorRehydration.ts) preserves the exact legacy miss behavior. A throwing
+ * rehydrator is fail-soft: logged and treated as a miss, never surfaced to the
+ * caller.
+ *
  * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3',
  * or main/src/services/*.
  */
 import { z } from 'zod';
 import { router, protectedProcedure } from '../trpc';
-import { MonitorRegistry } from '../../programmatic/monitor';
+import { MonitorRegistry, type MonitorSession } from '../../programmatic/monitor';
 import { StepResultStore, type StepResultRow } from '../../stepResultStore';
+
+// ---------------------------------------------------------------------------
+// Lazy-rehydration seam
+// ---------------------------------------------------------------------------
+
+/**
+ * Structural view of the lazy monitor rehydrator (implemented in
+ * monitorRehydration.ts, wired at boot by the composition root). Consulted ONLY
+ * on a MonitorRegistry miss; `rehydrate` registers the revived session itself
+ * (mirrors the registry's own register-on-create contract), so callers here just
+ * re-read the registry (or use the returned session directly).
+ */
+export interface MonitorRehydrator {
+  rehydrate(runId: string): MonitorSession | null;
+}
+
+let monitorRehydrator: MonitorRehydrator | null = null;
+
+/**
+ * Wire the lazy monitor rehydrator at boot (composition root). Idempotent — may
+ * be called again to replace it; tests install a fake per case and clear it via
+ * {@link _resetMonitorRehydratorForTesting}.
+ */
+export function setMonitorRehydrator(rehydrator: MonitorRehydrator | null): void {
+  monitorRehydrator = rehydrator;
+}
+
+/** Test-only: clear the wired rehydrator so a case starts from the unset (legacy) state. */
+export function _resetMonitorRehydratorForTesting(): void {
+  monitorRehydrator = null;
+}
+
+/**
+ * Look up a run's monitor session, falling back to the lazy rehydrator on a
+ * registry miss. Fail-soft: a throwing rehydrator is logged and treated as a
+ * miss (`undefined`) rather than escaping to the caller.
+ */
+function lookupOrRehydrate(runId: string): MonitorSession | undefined {
+  const existing = MonitorRegistry.getInstance().get(runId);
+  if (existing) return existing;
+  if (!monitorRehydrator) return undefined;
+  try {
+    return monitorRehydrator.rehydrate(runId) ?? undefined;
+  } catch (err) {
+    console.warn(
+      `[monitor.lookupOrRehydrate] rehydrator threw for run ${runId}; treating as miss:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return undefined;
+  }
+}
 
 export const monitorRouter = router({
   /**
    * Whether a monitor session is active for a run — drives whether the renderer
    * enables the Chat composer for the run (only programmatic runs with the SDK
-   * monitor have one). Cheap registry lookup.
+   * monitor have one). Registry lookup, falling back to lazy rehydration on a miss
+   * (see `lookupOrRehydrate`).
    */
   isActive: protectedProcedure
     .input(z.object({ runId: z.string() }))
     .query(({ input }): { active: boolean } => {
-      return { active: MonitorRegistry.getInstance().get(input.runId) !== undefined };
+      return { active: lookupOrRehydrate(input.runId) !== undefined };
     }),
 
   /**
    * Relay a user chat turn to the run's monitor (the human seam). No-op (returns
-   * { delivered: false }) when no monitor session is active for the run.
+   * { delivered: false }) when no monitor session is active for the run (including
+   * after a failed/refused lazy rehydration attempt).
    *
    * The monitor session owns the inject→answer→inject orchestration via `converse`:
    * it injects the human's turn so it renders + becomes part of the history the
@@ -53,7 +118,7 @@ export const monitorRouter = router({
   send: protectedProcedure
     .input(z.object({ runId: z.string(), text: z.string() }))
     .mutation(async ({ input }): Promise<{ delivered: boolean }> => {
-      const session = MonitorRegistry.getInstance().get(input.runId);
+      const session = lookupOrRehydrate(input.runId);
       if (!session) return { delivered: false };
       if (session.converse) {
         await session.converse(input.text);
