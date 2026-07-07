@@ -140,6 +140,7 @@ function makeHarness(): Harness {
       activated.push(id);
     },
     setVariantWeight: () => {},
+    adoptWorkflowSpec: () => {},
   };
   return { db: raw, deps, launches, getVariantCalls, activated };
 }

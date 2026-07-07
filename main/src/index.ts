@@ -2500,6 +2500,7 @@ app.whenReady().then(async () => {
       },
       setVariantStatus: (variantId, status) => workflowRegistry.setVariantStatus(variantId, status),
       setVariantWeight: (variantId, weight) => workflowRegistry.updateVariant(variantId, { weight }),
+      adoptWorkflowSpec: (workflowId, definition) => workflowRegistry.updateSpec(workflowId, definition),
       // Slice C: experiments.decide resolves the blocking pairwise decision review
       // item via experiment_comparisons.decision_review_item_id. Look up the item's
       // project (review items are project-scoped) then route the resolve through the

@@ -184,6 +184,10 @@ export interface ExperimentRow {
   decided_at: string | null;
   /** Soft chain link to the source experiment (experiments.rerun); NULL for an original. */
   rerun_of_experiment_id: string | null;
+  /** The variant adopted as the base workflow (experiments.promoteVariant); '__baseline__' when the baseline arm won. NULL until promoted. */
+  promoted_variant_id: string | null;
+  promoted_arm: ExperimentArm | null;
+  promoted_at: string | null;
   created_at: string;
   updated_at: string;
 }

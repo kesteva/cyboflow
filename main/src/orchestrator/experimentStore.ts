@@ -223,6 +223,17 @@ export function updateExperimentStatus(
   db.prepare(`UPDATE experiments SET ${sets.join(', ')} WHERE id = ?`).run(...params, experimentId);
 }
 
+/** Stamp the variant-outcome verdict (experiments.promoteVariant). One-way; the router guards against re-promotion. */
+export function setExperimentPromotion(
+  db: DatabaseLike,
+  experimentId: string,
+  opts: { promotedVariantId: string; promotedArm: ExperimentArm; promotedAt: string },
+): void {
+  db.prepare(
+    `UPDATE experiments SET promoted_variant_id = ?, promoted_arm = ?, promoted_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+  ).run(opts.promotedVariantId, opts.promotedArm, opts.promotedAt, experimentId);
+}
+
 /** Read a workflow run's status (fail-soft: missing run → null). */
 function readRunStatus(db: DatabaseLike, runId: string | null): string | null {
   if (!runId) return null;

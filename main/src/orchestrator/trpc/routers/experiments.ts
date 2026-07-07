@@ -19,8 +19,9 @@ import { router, protectedProcedure } from '../trpc';
 import type { DatabaseLike } from '../../types';
 import type { TaskChange } from '../../taskChangeRouter';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
-import type { PermissionMode } from '../../../../../shared/types/workflows';
+import type { PermissionMode, WorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
+import { workflowDefinitionSchema } from '../../workflowDefinitionSchema';
 import type {
   ExperimentArm,
   ExperimentRow,
@@ -44,6 +45,7 @@ import {
   isExperimentArmSettled,
   isExperimentSettled,
   isBaselineArm,
+  BASELINE_VARIANT_SENTINEL,
 } from '../../../../../shared/types/experiments';
 import {
   insertExperiment,
@@ -51,6 +53,7 @@ import {
   listExperimentsForProject,
   setExperimentRuns,
   updateExperimentStatus,
+  setExperimentPromotion,
   insertExperimentSeedTasks,
   listExperimentSeedTasks,
   seedTaskCloneIdsForArm,
@@ -130,6 +133,8 @@ export interface ExperimentsDeps {
   getProjectPath: (projectId: number) => string | null;
   setVariantStatus: (variantId: string, status: WorkflowVariantStatus) => void;
   setVariantWeight: (variantId: string, weight: number) => void;
+  /** Adopt a parsed WorkflowDefinition as the base workflow's spec (workflowRegistry.updateSpec). */
+  adoptWorkflowSpec: (workflowId: string, definition: WorkflowDefinition) => void;
   /** Optional: resolve the pairwise decision review item (slice C). Fail-soft when absent. */
   resolveReviewItem?: (reviewItemId: string) => void;
   /**
@@ -985,6 +990,81 @@ export async function abandonExperiment(deps: ExperimentsDeps, experimentId: str
 }
 
 // ---------------------------------------------------------------------------
+// promoteVariant — the VARIANT-OUTCOME decision (which workflow VERSION wins),
+// orthogonal to decide's CHANGES decision (which arm's concrete output to keep).
+// Gated on the experiment being settled (decided/abandoned) — same precondition
+// as rerun/switchToRotation.
+// ---------------------------------------------------------------------------
+
+/** @internal exported for unit tests. */
+export function promoteVariant(
+  deps: ExperimentsDeps,
+  experimentId: string,
+  arm: ExperimentArm,
+): { experimentId: string; promotedVariantId: string; promotedArm: ExperimentArm } {
+  const db = deps.db;
+  const exp = getExperiment(db, experimentId);
+  if (!exp) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: `experiment ${experimentId} not found` });
+  }
+  // Must be concluded (the changes decision made) — same precondition as rerun/switchToRotation.
+  if (!isExperimentSettled(exp.status)) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: `experiment ${experimentId} must be decided/abandoned before promoting a variant`,
+    });
+  }
+  // One-way: refuse a second promotion (adopting the other arm would silently overwrite the earlier verdict).
+  if (exp.promoted_variant_id !== null) {
+    throw new TRPCError({
+      code: 'CONFLICT',
+      message: `experiment ${experimentId} already promoted variant ${exp.promoted_variant_id}`,
+    });
+  }
+  const variantId = arm === 'A' ? exp.variant_a_id : exp.variant_b_id;
+  const now = new Date().toISOString();
+
+  // Baseline arm won: keep the current workflow definition unchanged, record verdict only.
+  if (isBaselineArm(variantId)) {
+    setExperimentPromotion(db, experimentId, {
+      promotedVariantId: BASELINE_VARIANT_SENTINEL,
+      promotedArm: arm,
+      promotedAt: now,
+    });
+    return { experimentId, promotedVariantId: BASELINE_VARIANT_SENTINEL, promotedArm: arm };
+  }
+
+  const variant = deps.getVariant(variantId);
+  if (!variant) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: `variant ${variantId} not found` });
+  }
+
+  // Adopt the variant's frozen step graph as the base workflow spec — all future
+  // normal launches resolve it. The spec_json is a validated resolved definition;
+  // re-validate defensively before writing.
+  let definition: WorkflowDefinition;
+  try {
+    definition = workflowDefinitionSchema.parse(JSON.parse(variant.spec_json));
+  } catch {
+    throw new TRPCError({
+      code: 'INTERNAL_SERVER_ERROR',
+      message: `variant ${variantId} has an invalid spec and cannot be promoted`,
+    });
+  }
+  deps.adoptWorkflowSpec(exp.workflow_id, definition);
+
+  // Retire the now-redundant variant IFF it is spec-only. A variant carrying agent
+  // deltas / model / execution-model pins is NOT redundant (the base workflow has
+  // no slot for those), so it is kept as a named version.
+  const specOnly =
+    variant.agent_overrides_json === null && variant.model === null && variant.execution_model === null;
+  if (specOnly) deps.setVariantStatus(variantId, 'retired');
+
+  setExperimentPromotion(db, experimentId, { promotedVariantId: variantId, promotedArm: arm, promotedAt: now });
+  return { experimentId, promotedVariantId: variantId, promotedArm: arm };
+}
+
+// ---------------------------------------------------------------------------
 // Comparison reads (slice C) — assemble the compare-view payloads
 // ---------------------------------------------------------------------------
 
@@ -1214,6 +1294,23 @@ export const experimentsRouter = router({
       }
       return { experimentId: exp.id, status: exp.status, winnerRunId: exp.winner_run_id };
     }),
+
+  /**
+   * Record the VARIANT-OUTCOME verdict: which workflow VERSION wins going
+   * forward. Orthogonal to `decide` (which arm's concrete output to keep).
+   * Requires the source experiment settled; one-way (a second call CONFLICTs).
+   * A real-variant arm has its step definition adopted as the base workflow's
+   * spec (and is retired if spec-only); the baseline arm leaves the workflow
+   * definition unchanged and only records the verdict.
+   */
+  promoteVariant: protectedProcedure
+    .input(z.object({ experimentId: z.string().min(1), arm: z.enum(['A', 'B']) }))
+    .mutation(
+      ({ input }): { experimentId: string; promotedVariantId: string; promotedArm: ExperimentArm } => {
+        const deps = requireDeps();
+        return promoteVariant(deps, input.experimentId, input.arm);
+      },
+    ),
 
   get: protectedProcedure
     .input(z.object({ experimentId: z.string().min(1) }))

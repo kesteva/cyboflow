@@ -16,6 +16,7 @@ import {
   startExperiment,
   decideExperiment,
   abandonExperiment,
+  promoteVariant,
   type ExperimentsDeps,
 } from '../trpc/routers/experiments';
 import { getExperiment, listExperimentSeedTasks } from '../experimentStore';
@@ -48,6 +49,7 @@ function buildDb(): Database.Database {
     session_a_id TEXT, session_b_id TEXT, seed_idea_id TEXT, seed_idea_clone_a_id TEXT, seed_idea_clone_b_id TEXT,
     status TEXT NOT NULL DEFAULT 'running', winner_run_id TEXT, winner_arm TEXT, merge_sha TEXT,
     decided_at TEXT, rerun_of_experiment_id TEXT,
+    promoted_variant_id TEXT, promoted_arm TEXT CHECK (promoted_arm IN ('A','B')), promoted_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);`);
   db.exec(`CREATE TABLE experiment_seed_tasks (
     experiment_id TEXT NOT NULL, arm TEXT NOT NULL CHECK (arm IN ('A','B')),
@@ -78,6 +80,12 @@ interface RecordedLaunch {
   seedTaskIds: string[] | undefined;
 }
 
+/** One recorded promoteVariant adoptWorkflowSpec call. */
+interface RecordedAdoptedSpec {
+  workflowId: string;
+  definition: unknown;
+}
+
 interface Harness {
   db: Database.Database;
   deps: ExperimentsDeps;
@@ -85,6 +93,7 @@ interface Harness {
   canceled: string[];
   activated: string[];
   launches: RecordedLaunch[];
+  adoptedSpecs: RecordedAdoptedSpec[];
   failArmB: { value: boolean };
 }
 
@@ -96,6 +105,7 @@ function makeHarness(): Harness {
   const canceled: string[] = [];
   const activated: string[] = [];
   const launches: RecordedLaunch[] = [];
+  const adoptedSpecs: RecordedAdoptedSpec[] = [];
   const failArmB = { value: false };
 
   const deps: ExperimentsDeps = {
@@ -140,8 +150,11 @@ function makeHarness(): Harness {
       activated.push(id);
     },
     setVariantWeight: () => {},
+    adoptWorkflowSpec: (workflowId, definition) => {
+      adoptedSpecs.push({ workflowId, definition });
+    },
   };
-  return { db: raw, deps, dismissed, canceled, activated, launches, failArmB };
+  return { db: raw, deps, dismissed, canceled, activated, launches, adoptedSpecs, failArmB };
 }
 
 /** Simulate an arm agent creating an epic + child task under its run (tagged via run.experiment_id). */
@@ -685,5 +698,136 @@ describe('experiments router orchestration (slice B)', () => {
     expect(exists(h.db, 'tasks', cloneA)).toBe(true);
     expect(exists(h.db, 'tasks', cloneB)).toBe(true);
     expect(listExperimentSeedTasks(dbAdapter(h.db), res.experimentId)).toHaveLength(2);
+  });
+
+  // --- Migration 052: promoteVariant (the VARIANT-OUTCOME verdict) -----------
+
+  /** A real WorkflowVariantRow whose spec_json is a valid, promotable definition. */
+  function validVariant(id: string, overrides: Partial<WorkflowVariantRow> = {}): WorkflowVariantRow {
+    return {
+      id,
+      workflow_id: 'wf',
+      label: id,
+      spec_json: JSON.stringify({
+        id: 'wf-def',
+        phases: [
+          {
+            id: 'phase-1',
+            label: 'Phase 1',
+            color: '#3b6dd6',
+            steps: [{ id: 'step-1', name: 'Step 1', agent: 'agent-a', mcps: [], retries: 0 }],
+          },
+        ],
+      }),
+      agent_overrides_json: null,
+      model: null,
+      execution_model: null,
+      weight: 1,
+      status: 'draft',
+      created_at: '',
+      updated_at: '',
+      ...overrides,
+    };
+  }
+
+  /** Drive a plain (unseeded) experiment to 'decided' with both arms discarded — the minimal settled state promoteVariant builds on. */
+  async function settledExperiment(
+    h: Harness,
+    opts: { workflowId?: string; variantAId?: string; variantBId?: string } = {},
+  ): Promise<Awaited<ReturnType<typeof startExperiment>>> {
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: opts.workflowId ?? 'wf',
+      variantAId: opts.variantAId ?? 'vA',
+      variantBId: opts.variantBId ?? 'vB',
+    });
+    setRunStatus(h.db, res.armA.runId, 'completed');
+    setRunStatus(h.db, res.armB.runId, 'completed');
+    await decideExperiment(h.deps, res.experimentId, null);
+    return res;
+  }
+
+  describe('promoteVariant (variant-outcome verdict)', () => {
+    it('rejects when the experiment is not yet settled (PRECONDITION_FAILED)', async () => {
+      const h = makeHarness();
+      const res = await startExperiment(h.deps, {
+        projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB',
+      });
+      // Both arms still running — the experiment is 'running', not decided/abandoned.
+      expect(() => promoteVariant(h.deps, res.experimentId, 'A')).toThrow(/must be decided\/abandoned/);
+    });
+
+    it("adopts a spec-only variant's spec, retires it, and stamps the promotion", async () => {
+      const h = makeHarness();
+      const res = await settledExperiment(h);
+      const retired: Array<{ id: string; status: string }> = [];
+      const deps: ExperimentsDeps = {
+        ...h.deps,
+        getVariant: (id) => (id === 'vA' ? validVariant('vA') : null),
+        setVariantStatus: (id, status) => {
+          retired.push({ id, status });
+        },
+      };
+
+      const out = promoteVariant(deps, res.experimentId, 'A');
+      expect(out).toEqual({ experimentId: res.experimentId, promotedVariantId: 'vA', promotedArm: 'A' });
+      // The variant's spec was adopted as the base workflow's spec (via the real deps' adoptWorkflowSpec, untouched by the override).
+      expect(h.adoptedSpecs).toHaveLength(1);
+      expect(h.adoptedSpecs[0].workflowId).toBe('wf');
+      // A spec-only variant (no agent overrides / model / execution model) is retired.
+      expect(retired).toEqual([{ id: 'vA', status: 'retired' }]);
+
+      const exp = getExperiment(dbAdapter(h.db), res.experimentId)!;
+      expect(exp.promoted_variant_id).toBe('vA');
+      expect(exp.promoted_arm).toBe('A');
+      expect(exp.promoted_at).not.toBeNull();
+    });
+
+    it('does NOT retire a variant that carries agent-prompt/model overrides', async () => {
+      const h = makeHarness();
+      const res = await settledExperiment(h);
+      const retired: Array<{ id: string; status: string }> = [];
+      const deps: ExperimentsDeps = {
+        ...h.deps,
+        getVariant: (id) =>
+          id === 'vA' ? validVariant('vA', { agent_overrides_json: '{"planner":{"model":"opus"}}' }) : null,
+        setVariantStatus: (id, status) => {
+          retired.push({ id, status });
+        },
+      };
+
+      const out = promoteVariant(deps, res.experimentId, 'A');
+      expect(out.promotedVariantId).toBe('vA');
+      // The spec is still adopted...
+      expect(h.adoptedSpecs).toHaveLength(1);
+      // ...but the variant is kept as a named version (not spec-only).
+      expect(retired).toEqual([]);
+    });
+
+    it('baseline arm records the __baseline__ sentinel with NO adoptWorkflowSpec call', async () => {
+      const h = makeHarness();
+      const res = await startExperiment(h.deps, {
+        projectId: 1, workflowId: 'wf', variantAId: '__baseline__', variantBId: 'vB',
+      });
+      setRunStatus(h.db, res.armA.runId, 'completed');
+      setRunStatus(h.db, res.armB.runId, 'completed');
+      await decideExperiment(h.deps, res.experimentId, null);
+
+      const out = promoteVariant(h.deps, res.experimentId, 'A');
+      expect(out).toEqual({ experimentId: res.experimentId, promotedVariantId: '__baseline__', promotedArm: 'A' });
+      expect(h.adoptedSpecs).toHaveLength(0);
+      const exp = getExperiment(dbAdapter(h.db), res.experimentId)!;
+      expect(exp.promoted_variant_id).toBe('__baseline__');
+      expect(exp.promoted_arm).toBe('A');
+    });
+
+    it('a second promote throws CONFLICT', async () => {
+      const h = makeHarness();
+      const res = await settledExperiment(h);
+      const deps: ExperimentsDeps = { ...h.deps, getVariant: (id) => (id === 'vA' ? validVariant('vA') : null) };
+
+      promoteVariant(deps, res.experimentId, 'A');
+      expect(() => promoteVariant(deps, res.experimentId, 'B')).toThrow(/already promoted/);
+    });
   });
 });
