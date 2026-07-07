@@ -15,7 +15,9 @@ import {
   updateExperimentStatus,
   reconcileExperimentStatus,
   recoverExperiments,
+  dismissAndSweepHalfCreatedExperiment,
 } from '../experimentStore';
+import type { ExperimentRow } from '../../../../shared/types/experiments';
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
@@ -172,5 +174,97 @@ describe('experimentStore', () => {
     insertExperiment(db, { projectId: 2, workflowId: 'wf', baseBranch: 'm', baseSha: 's', variantAId: 'a', variantBId: 'b' });
     expect(listExperimentsForProject(db, 1)).toHaveLength(1);
     expect(listExperimentsForProject(db, 2)).toHaveLength(1);
+  });
+});
+
+describe('dismissAndSweepHalfCreatedExperiment (boot recovery)', () => {
+  /** A half-created row: both clones + arm sessions set, run_a stamped, run_b NULL. */
+  function halfCreated(
+    db: ReturnType<typeof dbAdapter>,
+    sessions: { a?: string | null; b?: string | null } = {},
+  ): ExperimentRow {
+    const exp = insertExperiment(db, {
+      projectId: 7,
+      workflowId: 'wf',
+      baseBranch: 'main',
+      baseSha: 's',
+      variantAId: 'a',
+      variantBId: 'b',
+      sessionAId: sessions.a === undefined ? 'sessA' : sessions.a,
+      sessionBId: sessions.b === undefined ? 'sessB' : sessions.b,
+      seedIdeaCloneAId: 'cloneA',
+      seedIdeaCloneBId: 'cloneB',
+    });
+    setExperimentRuns(db, exp.id, { runAId: 'rA' }); // run_b_id stays NULL -> half-created
+    return getExperiment(db, exp.id)!;
+  }
+
+  it('dismisses BOTH arm sessions THEN sweeps both arms', async () => {
+    const db = dbAdapter(buildDb());
+    const exp = halfCreated(db);
+    const dismissed: string[] = [];
+    const swept: Array<{ projectId: number; runId: string; seedCloneId?: string | null }> = [];
+    await dismissAndSweepHalfCreatedExperiment(exp, {
+      dismissSession: async (id) => { dismissed.push(id); },
+      deleteExperimentArmEntities: async (projectId, opts) => {
+        swept.push({ projectId, runId: opts.runId, seedCloneId: opts.seedCloneId });
+      },
+    });
+    expect(dismissed).toEqual(['sessA', 'sessB']);
+    // Arm B's run id is NULL -> '' (matches no run-created events; the clone sweeps via seedCloneId).
+    expect(swept).toEqual([
+      { projectId: 7, runId: 'rA', seedCloneId: 'cloneA' },
+      { projectId: 7, runId: '', seedCloneId: 'cloneB' },
+    ]);
+  });
+
+  it('skips a null / never-created arm session id', async () => {
+    const db = dbAdapter(buildDb());
+    const exp = halfCreated(db, { b: null });
+    const dismissed: string[] = [];
+    await dismissAndSweepHalfCreatedExperiment(exp, {
+      dismissSession: async (id) => { dismissed.push(id); },
+      deleteExperimentArmEntities: async () => {},
+    });
+    expect(dismissed).toEqual(['sessA']); // session_b_id null -> skipped
+  });
+
+  it('a dismissal failure is LOGGED (not swallowed) and aborts neither the sibling dismiss nor the sweep', async () => {
+    const db = dbAdapter(buildDb());
+    const exp = halfCreated(db);
+    const attempts: string[] = [];
+    const swept: string[] = [];
+    const warns: Array<{ msg: string; ctx?: Record<string, unknown> }> = [];
+    await dismissAndSweepHalfCreatedExperiment(exp, {
+      dismissSession: async (id) => {
+        attempts.push(id);
+        if (id === 'sessA') throw new Error('boom-dismiss');
+      },
+      deleteExperimentArmEntities: async (_projectId, opts) => { swept.push(opts.runId); },
+      logger: { warn: (msg, ctx) => warns.push({ msg, ctx }) },
+    });
+    // Failure dismissing session A does not stop session B.
+    expect(attempts).toEqual(['sessA', 'sessB']);
+    // The failure is surfaced (logged), naming the offending ids.
+    expect(warns).toHaveLength(1);
+    expect(warns[0].ctx).toMatchObject({ experimentId: exp.id, sessionId: 'sessA' });
+    // The entity sweep still runs for BOTH arms.
+    expect(swept).toEqual(['rA', '']);
+  });
+
+  it('via recoverExperiments: half-created → abandoned AND both sessions dismissed + both arms swept', async () => {
+    const db = dbAdapter(buildDb());
+    const exp = halfCreated(db);
+    const dismissed: string[] = [];
+    const swept: string[] = [];
+    await recoverExperiments(db, async (e) => {
+      await dismissAndSweepHalfCreatedExperiment(e, {
+        dismissSession: async (id) => { dismissed.push(id); },
+        deleteExperimentArmEntities: async (_projectId, opts) => { swept.push(opts.runId); },
+      });
+    });
+    expect(getExperiment(db, exp.id)?.status).toBe('abandoned');
+    expect(dismissed).toEqual(['sessA', 'sessB']);
+    expect(swept).toEqual(['rA', '']);
   });
 });

@@ -131,7 +131,7 @@ import { readWorkflowPromptForRow } from './orchestrator/workflowPromptReaderAda
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import { recoverActiveStateOrphans, recoverArchivedSessionRunOrphans, backfillTerminalOutcomes, stampSessionRunsOutcome } from './orchestrator/runRecovery';
 import { setExperimentsDeps } from './orchestrator/trpc/routers/experiments';
-import { recoverExperiments, reconcileExperimentStatus } from './orchestrator/experimentStore';
+import { recoverExperiments, reconcileExperimentStatus, dismissAndSweepHalfCreatedExperiment } from './orchestrator/experimentStore';
 import { createQuickSessionCore } from './services/createQuickSessionCore';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs } from './utils/devDebugLog';
@@ -1916,33 +1916,6 @@ app.whenReady().then(async () => {
       console.log(`[Main] Backfilled terminal outcomes (failed: ${outcomeBackfill.failedBackfilled}, canceled: ${outcomeBackfill.canceledBackfilled})`);
     }
 
-    // Boot recovery: reconcile non-terminal A/B experiments (migration 049).
-    // running→grading when both arms are settled; a half-created experiment (crash
-    // mid-startSideBySide, one arm never launched) → abandoned + clone sweep.
-    try {
-      await recoverExperiments(db, async (exp) => {
-        const tcr = TaskChangeRouter.getInstance();
-        await tcr
-          .deleteExperimentArmEntities(exp.project_id, {
-            experimentId: exp.id,
-            runId: exp.run_a_id ?? '',
-            seedCloneId: exp.seed_idea_clone_a_id,
-          })
-          .catch(() => {});
-        await tcr
-          .deleteExperimentArmEntities(exp.project_id, {
-            experimentId: exp.id,
-            runId: exp.run_b_id ?? '',
-            seedCloneId: exp.seed_idea_clone_b_id,
-          })
-          .catch(() => {});
-      });
-    } catch (err) {
-      loggerLike.error('[Main] experiment boot recovery failed', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-
     // Known limitation: ApprovalRouter.clearPendingForRun is still a documented no-op
     // until TASK-304 lands. The Cancel-and-restart button therefore stops the Claude
     // SDK run and updates DB rows, but does not yet send deny-replies on the
@@ -2558,6 +2531,29 @@ app.whenReady().then(async () => {
       },
     });
     console.log('[Main] experiments deps wired');
+
+    // Boot recovery: reconcile non-terminal A/B experiments (migration 049).
+    // running→grading when both arms are settled; a half-created experiment (crash
+    // mid-startSideBySide, one arm never launched) → abandoned, THEN its two arm
+    // sessions are dismissed via the SAME full session-delete path startSideBySide's
+    // rollback uses (dismissSessionFully — cancels hosted runs + removes worktrees)
+    // and both arms' entities are swept. Deliberately placed AFTER dismissSessionFully
+    // + setExperimentsDeps are wired: the sweep callback reuses dismissSessionFully,
+    // which closes over cancelHostedRunsImpl (assigned above) + experimentsDb.
+    try {
+      await recoverExperiments(db, async (exp) => {
+        await dismissAndSweepHalfCreatedExperiment(exp, {
+          dismissSession: dismissSessionFully,
+          deleteExperimentArmEntities: (projectId, opts) =>
+            TaskChangeRouter.getInstance().deleteExperimentArmEntities(projectId, opts),
+          logger: loggerLike,
+        });
+      });
+    } catch (err) {
+      loggerLike.error('[Main] experiment boot recovery failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     // runs.setPermissionMode → shared session-mode write chokepoint (permission-
     // mode redesign §3d / Slice 5). Re-routes the chat / flow-run permission pill

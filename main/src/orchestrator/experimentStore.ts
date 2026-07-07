@@ -16,7 +16,7 @@
  *   grading  -> abandoned  (abandon)
  */
 import { randomUUID } from 'node:crypto';
-import type { DatabaseLike } from './types';
+import type { DatabaseLike, LoggerLike } from './types';
 import type { ExperimentArm, ExperimentRow, ExperimentStatus } from '../../../shared/types/experiments';
 import { isExperimentArmSettled } from '../../../shared/types/experiments';
 
@@ -234,4 +234,62 @@ export async function recoverExperiments(
       // Best-effort per experiment — one bad row must not abort the rest.
     }
   }
+}
+
+/** Structural collaborators for half-created-experiment boot recovery (injected by index.ts). */
+export interface HalfCreatedExperimentRecoveryDeps {
+  /** FULL session-delete path (cancels hosted runs + removes the worktree). NEVER a bare worktree-remove. */
+  dismissSession: (sessionId: string) => Promise<void>;
+  /** Hard-delete a run's experiment-tagged entities + the arm's seed clone. */
+  deleteExperimentArmEntities: (
+    projectId: number,
+    opts: { experimentId: string; runId: string; seedCloneId?: string | null },
+  ) => Promise<void>;
+  /** Optional warn logger — a dismissal failure is logged, never silently swallowed. */
+  logger?: Pick<LoggerLike, 'warn'>;
+}
+
+/**
+ * Recover a single half-created experiment (the `recoverExperiments` sweep callback
+ * body, extracted so it is unit-testable outside index.ts). reconcileExperimentStatus
+ * has already flipped the row to `abandoned` — so recoverExperiments will never
+ * revisit it — but the arm SESSIONS + worktrees created before the crash are still
+ * live. The in-process startSideBySide rollback ladder dismisses them via the FULL
+ * session-delete path; boot recovery MUST match, or an aborted experiment leaks its
+ * arm worktrees forever.
+ *
+ * Order: dismiss session_a then session_b (each wrapped so a failure LOGS and still
+ * lets the entity sweep run), THEN sweep both arms' entities. A null / never-created
+ * session id is skipped; an unknown id is tolerated by the per-session catch.
+ */
+export async function dismissAndSweepHalfCreatedExperiment(
+  exp: ExperimentRow,
+  deps: HalfCreatedExperimentRecoveryDeps,
+): Promise<void> {
+  for (const sessionId of [exp.session_a_id, exp.session_b_id]) {
+    if (!sessionId) continue;
+    try {
+      await deps.dismissSession(sessionId);
+    } catch (err) {
+      deps.logger?.warn('[experiments] boot recovery: dismiss arm session failed', {
+        experimentId: exp.id,
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  await deps
+    .deleteExperimentArmEntities(exp.project_id, {
+      experimentId: exp.id,
+      runId: exp.run_a_id ?? '',
+      seedCloneId: exp.seed_idea_clone_a_id,
+    })
+    .catch(() => {});
+  await deps
+    .deleteExperimentArmEntities(exp.project_id, {
+      experimentId: exp.id,
+      runId: exp.run_b_id ?? '',
+      seedCloneId: exp.seed_idea_clone_b_id,
+    })
+    .catch(() => {});
 }
