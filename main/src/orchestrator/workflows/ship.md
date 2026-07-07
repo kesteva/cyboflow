@@ -204,17 +204,25 @@ Independent tasks' subagent calls go out **in parallel** (multiple Agent tool
 calls in one message); as each returns, you continue that task's chain.
 
 1. **implement** → delegate to `cyboflow-implement` with the task body +
-   acceptance criteria. It returns an `## Implementation` summary.
+   acceptance criteria. It returns an `## Implementation` summary. **Retain its
+   list of files touched** — the shared worktree holds several lanes' uncommitted
+   changes at once, so every later step in this task's chain needs that list to
+   scope to THIS task's diff.
 2. **write-tests** → delegate to `cyboflow-write-tests` with the task + diff
-   summary. If its `## Tests` outcome reports a failing test, loop back to
-   `cyboflow-implement` to fix the cause before continuing.
-3. **code-review** → delegate to `cyboflow-code-review`. For each entry in its
-   `## Findings`, record a finding via `cyboflow_report_finding` (non-blocking;
-   lands in the review queue for human triage). When the finding concerns code,
-   always pass `category` and `locations` (each `{ path, line }`) so the review
-   queue can group and jump to it. If it returns a `## Blocking` defect, loop back
-   to `cyboflow-implement` to fix it before proceeding.
-4. **task-verify** → delegate to `cyboflow-task-verify`. Read its `VERDICT`. On
+   summary (including the files touched). If its `## Tests` outcome reports a
+   failing test, loop back to `cyboflow-implement` to fix the cause before
+   continuing.
+3. **code-review** → delegate to `cyboflow-code-review` with the task **and the
+   files it touched** (implement's list, plus any test files write-tests added) so
+   it reviews this task's diff and not other lanes' in-flight work. For each entry
+   in its `## Findings`, record a finding via `cyboflow_report_finding`
+   (non-blocking; lands in the review queue for human triage). When the finding
+   concerns code, always pass `category` and `locations` (each `{ path, line }`)
+   so the review queue can group and jump to it. If it returns a `## Blocking`
+   defect, loop back to `cyboflow-implement` to fix it before proceeding.
+4. **task-verify** → delegate to `cyboflow-task-verify` with the task, its
+   acceptance criteria, **and the files it touched** (same list, so it judges
+   this task's changes only). Read its `VERDICT`. On
    `FAIL`, re-delegate to `cyboflow-implement` with its `## Fix guidance`, then
    re-verify — up to 3× before marking the lane `failed` and **continuing the
    other lanes**. Whenever you re-delegate implement (task-verify `FAIL` or a
