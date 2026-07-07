@@ -40,7 +40,11 @@ import type {
   PairwiseSample,
   PairwisePreference,
 } from '../../../../../shared/types/experiments';
-import { isExperimentArmSettled, isExperimentSettled } from '../../../../../shared/types/experiments';
+import {
+  isExperimentArmSettled,
+  isExperimentSettled,
+  isBaselineArm,
+} from '../../../../../shared/types/experiments';
 import {
   insertExperiment,
   getExperiment,
@@ -275,9 +279,17 @@ export interface StartInput {
 export async function startExperiment(deps: ExperimentsDeps, input: StartInput): Promise<StartSideBySideResult> {
   const { db } = deps;
 
-  // 1. Validate project + both variants belong to the workflow + differ.
+  // 1. Validate project + both arms differ + each real-variant arm belongs to the
+  //    workflow. Either arm may be the current-workflow baseline sentinel
+  //    (BASELINE_VARIANT_SENTINEL) — that arm launches as baseline (variant_id NULL)
+  //    and is NOT looked up in the variant registry — but BOTH cannot be baseline.
+  const aIsBaseline = isBaselineArm(input.variantAId);
+  const bIsBaseline = isBaselineArm(input.variantBId);
   if (input.variantAId === input.variantBId) {
-    throw new TRPCError({ code: 'BAD_REQUEST', message: 'the two arms must use different variants' });
+    throw new TRPCError({
+      code: 'BAD_REQUEST',
+      message: 'the two arms must differ — at least one arm must be a variant (both cannot be the baseline)',
+    });
   }
   const projectPath = deps.getProjectPath(input.projectId);
   if (!projectPath) {
@@ -287,12 +299,16 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
   if (!workflow) {
     throw new TRPCError({ code: 'NOT_FOUND', message: `workflow ${input.workflowId} not found` });
   }
-  const variantA = deps.getVariant(input.variantAId);
-  const variantB = deps.getVariant(input.variantBId);
-  if (!variantA || !variantB) {
+  // Skip the registry existence check for a baseline arm (no variant row backs it).
+  const variantA = aIsBaseline ? null : deps.getVariant(input.variantAId);
+  const variantB = bIsBaseline ? null : deps.getVariant(input.variantBId);
+  if ((!aIsBaseline && !variantA) || (!bIsBaseline && !variantB)) {
     throw new TRPCError({ code: 'NOT_FOUND', message: 'one or both variants not found' });
   }
-  if (variantA.workflow_id !== input.workflowId || variantB.workflow_id !== input.workflowId) {
+  if (
+    (variantA && variantA.workflow_id !== input.workflowId) ||
+    (variantB && variantB.workflow_id !== input.workflowId)
+  ) {
     throw new TRPCError({ code: 'BAD_REQUEST', message: 'a variant belongs to a different workflow' });
   }
 
@@ -408,7 +424,12 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
       undefined,
       undefined,
       undefined,
-      { requestedVariantId: input.variantAId, experiment: { experimentId: exp.id, arm: 'A' } },
+      // A baseline arm launches as baseline (variant_id NULL): pass `baseline: true`
+      // so the launcher's VariantResolver returns null WITHOUT rotating. A real-variant
+      // arm pins its variant explicitly. Both carry the experiment/arm stamp.
+      aIsBaseline
+        ? { baseline: true, experiment: { experimentId: exp.id, arm: 'A' } }
+        : { requestedVariantId: input.variantAId, experiment: { experimentId: exp.id, arm: 'A' } },
     );
     setExperimentRuns(db, exp.id, { runAId: armA.runId });
 
@@ -427,7 +448,9 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
       undefined,
       undefined,
       undefined,
-      { requestedVariantId: input.variantBId, experiment: { experimentId: exp.id, arm: 'B' } },
+      bIsBaseline
+        ? { baseline: true, experiment: { experimentId: exp.id, arm: 'B' } }
+        : { requestedVariantId: input.variantBId, experiment: { experimentId: exp.id, arm: 'B' } },
     );
     setExperimentRuns(db, exp.id, { runBId: armB.runId });
 
@@ -751,9 +774,19 @@ function buildVerdict(row: ExperimentComparisonRow | null): PairwiseVerdict | nu
   };
 }
 
-/** The variant's live label; falls back to the id when the variant was deleted. */
+/**
+ * Human label for an arm's variant id: "Baseline" for the current-workflow
+ * baseline sentinel, else the resolved variant label (falling back to the raw id
+ * when the variant was deleted).
+ */
+function armVariantLabel(variantId: string, resolvedLabel: string | null): string {
+  if (isBaselineArm(variantId)) return 'Baseline';
+  return resolvedLabel ?? variantId;
+}
+
+/** The variant's live label; "Baseline" for a baseline arm, id when the variant was deleted. */
 function variantLabel(deps: ExperimentsDeps, variantId: string): string {
-  return deps.getVariant(variantId)?.label ?? variantId;
+  return armVariantLabel(variantId, deps.getVariant(variantId)?.label ?? null);
 }
 
 /** Assemble one arm's view (usage rollup + eval + findings + entity counts). */
@@ -901,6 +934,16 @@ export const experimentsRouter = router({
         throw new TRPCError({
           code: 'CONFLICT',
           message: `experiment ${input.experimentId} must be decided/abandoned before switching to rotation`,
+        });
+      }
+      // Rotation activates BOTH arms as variants — a baseline arm has no variant
+      // row to activate, so an experiment with a baseline arm cannot switch to
+      // rotation. Reject up front (the compare-view button is also disabled).
+      if (isBaselineArm(exp.variant_a_id) || isBaselineArm(exp.variant_b_id)) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message:
+            'switching to rotation requires two real variants — create a variant from the current workflow first',
         });
       }
       deps.setVariantStatus(exp.variant_a_id, 'active');
@@ -1066,8 +1109,8 @@ export const experimentsRouter = router({
           baseBranch: row.baseBranch,
           variantAId: row.variantAId,
           variantBId: row.variantBId,
-          armALabel: row.aLabel ?? row.variantAId,
-          armBLabel: row.bLabel ?? row.variantBId,
+          armALabel: armVariantLabel(row.variantAId, row.aLabel),
+          armBLabel: armVariantLabel(row.variantBId, row.bLabel),
           verdictPreference: row.verdictPreference,
           verdictConfidence: row.verdictConfidence,
           decision,

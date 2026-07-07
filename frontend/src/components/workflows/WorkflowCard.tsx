@@ -39,8 +39,9 @@ export interface WorkflowCardProps {
   /**
    * Open the A/B test launcher (side-by-side experiment, migration 048/049)
    * for this workflow. Omitted only hides the button — every workflow can be
-   * A/B tested once it has >=2 variants (the modal itself explains the
-   * "need two variants" state, so the card offers the action unconditionally).
+   * A/B tested once it has >=1 variant (an arm can be the current workflow
+   * baseline, so a single variant suffices; the modal itself explains the
+   * "need a variant" state, so the card offers the action unconditionally).
    */
   onAbTest?: (entry: WorkflowGalleryEntry) => void;
   /**

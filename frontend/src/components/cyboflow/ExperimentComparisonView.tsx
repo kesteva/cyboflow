@@ -39,6 +39,7 @@ import { formatRuntime } from './runEvalDisplay';
 import {
   isExperimentArmSettled,
   isExperimentSettled,
+  isBaselineArm,
 } from '../../../../shared/types/experiments';
 import type {
   ExperimentRow,
@@ -189,7 +190,12 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
   const expSettled = exp !== null && isExperimentSettled(exp.status);
   const canDecide = exp !== null && payload !== null && !expSettled && bothSettled;
   const canRerunComparison = exp !== null && (exp.status === 'running' || exp.status === 'grading');
-  const canSwitchToRotation = exp !== null && expSettled;
+  // "Switch to randomized" activates BOTH arms as rotation variants — impossible when
+  // an arm is the current-workflow baseline (there is no variant row to activate). The
+  // backend also rejects (PRECONDITION_FAILED); this disables the button up front.
+  const hasBaselineArm =
+    exp !== null && (isBaselineArm(exp.variant_a_id) || isBaselineArm(exp.variant_b_id));
+  const canSwitchToRotation = exp !== null && expSettled && !hasBaselineArm;
 
   // -- Actions -----------------------------------------------------------------
 
@@ -458,7 +464,13 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
                 type="button"
                 data-testid="experiment-switch-to-rotation"
                 disabled={!canSwitchToRotation || actionBusy !== null}
-                title={canSwitchToRotation ? undefined : 'Available once the experiment is decided or abandoned'}
+                title={
+                  canSwitchToRotation
+                    ? undefined
+                    : hasBaselineArm
+                      ? 'Rotation requires two real variants — one arm is the current workflow (baseline).'
+                      : 'Available once the experiment is decided or abandoned'
+                }
                 onClick={() => setRotationConfirmOpen(true)}
                 className="inline-flex items-center gap-1.5 rounded-button border border-border-primary px-3 py-1.5 text-xs font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
               >

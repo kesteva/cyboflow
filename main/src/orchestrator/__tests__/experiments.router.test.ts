@@ -166,7 +166,7 @@ describe('experiments router orchestration (slice B)', () => {
     const h = makeHarness();
     await expect(
       startExperiment(h.deps, { projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vA' }),
-    ).rejects.toThrow(/different variants/);
+    ).rejects.toThrow(/at least one arm must be a variant/);
     await expect(
       startExperiment(h.deps, { projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB', seedIdeaId: 'nope' }),
     ).rejects.toThrow(/seed idea/);

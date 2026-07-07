@@ -1,12 +1,16 @@
 /**
  * ABTestLaunchModal — thin side-by-side A/B experiment launcher (Slice B).
  *
- * Collects variant A + variant B from the workflow's pickable variants (the
- * SAME active+draft set VariantSelector offers, reusing {@link pickableVariants}
- * from variantSelectorLogic), an OPTIONAL seed idea (via the shared
- * {@link IdeaPickerModal} — already excludes decomposed ideas, migration 017),
- * and submits `experiments.startSideBySide`. A !== B is enforced with a disabled
- * submit button + an inline hint.
+ * Collects variant A + variant B for each arm. Each arm is either one of the
+ * workflow's pickable variants (the SAME active+draft set VariantSelector offers,
+ * reusing {@link pickableVariants} from variantSelectorLogic) OR the "Current
+ * workflow (baseline)" sentinel ({@link BASELINE_VARIANT_SENTINEL}) — so a
+ * workflow with a SINGLE variant can be tested head-to-head against the live
+ * workflow (the primary use case; one variant seeds A=baseline, B=variant). Plus
+ * an OPTIONAL seed idea (via the shared {@link IdeaPickerModal} — already excludes
+ * decomposed ideas, migration 017), then submits `experiments.startSideBySide`.
+ * A !== B is enforced with a disabled submit button + an inline hint (both arms
+ * cannot be the baseline).
  *
  * On success: navigates straight to arm A's session/run (mirrors
  * SessionStartWizard's launch → setActiveRun → setActiveProjectId → goToSession
@@ -20,6 +24,7 @@ import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';
 import { trpc } from '../../trpc/client';
 import { useWorkflowVariants } from '../../stores/variantsStore';
 import { pickableVariants } from './variantSelectorLogic';
+import { BASELINE_VARIANT_SENTINEL } from '../../../../shared/types/experiments';
 import { IdeaPickerModal } from './IdeaPickerModal';
 import { bootstrapArmSessionPanels } from '../../utils/bootstrapArmSessionPanels';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -50,18 +55,25 @@ export function ABTestLaunchModal({
   const [error, setError] = useState<string | null>(null);
   const startInFlightRef = useRef(false);
 
-  // One-shot default seeding per workflow: once the variant list resolves, pick
-  // the first two distinct pickable variants (mirrors VariantSelector's seeding
-  // effect) so an untouched modal already shows a valid pair when >=2 exist.
-  // Guarded per-workflowId so it re-seeds for a newly targeted workflow without
-  // ever overwriting the user's own later choice.
+  // One-shot default seeding per workflow: once the variant list resolves, seed a
+  // valid arm pair (mirrors VariantSelector's seeding effect) so an untouched modal
+  // is ready to submit. With EXACTLY one pickable variant — the primary use case —
+  // seed arm A = the current workflow (baseline) and arm B = that variant, so a
+  // one-variant workflow can be tested head-to-head against the live workflow. With
+  // >=2 variants, seed the first two distinct variants. Guarded per-workflowId so it
+  // re-seeds for a newly targeted workflow without ever overwriting a later choice.
   const seededForWorkflowId = useRef<string | null>(null);
   useEffect(() => {
     if (!isOpen || !loaded) return;
     if (seededForWorkflowId.current === workflowId) return;
     seededForWorkflowId.current = workflowId;
-    setVariantAId(options[0]?.id ?? '');
-    setVariantBId(options[1]?.id ?? '');
+    if (options.length === 1) {
+      setVariantAId(BASELINE_VARIANT_SENTINEL);
+      setVariantBId(options[0].id);
+    } else {
+      setVariantAId(options[0]?.id ?? '');
+      setVariantBId(options[1]?.id ?? '');
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, loaded, workflowId]);
 
@@ -126,7 +138,7 @@ export function ABTestLaunchModal({
     }
   };
 
-  const insufficientVariants = loaded && options.length < 2;
+  const insufficientVariants = loaded && options.length < 1;
   const sameVariantChosen = variantAId !== '' && variantAId === variantBId;
 
   return (
@@ -138,13 +150,14 @@ export function ABTestLaunchModal({
 
           {insufficientVariants && (
             <p className="text-xs text-text-secondary" data-testid="ab-test-insufficient-variants">
-              This workflow needs at least two variants (draft or active) before you
-              can run a side-by-side test. Create a second variant from the
+              This workflow needs at least one variant (draft or active) before you
+              can run a side-by-side test — an arm can be the current workflow
+              (baseline), but the other must be a variant. Create a variant from the
               Workflows editor first.
             </p>
           )}
 
-          {loaded && options.length >= 2 && (
+          {loaded && options.length >= 1 && (
             <>
               <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
                 Variant A
@@ -155,6 +168,7 @@ export function ABTestLaunchModal({
                   aria-label="Select variant A"
                   data-testid="ab-test-variant-a"
                 >
+                  <option value={BASELINE_VARIANT_SENTINEL}>Current workflow (baseline)</option>
                   {options.map((v) => (
                     <option key={v.id} value={v.id}>
                       {v.status === 'draft' ? `${v.label} (draft)` : v.label}
@@ -171,6 +185,7 @@ export function ABTestLaunchModal({
                   aria-label="Select variant B"
                   data-testid="ab-test-variant-b"
                 >
+                  <option value={BASELINE_VARIANT_SENTINEL}>Current workflow (baseline)</option>
                   {options.map((v) => (
                     <option key={v.id} value={v.id}>
                       {v.status === 'draft' ? `${v.label} (draft)` : v.label}

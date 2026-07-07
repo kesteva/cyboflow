@@ -116,6 +116,26 @@ void _settledStatusesAreValid;
 export type ExperimentKind = 'side_by_side';
 
 /**
+ * Sentinel variant id for the "Current workflow (baseline)" arm of a side-by-side
+ * experiment (precedent: the `__quick__` sentinel workflow name). Stored verbatim
+ * in `experiments.variant_a_id` / `variant_b_id` (both NOT NULL, migration 049) so
+ * a user with ONE variant can test it head-to-head against the live workflow.
+ *
+ * A baseline arm LAUNCHES as baseline (`workflow_runs.variant_id` NULL) — the run
+ * launcher pins it via `launchOptions.baseline` (VariantResolver returns null
+ * WITHOUT rotating). It never collides with a real variant id (those are `wfv_…`).
+ * The value coincides with variantSelectorLogic's `BASELINE_SENTINEL`, but this one
+ * is the cross-boundary EXPERIMENT-ARM sentinel — importable by both the launch UI
+ * and the main-process router (variantSelectorLogic is frontend-only).
+ */
+export const BASELINE_VARIANT_SENTINEL = '__baseline__';
+
+/** True when an experiment arm id is the baseline sentinel rather than a real variant. */
+export function isBaselineArm(variantId: string): boolean {
+  return variantId === BASELINE_VARIANT_SENTINEL;
+}
+
+/**
  * Lifecycle of a side-by-side experiment (migration 049, `experiments.status`).
  *
  * - `running`   — one or both arms still executing.

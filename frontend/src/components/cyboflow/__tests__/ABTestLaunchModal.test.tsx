@@ -97,6 +97,7 @@ vi.mock('../../../stores/navigationStore', () => ({
 }));
 
 import { ABTestLaunchModal } from '../ABTestLaunchModal';
+import { BASELINE_VARIANT_SENTINEL } from '../../../../../shared/types/experiments';
 
 function makeVariant(overrides: Partial<WorkflowVariantRow> = {}): WorkflowVariantRow {
   return {
@@ -133,10 +134,10 @@ beforeEach(() => {
   });
 });
 
-describe('ABTestLaunchModal — fewer than two pickable variants', () => {
+describe('ABTestLaunchModal — no pickable variants', () => {
   it('shows the explainer instead of selects, submit stays disabled', () => {
     mockUseWorkflowVariants.mockReturnValue({
-      variants: [makeVariant({ id: 'a' })],
+      variants: [],
       loaded: true,
       loading: false,
       error: null,
@@ -146,6 +147,53 @@ describe('ABTestLaunchModal — fewer than two pickable variants', () => {
     );
     expect(screen.getByTestId('ab-test-insufficient-variants')).toBeInTheDocument();
     expect(screen.queryByTestId('ab-test-variant-a')).not.toBeInTheDocument();
+    expect(screen.getByTestId('ab-test-submit')).toBeDisabled();
+  });
+});
+
+describe('ABTestLaunchModal — exactly one pickable variant (baseline vs variant)', () => {
+  beforeEach(() => {
+    mockUseWorkflowVariants.mockReturnValue({
+      variants: [makeVariant({ id: 'a', label: 'Variant A', status: 'active' })],
+      loaded: true,
+      loading: false,
+      error: null,
+    });
+  });
+
+  it('renders selects (not the explainer), seeded to baseline (A) vs the variant (B), submit enabled', () => {
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" onClose={vi.fn()} />);
+    expect(screen.queryByTestId('ab-test-insufficient-variants')).not.toBeInTheDocument();
+    const selectA = screen.getByTestId('ab-test-variant-a') as HTMLSelectElement;
+    const selectB = screen.getByTestId('ab-test-variant-b') as HTMLSelectElement;
+    // Both dropdowns offer the "Current workflow (baseline)" option.
+    expect(screen.getAllByText('Current workflow (baseline)').length).toBe(2);
+    // Seeded A = baseline, B = the lone variant.
+    expect(selectA.value).toBe(BASELINE_VARIANT_SENTINEL);
+    expect(selectB.value).toBe('a');
+    expect(screen.getByTestId('ab-test-submit')).not.toBeDisabled();
+  });
+
+  it('submit calls startSideBySide with the baseline sentinel for arm A', async () => {
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" onClose={vi.fn()} />);
+    fireEvent.click(screen.getByTestId('ab-test-submit'));
+
+    await waitFor(() => expect(mockStartSideBySide).toHaveBeenCalledTimes(1));
+    expect(mockStartSideBySide.mock.calls[0][0]).toEqual({
+      projectId: 1,
+      workflowId: 'wf-1',
+      variantAId: BASELINE_VARIANT_SENTINEL,
+      variantBId: 'a',
+    });
+  });
+
+  it('picking baseline for BOTH arms disables submit and shows the different-arms hint', () => {
+    render(<ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" onClose={vi.fn()} />);
+    // Set arm B to baseline too — now A === B === baseline.
+    fireEvent.change(screen.getByTestId('ab-test-variant-b'), {
+      target: { value: BASELINE_VARIANT_SENTINEL },
+    });
+    expect(screen.getByTestId('ab-test-same-variant-hint')).toBeInTheDocument();
     expect(screen.getByTestId('ab-test-submit')).toBeDisabled();
   });
 });
