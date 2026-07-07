@@ -448,6 +448,43 @@ retry the SAME step when it clears; never spend the step's own failure budgets o
   artifacts never mint on programmatic runs (idea-spec/decomposed-stories are
   unaffected — they re-derive from entity writes).
 
+## Orchestrated handover (2026-07-07) — `switch_to_orchestrated`
+
+The monitor's general escape hatch: when the user's request exceeds the
+programmatic plane's capabilities (`retry_step` re-runs steps; it cannot "fix
+this by hand then continue" or "change the approach for the rest"), the monitor
+can hand the ENTIRE run over to the orchestrated plane — a full interactive
+agent that continues the remaining workflow conversationally.
+
+- **Actuation** — second `MONITOR_CONVERSE_SCHEMA` action kind
+  (`{ kind: 'switch_to_orchestrated', reason }`); the prompt requires the monitor
+  to SUGGEST the handover and wait for the user's explicit confirmation on a
+  later turn (never attached merely because a retry failed); `reason` is a 1-3
+  sentence faithful summary of the user's outstanding request.
+- **Host handler** — `handoverRunHandler.ts`, mirroring pause/retry discipline:
+  pre-flight refusals OUTSIDE the held per-run queue (must be programmatic +
+  failed/awaiting_review/running); a live walk is aborted first
+  (`requestProgrammaticCancel` then `stopLiveRun`, no status write — sole-writer
+  rule); then the guarded flip — the FIRST and ONLY sanctioned
+  `workflow_runs.execution_model` UPDATE (`programmatic → orchestrated` +
+  revive to 'starting', guarded on model+status so it can never flip the other
+  way; migration 032 otherwise stamps the column immutable at createRun);
+  pending `gate:human-step:*` / `gate:systemic-pause:*` items are swept
+  (`clearPendingForRun`).
+- **Seeding** — `composeHandoverPrompt` builds a markdown brief (completed steps
+  from `step_results`, remaining steps from the definition with
+  previously-skipped/failed markers, the full workflow prompt body, the user's
+  request verbatim) delivered via `setPendingNudge` + a fire-and-forget
+  `execute()`: the executor re-reads the row, forks orchestrated, and — since
+  programmatic runs carry no `claude_session_id` — starts a FRESH conversation
+  seeded with the brief. The 'starting' status emit forces the frontend to
+  re-read `execution_model` (retry CTA un-gates; chat stays in monitor mode —
+  the monitor remains registered across the flip).
+- **One-way** — a handed-over run never returns to step-by-step execution;
+  `retryStep` on it refuses `not_programmatic`, and `step_results` freezes at
+  the flip (the step timeline stays live — both planes report through
+  `buildStepTransitionEvent`).
+
 Hardened by the same-day adversarial review (13 raw → 10 confirmed → 7 distinct):
 the controller's crash-resume skip set is now a MUTABLE local purged whenever the
 walk deliberately REVISITS a region (loopback jump or gate revise) so a
