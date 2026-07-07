@@ -38,6 +38,20 @@ describe('ReviewQueueHumanGate', () => {
     return { openHumanGate: vi.fn<HumanGateOpener['openHumanGate']>().mockResolvedValue(id) };
   }
 
+  /** A promise whose settlement the test drives by hand (ordering assertions). */
+  function makeDeferred<T>(): { promise: Promise<T>; resolve: (v: T) => void; reject: (e: unknown) => void } {
+    let resolve!: (v: T) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  /** Flush the full microtask queue (and any 0ms macrotask) so chained .finally() lands. */
+  const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
+
   it('opens a gate then resolves the parsed verdict when the matching item is resolved', async () => {
     const events = new EventEmitter();
     const opener = makeOpener('ri-1');
@@ -103,6 +117,96 @@ describe('ReviewQueueHumanGate', () => {
     };
     const gate = new ReviewQueueHumanGate(opener, events, channelFor);
     await expect(gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }) })).rejects.toThrow('could not open human gate');
+    expect(events.listenerCount('review-project-1')).toBe(0);
+  });
+
+  // ── ordering fix: the gate OWNS the run-resume (maybeResumeRun) BEFORE waking
+  //    the walk, so the run row is back in 'running' before the controller
+  //    proceeds — the end-of-walk drained-rest never fires against a stale
+  //    'awaiting_review' row and the router's trailing resume is a no-op ───────
+  it('resumes the run (maybeResumeRun) BEFORE waking the walk on a resolved gate', async () => {
+    const events = new EventEmitter();
+    const resume = makeDeferred<boolean>();
+    const maybeResumeRun = vi.fn((_runId: string): Promise<boolean> => resume.promise);
+    const opener: HumanGateOpener = { openHumanGate: vi.fn().mockResolvedValue('ri-1'), maybeResumeRun };
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+
+    let settledVerdict: string | undefined;
+    const pending = gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'approve-plan' }) });
+    void pending.then((v) => {
+      settledVerdict = v;
+    });
+
+    await flush(); // openHumanGate resolves; targetId registered
+    events.emit('review-project-1', { reviewItemId: 'ri-1', action: 'resolved', item: { resolution: 'approve' } });
+    await flush();
+
+    // The gate asked to resume the run…
+    expect(maybeResumeRun).toHaveBeenCalledWith('r');
+    // …but the walk has NOT woken yet — the resume promise is still pending.
+    expect(settledVerdict).toBeUndefined();
+
+    // Only once the run row is back in 'running' does the walk wake, with the verdict.
+    resume.resolve(true);
+    await flush();
+    expect(settledVerdict).toBe('approve');
+    await expect(pending).resolves.toBe('approve');
+    expect(events.listenerCount('review-project-1')).toBe(0);
+  });
+
+  it("resumes the run BEFORE waking the walk on a dismissed gate (verdict 'reject')", async () => {
+    const events = new EventEmitter();
+    const resume = makeDeferred<boolean>();
+    const maybeResumeRun = vi.fn((_runId: string): Promise<boolean> => resume.promise);
+    const opener: HumanGateOpener = { openHumanGate: vi.fn().mockResolvedValue('ri-d'), maybeResumeRun };
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+
+    let settledVerdict: string | undefined;
+    const pending = gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }) });
+    void pending.then((v) => {
+      settledVerdict = v;
+    });
+
+    await flush();
+    events.emit('review-project-1', { reviewItemId: 'ri-d', action: 'dismissed', item: {} });
+    await flush();
+
+    expect(maybeResumeRun).toHaveBeenCalledWith('r');
+    expect(settledVerdict).toBeUndefined(); // walk parked behind the pending resume
+
+    resume.resolve(false);
+    await flush();
+    expect(settledVerdict).toBe('reject');
+    await expect(pending).resolves.toBe('reject');
+  });
+
+  it('settles immediately on a resolved gate when the opener has no maybeResumeRun (back-compat)', async () => {
+    const events = new EventEmitter();
+    const opener = makeOpener('ri-bc'); // no maybeResumeRun
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+
+    const pending = gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }) });
+    await flush();
+    events.emit('review-project-1', { reviewItemId: 'ri-bc', action: 'resolved', item: { resolution: 'looks good' } });
+
+    // No resume primitive to await — the walk wakes directly (as before this fix).
+    await expect(pending).resolves.toBe('approve');
+    expect(events.listenerCount('review-project-1')).toBe(0);
+  });
+
+  it('still settles the verdict when maybeResumeRun REJECTS (walk can never hang on a resume failure)', async () => {
+    const events = new EventEmitter();
+    const maybeResumeRun = vi.fn((_runId: string): Promise<boolean> => Promise.reject(new Error('resume boom')));
+    const opener: HumanGateOpener = { openHumanGate: vi.fn().mockResolvedValue('ri-x'), maybeResumeRun };
+    const gate = new ReviewQueueHumanGate(opener, events, channelFor);
+
+    const pending = gate.resolve({ runId: 'r', projectId: 1, step: step({ id: 'g' }) });
+    await flush();
+    events.emit('review-project-1', { reviewItemId: 'ri-x', action: 'resolved', item: { resolution: 'revise it' } });
+
+    // .catch swallows the resume failure; .finally still wakes the walk with the verdict.
+    await expect(pending).resolves.toBe('revise');
+    expect(maybeResumeRun).toHaveBeenCalledWith('r');
     expect(events.listenerCount('review-project-1')).toBe(0);
   });
 

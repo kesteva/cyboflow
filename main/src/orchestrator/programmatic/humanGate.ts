@@ -56,6 +56,21 @@ export interface HumanGateOpener {
    * instead of rejecting. Optional so pre-existing openers/fakes keep compiling.
    */
   findPendingGate?(runId: string, stepId: string): Promise<string | null>;
+  /**
+   * Aggregate-unblock resume primitive: flip the run awaiting_review -> running
+   * once no blocking item remains (in production HumanStepManager.maybeResumeRun,
+   * the SAME method the blocking-items / systemic-pause gates use). The resolver
+   * OWNS this resume before waking the walk on a resolved/dismissed gate so the
+   * run row is back in 'running' before the controller proceeds — see onChange.
+   * Optional so pre-existing openers/fakes keep compiling; when absent the walk
+   * wakes directly (the router's trailing resume is then the only flip).
+   *
+   * Aggregate-unblock nuance: when ANOTHER blocking item is still pending,
+   * maybeResumeRun refuses (returns false) and the walk still wakes — the
+   * BlockingReviewItemsGate then re-parks at the next step boundary. That is
+   * existing designed behavior, not a bug.
+   */
+  maybeResumeRun?(runId: string): Promise<boolean>;
 }
 
 /**
@@ -117,18 +132,43 @@ export class ReviewQueueHumanGate implements HumanGateResolver {
         this.events.off(channel, onChange);
         if (signal && onAbort) signal.removeEventListener('abort', onAbort);
       };
+      // Resume the parked run BEFORE waking the walk, then settle the verdict.
+      // The run parked awaiting_review at this gate; the router's trailing
+      // maybeResumeRun (fired after ReviewItemRouter emits 'resolved') races the
+      // walk. If the walk wakes first and this is the run's LAST step, the
+      // end-of-walk drained-rest tries a strict 'running'->'awaiting_review' flip
+      // against a row STILL in 'awaiting_review' (rejected as an "expected race"),
+      // and the router's trailing maybeResumeRun then flips it to 'running' with
+      // no live walk — a zombie run stuck 'running' forever. Owning the resume
+      // here (mirrors blockingItemsGate.finishProceed / systemicPauseGate
+      // .settleResumed) guarantees the row is back in 'running' BEFORE the
+      // controller proceeds, so the drained-rest never fires against a stale
+      // 'awaiting_review' row and the router's trailing resume is a no-op.
+      // Aggregate-unblock nuance: if another blocking item is still pending,
+      // maybeResumeRun returns false and the walk still wakes — the
+      // BlockingReviewItemsGate re-parks at the next step boundary (designed).
+      const settleResumed = (verdict: HumanGateDecision): void => {
+        settled = true;
+        cleanup();
+        // .catch swallows a resume failure so the walk can never hang on it;
+        // .finally guarantees the walk wakes exactly once the flip has landed.
+        if (this.opener.maybeResumeRun) {
+          void this.opener
+            .maybeResumeRun(runId)
+            .catch(() => undefined)
+            .finally(() => resolve(verdict));
+        } else {
+          resolve(verdict);
+        }
+      };
       const onChange = (payload: unknown): void => {
         if (settled || targetId === null || !isReviewItemChangeLike(payload)) return;
         if (payload.reviewItemId !== targetId) return;
         if (payload.action === 'resolved') {
-          settled = true;
-          cleanup();
-          resolve(parseGateVerdict(payload.item?.resolution));
+          settleResumed(parseGateVerdict(payload.item?.resolution));
         } else if (payload.action === 'dismissed') {
           // A dismissed gate is treated as a rejection (the human declined it).
-          settled = true;
-          cleanup();
-          resolve('reject');
+          settleResumed('reject');
         }
       };
       // Cancel path: a canceled run aborts the awaiting Promise (settling to
