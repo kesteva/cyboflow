@@ -37,7 +37,11 @@ import type {
   SprintLaneRow,
   SprintLaneStepId,
 } from '../../../shared/types/sprintBatch';
-import { SPRINT_BATCH_CAP, SPRINT_LANE_STEP_IDS } from '../../../shared/types/sprintBatch';
+import {
+  SPRINT_BATCH_CAP,
+  SPRINT_LANE_STEP_IDS,
+  TERMINAL_BATCH_STATUSES,
+} from '../../../shared/types/sprintBatch';
 
 // ---------------------------------------------------------------------------
 // Auto-derive: parent-orchestrator subagent dispatch -> lane step
@@ -297,6 +301,225 @@ export class SprintLaneStore {
       }
       throw err;
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // addLane / removeLane — mid-run lane roster edits (monitor steering)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Resolve a task identifier that may be EITHER the opaque `tasks.id` OR its
+   * display `ref` (e.g. TASK-001) to the canonical opaque id, scoped to
+   * `projectId`. Opaque id wins (an exact `id` match is tried first, mirroring
+   * TaskChangeRouter.resolveTaskByRefOrId); on a miss the lookup falls back to
+   * the project-scoped `ref` (UNIQUE(project_id, ref) ⇒ unambiguous). Returns
+   * undefined when neither resolves. Used by addLane, which — unlike
+   * updateLane's by-existing-lane resolution — has no sprint_batch_tasks row
+   * yet to resolve against, so it must go straight to the tasks table.
+   */
+  private resolveTaskId(projectId: number, identifier: string): string | undefined {
+    const byId = this.db.prepare('SELECT id FROM tasks WHERE id = ?').get(identifier) as
+      | { id: string }
+      | undefined;
+    if (byId) return byId.id;
+    const byRef = this.db
+      .prepare('SELECT id FROM tasks WHERE project_id = ? AND ref = ?')
+      .get(projectId, identifier) as { id: string } | undefined;
+    return byRef?.id;
+  }
+
+  /** The run currently owning a batch (1:1, RunLauncher-stamped at launch). Mirrors resetFailedLanes' lookup. */
+  private resolveOwningRunId(batchId: string): string | undefined {
+    const row = this.db.prepare('SELECT id FROM workflow_runs WHERE batch_id = ?').get(batchId) as
+      | { id: string }
+      | undefined;
+    return row?.id;
+  }
+
+  /**
+   * Add ONE new 'queued' lane to a running batch — lets the monitor steer a
+   * sprint mid-run by adding a task after createForRun already seeded the
+   * initial roster. `taskId` may be the opaque tasks.id or the display ref
+   * (resolveTaskId, project-scoped).
+   *
+   * Rejections (SprintLaneError):
+   *   - 'bad_request'       — unknown batch; `taskId` resolves to no tasks
+   *                           row in this project; the batch is already
+   *                           terminal (TERMINAL_BATCH_STATUSES — a
+   *                           completed/failed/canceled batch accepts no new
+   *                           work); or the task already has a lane in this
+   *                           batch (UNIQUE(batch_id, task_id) — checked up
+   *                           front with a SELECT for a clean message rather
+   *                           than catching the constraint error).
+   *   - 'no_eligible_tasks' — the resolved task fails the SAME Q1 guard
+   *                           createForRun applies (filterEligibleTaskIds):
+   *                           not approved, not archived-free, or not at a
+   *                           ready-or-later non-terminal board stage.
+   *
+   * Emits a SprintLaneChangedEvent on the batch's owning run's channel
+   * (status='queued') so the swimlane canvas picks up the new lane live. The
+   * owning run is resolved the same way resetFailedLanes does
+   * (workflow_runs.batch_id, 1:1) — a missing owning run should not happen
+   * (RunLauncher stamps batch_id at launch) but is logged and skipped rather
+   * than failing the insert.
+   */
+  addLane(args: { projectId: number; batchId: string; taskId: string }): SprintLaneRow {
+    const { projectId, batchId, taskId } = args;
+
+    const batch = this.db.prepare('SELECT status FROM sprint_batches WHERE id = ?').get(batchId) as
+      | { status: string }
+      | undefined;
+    if (!batch) {
+      throw new SprintLaneError('bad_request', `no batch ${batchId}`);
+    }
+    if ((TERMINAL_BATCH_STATUSES as readonly string[]).includes(batch.status)) {
+      throw new SprintLaneError(
+        'bad_request',
+        `batch ${batchId} is terminal (${batch.status}) and cannot accept new lanes`,
+      );
+    }
+
+    const resolvedTaskId = this.resolveTaskId(projectId, taskId);
+    if (!resolvedTaskId) {
+      throw new SprintLaneError('bad_request', `no task ${taskId} in project ${projectId}`);
+    }
+
+    const eligible = this.filterEligibleTaskIds(projectId, [resolvedTaskId]);
+    if (eligible.length === 0) {
+      throw new SprintLaneError(
+        'no_eligible_tasks',
+        `task ${taskId} is not sprint-eligible: it must be approved and at "Ready for development" ` +
+          "or later, not archived/done/won't-do",
+      );
+    }
+
+    const txn = this.db.transaction(() => {
+      const dup = this.db
+        .prepare('SELECT id FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+        .get(batchId, resolvedTaskId);
+      if (dup) {
+        throw new SprintLaneError('bad_request', `task ${taskId} is already in this batch`);
+      }
+      this.db
+        .prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES (?, ?, 'queued')`)
+        .run(batchId, resolvedTaskId);
+    });
+    (txn as () => void)();
+
+    const lane = this.readLane(batchId, resolvedTaskId);
+    if (!lane) {
+      // Row vanished between commit and read-back — surface as not_found (parity with updateLane).
+      throw new SprintLaneError('lane_not_found', `lane for task ${resolvedTaskId} vanished after insert`);
+    }
+
+    const runId = this.resolveOwningRunId(batchId);
+    if (runId) {
+      const event: SprintLaneChangedEvent = {
+        runId,
+        batchId,
+        taskId: resolvedTaskId,
+        status: lane.status,
+        currentStepId: lane.currentStepId,
+        attempts: lane.attempts,
+        timestamp: lane.updatedAt,
+      };
+      sprintLaneEvents.emit(sprintLaneChannel(runId), event);
+    } else {
+      this.logger?.warn('[SprintLaneStore] addLane: no owning run for batch (event not emitted)', {
+        batchId,
+      });
+    }
+
+    this.logger?.info('[SprintLaneStore] lane added mid-run', { batchId, taskId: resolvedTaskId });
+    return lane;
+  }
+
+  /**
+   * Remove ONE not-yet-started lane from a batch — lets the monitor steer a
+   * sprint mid-run by dropping a queued task before any subagent has touched
+   * it. `taskId` may be the opaque tasks.id or the display ref, resolved the
+   * SAME way updateLane resolves it: an exact task_id match against THIS
+   * batch's lanes is tried first (join-free, so it works even when the tasks
+   * row is absent), and only on a miss does the lookup fall back to the
+   * display ref via the tasks join, scoped to this batch.
+   *
+   * Only a 'queued' lane may be removed. There is no 'canceled' lane status
+   * (adding one needs a CHECK-constraint migration on sprint_batch_tasks —
+   * out of scope here), so a lane that has already started ('running') or
+   * settled ('integrated' / 'failed' / 'blocked') is rejected rather than
+   * half-modeled by deleting live/finished work out from under the
+   * orchestrator.
+   *
+   * Rejections (SprintLaneError):
+   *   - 'lane_not_found' — no (batch, task) lane.
+   *   - 'bad_request'    — the lane exists but is not 'queued'.
+   *
+   * Best-effort emits a SprintLaneChangedEvent (status='queued', the lane's
+   * last known state) on the batch's owning run channel so the swimlane
+   * canvas can drop the row immediately; there is no dedicated "removed"
+   * event shape, and a missed/failed emit is fail-soft (never fails the
+   * delete) because `listLanes` is the canvas's authoritative source on its
+   * next fetch regardless.
+   */
+  removeLane(args: { projectId: number; batchId: string; taskId: string }): { removed: boolean } {
+    const { batchId, taskId } = args;
+
+    let resolvedTaskId = taskId;
+    const txn = this.db.transaction(() => {
+      let existing = this.db
+        .prepare('SELECT id, status FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+        .get(batchId, taskId) as { id: number; status: SprintBatchTaskStatus } | undefined;
+      if (!existing) {
+        const byRef = this.db
+          .prepare(
+            `SELECT sbt.id AS id, sbt.status AS status, sbt.task_id AS taskId
+               FROM sprint_batch_tasks sbt
+               JOIN tasks t ON t.id = sbt.task_id
+              WHERE sbt.batch_id = ? AND t.ref = ?`,
+          )
+          .get(batchId, taskId) as { id: number; status: SprintBatchTaskStatus; taskId: string } | undefined;
+        if (byRef) {
+          existing = { id: byRef.id, status: byRef.status };
+          resolvedTaskId = byRef.taskId;
+        }
+      }
+      if (!existing) {
+        throw new SprintLaneError('lane_not_found', `no lane for task ${taskId} in batch ${batchId}`);
+      }
+      if (existing.status !== 'queued') {
+        throw new SprintLaneError(
+          'bad_request',
+          `task ${taskId} has already started/finished (status '${existing.status}') and cannot be removed`,
+        );
+      }
+      this.db.prepare('DELETE FROM sprint_batch_tasks WHERE id = ?').run(existing.id);
+    });
+    (txn as () => void)();
+
+    try {
+      const runId = this.resolveOwningRunId(batchId);
+      if (runId) {
+        const event: SprintLaneChangedEvent = {
+          runId,
+          batchId,
+          taskId: resolvedTaskId,
+          status: 'queued',
+          currentStepId: null,
+          attempts: 0,
+          timestamp: new Date().toISOString(),
+        };
+        sprintLaneEvents.emit(sprintLaneChannel(runId), event);
+      }
+    } catch (err) {
+      this.logger?.debug('[SprintLaneStore] removeLane: event emit failed (fail-soft)', {
+        batchId,
+        taskId: resolvedTaskId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    this.logger?.info('[SprintLaneStore] lane removed mid-run', { batchId, taskId: resolvedTaskId });
+    return { removed: true };
   }
 
   // --------------------------------------------------------------------------

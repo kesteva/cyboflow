@@ -684,6 +684,251 @@ describe('SprintLaneStore', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // addLane / removeLane — mid-run lane roster edits (monitor steering)
+  // ---------------------------------------------------------------------------
+
+  /** Insert the workflow_runs row a batch is 1:1 owned by (mirrors resetFailedLanes' seedOwningRun below). */
+  function seedOwningRun(targetDb: Database.Database, batchId: string, runId = 'run-1'): void {
+    const workflowId = `workflow-${runId}`;
+    targetDb
+      .prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, 'test-workflow', '{}')`)
+      .run(workflowId);
+    targetDb
+      .prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, batch_id) VALUES (?, ?, 1, 'running', ?)`,
+      )
+      .run(runId, workflowId, batchId);
+  }
+
+  describe('addLane', () => {
+    it('inserts a queued lane, returns it, and it appears in listLanes', () => {
+      seedTask(db, 'tsk_a', 'TASK-001', 'First task');
+      seedTask(db, 'tsk_b', 'TASK-002', 'Second task');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+
+      const lane = store.addLane({ projectId: 1, batchId, taskId: 'tsk_b' });
+
+      expect(lane.taskId).toBe('tsk_b');
+      expect(lane.status).toBe('queued');
+      expect(lane.currentStepId).toBeNull();
+      expect(lane.ref).toBe('TASK-002');
+
+      const lanes = store.listLanes(batchId);
+      expect(lanes.map((l) => l.taskId).sort()).toEqual(['tsk_a', 'tsk_b']);
+    });
+
+    it('resolves the task by display ref (TASK-002), not just the opaque id', () => {
+      seedTask(db, 'tsk_a', 'TASK-001', 'First task');
+      seedTask(db, 'tsk_b', 'TASK-002', 'Second task');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+
+      const lane = store.addLane({ projectId: 1, batchId, taskId: 'TASK-002' });
+
+      expect(lane.taskId).toBe('tsk_b');
+      expect(lane.ref).toBe('TASK-002');
+    });
+
+    it('rejects a task already in the batch with bad_request (no second row)', () => {
+      seedTask(db, 'tsk_a', 'TASK-001', 'First task');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+
+      try {
+        store.addLane({ projectId: 1, batchId, taskId: 'tsk_a' });
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(SprintLaneError);
+        expect((err as SprintLaneError).code).toBe('bad_request');
+      }
+      expect(store.listLanes(batchId)).toHaveLength(1);
+    });
+
+    it('rejects addition to a terminal batch with bad_request', () => {
+      seedTask(db, 'tsk_a', 'TASK-001', 'First task');
+      seedTask(db, 'tsk_b', 'TASK-002', 'Second task');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      store.markBatchTerminal(batchId, 'completed');
+
+      try {
+        store.addLane({ projectId: 1, batchId, taskId: 'tsk_b' });
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(SprintLaneError);
+        expect((err as SprintLaneError).code).toBe('bad_request');
+      }
+      expect(store.listLanes(batchId)).toHaveLength(1);
+    });
+
+    it('rejects an unresolvable taskId with bad_request', () => {
+      seedTask(db, 'tsk_a', 'TASK-001', 'First task');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      try {
+        store.addLane({ projectId: 1, batchId, taskId: 'no-such-task' });
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect((err as SprintLaneError).code).toBe('bad_request');
+      }
+    });
+
+    it('rejects a missing batch with bad_request', () => {
+      expect(() => store.addLane({ projectId: 1, batchId: 'no-such-batch', taskId: 'tsk_a' })).toThrowError(
+        SprintLaneError,
+      );
+    });
+
+    it('emits a SprintLaneChangedEvent on the batch owning run channel', () => {
+      seedTask(db, 'tsk_a', 'TASK-001', 'First task');
+      seedTask(db, 'tsk_b', 'TASK-002', 'Second task');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      seedOwningRun(db, batchId);
+
+      const received: SprintLaneChangedEvent[] = [];
+      sprintLaneEvents.on(sprintLaneChannel('run-1'), (evt: SprintLaneChangedEvent) => {
+        received.push(evt);
+      });
+
+      store.addLane({ projectId: 1, batchId, taskId: 'tsk_b' });
+
+      expect(received).toHaveLength(1);
+      expect(received[0]).toMatchObject({
+        runId: 'run-1',
+        batchId,
+        taskId: 'tsk_b',
+        status: 'queued',
+        currentStepId: null,
+      });
+    });
+
+    describe('Q1 eligibility guard (collapsed-board schema)', () => {
+      let rdb: Database.Database;
+      let rstore: SprintLaneStore;
+
+      beforeEach(() => {
+        rdb = buildReadyLaneDb();
+        rstore = SprintLaneStore.initialize(dbAdapter(rdb));
+      });
+
+      afterEach(() => {
+        rdb.close();
+      });
+
+      it('rejects a PENDING (approved_at NULL) task with no_eligible_tasks', () => {
+        seedReadyTask(rdb, 'tsk_ready', 'TASK-001', 'Ready', { position: 6, approved: true });
+        seedReadyTask(rdb, 'tsk_pending', 'TASK-002', 'Pending', { position: 6, approved: false });
+        const { batchId } = rstore.createForRun(1, 'sdk', ['tsk_ready']);
+
+        try {
+          rstore.addLane({ projectId: 1, batchId, taskId: 'tsk_pending' });
+          expect.unreachable('should have thrown');
+        } catch (err) {
+          expect(err).toBeInstanceOf(SprintLaneError);
+          expect((err as SprintLaneError).code).toBe('no_eligible_tasks');
+        }
+        expect(rstore.listLanes(batchId)).toHaveLength(1);
+      });
+
+      it('rejects a below-Ready-for-development task with no_eligible_tasks', () => {
+        seedReadyTask(rdb, 'tsk_ready', 'TASK-001', 'Ready', { position: 6, approved: true });
+        seedReadyTask(rdb, 'tsk_idea', 'TASK-002', 'On the Idea column', { position: 1, approved: true });
+        const { batchId } = rstore.createForRun(1, 'sdk', ['tsk_ready']);
+
+        try {
+          rstore.addLane({ projectId: 1, batchId, taskId: 'tsk_idea' });
+          expect.unreachable('should have thrown');
+        } catch (err) {
+          expect((err as SprintLaneError).code).toBe('no_eligible_tasks');
+        }
+      });
+
+      it('accepts an eligible (approved, Ready-for-development) task', () => {
+        seedReadyTask(rdb, 'tsk_ready', 'TASK-001', 'Ready', { position: 6, approved: true });
+        seedReadyTask(rdb, 'tsk_ready2', 'TASK-002', 'Ready 2', { position: 6, approved: true });
+        const { batchId } = rstore.createForRun(1, 'sdk', ['tsk_ready']);
+
+        const lane = rstore.addLane({ projectId: 1, batchId, taskId: 'tsk_ready2' });
+        expect(lane.status).toBe('queued');
+        expect(rstore.listLanes(batchId)).toHaveLength(2);
+      });
+    });
+  });
+
+  describe('removeLane', () => {
+    it('removes a queued lane and returns { removed: true }', () => {
+      seedTask(db, 'tsk_a', 'TASK-001', 'First task');
+      seedTask(db, 'tsk_b', 'TASK-002', 'Second task');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b']);
+
+      const result = store.removeLane({ projectId: 1, batchId, taskId: 'tsk_b' });
+
+      expect(result).toEqual({ removed: true });
+      expect(store.listLanes(batchId).map((l) => l.taskId)).toEqual(['tsk_a']);
+    });
+
+    it('resolves the lane by display ref (TASK-002)', () => {
+      seedTask(db, 'tsk_a', 'TASK-001', 'First task');
+      seedTask(db, 'tsk_b', 'TASK-002', 'Second task');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b']);
+
+      const result = store.removeLane({ projectId: 1, batchId, taskId: 'TASK-002' });
+
+      expect(result).toEqual({ removed: true });
+      expect(store.listLanes(batchId).map((l) => l.taskId)).toEqual(['tsk_a']);
+    });
+
+    it('rejects removal of a running lane with bad_request (row survives)', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running' });
+
+      try {
+        store.removeLane({ projectId: 1, batchId, taskId: 'tsk_a' });
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(SprintLaneError);
+        expect((err as SprintLaneError).code).toBe('bad_request');
+      }
+      expect(store.listLanes(batchId)).toHaveLength(1);
+    });
+
+    it('rejects removal of an integrated lane with bad_request (row survives)', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'integrated' });
+
+      try {
+        store.removeLane({ projectId: 1, batchId, taskId: 'tsk_a' });
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect((err as SprintLaneError).code).toBe('bad_request');
+      }
+      expect(store.listLanes(batchId)).toHaveLength(1);
+    });
+
+    it('rejects an unknown (batch, task) lane with lane_not_found', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      try {
+        store.removeLane({ projectId: 1, batchId, taskId: 'tsk_other' });
+        expect.unreachable('should have thrown');
+      } catch (err) {
+        expect(err).toBeInstanceOf(SprintLaneError);
+        expect((err as SprintLaneError).code).toBe('lane_not_found');
+      }
+    });
+
+    it('emits a SprintLaneChangedEvent on the batch owning run channel', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a', 'tsk_b']);
+      seedOwningRun(db, batchId);
+
+      const received: SprintLaneChangedEvent[] = [];
+      sprintLaneEvents.on(sprintLaneChannel('run-1'), (evt: SprintLaneChangedEvent) => {
+        received.push(evt);
+      });
+
+      store.removeLane({ projectId: 1, batchId, taskId: 'tsk_b' });
+
+      expect(received).toHaveLength(1);
+      expect(received[0]).toMatchObject({ runId: 'run-1', batchId, taskId: 'tsk_b' });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // markBatchTerminal
   // ---------------------------------------------------------------------------
 
