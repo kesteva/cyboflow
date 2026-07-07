@@ -303,4 +303,133 @@ describe('experiments router orchestration (slice B)', () => {
     expect(chained.rerun_of_experiment_id).toBe(res.experimentId);
     expect(chained.id).not.toBe(res.experimentId);
   });
+
+  // --- Fix 1: fail-closed winner promotion in decide -------------------------
+
+  /** Drive a seeded experiment to both-arms-settled with tagged arm work on each side. */
+  async function settledSeededExperiment(h: Harness): Promise<{
+    ideaId: string;
+    res: Awaited<ReturnType<typeof startExperiment>>;
+    exp0: NonNullable<ReturnType<typeof getExperiment>>;
+    aWork: { epicId: string; taskId: string };
+    bWork: { epicId: string; taskId: string };
+  }> {
+    const idea = await h.deps.taskChangeRouter.applyChange(1, {
+      actor: 'user', entityType: 'idea', title: 'seed', body: 'orig-body',
+    });
+    const res = await startExperiment(h.deps, {
+      projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB', seedIdeaId: idea.taskId,
+    });
+    const exp0 = getExperiment(dbAdapter(h.db), res.experimentId)!;
+    const aWork = await seedArmWork(h, res.armA.runId);
+    const bWork = await seedArmWork(h, res.armB.runId);
+    h.db.prepare('UPDATE ideas SET body = ? WHERE id = ?').run('WINNER-BODY', exp0.seed_idea_clone_a_id as string);
+    setRunStatus(h.db, res.armA.runId, 'awaiting_review');
+    setRunStatus(h.db, res.armB.runId, 'awaiting_review');
+    return { ideaId: idea.taskId, res, exp0, aWork, bWork };
+  }
+
+  it('decide FAILS CLOSED when a winner reveal throws — nothing swept, status unchanged — then a retry succeeds', async () => {
+    const h = makeHarness();
+    const { ideaId, res, exp0, aWork, bWork } = await settledSeededExperiment(h);
+
+    // Wrap the router so the winner epic's promote reveal throws (a mid-reveal failure).
+    const failFor = aWork.epicId;
+    let sweepCalls = 0;
+    const failingDeps: ExperimentsDeps = {
+      ...h.deps,
+      taskChangeRouter: {
+        applyChange: (pid, change) => {
+          if (change.kind === 'experiment-promote' && change.taskId === failFor) {
+            return Promise.reject(new Error('boom-reveal'));
+          }
+          return h.deps.taskChangeRouter.applyChange(pid, change);
+        },
+        deleteExperimentArmEntities: (pid, opts) => {
+          sweepCalls += 1;
+          return h.deps.taskChangeRouter.deleteExperimentArmEntities(pid, opts);
+        },
+      },
+    };
+
+    await expect(decideExperiment(failingDeps, res.experimentId, res.armA.runId)).rejects.toThrow(
+      /winner promotion failed.*retry decide/,
+    );
+
+    // No sweep ran at all.
+    expect(sweepCalls).toBe(0);
+    // Status untouched (still running, NOT decided); no winner/decision stamp.
+    const midExp = getExperiment(dbAdapter(h.db), res.experimentId)!;
+    expect(midExp.status).toBe('running');
+    expect(midExp.winner_run_id).toBeNull();
+    expect(midExp.decided_at).toBeNull();
+    // Every winner AND loser entity still present + still experiment-tagged.
+    expect(exists(h.db, 'epics', aWork.epicId)).toBe(true);
+    expect(exists(h.db, 'tasks', aWork.taskId)).toBe(true);
+    expect(exists(h.db, 'epics', bWork.epicId)).toBe(true);
+    expect(exists(h.db, 'tasks', bWork.taskId)).toBe(true);
+    expect(exists(h.db, 'ideas', exp0.seed_idea_clone_a_id as string)).toBe(true);
+    expect(exists(h.db, 'ideas', exp0.seed_idea_clone_b_id as string)).toBe(true);
+    expect(field(h.db, 'epics', aWork.epicId, 'experiment_id')).toBe(res.experimentId);
+    expect(field(h.db, 'tasks', bWork.taskId, 'experiment_id')).toBe(res.experimentId);
+    // No session dismissed; no review item resolved (nothing was torn down).
+    expect(h.dismissed).toHaveLength(0);
+
+    // Retry with the (now-healthy) real deps → succeeds; idempotent fold/reveal re-run.
+    const dec = await decideExperiment(h.deps, res.experimentId, res.armA.runId);
+    expect(dec.status).toBe('decided');
+    // Winner revealed (tag cleared + approved) + reparented to the ORIGINAL idea.
+    expect(field(h.db, 'epics', aWork.epicId, 'experiment_id')).toBeNull();
+    expect(field(h.db, 'epics', aWork.epicId, 'approved_at')).not.toBeNull();
+    expect(field(h.db, 'epics', aWork.epicId, 'originating_idea_id')).toBe(ideaId);
+    expect(exists(h.db, 'tasks', aWork.taskId)).toBe(true);
+    // Winner clone + whole loser arm swept.
+    expect(exists(h.db, 'ideas', exp0.seed_idea_clone_a_id as string)).toBe(false);
+    expect(exists(h.db, 'epics', bWork.epicId)).toBe(false);
+    expect(exists(h.db, 'tasks', bWork.taskId)).toBe(false);
+    expect(exists(h.db, 'ideas', exp0.seed_idea_clone_b_id as string)).toBe(false);
+    // Loser session dismissed on the successful retry.
+    expect(h.dismissed).toContain(exp0.session_b_id);
+    const finalExp = getExperiment(dbAdapter(h.db), res.experimentId)!;
+    expect(finalExp.status).toBe('decided');
+    expect(finalExp.winner_run_id).toBe(res.armA.runId);
+  });
+
+  it('decide aborts at pre-sweep verification when a reveal "succeeds" without clearing the tag', async () => {
+    const h = makeHarness();
+    const { res, exp0, aWork, bWork } = await settledSeededExperiment(h);
+
+    // The winner task's promote reveal is stubbed to a silent no-op "success": it
+    // returns without clearing the tag, so the entity is still sandboxed going into
+    // the sweep. The pre-sweep verification must catch this and abort.
+    const skipFor = aWork.taskId;
+    let sweepCalls = 0;
+    const leakyDeps: ExperimentsDeps = {
+      ...h.deps,
+      taskChangeRouter: {
+        applyChange: (pid, change) => {
+          if (change.kind === 'experiment-promote' && change.taskId === skipFor) {
+            return Promise.resolve({ taskId: skipFor });
+          }
+          return h.deps.taskChangeRouter.applyChange(pid, change);
+        },
+        deleteExperimentArmEntities: (pid, opts) => {
+          sweepCalls += 1;
+          return h.deps.taskChangeRouter.deleteExperimentArmEntities(pid, opts);
+        },
+      },
+    };
+
+    await expect(decideExperiment(leakyDeps, res.experimentId, res.armA.runId)).rejects.toThrow(
+      new RegExp(`winner promotion failed.*still experiment-tagged.*${skipFor}`),
+    );
+    // Aborted before any sweep; nothing torn down; status unchanged.
+    expect(sweepCalls).toBe(0);
+    expect(exists(h.db, 'tasks', aWork.taskId)).toBe(true);
+    expect(exists(h.db, 'epics', bWork.epicId)).toBe(true);
+    expect(exists(h.db, 'ideas', exp0.seed_idea_clone_a_id as string)).toBe(true);
+    expect(exists(h.db, 'ideas', exp0.seed_idea_clone_b_id as string)).toBe(true);
+    expect(h.dismissed).toHaveLength(0);
+    expect(getExperiment(dbAdapter(h.db), res.experimentId)!.status).toBe('running');
+  });
 });

@@ -445,7 +445,12 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
 // decide
 // ---------------------------------------------------------------------------
 
-/** Reveal + reparent + clear-tag one arm's winner-created entities. */
+/**
+ * Reveal + reparent + clear-tag one arm's winner-created entities. A failure on
+ * ANY op propagates (no per-op swallow) so decideExperiment can abort the promotion
+ * BEFORE the destructive sweep — silently dropping a reveal here would let the
+ * still-tagged winner entity be swept as though it were throwaway.
+ */
 async function revealWinnerEntities(
   deps: ExperimentsDeps,
   projectId: number,
@@ -454,42 +459,36 @@ async function revealWinnerEntities(
 ): Promise<void> {
   const reparent = originalIdeaId ? { originatingIdeaId: originalIdeaId } : {};
   for (const epicId of listRunCreatedEpicIds(deps.db, winnerRunId)) {
-    await deps.taskChangeRouter
-      .applyChange(projectId, {
-        actor: 'orchestrator',
-        entityType: 'epic',
-        taskId: epicId,
-        approved: true,
-        clearExperiment: true,
-        ...reparent,
-        kind: 'experiment-promote',
-      })
-      .catch(() => {});
+    await deps.taskChangeRouter.applyChange(projectId, {
+      actor: 'orchestrator',
+      entityType: 'epic',
+      taskId: epicId,
+      approved: true,
+      clearExperiment: true,
+      ...reparent,
+      kind: 'experiment-promote',
+    });
   }
   for (const taskId of listRunCreatedTaskIds(deps.db, winnerRunId)) {
-    await deps.taskChangeRouter
-      .applyChange(projectId, {
-        actor: 'orchestrator',
-        entityType: 'task',
-        taskId,
-        approved: true,
-        clearExperiment: true,
-        ...reparent,
-        kind: 'experiment-promote',
-      })
-      .catch(() => {});
+    await deps.taskChangeRouter.applyChange(projectId, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      taskId,
+      approved: true,
+      clearExperiment: true,
+      ...reparent,
+      kind: 'experiment-promote',
+    });
   }
   // Winner-created ideas (unseeded arms may mint their own idea) — reveal only.
   for (const ideaId of listRunCreatedIdeaIds(deps.db, winnerRunId)) {
-    await deps.taskChangeRouter
-      .applyChange(projectId, {
-        actor: 'orchestrator',
-        entityType: 'idea',
-        taskId: ideaId,
-        clearExperiment: true,
-        kind: 'experiment-promote',
-      })
-      .catch(() => {});
+    await deps.taskChangeRouter.applyChange(projectId, {
+      actor: 'orchestrator',
+      entityType: 'idea',
+      taskId: ideaId,
+      clearExperiment: true,
+      kind: 'experiment-promote',
+    });
   }
 }
 
@@ -565,25 +564,69 @@ export async function decideExperiment(
 
   const seeded = exp.seed_idea_id !== null;
 
-  // 1. (seeded) REPLACE-fold the winner clone body into the ORIGINAL idea.
-  if (seeded && exp.seed_idea_id && winnerCloneId) {
-    const cloneRow = db.prepare('SELECT body FROM ideas WHERE id = ?').get(winnerCloneId) as
-      | { body?: unknown }
-      | undefined;
-    const cloneBody = typeof cloneRow?.body === 'string' ? cloneRow.body : null;
-    await deps.taskChangeRouter
-      .applyChange(exp.project_id, {
+  // PROMOTION PHASE (steps 1–2) — FAIL-CLOSED. The fold + reveal must fully
+  // succeed before ANY destructive sweep runs, because step 3 hard-deletes every
+  // winner-run-created entity whose experiment tag was NOT cleared. If a reveal
+  // silently failed (as the removed per-op .catch swallows allowed), the still-
+  // tagged winning work would be swept as though it were throwaway, with no retry
+  // path (decide on a decided experiment throws CONFLICT). On any failure we abort
+  // BEFORE the sweep, leaving status untouched (running/grading), no session
+  // dismissal, and the decision review item unresolved. Both the fold (REPLACE
+  // body) and each reveal (approved + clearExperiment + reparent) are idempotent —
+  // a second decide after a fixed cause re-runs them as no-ops and completes.
+  try {
+    // 1. (seeded) REPLACE-fold the winner clone body into the ORIGINAL idea.
+    if (seeded && exp.seed_idea_id && winnerCloneId) {
+      const cloneRow = db.prepare('SELECT body FROM ideas WHERE id = ?').get(winnerCloneId) as
+        | { body?: unknown }
+        | undefined;
+      const cloneBody = typeof cloneRow?.body === 'string' ? cloneRow.body : null;
+      await deps.taskChangeRouter.applyChange(exp.project_id, {
         actor: 'orchestrator',
         entityType: 'idea',
         taskId: exp.seed_idea_id,
         fields: { body: cloneBody },
         kind: 'experiment-promote-fold',
-      })
-      .catch(() => {});
+      });
+    }
+
+    // 2. Reveal winner entities (reparent to original when seeded) + clear their tag.
+    await revealWinnerEntities(deps, exp.project_id, winnerRunId, seeded ? exp.seed_idea_id : null);
+  } catch (err) {
+    throw new TRPCError({
+      code: 'INTERNAL_SERVER_ERROR',
+      message: `winner promotion failed (${
+        err instanceof Error ? err.message : String(err)
+      }); experiment left undecided — fix the cause and retry decide`,
+    });
   }
 
-  // 2. Reveal winner entities (reparent to original when seeded) + clear their tag.
-  await revealWinnerEntities(deps, exp.project_id, winnerRunId, seeded ? exp.seed_idea_id : null);
+  // 2b. Pre-sweep verification (belt-and-braces). The sweep in step 3 spares the
+  //     winner entities SOLELY because their tag was cleared in step 2 — so verify
+  //     that actually happened. If any winner-run-created epic/task/idea still
+  //     carries this experiment's tag (a reveal that "succeeded" without clearing),
+  //     abort with the SAME typed error rather than let the sweep destroy it. Same
+  //     retry contract: status/dismissal/review-item all untouched.
+  const stillTagged: string[] = [];
+  const collectStillTagged = (table: 'epics' | 'tasks' | 'ideas', ids: string[]): void => {
+    for (const id of ids) {
+      const row = db.prepare(`SELECT experiment_id AS eid FROM ${table} WHERE id = ?`).get(id) as
+        | { eid?: unknown }
+        | undefined;
+      if (row && row.eid === experimentId) stillTagged.push(id);
+    }
+  };
+  collectStillTagged('epics', listRunCreatedEpicIds(db, winnerRunId));
+  collectStillTagged('tasks', listRunCreatedTaskIds(db, winnerRunId));
+  collectStillTagged('ideas', listRunCreatedIdeaIds(db, winnerRunId));
+  if (stillTagged.length > 0) {
+    throw new TRPCError({
+      code: 'INTERNAL_SERVER_ERROR',
+      message: `winner promotion failed (winner entities still experiment-tagged after reveal: ${stillTagged.join(
+        ', ',
+      )}); experiment left undecided — fix the cause and retry decide`,
+    });
+  }
 
   // 3. Discard the (now-orphan) winner clone. The winner's entities had their tag
   //    cleared in step 2, so deleteExperimentArmEntities spares them and sweeps
