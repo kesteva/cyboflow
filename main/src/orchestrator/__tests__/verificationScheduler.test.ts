@@ -35,7 +35,7 @@ import type {
 } from '../../../../shared/types/visualVerification';
 
 const MIG_DIR = join(__dirname, '..', '..', 'database', 'migrations');
-const THROUGH_036 = [
+const THROUGH_048 = [
   '006_cyboflow_schema.sql',
   '011_workflow_step_tracking.sql',
   '014_native_tasks.sql',
@@ -57,7 +57,7 @@ function buildDb(): Database.Database {
     );
   `);
   db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
-  for (const f of THROUGH_036) db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
+  for (const f of THROUGH_048) db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
   return db;
 }
 
