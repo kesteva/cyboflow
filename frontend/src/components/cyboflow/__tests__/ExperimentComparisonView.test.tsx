@@ -29,6 +29,7 @@ const abandonMutate = vi.fn();
 const rerunComparisonMutate = vi.fn();
 const rerunMutate = vi.fn();
 const switchToRotationMutate = vi.fn();
+const promoteVariantMutate = vi.fn();
 const closeExperimentComparison = vi.fn();
 const setActiveProjectId = vi.fn();
 const goToSession = vi.fn();
@@ -46,6 +47,7 @@ vi.mock('../../../trpc/client', () => ({
         rerunComparison: { mutate: (...a: unknown[]) => rerunComparisonMutate(...a) },
         rerun: { mutate: (...a: unknown[]) => rerunMutate(...a) },
         switchToRotation: { mutate: (...a: unknown[]) => switchToRotationMutate(...a) },
+        promoteVariant: { mutate: (...a: unknown[]) => promoteVariantMutate(...a) },
       },
       tasks: { get: { query: vi.fn().mockResolvedValue(null) } },
     },
@@ -97,6 +99,9 @@ function makeExp(over: Partial<ExperimentRow> = {}): ExperimentRow {
     merge_sha: null,
     decided_at: null,
     rerun_of_experiment_id: null,
+    promoted_variant_id: null,
+    promoted_arm: null,
+    promoted_at: null,
     created_at: '2026-07-01T00:00:00.000Z',
     updated_at: '2026-07-01T00:00:00.000Z',
     ...over,
@@ -229,7 +234,7 @@ describe('ExperimentComparisonView', () => {
     expect(await screen.findByTestId('experiment-verdict-absent')).toHaveTextContent('disabled');
   });
 
-  it('disables the decide CTAs until both arms are settled, then maps Promote A/B and Discard both to decide()', async () => {
+  it('disables the decide CTAs until both arms are settled, then maps Accept A/B and Discard both to decide()', async () => {
     getQuery.mockResolvedValue(makeExp());
     getComparisonQuery.mockResolvedValueOnce(
       makePayload({ armB: makeArm({ runId: 'run-b', arm: 'B', variantLabel: 'variant-b', status: 'running' }) }),
@@ -238,19 +243,19 @@ describe('ExperimentComparisonView', () => {
 
     render(<ExperimentComparisonView experimentId="exp_1" />);
     await screen.findByTestId('experiment-verdict-card');
-    expect(screen.getByTestId('experiment-promote-a')).toBeDisabled();
-    expect(screen.getByTestId('experiment-promote-b')).toBeDisabled();
+    expect(screen.getByTestId('experiment-accept-a')).toBeDisabled();
+    expect(screen.getByTestId('experiment-accept-b')).toBeDisabled();
     expect(screen.getByTestId('experiment-discard-both')).toBeDisabled();
   });
 
-  it('Promote A calls decide with armA.runId and closes the comparison', async () => {
+  it('Accept A calls decide with armA.runId and closes the comparison', async () => {
     getQuery.mockResolvedValue(makeExp());
     getComparisonQuery.mockResolvedValue(makePayload());
     getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
     decideMutate.mockResolvedValue({ experimentId: 'exp_1', status: 'decided', winnerRunId: 'run-a' });
 
     render(<ExperimentComparisonView experimentId="exp_1" />);
-    const btn = await screen.findByTestId('experiment-promote-a');
+    const btn = await screen.findByTestId('experiment-accept-a');
     await waitFor(() => expect(btn).not.toBeDisabled());
     fireEvent.click(btn);
 
@@ -361,11 +366,22 @@ describe('ExperimentComparisonView', () => {
     expect(await screen.findByTestId('experiment-switch-to-rotation')).toBeDisabled();
   });
 
-  it('"Discard both & run again" composes decide(null) then rerun when not yet settled', async () => {
+  it('"Run another experiment" is disabled until the experiment is settled', async () => {
     getQuery.mockResolvedValue(makeExp({ status: 'grading' }));
     getComparisonQuery.mockResolvedValue(makePayload());
     getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
-    decideMutate.mockResolvedValue({ experimentId: 'exp_1', status: 'decided', winnerRunId: null });
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    expect(await screen.findByTestId('experiment-run-again-open')).toBeDisabled();
+  });
+
+  it('"Run another experiment" starts a rerun (no decide/abandon composition) once settled', async () => {
+    // The variant-outcome group (which "Run another experiment" now belongs to) is
+    // reachable only once the changes decision (piece 1) is already recorded, so the
+    // trigger no longer needs to compose a decide(null)/abandon pre-step.
+    getQuery.mockResolvedValue(makeExp({ status: 'decided' }));
+    getComparisonQuery.mockResolvedValue(makePayload());
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
     rerunMutate.mockResolvedValue({
       experimentId: 'exp_2',
       armA: { runId: 'run-a2', sessionId: 'sess-a2' },
@@ -373,41 +389,55 @@ describe('ExperimentComparisonView', () => {
     });
 
     render(<ExperimentComparisonView experimentId="exp_1" />);
-    fireEvent.click(await screen.findByTestId('experiment-run-again-open'));
+    const openBtn = await screen.findByTestId('experiment-run-again-open');
+    expect(openBtn).not.toBeDisabled();
+    fireEvent.click(openBtn);
     fireEvent.click(screen.getByTestId('experiment-run-again-start'));
 
-    await waitFor(() => expect(decideMutate).toHaveBeenCalledWith({ experimentId: 'exp_1', winnerRunId: null }));
     await waitFor(() => expect(rerunMutate).toHaveBeenCalledWith({ experimentId: 'exp_1' }));
+    expect(decideMutate).not.toHaveBeenCalled();
+    expect(abandonMutate).not.toHaveBeenCalled();
     await waitFor(() => expect(goToSession).toHaveBeenCalledTimes(1));
     expect(setActiveRun).toHaveBeenCalledWith('run-a2', 'sess-a2');
   });
 
-  it('"Discard both & run again" calls abandon (not decide) when an arm is still running', async () => {
-    // Regression: decide() hard-requires both arms settled (PRECONDITION_FAILED
-    // otherwise), but this button is reachable while an arm is still running (the
-    // label is deliberately "Discard both & run again" in that state). The fix
-    // branches to `abandon` — which cancels the still-running arm — instead of
-    // calling decide(null), which would reject.
+  it('"Abandon experiment" is offered while an arm is still running and tears the experiment down', async () => {
+    // Preserves the old "Discard both & run again" abandon-reachability contract:
+    // a still-running experiment (an arm not yet settled) can be torn down without
+    // waiting for a changes decision, now via a dedicated Abandon control.
     getQuery.mockResolvedValue(makeExp({ status: 'running' }));
     getComparisonQuery.mockResolvedValue(
       makePayload({ armB: makeArm({ runId: 'run-b', arm: 'B', status: 'running' }) }),
     );
     getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
     abandonMutate.mockResolvedValue({ experimentId: 'exp_1', status: 'abandoned', winnerRunId: null });
-    rerunMutate.mockResolvedValue({
-      experimentId: 'exp_2',
-      armA: { runId: 'run-a2', sessionId: 'sess-a2' },
-      armB: { runId: 'run-b2', sessionId: 'sess-b2' },
-    });
 
     render(<ExperimentComparisonView experimentId="exp_1" />);
-    fireEvent.click(await screen.findByTestId('experiment-run-again-open'));
-    fireEvent.click(screen.getByTestId('experiment-run-again-start'));
+    const btn = await screen.findByTestId('experiment-abandon');
+    fireEvent.click(btn);
 
     await waitFor(() => expect(abandonMutate).toHaveBeenCalledWith({ experimentId: 'exp_1' }));
     expect(decideMutate).not.toHaveBeenCalled();
-    await waitFor(() => expect(rerunMutate).toHaveBeenCalledWith({ experimentId: 'exp_1' }));
-    await waitFor(() => expect(goToSession).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(closeExperimentComparison).toHaveBeenCalledTimes(1));
+  });
+
+  it('a settled experiment enables the variant-outcome Promote buttons and calls experiments.promoteVariant with the chosen arm', async () => {
+    getQuery.mockResolvedValue(makeExp({ status: 'decided', winner_arm: 'A', winner_run_id: 'run-a' }));
+    getComparisonQuery.mockResolvedValue(makePayload());
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+    promoteVariantMutate.mockResolvedValue({ experimentId: 'exp_1', promotedVariantId: 'wfv_a', promotedArm: 'A' });
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    const btn = await screen.findByTestId('experiment-promote-variant-a');
+    expect(btn).not.toBeDisabled();
+    fireEvent.click(btn);
+    // Confirmation dialog gates the mutation — not called until confirmed.
+    expect(promoteVariantMutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Promote'));
+
+    await waitFor(() =>
+      expect(promoteVariantMutate).toHaveBeenCalledWith({ experimentId: 'exp_1', arm: 'A' }),
+    );
   });
 
   it('renders the shared changed-file list with per-arm frozen diffs via DiffBody', async () => {

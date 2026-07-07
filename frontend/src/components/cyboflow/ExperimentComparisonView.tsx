@@ -40,6 +40,7 @@ import {
   isExperimentArmSettled,
   isExperimentSettled,
   isBaselineArm,
+  BASELINE_VARIANT_SENTINEL,
 } from '../../../../shared/types/experiments';
 import type {
   ExperimentRow,
@@ -83,6 +84,20 @@ function stalledArm(payload: ExperimentComparisonPayload): ExperimentArm | null 
   return null;
 }
 
+/** The raw variant id (or the baseline sentinel) backing one arm of an experiment. */
+function armVariantId(exp: ExperimentRow, arm: ExperimentArm): string {
+  return arm === 'A' ? exp.variant_a_id : exp.variant_b_id;
+}
+
+/** Human summary of the recorded CHANGES decision (experiments.decide) once an experiment is settled. */
+function changesDecisionSummary(exp: ExperimentRow): string {
+  if (exp.status === 'abandoned') return 'Experiment abandoned';
+  if (exp.winner_run_id === null) return '✓ Discarded both arms';
+  if (exp.winner_arm === 'A') return "✓ Accepted arm A's changes";
+  if (exp.winner_arm === 'B') return "✓ Accepted arm B's changes";
+  return 'Changes decision recorded';
+}
+
 export interface ExperimentComparisonViewProps {
   experimentId: string;
 }
@@ -103,6 +118,7 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
   const [seedIdeaLabel, setSeedIdeaLabel] = useState<string | null>(null);
   const [ideaPickerOpen, setIdeaPickerOpen] = useState(false);
   const [rotationConfirmOpen, setRotationConfirmOpen] = useState(false);
+  const [promoteConfirm, setPromoteConfirm] = useState<ExperimentArm | null>(null);
 
   // -- Data loading + polling ------------------------------------------------
 
@@ -196,6 +212,10 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
   const hasBaselineArm =
     exp !== null && (isBaselineArm(exp.variant_a_id) || isBaselineArm(exp.variant_b_id));
   const canSwitchToRotation = exp !== null && expSettled && !hasBaselineArm;
+  // Variant-outcome (piece 2) is gated on the changes decision (piece 1) being
+  // concluded, and is one-way — a settled experiment can promote at most once.
+  const alreadyPromoted = exp !== null && exp.promoted_variant_id !== null;
+  const canPromoteVariant = expSettled && !alreadyPromoted;
 
   // -- Actions -----------------------------------------------------------------
 
@@ -251,18 +271,10 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
     setActionBusy('rerun');
     setActionError(null);
     try {
-      // When the experiment is not yet decided, this composes as "Discard both &
-      // run again": settle the live experiment FIRST, then chain the rerun.
-      // `decide` hard-requires both arms settled (PRECONDITION_FAILED otherwise),
-      // so only take that path once bothSettled — while an arm is still running,
-      // `abandon` cancels it and tears the experiment down instead.
-      if (!expSettled) {
-        if (bothSettled) {
-          await trpc.cyboflow.experiments.decide.mutate({ experimentId, winnerRunId: null });
-        } else {
-          await trpc.cyboflow.experiments.abandon.mutate({ experimentId });
-        }
-      }
+      // Run-again is now reachable ONLY once the experiment is settled (the changes
+      // decision is recorded) — the trigger is disabled until then — so this no
+      // longer needs to compose a decide/abandon pre-step; `abandon` (below) covers
+      // tearing down a still-running experiment.
       const result = await trpc.cyboflow.experiments.rerun.mutate({
         experimentId,
         ...(seedIdeaId !== null ? { seedIdeaId } : {}),
@@ -275,6 +287,36 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : 'Failed to start the new experiment');
       setActionBusy(null);
+    }
+  };
+
+  const handleAbandon = async (): Promise<void> => {
+    if (exp === null || actionBusy !== null) return;
+    setActionBusy('abandon');
+    setActionError(null);
+    try {
+      await trpc.cyboflow.experiments.abandon.mutate({ experimentId });
+      useNavigationStore.getState().closeExperimentComparison();
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : 'Failed to abandon the experiment');
+      setActionBusy(null);
+    }
+  };
+
+  const handlePromoteVariant = async (arm: ExperimentArm): Promise<void> => {
+    if (exp === null || actionBusy !== null) return;
+    setActionBusy('promoteVariant');
+    setActionError(null);
+    try {
+      await trpc.cyboflow.experiments.promoteVariant.mutate({ experimentId, arm });
+      // Re-fetch the experiment row so `alreadyPromoted` reflects the new state.
+      const fresh = await trpc.cyboflow.experiments.get.query({ experimentId });
+      setExp(fresh);
+    } catch (err: unknown) {
+      setActionError(err instanceof Error ? err.message : 'Failed to promote the variant');
+    } finally {
+      setActionBusy(null);
+      setPromoteConfirm(null);
     }
   };
 
@@ -360,123 +402,182 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
             </p>
           )}
 
-          <div className="flex flex-col gap-3 border-t border-border-primary pt-5">
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                type="button"
-                data-testid="experiment-promote-a"
-                disabled={!canDecide || actionBusy !== null}
-                onClick={() => void handleDecide(payload.armA.runId)}
-                className="inline-flex items-center gap-1.5 rounded-button bg-interactive px-3.5 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <Trophy size={14} /> Promote A
-              </button>
-              <button
-                type="button"
-                data-testid="experiment-promote-b"
-                disabled={!canDecide || actionBusy !== null}
-                onClick={() => void handleDecide(payload.armB.runId)}
-                className="inline-flex items-center gap-1.5 rounded-button bg-interactive px-3.5 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <Trophy size={14} /> Promote B
-              </button>
-              <button
-                type="button"
-                data-testid="experiment-discard-both"
-                disabled={!canDecide || actionBusy !== null}
-                onClick={() => void handleDecide(null)}
-                className="inline-flex items-center gap-1.5 rounded-button border border-border-primary px-3.5 py-2 text-sm font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <Ban size={14} /> Discard both
-              </button>
-              {!bothSettled && !expSettled && (
-                <span className="text-xs text-text-muted" data-testid="experiment-decide-hint">
-                  Waiting for both arms to finish before a decision can be recorded.
-                </span>
+          <div className="flex flex-col gap-4 border-t border-border-primary pt-5">
+            {/* Group 1 — Changes decision: which arm's concrete output (entities/diffs) to accept. */}
+            <div className="flex flex-col gap-2">
+              <div className="eyebrow text-text-tertiary">Changes</div>
+              {!expSettled ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    data-testid="experiment-accept-a"
+                    disabled={!canDecide || actionBusy !== null}
+                    onClick={() => void handleDecide(payload.armA.runId)}
+                    className="inline-flex items-center gap-1.5 rounded-button bg-interactive px-3.5 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Trophy size={14} /> Accept A&apos;s changes
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="experiment-accept-b"
+                    disabled={!canDecide || actionBusy !== null}
+                    onClick={() => void handleDecide(payload.armB.runId)}
+                    className="inline-flex items-center gap-1.5 rounded-button bg-interactive px-3.5 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Trophy size={14} /> Accept B&apos;s changes
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="experiment-discard-both"
+                    disabled={!canDecide || actionBusy !== null}
+                    onClick={() => void handleDecide(null)}
+                    className="inline-flex items-center gap-1.5 rounded-button border border-border-primary px-3.5 py-2 text-sm font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Ban size={14} /> Discard both
+                  </button>
+                  {!bothSettled && (
+                    <span className="text-xs text-text-muted" data-testid="experiment-decide-hint">
+                      Waiting for both arms to finish before a decision can be recorded.
+                    </span>
+                  )}
+                  {!bothSettled && (
+                    <button
+                      type="button"
+                      data-testid="experiment-abandon"
+                      disabled={actionBusy !== null}
+                      onClick={() => void handleAbandon()}
+                      className="text-xs font-medium text-text-tertiary underline hover:text-status-error disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Abandon experiment
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <p className="text-sm text-text-secondary" data-testid="experiment-changes-decision-summary">
+                  {changesDecisionSummary(exp)}
+                </p>
               )}
             </div>
 
-            <div className="flex flex-wrap items-center gap-2 border-t border-dashed border-border-primary pt-3">
-              {!runAgainOpen ? (
-                <button
-                  type="button"
-                  data-testid="experiment-run-again-open"
-                  onClick={() => setRunAgainOpen(true)}
-                  className="inline-flex items-center gap-1.5 rounded-button border border-border-primary px-3 py-1.5 text-xs font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary"
-                >
-                  <RotateCcw size={13} />
-                  {expSettled ? 'Run again with new seed…' : 'Discard both & run again…'}
-                </button>
-              ) : (
-                <div className="flex flex-col gap-2 rounded-card border border-border-primary bg-surface-secondary/30 p-3" data-testid="experiment-run-again-panel">
-                  <span className="text-xs font-medium text-text-secondary">
-                    {expSettled
-                      ? 'Repeat this head-to-head with the same variants.'
-                      : 'This discards both live arms, then repeats the head-to-head with the same variants.'}
+            {/* Group 2 — Variant outcome: which workflow VERSION wins going forward. */}
+            <div className="flex flex-col gap-2 border-t border-dashed border-border-primary pt-3">
+              <div className="eyebrow text-text-tertiary">Which version wins?</div>
+              <div className="flex flex-wrap items-center gap-2">
+                {!alreadyPromoted ? (
+                  <>
+                    <button
+                      type="button"
+                      data-testid="experiment-promote-variant-a"
+                      disabled={!canPromoteVariant || actionBusy !== null}
+                      onClick={() => setPromoteConfirm('A')}
+                      className="inline-flex items-center gap-1.5 rounded-button bg-interactive px-3.5 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Trophy size={14} /> Promote A
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="experiment-promote-variant-b"
+                      disabled={!canPromoteVariant || actionBusy !== null}
+                      onClick={() => setPromoteConfirm('B')}
+                      className="inline-flex items-center gap-1.5 rounded-button bg-interactive px-3.5 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Trophy size={14} /> Promote B
+                    </button>
+                  </>
+                ) : (
+                  <span className="text-sm text-text-secondary" data-testid="experiment-promoted-summary">
+                    {exp.promoted_variant_id === BASELINE_VARIANT_SENTINEL
+                      ? '✓ Kept the current baseline'
+                      : `✓ Promoted ${exp.promoted_arm === 'A' ? payload.armA.variantLabel : payload.armB.variantLabel} as the workflow baseline`}
                   </span>
-                  <div className="flex items-center gap-2 text-xs text-text-secondary">
-                    <span>Seed idea (optional):</span>
-                    {seedIdeaId === null ? (
-                      <button
-                        type="button"
-                        onClick={() => setIdeaPickerOpen(true)}
-                        data-testid="experiment-run-again-add-seed"
-                        className="rounded-button border border-border-primary bg-bg-primary px-2 py-0.5 text-[11px] font-medium text-text-primary hover:bg-bg-hover"
-                      >
-                        Add a seed idea
-                      </button>
-                    ) : (
-                      <>
-                        <span className="truncate" data-testid="experiment-run-again-seed-label">{seedIdeaLabel}</span>
+                )}
+
+                {!runAgainOpen ? (
+                  <button
+                    type="button"
+                    data-testid="experiment-run-again-open"
+                    disabled={!expSettled || actionBusy !== null}
+                    onClick={() => setRunAgainOpen(true)}
+                    className="inline-flex items-center gap-1.5 rounded-button border border-border-primary px-3 py-1.5 text-xs font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <RotateCcw size={13} />
+                    Run another experiment…
+                  </button>
+                ) : (
+                  <div className="flex flex-col gap-2 rounded-card border border-border-primary bg-surface-secondary/30 p-3" data-testid="experiment-run-again-panel">
+                    <span className="text-xs font-medium text-text-secondary">
+                      Repeat this head-to-head with the same variants.
+                    </span>
+                    <div className="flex items-center gap-2 text-xs text-text-secondary">
+                      <span>Seed idea (optional):</span>
+                      {seedIdeaId === null ? (
                         <button
                           type="button"
-                          onClick={() => { setSeedIdeaId(null); setSeedIdeaLabel(null); }}
-                          className="text-text-tertiary underline hover:text-text-primary"
+                          onClick={() => setIdeaPickerOpen(true)}
+                          data-testid="experiment-run-again-add-seed"
+                          className="rounded-button border border-border-primary bg-bg-primary px-2 py-0.5 text-[11px] font-medium text-text-primary hover:bg-bg-hover"
                         >
-                          Remove
+                          Add a seed idea
                         </button>
-                      </>
-                    )}
+                      ) : (
+                        <>
+                          <span className="truncate" data-testid="experiment-run-again-seed-label">{seedIdeaLabel}</span>
+                          <button
+                            type="button"
+                            onClick={() => { setSeedIdeaId(null); setSeedIdeaLabel(null); }}
+                            className="text-text-tertiary underline hover:text-text-primary"
+                          >
+                            Remove
+                          </button>
+                        </>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        data-testid="experiment-run-again-start"
+                        disabled={actionBusy !== null}
+                        onClick={() => void handleRunAgain()}
+                        className="rounded-button bg-interactive px-3 py-1.5 text-xs font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {actionBusy === 'rerun' ? 'Starting…' : 'Run again'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setRunAgainOpen(false); setSeedIdeaId(null); setSeedIdeaLabel(null); }}
+                        disabled={actionBusy !== null}
+                        className="rounded-button px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary"
+                      >
+                        Cancel
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      data-testid="experiment-run-again-start"
-                      disabled={actionBusy !== null}
-                      onClick={() => void handleRunAgain()}
-                      className="rounded-button bg-interactive px-3 py-1.5 text-xs font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {actionBusy === 'rerun' ? 'Starting…' : expSettled ? 'Run again' : 'Discard both & run again'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => { setRunAgainOpen(false); setSeedIdeaId(null); setSeedIdeaLabel(null); }}
-                      disabled={actionBusy !== null}
-                      className="rounded-button px-3 py-1.5 text-xs text-text-secondary hover:text-text-primary"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              )}
+                )}
 
-              <button
-                type="button"
-                data-testid="experiment-switch-to-rotation"
-                disabled={!canSwitchToRotation || actionBusy !== null}
-                title={
-                  canSwitchToRotation
-                    ? undefined
-                    : hasBaselineArm
-                      ? 'Rotation requires two real variants — one arm is the current workflow (baseline).'
-                      : 'Available once the experiment is decided or abandoned'
-                }
-                onClick={() => setRotationConfirmOpen(true)}
-                className="inline-flex items-center gap-1.5 rounded-button border border-border-primary px-3 py-1.5 text-xs font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <Shuffle size={13} />
-                Switch to randomized
-              </button>
+                <button
+                  type="button"
+                  data-testid="experiment-switch-to-rotation"
+                  disabled={!canSwitchToRotation || actionBusy !== null}
+                  title={
+                    canSwitchToRotation
+                      ? undefined
+                      : hasBaselineArm
+                        ? 'Rotation requires two real variants — one arm is the current workflow (baseline).'
+                        : 'Available once the experiment is decided or abandoned'
+                  }
+                  onClick={() => setRotationConfirmOpen(true)}
+                  className="inline-flex items-center gap-1.5 rounded-button border border-border-primary px-3 py-1.5 text-xs font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Shuffle size={13} />
+                  Switch to randomized
+                </button>
+
+                {!expSettled && (
+                  <span className="text-xs text-text-muted" data-testid="experiment-variant-outcome-hint">
+                    Available once you record a changes decision above.
+                  </span>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -493,6 +594,30 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
         title="Switch to randomized rotation?"
         message="Both variants are activated for rotation — future launches of this workflow randomly assign one of them, and every rotation run continues to accrue a judge-grading cost. This does not change the recorded decision for this experiment."
         confirmText="Switch to rotation"
+        cancelText="Cancel"
+      />
+
+      <ConfirmDialog
+        isOpen={promoteConfirm !== null}
+        onClose={() => setPromoteConfirm(null)}
+        onConfirm={() => {
+          if (promoteConfirm !== null) void handlePromoteVariant(promoteConfirm);
+        }}
+        title={
+          promoteConfirm === null
+            ? ''
+            : isBaselineArm(armVariantId(exp, promoteConfirm))
+              ? 'Keep the current baseline?'
+              : `Promote variant ${promoteConfirm === 'A' ? payload.armA.variantLabel : payload.armB.variantLabel} as the baseline?`
+        }
+        message={
+          promoteConfirm === null
+            ? ''
+            : isBaselineArm(armVariantId(exp, promoteConfirm))
+              ? `Arm ${promoteConfirm} is the current workflow (baseline). Promoting it records the verdict and leaves the workflow definition unchanged.`
+              : "The winning variant's step definition is written into this workflow, so all future normal launches use it. If this variant only changes the step definition, it will be retired; if it also carries agent-prompt or model overrides, it is kept as a named version."
+        }
+        confirmText="Promote"
         cancelText="Cancel"
       />
     </div>
