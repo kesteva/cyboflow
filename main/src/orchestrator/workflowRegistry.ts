@@ -380,7 +380,7 @@ export class WorkflowRegistry {
   }
 
   // --------------------------------------------------------------------------
-  // Workflow variants (A/B testing, migration 046)
+  // Workflow variants (A/B testing, migration 048)
   // --------------------------------------------------------------------------
 
   /** Read a single variant row by id. Returns null when absent. */
@@ -833,7 +833,7 @@ export class WorkflowRegistry {
       requestedExecutionModel?: ExecutionModel;
       requestedModel?: string;
       requestedEvalEnabled?: boolean;
-      // A/B testing (migration 046). variant* are supplied by the VariantResolver
+      // A/B testing (migration 048). variant* are supplied by the VariantResolver
       // via RunLauncher.launch; experiment* are supplied by slice B's experiment
       // launcher. All stamped immutably (no UPDATE path), mirroring model/substrate.
       variantId?: string;
@@ -961,7 +961,7 @@ export class WorkflowRegistry {
       opts?.requestedEvalEnabled === undefined ? null : opts.requestedEvalEnabled ? 1 : 0;
 
     // Freeze the run's EFFECTIVE spec onto the run as a content address
-    // (migration 026 + A/B 046). For a VARIANT run the effective spec is the
+    // (migration 026 + A/B 048). For a VARIANT run the effective spec is the
     // variant's frozen spec_json; otherwise it is the workflow's live spec_json.
     // Like substrate, spec_hash is stamped ONCE at INSERT and is immutable for the
     // run lifetime — there is no UPDATE path. The six per-run "effective

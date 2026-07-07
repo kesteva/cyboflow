@@ -155,7 +155,7 @@ export function buildStepTransitionEvent(
 ): WorkflowStepTransitionEvent | null {
   const timestamp = new Date().toISOString();
 
-  // Resolve the run's workflow name + FROZEN spec (A/B testing, migration 046:
+  // Resolve the run's workflow name + FROZEN spec (A/B testing, migration 048:
   // resolveRunFrozenSpec resolves the run's (workflow_id, spec_hash) revision,
   // falling back to the live workflows.spec_json), then validate the stepId against
   // the run's EFFECTIVE definition (dynamic step-id model: resolveWorkflowDefinition

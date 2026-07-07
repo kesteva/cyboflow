@@ -141,7 +141,7 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN eval_enabled INTEGER');
     evalEnabledAdded = true;
   };
-  // Migration 046 (A/B testing): createRun stamps + getRunById projects four new
+  // Migration 048 (A/B testing): createRun stamps + getRunById projects four new
   // workflow_runs tagging columns (experiment_id / experiment_arm / variant_id /
   // variant_label). Both read-model surfaces (includeSubstrate) and the row-level
   // readers (includeWorkflowRunTaskColumns) therefore need them — folded in
@@ -155,7 +155,7 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_arm TEXT');
     db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_id TEXT');
     db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_label TEXT');
-    // Migration 047 (A/B slice B): getRunById also projects merge_sha (the merge
+    // Migration 049 (A/B slice B): getRunById also projects merge_sha (the merge
     // commit the run's code landed on, stamped at close-out). Additive nullable TEXT.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN merge_sha TEXT');
     variantColumnsAdded = true;
@@ -185,7 +185,7 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addModelColumnOnce();
     // Migration 044: getRunById projects eval_enabled beside model.
     addEvalEnabledColumnOnce();
-    // Migration 046: getRunById projects the four A/B tagging columns.
+    // Migration 048: getRunById projects the four A/B tagging columns.
     addVariantColumnsOnce();
   }
   if (options?.includeQuestionsTable) {
@@ -228,7 +228,7 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addModelColumnOnce();
     // Migration 044: getRunById projects eval_enabled (per-run eval override).
     addEvalEnabledColumnOnce();
-    // Migration 046: getRunById projects the four A/B tagging columns.
+    // Migration 048: getRunById projects the four A/B tagging columns.
     addVariantColumnsOnce();
   }
   return db;

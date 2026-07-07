@@ -304,7 +304,7 @@ export function stampSessionRunsOutcome(
   db: DatabaseLike,
   sessionId: string,
   outcome: 'merged' | 'dismissed',
-  // A/B post-merge attribution (migration 047): the merge commit SHA where this
+  // A/B post-merge attribution (migration 049): the merge commit SHA where this
   // session's code landed. Stamped onto workflow_runs.merge_sha ONLY for a
   // 'merged' outcome AND only when provided (the caller computes it post-merge);
   // 'dismissed' and a missing SHA leave merge_sha NULL. Guarded by the same

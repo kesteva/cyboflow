@@ -1,5 +1,5 @@
 /**
- * experimentStore — the experiments-table write surface (migration 047).
+ * experimentStore — the experiments-table write surface (migration 049).
  * Exercises insert/get/setRuns/updateStatus + reconcileExperimentStatus
  * transitions (running→grading when both arms settled; half-created → abandoned)
  * + recoverExperiments boot reconcile, against an in-memory DB.

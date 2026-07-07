@@ -1,5 +1,5 @@
 /**
- * cyboflow.experiments sub-router (A/B testing slice B, migration 047).
+ * cyboflow.experiments sub-router (A/B testing slice B, migration 049).
  *
  * Side-by-side experiment orchestration: startSideBySide launches two variant
  * arms in SHA-pinned worktrees with sandboxed entity writes; decide promotes the
@@ -233,7 +233,7 @@ function bothArmsSettled(db: DatabaseLike, exp: ExperimentRow): boolean {
 
 /**
  * Resolve the pairwise decision review item (slice C wires the table). Fail-soft:
- * the experiment_comparisons table arrives in migration 048, so on a slice-B DB
+ * the experiment_comparisons table arrives in migration 050, so on a slice-B DB
  * the read throws "no such table" and this silently no-ops (schema-absence catch,
  * mirroring resolveRunFrozenSpec's isSchemaAbsenceError pattern).
  */
@@ -246,7 +246,7 @@ function resolveDecisionReviewItem(deps: ExperimentsDeps, experimentId: string):
       deps.resolveReviewItem(row.id);
     }
   } catch {
-    // experiment_comparisons absent (pre-048) — nothing to resolve yet.
+    // experiment_comparisons absent (pre-050) — nothing to resolve yet.
   }
 }
 

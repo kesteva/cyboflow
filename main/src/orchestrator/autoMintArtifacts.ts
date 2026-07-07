@@ -212,7 +212,7 @@ interface IdeaContentRow {
  * the step id is absent.
  */
 function resolveStep(db: DatabaseLike, runId: string, stepId: string): WorkflowStep | null {
-  // A/B testing (migration 046): resolve the run's FROZEN effective spec (its
+  // A/B testing (migration 048): resolve the run's FROZEN effective spec (its
   // variant graph, else the live spec) via resolveRunFrozenSpec instead of a live
   // JOIN read, so a variant run's steps resolve against ITS definition.
   const runRow = resolveRunFrozenSpec(db, runId);

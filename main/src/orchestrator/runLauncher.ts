@@ -159,7 +159,7 @@ export class RunLauncher {
      */
     private readonly sessionPermissionModeDeps?: SessionAgentPermissionModeDeps,
     /**
-     * Optional rotation resolver (A/B testing, migration 046). When injected,
+     * Optional rotation resolver (A/B testing, migration 048). When injected,
      * launch() resolves the variant for every launch (explicit pin or weighted
      * random over active variants) BEFORE createRun and threads the variant fields
      * into the createRun opts bag. When absent (legacy call sites / tests that
@@ -288,13 +288,13 @@ export class RunLauncher {
     // requestedModel there is no resolver ladder; the value is read at the trigger
     // (snapshotRunForEval). OPTIONAL — omitted for every legacy/one-click call site.
     requestedEvalEnabled?: boolean,
-    // A/B testing (migration 046). ONE trailing options object (resolves the
+    // A/B testing (migration 048). ONE trailing options object (resolves the
     // variant-pin + experiment-stamp surface without adding two positionals):
     //   - requestedVariantId — an EXPLICIT variant pin (UI selection / restart
     //     inherit / experiment arm). When omitted the VariantResolver applies
     //     weighted rotation over active variants (or resolves null → baseline).
     //   - experiment — slice B stamps the run's experiment_id + arm so the arm's
-    //     entity writes are sandboxed. The 046 columns exist for this; slice B
+    //     entity writes are sandboxed. The 048 columns exist for this; slice B
     //     supplies the values, and createRun stamps them immutably now.
     launchOptions?: {
       requestedVariantId?: string;
@@ -395,7 +395,7 @@ export class RunLauncher {
     // omitted and createRun falls back to workflow.project_id. The `opts` object
     // is only passed when projectId is defined so the legacy fallback path stays
     // byte-identical for callers that never thread a project.
-    // A/B testing (migration 046): resolve the variant for this launch ONCE, here,
+    // A/B testing (migration 048): resolve the variant for this launch ONCE, here,
     // pre-createRun — so EVERY launch surface (picker, one-click, backlog, restart,
     // experiment arm) inherits rotation from a single place and createRun stays a
     // pure stamper. An explicit pin (requestedVariantId) loads regardless of status;
@@ -578,7 +578,7 @@ export class RunLauncher {
           runId,
           worktreePath,
           branchName,
-          // A/B testing (migration 046): surface the variant assignment immediately
+          // A/B testing (migration 048): surface the variant assignment immediately
           // so the UI can badge the run without an extra query. Omitted for a
           // baseline run.
           ...(rv !== null ? { variantLabel: rv.variantLabel } : {}),
@@ -805,7 +805,7 @@ export class RunLauncher {
   /**
    * Build the frozen step->agent map persisted in workflow_runs.steps_snapshot_json.
    *
-   * A/B testing (migration 046): resolves the run's FROZEN effective definition via
+   * A/B testing (migration 048): resolves the run's FROZEN effective definition via
    * resolveRunFrozenSpec — a VARIANT run's snapshot must describe ITS graph, not the
    * live workflow spec_json (the snapshot's consumers are load-bearing: runIsPlanGated
    * → pending/hidden + reveal + delete-gate, board current-agent display). Falls back

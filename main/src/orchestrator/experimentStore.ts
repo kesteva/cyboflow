@@ -1,6 +1,6 @@
 /**
  * experimentStore — the SINGLE write surface for the `experiments` table
- * (migration 047, slice B). Pure over {@link DatabaseLike} so the experiments
+ * (migration 049, slice B). Pure over {@link DatabaseLike} so the experiments
  * router + boot recovery can drive it without electron/better-sqlite3, and unit
  * tests exercise it against an in-memory DB.
  *
@@ -221,7 +221,7 @@ export async function recoverExperiments(
       .prepare("SELECT * FROM experiments WHERE status IN ('running','grading')")
       .all() as ExperimentRow[];
   } catch {
-    // Pre-047 DB (no experiments table) — nothing to recover.
+    // Pre-049 DB (no experiments table) — nothing to recover.
     return;
   }
   for (const exp of rows) {

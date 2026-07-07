@@ -76,7 +76,7 @@ export interface ActiveRunRow extends WorkflowRunListRow {
   /** Human-readable workflow name (e.g. "planner"), resolved from workflow_id. */
   workflowName: string;
   /**
-   * Side-by-side experiment id (migration 047) — soft link to experiments.id.
+   * Side-by-side experiment id (migration 049) — soft link to experiments.id.
    * OPTIONAL, additive widening (mirrors `variant_label?` above): `runs.list`'s
    * SQL projection (listRunsHandler) does not select this column yet, so it is
    * `undefined` until that lands — RunCenterPane's experiment chip degrades

@@ -1233,7 +1233,7 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * No DB write, no emit — this is a pure read of the run's workflow row.
    */
   private buildStepReportingAppendForRun(runId: string): string {
-    // A/B testing (migration 046): resolve the run's FROZEN effective spec (its
+    // A/B testing (migration 048): resolve the run's FROZEN effective spec (its
     // variant graph, else the live spec) via resolveRunFrozenSpec instead of a live
     // JOIN read, so an interactive variant run reports against ITS definition.
     let row: { workflowName: string; specJson: string | null } | null;

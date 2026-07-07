@@ -1,19 +1,19 @@
--- Migration 047: workflow A/B testing (slice B) — side-by-side experiments
+-- Migration 049: workflow A/B testing (slice B) — side-by-side experiments
 -- umbrella + entity-sandbox / attribution columns + run merge-sha close-out.
 --
 -- PRAGMA foreign_keys is OFF during migration (database.ts), so all cross-table
 -- links below are SOFT (no FK clauses); ALTER ADD COLUMN is idempotent via the
 -- filename-keyed ledger. Runs inside runFileBasedMigrations' transaction wrapper.
 --
--- Migration ownership (cross-slice contract): 046 owns the workflow_variants
+-- Migration ownership (cross-slice contract): 048 owns the workflow_variants
 -- table + the four workflow_runs stamp columns (experiment_id / experiment_arm /
--- variant_id / variant_label); 047 (this file) owns the experiments table, the
+-- variant_id / variant_label); 049 (this file) owns the experiments table, the
 -- ideas/epics/tasks sandbox+attribution columns, and workflow_runs.merge_sha;
--- 048 (slice C) owns experiment_comparisons.
+-- 050 (slice C) owns experiment_comparisons.
 --
 -- ⚠️ MIGRATION-NUMBER COLLISION: sibling branches have previously claimed 043/044.
 -- The ledger is filename-keyed; whichever lands second must renumber. The
--- integrator MUST verify no other 047_*.sql exists at merge time.
+-- integrator MUST verify no other 049_*.sql exists at merge time.
 
 CREATE TABLE IF NOT EXISTS experiments (
   id                    TEXT PRIMARY KEY,                 -- 'exp_' + hex
@@ -61,8 +61,8 @@ ALTER TABLE epics ADD COLUMN caused_by_run_id TEXT;
 ALTER TABLE tasks ADD COLUMN caused_by_run_id TEXT;
 
 -- The merge commit SHA where this run's code landed, stamped at merge close-out.
--- (046 owns experiment_id/experiment_arm/variant_id/variant_label on
---  workflow_runs; 047 owns ONLY this close-out column.)
+-- (048 owns experiment_id/experiment_arm/variant_id/variant_label on
+--  workflow_runs; 049 owns ONLY this close-out column.)
 ALTER TABLE workflow_runs ADD COLUMN merge_sha TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_ideas_experiment ON ideas(experiment_id);

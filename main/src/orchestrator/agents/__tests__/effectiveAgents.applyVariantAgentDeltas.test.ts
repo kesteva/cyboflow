@@ -1,5 +1,5 @@
 /**
- * Unit tests for applyVariantAgentDeltas (A/B testing, migration 046).
+ * Unit tests for applyVariantAgentDeltas (A/B testing, migration 048).
  *
  * A prompt-only delta over an unoverridden builtin drops rawContent + flips source
  * to builtin-override; a model delta narrows via isAgentModelAlias (a bad alias

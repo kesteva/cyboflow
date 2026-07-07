@@ -1,6 +1,6 @@
 /**
  * VariantManagerSection — the "Variants" management panel for a workflow
- * (migration 046 / workflow A/B testing), rendered inside
+ * (migration 048 / workflow A/B testing), rendered inside
  * {@link WorkflowEditorModal} (edit mode only — a variant always snapshots an
  * EXISTING workflow row, so there is nothing to manage in create mode).
  *

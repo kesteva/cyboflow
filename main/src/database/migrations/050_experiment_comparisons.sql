@@ -1,4 +1,4 @@
--- Migration 048: workflow A/B testing — pairwise experiment comparison (slice C).
+-- Migration 050: workflow A/B testing — pairwise experiment comparison (slice C).
 -- One pairwise-verdict row per side-by-side experiment (v1: exactly 2 arms => 1
 -- comparison). The row is SELF-CONTAINED: both arms' frozen diffs + seed context
 -- live on it so the pairwise judge survives worktree teardown and does not depend
@@ -6,12 +6,12 @@
 -- mirrors run_evals.diff_text's "freeze the diff at trigger" rationale.
 --
 -- run_id_a = the run tagged experiment_arm='A'; run_id_b = the run tagged 'B'
--- (arm identity comes from mig 046's workflow_runs.experiment_arm, NOT from
+-- (arm identity comes from mig 048's workflow_runs.experiment_arm, NOT from
 -- lexicographic ordering). Dedup + crash-safety via INSERT OR IGNORE on
 -- UNIQUE(experiment_id). All FKs ON DELETE CASCADE (run/experiment deletion drops
 -- the comparison; retention caveat documented in the plan Risks).
 --
--- This migration does NOT touch workflow_runs (mig 046 owns experiment_id/
+-- This migration does NOT touch workflow_runs (mig 048 owns experiment_id/
 -- experiment_arm/variant_id/variant_label). Runs inside runFileBasedMigrations'
 -- transaction wrapper (no explicit BEGIN/COMMIT). PRAGMA foreign_keys is OFF
 -- during migration (database.ts), so the FKs below are recorded, not enforced now.
@@ -23,7 +23,7 @@
 --
 -- ⚠️ MIGRATION-NUMBER COLLISION: numbers 043/044/045 were previously claimed by
 -- sibling branches. The ledger is filename-keyed; whichever lands second must
--- renumber. The integrator MUST verify no other 048_*.sql exists at merge time.
+-- renumber. The integrator MUST verify no other 050_*.sql exists at merge time.
 
 CREATE TABLE IF NOT EXISTS experiment_comparisons (
   id                      TEXT PRIMARY KEY,

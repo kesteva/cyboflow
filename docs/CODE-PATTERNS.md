@@ -244,7 +244,7 @@ better-sqlite3 throws or returns wrong rows silently. Hand-rolled type guards ar
 ### Per-run workflow definitions resolve the FROZEN spec (never live `workflows.spec_json`)
 
 A run stamps `spec_hash` at `createRun` from its EFFECTIVE spec — the variant's frozen
-`spec_json` for a variant run (migration 046), else the live workflow spec — and
+`spec_json` for a variant run (migration 048), else the live workflow spec — and
 `recordRevision`s it in the same transaction, so `(workflow_id, spec_hash)` always resolves
 to the exact spec the run executes. **Any code that resolves a workflow definition FOR A
 RUN must call `resolveRunFrozenSpec(db, runId)`** (`main/src/orchestrator/runFrozenSpec.ts`;

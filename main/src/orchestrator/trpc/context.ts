@@ -75,7 +75,7 @@ export interface WorkflowRegistryLike {
    * ('reserved'), or a flow with run history ('run history').
    */
   deleteWorkflow(workflowId: string): void;
-  // --- Workflow variants (A/B testing, migration 046) ---
+  // --- Workflow variants (A/B testing, migration 048) ---
   /** List a workflow's variants (newest-first). */
   listVariants(workflowId: string): WorkflowVariantRow[];
   /**

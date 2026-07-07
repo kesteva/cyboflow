@@ -1,6 +1,6 @@
 /**
  * VariantEditorModal — edits ONE workflow variant's frozen spec + per-agent
- * deltas + model/execution-model defaults (migration 046).
+ * deltas + model/execution-model defaults (migration 048).
  *
  * Deliberately pragmatic (per the architect ruling: "do not over-build"): it
  * reuses the SAME graph-editing plumbing as {@link WorkflowEditorModal}

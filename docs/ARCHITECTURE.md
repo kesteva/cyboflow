@@ -630,9 +630,9 @@ means "task complete + committed in the session worktree"; the session Merge clo
 integrated lanes' tasks to Done and marks the batch terminal. See
 `docs/parallel-sprint-design.md` for the full architecture.
 
-#### Workflow A/B testing — variants, experiments, pairwise grading (migrations 046–048)
+#### Workflow A/B testing — variants, experiments, pairwise grading (migrations 048–050)
 
-**Variants (046).** A `workflow_variants` row is a named, frozen snapshot of a workflow's
+**Variants (048).** A `workflow_variants` row is a named, frozen snapshot of a workflow's
 resolved definition (`spec_json`) plus per-variant config (agent prompt/model deltas in
 `agent_overrides_json`, optional `model` / `execution_model` defaults, rotation `weight`).
 Status is `draft` (default — pinnable, experiment-usable, never auto-rotated) | `active`
@@ -647,7 +647,7 @@ workflow definition resolves the frozen spec via **`resolveRunFrozenSpec`**
 fallback); reading live `workflows.spec_json` per-run is a bug class (it also used to let a
 mid-run edit change a running definition).
 
-**Experiments (047).** A side-by-side A/B test is an `experiments` row owning ONE
+**Experiments (049).** A side-by-side A/B test is an `experiments` row owning ONE
 pre-resolved `base_sha` and two arm sessions whose worktrees are pinned to that exact
 committish, two arm runs (launched via `experiments.startSideBySide`), and — when
 idea-seeded — one hidden per-arm CLONE of the seed idea. Arm entity writes are
@@ -662,7 +662,7 @@ head-to-head via `rerun_of_experiment_id`, `switchToRotation` activates both var
 `workflow_runs.merge_sha` is stamped at merge close-out and `ideas/epics/tasks.caused_by_run_id`
 is the manual post-merge-bug attribution link.
 
-**Pairwise grading (048).** `experiment_comparisons` (UNIQUE per experiment) is a
+**Pairwise grading (050).** `experiment_comparisons` (UNIQUE per experiment) is a
 self-contained verdict row: both arms' diffs are FROZEN onto it at capture (worktree-
 independent), K=3 position-randomized judge samples aggregate to a `preference A|B|tie`, and
 completion mints a blocking `kind='decision'` review item (gate `experiment-comparison`)
@@ -692,8 +692,8 @@ satellites), `015_entity_model_rebuild.sql` (the 3-table entity model + `entity_
 `042_collapse_board.sql` (narrows the board to the 4 kept stages + adds the off-board
 `ideas.decomposed_at` / `epics`+`tasks.approved_at` / `workflow_runs.plan_approved_at` stamps
 via a relocate-then-delete that respects the `ON DELETE RESTRICT` stage FK, mirroring 024),
-`043`–`045`, and the A/B-testing trio `046_workflow_variants.sql` /
-`047_experiments.sql` / `048_experiment_comparisons.sql` (see the section above). 015
+`043`–`045`, and the A/B-testing trio `048_workflow_variants.sql` /
+`049_experiments.sql` / `050_experiment_comparisons.sql` (see the section above). 015
 and 016 are forward-only with no backfill (no prod data existed); the destructive DROP+recreate
 in 015 is intentional and safe.
 

@@ -199,7 +199,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
   // Fail-soft: a stamping failure is logged and never propagates — the merge has
   // already succeeded and its response must not depend on this bookkeeping.
   const stampMergedOutcomeForSession = async (sessionId: string, projectPath?: string) => {
-    // A/B post-merge attribution (migration 047): after a successful merge the
+    // A/B post-merge attribution (migration 049): after a successful merge the
     // project root is checked out on the just-updated main branch, so its HEAD is
     // the merge commit this session's code landed on. Compute it and stamp it onto
     // workflow_runs.merge_sha. Fail-soft: a SHA read failure leaves merge_sha NULL

@@ -260,7 +260,7 @@ export default function SessionStartWizard(): React.JSX.Element {
   // Default 'inherit' keeps launches byte-identical.
   const [worktreeModeOverride, setWorktreeModeOverride] = useState<'inherit' | QuickSessionWorktreeMode>('inherit');
   // Advanced (Configure ③, WORKFLOW only): per-run A/B variant choice (migration
-  // 046, VariantSelector). Defaults to 'rotation' — a no-op selection
+  // 048, VariantSelector). Defaults to 'rotation' — a no-op selection
   // (variantSelectionToStartInput sends neither `variantId` nor `baseline`) so a
   // workflow with zero/ineligible variants launches exactly as before.
   // VariantSelector re-seeds this to the architect default once its list
@@ -936,7 +936,7 @@ export default function SessionStartWizard(): React.JSX.Element {
               />
             )}
 
-            {/* Per-run A/B variant selector (migration 046), WORKFLOW only — hidden
+            {/* Per-run A/B variant selector (migration 048), WORKFLOW only — hidden
                 entirely for a workflow with zero variants. Threaded into
                 runs.start as variantId / baseline (never both); rotation sends
                 neither field. */}

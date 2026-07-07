@@ -655,7 +655,7 @@ export class RunExecutor {
       );
     }
 
-    // A/B testing (migration 046): the run walks its FROZEN effective spec, not
+    // A/B testing (migration 048): the run walks its FROZEN effective spec, not
     // the live workflow spec_json. For a variant run this is the variant's graph;
     // for a baseline run it is byte-identical to the live spec. resolveRunFrozenSpec
     // falls back to the live spec when no revision resolves, so this is safe even

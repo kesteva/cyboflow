@@ -1,5 +1,5 @@
 /**
- * VariantSelector — per-launch workflow A/B variant choice (migration 046),
+ * VariantSelector — per-launch workflow A/B variant choice (migration 048),
  * following the {@link ModelSelector} / {@link SubstrateSelector} template:
  * controlled (value/onChange), fed by `trpc.cyboflow.variants.list` via
  * {@link useWorkflowVariants}.

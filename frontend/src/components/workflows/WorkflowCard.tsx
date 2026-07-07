@@ -37,7 +37,7 @@ export interface WorkflowCardProps {
   /** Duplicate this workflow into a new editable draft. Wired in P4. */
   onDuplicate?: (entry: WorkflowGalleryEntry) => void;
   /**
-   * Open the A/B test launcher (side-by-side experiment, migration 046/047)
+   * Open the A/B test launcher (side-by-side experiment, migration 048/049)
    * for this workflow. Omitted only hides the button — every workflow can be
    * A/B tested once it has >=2 variants (the modal itself explains the
    * "need two variants" state, so the card offers the action unconditionally).

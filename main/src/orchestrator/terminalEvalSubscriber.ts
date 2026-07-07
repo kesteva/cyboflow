@@ -94,7 +94,7 @@ export function handleTerminalStatusEvent(
       .prepare('SELECT experiment_id AS e, variant_id AS v FROM workflow_runs WHERE id = ?')
       .get(event.runId) as TagRow | undefined;
   } catch (err) {
-    // Pre-046 DB (no tag columns) or a read fault — treat as untagged (no-op).
+    // Pre-048 DB (no tag columns) or a read fault — treat as untagged (no-op).
     deps.logger?.warn?.('[pairwise] terminal tag read failed (treated untagged)', {
       runId: event.runId,
       error: err instanceof Error ? err.message : String(err),

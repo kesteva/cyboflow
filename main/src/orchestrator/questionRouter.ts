@@ -734,12 +734,12 @@ export class QuestionRouter extends EventEmitter {
    * best-effort (a vanished row must not abort the remaining reveals).
    */
   private async revealRunDrafts(runId: string, projectId: number): Promise<void> {
-    // A/B REVEAL SUPPRESSION (migration 047): an experiment-arm run's drafts are
+    // A/B REVEAL SUPPRESSION (migration 049): an experiment-arm run's drafts are
     // sandboxed until the human decides the head-to-head — reveal happens
     // EXCLUSIVELY via experiments.decide (clearExperiment + approved). Answering an
     // arm's approve-plan gate (promoteTasksOnPlanApproval) or an arm completing
     // (promotePendingDraftsForRun) must NOT flip its entities visible mid-experiment.
-    // Guard the single reveal core so BOTH callers no-op. Fail-soft: a pre-046 DB
+    // Guard the single reveal core so BOTH callers no-op. Fail-soft: a pre-048 DB
     // (no experiment_id column) throws here and falls through to the normal reveal.
     try {
       const expRow = this.db
@@ -749,7 +749,7 @@ export class QuestionRouter extends EventEmitter {
         return;
       }
     } catch {
-      // pre-046 DB (no experiment_id column) — proceed with the normal reveal.
+      // pre-048 DB (no experiment_id column) — proceed with the normal reveal.
     }
 
     const now = new Date().toISOString();

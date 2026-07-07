@@ -1,5 +1,5 @@
 /**
- * Integration tests for the cyboflow.variants tRPC router (A/B testing, mig 046).
+ * Integration tests for the cyboflow.variants tRPC router (A/B testing, mig 048).
  *
  * create/list/update/setStatus/delete happy paths + CONFLICT on label collision +
  * CONFLICT on delete-with-run-history + BAD_REQUEST on unresolvable/foreign +

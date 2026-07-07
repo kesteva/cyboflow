@@ -537,7 +537,7 @@ describe('stampSessionRunsOutcome', () => {
     expect(readOutcome(db, 'run-other')).toBeNull();
   });
 
-  // A/B post-merge attribution (migration 047): the mergeSha param stamps
+  // A/B post-merge attribution (migration 049): the mergeSha param stamps
   // workflow_runs.merge_sha ONLY for a 'merged' outcome.
   it('stamps merge_sha on a merged outcome; leaves it NULL for dismissed', () => {
     const db = makeDb();

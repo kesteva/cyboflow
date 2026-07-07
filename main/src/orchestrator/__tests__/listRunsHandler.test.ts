@@ -189,7 +189,7 @@ describe('listRunsHandler substrate round-trip', () => {
 });
 
 // ---------------------------------------------------------------------------
-// (f) variant_label projection (migration 046 / A/B testing).
+// (f) variant_label projection (migration 048 / A/B testing).
 //
 // includeSubstrate folds in the four workflow_runs A/B tagging columns
 // (addVariantColumnsOnce in orchestratorTestDb.ts), so the same fixture flag

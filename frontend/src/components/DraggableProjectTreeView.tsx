@@ -1339,7 +1339,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                                         <span className="text-sm text-text-primary truncate" title={run.workflowName}>
                                           {run.workflowName}
                                         </span>
-                                        {/* A/B variant chip (migration 046) — denormalized
+                                        {/* A/B variant chip (migration 048) — denormalized
                                             workflow_runs.variant_label off the run row, no
                                             extra query. Absent for baseline runs. */}
                                         {run.variant_label && (
@@ -1411,7 +1411,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                               <span className="text-sm text-text-primary truncate" title={label}>
                                 {label}
                               </span>
-                              {/* A/B variant chip (migration 046) — see childRuns above. */}
+                              {/* A/B variant chip (migration 048) — see childRuns above. */}
                               {run.variant_label && (
                                 <span
                                   className="rounded-badge border border-border-primary bg-bg-secondary px-1 py-px text-[9px] font-medium text-text-tertiary truncate flex-shrink-0"

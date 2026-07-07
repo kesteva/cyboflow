@@ -1,6 +1,6 @@
 /**
  * Unit tests for WorkflowRegistry.createRun variant/experiment stamping
- * (A/B testing, migration 046).
+ * (A/B testing, migration 048).
  *
  * With variantSpecJson: spec_hash = computeSpecHash(variantSpec) AND a resolvable
  * workflow_revisions row is written (same tx); model ladder requestedModel >

@@ -1,4 +1,4 @@
--- Migration 046: workflow A/B testing — variant registry + run tagging.
+-- Migration 048: workflow A/B testing — variant registry + run tagging.
 -- Owns the workflow_variants table AND all four workflow_runs ALTERs (shared
 -- contract). Nullable columns, no CHECK (mirrors 037/044); ALTER ADD COLUMN is
 -- idempotent via the filename-keyed ledger. Runs inside runFileBasedMigrations'
@@ -13,7 +13,7 @@
 --
 -- ⚠️ MIGRATION-NUMBER COLLISION: sibling branches have previously claimed 043/044.
 -- The ledger is filename-keyed; whichever lands second must renumber. The
--- integrator MUST verify no other 046_*.sql exists at merge time.
+-- integrator MUST verify no other 048_*.sql exists at merge time.
 
 CREATE TABLE IF NOT EXISTS workflow_variants (
   id                   TEXT PRIMARY KEY,                 -- 'wfv_' + hex

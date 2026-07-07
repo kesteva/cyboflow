@@ -106,7 +106,7 @@ export function selectionForSentinel(sentinel: string): VariantSelection {
 
 /**
  * Map a {@link VariantSelection} to the fields `runs.start` expects (migration
- * 046 `variantId` + `baseline`). "Rotation" sends NEITHER field — the
+ * 048 `variantId` + `baseline`). "Rotation" sends NEITHER field — the
  * launcher's VariantResolver applies weighted rotation exactly as it does when
  * a workflow has no picker at all (byte-identical to omitting the picker).
  */

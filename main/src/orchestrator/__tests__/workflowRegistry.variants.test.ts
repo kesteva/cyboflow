@@ -1,5 +1,5 @@
 /**
- * Unit tests for WorkflowRegistry variant lifecycle (A/B testing, migration 046).
+ * Unit tests for WorkflowRegistry variant lifecycle (A/B testing, migration 048).
  *
  * createVariantFromCurrent snapshots the RESOLVED static def for a built-in with
  * spec_json='{}' (seeds status='draft'); label collision throws; updateVariant

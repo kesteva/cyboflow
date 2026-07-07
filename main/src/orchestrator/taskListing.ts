@@ -126,7 +126,7 @@ interface TaskDbRow {
   decomposed_at: string | null;
   /** EPIC/TASK approval stamp (042); projected as NULL on the ideas branch. */
   approved_at: string | null;
-  /** A/B experiment sandbox tag (047); non-null rows are hidden by default in selectProjectBacklog. */
+  /** A/B experiment sandbox tag (049); non-null rows are hidden by default in selectProjectBacklog. */
   experiment_id: string | null;
   version: number;
   created_at: string;
@@ -716,7 +716,7 @@ export function resolveBacklogRef(db: DatabaseLike, projectId: number, ref: stri
 export function selectProjectBacklog(
   db: DatabaseLike,
   projectId: number | null,
-  // A/B experiments (migration 047): by default the backlog EXCLUDES
+  // A/B experiments (migration 049): by default the backlog EXCLUDES
   // experiment-tagged rows (hidden sandbox drafts) server-side — closing the leak
   // paths the client board filter alone misses (TaskBatchPickerModal, IdeaPickerModal).
   // Slice C's compare view passes `includeExperimentTagged` to see an arm's outputs.
@@ -736,7 +736,7 @@ export function selectProjectBacklog(
   const allRows = (scoped ? stmt.all(projectId, projectId, projectId) : stmt.all()) as TaskDbRow[];
   // Drop experiment-tagged rows unless explicitly included. Filtered post-query
   // (vs a WHERE clause) so the same UNION serves both modes and stays fail-soft
-  // on any pre-047 row whose experiment_id reads back null.
+  // on any pre-049 row whose experiment_id reads back null.
   const includeTagged = opts?.includeExperimentTagged === true;
   const rows = includeTagged ? allRows : allRows.filter((r) => (r.experiment_id ?? null) === null);
 

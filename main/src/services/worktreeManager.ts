@@ -105,7 +105,7 @@ export class WorktreeManager {
     worktreePath: string,
     branchName: string,
     baseBranch?: string,
-    // A/B experiments (migration 047): pin the new worktree's branch to an EXACT
+    // A/B experiments (migration 049): pin the new worktree's branch to an EXACT
     // committish (a raw SHA), not a branch tip. When set, the `refs/heads/<base>`
     // guard is skipped (a SHA is not a branch) and `git worktree add -b` cuts the
     // branch at that commit — so "the base branch moved between the two arm

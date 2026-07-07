@@ -148,9 +148,9 @@ export interface BacklogTaskItem {
    */
   approved_at: string | null;
   /**
-   * Side-by-side experiment tag (migration 047): the experiment whose sandbox this
+   * Side-by-side experiment tag (migration 049): the experiment whose sandbox this
    * entity belongs to, or null for a normal board entity. Read back as null on any
-   * pre-047 DB. OPTIONAL for cross-process shape parity (mirrors `blockedBy?` /
+   * pre-049 DB. OPTIONAL for cross-process shape parity (mirrors `blockedBy?` /
    * `relatedTo?`) so a partial emit compiles — but the MAIN read/emit constructors
    * (selectProjectBacklog's projectTaskItem + TaskChangeRouter.buildBacklogTaskItem)
    * ALWAYS populate it, and the server excludes tagged rows from the board by

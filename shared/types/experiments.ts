@@ -15,7 +15,7 @@ import type { WorkflowRunStatus } from './cyboflow';
 import type { RunUsageRollup, RunEval, QualityFinding } from './insights';
 
 /**
- * Lifecycle status of a workflow variant (migration 046).
+ * Lifecycle status of a workflow variant (migration 048).
  *
  * - `draft`   — the default at creation. Defined, pinnable (restart / experiment
  *               arms load it explicitly), usable in a side-by-side experiment,
@@ -36,7 +36,7 @@ export const WORKFLOW_VARIANT_STATUSES: readonly WorkflowVariantStatus[] = [
   'retired',
 ] as const;
 
-/** Which arm of a side-by-side experiment a run belongs to (migration 046 column). */
+/** Which arm of a side-by-side experiment a run belongs to (migration 048 column). */
 export type ExperimentArm = 'A' | 'B';
 
 /**
@@ -52,7 +52,7 @@ export interface WorkflowVariantAgentDelta {
 /** Map of `agentKey -> delta`, stored JSON-encoded in workflow_variants.agent_overrides_json. */
 export type WorkflowVariantAgentOverrides = Record<string, WorkflowVariantAgentDelta>;
 
-/** `workflow_variants` DB row (migration 046). */
+/** `workflow_variants` DB row (migration 048). */
 export interface WorkflowVariantRow {
   id: string;
   workflow_id: string;
@@ -105,7 +105,7 @@ const _settledStatusesAreValid: readonly _SettledStatuses[] = [
 void _settledStatusesAreValid;
 
 // ===========================================================================
-// Slice B — side-by-side experiments (migration 047)
+// Slice B — side-by-side experiments (migration 049)
 //
 // Appended below slice A's variant types; the ExperimentArm definition above is
 // shared (one definition, cross-slice contract). Slice C appends comparison /
@@ -116,7 +116,7 @@ void _settledStatusesAreValid;
 export type ExperimentKind = 'side_by_side';
 
 /**
- * Lifecycle of a side-by-side experiment (migration 047, `experiments.status`).
+ * Lifecycle of a side-by-side experiment (migration 049, `experiments.status`).
  *
  * - `running`   — one or both arms still executing.
  * - `grading`   — both arms settled (isExperimentArmSettled); awaiting the human
@@ -140,7 +140,7 @@ export function isExperimentSettled(status: string): boolean {
   return status === 'decided' || status === 'abandoned';
 }
 
-/** `experiments` DB row (migration 047). */
+/** `experiments` DB row (migration 049). */
 export interface ExperimentRow {
   id: string;
   project_id: number;
@@ -184,7 +184,7 @@ export interface DecideResult {
 
 // ===========================================================================
 // Slice C — pairwise grading + per-variant stats + comparison payloads
-// (migration 048, experiment_comparisons). Appended below slices A/B without
+// (migration 050, experiment_comparisons). Appended below slices A/B without
 // touching their exports.
 // ===========================================================================
 
@@ -223,7 +223,7 @@ export interface PairwiseVerdict {
   perSample: PairwiseSample[];
 }
 
-/** `experiment_comparisons` DB row (migration 048). */
+/** `experiment_comparisons` DB row (migration 050). */
 export interface ExperimentComparisonRow {
   id: string;
   experiment_id: string;

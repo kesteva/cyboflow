@@ -1,5 +1,5 @@
 /**
- * WorktreeManager.createWorktree — exact-committish (SHA) pinning (migration 047,
+ * WorktreeManager.createWorktree — exact-committish (SHA) pinning (migration 049,
  * A/B experiments). Both arm worktrees pin the SAME pre-resolved base SHA so the
  * base-branch-moved race is impossible; a branch-name collision hard-errors so the
  * pin can never be silently bypassed by the branch-exists attach path.

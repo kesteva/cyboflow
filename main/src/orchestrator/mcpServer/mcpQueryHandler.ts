@@ -656,7 +656,7 @@ export class McpQueryHandler {
       return;
     }
 
-    // A/B testing (migration 046): resolve the run's FROZEN effective spec (its
+    // A/B testing (migration 048): resolve the run's FROZEN effective spec (its
     // variant graph, else the live spec) via resolveRunFrozenSpec (already keyed by
     // runId) instead of a live JOIN read.
     const row = resolveRunFrozenSpec(this.db, msg.runId);

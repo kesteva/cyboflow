@@ -1,5 +1,5 @@
 /**
- * Unit tests for resolveRunFrozenSpec (A/B testing, migration 046).
+ * Unit tests for resolveRunFrozenSpec (A/B testing, migration 048).
  *
  * revision present → returns the revision text; revision absent → falls back to
  * the live workflows.spec_json; missing run → null; schema-level absence

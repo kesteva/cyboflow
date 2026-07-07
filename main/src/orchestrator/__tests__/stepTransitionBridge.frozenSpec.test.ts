@@ -1,5 +1,5 @@
 /**
- * Reader-migration test (A/B testing, migration 046): buildStepTransitionEvent
+ * Reader-migration test (A/B testing, migration 048): buildStepTransitionEvent
  * resolves a variant run's steps from its FROZEN revision, not the live
  * workflows.spec_json.
  *

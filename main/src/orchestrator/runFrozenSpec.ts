@@ -22,7 +22,7 @@ import type { DatabaseLike } from './types';
 /**
  * True only for SQLite "schema absence" errors — a missing table or column. These
  * are the ONLY expected failures of the reads below (a DB predating migration
- * 026/046 lacks the `spec_hash` column / `workflow_revisions` table; a minimal test
+ * 026/048 lacks the `spec_hash` column / `workflow_revisions` table; a minimal test
  * DB may lack `workflows`/`workflow_runs` entirely) and are the documented
  * degrade-to-fallback path. Any OTHER error (lock/I-O/corruption) means the DB is
  * genuinely broken — the caller must see it, not a misleading run-not-found / live-
@@ -47,7 +47,7 @@ export function resolveRunFrozenSpec(
   runId: string,
 ): { workflowName: string; specJson: string | null } | null {
   // Base read uses ONLY always-present columns (name + live spec_json), so this
-  // resolves even on a DB predating migration 026/046 (spec_hash / revisions). A
+  // resolves even on a DB predating migration 026/048 (spec_hash / revisions). A
   // schema-ABSENCE failure (e.g. a minimal test DB with no `workflows` table) returns
   // null → the caller falls back to its own live workflow row / skips. Any OTHER
   // error (transient lock / I-O / corruption) is rethrown rather than masked as a

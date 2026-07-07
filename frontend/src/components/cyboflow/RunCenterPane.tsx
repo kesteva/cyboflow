@@ -203,7 +203,7 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
             onTabClose={(id) => closeTab(sessionKey, id)}
           />
         </div>
-        {/* A/B variant pill (migration 046) — reads the denormalized
+        {/* A/B variant pill (migration 048) — reads the denormalized
             workflow_runs.variant_label off the active run row, so no extra query
             is needed. Absent for baseline (non-variant) runs. */}
         {activeRun?.variant_label && (
@@ -229,7 +229,7 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
             Variant: {activeRun.variant_label}
           </div>
         )}
-        {/* A/B side-by-side experiment chip (migration 047, slice B thin launch
+        {/* A/B side-by-side experiment chip (migration 049, slice B thin launch
             UI) — reads the denormalized workflow_runs.experiment_id/experiment_arm
             off the active run row. Absent for a non-experiment run. Deliberately
             minimal (label + arm only); the full banner + gated "View comparison"

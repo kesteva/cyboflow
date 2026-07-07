@@ -84,7 +84,7 @@ interface RunRow {
   model: string | null;
   /** Per-run eval override (migration 044): 0 = off, 1 = on, NULL = inherit global. */
   eval_enabled: number | null;
-  /** A/B testing tags (migration 046) — set => this run is variant/experiment-tagged. */
+  /** A/B testing tags (migration 048) — set => this run is variant/experiment-tagged. */
   experiment_id: string | null;
   variant_id: string | null;
   workflow_id: string;
@@ -154,8 +154,8 @@ export async function snapshotRunForEval(
 
   // Opt-in gate (A/B testing slice C widening): a built-in flow (name, not step id)
   // OR a variant/experiment-tagged run. Quick sessions and untagged custom flows
-  // fall out here. The tag columns land in migration 046 — the row read above is
-  // fail-soft (the surrounding caller swallows any throw), and on a pre-046 DB the
+  // fall out here. The tag columns land in migration 048 — the row read above is
+  // fail-soft (the surrounding caller swallows any throw), and on a pre-048 DB the
   // SELECT simply omits them (undefined → treated as null → not tagged).
   const tagged = run.experiment_id !== null || run.variant_id !== null;
   if (!isCyboflowWorkflowName(run.workflowName) && !tagged) {

@@ -1,5 +1,5 @@
 /**
- * TaskChangeRouter — A/B experiment sandbox (migration 047).
+ * TaskChangeRouter — A/B experiment sandbox (migration 049).
  *
  * Covers: create-tag + pending landing, the BIDIRECTIONAL update guard, the
  * orchestrator-only clearExperiment reveal, the causedByRunId attribution scalar,
@@ -35,7 +35,7 @@ function buildDb(): Database.Database {
   db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
   db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
-  // migration 046 (experiment_id on runs) + 047 (sandbox tag + attribution).
+  // migration 048 (experiment_id on runs) + 049 (sandbox tag + attribution).
   db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT;');
   for (const t of ['ideas', 'epics', 'tasks']) {
     db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
@@ -59,7 +59,7 @@ function expField(db: Database.Database, table: string, id: string, col: string)
   return (db.prepare(`SELECT ${col} AS v FROM ${table} WHERE id = ?`).get(id) as { v: unknown }).v;
 }
 
-describe('TaskChangeRouter — experiment sandbox (migration 047)', () => {
+describe('TaskChangeRouter — experiment sandbox (migration 049)', () => {
   afterEach(() => {
     TaskChangeRouter._resetForTesting();
     ReviewItemRouter._resetForTesting();

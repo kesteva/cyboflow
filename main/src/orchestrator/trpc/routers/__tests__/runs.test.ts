@@ -656,7 +656,7 @@ describe('cyboflow.runs.start', () => {
   });
 
   // -------------------------------------------------------------------------
-  // (a8) A/B testing (migration 046): variantId supplied → forwarded as the
+  // (a8) A/B testing (migration 048): variantId supplied → forwarded as the
   // trailing (15th) launchOptions object as an EXPLICIT variant pin.
   // -------------------------------------------------------------------------
   it('(a8) variantId supplied → forwards { requestedVariantId } as the trailing launchOptions', async () => {
@@ -2606,7 +2606,7 @@ describe('cyboflow.runs.getPhaseState — spec_json resolution', () => {
     expect(result.definition.id).toBe('sprint');
   });
 
-  // A/B testing (migration 046): a variant / mid-run-edited run must render its
+  // A/B testing (migration 048): a variant / mid-run-edited run must render its
   // FROZEN graph (resolveRunFrozenSpec by (workflow_id, spec_hash)), NOT the live
   // workflows.spec_json. Seeds a run whose spec_hash points at a frozen revision
   // that DIFFERS from the live workflow spec, and asserts the frozen graph wins.

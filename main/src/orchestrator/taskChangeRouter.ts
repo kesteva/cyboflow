@@ -122,7 +122,7 @@ export type TaskChangeErrorCode =
   | 'concurrency'
   | 'invalid_dependency'
   | 'dependency_cycle'
-  // A/B experiments (migration 047): a write crossed an experiment sandbox
+  // A/B experiments (migration 049): a write crossed an experiment sandbox
   // boundary — an experiment-tagged run tried to mutate an entity outside its
   // experiment, OR an untagged actor (user / other run) tried to mutate a
   // hidden experiment-tagged entity. Surfaced to the agent as a tool-error so
@@ -219,7 +219,7 @@ export interface TaskChange {
   expectedVersion?: number;
   /** The run that triggered this change, recorded on the entity_events row. */
   runId?: string;
-  // ----- A/B experiment sandbox (migration 047) -----
+  // ----- A/B experiment sandbox (migration 049) -----
   /**
    * CREATE path: stamp `experiment_id` on the new entity, sandboxing it (hidden
    * from the board + sandbox-scoped for updates). Supplied EXPLICITLY for the
@@ -237,7 +237,7 @@ export interface TaskChange {
   clearExperiment?: boolean;
   /**
    * UPDATE path: link this entity to the run that INTRODUCED it (post-merge bug
-   * attribution, migration 047). A normal nullable scalar — human-settable (a user
+   * attribution, migration 049). A normal nullable scalar — human-settable (a user
    * declares "this bug was introduced by run X"), mints an entity_event + broadcast.
    * NOT orchestrator-restricted.
    */
@@ -308,9 +308,9 @@ interface EntityDbRow {
   approved_at: string | null;
   /** JSON IdeaAttachment[] (ideas-only, migration 028); NULL on epics/tasks + when unset. */
   attachments: string | null;
-  /** A/B experiment sandbox tag (migration 047); NULL on a normal board entity + pre-047 DBs. */
+  /** A/B experiment sandbox tag (migration 049); NULL on a normal board entity + pre-049 DBs. */
   experiment_id: string | null;
-  /** Post-merge bug attribution (migration 047); the run that introduced this entity, else NULL. */
+  /** Post-merge bug attribution (migration 049); the run that introduced this entity, else NULL. */
   caused_by_run_id: string | null;
   version: number;
   created_at: string;
@@ -743,7 +743,7 @@ export class TaskChangeRouter {
   }
 
   /**
-   * A/B DISCARD SWEEP (migration 047) — hard-delete a losing/abandoned experiment
+   * A/B DISCARD SWEEP (migration 049) — hard-delete a losing/abandoned experiment
    * arm's entities. A generalization of {@link deleteRunCreatedEntities} with the
    * plan-gating triple-gate replaced by an EXPERIMENT gate: a target is swept iff
    * its `experiment_id === experimentId` (belt-and-braces per entity), reusing the
@@ -764,7 +764,7 @@ export class TaskChangeRouter {
     const { experimentId, runId, seedCloneId } = opts;
 
     // A target is swept iff its experiment_id matches. Fail-soft: a vanished row
-    // or a pre-047 DB (no experiment_id column) spares it (never a wrong delete).
+    // or a pre-049 DB (no experiment_id column) spares it (never a wrong delete).
     const matchesExperiment = (table: 'ideas' | 'epics' | 'tasks', id: string): boolean => {
       try {
         const r = this.db
@@ -773,7 +773,7 @@ export class TaskChangeRouter {
         if (!r) return false; // already gone
         return r.eid === experimentId;
       } catch {
-        return false; // pre-047 schema (no experiment_id) — spare it
+        return false; // pre-049 schema (no experiment_id) — spare it
       }
     };
 
@@ -945,7 +945,7 @@ export class TaskChangeRouter {
       const attachments =
         attachmentsArr && attachmentsArr.length > 0 ? JSON.stringify(attachmentsArr) : null;
 
-      // A/B SANDBOX (migration 047): the experiment this entity belongs to — the
+      // A/B SANDBOX (migration 049): the experiment this entity belongs to — the
       // EXPLICIT change.experimentId (orchestrator-created seed clones, no runId)
       // OR the creating run's own experiment_id (run-created drafts). A non-null
       // value hides the entity from the board + sandbox-scopes its future updates.
@@ -1022,7 +1022,7 @@ export class TaskChangeRouter {
       approvedAt: string | null;
       parentEpicId: string | null;
       originatingIdeaId: string | null;
-      /** A/B experiment sandbox tag (migration 047); null = normal board entity. */
+      /** A/B experiment sandbox tag (migration 049); null = normal board entity. */
       experimentId: string | null;
       now: string;
     },
@@ -1045,8 +1045,8 @@ export class TaskChangeRouter {
       cols.push('approved_at');
       vals.push(v.approvedAt);
     }
-    // A/B experiment sandbox tag (migration 047). Gated on the column existing so
-    // pre-047 / partial-migration test DBs keep inserting; only stamps a non-null
+    // A/B experiment sandbox tag (migration 049). Gated on the column existing so
+    // pre-049 / partial-migration test DBs keep inserting; only stamps a non-null
     // value on an experiment-created entity (every other create passes null).
     if (this.columnExists(desc.table, 'experiment_id')) {
       cols.push('experiment_id');
@@ -1100,7 +1100,7 @@ export class TaskChangeRouter {
    * Only consulted for epics/tasks (desc.hasApproval); ideas never call this.
    */
   /**
-   * A/B SANDBOX (migration 047): resolve the experiment_id a CREATED entity
+   * A/B SANDBOX (migration 049): resolve the experiment_id a CREATED entity
    * belongs to. Precedence: an EXPLICIT `change.experimentId` (the orchestrator
    * stamps it on the per-arm seed clones, which have no runId) wins; otherwise the
    * creating run's OWN experiment_id (so every entity a tagged run mints inherits
@@ -1115,8 +1115,8 @@ export class TaskChangeRouter {
   }
 
   /**
-   * The experiment_id stamped on a run (migration 046), or null. Fail-soft: no
-   * runId, a vanished run, or a pre-046 DB (no experiment_id column) all yield
+   * The experiment_id stamped on a run (migration 048), or null. Fail-soft: no
+   * runId, a vanished run, or a pre-048 DB (no experiment_id column) all yield
    * null. Used by both the create-tag derivation and the update sandbox guard.
    */
   private runExperimentIdFor(runId?: string): string | null {
@@ -1129,13 +1129,13 @@ export class TaskChangeRouter {
         ? run.experimentId
         : null;
     } catch {
-      return null; // pre-046 DB (no experiment_id column) -> untagged
+      return null; // pre-048 DB (no experiment_id column) -> untagged
     }
   }
 
   /**
-   * The experiment_id tag on a TASK row (migration 047), or null. Fail-soft: a
-   * vanished task or a pre-047 DB (no experiment_id column) yields null. Used by
+   * The experiment_id tag on a TASK row (migration 049), or null. Fail-soft: a
+   * vanished task or a pre-049 DB (no experiment_id column) yields null. Used by
    * the add-dependency sandbox guard, which cannot read `current.experiment_id`
    * (runAddDependency has no located-entity row like runUpdate does).
    */
@@ -1148,7 +1148,7 @@ export class TaskChangeRouter {
         ? row.experimentId
         : null;
     } catch {
-      return null; // pre-047 DB (no experiment_id column) -> untagged
+      return null; // pre-049 DB (no experiment_id column) -> untagged
     }
   }
 
@@ -1267,7 +1267,7 @@ export class TaskChangeRouter {
         );
       }
 
-      // A/B SANDBOX GUARD (migration 047) — BIDIRECTIONAL, before every per-kind
+      // A/B SANDBOX GUARD (migration 049) — BIDIRECTIONAL, before every per-kind
       // branch so ALL update kinds (fields/stage/archive/reparent/originatingIdea)
       // are denied uniformly. The orchestrator is EXEMPT — only its promote/fold/
       // sweep/reveal (clearExperiment) paths legitimately cross the boundary.
@@ -1363,7 +1363,7 @@ export class TaskChangeRouter {
         }
       }
 
-      // ----- clearExperiment toggle (A/B reveal, migration 047) -----
+      // ----- clearExperiment toggle (A/B reveal, migration 049) -----
       // ORCHESTRATOR-ONLY: experiments.decide clears the winner's sandbox tag,
       // revealing it out of the experiment. Minting it through the chokepoint (vs a
       // raw UPDATE) gives the entity_event + version bump + broadcast a mounted
@@ -1379,9 +1379,9 @@ export class TaskChangeRouter {
         }
       }
 
-      // ----- causedByRunId scalar (post-merge bug attribution, migration 047) -----
+      // ----- causedByRunId scalar (post-merge bug attribution, migration 049) -----
       // A normal nullable scalar — human-settable ("this bug was introduced by run
-      // X"). NOT orchestrator-restricted. Guarded on the column existing (pre-047).
+      // X"). NOT orchestrator-restricted. Guarded on the column existing (pre-049).
       if (change.causedByRunId !== undefined && this.columnExists(desc.table, 'caused_by_run_id')) {
         const next = change.causedByRunId ?? null;
         if (next !== (current.caused_by_run_id ?? null)) {
@@ -1775,7 +1775,7 @@ export class TaskChangeRouter {
         throw new TaskChangeError('invalid_dependency', 'a task cannot depend on itself');
       }
 
-      // A/B SANDBOX GUARD (migration 047) — BIDIRECTIONAL, mirroring runUpdate.
+      // A/B SANDBOX GUARD (migration 049) — BIDIRECTIONAL, mirroring runUpdate.
       // The DAG edge mutates the blocked task's dependency state + mints a
       // 'dependency-added' event/broadcast on it, so the same sandbox boundary
       // applies here as to any other update. The orchestrator is EXEMPT (its
@@ -1923,7 +1923,7 @@ export class TaskChangeRouter {
       desc.hasApproval && this.columnExists(desc.table, 'approved_at')
         ? 'approved_at'
         : 'NULL AS approved_at';
-    // A/B experiment tag + attribution (migration 047), fail-soft on pre-047 / partial test DBs.
+    // A/B experiment tag + attribution (migration 049), fail-soft on pre-049 / partial test DBs.
     const experimentId = this.columnExists(desc.table, 'experiment_id')
       ? 'experiment_id'
       : 'NULL AS experiment_id';
@@ -2341,7 +2341,7 @@ export class TaskChangeRouter {
       // stamp silently flips board visibility on every live event.
       decomposed_at: row.decomposed_at,
       approved_at: row.approved_at,
-      // A/B sandbox tag (migration 047). Same silent-drop rationale as the
+      // A/B sandbox tag (migration 049). Same silent-drop rationale as the
       // visibility stamps: the client `isExperimentSandboxed` selector compares
       // `!== null`, so it MUST be projected on the emit path.
       experiment_id: row.experiment_id ?? null,

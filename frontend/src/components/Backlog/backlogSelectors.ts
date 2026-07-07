@@ -69,7 +69,7 @@ export function isPending(t: BacklogTaskItem): boolean {
 
 /**
  * Whether an entity is currently sandboxed inside a side-by-side A/B experiment
- * (migration 047 — `experiment_id` stamped on CREATE, cleared only by
+ * (migration 049 — `experiment_id` stamped on CREATE, cleared only by
  * `experiments.decide`'s promote path). Server-side `selectProjectBacklog`
  * already excludes these rows by default, but a client selector is defense in
  * depth against any read path that fetches entities directly (e.g. a stale

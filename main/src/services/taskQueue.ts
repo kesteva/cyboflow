@@ -62,7 +62,7 @@ interface CreateSessionJob {
   folderId?: string;
   baseBranch?: string;
   /**
-   * A/B experiments (migration 047): pin the session worktree's branch to an
+   * A/B experiments (migration 049): pin the session worktree's branch to an
    * EXACT committish (a raw SHA) instead of a branch tip. Threaded into
    * worktreeManager.createWorktree → _createAtPath (skips the refs/heads guard;
    * hard-errors if the branch already exists). Undefined = normal branch-tip base.
@@ -229,7 +229,7 @@ export class TaskQueue {
           }
           actualBaseBranch = getCurrentBranch(targetProject.path) ?? undefined;
         } else {
-          // A/B experiment arms (migration 047) pin the arm's worktree to a fixed
+          // A/B experiment arms (migration 049) pin the arm's worktree to a fixed
           // baseCommittish so every arm branches from the SAME base commit; undefined
           // for ordinary sessions keeps createWorktree's default base behaviour.
           ({ worktreePath, baseCommit, baseBranch: actualBaseBranch } = await worktreeManager.createWorktree(targetProject.path, worktreeName, undefined, baseBranch, targetProject.worktree_folder || undefined, baseCommittish));

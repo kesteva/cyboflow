@@ -1,5 +1,5 @@
 /**
- * Unit tests for VariantResolver (A/B testing, migration 046).
+ * Unit tests for VariantResolver (A/B testing, migration 048).
  *
  * Covers the rotation seam: weighted pick determinism with an injected Rng,
  * zero/all-paused → null, weight=0 active excluded, explicit pin loads regardless

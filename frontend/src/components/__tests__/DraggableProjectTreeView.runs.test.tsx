@@ -575,7 +575,7 @@ describe('DraggableProjectTreeView — runs nest under their session', () => {
 });
 
 // ---------------------------------------------------------------------------
-// A/B variant chip (migration 046) — denormalized workflow_runs.variant_label
+// A/B variant chip (migration 048) — denormalized workflow_runs.variant_label
 // ---------------------------------------------------------------------------
 
 describe('DraggableProjectTreeView — A/B variant chip', () => {

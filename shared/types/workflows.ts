@@ -149,24 +149,24 @@ export interface WorkflowRunRow {
    */
   eval_enabled?: number | null;
   /**
-   * Side-by-side experiment id (migration 046) — soft link to experiments.id
+   * Side-by-side experiment id (migration 048) — soft link to experiments.id
    * (slice B owns that table). NULL for every non-experiment run. Stamped once at
    * createRun and immutable for the run. Sandboxes the arm's entity writes.
    */
   experiment_id?: string | null;
-  /** Which arm of the experiment this run drives ('A' | 'B'; migration 046). NULL for non-experiment runs. */
+  /** Which arm of the experiment this run drives ('A' | 'B'; migration 048). NULL for non-experiment runs. */
   experiment_arm?: ExperimentArm | null;
   /**
-   * Variant assignment (migration 046) — a SOFT link (no FK) to workflow_variants.id,
+   * Variant assignment (migration 048) — a SOFT link (no FK) to workflow_variants.id,
    * so a retired/deleted variant never orphans a historical run. NULL = baseline
    * (live-spec) run. Stamped once at createRun and immutable; the run froze the
    * variant's spec into spec_hash + workflow_revisions at the same time.
    */
   variant_id?: string | null;
-  /** Denormalized variant label (migration 046) that survives variant rename/delete. NULL for baseline runs. */
+  /** Denormalized variant label (migration 048) that survives variant rename/delete. NULL for baseline runs. */
   variant_label?: string | null;
   /**
-   * The merge commit SHA where this run's code landed (migration 047), stamped at
+   * The merge commit SHA where this run's code landed (migration 049), stamped at
    * merge close-out (stampSessionRunsOutcome 'merged'). NULL until merged (or when
    * the SHA read fails, fail-soft). Read by slice C's post-merge bug attribution.
    */
@@ -239,7 +239,7 @@ export interface WorkflowRunListRow {
    */
   error_message?: string | null;
   /**
-   * Denormalized variant label (migration 046) that survives variant
+   * Denormalized variant label (migration 048) that survives variant
    * rename/delete — see `WorkflowRunRow.variant_label`. Surfaced on the list row
    * so the left-rail run chip and any other list-driven surface can render a
    * "Variant: <label>" tag without a second query. NULL for baseline
@@ -247,7 +247,7 @@ export interface WorkflowRunListRow {
    */
   variant_label?: string | null;
   /**
-   * A/B experiment membership (migration 046, slice B) surfaced on the list row
+   * A/B experiment membership (migration 048, slice B) surfaced on the list row
    * so list-driven surfaces (RunCenterPane experiment chip, left rail) can mark
    * side-by-side arm runs without a second query. NULL for non-experiment runs.
    * Optional + additive, mirroring `variant_label?`; the frontend `ActiveRunRow`

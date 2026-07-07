@@ -1,12 +1,12 @@
 /**
- * Integration tests for migration 046_workflow_variants.sql (A/B testing).
+ * Integration tests for migration 048_workflow_variants.sql (A/B testing).
  *
- * 046 creates the workflow_variants table (FK workflow_id → workflows ON DELETE
+ * 048 creates the workflow_variants table (FK workflow_id → workflows ON DELETE
  * CASCADE, UNIQUE(workflow_id, label)) AND four nullable workflow_runs tagging
  * columns (experiment_id / experiment_arm / variant_id / variant_label).
  *
  * Applies 006 (workflows + workflow_runs base) against an in-memory SQLite, then
- * applies the real 046 SQL via the production transaction wrapper and asserts:
+ * applies the real 048 SQL via the production transaction wrapper and asserts:
  * the chain applies cleanly, the table + columns exist, the UNIQUE(label) rejects
  * a duplicate, status defaults to 'draft', and the workflow FK cascades.
  */
@@ -52,10 +52,10 @@ interface TableInfoRow {
   dflt_value: unknown;
 }
 
-describe('Migration 046: workflow_variants + run tagging columns', () => {
+describe('Migration 048: workflow_variants + run tagging columns', () => {
   it('applies cleanly and creates the workflow_variants table', () => {
     const db = buildDbThrough006();
-    runMigrationViaProductionPath(db, readMigration('046_workflow_variants.sql'));
+    runMigrationViaProductionPath(db, readMigration('048_workflow_variants.sql'));
     const table = db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workflow_variants'")
       .get() as { name: string } | undefined;
@@ -65,7 +65,7 @@ describe('Migration 046: workflow_variants + run tagging columns', () => {
 
   it('adds the four nullable workflow_runs tagging columns', () => {
     const db = buildDbThrough006();
-    runMigrationViaProductionPath(db, readMigration('046_workflow_variants.sql'));
+    runMigrationViaProductionPath(db, readMigration('048_workflow_variants.sql'));
     const cols = (db.prepare('PRAGMA table_info(workflow_runs)').all() as TableInfoRow[]).map((c) => c.name);
     expect(cols).toEqual(expect.arrayContaining(['experiment_id', 'experiment_arm', 'variant_id', 'variant_label']));
     db.close();
@@ -73,7 +73,7 @@ describe('Migration 046: workflow_variants + run tagging columns', () => {
 
   it('defaults status to \'draft\' and weight to 1', () => {
     const db = buildDbThrough006();
-    runMigrationViaProductionPath(db, readMigration('046_workflow_variants.sql'));
+    runMigrationViaProductionPath(db, readMigration('048_workflow_variants.sql'));
     db.prepare("INSERT INTO workflow_variants (id, workflow_id, label) VALUES ('wfv_1', 'wf1', 'v1')").run();
     const row = db.prepare('SELECT status, weight FROM workflow_variants WHERE id = ?').get('wfv_1') as {
       status: string;
@@ -86,7 +86,7 @@ describe('Migration 046: workflow_variants + run tagging columns', () => {
 
   it('enforces UNIQUE(workflow_id, label)', () => {
     const db = buildDbThrough006();
-    runMigrationViaProductionPath(db, readMigration('046_workflow_variants.sql'));
+    runMigrationViaProductionPath(db, readMigration('048_workflow_variants.sql'));
     db.prepare("INSERT INTO workflow_variants (id, workflow_id, label) VALUES ('wfv_1', 'wf1', 'dup')").run();
     expect(() =>
       db.prepare("INSERT INTO workflow_variants (id, workflow_id, label) VALUES ('wfv_2', 'wf1', 'dup')").run(),
@@ -96,7 +96,7 @@ describe('Migration 046: workflow_variants + run tagging columns', () => {
 
   it('cascades variant deletion when the workflow is deleted', () => {
     const db = buildDbThrough006();
-    runMigrationViaProductionPath(db, readMigration('046_workflow_variants.sql'));
+    runMigrationViaProductionPath(db, readMigration('048_workflow_variants.sql'));
     // Remove the run first so the workflow FK from workflow_runs does not block delete.
     db.prepare('DELETE FROM workflow_runs WHERE workflow_id = ?').run('wf1');
     db.prepare("INSERT INTO workflow_variants (id, workflow_id, label) VALUES ('wfv_1', 'wf1', 'v1')").run();

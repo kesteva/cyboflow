@@ -153,7 +153,7 @@ export function computeEffectiveAgents(
 
 /**
  * Apply a workflow VARIANT's per-agent deltas ON TOP of an already-computed
- * effective agent set (A/B testing, migration 046). Pure — no DB / FS.
+ * effective agent set (A/B testing, migration 048). Pure — no DB / FS.
  *
  * For each agent whose `agentKey` has a delta:
  *   - `systemPrompt` (when present) replaces the agent's prompt;

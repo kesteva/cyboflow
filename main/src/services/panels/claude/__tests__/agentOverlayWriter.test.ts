@@ -318,7 +318,7 @@ describe('agentOverlayWriter — installAgentOverlay integration (AC-P1-6)', () 
   });
 });
 
-describe('agentOverlayWriter — variant agent deltas (A/B testing, migration 046)', () => {
+describe('agentOverlayWriter — variant agent deltas (A/B testing, migration 048)', () => {
   let worktree: string;
 
   beforeEach(() => {
@@ -329,7 +329,7 @@ describe('agentOverlayWriter — variant agent deltas (A/B testing, migration 04
     fs.rmSync(worktree, { recursive: true, force: true });
   });
 
-  /** DB with the migration-046 variant surface: run.variant_id + workflow_variants. */
+  /** DB with the migration-048 variant surface: run.variant_id + workflow_variants. */
   function makeVariantDb(): Database.Database {
     const db = makeDb();
     db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_id TEXT');

@@ -132,7 +132,7 @@ describe('cyboflow.runs.restart', () => {
   });
 
   // -------------------------------------------------------------------------
-  // (b2) A/B testing (migration 046): restart INHERITS the failed run's variant.
+  // (b2) A/B testing (migration 048): restart INHERITS the failed run's variant.
   // -------------------------------------------------------------------------
   it('(b2) re-pins the failed run variant_id as the trailing launchOptions (inherit, no re-roll)', async () => {
     const { runId } = seedRun(db, { id: 'run-variant-failed', status: 'failed', projectId: 1 });
@@ -153,7 +153,7 @@ describe('cyboflow.runs.restart', () => {
   });
 
   // -------------------------------------------------------------------------
-  // (b3) A/B testing (migration 046): restart REFUSES an experiment-tagged arm.
+  // (b3) A/B testing (migration 048): restart REFUSES an experiment-tagged arm.
   // -------------------------------------------------------------------------
   it('(b3) refuses to restart an experiment-tagged run with a CONFLICT', async () => {
     const { runId } = seedRun(db, { id: 'run-exp-failed', status: 'failed', projectId: 1 });

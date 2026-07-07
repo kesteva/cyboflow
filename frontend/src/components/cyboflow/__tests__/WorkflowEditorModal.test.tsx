@@ -106,7 +106,7 @@ vi.mock('../../../trpc/client', () => ({
       runs: {
         start: { mutate: vi.fn() },
       },
-      // A/B testing (migration 046) — VariantManagerSection (rendered in edit
+      // A/B testing (migration 048) — VariantManagerSection (rendered in edit
       // mode) fetches this on mount. Empty by default so the section renders its
       // "no variants yet" empty state without extra wiring per test.
       variants: {

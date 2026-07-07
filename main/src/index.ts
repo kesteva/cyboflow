@@ -1565,7 +1565,7 @@ async function initializeServices() {
     // explicit requestedPermissionMode is supplied, launch() writes it to the host
     // session through the shared chokepoint before createRun.
     sessionPermissionModeDeps,
-    // A/B testing (migration 046): the rotation resolver. launch() resolves the
+    // A/B testing (migration 048): the rotation resolver. launch() resolves the
     // variant (explicit pin or weighted random over active variants) pre-createRun
     // so every launch surface inherits rotation from one place.
     new VariantResolver(cyboflowDb),
@@ -1916,7 +1916,7 @@ app.whenReady().then(async () => {
       console.log(`[Main] Backfilled terminal outcomes (failed: ${outcomeBackfill.failedBackfilled}, canceled: ${outcomeBackfill.canceledBackfilled})`);
     }
 
-    // Boot recovery: reconcile non-terminal A/B experiments (migration 047).
+    // Boot recovery: reconcile non-terminal A/B experiments (migration 049).
     // running→grading when both arms are settled; a half-created experiment (crash
     // mid-startSideBySide, one arm never launched) → abandoned + clone sweep.
     try {
@@ -2441,7 +2441,7 @@ app.whenReady().then(async () => {
     });
     console.log('[Main] runs.start deps wired');
 
-    // A/B experiments (slice B, migration 047). Inject the concrete collaborators
+    // A/B experiments (slice B, migration 049). Inject the concrete collaborators
     // the experiments router orchestrates: the SHA-pinned arm-session core
     // (createQuickSessionCore — the SAME path sessions:create-quick uses), the run
     // launcher, the entity chokepoint, the git-neutral run cancel, and the FULL
@@ -2547,7 +2547,7 @@ app.whenReady().then(async () => {
             })
             .catch(() => {});
         } catch {
-          /* fail-soft: pre-048 DB or missing item — nothing to resolve */
+          /* fail-soft: pre-050 DB or missing item — nothing to resolve */
         }
       },
       // Slice C: rerunComparison re-drives the pairwise snapshot+enqueue after

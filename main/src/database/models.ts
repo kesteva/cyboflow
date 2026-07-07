@@ -534,30 +534,30 @@ export interface WorkflowRevisionRow {
 }
 
 /**
- * `workflow_variants` row (migration 046) — a named A/B variant of a workflow
+ * `workflow_variants` row (migration 048) — a named A/B variant of a workflow
  * that snapshots a frozen resolved spec_json + optional per-agent deltas + model
  * / execution-model defaults. The canonical shape lives in
  * `shared/types/experiments.ts` (cross-slice contract); re-exported here so DB-row
  * consumers can import it alongside the other `*Row` interfaces. The four sibling
  * `workflow_runs` tagging cells (experiment_id / experiment_arm / variant_id /
- * variant_label) also land in migration 046 and are declared on `WorkflowRunRow`
+ * variant_label) also land in migration 048 and are declared on `WorkflowRunRow`
  * (shared/types/workflows.ts).
  */
 export type { WorkflowVariantRow } from '../../../shared/types/experiments';
 
 /**
- * `experiments` row (migration 047) — a side-by-side head-to-head umbrella that
+ * `experiments` row (migration 049) — a side-by-side head-to-head umbrella that
  * owns `base_branch`/`base_sha` (pinned once) and links its two arm runs +
  * sessions + per-arm hidden seed-idea clones back via soft columns. The canonical
  * shape lives in `shared/types/experiments.ts` (cross-slice contract); re-exported
  * here so DB-row consumers can import it alongside the other `*Row` interfaces.
  * The sibling entity columns (ideas/epics/tasks `experiment_id` + `caused_by_run_id`)
- * and `workflow_runs.merge_sha` also land in migration 047.
+ * and `workflow_runs.merge_sha` also land in migration 049.
  */
 export type { ExperimentRow } from '../../../shared/types/experiments';
 
 /**
- * `experiment_comparisons` row (migration 048) — one self-contained pairwise
+ * `experiment_comparisons` row (migration 050) — one self-contained pairwise
  * A/B verdict per side-by-side experiment (v1: 2 arms => 1 comparison). Freezes
  * both arms' diffs + seed context on the row so the pairwise judge survives
  * worktree teardown and does not depend on per-arm run_evals rows. The canonical

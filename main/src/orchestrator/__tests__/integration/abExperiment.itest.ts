@@ -1,10 +1,10 @@
 /**
  * Tier-3 mocked-SDK integration — workflow A/B testing end-to-end
  * (variant registry + rotation, side-by-side experiments + entity sandbox,
- * pairwise judge, decide/rerun guards). Migrations 046 / 047 / 048.
+ * pairwise judge, decide/rerun guards). Migrations 048 / 049 / 050.
  *
  * Like the other *.itest.ts, this boots the REAL orchestrator stack over a
- * migration-replay temp-file DB (the full current schema, replayed through 048)
+ * migration-replay temp-file DB (the full current schema, replayed through 050)
  * and fakes ONLY the process/filesystem boundary the Tier-3 harness cannot do
  * for real. Concretely REAL here:
  *   - the migration chain + every table CHECK/UNIQUE/index (real DatabaseService);
@@ -69,7 +69,7 @@ import type { DatabaseLike } from '../../types';
 import type { RunGitDiff } from '../../../../../shared/types/runFiles';
 
 // ---------------------------------------------------------------------------
-// Migration-replay temp DB (full current app schema through 048).
+// Migration-replay temp DB (full current app schema through 050).
 // ---------------------------------------------------------------------------
 
 const WF_ID = 'wf-planner';
@@ -339,10 +339,10 @@ describe('Tier-3 A/B testing: variants, rotation, side-by-side experiments, pair
     teardownDb(t);
   });
 
-  it('1. migration replay: the three A/B tables + the run/entity stamp columns exist through 048', () => {
-    expect(hasTable(t, 'workflow_variants')).toBe(true); // mig 046
-    expect(hasTable(t, 'experiments')).toBe(true); // mig 047
-    expect(hasTable(t, 'experiment_comparisons')).toBe(true); // mig 048
+  it('1. migration replay: the three A/B tables + the run/entity stamp columns exist through 050', () => {
+    expect(hasTable(t, 'workflow_variants')).toBe(true); // mig 048
+    expect(hasTable(t, 'experiments')).toBe(true); // mig 049
+    expect(hasTable(t, 'experiment_comparisons')).toBe(true); // mig 050
 
     const runCols = columns(t, 'workflow_runs');
     for (const col of ['experiment_id', 'experiment_arm', 'variant_id', 'variant_label', 'merge_sha']) {

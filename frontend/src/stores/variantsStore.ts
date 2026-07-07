@@ -1,6 +1,6 @@
 /**
  * variantsStore — per-workflow list of {@link WorkflowVariantRow}s (migration
- * 046 / workflow A/B testing), backing the VariantSelector picker and the
+ * 048 / workflow A/B testing), backing the VariantSelector picker and the
  * Workflows-editor variant management section.
  *
  * Keyed by `workflowId` (variants are workflow-scoped, unlike the cross-project

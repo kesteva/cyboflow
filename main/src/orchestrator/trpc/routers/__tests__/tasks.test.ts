@@ -70,7 +70,7 @@ function buildDb(): Database.Database {
   db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
   db.exec(readFileSync(join(migDir, '042_collapse_board.sql'), 'utf-8'));
-  // Migration 047 (A/B slice B): the read-side UNION projects experiment_id.
+  // Migration 049 (A/B slice B): the read-side UNION projects experiment_id.
   for (const t of ['ideas', 'epics', 'tasks']) {
     db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
     db.exec(`ALTER TABLE ${t} ADD COLUMN caused_by_run_id TEXT;`);

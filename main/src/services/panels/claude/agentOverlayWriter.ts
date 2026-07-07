@@ -88,7 +88,7 @@ function readOverrides(db: Database.Database, projectId: number, logger?: Logger
 }
 
 /**
- * Read a run's VARIANT agent deltas (A/B testing, migration 046): resolve the
+ * Read a run's VARIANT agent deltas (A/B testing, migration 048): resolve the
  * run's `variant_id`, load the variant's `agent_overrides_json`, and parse it into
  * a `WorkflowVariantAgentOverrides` map. Returns `null` (apply nothing) when the
  * run is not variant-tagged, the variant/column is absent, or the JSON is
@@ -106,7 +106,7 @@ function readVariantAgentDeltas(
       .get(runId) as { variantId?: unknown } | undefined;
     variantId = typeof runRow?.variantId === 'string' ? runRow.variantId : null;
   } catch {
-    // Pre-046 DB (column absent) — no variants exist, so nothing to apply.
+    // Pre-048 DB (column absent) — no variants exist, so nothing to apply.
     return null;
   }
   if (variantId === null) return null;
@@ -144,7 +144,7 @@ function readVariantAgentDeltas(
  * as `cyboflow-<agentKey>.md` files. No-op (writes nothing) when the run row is missing.
  * Never removes anything; never throws — a failure here must not break a spawn.
  *
- * A/B testing (migration 046): after computing the project-override effective set,
+ * A/B testing (migration 048): after computing the project-override effective set,
  * a variant run applies its per-agent deltas ON TOP via applyVariantAgentDeltas —
  * so the variant delta WINS over the project override for the fields it touches.
  */

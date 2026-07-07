@@ -1,5 +1,5 @@
 /**
- * cyboflow.variants sub-router (A/B testing, migration 046).
+ * cyboflow.variants sub-router (A/B testing, migration 048).
  *
  * CRUD over a workflow's named variants, backed by WorkflowRegistry's variant
  * lifecycle methods (mirroring the workflows router conventions). All

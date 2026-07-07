@@ -906,7 +906,7 @@ export const runsRouter = router({
       // Advanced "Orchestration" tri-state. Safe on any substrate: the resolver
       // hard-pins 'orchestrated' for interactive-PTY runs regardless of this value.
       executionModel: z.enum(['orchestrated', 'programmatic']).optional(),
-      // Optional explicit A/B variant pin (migration 046). When supplied it is
+      // Optional explicit A/B variant pin (migration 048). When supplied it is
       // threaded to RunLauncher.launch as an EXPLICIT variant pin (loaded
       // regardless of status); when omitted the launcher's VariantResolver applies
       // weighted rotation over the workflow's active variants (or resolves null →
@@ -1021,7 +1021,7 @@ export const runsRouter = router({
         input.findingIds,
         input.model,
         input.evalEnabled,
-        // A/B testing (migration 046): the trailing launchOptions object. An
+        // A/B testing (migration 048): the trailing launchOptions object. An
         // explicit variant pin wins over a baseline pin (VariantSelector only ever
         // sends one or the other); rotation (neither supplied) and experiment
         // stamps are resolved/supplied elsewhere.
@@ -1101,7 +1101,7 @@ export const runsRouter = router({
       // Only a terminally-FAILED run may restart — a running / rested / completed run
       // is not a restart candidate (the panel only shows the CTA for 'failed').
       if (row.status !== 'failed') return { noOp: true, reason: 'not_failed' };
-      // A/B testing (migration 046): REFUSE restarting an experiment-tagged arm.
+      // A/B testing (migration 048): REFUSE restarting an experiment-tagged arm.
       // The arm's run identity is load-bearing for the experiment (its entity writes
       // are sandboxed by experiment_id); a fresh run would silently lose the tag and
       // de-sandbox its writes. The human must decide/abandon the experiment (or
@@ -1161,7 +1161,7 @@ export const runsRouter = router({
         // Copy the failed run's per-run eval pin (1/0 → true/false; NULL → inherit
         // the global setting) so a restart preserves the launch-time choice.
         row.eval_enabled === null ? undefined : row.eval_enabled === 1,
-        // A/B testing (migration 046): INHERIT the failed run's variant (no re-roll)
+        // A/B testing (migration 048): INHERIT the failed run's variant (no re-roll)
         // so per-variant stats stay coherent. An explicit pin loads regardless of
         // status, so a paused/retired variant still restarts correctly. Baseline
         // runs (variant_id NULL) pin `baseline: true` so the resolver returns null
@@ -2385,7 +2385,7 @@ export const runsRouter = router({
         });
       }
 
-      // A/B testing (migration 046): resolve the effective definition from the run's
+      // A/B testing (migration 048): resolve the effective definition from the run's
       // FROZEN spec (its variant graph, else the live spec) via resolveRunFrozenSpec —
       // NOT the live JOIN read above — so a structural variant run (or a run whose live
       // workflows.spec_json was edited mid-run) renders the graph its current_step_id was

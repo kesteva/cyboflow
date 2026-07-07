@@ -69,7 +69,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   const [model, setModel] = useState<string>(DEFAULT_WORKFLOW_MODEL);
 
   /**
-   * The per-run A/B variant choice (migration 046, VariantSelector). Defaults to
+   * The per-run A/B variant choice (migration 048, VariantSelector). Defaults to
    * 'rotation' — a no-op selection ({@link variantSelectionToStartInput} sends
    * neither `variantId` nor `baseline`) so a workflow with zero (or no eligible)
    * variants launches exactly as before. VariantSelector re-seeds this to the
@@ -366,7 +366,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           → workflow_runs.model (migration 037). Quick: into useQuickSession. */}
       <ModelSelector value={model} onChange={setModel} id="workflow-picker-model" />
 
-      {/* Per-run A/B variant selector (migration 046) — hidden entirely for a
+      {/* Per-run A/B variant selector (migration 048) — hidden entirely for a
           workflow with zero variants. Threaded into runs.start as variantId /
           baseline (never both); rotation sends neither field. */}
       {selectedId !== null && (

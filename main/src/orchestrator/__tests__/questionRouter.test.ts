@@ -877,7 +877,7 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
     db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
     db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
-    // migration 046/047: experiment tag on runs + entity tables (reveal suppression).
+    // migration 048/049: experiment tag on runs + entity tables (reveal suppression).
     db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT;');
     for (const t of ['ideas', 'epics', 'tasks']) {
       db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
@@ -1286,7 +1286,7 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     expect(epicApprovedAt(db, epicId)).not.toBeNull();
   });
 
-  // A/B REVEAL SUPPRESSION (migration 047): an experiment-arm run's drafts must
+  // A/B REVEAL SUPPRESSION (migration 049): an experiment-arm run's drafts must
   // NOT be revealed by the completion/approve path — reveal happens exclusively via
   // experiments.decide. Both promotePendingDraftsForRun and promoteTasksOnPlanApproval
   // funnel through revealRunDrafts, which no-ops for an experiment-tagged run.
@@ -1415,7 +1415,7 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
     db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
     db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
     db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
-    // migration 046/047: experiment tag on runs + entity tables (reveal suppression).
+    // migration 048/049: experiment tag on runs + entity tables (reveal suppression).
     db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT;');
     for (const t of ['ideas', 'epics', 'tasks']) {
       db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
@@ -1642,7 +1642,7 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
     db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
     db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
-    // migration 046/047: experiment tag on runs + entity tables (reveal suppression).
+    // migration 048/049: experiment tag on runs + entity tables (reveal suppression).
     db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT;');
     for (const t of ['ideas', 'epics', 'tasks']) {
       db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
