@@ -32,6 +32,13 @@ describe('isSystemicStepError', () => {
     ],
     ['authentication_error subtype alone', 'authentication_error: invalid credentials'],
     ['invalid x-api-key phrasing', 'invalid x-api-key'],
+    [
+      'real mid-run connection-closed fixture',
+      'Claude Code returned an error result: API Error: Connection closed mid-response. The response above may be incomplete.',
+    ],
+    ['ECONNRESET code', 'ECONNRESET'],
+    ['socket hang up', 'socket hang up'],
+    ['fetch failed wrapper', 'fetch failed'],
   ];
 
   it.each(positives)('matches: %s', (_label, error) => {
@@ -48,6 +55,14 @@ describe('isSystemicStepError', () => {
     ['controller execution bound text', 'Step exceeded the execution bound of 30 minutes'],
     ['error_max_turns-ish text', 'error_max_turns: the step hit its max turn allowance'],
     ['ordinary text mentioning authentication alone (no error/failed word)', 'Please check your authentication settings'],
+    [
+      'timeout wording without the word "connection" (boundary: not systemic)',
+      'request timed out',
+    ],
+    [
+      'connection mentioned in unrelated file-edit prose, not a failure',
+      'the agent edited connection-pool.ts and the tests failed',
+    ],
   ];
 
   it.each(negatives)('does not match: %s', (_label, error) => {

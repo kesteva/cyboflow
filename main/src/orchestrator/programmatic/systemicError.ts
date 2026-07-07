@@ -110,6 +110,41 @@ const SYSTEMIC_PATTERNS: SystemicPattern[] = [
     name: 'auth-invalid-x-api-key',
     pattern: /invalid x-api-key/i,
   },
+  // Transport-level failures below: a dropped/reset/timed-out connection is an
+  // environment-level condition exactly like overload or a rate limit — the
+  // step itself did nothing wrong, the network under it did. Asymmetric cost
+  // here justifies leaning inclusive: a FALSE POSITIVE only costs a recoverable
+  // PARK (a human can always resume-or-give-up from the review queue), while a
+  // FALSE NEGATIVE costs a hard lane failure that skips the run's closing
+  // verification stages entirely (the defect this file exists to prevent).
+  {
+    // The exact live fixture: "API Error: Connection closed mid-response. The
+    // response above may be incomplete."
+    name: 'net-connection-closed',
+    pattern: /connection closed/i,
+  },
+  {
+    // "connection error" / "connection reset" / "connection refused" /
+    // "connection timed out" (also "connection timedout" / "connection
+    // timed-out"). Requires the literal word "connection" immediately before
+    // the failure word so ordinary prose like "edited connection-pool.ts"
+    // never matches.
+    name: 'net-connection-failure',
+    pattern: /connection (error|reset|refused|timed?[ -]?out)/i,
+  },
+  {
+    // Node/libuv error codes surfaced verbatim in thrown Error messages:
+    // ECONNRESET, ECONNREFUSED, ECONNABORTED, ETIMEDOUT, and the classic
+    // "socket hang up" (Node's http client's own connection-drop message).
+    name: 'net-econn-codes',
+    pattern: /econn(reset|refused|aborted)|etimedout|socket hang ?up/i,
+  },
+  {
+    // undici/fetch's own wrapper message for any underlying transport failure
+    // (`TypeError: fetch failed`, cause chain omitted from the surfaced text).
+    name: 'net-fetch-failed',
+    pattern: /fetch failed/i,
+  },
 ];
 
 /**
