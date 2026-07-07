@@ -22,6 +22,7 @@ import type {
   WorkflowDefinition,
   WorkflowPhase,
   WorkflowStep,
+  WorkflowStepReportStatus,
 } from '../../../../../shared/types/workflows';
 
 // ── builders ────────────────────────────────────────────────────────────────
@@ -72,12 +73,12 @@ function makeRunner(scripts: Record<string, StepRunResult[]> = {}): StepRunner &
  * from a per-step-id queue of decisions (default 'approve').
  */
 function makeHost(gates: Record<string, HumanGateDecision[]> = {}): ControllerHost & {
-  reports: Array<{ id: string; status: 'running' | 'done' }>;
+  reports: Array<{ id: string; status: WorkflowStepReportStatus }>;
   gateCalls: string[];
 } {
   const queues: Record<string, HumanGateDecision[]> = {};
   for (const [k, v] of Object.entries(gates)) queues[k] = [...v];
-  const reports: Array<{ id: string; status: 'running' | 'done' }> = [];
+  const reports: Array<{ id: string; status: WorkflowStepReportStatus }> = [];
   const gateCalls: string[] = [];
   return {
     reports,
@@ -172,25 +173,33 @@ describe('WorkflowController', () => {
   it('fails the run when a required step exhausts its retries with no loopback', async () => {
     const d = def([phase('p1', [step({ id: 'a', retries: 1 }), step({ id: 'b' })])]);
     const runner = makeRunner({ a: [{ status: 'failed', error: 'boom' }, { status: 'failed', error: 'boom' }] });
+    const host = makeHost();
 
-    const result = await new WorkflowController(runner, makeHost()).run('r', d);
+    const result = await new WorkflowController(runner, host).run('r', d);
 
     expect(result.outcome).toBe('failed');
     expect(result.failedStepId).toBe('a');
     expect(result.steps[0]).toMatchObject({ stepId: 'a', outcome: 'failed', attempts: 2, error: 'boom' });
     // 'b' never ran — the run terminated at 'a'.
     expect(runner.calls.some((c) => c.id === 'b')).toBe(false);
+    // The required-failure path reports the terminal 'failed' status (not 'done'),
+    // so the timeline can distinguish the failed step from a completed one.
+    expect(host.reports.at(-1)).toEqual({ id: 'a', status: 'failed' });
   });
 
   it('skips a failing optional step and continues to completion', async () => {
     const d = def([phase('p1', [step({ id: 'a', optional: true }), step({ id: 'b' })])]);
     const runner = makeRunner({ a: [{ status: 'failed', error: 'meh' }] });
+    const host = makeHost();
 
-    const result = await new WorkflowController(runner, makeHost()).run('r', d);
+    const result = await new WorkflowController(runner, host).run('r', d);
 
     expect(result.outcome).toBe('completed');
     expect(result.steps[0]).toMatchObject({ stepId: 'a', outcome: 'skipped', attempts: 1 });
     expect(result.steps[1]).toMatchObject({ stepId: 'b', outcome: 'done' });
+    // The optional-skip path reports 'skipped' for 'a' (then 'b' running → done).
+    expect(host.reports).toContainEqual({ id: 'a', status: 'skipped' });
+    expect(host.reports.some((r) => r.id === 'a' && r.status === 'done')).toBe(false);
   });
 
   it('loops back to an intra-phase target on failure, then completes after the rerun succeeds', async () => {
@@ -241,6 +250,11 @@ describe('WorkflowController', () => {
 
     expect(result.outcome).toBe('rejected');
     expect(result.failedStepId).toBe('gate');
+    // A REJECTED gate rests awaiting the human's decision — it still reports 'done'
+    // (NOT a 'failed'/'skipped' marker), so the timeline never shows a misleading
+    // red FAILED on a gate the human declined. (reportStep collapse, decision 2.)
+    expect(host.reports.at(-1)).toEqual({ id: 'gate', status: 'done' });
+    expect(host.reports.some((r) => r.status === 'failed' || r.status === 'skipped')).toBe(false);
   });
 
   it("loops back on a human gate 'revise' decision, then completes on approve", async () => {
@@ -357,16 +371,24 @@ describe('WorkflowController', () => {
     function makeTriageHost(
       decision: TriageDecision | TriageDecision[],
       gates: Record<string, HumanGateDecision[]> = {},
-    ): ControllerHost & { events: SupervisorEvent[]; gateCalls: string[] } {
+    ): ControllerHost & {
+      events: SupervisorEvent[];
+      gateCalls: string[];
+      reports: Array<{ id: string; status: WorkflowStepReportStatus }>;
+    } {
       const decisions = Array.isArray(decision) ? [...decision] : null;
       const gateQ: Record<string, HumanGateDecision[]> = {};
       for (const [k, v] of Object.entries(gates)) gateQ[k] = [...v];
       const events: SupervisorEvent[] = [];
       const gateCalls: string[] = [];
+      const reports: Array<{ id: string; status: WorkflowStepReportStatus }> = [];
       return {
         events,
         gateCalls,
-        reportStep() {},
+        reports,
+        reportStep(id, status) {
+          reports.push({ id, status });
+        },
         async requestHumanGate(s) {
           gateCalls.push(s.id);
           return gateQ[s.id]?.shift() ?? 'approve';
@@ -422,6 +444,8 @@ describe('WorkflowController', () => {
       expect(result.outcome).toBe('completed');
       expect(host.gateCalls).toEqual(['a']); // failure escalated to the human gate
       expect(runner.calls.some((c) => c.id === 'b')).toBe(true); // advanced past the skip
+      // The human ACCEPTED the failure → the step is reported 'skipped' (not 'done').
+      expect(host.reports).toContainEqual({ id: 'a', status: 'skipped' });
     });
 
     it("'escalate' → human reject fails the run", async () => {
@@ -442,6 +466,9 @@ describe('WorkflowController', () => {
       const result = await new WorkflowController(runner, host).run('r', d);
 
       expect(result.outcome).toBe('canceled');
+      // Cancellation is a run-level affair — the aborted step still reports 'done'
+      // (not a 'failed'/'skipped' marker); the run's own status conveys the cancel.
+      expect(host.reports.at(-1)).toEqual({ id: 'a', status: 'done' });
     });
 
     it('does not trip the execution bound when a single self-loopback step ALSO triage-retries', async () => {
@@ -794,6 +821,28 @@ describe('WorkflowController', () => {
       const integrated = driver.lanes.filter((l) => l.status === 'integrated');
       expect(failed.length).toBe(1);
       expect(integrated.length).toBe(1);
+    });
+
+    it("gates off a closing stage (reports 'skipped') when a fan-out lane fails", async () => {
+      // execute(fanOut) → review(automated). One lane's required inner step fails ⇒
+      // the sprint is incomplete ⇒ the closing 'review' stage is gated off. With no
+      // human gate after it, the run completes and 'review' is recorded + reported
+      // 'skipped' (never hitting the runner).
+      const d = def([
+        phase('p1', [fanStep('execute', ['implement', 'verify']), step({ id: 'review' })]),
+      ]);
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const runner = makeRunner({ implement: [{ status: 'failed', error: 'boom' }] });
+      const host = makeFanHost(driver);
+
+      const result = await new WorkflowController(runner, host).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(runner.calls.some((c) => c.id === 'review')).toBe(false); // gated off
+      expect(result.steps).toContainEqual(
+        expect.objectContaining({ stepId: 'review', outcome: 'skipped' }),
+      );
+      expect(host.reports).toContainEqual({ id: 'review', status: 'skipped' });
     });
 
     it('continues the lane when an OPTIONAL inner step fails (no lane failure)', async () => {

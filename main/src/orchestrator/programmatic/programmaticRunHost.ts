@@ -26,7 +26,7 @@
  * Bound to one run (runId + projectId) when constructed by
  * DefaultProgrammaticRunner.
  */
-import type { WorkflowStep } from '../../../../shared/types/workflows';
+import type { WorkflowStep, WorkflowStepReportStatus } from '../../../../shared/types/workflows';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { LoggerLike } from '../types';
 import type {
@@ -49,7 +49,7 @@ import { buildAssistantTextEvent } from './syntheticEvents';
  * production a thin adapter over `buildStepTransitionEvent`; in tests a spy.
  */
 export interface StepReporter {
-  report(runId: string, stepId: string, status: 'pending' | 'running' | 'done'): void;
+  report(runId: string, stepId: string, status: WorkflowStepReportStatus): void;
 }
 
 export interface ProgrammaticRunHostArgs {
@@ -112,7 +112,7 @@ export interface ProgrammaticRunHostArgs {
 export class ProgrammaticRunHost implements ControllerHost {
   constructor(private readonly args: ProgrammaticRunHostArgs) {}
 
-  reportStep(stepId: string, status: 'running' | 'done'): void {
+  reportStep(stepId: string, status: WorkflowStepReportStatus): void {
     try {
       this.args.reporter.report(this.args.runId, stepId, status);
     } catch (err) {

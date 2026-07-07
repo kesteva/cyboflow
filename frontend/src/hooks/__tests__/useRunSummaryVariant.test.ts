@@ -88,6 +88,19 @@ describe('isTerminalStepReached', () => {
     expect(isTerminalStepReached(ps)).toBe(true);
   });
 
+  it("is true when steps are settled as a mix of 'done' and 'skipped' (a surviving skip marker must not withhold 'complete')", () => {
+    const ps = phaseState({
+      currentStepId: 'sprint-verify',
+      stepStates: [
+        { stepId: 'approve-plan', status: 'done' },
+        { stepId: 'execute-tasks', status: 'done' },
+        { stepId: 'sprint-verify', status: 'skipped' },
+        { stepId: 'human-review', status: 'done' },
+      ],
+    });
+    expect(isTerminalStepReached(ps)).toBe(true);
+  });
+
   it('is false at a mid-flow step with concrete non-done step state (the interactive turn-end-rest regression, 2026-07-06)', () => {
     const ps = phaseState({
       currentStepId: 'execute-tasks',

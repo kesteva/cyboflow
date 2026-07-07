@@ -369,12 +369,23 @@ export interface WorkflowDefinition {
 }
 
 /**
+ * The status a step REPORTS to the live timeline — every step status except the
+ * initial 'pending' placeholder (a step is never reported back to 'pending').
+ * Shared by the three programmatic reporter layers so they can't drift:
+ * `ControllerHost.reportStep` → `StepReporter.report` → the
+ * `buildStepTransitionEvent` adapter. 'failed' / 'skipped' are the terminal
+ * markers surfaced in the step timeline (migration 033 outcomes 'rejected' /
+ * 'canceled' intentionally still report 'done' — see WorkflowController).
+ */
+export type WorkflowStepReportStatus = 'running' | 'done' | 'failed' | 'skipped';
+
+/**
  * Runtime state snapshot for a single workflow step during a live run.
  * Consumed by the progress rail and the tRPC subscription (TASK-766).
  */
 export interface WorkflowStepState {
   stepId: string;
-  status: 'pending' | 'running' | 'done';
+  status: 'pending' | WorkflowStepReportStatus;
 }
 
 /**

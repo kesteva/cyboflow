@@ -518,6 +518,33 @@ describe('buildStepTransitionEvent — step_transition raw_events persistence', 
     expect(payload.status).toBe('done');
   });
 
+  it("(f) accepts + persists the terminal 'failed'/'skipped' markers (emit + raw_events)", () => {
+    for (const status of ['failed', 'skipped'] as const) {
+      const { db, runId } = seedForBridge('sprint');
+      const adapter = dbAdapter(db);
+      emittedEvents = [];
+
+      const event = buildStepTransitionEvent(runId, 'execute-tasks', status, adapter);
+
+      // The widened status flows through the emit verbatim…
+      expect(event).not.toBeNull();
+      expect(event!.status).toBe(status);
+      expect(emittedEvents).toHaveLength(1);
+      expect(emittedEvents[0].status).toBe(status);
+
+      // …current_step_id still points at the step where the run stopped/last acted…
+      const row = db
+        .prepare('SELECT current_step_id FROM workflow_runs WHERE id = ?')
+        .get(runId) as { current_step_id: string | null } | undefined;
+      expect(row?.current_step_id).toBe('execute-tasks');
+
+      // …and the persisted raw_events row carries the marker.
+      expect(countRawEvents(db, runId)).toBe(1);
+      const { payload } = readStepTransitionRow(db, runId);
+      expect(payload.status).toBe(status);
+    }
+  });
+
   it('(f) persists from the shared handler path regardless of substrate (no substrate fork)', () => {
     // The bridge has no substrate parameter — the SAME call site serves both the
     // SDK and interactive substrates, so a single valid transition always lands

@@ -31,6 +31,7 @@ import { SPRINT_BATCH_MAX_TASKS } from '../../../../../shared/types/sprintBatch'
 import { sprintLaneEvents, sprintLaneChannel, SprintLaneStore } from '../../sprintLaneStore';
 import { countPendingBlockingReviewItems } from '../../reviewItemListing';
 import { ReviewItemRouter } from '../../reviewItemRouter';
+import { StepResultStore } from '../../stepResultStore';
 import { ApprovalRouter } from '../../approvalRouter';
 import { QuestionRouter } from '../../questionRouter';
 import { TaskChangeRouter } from '../../taskChangeRouter';
@@ -2352,13 +2353,20 @@ export const runsRouter = router({
 
       const currentStepId = row.current_step_id;
 
-      // Terminal run statuses: when the run has completed, failed, or been canceled,
-      // the current step's status must be 'done' — not 'running'. Without this check,
-      // a run that completes before the renderer's getPhaseState query resolves (which
-      // causes subscription 'done' events to be silently dropped) would show the current
+      // Terminal run statuses: when the run has completed or been canceled, every
+      // step collapses to 'done' — not 'running'. Without this check, a run that
+      // completes before the renderer's getPhaseState query resolves (which causes
+      // subscription 'done' events to be silently dropped) would show the current
       // step as perpetually 'running'.
-      const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'canceled']);
-      const runIsTerminal = TERMINAL_RUN_STATUSES.has(row.run_status);
+      //
+      // A FAILED run is terminal too but deliberately KEEPS the positional
+      // derivation (before → 'done', at → 'done', after → 'pending'): steps the
+      // walk never reached must not render as DONE beside the FAILED marker the
+      // overlay below promotes — and this mirrors exactly what the live 'failed'
+      // transition event painted before the reload (mergeTransition sets
+      // after-steps to 'pending').
+      const runIsAllDone = row.run_status === 'completed' || row.run_status === 'canceled';
+      const runIsFailed = row.run_status === 'failed';
 
       // Flatten all steps across phases in declaration order.
       const flatSteps = definition.phases.flatMap((p) => p.steps);
@@ -2371,19 +2379,47 @@ export const runsRouter = router({
 
       const stepStates: WorkflowStepState[] = flatSteps.map((s, i) => {
         let status: WorkflowStepState['status'];
-        if (runIsTerminal) {
+        if (runIsAllDone) {
           status = 'done';
         } else if (matchIndex === -1) {
           status = 'pending';
         } else if (i < matchIndex) {
           status = 'done';
         } else if (i === matchIndex) {
-          status = 'running';
+          // Failed runs are terminal: the step the run stopped on must not show
+          // 'running' (the overlay below promotes it to 'failed' when recorded).
+          status = runIsFailed ? 'done' : 'running';
         } else {
           status = 'pending';
         }
         return { stepId: s.id, status };
       });
+
+      // Overlay the persisted per-step OUTCOMES (migration 033). The positional
+      // derivation above collapses every settled step to 'done', but the
+      // programmatic controller records rich outcomes to step_results. Promote a
+      // 'done' step to 'failed'/'skipped' when its recorded outcome says so, so the
+      // timeline distinguishes a failed/skipped step from a completed one.
+      // Constraints:
+      //   - ONLY 'done' is overlaid — a step being re-driven right now ('running')
+      //     must not show a stale marker, and a not-yet-reached step ('pending')
+      //     has no outcome to show.
+      //   - 'rejected'/'canceled' outcomes are LEFT as 'done' (they aren't timeline
+      //     markers — mirrors WorkflowController.reportStep's collapse).
+      //   - Store uninitialized (early boot / orchestrated-only DBs) ⇒ null ⇒ exact
+      //     legacy behavior (no overlay).
+      const stepResultStore = StepResultStore.tryGetInstance();
+      if (stepResultStore !== null) {
+        const outcomeByStepId = new Map(
+          stepResultStore.listForRun(input.runId).map((r) => [r.stepId, r.outcome] as const),
+        );
+        for (const s of stepStates) {
+          if (s.status !== 'done') continue;
+          const outcome = outcomeByStepId.get(s.stepId);
+          if (outcome === 'failed') s.status = 'failed';
+          else if (outcome === 'skipped') s.status = 'skipped';
+        }
+      }
 
       return { definition, currentStepId, stepStates };
     }),

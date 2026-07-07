@@ -242,7 +242,7 @@ export class WorkflowController {
               attempts: 1,
               error: 'sprint has incomplete or blocked tasks — closing stage skipped',
             });
-            this.host.reportStep(step.id, 'done');
+            this.host.reportStep(step.id, 'skipped');
             this.host.log?.(
               'warn',
               `skipping '${step.id}': sprint has incomplete/blocked tasks; advancing to the human gate`,
@@ -441,7 +441,7 @@ export class WorkflowController {
         if (step.optional === true) {
           this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'skipped', attempts: attempt, error: lastError });
           this.host.log?.('warn', `optional step '${step.id}' failed; skipping`);
-          this.host.reportStep(step.id, 'done');
+          this.host.reportStep(step.id, 'skipped');
           i += 1;
           continue;
         }
@@ -790,7 +790,7 @@ export class WorkflowController {
         // The human accepts the failure — skip the step and advance.
         this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'skipped', attempts: attempt, error: lastError });
         this.host.log?.('warn', `triage: human accepted failure of step '${step.id}'; skipping`);
-        this.host.reportStep(step.id, 'done');
+        this.host.reportStep(step.id, 'skipped');
         return { terminal: false, i: i + 1 };
       }
       if (verdict === 'abort') {
@@ -807,7 +807,7 @@ export class WorkflowController {
     }
 
     this.pushStep(steps, { stepId: step.id, phaseId: phase.id, outcome: 'failed', attempts: attempt, error: lastError });
-    this.host.reportStep(step.id, 'done');
+    this.host.reportStep(step.id, 'failed');
     return { terminal: true, result: { outcome: 'failed', steps, failedStepId: step.id } };
   }
 

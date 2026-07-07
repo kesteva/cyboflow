@@ -135,7 +135,13 @@ function isValidStepId(
  * @param runId   The workflow_runs.id for the run being transitioned.
  * @param stepId  The step id to set as current_step_id. Caller resolves this
  *                via resolveInitialStepId() before calling.
- * @param status  The new step status ('pending' | 'running' | 'done').
+ * @param status  The new step status ('pending' | 'running' | 'done' | 'failed'
+ *                | 'skipped'). 'failed'/'skipped' are the programmatic terminal
+ *                markers (WorkflowController); both are persisted to the
+ *                step_transition raw_events row and set current_step_id to this
+ *                step (where the run stopped/last acted). Only 'done' fires the
+ *                completion auto-mint hook below — a failed/skipped step mints
+ *                no deliverable.
  * @param db      Narrow DatabaseLike interface.
  * @param logger  Optional LoggerLike for warn-level fallback logging.
  */

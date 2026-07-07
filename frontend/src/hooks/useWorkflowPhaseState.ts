@@ -54,10 +54,19 @@ const INITIAL_STATE: UseWorkflowPhaseStateResult = {
 /**
  * Merges a WorkflowStepTransitionEvent delta into the current snapshot.
  *
- * Ordering rules (applied to flat step order across all phases):
- *   - Steps before event.stepId → 'done'
- *   - Step at event.stepId      → event.status
- *   - Steps after event.stepId  → 'pending'
+ * Ordering rules (applied to flat step order across all phases), MARKER-PRESERVING:
+ *   - Bare run-level 'done' event: every step → 'done', EXCEPT steps already
+ *     carrying a terminal 'failed'/'skipped' marker (those are preserved).
+ *   - Positional event (status 'running'/'failed'/'skipped') at flat index idx:
+ *       · step at idx        → event.status
+ *       · steps AFTER idx     → 'pending'
+ *       · steps BEFORE idx    → keep an existing 'failed'/'skipped' marker, else 'done'
+ *
+ * Rationale for marker preservation: after an optional-step SKIP the walk CONTINUES,
+ * so the next step's 'running' event must NOT bleach the earlier skip marker back to
+ * 'done'. A RETRY re-runs AT the marked step's OWN idx, so its 'running' event lands
+ * on i === idx and correctly clears that step's stale marker (the marker only survives
+ * as a "before" step, never as the event's own step).
  *
  * Returns prev unchanged if:
  *   - prev.definition is null (race protection — query hasn't resolved yet)
@@ -65,7 +74,7 @@ const INITIAL_STATE: UseWorkflowPhaseStateResult = {
  */
 function mergeTransition(
   prev: UseWorkflowPhaseStateResult,
-  event: { stepId: string; status: 'pending' | 'running' | 'done' },
+  event: { stepId: string; status: WorkflowStepState['status'] },
 ): UseWorkflowPhaseStateResult {
   if (prev.definition === null) {
     // Query hasn't resolved yet — drop this event.
@@ -80,12 +89,21 @@ function mergeTransition(
     return prev;
   }
 
+  // Prior status per step id, so terminal markers ('failed'/'skipped') already
+  // recorded on a step survive a later positional event landing past them.
+  const prevStatusById = new Map(prev.stepStates.map((s) => [s.stepId, s.status]));
+  const markerOrDone = (stepId: string): WorkflowStepState['status'] => {
+    const prior = prevStatusById.get(stepId);
+    return prior === 'failed' || prior === 'skipped' ? prior : 'done';
+  };
+
   const newStates: WorkflowStepState[] = orderedIds.map((stepId, i) => {
     let status: WorkflowStepState['status'];
     if (event.status === 'done') {
-      status = 'done';
+      // Run-level all-done: keep terminal markers, everything else → 'done'.
+      status = markerOrDone(stepId);
     } else if (i < idx) {
-      status = 'done';
+      status = markerOrDone(stepId);
     } else if (i === idx) {
       status = event.status;
     } else {

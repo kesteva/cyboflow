@@ -21,7 +21,7 @@
  * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3',
  * 'fs', or any concrete service in main/src/services/*. Shared types only.
  */
-import type { WorkflowStep } from '../../../../shared/types/workflows';
+import type { WorkflowStep, WorkflowStepReportStatus } from '../../../../shared/types/workflows';
 import type { SprintBatchTaskStatus } from '../../../../shared/types/sprintBatch';
 
 /**
@@ -216,11 +216,23 @@ export interface FanOutDriver {
 export interface ControllerHost {
   /**
    * Report a step boundary to the live timeline. The controller calls this with
-   * 'running' as it begins each step and 'done' when the step settles (whether
-   * completed, skipped, failed, or rejected) — mirroring the orchestrated path's
-   * single running/done pair per step. Must be fail-soft (never throw).
+   * 'running' as it begins each step and then a TERMINAL status as it settles:
+   *   - 'done'    — the step completed (or a gate approved / a loopback / triage
+   *                 retry re-drives it — those re-report 'done' before re-running).
+   *   - 'failed'  — a REQUIRED step exhausted its retry + loopback + triage budget
+   *                 (handleRequiredFailure's terminal arm).
+   *   - 'skipped' — an OPTIONAL step failed, a sprint's closing stage was gated off
+   *                 (incomplete lanes), or the human ACCEPTED a required failure at
+   *                 the triage-escalation gate.
+   * The 'rejected' (gate reject / revise-budget-exhausted) and 'canceled' (run
+   * abort / fan-out cancel / gate abort) OUTCOMES deliberately still report 'done',
+   * NOT a timeline marker: a rejected gate RESTS awaiting the human's decision, so a
+   * red "FAILED" marker there would mislead; and cancellation is a run-level affair
+   * the run's own status already conveys. The rich outcome is persisted to
+   * step_results regardless (migration 033) — this is purely the timeline's view.
+   * Must be fail-soft (never throw).
    */
-  reportStep(stepId: string, status: 'running' | 'done'): void;
+  reportStep(stepId: string, status: WorkflowStepReportStatus): void;
 
   /**
    * Resolve a human-gate step. The production host integrates with the review /

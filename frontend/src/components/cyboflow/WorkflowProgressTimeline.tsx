@@ -146,7 +146,22 @@ function borderClassForStatus(status: WorkflowStepState['status']): string {
   switch (status) {
     case 'done':    return 'border-status-success';
     case 'running': return 'border-status-error'; // fallback: status-running absent (IDEA-026 Q5)
+    case 'failed':  return 'border-status-error';
+    case 'skipped': return 'border-border-secondary'; // muted: an optional/gated-off step, not a defect
     case 'pending': return 'border-border-primary';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Status badge text color — keeps the uppercase status label consistent with
+// its left-border treatment (red for FAILED, muted for SKIPPED, secondary else).
+// ---------------------------------------------------------------------------
+
+function badgeClassForStatus(status: WorkflowStepState['status']): string {
+  switch (status) {
+    case 'failed':  return 'text-status-error';
+    case 'skipped': return 'text-text-muted';
+    default:        return 'text-text-secondary';
   }
 }
 
@@ -381,7 +396,7 @@ export function WorkflowProgressTimeline({
                         {step.name}
                       </span>
                       {/* Status badge */}
-                      <span className="ml-auto uppercase tracking-wide text-text-secondary">
+                      <span className={`ml-auto uppercase tracking-wide ${badgeClassForStatus(status)}`}>
                         {status}
                       </span>
                     </div>

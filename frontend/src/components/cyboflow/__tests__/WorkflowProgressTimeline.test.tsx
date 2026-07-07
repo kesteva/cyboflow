@@ -17,7 +17,7 @@
  *   9. Phase headers: swatch color, label, step count.
  */
 import '@testing-library/jest-dom';
-import { render, screen, act, fireEvent } from '@testing-library/react';
+import { render, screen, act, fireEvent, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
@@ -213,6 +213,34 @@ describe('WorkflowProgressTimeline', () => {
 
     const pendingItem = screen.getByTestId('step-item-task-verify');
     expect(pendingItem.className).toContain('border-border-primary');
+  });
+
+  it('renders failed step with border-status-error border and a text-status-error badge', () => {
+    const phaseState = makePhaseState({
+      stepStatuses: { implement: 'failed', 'write-tests': 'pending', 'task-verify': 'pending' },
+    });
+
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={phaseState} />);
+
+    const failedItem = screen.getByTestId('step-item-implement');
+    expect(failedItem.className).toContain('border-status-error');
+    // The status badge shows the (CSS-uppercased) label in the failed/red color.
+    const badge = within(failedItem).getByText('failed');
+    expect(badge.className).toContain('text-status-error');
+    expect(badge.className).toContain('uppercase');
+  });
+
+  it('renders skipped step with a muted border-border-secondary border and a text-text-muted badge', () => {
+    const phaseState = makePhaseState({
+      stepStatuses: { implement: 'skipped', 'write-tests': 'pending', 'task-verify': 'pending' },
+    });
+
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={phaseState} />);
+
+    const skippedItem = screen.getByTestId('step-item-implement');
+    expect(skippedItem.className).toContain('border-border-secondary');
+    const badge = within(skippedItem).getByText('skipped');
+    expect(badge.className).toContain('text-text-muted');
   });
 
   // ── AC2: Pulse animation on running bullet only ───────────────────────────

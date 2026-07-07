@@ -69,6 +69,7 @@ import type { ResumeRunDeps, ResumeRunResult } from '../../../resumeRunHandler';
 import { RunQueueRegistry } from '../../../RunQueueRegistry';
 import { ApprovalRouter } from '../../../approvalRouter';
 import { createTestDb, seedRun, seedApproval } from '../../../__test_fixtures__/orchestratorTestDb';
+import { StepResultStore, type StepResultRow } from '../../../stepResultStore';
 import { stepTransitionEvents } from '../events';
 import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../../../shared/types/workflows';
 import { buildStepTransitionEvent, resolveInitialStepId } from '../../../stepTransitionBridge';
@@ -2234,6 +2235,150 @@ describe('cyboflow.runs.getPhaseState', () => {
     const contextStep = result.stepStates.find((s) => s.stepId === 'context');
     expect(contextStep, 'context step not found in stepStates').toBeDefined();
     expect(contextStep!.status).toBe('running');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runs.getPhaseState — step_results outcome overlay (migration 033)
+//
+// The positional derivation collapses every settled step to 'done'; the overlay
+// promotes a 'done' step to 'failed'/'skipped' when the programmatic controller
+// recorded that outcome to step_results. Only 'done' is overlaid — a 'running'
+// step being re-driven and a not-yet-reached 'pending' step are left untouched,
+// and 'rejected'/'canceled' outcomes stay 'done'. When the store was never
+// initialized (tryGetInstance null) no overlay is applied. Failed runs keep the
+// POSITIONAL derivation (steps after the failure stay 'pending') instead of the
+// completed/canceled all-done collapse — see getPhaseState's runIsFailed branch.
+// ---------------------------------------------------------------------------
+
+/** createTestDbWithStepTracking + the migration-033 step_results table. */
+function createTestDbWithStepResults(): Database.Database {
+  const db = createTestDbWithStepTracking();
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS step_results (
+      run_id     TEXT NOT NULL,
+      step_id    TEXT NOT NULL,
+      phase_id   TEXT,
+      outcome    TEXT NOT NULL CHECK (outcome IN ('done', 'skipped', 'failed', 'rejected', 'canceled')),
+      attempts   INTEGER NOT NULL DEFAULT 1,
+      summary    TEXT,
+      error      TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (run_id, step_id)
+    );
+  `);
+  return db;
+}
+
+describe('cyboflow.runs.getPhaseState — step_results overlay (migration 033)', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDbWithStepResults();
+  });
+
+  afterEach(() => {
+    // The store is a module-level singleton — reset so a test that initializes it
+    // never leaks the overlay into an unrelated test.
+    StepResultStore._resetForTesting();
+  });
+
+  /** Insert a step_results row directly (bypasses the store — used to prove the
+   *  store-uninitialized legacy path where getPhaseState must NOT read this row). */
+  function insertStepResultRow(runId: string, stepId: string, outcome: StepResultRow['outcome']): void {
+    db.prepare(
+      `INSERT OR REPLACE INTO step_results (run_id, step_id, outcome, attempts)
+       VALUES (?, ?, ?, 1)`,
+    ).run(runId, stepId, outcome);
+  }
+
+  it("overlays a 'failed' outcome onto a failed run's failed step (rest stay done)", async () => {
+    const runId = 'run-gps-overlay-failed';
+    seedPhaseRun(db, runId, 'sprint', 'execute-tasks');
+    db.prepare(`UPDATE workflow_runs SET status = 'failed' WHERE id = ?`).run(runId);
+    StepResultStore.initialize(dbAdapter(db));
+    insertStepResultRow(runId, 'execute-tasks', 'failed');
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    const idx = result.stepStates.findIndex((s) => s.stepId === 'execute-tasks');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(result.stepStates[idx]!.status).toBe('failed');
+    // Failed runs keep the POSITIONAL derivation: steps the walk finished are
+    // 'done'; steps it never reached stay 'pending' — they must not render as
+    // green DONE beside the red FAILED marker (mirrors the live 'failed'
+    // transition event, which sets after-steps to 'pending').
+    result.stepStates.forEach((s, i) => {
+      if (i === idx) return;
+      expect(s.status, `step ${s.stepId}`).toBe(i < idx ? 'done' : 'pending');
+    });
+  });
+
+  it("overlays a 'skipped' outcome onto an earlier done step of a still-running run", async () => {
+    const runId = 'run-gps-overlay-skipped';
+    // Running run parked at 'sprint-verify' ⇒ earlier steps are positionally 'done',
+    // 'sprint-verify' is 'running'. An optional 'analyze-dependencies' was skipped.
+    seedPhaseRun(db, runId, 'sprint', 'sprint-verify');
+    StepResultStore.initialize(dbAdapter(db));
+    insertStepResultRow(runId, 'analyze-dependencies', 'skipped');
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    const skipped = result.stepStates.find((s) => s.stepId === 'analyze-dependencies');
+    const running = result.stepStates.find((s) => s.stepId === 'sprint-verify');
+    expect(skipped!.status).toBe('skipped');
+    expect(running!.status).toBe('running');
+  });
+
+  it("does NOT overlay a 'running' step (a re-driven step must not show a stale marker)", async () => {
+    const runId = 'run-gps-overlay-running-guard';
+    seedPhaseRun(db, runId, 'sprint', 'sprint-verify'); // sprint-verify is 'running'
+    StepResultStore.initialize(dbAdapter(db));
+    // A stale 'failed' from a prior attempt of the step being re-driven right now.
+    insertStepResultRow(runId, 'sprint-verify', 'failed');
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    const running = result.stepStates.find((s) => s.stepId === 'sprint-verify');
+    expect(running!.status).toBe('running'); // NOT 'failed'
+  });
+
+  it("leaves a 'rejected'/'canceled' outcome as 'done' (not a timeline marker)", async () => {
+    const runId = 'run-gps-overlay-rejected';
+    seedPhaseRun(db, runId, 'sprint', 'execute-tasks');
+    db.prepare(`UPDATE workflow_runs SET status = 'failed' WHERE id = ?`).run(runId);
+    StepResultStore.initialize(dbAdapter(db));
+    insertStepResultRow(runId, 'execute-tasks', 'rejected');
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    const execStep = result.stepStates.find((s) => s.stepId === 'execute-tasks');
+    expect(execStep!.status).toBe('done');
+  });
+
+  it('store uninitialized ⇒ exact legacy behavior (no overlay even with a matching row)', async () => {
+    const runId = 'run-gps-overlay-no-store';
+    seedPhaseRun(db, runId, 'sprint', 'execute-tasks');
+    db.prepare(`UPDATE workflow_runs SET status = 'failed' WHERE id = ?`).run(runId);
+    // A step_results row exists, but the store is NOT initialized (afterEach reset).
+    insertStepResultRow(runId, 'execute-tasks', 'failed');
+    expect(StepResultStore.tryGetInstance()).toBeNull();
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    const result = await caller.cyboflow.runs.getPhaseState({ runId });
+
+    // No overlay: the recorded-failed step derives positionally as plain 'done'
+    // (steps before it 'done', after it 'pending') — the 'failed' marker never
+    // appears without the store.
+    const idx = result.stepStates.findIndex((s) => s.stepId === 'execute-tasks');
+    expect(idx).toBeGreaterThanOrEqual(0);
+    result.stepStates.forEach((s, i) => {
+      expect(s.status, `step ${s.stepId}`).toBe(i <= idx ? 'done' : 'pending');
+    });
   });
 });
 

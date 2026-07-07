@@ -198,6 +198,108 @@ describe('useWorkflowPhaseState', () => {
     ]);
   });
 
+  // ── marker-preserving positional merge (failed/skipped) ─────────────────────
+
+  /** Capture the widened onData handler for the (single) subscription. */
+  function captureOnData(): (event: {
+    stepId: string;
+    status: WorkflowStepState['status'];
+    runId: string;
+    timestamp: string;
+  }) => void {
+    const args = subscribeSpy.mock.calls[0] as [
+      { runId: string },
+      {
+        onData: (event: {
+          stepId: string;
+          status: WorkflowStepState['status'];
+          runId: string;
+          timestamp: string;
+        }) => void;
+        onError: (err: unknown) => void;
+      },
+    ];
+    return args[1].onData;
+  }
+
+  it("marker preservation: a SKIP at idx 1 survives a later 'running' at idx 2", async () => {
+    const { result } = renderHook(() => useWorkflowPhaseState('r1'));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const onData = captureOnData();
+
+    // s2 is SKIPPED (the walk continues past an optional skip)…
+    await act(async () => {
+      onData({ runId: 'r1', stepId: 's2', status: 'skipped', timestamp: '2026-01-01T00:00:00Z' });
+    });
+    expect(result.current.stepStates).toEqual([
+      { stepId: 's1', status: 'done' },
+      { stepId: 's2', status: 'skipped' },
+      { stepId: 's3', status: 'pending' },
+    ]);
+
+    // …then s3 goes 'running'. The 'running' event must NOT bleach s2's skip marker
+    // back to 'done' (s2 is now a "before" step, preserved).
+    await act(async () => {
+      onData({ runId: 'r1', stepId: 's3', status: 'running', timestamp: '2026-01-01T00:00:01Z' });
+    });
+    expect(result.current.stepStates).toEqual([
+      { stepId: 's1', status: 'done' },
+      { stepId: 's2', status: 'skipped' },
+      { stepId: 's3', status: 'running' },
+    ]);
+  });
+
+  it("retry: a 'running' event AT the failed step's own idx clears its 'failed' marker", async () => {
+    const { result } = renderHook(() => useWorkflowPhaseState('r1'));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const onData = captureOnData();
+
+    // s2 FAILS…
+    await act(async () => {
+      onData({ runId: 'r1', stepId: 's2', status: 'failed', timestamp: '2026-01-01T00:00:00Z' });
+    });
+    expect(result.current.stepStates[1]).toEqual({ stepId: 's2', status: 'failed' });
+
+    // …a retry re-runs s2: the 'running' event lands on s2's OWN idx (i === idx), so
+    // it clears the stale marker rather than preserving it.
+    await act(async () => {
+      onData({ runId: 'r1', stepId: 's2', status: 'running', timestamp: '2026-01-01T00:00:01Z' });
+    });
+    expect(result.current.stepStates).toEqual([
+      { stepId: 's1', status: 'done' },
+      { stepId: 's2', status: 'running' },
+      { stepId: 's3', status: 'pending' },
+    ]);
+  });
+
+  it("bare run-level 'done' preserves existing failed/skipped markers", async () => {
+    const { result } = renderHook(() => useWorkflowPhaseState('r1'));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const onData = captureOnData();
+
+    // s2 FAILS…
+    await act(async () => {
+      onData({ runId: 'r1', stepId: 's2', status: 'failed', timestamp: '2026-01-01T00:00:00Z' });
+    });
+
+    // …then a bare run-level 'done' arrives. Everything → 'done' EXCEPT the marked
+    // step, which keeps 'failed'.
+    await act(async () => {
+      onData({ runId: 'r1', stepId: 's1', status: 'done', timestamp: '2026-01-01T00:00:01Z' });
+    });
+    expect(result.current.stepStates).toEqual([
+      { stepId: 's1', status: 'done' },
+      { stepId: 's2', status: 'failed' },
+      { stepId: 's3', status: 'done' },
+    ]);
+  });
+
   it('unsubscribes on unmount', async () => {
     const { unmount } = renderHook(() => useWorkflowPhaseState('r1'));
 

@@ -359,6 +359,19 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
 
     // The run did not reach the refine phase (epics never spawned).
     expect(spawner.calls.some((c) => c.prompt.includes('`epics`'))).toBe(false);
+
+    // A REJECTED gate rests awaiting the human's decision — it reports 'done', NOT
+    // a 'failed'/'skipped' marker (decision 2 collapse). No persisted step_transition
+    // row should carry a timeline marker.
+    const markerRows = db
+      .prepare(
+        `SELECT payload_json FROM raw_events
+          WHERE run_id = ? AND event_type = 'step_transition'`,
+      )
+      .all('run-rej')
+      .map((r) => JSON.parse((r as { payload_json: string }).payload_json) as { status: string })
+      .filter((p) => p.status === 'failed' || p.status === 'skipped');
+    expect(markerRows).toHaveLength(0);
   });
 
   it('default (no monitor): a failed step is escalated to the human review queue, approved (skipped), and the run continues', async () => {
@@ -408,6 +421,20 @@ describe('programmatic integration — real runner + controller + gate + DB', ()
       current_step_id: string | null;
     };
     expect(finalStep.current_step_id).toBe('decompose');
+
+    // The escalated-then-accepted 'context' step recorded a 'skipped' marker on the
+    // live timeline — the REAL reporter → buildStepTransitionEvent path persisted it
+    // (its LAST step_transition row is 'skipped', not 'done').
+    const contextStatuses = db
+      .prepare(
+        `SELECT payload_json FROM raw_events
+          WHERE run_id = ? AND event_type = 'step_transition' ORDER BY rowid ASC`,
+      )
+      .all('run-esc')
+      .map((r) => JSON.parse((r as { payload_json: string }).payload_json) as { step_id: string; status: string })
+      .filter((p) => p.step_id === 'context')
+      .map((p) => p.status);
+    expect(contextStatuses.at(-1)).toBe('skipped');
   });
 
   it("monitor: a 'retry' triage verdict recovers a transiently-failing step", async () => {
