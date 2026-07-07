@@ -17,7 +17,12 @@
  */
 import { randomUUID } from 'node:crypto';
 import type { DatabaseLike, LoggerLike } from './types';
-import type { ExperimentArm, ExperimentRow, ExperimentStatus } from '../../../shared/types/experiments';
+import type {
+  ExperimentArm,
+  ExperimentRow,
+  ExperimentSeedTaskRow,
+  ExperimentStatus,
+} from '../../../shared/types/experiments';
 import { isExperimentArmSettled } from '../../../shared/types/experiments';
 
 /** Fields required to seed a new experiments row (status defaults to 'running'). */
@@ -91,6 +96,71 @@ export function listExperimentsForProject(db: DatabaseLike, projectId: number): 
   return db
     .prepare('SELECT * FROM experiments WHERE project_id = ? ORDER BY created_at DESC, id DESC')
     .all(projectId) as ExperimentRow[];
+}
+
+// ---------------------------------------------------------------------------
+// experiment_seed_tasks (migration 051) — per-arm task-clone mapping for a
+// SPRINT experiment. NOT an entity table: these direct helpers own its writes
+// (the clone ROWS in `tasks` are still minted/swept through TaskChangeRouter).
+// ---------------------------------------------------------------------------
+
+/** One (original -> clone) pair for a single arm, inserted at start. */
+export interface SeedTaskClonePair {
+  originalTaskId: string;
+  cloneTaskId: string;
+}
+
+/** Insert the (experiment, arm, original -> clone) mapping rows for one arm. */
+export function insertExperimentSeedTasks(
+  db: DatabaseLike,
+  experimentId: string,
+  arm: ExperimentArm,
+  pairs: readonly SeedTaskClonePair[],
+): void {
+  if (pairs.length === 0) return;
+  const stmt = db.prepare(
+    `INSERT INTO experiment_seed_tasks (experiment_id, arm, original_task_id, clone_task_id)
+     VALUES (?, ?, ?, ?)`,
+  );
+  for (const p of pairs) {
+    stmt.run(experimentId, arm, p.originalTaskId, p.cloneTaskId);
+  }
+}
+
+/**
+ * All seed-task mapping rows for an experiment. Fail-soft: a pre-051 DB (no
+ * experiment_seed_tasks table) or any thrown query yields [] — an idea-seeded or
+ * pre-feature experiment simply has no rows, so the clone-sweep enumeration
+ * degrades to "no task clones", never a throw (mirrors recoverExperiments' pattern).
+ */
+export function listExperimentSeedTasks(db: DatabaseLike, experimentId: string): ExperimentSeedTaskRow[] {
+  try {
+    return db
+      .prepare('SELECT * FROM experiment_seed_tasks WHERE experiment_id = ? ORDER BY arm, original_task_id')
+      .all(experimentId) as ExperimentSeedTaskRow[];
+  } catch {
+    return [];
+  }
+}
+
+/** The clone task ids for one arm of an experiment (from the mapping table). */
+export function seedTaskCloneIdsForArm(
+  db: DatabaseLike,
+  experimentId: string,
+  arm: ExperimentArm,
+): string[] {
+  return listExperimentSeedTasks(db, experimentId)
+    .filter((r) => r.arm === arm)
+    .map((r) => r.clone_task_id);
+}
+
+/** Drop all seed-task mapping rows for an experiment (decide / discard / abandon close-out). Fail-soft on a pre-051 DB. */
+export function deleteExperimentSeedTasks(db: DatabaseLike, experimentId: string): void {
+  try {
+    db.prepare('DELETE FROM experiment_seed_tasks WHERE experiment_id = ?').run(experimentId);
+  } catch {
+    // Pre-051 DB (no table) — nothing to delete.
+  }
 }
 
 /** Stamp the mutable per-arm links (run ids / session ids / clone ids) — only the provided fields. */
@@ -240,10 +310,15 @@ export async function recoverExperiments(
 export interface HalfCreatedExperimentRecoveryDeps {
   /** FULL session-delete path (cancels hosted runs + removes the worktree). NEVER a bare worktree-remove. */
   dismissSession: (sessionId: string) => Promise<void>;
-  /** Hard-delete a run's experiment-tagged entities + the arm's seed clone. */
+  /** Hard-delete a run's experiment-tagged entities + the arm's seed idea clone + seed task clones. */
   deleteExperimentArmEntities: (
     projectId: number,
-    opts: { experimentId: string; runId: string; seedCloneId?: string | null },
+    opts: {
+      experimentId: string;
+      runId: string;
+      seedCloneId?: string | null;
+      seedTaskCloneIds?: string[];
+    },
   ) => Promise<void>;
   /** Optional warn logger — a dismissal failure is logged, never silently swallowed. */
   logger?: Pick<LoggerLike, 'warn'>;
@@ -259,10 +334,14 @@ export interface HalfCreatedExperimentRecoveryDeps {
  * arm worktrees forever.
  *
  * Order: dismiss session_a then session_b (each wrapped so a failure LOGS and still
- * lets the entity sweep run), THEN sweep both arms' entities. A null / never-created
- * session id is skipped; an unknown id is tolerated by the per-session catch.
+ * lets the entity sweep run), THEN sweep both arms' entities (idea seed clone +
+ * migration-051 seed TASK clones, enumerated from the mapping table), THEN drop the
+ * mapping rows. A null / never-created session id is skipped; an unknown id is
+ * tolerated by the per-session catch. Takes `db` so it can read the seed-task
+ * mapping (the store's write surface owns experiment_seed_tasks).
  */
 export async function dismissAndSweepHalfCreatedExperiment(
+  db: DatabaseLike,
   exp: ExperimentRow,
   deps: HalfCreatedExperimentRecoveryDeps,
 ): Promise<void> {
@@ -283,6 +362,7 @@ export async function dismissAndSweepHalfCreatedExperiment(
       experimentId: exp.id,
       runId: exp.run_a_id ?? '',
       seedCloneId: exp.seed_idea_clone_a_id,
+      seedTaskCloneIds: seedTaskCloneIdsForArm(db, exp.id, 'A'),
     })
     .catch(() => {});
   await deps
@@ -290,6 +370,8 @@ export async function dismissAndSweepHalfCreatedExperiment(
       experimentId: exp.id,
       runId: exp.run_b_id ?? '',
       seedCloneId: exp.seed_idea_clone_b_id,
+      seedTaskCloneIds: seedTaskCloneIdsForArm(db, exp.id, 'B'),
     })
     .catch(() => {});
+  deleteExperimentSeedTasks(db, exp.id);
 }

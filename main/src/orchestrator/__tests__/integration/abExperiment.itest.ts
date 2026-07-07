@@ -47,7 +47,12 @@ import { computeSpecHash } from '../../specHash';
 import { resolveRunFrozenSpec } from '../../runFrozenSpec';
 import { TaskChangeRouter } from '../../taskChangeRouter';
 import { ReviewItemRouter } from '../../reviewItemRouter';
-import { getExperiment, insertExperiment, reconcileExperimentStatus } from '../../experimentStore';
+import {
+  getExperiment,
+  insertExperiment,
+  listExperimentSeedTasks,
+  reconcileExperimentStatus,
+} from '../../experimentStore';
 import {
   startExperiment,
   decideExperiment,
@@ -73,6 +78,7 @@ import type { RunGitDiff } from '../../../../../shared/types/runFiles';
 // ---------------------------------------------------------------------------
 
 const WF_ID = 'wf-planner';
+const SPRINT_WF_ID = 'wf-sprint';
 const PROJECT_ID = 1;
 
 interface TestDb {
@@ -99,6 +105,10 @@ function buildMigrationDb(): TestDb {
   raw
     .prepare("INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, ?, 'planner', '{}')")
     .run(WF_ID, PROJECT_ID);
+  // The task-driven sprint workflow (migration 051 seed-task experiments).
+  raw
+    .prepare("INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, ?, 'sprint', '{}')")
+    .run(SPRINT_WF_ID, PROJECT_ID);
   return { service, raw, db: dbAdapter(raw), dir };
 }
 
@@ -158,6 +168,8 @@ interface ExpHarness {
   deps: ExperimentsDeps;
   dismissed: string[];
   canceled: string[];
+  /** Per-arm seedTaskIds the fake launcher received (migration 051 task-seeded arms). */
+  launchedSeedTaskIds: { A?: string[]; B?: string[] };
   /** review-item resolutions kicked off by the fail-soft resolveReviewItem seam. */
   resolvePromises: Promise<unknown>[];
 }
@@ -170,13 +182,15 @@ interface ExpHarness {
 function makeExpHarness(t: TestDb, registry: WorkflowRegistry, tcr: TaskChangeRouter): ExpHarness {
   const dismissed: string[] = [];
   const canceled: string[] = [];
+  const launchedSeedTaskIds: { A?: string[]; B?: string[] } = {};
   const resolvePromises: Promise<unknown>[] = [];
 
   const deps: ExperimentsDeps = {
     db: t.db,
     // Faked launch: resolve the pinned variant, drive the REAL createRun (arm runs
     // get real variant_id/experiment_id/experiment_arm/spec_hash), then stamp a
-    // synthetic worktree_path. No SDK spawn.
+    // synthetic worktree_path. No SDK spawn (so the sprint lane machinery is not
+    // exercised — see file header; the clone eligibility is still asserted directly).
     runLauncher: {
       launch: async (
         workflowId,
@@ -187,7 +201,7 @@ function makeExpHarness(t: TestDb, registry: WorkflowRegistry, tcr: TaskChangeRo
         sessionId,
         _pm,
         _bb,
-        _stids,
+        seedTaskIds,
         _pid,
         _em,
         _fids,
@@ -207,6 +221,7 @@ function makeExpHarness(t: TestDb, registry: WorkflowRegistry, tcr: TaskChangeRo
           ...(experiment ? { experimentId: experiment.experimentId, experimentArm: experiment.arm } : {}),
         });
         const arm = experiment?.arm ?? 'X';
+        if (arm === 'A' || arm === 'B') launchedSeedTaskIds[arm] = seedTaskIds;
         const worktreePath = `/wt/arm-${arm}`;
         t.raw.prepare('UPDATE workflow_runs SET worktree_path = ? WHERE id = ?').run(worktreePath, runId);
         return { runId, worktreePath, branchName: `b/${runId}`, permissionMode: 'default' as const };
@@ -254,7 +269,7 @@ function makeExpHarness(t: TestDb, registry: WorkflowRegistry, tcr: TaskChangeRo
       );
     },
   };
-  return { deps, dismissed, canceled, resolvePromises };
+  return { deps, dismissed, canceled, launchedSeedTaskIds, resolvePromises };
 }
 
 function makePairwiseWorker(
@@ -585,5 +600,81 @@ describe('Tier-3 A/B testing: variants, rotation, side-by-side experiments, pair
       status: 'abandoned',
       halfCreated: true,
     });
+  });
+
+  it('5. sprint task-seeded round trip: clones per arm (tagged+approved), arms launch with clone taskIds, decide folds body+stage back + sweeps all clones', async () => {
+    const variantA = registry.createVariantFromCurrent(SPRINT_WF_ID, 'sprint-a');
+    const variantB = registry.createVariantFromCurrent(SPRINT_WF_ID, 'sprint-b');
+    const h = makeExpHarness(t, registry, tcr);
+    setExperimentsDeps(h.deps);
+
+    // A sprint-eligible ORIGINAL task (approved + Ready-for-development, untagged).
+    const orig = (
+      await tcr.applyChange(PROJECT_ID, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'original task',
+        body: 'ORIGINAL TASK BODY',
+      })
+    ).taskId;
+
+    const res = await startExperiment(h.deps, {
+      projectId: PROJECT_ID,
+      workflowId: SPRINT_WF_ID,
+      variantAId: variantA.id,
+      variantBId: variantB.id,
+      seedTaskIds: [orig],
+    });
+
+    // Mapping rows: 1 original × 2 arms; each clone is real, experiment-tagged, approved.
+    const rows = listExperimentSeedTasks(t.db, res.experimentId);
+    expect(rows).toHaveLength(2);
+    const cloneA = rows.find((r) => r.arm === 'A')!.clone_task_id;
+    const cloneB = rows.find((r) => r.arm === 'B')!.clone_task_id;
+    for (const cloneId of [cloneA, cloneB]) {
+      expect(entityField(t, 'tasks', cloneId, 'experiment_id')).toBe(res.experimentId);
+      expect(entityField(t, 'tasks', cloneId, 'approved_at')).not.toBeNull();
+    }
+    // Clones are board-hidden; the original stays on the board.
+    const backlog = selectProjectBacklog(t.db, PROJECT_ID).map((r) => r.id);
+    expect(backlog).toContain(orig);
+    expect(backlog).not.toContain(cloneA);
+    expect(backlog).not.toContain(cloneB);
+
+    // Each arm launched with ITS clone ids as seedTaskIds (the sprint launch seam).
+    expect(h.launchedSeedTaskIds.A).toEqual([cloneA]);
+    expect(h.launchedSeedTaskIds.B).toEqual([cloneB]);
+    // Arm runs carry the experiment stamp (REAL createRun) on the sprint workflow.
+    expect(runField(t, res.armA.runId, 'experiment_id')).toBe(res.experimentId);
+    expect(runField(t, res.armA.runId, 'experiment_arm')).toBe('A');
+
+    // Winner arm A's clone evolves: new body + moved to 'Done' (position 9).
+    const doneStageId = (
+      t.raw.prepare('SELECT id FROM board_stages WHERE position = 9 LIMIT 1').get() as { id: string }
+    ).id;
+    t.raw.prepare('UPDATE tasks SET body = ? WHERE id = ?').run('WINNER TASK BODY', cloneA);
+    await tcr.applyChange(PROJECT_ID, {
+      actor: 'orchestrator',
+      entityType: 'task',
+      taskId: cloneA,
+      stageId: doneStageId,
+    });
+
+    setRunStatus(t, res.armA.runId, 'awaiting_review');
+    setRunStatus(t, res.armB.runId, 'awaiting_review');
+    expect(reconcileExperimentStatus(t.db, res.experimentId)).toMatchObject({ status: 'grading' });
+
+    const dec = await decideExperiment(h.deps, res.experimentId, res.armA.runId);
+    expect(dec.status).toBe('decided');
+
+    // Original folded from the WINNER clone: body REPLACED + moved to the clone's stage.
+    expect(entityField(t, 'tasks', orig, 'body')).toBe('WINNER TASK BODY');
+    expect(entityField(t, 'tasks', orig, 'stage_id')).toBe(doneStageId);
+    expect(entityField(t, 'tasks', orig, 'experiment_id')).toBeNull();
+    // Every clone swept + mapping cleared; the original survives on the board.
+    expect(entityExists(t, 'tasks', cloneA)).toBe(false);
+    expect(entityExists(t, 'tasks', cloneB)).toBe(false);
+    expect(entityExists(t, 'tasks', orig)).toBe(true);
+    expect(listExperimentSeedTasks(t.db, res.experimentId)).toEqual([]);
   });
 });

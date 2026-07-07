@@ -749,8 +749,10 @@ export class TaskChangeRouter {
    * its `experiment_id === experimentId` (belt-and-braces per entity), reusing the
    * same epic-cascade child-sparing shape. Enumerates the run's created
    * epics/tasks/ideas (entity_events) PLUS the explicit orchestrator-created seed
-   * clone (`seedCloneId`, which has no run-created event). Routes each delete
-   * through applyDelete (actor 'orchestrator', exempt from the active-run guard).
+   * IDEA clone (`seedCloneId`) AND the explicit orchestrator-created seed TASK
+   * clones (`seedTaskCloneIds`, migration 051) — all three of which have NO
+   * run-created event. Routes each delete through applyDelete (actor 'orchestrator',
+   * exempt from the active-run guard).
    *
    * HARD-delete, not archive: experiment entities were NEVER on the board (hidden
    * by the tag the whole time), so archiving would surface throwaway drafts as
@@ -759,9 +761,20 @@ export class TaskChangeRouter {
    */
   async deleteExperimentArmEntities(
     projectId: number,
-    opts: { experimentId: string; runId: string; seedCloneId?: string | null },
+    opts: {
+      experimentId: string;
+      runId: string;
+      seedCloneId?: string | null;
+      /**
+       * Explicit orchestrator-created seed TASK clones (migration 051). Like
+       * `seedCloneId` these carry no run-created entity_event, so they are swept by
+       * id (not enumerated from the run) — each still passes the per-entity
+       * experiment gate before deletion.
+       */
+      seedTaskCloneIds?: string[];
+    },
   ): Promise<void> {
-    const { experimentId, runId, seedCloneId } = opts;
+    const { experimentId, runId, seedCloneId, seedTaskCloneIds } = opts;
 
     // A target is swept iff its experiment_id matches. Fail-soft: a vanished row
     // or a pre-049 DB (no experiment_id column) spares it (never a wrong delete).
@@ -829,13 +842,28 @@ export class TaskChangeRouter {
       }
     }
 
-    // The explicit orchestrator-created seed clone (no run-created event links it).
-    // Its applyDelete cascade claims any epics/tasks still parented under it.
+    // The explicit orchestrator-created seed IDEA clone (no run-created event links
+    // it). Its applyDelete cascade claims any epics/tasks still parented under it.
     if (seedCloneId && matchesExperiment('ideas', seedCloneId)) {
       try {
         await this.applyDelete(projectId, { actor: 'orchestrator', entityType: 'idea', taskId: seedCloneId, runId });
       } catch {
         /* best-effort */
+      }
+    }
+
+    // The explicit orchestrator-created seed TASK clones (migration 051 — one per
+    // selected seed task, per arm). Each carries no run-created event, so it is
+    // swept by id here (mirroring seedCloneId); the per-entity experiment gate
+    // still guards each delete against cross-experiment contamination.
+    if (seedTaskCloneIds && seedTaskCloneIds.length > 0) {
+      for (const cloneTaskId of seedTaskCloneIds) {
+        if (!matchesExperiment('tasks', cloneTaskId)) continue;
+        try {
+          await this.applyDelete(projectId, { actor: 'orchestrator', entityType: 'task', taskId: cloneTaskId, runId });
+        } catch {
+          /* best-effort */
+        }
       }
     }
   }

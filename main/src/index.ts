@@ -2542,7 +2542,7 @@ app.whenReady().then(async () => {
     // which closes over cancelHostedRunsImpl (assigned above) + experimentsDb.
     try {
       await recoverExperiments(db, async (exp) => {
-        await dismissAndSweepHalfCreatedExperiment(exp, {
+        await dismissAndSweepHalfCreatedExperiment(db, exp, {
           dismissSession: dismissSessionFully,
           deleteExperimentArmEntities: (projectId, opts) =>
             TaskChangeRouter.getInstance().deleteExperimentArmEntities(projectId, opts),

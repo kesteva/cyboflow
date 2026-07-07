@@ -18,7 +18,7 @@ import {
   abandonExperiment,
   type ExperimentsDeps,
 } from '../trpc/routers/experiments';
-import { getExperiment } from '../experimentStore';
+import { getExperiment, listExperimentSeedTasks } from '../experimentStore';
 import type { WorkflowVariantRow } from '../../../../shared/types/experiments';
 
 function buildDb(): Database.Database {
@@ -49,15 +49,33 @@ function buildDb(): Database.Database {
     status TEXT NOT NULL DEFAULT 'running', winner_run_id TEXT, winner_arm TEXT, merge_sha TEXT,
     decided_at TEXT, rerun_of_experiment_id TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);`);
+  db.exec(`CREATE TABLE experiment_seed_tasks (
+    experiment_id TEXT NOT NULL, arm TEXT NOT NULL CHECK (arm IN ('A','B')),
+    original_task_id TEXT NOT NULL, clone_task_id TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (experiment_id, arm, original_task_id), UNIQUE (clone_task_id));`);
   db.prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf', 1, 'planner', '{}')`).run();
+  // A sprint workflow so the task-seeded experiment path (migration 051) can resolve
+  // workflow.name === 'sprint'.
+  db.prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-sprint', 1, 'sprint', '{}')`).run();
   return db;
 }
 
 function variant(id: string): WorkflowVariantRow {
+  // Sprint-experiment tests name their variants '...-sprint' so they resolve to the
+  // 'wf-sprint' workflow (the variant→workflow match check in startExperiment).
+  const workflowId = id.includes('sprint') ? 'wf-sprint' : 'wf';
   return {
-    id, workflow_id: 'wf', label: id, spec_json: '{}', agent_overrides_json: null,
+    id, workflow_id: workflowId, label: id, spec_json: '{}', agent_overrides_json: null,
     model: null, execution_model: null, weight: 1, status: 'draft', created_at: '', updated_at: '',
   };
+}
+
+/** Recorded launch invocation: arm + the seedTaskIds (position 9) it received. */
+interface RecordedLaunch {
+  arm: 'A' | 'B' | undefined;
+  runId: string;
+  seedTaskIds: string[] | undefined;
 }
 
 interface Harness {
@@ -66,6 +84,7 @@ interface Harness {
   dismissed: string[];
   canceled: string[];
   activated: string[];
+  launches: RecordedLaunch[];
   failArmB: { value: boolean };
 }
 
@@ -76,12 +95,13 @@ function makeHarness(): Harness {
   const dismissed: string[] = [];
   const canceled: string[] = [];
   const activated: string[] = [];
+  const launches: RecordedLaunch[] = [];
   const failArmB = { value: false };
 
   const deps: ExperimentsDeps = {
     db,
     runLauncher: {
-      launch: async (_wf, _pp, _sub, _tid, ideaId, _sid, _pm, _bb, _stids, _pid, _em, _fids, _model, _ev, opts) => {
+      launch: async (workflowId, _pp, _sub, _tid, ideaId, _sid, _pm, _bb, seedTaskIds, _pid, _em, _fids, _model, _ev, opts) => {
         if (opts?.experiment?.arm === 'B' && failArmB.value) {
           throw new Error('simulated arm B launch failure');
         }
@@ -89,9 +109,10 @@ function makeHarness(): Harness {
         raw
           .prepare(
             `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, experiment_id, seed_idea_id)
-             VALUES (?, 'wf', 1, 'running', 'default', ?, ?)`,
+             VALUES (?, ?, 1, 'running', 'default', ?, ?)`,
           )
-          .run(runId, opts?.experiment?.experimentId ?? null, ideaId ?? null);
+          .run(runId, workflowId, opts?.experiment?.experimentId ?? null, ideaId ?? null);
+        launches.push({ arm: opts?.experiment?.arm, runId, seedTaskIds });
         return { runId, worktreePath: `/wt/${runId}`, branchName: `b/${runId}`, permissionMode: 'default' };
       },
     },
@@ -108,14 +129,19 @@ function makeHarness(): Harness {
       canceled.push(rid);
     },
     getVariant: (id) => variant(id),
-    getWorkflow: () => ({ id: 'wf', name: 'planner' }),
+    getWorkflow: (id) => {
+      const row = raw.prepare('SELECT id, name FROM workflows WHERE id = ?').get(id) as
+        | { id: string; name: string }
+        | undefined;
+      return row ? { id: row.id, name: row.name } : null;
+    },
     getProjectPath: () => '/tmp/p1',
     setVariantStatus: (id) => {
       activated.push(id);
     },
     setVariantWeight: () => {},
   };
-  return { db: raw, deps, dismissed, canceled, activated, failArmB };
+  return { db: raw, deps, dismissed, canceled, activated, launches, failArmB };
 }
 
 /** Simulate an arm agent creating an epic + child task under its run (tagged via run.experiment_id). */
@@ -431,5 +457,233 @@ describe('experiments router orchestration (slice B)', () => {
     expect(exists(h.db, 'ideas', exp0.seed_idea_clone_b_id as string)).toBe(true);
     expect(h.dismissed).toHaveLength(0);
     expect(getExperiment(dbAdapter(h.db), res.experimentId)!.status).toBe('running');
+  });
+
+  // --- Migration 051: sprint task-seeded experiments -------------------------
+
+  /** Create a sprint-eligible ORIGINAL task (approved + Ready-for-dev, untagged). */
+  async function seedEligibleTask(h: Harness, title: string, body: string): Promise<string> {
+    const res = await h.deps.taskChangeRouter.applyChange(1, {
+      actor: 'user',
+      entityType: 'task',
+      title,
+      body,
+    });
+    return res.taskId;
+  }
+
+  it('start (task-seeded sprint): clones each task per arm, records the mapping, launches arms with clone taskIds', async () => {
+    const h = makeHarness();
+    const t1 = await seedEligibleTask(h, 'T1', 'body-1');
+    const t2 = await seedEligibleTask(h, 'T2', 'body-2');
+
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf-sprint',
+      variantAId: 'vA-sprint',
+      variantBId: 'vB-sprint',
+      seedTaskIds: [t1, t2],
+    });
+
+    // Mapping rows: 2 originals × 2 arms = 4, each linking an original to a distinct clone.
+    const rows = listExperimentSeedTasks(dbAdapter(h.db), res.experimentId);
+    expect(rows).toHaveLength(4);
+    const armAClones = rows.filter((r) => r.arm === 'A').map((r) => r.clone_task_id);
+    const armBClones = rows.filter((r) => r.arm === 'B').map((r) => r.clone_task_id);
+    expect(armAClones).toHaveLength(2);
+    expect(armBClones).toHaveLength(2);
+    // Originals map to the two seeds; arm-A and arm-B clones are disjoint.
+    expect(rows.filter((r) => r.arm === 'A').map((r) => r.original_task_id).sort()).toEqual([t1, t2].sort());
+    expect(new Set([...armAClones, ...armBClones]).size).toBe(4);
+
+    // Each clone is a real, HIDDEN (experiment-tagged) + APPROVED task at a
+    // sprint-eligible stage (so createForRun's eligibility filter would accept it).
+    for (const cloneId of [...armAClones, ...armBClones]) {
+      expect(field(h.db, 'tasks', cloneId, 'experiment_id')).toBe(res.experimentId);
+      expect(field(h.db, 'tasks', cloneId, 'approved_at')).not.toBeNull();
+    }
+
+    // The originals were NOT tagged (they stay on the board).
+    expect(field(h.db, 'tasks', t1, 'experiment_id')).toBeNull();
+
+    // Each arm launched with ITS clone ids as seedTaskIds (never an ideaId/taskId).
+    const launchA = h.launches.find((l) => l.arm === 'A');
+    const launchB = h.launches.find((l) => l.arm === 'B');
+    expect(launchA?.seedTaskIds?.sort()).toEqual(armAClones.sort());
+    expect(launchB?.seedTaskIds?.sort()).toEqual(armBClones.sort());
+  });
+
+  it('rejects providing BOTH a seed idea and seed tasks', async () => {
+    const h = makeHarness();
+    const idea = await h.deps.taskChangeRouter.applyChange(1, { actor: 'user', entityType: 'idea', title: 'seed' });
+    const t1 = await seedEligibleTask(h, 'T1', 'b');
+    await expect(
+      startExperiment(h.deps, {
+        projectId: 1,
+        workflowId: 'wf-sprint',
+        variantAId: 'vA-sprint',
+        variantBId: 'vB-sprint',
+        seedIdeaId: idea.taskId,
+        seedTaskIds: [t1],
+      }),
+    ).rejects.toThrow(/either a seed idea or seed tasks/i);
+    expect(h.launches).toHaveLength(0);
+  });
+
+  it('rejects an ineligible seed task (not approved / wrong stage / foreign)', async () => {
+    const h = makeHarness();
+    const good = await seedEligibleTask(h, 'good', 'b');
+    // A PENDING (unapproved) task: created during a plan-gated run leaves approved_at NULL.
+    // Simpler here: create then move it to a below-ready stage so it fails position >= 6.
+    const pending = await seedEligibleTask(h, 'pending', 'b');
+    // Move `pending` to the position-1 (Idea) stage — orchestrator can set any stage.
+    const stage1 = (h.db.prepare('SELECT id FROM board_stages WHERE position = 1 LIMIT 1').get() as { id: string }).id;
+    await h.deps.taskChangeRouter.applyChange(1, {
+      actor: 'orchestrator', entityType: 'task', taskId: pending, stageId: stage1,
+    });
+    await expect(
+      startExperiment(h.deps, {
+        projectId: 1,
+        workflowId: 'wf-sprint',
+        variantAId: 'vA-sprint',
+        variantBId: 'vB-sprint',
+        seedTaskIds: [good, pending],
+      }),
+    ).rejects.toThrow(/not eligible for a sprint experiment/i);
+    expect(h.launches).toHaveLength(0);
+  });
+
+  it('rejects seed tasks on a NON-sprint workflow, and a sprint with NO seed tasks', async () => {
+    const h = makeHarness();
+    const t1 = await seedEligibleTask(h, 'T1', 'b');
+    // seedTasks on a planner workflow → rejected.
+    await expect(
+      startExperiment(h.deps, {
+        projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB', seedTaskIds: [t1],
+      }),
+    ).rejects.toThrow(/only valid for the 'sprint' workflow/i);
+    // A sprint experiment with NO seed tasks → rejected.
+    await expect(
+      startExperiment(h.deps, {
+        projectId: 1, workflowId: 'wf-sprint', variantAId: 'vA-sprint', variantBId: 'vB-sprint',
+      }),
+    ).rejects.toThrow(/requires at least one seed task/i);
+    expect(h.launches).toHaveLength(0);
+  });
+
+  it('decide(winner) folds each winner task clone body+stage onto its original, then sweeps ALL clones + mapping rows', async () => {
+    const h = makeHarness();
+    const t1 = await seedEligibleTask(h, 'T1', 'orig-1');
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf-sprint',
+      variantAId: 'vA-sprint',
+      variantBId: 'vB-sprint',
+      seedTaskIds: [t1],
+    });
+    const rows = listExperimentSeedTasks(dbAdapter(h.db), res.experimentId);
+    const cloneA = rows.find((r) => r.arm === 'A')!.clone_task_id;
+    const cloneB = rows.find((r) => r.arm === 'B')!.clone_task_id;
+
+    // The winning arm A's clone evolves: new body + moved to a later ("Done") stage.
+    const doneStage = (h.db.prepare('SELECT id FROM board_stages WHERE position = 9 LIMIT 1').get() as { id: string }).id;
+    h.db.prepare('UPDATE tasks SET body = ? WHERE id = ?').run('WINNER-TASK-BODY', cloneA);
+    await h.deps.taskChangeRouter.applyChange(1, {
+      actor: 'orchestrator', entityType: 'task', taskId: cloneA, stageId: doneStage,
+    });
+
+    setRunStatus(h.db, res.armA.runId, 'awaiting_review');
+    setRunStatus(h.db, res.armB.runId, 'awaiting_review');
+
+    const dec = await decideExperiment(h.deps, res.experimentId, res.armA.runId);
+    expect(dec.status).toBe('decided');
+
+    // Original folded: body REPLACED from the winner clone, moved to the clone's stage.
+    expect(field(h.db, 'tasks', t1, 'body')).toBe('WINNER-TASK-BODY');
+    expect(field(h.db, 'tasks', t1, 'stage_id')).toBe(doneStage);
+    // approved_at on the original is untouched (still approved).
+    expect(field(h.db, 'tasks', t1, 'approved_at')).not.toBeNull();
+    // The original is never experiment-tagged.
+    expect(field(h.db, 'tasks', t1, 'experiment_id')).toBeNull();
+
+    // BOTH arms' clones swept + mapping rows cleared.
+    expect(exists(h.db, 'tasks', cloneA)).toBe(false);
+    expect(exists(h.db, 'tasks', cloneB)).toBe(false);
+    expect(listExperimentSeedTasks(dbAdapter(h.db), res.experimentId)).toEqual([]);
+    // Loser session dismissed; winner session kept.
+    const exp0 = getExperiment(dbAdapter(h.db), res.experimentId)!;
+    expect(h.dismissed).toContain(exp0.session_b_id);
+    expect(h.dismissed).not.toContain(exp0.session_a_id);
+  });
+
+  it('decide(null) discard-both sweeps every task clone + clears the mapping rows; original untouched', async () => {
+    const h = makeHarness();
+    const t1 = await seedEligibleTask(h, 'T1', 'orig-1');
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf-sprint',
+      variantAId: 'vA-sprint',
+      variantBId: 'vB-sprint',
+      seedTaskIds: [t1],
+    });
+    const rows = listExperimentSeedTasks(dbAdapter(h.db), res.experimentId);
+    const cloneA = rows.find((r) => r.arm === 'A')!.clone_task_id;
+    const cloneB = rows.find((r) => r.arm === 'B')!.clone_task_id;
+    setRunStatus(h.db, res.armA.runId, 'completed');
+    setRunStatus(h.db, res.armB.runId, 'completed');
+
+    const dec = await decideExperiment(h.deps, res.experimentId, null);
+    expect(dec.winnerRunId).toBeNull();
+    // Both clones swept + mapping cleared; the original is untouched (still on the board).
+    expect(exists(h.db, 'tasks', cloneA)).toBe(false);
+    expect(exists(h.db, 'tasks', cloneB)).toBe(false);
+    expect(exists(h.db, 'tasks', t1)).toBe(true);
+    expect(field(h.db, 'tasks', t1, 'body')).toBe('orig-1');
+    expect(listExperimentSeedTasks(dbAdapter(h.db), res.experimentId)).toEqual([]);
+  });
+
+  it('task-seeded fold FAILS CLOSED: a fold error aborts before any sweep, status unchanged, clones intact', async () => {
+    const h = makeHarness();
+    const t1 = await seedEligibleTask(h, 'T1', 'orig-1');
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf-sprint',
+      variantAId: 'vA-sprint',
+      variantBId: 'vB-sprint',
+      seedTaskIds: [t1],
+    });
+    const rows = listExperimentSeedTasks(dbAdapter(h.db), res.experimentId);
+    const cloneA = rows.find((r) => r.arm === 'A')!.clone_task_id;
+    const cloneB = rows.find((r) => r.arm === 'B')!.clone_task_id;
+    setRunStatus(h.db, res.armA.runId, 'awaiting_review');
+    setRunStatus(h.db, res.armB.runId, 'awaiting_review');
+
+    // Make the fold onto the original task throw.
+    let sweepCalls = 0;
+    const failingDeps: ExperimentsDeps = {
+      ...h.deps,
+      taskChangeRouter: {
+        applyChange: (pid, change) => {
+          if (change.kind === 'experiment-promote-fold' && change.taskId === t1) {
+            return Promise.reject(new Error('boom-fold'));
+          }
+          return h.deps.taskChangeRouter.applyChange(pid, change);
+        },
+        deleteExperimentArmEntities: (pid, opts) => {
+          sweepCalls += 1;
+          return h.deps.taskChangeRouter.deleteExperimentArmEntities(pid, opts);
+        },
+      },
+    };
+
+    await expect(decideExperiment(failingDeps, res.experimentId, res.armA.runId)).rejects.toThrow(
+      /winner promotion failed.*retry decide/,
+    );
+    // No sweep ran; status untouched; both clones + mapping rows intact.
+    expect(sweepCalls).toBe(0);
+    expect(getExperiment(dbAdapter(h.db), res.experimentId)!.status).toBe('running');
+    expect(exists(h.db, 'tasks', cloneA)).toBe(true);
+    expect(exists(h.db, 'tasks', cloneB)).toBe(true);
+    expect(listExperimentSeedTasks(dbAdapter(h.db), res.experimentId)).toHaveLength(2);
   });
 });

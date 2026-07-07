@@ -16,6 +16,10 @@ import {
   reconcileExperimentStatus,
   recoverExperiments,
   dismissAndSweepHalfCreatedExperiment,
+  insertExperimentSeedTasks,
+  listExperimentSeedTasks,
+  seedTaskCloneIdsForArm,
+  deleteExperimentSeedTasks,
 } from '../experimentStore';
 import type { ExperimentRow } from '../../../../shared/types/experiments';
 
@@ -48,6 +52,15 @@ function buildDb(): Database.Database {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE workflow_runs (id TEXT PRIMARY KEY, status TEXT NOT NULL);
+    CREATE TABLE experiment_seed_tasks (
+      experiment_id TEXT NOT NULL,
+      arm TEXT NOT NULL CHECK (arm IN ('A','B')),
+      original_task_id TEXT NOT NULL,
+      clone_task_id TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+      UNIQUE (experiment_id, arm, original_task_id),
+      UNIQUE (clone_task_id)
+    );
   `);
   return db;
 }
@@ -204,7 +217,7 @@ describe('dismissAndSweepHalfCreatedExperiment (boot recovery)', () => {
     const exp = halfCreated(db);
     const dismissed: string[] = [];
     const swept: Array<{ projectId: number; runId: string; seedCloneId?: string | null }> = [];
-    await dismissAndSweepHalfCreatedExperiment(exp, {
+    await dismissAndSweepHalfCreatedExperiment(db, exp, {
       dismissSession: async (id) => { dismissed.push(id); },
       deleteExperimentArmEntities: async (projectId, opts) => {
         swept.push({ projectId, runId: opts.runId, seedCloneId: opts.seedCloneId });
@@ -218,11 +231,33 @@ describe('dismissAndSweepHalfCreatedExperiment (boot recovery)', () => {
     ]);
   });
 
+  it('sweeps the migration-051 seed TASK clones + clears the mapping rows', async () => {
+    const db = dbAdapter(buildDb());
+    const exp = halfCreated(db);
+    // Seed a per-arm task-clone mapping (as startExperiment would have before the crash).
+    insertExperimentSeedTasks(db, exp.id, 'A', [{ originalTaskId: 'tOrig1', cloneTaskId: 'tCloneA1' }]);
+    insertExperimentSeedTasks(db, exp.id, 'B', [{ originalTaskId: 'tOrig1', cloneTaskId: 'tCloneB1' }]);
+    const sweptTaskClones: Array<{ runId: string; ids: string[] | undefined }> = [];
+    await dismissAndSweepHalfCreatedExperiment(db, exp, {
+      dismissSession: async () => {},
+      deleteExperimentArmEntities: async (_projectId, opts) => {
+        sweptTaskClones.push({ runId: opts.runId, ids: opts.seedTaskCloneIds });
+      },
+    });
+    // Each arm's clone ids were passed through for the sweep.
+    expect(sweptTaskClones).toEqual([
+      { runId: 'rA', ids: ['tCloneA1'] },
+      { runId: '', ids: ['tCloneB1'] },
+    ]);
+    // The mapping rows were dropped after the sweep.
+    expect(listExperimentSeedTasks(db, exp.id)).toEqual([]);
+  });
+
   it('skips a null / never-created arm session id', async () => {
     const db = dbAdapter(buildDb());
     const exp = halfCreated(db, { b: null });
     const dismissed: string[] = [];
-    await dismissAndSweepHalfCreatedExperiment(exp, {
+    await dismissAndSweepHalfCreatedExperiment(db, exp, {
       dismissSession: async (id) => { dismissed.push(id); },
       deleteExperimentArmEntities: async () => {},
     });
@@ -235,7 +270,7 @@ describe('dismissAndSweepHalfCreatedExperiment (boot recovery)', () => {
     const attempts: string[] = [];
     const swept: string[] = [];
     const warns: Array<{ msg: string; ctx?: Record<string, unknown> }> = [];
-    await dismissAndSweepHalfCreatedExperiment(exp, {
+    await dismissAndSweepHalfCreatedExperiment(db, exp, {
       dismissSession: async (id) => {
         attempts.push(id);
         if (id === 'sessA') throw new Error('boom-dismiss');
@@ -258,7 +293,7 @@ describe('dismissAndSweepHalfCreatedExperiment (boot recovery)', () => {
     const dismissed: string[] = [];
     const swept: string[] = [];
     await recoverExperiments(db, async (e) => {
-      await dismissAndSweepHalfCreatedExperiment(e, {
+      await dismissAndSweepHalfCreatedExperiment(db, e, {
         dismissSession: async (id) => { dismissed.push(id); },
         deleteExperimentArmEntities: async (_projectId, opts) => { swept.push(opts.runId); },
       });
@@ -266,5 +301,36 @@ describe('dismissAndSweepHalfCreatedExperiment (boot recovery)', () => {
     expect(getExperiment(db, exp.id)?.status).toBe('abandoned');
     expect(dismissed).toEqual(['sessA', 'sessB']);
     expect(swept).toEqual(['rA', '']);
+  });
+});
+
+describe('experiment_seed_tasks helpers (migration 051)', () => {
+  it('insert + list + per-arm clone ids + delete', () => {
+    const db = dbAdapter(buildDb());
+    const exp = insertExperiment(db, {
+      projectId: 1, workflowId: 'wf', baseBranch: 'main', baseSha: 's', variantAId: 'a', variantBId: 'b',
+    });
+    insertExperimentSeedTasks(db, exp.id, 'A', [
+      { originalTaskId: 'o1', cloneTaskId: 'a1' },
+      { originalTaskId: 'o2', cloneTaskId: 'a2' },
+    ]);
+    insertExperimentSeedTasks(db, exp.id, 'B', [
+      { originalTaskId: 'o1', cloneTaskId: 'b1' },
+      { originalTaskId: 'o2', cloneTaskId: 'b2' },
+    ]);
+    expect(listExperimentSeedTasks(db, exp.id)).toHaveLength(4);
+    expect(seedTaskCloneIdsForArm(db, exp.id, 'A').sort()).toEqual(['a1', 'a2']);
+    expect(seedTaskCloneIdsForArm(db, exp.id, 'B').sort()).toEqual(['b1', 'b2']);
+    deleteExperimentSeedTasks(db, exp.id);
+    expect(listExperimentSeedTasks(db, exp.id)).toEqual([]);
+  });
+
+  it('listExperimentSeedTasks is fail-soft on a pre-051 DB (no table)', () => {
+    const raw = new Database(':memory:');
+    const db = dbAdapter(raw);
+    // No experiment_seed_tasks table exists — must degrade to [] not throw.
+    expect(listExperimentSeedTasks(db, 'exp_x')).toEqual([]);
+    expect(seedTaskCloneIdsForArm(db, 'exp_x', 'A')).toEqual([]);
+    expect(() => deleteExperimentSeedTasks(db, 'exp_x')).not.toThrow();
   });
 });

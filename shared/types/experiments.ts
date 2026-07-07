@@ -188,6 +188,22 @@ export interface ExperimentRow {
   updated_at: string;
 }
 
+/**
+ * `experiment_seed_tasks` DB row (migration 051) — per-arm task-clone mapping for
+ * a SPRINT experiment. A sprint arm runs a real task set, so startSideBySide
+ * clones every selected seed task PER ARM (each clone experiment-tagged, hence
+ * board-hidden) and launches the arm with its clone `taskIds`. This mapping lets
+ * decide fold each winner clone's outcome (body + stage) back onto its ORIGINAL
+ * task and sweep every clone (both arms) on decide / discard / abandon / recovery.
+ */
+export interface ExperimentSeedTaskRow {
+  experiment_id: string;
+  arm: ExperimentArm;
+  original_task_id: string;
+  clone_task_id: string;
+  created_at: string;
+}
+
 /** Result of `experiments.startSideBySide`. */
 export interface StartSideBySideResult {
   experimentId: string;

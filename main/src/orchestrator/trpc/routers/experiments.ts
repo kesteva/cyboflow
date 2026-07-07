@@ -51,7 +51,13 @@ import {
   listExperimentsForProject,
   setExperimentRuns,
   updateExperimentStatus,
+  insertExperimentSeedTasks,
+  listExperimentSeedTasks,
+  seedTaskCloneIdsForArm,
+  deleteExperimentSeedTasks,
 } from '../../experimentStore';
+import { SPRINT_BATCH_MAX_TASKS } from '../../../../../shared/types/sprintBatch';
+import type { Priority } from '../../../../../shared/types/tasks';
 import { listRunCreatedEpicIds, listRunCreatedIdeaIds, listRunCreatedTaskIds } from '../../runEntityOwnership';
 import { selectRunUsageRollups, selectRunFindings, getRunEval } from '../../insightsQueries';
 import { experimentEvents, eventToAsyncIterable } from './events';
@@ -90,7 +96,12 @@ export interface ExperimentsTaskChangeLike {
   applyChange(projectId: number, change: TaskChange): Promise<{ taskId: string }>;
   deleteExperimentArmEntities(
     projectId: number,
-    opts: { experimentId: string; runId: string; seedCloneId?: string | null },
+    opts: {
+      experimentId: string;
+      runId: string;
+      seedCloneId?: string | null;
+      seedTaskCloneIds?: string[];
+    },
   ): Promise<void>;
 }
 
@@ -219,6 +230,107 @@ async function cloneSeedIdea(
   return result.taskId;
 }
 
+/** Copyable fields of a validated sprint seed task (migration 051). */
+interface SeedTaskFields {
+  id: string;
+  title: string;
+  summary: string | null;
+  body: string | null;
+  priority: Priority;
+  repo: string | null;
+}
+
+/**
+ * Read + validate ONE seed task for a sprint experiment. Returns null (the caller
+ * rejects) unless the task exists, belongs to the project, is NOT already
+ * experiment-tagged, and is sprint-eligible — the SAME predicate the normal sprint
+ * batch picker + runs.start pre-check enforce (SprintLaneStore.filterEligibleTaskIds):
+ * approved (approved_at NOT NULL), not archived, at a ready-or-later, NON-terminal
+ * board stage (position >= 6 AND is_terminal = 0). Replicated here (not imported
+ * from SprintLaneStore) to preserve the router's injected-deps + standalone-typecheck
+ * invariant; kept in lockstep with that filter by the shared SQL shape.
+ */
+function readSeedTask(db: DatabaseLike, taskId: string, projectId: number): SeedTaskFields | null {
+  const row = db
+    .prepare(
+      `SELECT t.title AS title, t.summary AS summary, t.body AS body, t.priority AS priority,
+              t.repo AS repo, t.project_id AS project_id, t.experiment_id AS experiment_id,
+              t.approved_at AS approved_at, t.archived_at AS archived_at,
+              bs.position AS stage_position, bs.is_terminal AS is_terminal
+         FROM tasks t
+         JOIN board_stages bs ON bs.id = t.stage_id
+        WHERE t.id = ?`,
+    )
+    .get(taskId) as
+    | {
+        title?: unknown;
+        summary?: unknown;
+        body?: unknown;
+        priority?: unknown;
+        repo?: unknown;
+        project_id?: unknown;
+        experiment_id?: unknown;
+        approved_at?: unknown;
+        archived_at?: unknown;
+        stage_position?: unknown;
+        is_terminal?: unknown;
+      }
+    | undefined;
+  if (!row) return null;
+  if (row.project_id !== projectId) return null;
+  // Already part of an experiment — never re-seed a hidden clone.
+  if (row.experiment_id !== null && row.experiment_id !== undefined) return null;
+  // Sprint-eligibility (mirror filterEligibleTaskIds).
+  if (row.approved_at === null || row.approved_at === undefined) return null;
+  if (row.archived_at !== null && row.archived_at !== undefined) return null;
+  if (typeof row.stage_position !== 'number' || row.stage_position < 6) return null;
+  if (row.is_terminal === 1) return null;
+  return {
+    id: taskId,
+    title: typeof row.title === 'string' ? row.title : 'Untitled',
+    summary: typeof row.summary === 'string' ? row.summary : null,
+    body: typeof row.body === 'string' ? row.body : null,
+    priority: (typeof row.priority === 'string' ? row.priority : 'P2') as Priority,
+    repo: typeof row.repo === 'string' ? row.repo : null,
+  };
+}
+
+/**
+ * Clone one seed task for an arm (experiment-tagged + sprint-eligible). Two writes
+ * through the chokepoint: (1) CREATE — lands at the type-default "Ready for
+ * development" stage (position 6, sprint-eligible by stage) but experiment-tagged,
+ * so it is board-hidden AND — per computeCreateApprovedAt — PENDING (approved_at
+ * NULL); (2) APPROVE — stamp approved_at so the sprint launcher's eligibility
+ * filter accepts the clone as a seed task while it stays hidden by the tag. Returns
+ * the clone id.
+ */
+async function cloneSeedTask(
+  deps: ExperimentsDeps,
+  projectId: number,
+  experimentId: string,
+  seed: SeedTaskFields,
+): Promise<string> {
+  const created = await deps.taskChangeRouter.applyChange(projectId, {
+    actor: 'orchestrator',
+    entityType: 'task',
+    title: seed.title,
+    summary: seed.summary,
+    body: seed.body,
+    priority: seed.priority,
+    repo: seed.repo,
+    experimentId,
+    kind: 'experiment-seed-clone',
+  });
+  await deps.taskChangeRouter.applyChange(projectId, {
+    actor: 'orchestrator',
+    entityType: 'task',
+    taskId: created.taskId,
+    approved: true,
+    kind: 'experiment-seed-clone-approve',
+  });
+  return created.taskId;
+}
+
 /** Read a run's status (null when missing). */
 function runStatus(db: DatabaseLike, runId: string | null): string | null {
   if (!runId) return null;
@@ -270,6 +382,13 @@ export interface StartInput {
   variantAId: string;
   variantBId: string;
   seedIdeaId?: string;
+  /**
+   * Sprint experiment seed tasks (migration 051). Mutually exclusive with
+   * seedIdeaId; REQUIRED (>=1) for the task-driven `sprint` workflow and rejected
+   * for any other. Each arm clones every listed task and launches with its clone
+   * `taskIds` so the normal sprint stage/lane machinery runs inside the sandbox.
+   */
+  seedTaskIds?: string[];
   substrate?: CliSubstrate;
   permissionMode?: PermissionMode;
   rerunOfExperimentId?: string;
@@ -322,6 +441,60 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
         message: `seed idea ${input.seedIdeaId} is missing, decomposed, or in another project`,
       });
     }
+  }
+
+  // 1c. Validate seed tasks (sprint experiments, migration 051). A sprint is
+  //     task-driven — each arm must run a real task set — so a `sprint` experiment
+  //     REQUIRES >=1 seed task (a task-less sprint arm has nothing to execute), a
+  //     NON-sprint workflow may NOT carry seed tasks, and seed tasks are mutually
+  //     exclusive with a seed idea. Each task must be sprint-eligible + untagged
+  //     (the SAME predicate the batch picker enforces); a mixed selection is
+  //     rejected STRICTLY (mirrors the runs.start pre-check — a silent drop would
+  //     launch an arm running only part of the intended set).
+  const isSprint = workflow.name === 'sprint';
+  const hasSeedTasks = input.seedTaskIds !== undefined && input.seedTaskIds.length > 0;
+  if (input.seedIdeaId && hasSeedTasks) {
+    throw new TRPCError({ code: 'BAD_REQUEST', message: 'provide either a seed idea or seed tasks, not both' });
+  }
+  if (hasSeedTasks && !isSprint) {
+    throw new TRPCError({
+      code: 'BAD_REQUEST',
+      message: `seed tasks are only valid for the 'sprint' workflow (got '${workflow.name}')`,
+    });
+  }
+  if (isSprint && !hasSeedTasks) {
+    throw new TRPCError({
+      code: 'BAD_REQUEST',
+      message: 'a sprint A/B test requires at least one seed task (both arms run a task-less sprint otherwise)',
+    });
+  }
+  let seedTasks: SeedTaskFields[] | null = null;
+  if (hasSeedTasks) {
+    const requested = input.seedTaskIds as string[];
+    const cap = SPRINT_BATCH_MAX_TASKS[input.substrate ?? 'sdk'];
+    if (requested.length > cap) {
+      throw new TRPCError({
+        code: 'BAD_REQUEST',
+        message: `too many seed tasks for the ${input.substrate ?? 'sdk'} substrate: ${requested.length} > ${cap}`,
+      });
+    }
+    const unique = [...new Set(requested)];
+    const resolved: SeedTaskFields[] = [];
+    const ineligible: string[] = [];
+    for (const tid of unique) {
+      const st = readSeedTask(db, tid, input.projectId);
+      if (st) resolved.push(st);
+      else ineligible.push(tid);
+    }
+    if (ineligible.length > 0) {
+      throw new TRPCError({
+        code: 'BAD_REQUEST',
+        message: `${ineligible.length} seed task(s) not eligible for a sprint experiment: ${ineligible.join(
+          ', ',
+        )} — each must exist in this project, be approved + at "Ready for development" or later (not archived/done/won't-do), and not already part of an experiment`,
+      });
+    }
+    seedTasks = resolved;
   }
 
   // 2. Resolve base ref + exact SHA ONCE (project root HEAD).
@@ -385,6 +558,11 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
         experimentId: exp.id,
         runId: cur?.run_a_id ?? '',
         seedCloneId: cur?.seed_idea_clone_a_id,
+        // Seed TASK clones (migration 051) are created in step 5 BEFORE either arm
+        // launches, so an arm can own tagged clones even when its run was never
+        // stamped — sweep them via the mapping table (empty for an idea-seeded /
+        // pre-clone abort).
+        seedTaskCloneIds: seedTaskCloneIdsForArm(db, exp.id, 'A'),
       })
       .catch(() => {});
     await deps.taskChangeRouter
@@ -392,23 +570,50 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
         experimentId: exp.id,
         runId: cur?.run_b_id ?? '',
         seedCloneId: cur?.seed_idea_clone_b_id,
+        seedTaskCloneIds: seedTaskCloneIdsForArm(db, exp.id, 'B'),
       })
       .catch(() => {});
+    deleteExperimentSeedTasks(db, exp.id);
     updateExperimentStatus(db, exp.id, 'abandoned');
     throw new TRPCError({ code: 'INTERNAL_SERVER_ERROR', message: detail });
   };
 
   try {
-    // 5. Seed-clone per arm (idea-seeded only).
+    // 5. Seed-clone per arm. Idea-seeded → one hidden idea clone per arm; sprint
+    //    task-seeded → one hidden, approved task clone per selected task per arm,
+    //    recorded in the experiment_seed_tasks mapping. The two are mutually
+    //    exclusive (validated in 1c), so at most one branch runs.
     let cloneA: string | null = null;
     let cloneB: string | null = null;
+    let taskCloneIdsA: string[] | null = null;
+    let taskCloneIdsB: string[] | null = null;
     if (seed) {
       cloneA = await cloneSeedIdea(deps, input.projectId, exp.id, seed);
       cloneB = await cloneSeedIdea(deps, input.projectId, exp.id, seed);
       setExperimentRuns(db, exp.id, { seedIdeaCloneAId: cloneA, seedIdeaCloneBId: cloneB });
+    } else if (seedTasks) {
+      taskCloneIdsA = [];
+      for (const st of seedTasks) taskCloneIdsA.push(await cloneSeedTask(deps, input.projectId, exp.id, st));
+      taskCloneIdsB = [];
+      for (const st of seedTasks) taskCloneIdsB.push(await cloneSeedTask(deps, input.projectId, exp.id, st));
+      insertExperimentSeedTasks(
+        db,
+        exp.id,
+        'A',
+        seedTasks.map((st, i) => ({ originalTaskId: st.id, cloneTaskId: (taskCloneIdsA as string[])[i] })),
+      );
+      insertExperimentSeedTasks(
+        db,
+        exp.id,
+        'B',
+        seedTasks.map((st, i) => ({ originalTaskId: st.id, cloneTaskId: (taskCloneIdsB as string[])[i] })),
+      );
     }
 
-    // 6. Launch arm A then B (ideaId = the arm's clone; NEVER taskId/taskIds).
+    // 6. Launch arm A then B. Idea-seeded arms pass `ideaId = the arm's idea clone`;
+    //    sprint task-seeded arms pass `seedTaskIds = the arm's task clone ids` (the
+    //    9th positional, exactly as the normal sprint launch threads them). The two
+    //    seed modes are mutually exclusive.
     const armA = await deps.runLauncher.launch(
       input.workflowId,
       projectPath,
@@ -418,7 +623,7 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
       sessionA.sessionId,
       input.permissionMode,
       undefined,
-      undefined,
+      taskCloneIdsA ?? undefined,
       input.projectId,
       undefined,
       undefined,
@@ -442,7 +647,7 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
       sessionB.sessionId,
       input.permissionMode,
       undefined,
-      undefined,
+      taskCloneIdsB ?? undefined,
       input.projectId,
       undefined,
       undefined,
@@ -539,13 +744,15 @@ export async function decideExperiment(
 
   const now = new Date().toISOString();
 
-  // Discard-both (winnerRunId null): sweep both arms, dismiss both sessions.
+  // Discard-both (winnerRunId null): sweep both arms (incl. seed TASK clones),
+  // dismiss both sessions, drop the seed-task mapping rows.
   if (winnerRunId === null) {
     if (exp.run_a_id) {
       await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
         experimentId,
         runId: exp.run_a_id,
         seedCloneId: exp.seed_idea_clone_a_id,
+        seedTaskCloneIds: seedTaskCloneIdsForArm(db, experimentId, 'A'),
       });
     }
     if (exp.run_b_id) {
@@ -553,8 +760,10 @@ export async function decideExperiment(
         experimentId,
         runId: exp.run_b_id,
         seedCloneId: exp.seed_idea_clone_b_id,
+        seedTaskCloneIds: seedTaskCloneIdsForArm(db, experimentId, 'B'),
       });
     }
+    deleteExperimentSeedTasks(db, experimentId);
     updateExperimentStatus(db, experimentId, 'decided', {
       winnerRunId: null,
       winnerArm: null,
@@ -597,8 +806,10 @@ export async function decideExperiment(
   // dismissal, and the decision review item unresolved. Both the fold (REPLACE
   // body) and each reveal (approved + clearExperiment + reparent) are idempotent —
   // a second decide after a fixed cause re-runs them as no-ops and completes.
+  const winnerSeedTaskRows = listExperimentSeedTasks(db, experimentId).filter((r) => r.arm === winnerArm);
+
   try {
-    // 1. (seeded) REPLACE-fold the winner clone body into the ORIGINAL idea.
+    // 1. (idea-seeded) REPLACE-fold the winner clone body into the ORIGINAL idea.
     if (seeded && exp.seed_idea_id && winnerCloneId) {
       const cloneRow = db.prepare('SELECT body FROM ideas WHERE id = ?').get(winnerCloneId) as
         | { body?: unknown }
@@ -613,7 +824,31 @@ export async function decideExperiment(
       });
     }
 
-    // 2. Reveal winner entities (reparent to original when seeded) + clear their tag.
+    // 1b. (sprint task-seeded) Fold each winner TASK clone back onto its ORIGINAL
+    //     task: REPLACE the original's body with the clone's and move the original
+    //     to the clone's board stage (the sprint outcome). ONE canonical
+    //     stage-change applyChange per task (fields.body + stageId together); the
+    //     original is untagged so the orchestrator-actor write is sandbox-exempt.
+    //     approved_at is NOT touched — the original stays as the user approved it.
+    for (const row of winnerSeedTaskRows) {
+      const cloneRow = db.prepare('SELECT body AS body, stage_id AS stageId FROM tasks WHERE id = ?').get(
+        row.clone_task_id,
+      ) as { body?: unknown; stageId?: unknown } | undefined;
+      const cloneBody = typeof cloneRow?.body === 'string' ? cloneRow.body : null;
+      const cloneStageId = typeof cloneRow?.stageId === 'string' ? cloneRow.stageId : undefined;
+      await deps.taskChangeRouter.applyChange(exp.project_id, {
+        actor: 'orchestrator',
+        entityType: 'task',
+        taskId: row.original_task_id,
+        fields: { body: cloneBody },
+        ...(cloneStageId ? { stageId: cloneStageId } : {}),
+        kind: 'experiment-promote-fold',
+      });
+    }
+
+    // 2. Reveal winner entities (reparent to original when idea-seeded) + clear their
+    //    tag. Task-seeded arms create no board entities (they execute the clones), so
+    //    this is a no-op there; the fold above carried the outcome.
     await revealWinnerEntities(deps, exp.project_id, winnerRunId, seeded ? exp.seed_idea_id : null);
   } catch (err) {
     throw new TRPCError({
@@ -651,23 +886,31 @@ export async function decideExperiment(
     });
   }
 
-  // 3. Discard the (now-orphan) winner clone. The winner's entities had their tag
-  //    cleared in step 2, so deleteExperimentArmEntities spares them and sweeps
-  //    ONLY the still-tagged clone.
+  const loserArm: ExperimentArm = winnerArm === 'A' ? 'B' : 'A';
+
+  // 3. Discard the (now-orphan) winner clones. The winner's run-created entities had
+  //    their tag cleared in step 2, so deleteExperimentArmEntities spares them and
+  //    sweeps ONLY the still-tagged clones — the seed IDEA clone AND the seed TASK
+  //    clones (whose outcome was already folded onto the originals in step 1b).
   await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
     experimentId,
     runId: winnerRunId,
     seedCloneId: winnerCloneId,
+    seedTaskCloneIds: seedTaskCloneIdsForArm(db, experimentId, winnerArm),
   });
 
-  // 4. Discard the whole loser arm.
+  // 4. Discard the whole loser arm (incl. its seed TASK clones).
   if (loserRunId) {
     await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
       experimentId,
       runId: loserRunId,
       seedCloneId: loserCloneId,
+      seedTaskCloneIds: seedTaskCloneIdsForArm(db, experimentId, loserArm),
     });
   }
+
+  // 4b. Drop the seed-task mapping rows (both arms swept above).
+  deleteExperimentSeedTasks(db, experimentId);
 
   // 5. Stamp the decision.
   updateExperimentStatus(db, experimentId, 'decided', {
@@ -714,13 +957,14 @@ export async function abandonExperiment(deps: ExperimentsDeps, experimentId: str
   if (exp.session_a_id) await deps.dismissSession(exp.session_a_id).catch(() => {});
   if (exp.session_b_id) await deps.dismissSession(exp.session_b_id).catch(() => {});
 
-  // Sweep both arms' entities.
+  // Sweep both arms' entities (incl. seed TASK clones), then drop the mapping rows.
   if (exp.run_a_id) {
     await deps.taskChangeRouter
       .deleteExperimentArmEntities(exp.project_id, {
         experimentId,
         runId: exp.run_a_id,
         seedCloneId: exp.seed_idea_clone_a_id,
+        seedTaskCloneIds: seedTaskCloneIdsForArm(db, experimentId, 'A'),
       })
       .catch(() => {});
   }
@@ -730,9 +974,11 @@ export async function abandonExperiment(deps: ExperimentsDeps, experimentId: str
         experimentId,
         runId: exp.run_b_id,
         seedCloneId: exp.seed_idea_clone_b_id,
+        seedTaskCloneIds: seedTaskCloneIdsForArm(db, experimentId, 'B'),
       })
       .catch(() => {});
   }
+  deleteExperimentSeedTasks(db, experimentId);
 
   updateExperimentStatus(db, experimentId, 'abandoned');
   return { experimentId, status: 'abandoned', winnerRunId: null };
@@ -854,6 +1100,10 @@ export const experimentsRouter = router({
         variantAId: z.string().min(1),
         variantBId: z.string().min(1),
         seedIdeaId: z.string().min(1).optional(),
+        // Sprint experiment seed tasks (migration 051) — mutually exclusive with
+        // seedIdeaId; REQUIRED for the sprint workflow, rejected otherwise (the
+        // startExperiment core enforces the cross-field rules + eligibility).
+        seedTaskIds: z.array(z.string().min(1)).optional(),
         substrate: z.enum(['sdk', 'interactive']).optional(),
         permissionMode: z.enum(['default', 'acceptEdits', 'auto', 'dontAsk']).optional(),
       }),
@@ -888,7 +1138,16 @@ export const experimentsRouter = router({
    * rerun_of_experiment_id. Requires the source settled.
    */
   rerun: protectedProcedure
-    .input(z.object({ experimentId: z.string().min(1), seedIdeaId: z.string().min(1).optional() }))
+    .input(
+      z.object({
+        experimentId: z.string().min(1),
+        seedIdeaId: z.string().min(1).optional(),
+        // A rerun of a sprint (task-seeded) experiment offers a FRESH seed-task set
+        // (the caller copies the source's originals forward as the default). Threaded
+        // straight into startExperiment, which re-validates + re-clones them.
+        seedTaskIds: z.array(z.string().min(1)).optional(),
+      }),
+    )
     .mutation(async ({ input }): Promise<StartSideBySideResult> => {
       const deps = requireDeps();
       const src = getExperiment(deps.db, input.experimentId);
@@ -907,6 +1166,7 @@ export const experimentsRouter = router({
         variantAId: src.variant_a_id,
         variantBId: src.variant_b_id,
         seedIdeaId: input.seedIdeaId,
+        seedTaskIds: input.seedTaskIds,
         rerunOfExperimentId: src.id,
       });
     }),
