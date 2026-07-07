@@ -97,7 +97,10 @@ human approves the plan.
    - **Revise** → re-delegate the relevant subagent(s) with the feedback, refresh
      the artifact (a repeat `cyboflow_report_artifact` call with the same atype
      enriches the same tab) / re-fold the body (REPLACING the existing
-     `## Architecture design` section), and re-ask. Do **not** proceed to
+     `## Architecture design` section), and re-ask. When the feedback changes the
+     idea's **intent or scope** — not just the design surface — also update the
+     idea spec in the body via `cyboflow_update_task`, so the spec, prototype, and
+     architecture stay in agreement. Do **not** proceed to
      epics until the user answers Approve.
 7. **epics** (large ideas only) → delegate to `cyboflow-epics`; **hold** the returned
    epics in context — do **not** create them yet. A `small` idea skips straight to
