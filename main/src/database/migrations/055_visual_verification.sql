@@ -1,6 +1,6 @@
--- Migration 036: visual-verification run-stamp columns + verification_requests.
+-- Migration 055: visual-verification run-stamp columns + verification_requests.
 --
--- (Runs after 035_artifacts. Depends only on workflow_runs (011); the
+-- (Runs after 054_baseline_rotation. Depends only on workflow_runs (011); the
 --  intervening migrations do not alter it. See docs/visual-verification-design.md.)
 --
 -- This is the persistence layer for the layered visual-verification MVP. It does

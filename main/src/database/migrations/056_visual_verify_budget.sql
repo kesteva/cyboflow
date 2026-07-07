@@ -1,7 +1,7 @@
--- Migration 037: per-project visual-verify judge-call budget + cost telemetry.
+-- Migration 056: per-project visual-verify judge-call budget + cost telemetry.
 --
--- (Runs after 036_visual_verification. Depends only on projects (006) +
---  verification_requests (036). See docs/visual-verification-design.md §"L5".)
+-- (Runs after 055_visual_verification. Depends only on projects (006) +
+--  verification_requests (055). See docs/visual-verification-design.md §"L5".)
 --
 -- The L5 low-confidence tier adds a PER-PROJECT cap on paid VLM (vision) calls on
 -- top of today's per-RUN cap (the cappedVlmJudge decorator). It does two things:

@@ -54,7 +54,7 @@ function buildDb(): Database.Database {
     '022_sprint_batches.sql',
     '023_sprint_lane_step.sql',
     '025_sprint_lane_attempts.sql',
-    '036_visual_verification.sql',
+    '055_visual_verification.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }

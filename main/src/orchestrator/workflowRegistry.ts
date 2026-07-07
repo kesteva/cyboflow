@@ -77,7 +77,7 @@ export interface WorkflowConfigProvider {
    * type rungs. Optional + absent => createRun floors the run to the DISABLED
    * posture (verify_enabled=0 / verify_type=NULL / verify_chain=NULL), the
    * zero-behavior-change default, so existing fixtures without config stamp a
-   * disabled run exactly as before migration 046.
+   * disabled run exactly as before migration 055.
    */
   getVisualVerifyConfig?(): ResolvedVisualVerifyConfig;
 }

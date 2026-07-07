@@ -145,7 +145,7 @@ describe('WorkflowRegistry', () => {
     // includeWorkflowRunTaskColumns block above (folded in alongside
     // execution_model), so no manual ALTER is needed here.
     // createRun now also stamps the three immutable visual-verification columns
-    // (migration 046) — verify_enabled / verify_type / verify_chain, the sibling
+    // (migration 055) — verify_enabled / verify_type / verify_chain, the sibling
     // run-stamp to substrate / execution_model that getRunById also projects.
     // Layer the additive ALTERs on top (mirrors the migration's ADD COLUMNs;
     // never widens GATE_SCHEMA). With the master switch OFF (no config injected)

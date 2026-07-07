@@ -837,7 +837,7 @@ async function initializeServices() {
 
   // VerificationScheduler — the main-process singleton that owns the DB-backed
   // verification_requests queue, the ResourceLeasePool (over the shared `mutex`),
-  // and the waterfall drain loop (migration 036 / layered visual verification).
+  // and the waterfall drain loop (migration 055 / layered visual verification).
   // Lane agents fire-and-continue via the mcp-request-verification handler (P6),
   // which reaches this singleton through getInstance() to enqueue + nudge.
   //
@@ -1031,7 +1031,7 @@ async function initializeServices() {
     devServerProvider: devServerManager,
     devServerContextResolver,
     // S5 — golden-baseline SSIM pre-diff gates the (paid) VLM. The per-project
-    // judge-call budget + judge_calls_used telemetry (migration 037) are enforced
+    // judge-call budget + judge_calls_used telemetry (migration 056) are enforced
     // inside the scheduler off its injected db; the per-RUN cap stays the
     // cappedVlmJudge decorator above.
     baselinePreDiff,

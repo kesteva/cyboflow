@@ -1,7 +1,7 @@
 /**
- * Migration 036_visual_verification.sql — schema + constraint integration tests.
+ * Migration 055_visual_verification.sql — schema + constraint integration tests.
  *
- * Applies 006 -> 011 -> 014 -> 015 -> 016 -> 036 against an in-memory SQLite
+ * Applies 006 -> 011 -> 014 -> 015 -> 016 -> 055 against an in-memory SQLite
  * instance. Proves:
  *   1. workflow_runs gains the 3 immutable verify_* stamp columns with the spec'd
  *      defaults (verify_enabled=0, verify_type=NULL, verify_chain=NULL).
@@ -46,7 +46,7 @@ const THROUGH_016 = [
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
   seedProject(db);
-  apply(db, [...THROUGH_016, '036_visual_verification.sql']);
+  apply(db, [...THROUGH_016, '055_visual_verification.sql']);
   return db;
 }
 
@@ -77,7 +77,7 @@ function insertRequest(
   );
 }
 
-describe('Migration 036: verify run-stamp columns + verification_requests', () => {
+describe('Migration 048: verify run-stamp columns + verification_requests', () => {
   it('adds the 3 verify_* columns to workflow_runs with the spec defaults', () => {
     const db = buildDb();
     const cols = db.prepare('PRAGMA table_info(workflow_runs)').all() as {

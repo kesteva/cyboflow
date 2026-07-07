@@ -4,7 +4,7 @@
  * Exact sibling of substrateResolver.ts / executionModelResolver.ts: all three
  * are resolved together in WorkflowRegistry.createRun and stamped IMMUTABLY onto
  * the workflow_runs row (no UPDATE path — a long run can't change posture
- * mid-flight; migration 036's verify_enabled / verify_type / verify_chain).
+ * mid-flight; migration 055's verify_enabled / verify_type / verify_chain).
  *
  * Standalone-typecheck invariant: this file must NOT import from 'electron',
  * 'better-sqlite3', 'fs', or any concrete service in main/src/services/*. It

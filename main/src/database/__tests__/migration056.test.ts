@@ -1,8 +1,8 @@
 /**
- * Migration 037_visual_verify_budget.sql — schema + default integration tests.
+ * Migration 056_visual_verify_budget.sql — schema + default integration tests.
  *
- * Applies 006 -> 011 -> 014 -> 015 -> 016 -> 036 -> 037 against an in-memory
- * SQLite instance (mirrors migration036.test.ts EXACTLY). Proves:
+ * Applies 006 -> 011 -> 014 -> 015 -> 016 -> 055 -> 056 against an in-memory
+ * SQLite instance (mirrors migration055.test.ts EXACTLY). Proves:
  *   1. projects gains visual_verify_budget_calls (INTEGER, NULLABLE = unlimited).
  *   2. verification_requests gains judge_calls_used (INTEGER NOT NULL DEFAULT 0).
  *   3. Existing rows read back the spec defaults (budget NULL, judge_calls_used 0).
@@ -34,19 +34,19 @@ function apply(db: Database.Database, files: string[]): void {
   for (const f of files) db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
 }
 
-const THROUGH_036 = [
+const THROUGH_055 = [
   '006_cyboflow_schema.sql',
   '011_workflow_step_tracking.sql',
   '014_native_tasks.sql',
   '015_entity_model_rebuild.sql',
   '016_review_items.sql',
-  '036_visual_verification.sql',
+  '055_visual_verification.sql',
 ];
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
   seedProject(db);
-  apply(db, [...THROUGH_036, '037_visual_verify_budget.sql']);
+  apply(db, [...THROUGH_055, '056_visual_verify_budget.sql']);
   return db;
 }
 
@@ -60,7 +60,7 @@ function seedRun(db: Database.Database, runId: string): void {
   ).run(runId);
 }
 
-describe('Migration 037: visual-verify per-project budget + telemetry columns', () => {
+describe('Migration 049: visual-verify per-project budget + telemetry columns', () => {
   it('adds projects.visual_verify_budget_calls as a NULLABLE INTEGER (= unlimited)', () => {
     const db = buildDb();
     const cols = db.prepare('PRAGMA table_info(projects)').all() as {
@@ -150,7 +150,7 @@ describe('Migration 037: visual-verify per-project budget + telemetry columns', 
     // Re-running the same file MUST raise 'duplicate column name' (the signal
     // runFileBasedMigrations uses to skip an already-applied file), proving the
     // ALTERs are not silently re-runnable / corrupting.
-    expect(() => apply(db, ['037_visual_verify_budget.sql'])).toThrow(/duplicate column name/i);
+    expect(() => apply(db, ['056_visual_verify_budget.sql'])).toThrow(/duplicate column name/i);
     db.close();
   });
 });

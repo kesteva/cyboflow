@@ -16,7 +16,7 @@
  *  - The VisualBackendId union and the BACKEND_CAPABILITIES rows / FALLBACK_CHAINS
  *    members are one backend set. If a new backend is ever added, widen both.
  *  - REQUEST_STATUS mirrors the CHECK domain on verification_requests.status in
- *    migration 036 (defined in P3) — a single contract split across TypeScript +
+ *    migration 055 (defined in P3) — a single contract split across TypeScript +
  *    SQL, exactly as the CliSubstrate / migration 013 pairing.
  */
 
@@ -103,7 +103,7 @@ export const FALLBACK_CHAINS: Record<VerificationType, VisualBackendId[]> = {
 };
 
 /**
- * The lifecycle of a row in verification_requests (migration 036). Mirrors the
+ * The lifecycle of a row in verification_requests (migration 055). Mirrors the
  * CHECK domain on that column — a single contract split across TypeScript + SQL.
  *   queued  → enqueued, awaiting a free drain slot.
  *   leased  → a resource lease is held; capture about to start.
@@ -200,7 +200,7 @@ export interface VerificationRequestInput {
    * merge-gate (locked decision #2). The lane agent passes its OWN display ref
    * (e.g. "TASK-008") or opaque task id; the merge-gate driver resolves it through
    * SprintLaneStore (ref OR id, same as updateLane). Optional + carried inside
-   * deliverable_json (no new column — migration 036 is frozen): absent for a
+   * deliverable_json (no new column — migration 055 is frozen): absent for a
    * single-lane batch (attribution is unambiguous) or a non-sprint run (no gate).
    */
   taskRef?: string;
@@ -546,7 +546,7 @@ export interface VerdictV1BaselineExtension {
 }
 
 /**
- * One row of the `verification_requests` table (migration 036, written in a
+ * One row of the `verification_requests` table (migration 055, written in a
  * later slice) as read at the L6 verify-queue panel boundary (declared now for
  * S7/L6 — no consumer until then). Snake_case mirrors the SQLite columns; the
  * JSON columns (`deliverable_json` / `chain_json` / `verdict_json`) are stored as

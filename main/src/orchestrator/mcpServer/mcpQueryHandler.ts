@@ -282,7 +282,7 @@ export type McpQueryMessage =
   | {
       /**
        * FIRE-AND-CONTINUE visual-verification request. Resolves the run's stamped
-       * verify posture (migration 036), enqueues a verification_requests row, and
+       * verify posture (migration 055), enqueues a verification_requests row, and
        * replies { requestId } synchronously — the lane NEVER blocks on the verdict.
        * A disabled run replies { skipped:true } (never an error). typeOverride only
        * NARROWS within the run's resolved chain; it cannot enable a disabled run.
@@ -702,7 +702,7 @@ export class McpQueryHandler {
       return;
     }
 
-    // A/B testing (migration 048): resolve the run's FROZEN effective spec (its
+    // A/B testing (migration 055): resolve the run's FROZEN effective spec (its
     // variant graph, else the live spec) via resolveRunFrozenSpec (already keyed by
     // runId) instead of a live JOIN read.
     const row = resolveRunFrozenSpec(this.db, msg.runId);
@@ -2138,7 +2138,7 @@ export class McpQueryHandler {
   //
   // FIRE-AND-CONTINUE producer seam (docs/visual-verification-design.md §"The
   // collision story" #1): resolve the run's IMMUTABLY-stamped verify posture
-  // (migration 036 verify_enabled / verify_type / verify_chain), enqueue ONE
+  // (migration 055 verify_enabled / verify_type / verify_chain), enqueue ONE
   // verification_requests row via the VerificationScheduler chokepoint, and reply
   // { requestId } SYNCHRONOUSLY — the lane is never held on the verdict. The
   // scheduler drains on its OWN setImmediate loop (NOT RunQueueRegistry), captures
@@ -2190,7 +2190,7 @@ export class McpQueryHandler {
       return;
     }
 
-    // Read the run's IMMUTABLE verify stamp (migration 036). Read defensively — a
+    // Read the run's IMMUTABLE verify stamp (migration 055). Read defensively — a
     // pre-036 DB lacking the columns degrades to a disabled posture (skipped).
     let enabled = false;
     let stampedType: VerificationType | null = null;

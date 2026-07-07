@@ -41,7 +41,7 @@ const THROUGH_036 = [
   '014_native_tasks.sql',
   '015_entity_model_rebuild.sql',
   '016_review_items.sql',
-  '036_visual_verification.sql',
+  '055_visual_verification.sql',
 ];
 
 function buildDb(): Database.Database {
