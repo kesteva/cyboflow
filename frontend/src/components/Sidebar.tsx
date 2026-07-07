@@ -7,6 +7,7 @@ import cyboflowLogo from '../assets/cyboflow-logo.svg';
 import { IconButton } from './ui/Button';
 import { Modal, ModalHeader, ModalBody } from './ui/Modal';
 import { useConfigStore } from '../stores/configStore';
+import { useUpdater } from '../hooks/useUpdater';
 import { trackEvent } from '../utils/telemetry';
 
 interface SidebarProps {
@@ -71,6 +72,7 @@ export function Sidebar({
   const [gitCommit, setGitCommit] = useState<string>('');
   const [worktreeName, setWorktreeName] = useState<string>('');
   const [isDev, setIsDev] = useState<boolean>(false);
+  const { state: updateState, download: downloadUpdate, install: installUpdate, check: checkForUpdate } = useUpdater();
   useEffect(() => {
     // Fetch version info on component mount
     const fetchVersion = async () => {
@@ -102,6 +104,16 @@ export function Sidebar({
     };
 
     fetchVersion();
+  }, []);
+
+  useEffect(() => {
+    // Silently probe for an available update once on mount so the bottom-of-rail
+    // version line can flip to an "Update available" pill. Fail-soft: dev /
+    // unpackaged builds resolve to 'unsupported' and keep the muted version line.
+    void checkForUpdate();
+    // checkForUpdate is a fresh closure each render but we only want the mount
+    // probe; intentionally omit it from deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -335,16 +347,50 @@ export function Sidebar({
           {/* Archive progress indicator above version */}
           <ArchiveProgress />
           
-          {/* Version display at bottom */}
+          {/* Version display at bottom — flips to an update pill when the
+              auto-updater has news, otherwise shows the muted version line. */}
           {version && (
             <div className="px-4 py-2 border-t border-border-primary">
-              <div
-                className="text-xs text-text-tertiary text-center cursor-pointer hover:text-text-secondary transition-colors truncate"
-                onClick={onAboutClick}
-                title="Click to view version details"
-              >
-                v{version}{worktreeName && ` • ${worktreeName}`}{gitCommit && ` • ${gitCommit}`}
-              </div>
+              {updateState.status === 'available' ? (
+                <div
+                  className="text-xs text-center rounded px-2 py-1 cursor-pointer w-full truncate bg-interactive text-text-on-interactive hover:bg-interactive-hover transition-colors"
+                  onClick={() => void downloadUpdate()}
+                  title={`Version ${updateState.version} is available — click to download`}
+                >
+                  Update available →
+                </div>
+              ) : updateState.status === 'downloading' ? (
+                <div
+                  className="w-full"
+                  title={`Downloading update… ${updateState.percent}%`}
+                >
+                  <div className="h-1.5 w-full rounded-full bg-surface-secondary overflow-hidden">
+                    <div
+                      className="h-full bg-interactive transition-all duration-200"
+                      style={{ width: `${updateState.percent}%` }}
+                    />
+                  </div>
+                  <div className="text-xs text-text-tertiary text-center mt-1 truncate">
+                    Downloading… {updateState.percent}%
+                  </div>
+                </div>
+              ) : updateState.status === 'downloaded' ? (
+                <div
+                  className="text-xs text-center rounded px-2 py-1 cursor-pointer w-full truncate bg-interactive text-text-on-interactive hover:bg-interactive-hover transition-colors"
+                  onClick={installUpdate}
+                  title={`Version ${updateState.version} is ready — restart to finish updating`}
+                >
+                  Restart to update
+                </div>
+              ) : (
+                <div
+                  className="text-xs text-text-tertiary text-center cursor-pointer hover:text-text-secondary transition-colors truncate"
+                  onClick={onAboutClick}
+                  title="Click to view version details"
+                >
+                  v{version}{worktreeName && ` • ${worktreeName}`}{gitCommit && ` • ${gitCommit}`}
+                </div>
+              )}
             </div>
           )}
         </div>

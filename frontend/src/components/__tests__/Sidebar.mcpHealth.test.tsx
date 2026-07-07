@@ -45,6 +45,19 @@ vi.mock('../ui/Button', () => ({
   ),
 }));
 
+// Mock useUpdater so the sidebar's mount-time updater subscription is a no-op.
+// This test asserts MCP surfaces only; the updater path is exercised by
+// Sidebar.updatePill.test.tsx. Pinning an idle state renders no update pill.
+vi.mock('../../hooks/useUpdater', () => ({
+  useUpdater: () => ({
+    state: { status: 'idle' },
+    check: vi.fn().mockResolvedValue(undefined),
+    download: vi.fn(),
+    install: vi.fn(),
+    reset: vi.fn(),
+  }),
+}));
+
 // Mock window.electronAPI for the version fetch
 const mockInvoke = vi.fn();
 beforeEach(() => {
