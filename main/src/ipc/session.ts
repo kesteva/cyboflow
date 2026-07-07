@@ -178,14 +178,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     cyboflow
   } = services;
 
-  // Session ids already claimed by a `sessions:create-quick` await-matcher.
-  // Same-second concurrent creates share one generated branchName, so every
-  // waiting matcher accepts every resulting session (base + suffixed forms) —
-  // this set makes each session resolvable by exactly ONE caller. Registration
-  // happens once per app, so the set spans all create-quick calls; it grows by
-  // one UUID per quick session for the process lifetime (negligible).
-  const claimedQuickSessionIds = new Set<string>();
-
   // Resolve the single server-side 'claude' panel id an interactive quick session
   // owns (created by sessions:create-quick). Undefined if none exists yet.
   const resolveClaudePanelId = (sessionId: string): string | undefined =>

@@ -20,6 +20,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { _resetClaimedQuickSessionIdsForTesting } from '../../services/createQuickSessionCore';
 
 // Electron is imported transitively via session.ts -> panelManager etc.
 vi.mock('electron', () => ({
@@ -119,6 +120,9 @@ beforeEach(() => {
   vi.mocked(panelManager.createPanel).mockClear();
   vi.mocked(panelManager.getPanelsForSession).mockReset();
   vi.mocked(panelManager.getPanelsForSession).mockReturnValue([]);
+  // The core's claim set spans the module lifetime; fixtures here reuse the
+  // constant 'sess-001' id, so a stale claim would time out every later await.
+  _resetClaimedQuickSessionIdsForTesting();
 });
 
 function makeServices(opts?: {
@@ -367,6 +371,9 @@ describe('sessions:create-quick handler - workflow_runs pipeline', () => {
         made.services,
       );
 
+      // Both iterations resolve the same constant 'sess-001' fixture id — clear
+      // the core's claim set so the second create-quick await can resolve too.
+      _resetClaimedQuickSessionIdsForTesting();
       await invoke(handlers, 'sessions:create-quick', { projectId: 42, branchName: TEST_BRANCH });
 
       const sessionIdStamps = made.dbRunCalls.filter((c) =>

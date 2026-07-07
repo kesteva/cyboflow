@@ -116,6 +116,15 @@ export interface CreateQuickSessionCoreResult {
 const claimedQuickSessionIds = new Set<string>();
 
 /**
+ * Test-only: clear the claimed-session-id set. Production ids are unique UUIDs
+ * so the set never needs clearing there; test fixtures reuse constant session
+ * ids across cases, and a stale claim makes every later await time out.
+ */
+export function _resetClaimedQuickSessionIdsForTesting(): void {
+  claimedQuickSessionIds.clear();
+}
+
+/**
  * Create a quick (flow-less) worktree session + its `__quick__` sentinel run and
  * advance it to running. See the module header for the two callers. Throws on a
  * session-create timeout or a sentinel transition failure (the caller decides
