@@ -1,11 +1,13 @@
 /**
  * ReviewItemRouter — the SINGLE write chokepoint for the unified review inbox.
  *
- * INVARIANT: every review_items write (Sprint-agent findings via MCP, the folded
- * PreToolUse/approval path, approve-idea/approve-plan decision gates, manual
- * human tasks, and triage resolve/dismiss) routes through applyReviewItem.
- * Nothing INSERTs/UPDATEs `review_items` directly. Each applyReviewItem
- * atomically (1) mutates the row and (2) appends a delta row to the polymorphic
+ * INVARIANT: review_items writes route through applyReviewItem unless they are
+ * folded run-pause co-writes in reviewItemListing.ts. Those helpers write
+ * synchronously inside the approval/question/human-gate transaction so the
+ * legacy gate row and the review-item row commit or roll back together. They
+ * must still append the same entity_events deltas and emit via
+ * emitReviewItemChangedById after commit. Each applyReviewItem atomically
+ * (1) mutates the row and (2) appends a delta row to the polymorphic
  * `entity_events(entity_type='review_item', entity_id=<reviewItemId>)`, then
  * emits a ReviewItemChangedEvent after commit.
  *

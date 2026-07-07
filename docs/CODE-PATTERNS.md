@@ -416,10 +416,14 @@ the current stage is a no-op) and best-effort at the follow-on seam:
 
 ### review_items write pattern (`ReviewItemRouter.applyReviewItem`)
 
-Every `review_items` write routes through `ReviewItemRouter.applyReviewItem`
+Normal `review_items` writes route through `ReviewItemRouter.applyReviewItem`
 (`main/src/orchestrator/reviewItemRouter.ts`) — the second single-table chokepoint, structurally
 a twin of `TaskChangeRouter` (per-project queue, atomic mutate + `entity_events` delta with
-`entity_type='review_item'`, post-commit `ReviewItemChangedEvent`). Rules:
+`entity_type='review_item'`, post-commit `ReviewItemChangedEvent`). The sanctioned exception is
+the folded run-pause co-write helpers in `reviewItemListing.ts`: approval/question/human-gate
+paths write synchronously inside their own transaction so the legacy gate row and review item
+commit or roll back together. Those helpers must still append the same `entity_events` deltas and
+emit after commit via `emitReviewItemChangedById`. Rules:
 
 - The entity link is a **SOFT polymorphic** `(entity_type, entity_id)` pair — both nullable,
   `entity_type` is CHECK-constrained to `(idea|epic|task)`, and the pairing is validated in the
@@ -437,12 +441,13 @@ a twin of `TaskChangeRouter` (per-project queue, atomic mutate + `entity_events`
 
 ### In-repo workflow prompt bodies (self-containment)
 
-The three user-facing flows (Planner + Sprint + Compound) and their prompt BODIES live in app
-source at `main/src/orchestrator/workflows/` (`planner.md`, `sprint.md`, `compound.md`,
-`builtInWorkflows.ts`). There is NO runtime read from `~/.claude/plugins/cache/soloflow/...`.
+The four user-facing flows (Planner + Sprint + Compound + Ship) and their prompt BODIES live in
+app source at `main/src/orchestrator/workflows/` (`planner.md`, `sprint.md`, `compound.md`,
+`ship.md`, `builtInWorkflows.ts`). There is NO runtime read from
+`~/.claude/plugins/cache/soloflow/...`.
 Rules when touching workflows:
 
-- The flow-name set is `CYBOFLOW_WORKFLOW_NAMES` (`['planner','sprint','compound']`) in
+- The flow-name set is `CYBOFLOW_WORKFLOW_NAMES` (`['planner','sprint','compound','ship']`) in
   `shared/types/workflows.ts`; `buildBuiltInWorkflows()` maps over it, so adding/removing a flow
   there is a compile-time tripwire on the descriptor map and on `WORKFLOW_DEFINITIONS`
   (`Readonly<Record<CyboflowWorkflowName, …>>`). Use the `Cyboflow*` names — NOT the historical
@@ -455,9 +460,8 @@ Rules when touching workflows:
 - Prompt bodies are SELF-CONTAINED: agents write the DB via `cyboflow_*` MCP tools, never
   `.soloflow/IDEA-NNN.md` / `TASK-NNN.md` files. `builtInWorkflows.test.ts` asserts the bodies
   contain no `.soloflow` / `IDEA-NNN.md` / `TASK-NNN.md` reference — keep that green.
-- Dropped flows (`compound` / `prune`) have their prose preserved under
-  `docs/workflows-future/` for a future cyboflow-native rebuild — do NOT re-add them to
-  `WORKFLOW_DEFINITIONS`.
+- Dropped flow prose for `prune` is preserved under `docs/workflows-future/` for a future
+  cyboflow-native rebuild — do NOT re-add it to `WORKFLOW_DEFINITIONS`.
 
 - **Canonical example:** `main/src/orchestrator/workflows/builtInWorkflows.ts`;
   `main/src/orchestrator/workflows/__tests__/builtInWorkflows.test.ts`.

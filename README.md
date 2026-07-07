@@ -5,17 +5,18 @@ Cyboflow is a self-contained macOS desktop app designed to make it easier to bui
 ## What it does
 
 Cyboflow comes with five core features:
-1. **Multi-agent workflows**: Cyboflow is designed to make it easier to run complex multi-step, multi-agent workflows including three natively included as well as a custom workflow and agent builder. 
+1. **Multi-agent workflows**: Cyboflow is designed to make it easier to run complex multi-step, multi-agent workflows including four natively included as well as a custom workflow and agent builder.
 2. **Centralized review queue**: Cyboflow has a built in central human review queue to make it easier to monitor activity across agents, grant approvals as needed, and triage any issues. 
 3. **Analytics, insights, and observability**: Cyboflow tracks token usage, failure rates, errors, and bugs across workflow runs so you can iterate and improve on them over time
 4. **Worktree isolated SDK or PTY session**: Every session runs in its own worktree and can be run via SDK (for a chat experience) or PTY (for an interactive terminal experience)
 5. **Native task tracking**: Built into Cyboflow is a native task tracking module that lets you take ideas through clarification, extraction, execution and review. 
 
 #### Multi-agent workflows
-Cyboflow ships three flows out of the box:
+Cyboflow ships four flows out of the box:
 - **Planner** turns a raw idea into a reviewed backlog: it captures the idea, optionally researches it, decomposes it into epics and tasks, and pauses at human approval gates. 
 - **Sprint** executes the ready tasks — implement, test, review, verify — across isolated worktrees, optionally fanning a batch of tasks out across parallel subagents. 
 - **Compound** mines completed work for cleanups, follow-up tasks, and codebase-doc improvements
+- **Ship** runs the planning and sprint execution path end to end for an approved idea.
 
 Edit these workflows or build your own custom agents + workflows and get built in tracking. 
 

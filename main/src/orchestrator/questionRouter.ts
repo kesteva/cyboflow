@@ -1214,6 +1214,7 @@ export class QuestionRouter extends EventEmitter {
    * Returns the total number of workflow_runs rows transitioned.
    */
   recoverStaleAwaitingInput(): number {
+    const resolvedReviewItemIds: string[] = [];
     const transition = this.db.transaction(() => {
       const staleRuns = this.db
         .prepare(
@@ -1267,17 +1268,30 @@ export class QuestionRouter extends EventEmitter {
       // they don't linger as stale blocking items. No-op pre-016.
       if (hasReviewItemsTable(this.db)) {
         const now = new Date().toISOString();
-        this.db
+        const rows = this.db
           .prepare(
-            `UPDATE review_items
-                SET status = 'resolved', resolved_by = 'system', resolution = 'app_restart', updated_at = ?
+            `SELECT id, run_id AS runId FROM review_items
               WHERE kind = 'decision' AND status = 'pending' AND source = 'question' AND run_id IN (${allPh})`,
           )
-          .run(now, ...allIds);
+          .all(...allIds) as Array<{ id: string; runId: string | null }>;
+        for (const row of rows) {
+          const resolvedId = resolveReviewItemById(
+            this.db,
+            row.id,
+            'system',
+            'app_restart',
+            now,
+            row.runId,
+          );
+          if (resolvedId !== null) resolvedReviewItemIds.push(resolvedId);
+        }
       }
       return { resumable: resumableIds.length, failed: failedIds.length };
     });
     const { resumable, failed } = transition();
+    for (const reviewItemId of resolvedReviewItemIds) {
+      emitReviewItemChangedById(this.db, reviewItemId, 'resolved');
+    }
     const total = resumable + failed;
     if (total > 0) {
       console.log(

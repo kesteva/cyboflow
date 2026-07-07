@@ -3,9 +3,10 @@
 ## Purpose
 
 Cyboflow is a macOS desktop app that orchestrates Claude Code as a multi-agent workflow runner.
-It is **self-contained**: the three user-facing flows — **Planner**, **Sprint**, and
-**Compound** (mines merged runs for durable learnings, launched from the Insights view) — and
-their prompt bodies ship inside the app source (`main/src/orchestrator/workflows/`). There is **no
+It is **self-contained**: the four user-facing flows — **Planner**, **Sprint**,
+**Compound** (mines merged runs for durable learnings, launched from the Insights view), and
+**Ship** (planner + sprint end to end) — and their prompt bodies ship inside the app source
+(`main/src/orchestrator/workflows/`). There is **no
 runtime dependency on the SoloFlow plugin cache** (`~/.claude/plugins/cache/soloflow/...`). The
 app spawns Claude Code in an isolated git worktree per run, streams and parses its structured
 output, and concentrates everything that needs human attention — tool-use approvals, agent
@@ -13,16 +14,16 @@ findings, human-gate decisions, and manual tasks — into a single workspace-sco
 queue**. That review queue, backed by a DB-canonical `review_items` inbox, is the product
 differentiator.
 
-Planner and Sprint write the app's own DB-canonical **3-table entity model** (`ideas` / `epics`
-/ `tasks`) via the `cyboflow_*` MCP tools — never `.soloflow/IDEA-NNN.md` or `TASK-NNN.md`
-files. All entities share a single 4-stage board (see "Data Model"). The `__quick__` sentinel
-flow remains an internal, picker-hidden lightweight path.
+Planner, Sprint, and Ship write the app's own DB-canonical **3-table entity model** (`ideas` /
+`epics` / `tasks`) via the `cyboflow_*` MCP tools — never `.soloflow/IDEA-NNN.md` or
+`TASK-NNN.md` files. All entities share a single 4-stage board (see "Data Model"). The
+`__quick__` sentinel flow remains an internal, picker-hidden lightweight path.
 
 This codebase is forked from `stravu/crystal` at tag `0.3.5` (commit `1e18e0b`). Crystal
 branding, IPC transport, and Crystal-specific features are being progressively replaced. See
-`docs/cyboflow_system_design.md` for the full product spec and cut decisions. `compound` was
-rebuilt natively (`compound.md`, launched from the Insights view); only the `prune` SoloFlow
-flow remains dropped, its prose preserved under `docs/workflows-future/` for a future rebuild.
+`docs/cyboflow_system_design.md` for the full product spec and cut decisions. `compound` and
+`ship` were rebuilt natively (`compound.md`, `ship.md`); only the `prune` SoloFlow flow remains
+dropped, its prose preserved under `docs/workflows-future/` for a future rebuild.
 
 ## Entry Points
 
@@ -103,15 +104,16 @@ injected, no `electron` / `better-sqlite3` / `services/*` imports):
   PENDING (`NULL` = backend-invisible + sprint-ineligible) for plan-gated runs and visible
   (`now`) otherwise; after a child-task write settles it re-enters the queue to roll a parent
   epic's stage up via `recomputeEpicStage` (migration 042 — see "Data Model").
-- **`reviewItemRouter.ts` (`ReviewItemRouter.applyReviewItem`)** — the SINGLE write chokepoint for
-  `review_items`. Every write (Sprint-agent findings via MCP, the folded PreToolUse/approval path,
-  approve-idea/approve-plan decision gates, manual human tasks, triage resolve/dismiss) routes
-  through it. Each call atomically mutates the row and appends a delta to `entity_events` with
-  `entity_type='review_item'` (migration 015 widened the CHECK to allow it — no new event table),
-  then emits a `ReviewItemChangedEvent`. `promote-to-task` is NOT handled here: it is a two-
-  chokepoint triage operation (resolve the item via this router AND mint a real task via
-  `TaskChangeRouter`) orchestrated in the `reviewItems` tRPC router so each router stays
-  single-table.
+- **`reviewItemRouter.ts` (`ReviewItemRouter.applyReviewItem`)** — the SINGLE normal-write
+  chokepoint for `review_items`. Sprint-agent findings via MCP, manual human tasks, and user
+  triage resolve/dismiss route through it. The sanctioned exception is folded run-pause co-writes
+  in `reviewItemListing.ts`: approval/question/human-gate code writes the review item
+  synchronously inside the same transaction as the legacy gate row so both commit or roll back
+  together. Those helpers still append the same `entity_events` deltas and emit through
+  `emitReviewItemChangedById` after commit, so readers see the same shape. `promote-to-task` is
+  NOT handled here: it is a two-chokepoint triage operation (resolve the item via this router AND
+  mint a real task via `TaskChangeRouter`) orchestrated in the `reviewItems` tRPC router so each
+  router stays single-table.
 - **`artifactRouter.ts` (`ArtifactRouter.apply`)** — the SINGLE write chokepoint for the run-scoped
   `artifacts` table (migration 029). Backs the tabbed center pane's artifact tabs (idea spec,
   decomposed stories, screenshots, ui prototype, generic live canvas). `apply(projectId, change)`
