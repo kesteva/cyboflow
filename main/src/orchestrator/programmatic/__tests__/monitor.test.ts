@@ -258,20 +258,176 @@ describe('parseConverseOutput', () => {
     expect(parseConverseOutput({ reply: 'ok', action: { kind: 'switch_to_orchestrated', reason: '   ' } })).toEqual({ reply: 'ok' });
     expect(parseConverseOutput({ reply: 'ok', action: { kind: 'switch_to_orchestrated', reason: 42 } })).toEqual({ reply: 'ok' });
   });
+
+  it('parses a valid add_task action (title required; body/priority optional)', () => {
+    expect(parseConverseOutput({ reply: 'adding it.', action: { kind: 'add_task', title: 'New task' } })).toEqual({
+      reply: 'adding it.',
+      action: { kind: 'add_task', title: 'New task' },
+    });
+    expect(
+      parseConverseOutput({
+        reply: 'adding it.',
+        action: { kind: 'add_task', title: 'New task', body: 'details', priority: 'high' },
+      }),
+    ).toEqual({
+      reply: 'adding it.',
+      action: { kind: 'add_task', title: 'New task', body: 'details', priority: 'high' },
+    });
+  });
+
+  it('drops add_task when title is missing/blank/non-string', () => {
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'add_task' } })).toEqual({ reply: 'ok' });
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'add_task', title: '   ' } })).toEqual({ reply: 'ok' });
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'add_task', title: 42 } })).toEqual({ reply: 'ok' });
+  });
+
+  it('parses a valid remove_task action', () => {
+    expect(parseConverseOutput({ reply: 'removing it.', action: { kind: 'remove_task', taskRef: 'TASK-1' } })).toEqual({
+      reply: 'removing it.',
+      action: { kind: 'remove_task', taskRef: 'TASK-1' },
+    });
+  });
+
+  it('drops remove_task when taskRef is missing/blank', () => {
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'remove_task' } })).toEqual({ reply: 'ok' });
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'remove_task', taskRef: '' } })).toEqual({ reply: 'ok' });
+  });
+
+  it('parses a valid edit_task action (taskRef + at least one of title/body/priority)', () => {
+    expect(
+      parseConverseOutput({ reply: 'editing it.', action: { kind: 'edit_task', taskRef: 'TASK-1', title: 'Renamed' } }),
+    ).toEqual({ reply: 'editing it.', action: { kind: 'edit_task', taskRef: 'TASK-1', title: 'Renamed' } });
+    expect(
+      parseConverseOutput({ reply: 'editing it.', action: { kind: 'edit_task', taskRef: 'TASK-1', priority: 'low' } }),
+    ).toEqual({ reply: 'editing it.', action: { kind: 'edit_task', taskRef: 'TASK-1', priority: 'low' } });
+  });
+
+  it('drops edit_task when taskRef is missing or no field to change is present', () => {
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'edit_task', title: 'Renamed' } })).toEqual({ reply: 'ok' });
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'edit_task', taskRef: 'TASK-1' } })).toEqual({ reply: 'ok' });
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'edit_task', taskRef: 'TASK-1', title: '   ' } })).toEqual({
+      reply: 'ok',
+    });
+  });
+
+  it('parses valid skip_step / unskip_step actions', () => {
+    expect(parseConverseOutput({ reply: 'skipping.', action: { kind: 'skip_step', stepId: 'tasks' } })).toEqual({
+      reply: 'skipping.',
+      action: { kind: 'skip_step', stepId: 'tasks' },
+    });
+    expect(parseConverseOutput({ reply: 'unskipping.', action: { kind: 'unskip_step', stepId: 'tasks' } })).toEqual({
+      reply: 'unskipping.',
+      action: { kind: 'unskip_step', stepId: 'tasks' },
+    });
+  });
+
+  it('drops skip_step / unskip_step when stepId is missing/blank', () => {
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'skip_step' } })).toEqual({ reply: 'ok' });
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'unskip_step', stepId: '' } })).toEqual({ reply: 'ok' });
+  });
+
+  it('parses a valid steer_step action (stepId + guidance both required)', () => {
+    expect(
+      parseConverseOutput({
+        reply: 'steering it.',
+        action: { kind: 'steer_step', stepId: 'tasks', guidance: 'be careful with the migration' },
+      }),
+    ).toEqual({
+      reply: 'steering it.',
+      action: { kind: 'steer_step', stepId: 'tasks', guidance: 'be careful with the migration' },
+    });
+  });
+
+  it('drops steer_step when stepId or guidance is missing/blank', () => {
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'steer_step', stepId: 'tasks' } })).toEqual({ reply: 'ok' });
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'steer_step', guidance: 'be careful' } })).toEqual({
+      reply: 'ok',
+    });
+    expect(
+      parseConverseOutput({ reply: 'ok', action: { kind: 'steer_step', stepId: 'tasks', guidance: '   ' } }),
+    ).toEqual({ reply: 'ok' });
+  });
+
+  it('parses a valid resolve_review_item action (outcome/resolution optional)', () => {
+    expect(
+      parseConverseOutput({ reply: 'resolving it.', action: { kind: 'resolve_review_item', reviewItemId: 'RI-1' } }),
+    ).toEqual({ reply: 'resolving it.', action: { kind: 'resolve_review_item', reviewItemId: 'RI-1' } });
+    expect(
+      parseConverseOutput({
+        reply: 'resolving it.',
+        action: { kind: 'resolve_review_item', reviewItemId: 'RI-1', outcome: 'approve', resolution: 'looks fine' },
+      }),
+    ).toEqual({
+      reply: 'resolving it.',
+      action: { kind: 'resolve_review_item', reviewItemId: 'RI-1', outcome: 'approve', resolution: 'looks fine' },
+    });
+  });
+
+  it('drops resolve_review_item when reviewItemId is missing/blank', () => {
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'resolve_review_item' } })).toEqual({ reply: 'ok' });
+  });
+
+  it('keeps a resolve_review_item action but drops an invalid outcome', () => {
+    expect(
+      parseConverseOutput({
+        reply: 'resolving it.',
+        action: { kind: 'resolve_review_item', reviewItemId: 'RI-1', outcome: 'maybe' },
+      }),
+    ).toEqual({ reply: 'resolving it.', action: { kind: 'resolve_review_item', reviewItemId: 'RI-1' } });
+  });
+
+  it('parses a valid file_note action (title required; body optional)', () => {
+    expect(parseConverseOutput({ reply: 'filing it.', action: { kind: 'file_note', title: 'Heads up' } })).toEqual({
+      reply: 'filing it.',
+      action: { kind: 'file_note', title: 'Heads up' },
+    });
+    expect(
+      parseConverseOutput({ reply: 'filing it.', action: { kind: 'file_note', title: 'Heads up', body: 'some detail' } }),
+    ).toEqual({ reply: 'filing it.', action: { kind: 'file_note', title: 'Heads up', body: 'some detail' } });
+  });
+
+  it('drops file_note when title is missing/blank', () => {
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'file_note' } })).toEqual({ reply: 'ok' });
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'file_note', title: '' } })).toEqual({ reply: 'ok' });
+  });
 });
 
 describe('MONITOR_CONVERSE_SCHEMA', () => {
-  it('requires reply, makes action optional, and enforces the kind enum (retry_step + switch_to_orchestrated)', () => {
+  it('requires reply, makes action optional, and enforces the kind enum (all 10 action kinds)', () => {
     expect(MONITOR_CONVERSE_SCHEMA.required).toEqual(['reply']);
     expect(MONITOR_CONVERSE_SCHEMA.additionalProperties).toBe(false);
     const props = MONITOR_CONVERSE_SCHEMA.properties as Record<string, Record<string, unknown>>;
     expect(props.action.additionalProperties).toBe(false);
     expect(props.action.required).toEqual(['kind']);
     const actionProps = props.action.properties as Record<string, { type?: string; enum?: string[] }>;
-    expect(actionProps.kind.enum).toEqual(['retry_step', 'switch_to_orchestrated']);
-    // Both kind-specific fields are declared (stepId = retry_step, reason = switch_to_orchestrated) and optional at the schema level.
-    expect(actionProps.stepId.type).toBe('string');
-    expect(actionProps.reason.type).toBe('string');
+    expect(actionProps.kind.enum).toEqual([
+      'retry_step',
+      'switch_to_orchestrated',
+      'add_task',
+      'remove_task',
+      'edit_task',
+      'skip_step',
+      'unskip_step',
+      'steer_step',
+      'resolve_review_item',
+      'file_note',
+    ]);
+    // Every kind-specific field is declared and optional at the schema level (only
+    // the fields relevant to the chosen `kind` should be set).
+    for (const field of [
+      'stepId',
+      'reason',
+      'title',
+      'body',
+      'priority',
+      'taskRef',
+      'guidance',
+      'reviewItemId',
+      'resolution',
+    ]) {
+      expect(actionProps[field].type).toBe('string');
+    }
+    expect(actionProps.outcome.enum).toEqual(['approve', 'reject']);
   });
 });
 
@@ -301,6 +457,41 @@ describe('buildActionAnswerPrompt', () => {
     expect(p).toContain('reason'); // attach a faithful summary
     // Existing framing stays intact: explicit-ask-only + never-claim-success.
     expect(p).toContain('you never claim it succeeded yourself');
+  });
+
+  it('describes all 10 action kinds, grouped by task edits / step control / review queue', () => {
+    const history: MonitorHistory = { conversation: [], steps: [] };
+    const p = buildActionAnswerPrompt(ctx, 'what can you do?', history);
+    for (const kind of [
+      'retry_step',
+      'switch_to_orchestrated',
+      'add_task',
+      'remove_task',
+      'edit_task',
+      'skip_step',
+      'unskip_step',
+      'steer_step',
+      'resolve_review_item',
+      'file_note',
+    ]) {
+      expect(p).toContain(`"${kind}"`);
+    }
+    // Task edits: not-yet-started + next-wave framing.
+    expect(p).toContain('NOT-YET-STARTED');
+    expect(p).toContain('NEXT wave');
+    // Step control: upcoming/not-reached framing.
+    expect(p).toContain("HASN'T reached yet");
+    // Return-shape contract lists all 10 kinds and defers to per-kind fields.
+    expect(p).toContain('fields relevant to the chosen');
+  });
+
+  it('requires explicit confirmation on a later turn before actuating any mutating action, including the low-risk file_note', () => {
+    const history: MonitorHistory = { conversation: [], steps: [] };
+    const p = buildActionAnswerPrompt(ctx, 'add a task to fix the flaky test', history);
+    expect(p).toContain('CONFIRM BEFORE YOU ACT');
+    expect(p).toContain('file_note');
+    expect(p).toContain('low-risk');
+    expect(p).toContain('WAIT for the user\'s EXPLICIT confirmation on a LATER turn');
   });
 });
 
@@ -448,6 +639,27 @@ function collectInjected(): { injectEvent: (event: unknown) => void; injected: A
   return { injectEvent, injected };
 }
 
+/**
+ * Build a fully-populated fake `MonitorActions` bag (a no-op `vi.fn()` per
+ * method), with any subset overridden. All 10 methods are required members of
+ * the interface, so every test constructing a bag needs the full shape.
+ */
+function makeActions(overrides: Partial<MonitorActions> = {}): MonitorActions {
+  return {
+    retryStep: vi.fn<MonitorActions['retryStep']>(),
+    switchToOrchestrated: vi.fn<MonitorActions['switchToOrchestrated']>(),
+    addTask: vi.fn<MonitorActions['addTask']>(),
+    removeTask: vi.fn<MonitorActions['removeTask']>(),
+    editTask: vi.fn<MonitorActions['editTask']>(),
+    skipStep: vi.fn<MonitorActions['skipStep']>(),
+    unskipStep: vi.fn<MonitorActions['unskipStep']>(),
+    steerStep: vi.fn<MonitorActions['steerStep']>(),
+    resolveReviewItem: vi.fn<MonitorActions['resolveReviewItem']>(),
+    fileNote: vi.fn<MonitorActions['fileNote']>(),
+    ...overrides,
+  };
+}
+
 describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', () => {
   it('with no actions wired, converse uses textQuery exactly as before (structuredQuery untouched)', async () => {
     const { reader } = fakeHistory({ conversation: [], steps: [] });
@@ -472,7 +684,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
     const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({ reply: 'the run is on step 3' });
     const textQuery: TextQueryFn = vi.fn();
     const retryStep = vi.fn<MonitorActions['retryStep']>();
-    const actions: MonitorActions = { retryStep, switchToOrchestrated: vi.fn<MonitorActions['switchToOrchestrated']>() };
+    const actions = makeActions({ retryStep });
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({
       ctx,
@@ -503,7 +715,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
       .fn()
       .mockResolvedValue({ reply: 'retrying tasks now.', action: { kind: 'retry_step', stepId: 'tasks' } });
     const retryStep = vi.fn<MonitorActions['retryStep']>().mockResolvedValue({ ok: true, message: 'run resumed from tasks' });
-    const actions: MonitorActions = { retryStep, switchToOrchestrated: vi.fn<MonitorActions['switchToOrchestrated']>() };
+    const actions = makeActions({ retryStep });
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({
       ctx,
@@ -532,7 +744,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
       .fn()
       .mockResolvedValue({ reply: 'attempting retry.', action: { kind: 'retry_step' } });
     const retryStep = vi.fn<MonitorActions['retryStep']>().mockResolvedValue({ ok: false, message: 'run is not failed or resting' });
-    const actions: MonitorActions = { retryStep, switchToOrchestrated: vi.fn<MonitorActions['switchToOrchestrated']>() };
+    const actions = makeActions({ retryStep });
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({
       ctx,
@@ -555,7 +767,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
       .fn()
       .mockResolvedValue({ reply: 'retrying now.', action: { kind: 'retry_step', stepId: 'tasks' } });
     const retryStep = vi.fn<MonitorActions['retryStep']>().mockRejectedValue(new Error('handler exploded'));
-    const actions: MonitorActions = { retryStep, switchToOrchestrated: vi.fn<MonitorActions['switchToOrchestrated']>() };
+    const actions = makeActions({ retryStep });
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({
       ctx,
@@ -578,7 +790,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
       .fn()
       .mockResolvedValue({ action: { kind: 'retry_step', stepId: 42 } });
     const retryStep = vi.fn<MonitorActions['retryStep']>();
-    const actions: MonitorActions = { retryStep, switchToOrchestrated: vi.fn<MonitorActions['switchToOrchestrated']>() };
+    const actions = makeActions({ retryStep });
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({
       ctx,
@@ -603,7 +815,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
     const { reader } = fakeHistory({ conversation: [], steps: [] });
     const structuredQuery: StructuredQueryFn = vi.fn().mockRejectedValue(new Error('sdk down'));
     const retryStep = vi.fn<MonitorActions['retryStep']>();
-    const actions: MonitorActions = { retryStep, switchToOrchestrated: vi.fn<MonitorActions['switchToOrchestrated']>() };
+    const actions = makeActions({ retryStep });
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({
       ctx,
@@ -631,7 +843,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
     const switchToOrchestrated = vi
       .fn<MonitorActions['switchToOrchestrated']>()
       .mockResolvedValue({ ok: true, message: 'run handed over to the orchestrated plane' });
-    const actions: MonitorActions = { retryStep, switchToOrchestrated };
+    const actions = makeActions({ retryStep, switchToOrchestrated });
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
 
@@ -657,7 +869,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
     const switchToOrchestrated = vi
       .fn<MonitorActions['switchToOrchestrated']>()
       .mockResolvedValue({ ok: false, message: 'run is already terminal' });
-    const actions: MonitorActions = { retryStep: vi.fn<MonitorActions['retryStep']>(), switchToOrchestrated };
+    const actions = makeActions({ switchToOrchestrated });
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
 
@@ -676,7 +888,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
     const switchToOrchestrated = vi
       .fn<MonitorActions['switchToOrchestrated']>()
       .mockRejectedValue(new Error('handover exploded'));
-    const actions: MonitorActions = { retryStep: vi.fn<MonitorActions['retryStep']>(), switchToOrchestrated };
+    const actions = makeActions({ switchToOrchestrated });
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
 
@@ -684,6 +896,139 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
 
     expect(reply).toBe('handing over.');
     expect(injected.at(-1)).toEqual({ role: 'assistant', text: '⚠ The handover action failed unexpectedly.' });
+  });
+});
+
+describe('DefaultMonitorSession.converse — expanded actuation (8 new steering actions)', () => {
+  it.each([
+    {
+      name: 'add_task',
+      action: { kind: 'add_task', title: 'Fix flaky test', body: 'see CI run 123', priority: 'high' },
+      method: 'addTask' as const,
+      expectedInput: { title: 'Fix flaky test', body: 'see CI run 123', priority: 'high' },
+    },
+    {
+      name: 'remove_task',
+      action: { kind: 'remove_task', taskRef: 'TASK-1' },
+      method: 'removeTask' as const,
+      expectedInput: { taskRef: 'TASK-1' },
+    },
+    {
+      name: 'edit_task',
+      action: { kind: 'edit_task', taskRef: 'TASK-1', title: 'Renamed task' },
+      method: 'editTask' as const,
+      expectedInput: { taskRef: 'TASK-1', title: 'Renamed task', body: undefined, priority: undefined },
+    },
+    {
+      name: 'skip_step',
+      action: { kind: 'skip_step', stepId: 'tasks' },
+      method: 'skipStep' as const,
+      expectedInput: { stepId: 'tasks' },
+    },
+    {
+      name: 'unskip_step',
+      action: { kind: 'unskip_step', stepId: 'tasks' },
+      method: 'unskipStep' as const,
+      expectedInput: { stepId: 'tasks' },
+    },
+    {
+      name: 'steer_step',
+      action: { kind: 'steer_step', stepId: 'tasks', guidance: 'be extra careful with the migration' },
+      method: 'steerStep' as const,
+      expectedInput: { stepId: 'tasks', guidance: 'be extra careful with the migration' },
+    },
+    {
+      name: 'resolve_review_item',
+      action: { kind: 'resolve_review_item', reviewItemId: 'RI-1', outcome: 'approve' },
+      method: 'resolveReviewItem' as const,
+      expectedInput: { reviewItemId: 'RI-1', outcome: 'approve', resolution: undefined },
+    },
+    {
+      name: 'file_note',
+      action: { kind: 'file_note', title: 'Heads up about the flaky test' },
+      method: 'fileNote' as const,
+      expectedInput: { title: 'Heads up about the flaky test', body: undefined },
+    },
+  ])('a $name action routes to actions.$method with the mapped input and injects a ▶ success turn', async ({ action, method, expectedInput }) => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({ reply: 'doing it.', action });
+    const fn = vi.fn().mockResolvedValue({ ok: true, message: 'done' });
+    const actions = makeActions({ [method]: fn } as Partial<MonitorActions>);
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    const reply = await session.converse('please do the thing');
+
+    expect(reply).toBe('doing it.');
+    expect(fn).toHaveBeenCalledTimes(1);
+    expect(fn).toHaveBeenCalledWith(expectedInput);
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '▶ done' });
+  });
+
+  it('a resolve_review_item action resolving ok:false injects a ⚠-prefixed turn', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
+      reply: 'resolving it.',
+      action: { kind: 'resolve_review_item', reviewItemId: 'RI-1', outcome: 'reject' },
+    });
+    const resolveReviewItem = vi
+      .fn<MonitorActions['resolveReviewItem']>()
+      .mockResolvedValue({ ok: false, message: 'review item already resolved' });
+    const actions = makeActions({ resolveReviewItem });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    await session.converse('reject it');
+
+    expect(resolveReviewItem).toHaveBeenCalledWith({ reviewItemId: 'RI-1', outcome: 'reject', resolution: undefined });
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '⚠ review item already resolved' });
+  });
+
+  it('a throwing addTask fails soft: injects the add_task-specific apology, converse still resolves with the reply', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
+      reply: 'adding the task now.',
+      action: { kind: 'add_task', title: 'New task' },
+    });
+    const addTask = vi.fn<MonitorActions['addTask']>().mockRejectedValue(new Error('router exploded'));
+    const actions = makeActions({ addTask });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    const reply = await session.converse('add a task for this');
+
+    expect(reply).toBe('adding the task now.');
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '⚠ Adding the task failed unexpectedly.' });
+  });
+
+  it('a bag missing the corresponding method resolves to the graceful "not available" fallback instead of throwing', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
+      reply: 'skipping it.',
+      action: { kind: 'skip_step', stepId: 'tasks' },
+    });
+    // A bag that type-satisfies MonitorActions but was constructed without skipStep
+    // wired (e.g. an older host binding) — the defensive `typeof === 'function'`
+    // guard in `runAction` must catch this rather than throwing. Cast through
+    // Record<string, unknown> since `skipStep` is a required (non-optional) member
+    // of `MonitorActions` and TS forbids `delete` on a non-optional property.
+    const bag = makeActions() as unknown as Record<string, unknown>;
+    delete bag.skipStep;
+    const partialActions = bag as unknown as MonitorActions;
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({
+      ctx,
+      history: reader,
+      structuredQuery,
+      textQuery: vi.fn(),
+      injectEvent,
+      actions: partialActions,
+    });
+
+    const reply = await session.converse('skip that step');
+
+    expect(reply).toBe('skipping it.');
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '⚠ That action is not available for this run.' });
   });
 });
 

@@ -230,21 +230,23 @@ Answer concisely and concretely, grounding your reply in the run's history above
  * Compose the ACTION-CAPABLE answer prompt used when the monitor session was built
  * with a `MonitorActions` actuator wired (the monitor-actuation seam). Same digest
  * scaffolding as `buildAnswerPrompt`, but the hard "do NOT try to run ... steps" line
- * is replaced with a capabilities contract: the monitor may attach AT MOST ONE
- * action to its reply, and ONLY when the user explicitly asks for it — either a
- * `retry_step` (retry/resume/re-run of a failed or skipped step) or a ONE-WAY
- * `switch_to_orchestrated` handover of the whole run when the request exceeds
- * step-by-step execution. The host (not the monitor) validates run state and
- * executes the action — the monitor never claims success itself. Pure (output
- * depends only on its args); structured output shape is `{ reply, action? }` per
- * `MONITOR_CONVERSE_SCHEMA`.
+ * is replaced with a capabilities contract covering 10 action kinds: retrying/
+ * handover (`retry_step`, the ONE-WAY `switch_to_orchestrated`), task mutations
+ * (`add_task`/`remove_task`/`edit_task`), step control (`skip_step`/`unskip_step`/
+ * `steer_step`), and review-queue actions (`resolve_review_item`/`file_note`). The
+ * monitor may attach AT MOST ONE action per reply; every kind (including the
+ * low-risk `file_note`) requires the user's EXPLICIT confirmation on a later turn
+ * before it is attached — never actuated purely on inference. The host (not the
+ * monitor) validates run state and executes the action — the monitor never claims
+ * success itself. Pure (output depends only on its args); structured output shape
+ * is `{ reply, action? }` per `MONITOR_CONVERSE_SCHEMA`.
  */
 export function buildActionAnswerPrompt(
   ctx: MonitorContext,
   question: string,
   history: MonitorHistory,
 ): string {
-  return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. You still do not sequence steps yourself — host code does. Your role is to MONITOR the run, answer the user's questions about it, and — only when explicitly asked — attach a validated action for the host to execute.
+  return `You are the SUPERVISOR of a "${ctx.workflowName}" workflow run executing in this git worktree. You still do not sequence steps yourself — host code does. Your role is to MONITOR the run, answer the user's questions about it, and — only when explicitly asked and explicitly confirmed — attach a validated action for the host to execute.
 
 Step timeline so far:
 ${digestSteps(history.steps)}
@@ -256,14 +258,28 @@ The user asks:
 ${question}
 
 Capabilities:
-- You may attach AT MOST ONE action per reply, and ONLY when the user EXPLICITLY asks for it — a retry, a resume, or a re-run of a failed or skipped step. This covers two cases: a FAILED or RESTING run, where it revives the run at the failed/skipped step; and a run currently PAUSED on a usage-limit item, where the host resolves that pause instead. Either way the host picks the right mechanism for the run's actual state and reports back which one happened.
-- Action "retry_step": set \`stepId\` to the exact step id from the timeline above when the user names a step or the timeline makes clear which step failed/skipped; omit \`stepId\` to default to the run's failed step. The HOST validates the run's state and reports the outcome back to the user — you never claim the retry succeeded yourself.
-- Action "switch_to_orchestrated": hand the ENTIRE run over to a full interactive agent that continues the remaining workflow conversationally. Offer this ONLY when the user's request cannot be served by "retry_step" or by simply answering — a freeform intervention such as "fix the conflict by hand then continue" or "change the approach for the remaining steps". NEVER attach it merely because a retry failed. Because it is ONE-WAY — the run does NOT return to step-by-step execution afterward — SUGGEST it in your reply first and WAIT for the user's EXPLICIT confirmation on a later turn before attaching it. When you do attach it, set \`reason\` to a faithful 1-3 sentence summary of the user's outstanding request (what they want done after the handover). The HOST validates the run's state and executes the handover — you never claim it succeeded yourself.
+- You may attach AT MOST ONE action per reply, and ONLY when the user EXPLICITLY asks for it.
+- Retrying / handover:
+  - Action "retry_step": a retry, a resume, or a re-run of a failed or skipped step. Set \`stepId\` to the exact step id from the timeline above when the user names a step or the timeline makes clear which step failed/skipped; omit \`stepId\` to default to the run's failed step. This covers two cases: a FAILED or RESTING run, where it revives the run at the failed/skipped step; and a run currently PAUSED on a usage-limit item, where the host resolves that pause instead. Either way the host picks the right mechanism for the run's actual state and reports back which one happened. The HOST validates the run's state and reports the outcome back to the user — you never claim the retry succeeded yourself.
+  - Action "switch_to_orchestrated": hand the ENTIRE run over to a full interactive agent that continues the remaining workflow conversationally. Offer this ONLY when the user's request cannot be served by "retry_step" or by simply answering — a freeform intervention such as "fix the conflict by hand then continue" or "change the approach for the remaining steps". NEVER attach it merely because a retry failed. Because it is ONE-WAY — the run does NOT return to step-by-step execution afterward — SUGGEST it in your reply first and WAIT for the user's EXPLICIT confirmation on a later turn before attaching it. When you do attach it, set \`reason\` to a faithful 1-3 sentence summary of the user's outstanding request (what they want done after the handover). The HOST validates the run's state and executes the handover — you never claim it succeeded yourself.
+- Task edits (the run's sprint/ship task fan-out): these apply to a NOT-YET-STARTED task and take effect starting from the run's NEXT wave — they cannot change a task whose work already began.
+  - Action "add_task": add a new task. Set \`title\` (required), and optionally \`body\` and \`priority\`.
+  - Action "remove_task": remove a not-yet-started task. Set \`taskRef\` (required) to its ref or id.
+  - Action "edit_task": edit a not-yet-started task. Set \`taskRef\` (required) plus at least one of \`title\`, \`body\`, or \`priority\` to change.
+- Step control: these affect an UPCOMING step the run HASN'T reached yet — they cannot change a step already running or finished.
+  - Action "skip_step": skip an upcoming step. Set \`stepId\` (required).
+  - Action "unskip_step": reverse a previously requested skip on an upcoming step. Set \`stepId\` (required).
+  - Action "steer_step": inject freeform guidance for an upcoming step before it runs. Set \`stepId\` and \`guidance\` (both required).
+- Review queue:
+  - Action "resolve_review_item": resolve a pending gate, finding, or permission request by id. Set \`reviewItemId\` (required), and optionally \`outcome\` ("approve" or "reject") and \`resolution\` (a short note).
+  - Action "file_note": file a non-blocking informational note into the run's review queue. Set \`title\` (required) and optionally \`body\`.
 - For a pure question (no explicit action request), return no action.
+
+CONFIRM BEFORE YOU ACT: for every action kind — including "file_note", which is low-risk but still confirmed for consistency — first SUGGEST the action in your reply and WAIT for the user's EXPLICIT confirmation on a LATER turn before attaching it. NEVER actuate a task edit, step-control, review-queue, or handover action purely on inference from the user's first mention of it. You may ask a clarifying question instead of confirming when the request is ambiguous (e.g. which task, which step, which review item).
 
 Answer concisely and concretely, grounding your reply in the run's history above. You have read-only tools (Read/Grep/Glob) for inspecting the worktree — use them when needed to answer accurately.
 
-Return your response as structured output: { reply: string, action?: { kind: "retry_step", stepId?: string } | { kind: "switch_to_orchestrated", reason: string } }. \`reply\` is the message shown to the user.`;
+Return your response as structured output: { reply: string, action?: { kind: "retry_step" | "switch_to_orchestrated" | "add_task" | "remove_task" | "edit_task" | "skip_step" | "unskip_step" | "steer_step" | "resolve_review_item" | "file_note", ...fields } }, where only the fields relevant to the chosen \`kind\` (see Capabilities above) should be set. \`reply\` is the message shown to the user.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -272,16 +288,17 @@ Return your response as structured output: { reply: string, action?: { kind: "re
 
 /**
  * JSON schema the SDK `outputFormat` enforces for a structured converse reply: a
- * required `reply` string plus an OPTIONAL `action` object (`retry_step` or
- * `switch_to_orchestrated`). `additionalProperties: false` at every level so the
- * SDK rejects any extra fields. Used only when a `MonitorActions` actuator is wired
- * (`converseOnce` picks this over `MONITOR_TRIAGE_SCHEMA` / plain text).
+ * required `reply` string plus an OPTIONAL `action` object (one of 10 kinds —
+ * `retry_step` / `switch_to_orchestrated` plus 8 non-stopping steering actions:
+ * task mutations, step control, and review-queue actions). `additionalProperties:
+ * false` at every level so the SDK rejects any extra fields. Used only when a
+ * `MonitorActions` actuator is wired (`converseOnce` picks this over
+ * `MONITOR_TRIAGE_SCHEMA` / plain text).
  *
- * The two action fields are kind-specific and both optional at the schema level:
- * `stepId` is `retry_step`-only; `reason` is `switch_to_orchestrated`-only but
- * REQUIRED in practice for that kind (a 1-3 sentence faithful summary of what the
- * user wants done after the handover) — `parseConverseAction` drops a
- * `switch_to_orchestrated` action whose `reason` is missing/blank.
+ * Every field below is kind-specific and optional at the schema level (only the
+ * fields relevant to the chosen `kind` should be set) — `parseConverseAction`
+ * enforces the REQUIRED-in-practice fields per kind and drops the action when
+ * they're missing/blank; see its doc comment for the exact per-kind rules.
  */
 export const MONITOR_CONVERSE_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -294,16 +311,63 @@ export const MONITOR_CONVERSE_SCHEMA: Record<string, unknown> = {
       additionalProperties: false,
       required: ['kind'],
       properties: {
-        kind: { type: 'string', enum: ['retry_step', 'switch_to_orchestrated'] },
+        kind: {
+          type: 'string',
+          enum: [
+            'retry_step',
+            'switch_to_orchestrated',
+            'add_task',
+            'remove_task',
+            'edit_task',
+            'skip_step',
+            'unskip_step',
+            'steer_step',
+            'resolve_review_item',
+            'file_note',
+          ],
+        },
         stepId: {
           type: 'string',
           description:
-            'retry_step only: exact step id to retry; omit to default to the run\'s failed step.',
+            'retry_step / skip_step / unskip_step / steer_step: exact step id from the timeline. For retry_step, omit to default to the run\'s failed step.',
         },
         reason: {
           type: 'string',
           description:
             'switch_to_orchestrated only (REQUIRED in practice): a faithful 1-3 sentence summary of what the user wants done after the handover.',
+        },
+        title: {
+          type: 'string',
+          description: 'add_task / edit_task / file_note: the task or note title.',
+        },
+        body: {
+          type: 'string',
+          description: 'add_task / edit_task / file_note: the task or note body (markdown).',
+        },
+        priority: {
+          type: 'string',
+          description: 'add_task / edit_task: the task priority.',
+        },
+        taskRef: {
+          type: 'string',
+          description: 'remove_task / edit_task: the ref or id of the task to mutate.',
+        },
+        guidance: {
+          type: 'string',
+          description: 'steer_step only (REQUIRED in practice): freeform guidance injected before the step runs.',
+        },
+        reviewItemId: {
+          type: 'string',
+          description: 'resolve_review_item only (REQUIRED in practice): the id of the pending review item to resolve.',
+        },
+        outcome: {
+          type: 'string',
+          enum: ['approve', 'reject'],
+          description: 'resolve_review_item only: the resolution outcome.',
+        },
+        resolution: {
+          type: 'string',
+          description: 'resolve_review_item only: an optional resolution note.',
         },
       },
     },
@@ -327,27 +391,184 @@ export interface ConverseSwitchToOrchestratedAction {
   reason: string;
 }
 
+/**
+ * Add a new task to the run's sprint/ship task fan-out. `title` is required;
+ * `body`/`priority` are optional.
+ */
+export interface ConverseAddTaskAction {
+  kind: 'add_task';
+  title: string;
+  body?: string;
+  priority?: string;
+}
+
+/** Remove a not-yet-started task, identified by `taskRef` (ref or id). */
+export interface ConverseRemoveTaskAction {
+  kind: 'remove_task';
+  taskRef: string;
+}
+
+/**
+ * Edit a not-yet-started task, identified by `taskRef`. At least one of
+ * `title`/`body`/`priority` must be present (enforced by `parseConverseAction`).
+ */
+export interface ConverseEditTaskAction {
+  kind: 'edit_task';
+  taskRef: string;
+  title?: string;
+  body?: string;
+  priority?: string;
+}
+
+/** Mark an upcoming (not-yet-reached) step to be skipped when the run reaches it. */
+export interface ConverseSkipStepAction {
+  kind: 'skip_step';
+  stepId: string;
+}
+
+/** Reverse a previously requested `skip_step` for an upcoming step. */
+export interface ConverseUnskipStepAction {
+  kind: 'unskip_step';
+  stepId: string;
+}
+
+/** Inject freeform guidance for an upcoming (not-yet-reached) step before it runs. */
+export interface ConverseSteerStepAction {
+  kind: 'steer_step';
+  stepId: string;
+  guidance: string;
+}
+
+/**
+ * Resolve a pending review-queue item (a gate, finding, or permission request) by
+ * id. `outcome`/`resolution` are optional.
+ */
+export interface ConverseResolveReviewItemAction {
+  kind: 'resolve_review_item';
+  reviewItemId: string;
+  outcome?: 'approve' | 'reject';
+  resolution?: string;
+}
+
+/** File a non-blocking informational note into the run's review queue. */
+export interface ConverseFileNoteAction {
+  kind: 'file_note';
+  title: string;
+  body?: string;
+}
+
 /** Any host-executable action a converse reply may attach (at most one). */
-export type ConverseAction = ConverseRetryStepAction | ConverseSwitchToOrchestratedAction;
+export type ConverseAction =
+  | ConverseRetryStepAction
+  | ConverseSwitchToOrchestratedAction
+  | ConverseAddTaskAction
+  | ConverseRemoveTaskAction
+  | ConverseEditTaskAction
+  | ConverseSkipStepAction
+  | ConverseUnskipStepAction
+  | ConverseSteerStepAction
+  | ConverseResolveReviewItemAction
+  | ConverseFileNoteAction;
+
+/** True iff `v` is a string with non-whitespace content (the drop-if-missing check below). */
+function isNonEmptyString(v: unknown): v is string {
+  return typeof v === 'string' && v.trim().length > 0;
+}
 
 /**
  * Narrow + sanitize a candidate `action` field into a `ConverseAction`, or drop it.
- * `retry_step` keeps its optional-`stepId` contract; `switch_to_orchestrated`
- * REQUIRES a non-empty trimmed `reason` (a missing/blank reason drops the action —
- * the same failure mode as an unknown `kind`), and stores it verbatim.
+ * `retry_step` keeps its optional-`stepId` contract; every other kind REQUIRES its
+ * kind-specific fields to be non-empty strings (a missing/blank required field
+ * drops the whole action — the same failure mode as an unknown `kind`):
+ *
+ * - `switch_to_orchestrated` requires `reason`.
+ * - `add_task` / `file_note` require `title`.
+ * - `remove_task` requires `taskRef`.
+ * - `edit_task` requires `taskRef` AND at least one of `title`/`body`/`priority`.
+ * - `skip_step` / `unskip_step` require `stepId`.
+ * - `steer_step` requires `stepId` AND `guidance`.
+ * - `resolve_review_item` requires `reviewItemId`; `outcome`, if present, must be
+ *   `'approve'` or `'reject'` — an invalid `outcome` is dropped to `undefined`
+ *   while the rest of the action is KEPT (not the same failure mode as a missing
+ *   required field).
+ *
+ * Optional fields (`body`, `priority`, `resolution`, etc.) are stored verbatim
+ * when present as a string; a present-but-wrong-typed optional field drops the
+ * whole action, mirroring `retry_step`'s existing `stepId` type check.
  */
 function parseConverseAction(v: unknown): ConverseAction | undefined {
   if (typeof v !== 'object' || v === null) return undefined;
   const o = v as Record<string, unknown>;
-  if (o.kind === 'retry_step') {
-    if (o.stepId !== undefined && typeof o.stepId !== 'string') return undefined;
-    return typeof o.stepId === 'string' ? { kind: 'retry_step', stepId: o.stepId } : { kind: 'retry_step' };
+  switch (o.kind) {
+    case 'retry_step': {
+      if (o.stepId !== undefined && typeof o.stepId !== 'string') return undefined;
+      return typeof o.stepId === 'string' ? { kind: 'retry_step', stepId: o.stepId } : { kind: 'retry_step' };
+    }
+    case 'switch_to_orchestrated': {
+      if (!isNonEmptyString(o.reason)) return undefined;
+      return { kind: 'switch_to_orchestrated', reason: o.reason };
+    }
+    case 'add_task': {
+      if (!isNonEmptyString(o.title)) return undefined;
+      if (o.body !== undefined && typeof o.body !== 'string') return undefined;
+      if (o.priority !== undefined && typeof o.priority !== 'string') return undefined;
+      return {
+        kind: 'add_task',
+        title: o.title,
+        ...(typeof o.body === 'string' ? { body: o.body } : {}),
+        ...(typeof o.priority === 'string' ? { priority: o.priority } : {}),
+      };
+    }
+    case 'remove_task': {
+      if (!isNonEmptyString(o.taskRef)) return undefined;
+      return { kind: 'remove_task', taskRef: o.taskRef };
+    }
+    case 'edit_task': {
+      if (!isNonEmptyString(o.taskRef)) return undefined;
+      if (o.title !== undefined && typeof o.title !== 'string') return undefined;
+      if (o.body !== undefined && typeof o.body !== 'string') return undefined;
+      if (o.priority !== undefined && typeof o.priority !== 'string') return undefined;
+      const hasEdit = isNonEmptyString(o.title) || isNonEmptyString(o.body) || isNonEmptyString(o.priority);
+      if (!hasEdit) return undefined;
+      return {
+        kind: 'edit_task',
+        taskRef: o.taskRef,
+        ...(typeof o.title === 'string' ? { title: o.title } : {}),
+        ...(typeof o.body === 'string' ? { body: o.body } : {}),
+        ...(typeof o.priority === 'string' ? { priority: o.priority } : {}),
+      };
+    }
+    case 'skip_step': {
+      if (!isNonEmptyString(o.stepId)) return undefined;
+      return { kind: 'skip_step', stepId: o.stepId };
+    }
+    case 'unskip_step': {
+      if (!isNonEmptyString(o.stepId)) return undefined;
+      return { kind: 'unskip_step', stepId: o.stepId };
+    }
+    case 'steer_step': {
+      if (!isNonEmptyString(o.stepId) || !isNonEmptyString(o.guidance)) return undefined;
+      return { kind: 'steer_step', stepId: o.stepId, guidance: o.guidance };
+    }
+    case 'resolve_review_item': {
+      if (!isNonEmptyString(o.reviewItemId)) return undefined;
+      if (o.resolution !== undefined && typeof o.resolution !== 'string') return undefined;
+      const outcome = o.outcome === 'approve' || o.outcome === 'reject' ? o.outcome : undefined;
+      return {
+        kind: 'resolve_review_item',
+        reviewItemId: o.reviewItemId,
+        ...(outcome ? { outcome } : {}),
+        ...(typeof o.resolution === 'string' ? { resolution: o.resolution } : {}),
+      };
+    }
+    case 'file_note': {
+      if (!isNonEmptyString(o.title)) return undefined;
+      if (o.body !== undefined && typeof o.body !== 'string') return undefined;
+      return { kind: 'file_note', title: o.title, ...(typeof o.body === 'string' ? { body: o.body } : {}) };
+    }
+    default:
+      return undefined;
   }
-  if (o.kind === 'switch_to_orchestrated') {
-    if (typeof o.reason !== 'string' || o.reason.trim().length === 0) return undefined;
-    return { kind: 'switch_to_orchestrated', reason: o.reason };
-  }
-  return undefined;
 }
 
 /**
@@ -375,6 +596,45 @@ export function parseConverseOutput(
 export interface MonitorActionResult {
   ok: boolean;
   message: string;
+}
+
+/**
+ * Fallback result for an action whose corresponding `MonitorActions` method is
+ * absent from the bag (see `DefaultMonitorSession.runAction`'s defensive guard).
+ */
+const ACTION_UNAVAILABLE: MonitorActionResult = {
+  ok: false,
+  message: 'That action is not available for this run.',
+};
+
+/**
+ * Per-kind fail-soft apology injected when a host actuator THROWS (`actuate`) —
+ * distinct from `ACTION_UNAVAILABLE`, which covers a missing method rather than a
+ * thrown error.
+ */
+function actuationFailureFallback(kind: ConverseAction['kind']): string {
+  switch (kind) {
+    case 'retry_step':
+      return '⚠ The retry action failed unexpectedly.';
+    case 'switch_to_orchestrated':
+      return '⚠ The handover action failed unexpectedly.';
+    case 'add_task':
+      return '⚠ Adding the task failed unexpectedly.';
+    case 'remove_task':
+      return '⚠ Removing the task failed unexpectedly.';
+    case 'edit_task':
+      return '⚠ Editing the task failed unexpectedly.';
+    case 'skip_step':
+      return '⚠ Skipping the step failed unexpectedly.';
+    case 'unskip_step':
+      return '⚠ Un-skipping the step failed unexpectedly.';
+    case 'steer_step':
+      return '⚠ Steering the step failed unexpectedly.';
+    case 'resolve_review_item':
+      return '⚠ Resolving the review item failed unexpectedly.';
+    case 'file_note':
+      return '⚠ Filing the note failed unexpectedly.';
+  }
 }
 
 /**
@@ -418,6 +678,74 @@ export interface MonitorActions {
    * step-by-step execution afterward.
    */
   switchToOrchestrated(reason: string): Promise<MonitorActionResult>;
+
+  /**
+   * Add a new task to the run's sprint/ship task fan-out. Host-validated and
+   * host-executed; the monitor brain never validates or executes this itself —
+   * it only requests it (after the user's explicit confirmation, per the
+   * action-capable prompt's contract) and relays the host's reported outcome.
+   * Takes effect starting from the run's NEXT wave — it cannot retroactively
+   * affect a wave already in flight.
+   */
+  addTask(input: { title: string; body?: string; priority?: string }): Promise<MonitorActionResult>;
+
+  /**
+   * Remove a not-yet-started task from the run's sprint/ship fan-out, identified
+   * by ref or id. Host-validated and host-executed; never actuated without the
+   * user's explicit confirmation.
+   */
+  removeTask(input: { taskRef: string }): Promise<MonitorActionResult>;
+
+  /**
+   * Edit a not-yet-started task's title/body/priority, identified by ref or id.
+   * Host-validated and host-executed; never actuated without the user's explicit
+   * confirmation.
+   */
+  editTask(input: {
+    taskRef: string;
+    title?: string;
+    body?: string;
+    priority?: string;
+  }): Promise<MonitorActionResult>;
+
+  /**
+   * Mark an upcoming (not-yet-reached) step to be skipped when the run gets to
+   * it. Host-validated and host-executed; never actuated without the user's
+   * explicit confirmation.
+   */
+  skipStep(input: { stepId: string }): Promise<MonitorActionResult>;
+
+  /**
+   * Reverse a previously requested `skipStep` for an upcoming step.
+   * Host-validated and host-executed; never actuated without the user's explicit
+   * confirmation.
+   */
+  unskipStep(input: { stepId: string }): Promise<MonitorActionResult>;
+
+  /**
+   * Inject freeform guidance for an upcoming (not-yet-reached) step to steer how
+   * it executes. Host-validated and host-executed; never actuated without the
+   * user's explicit confirmation.
+   */
+  steerStep(input: { stepId: string; guidance: string }): Promise<MonitorActionResult>;
+
+  /**
+   * Resolve a pending review-queue item (a gate, finding, or permission request)
+   * by id. Host-validated and host-executed; never actuated without the user's
+   * explicit confirmation.
+   */
+  resolveReviewItem(input: {
+    reviewItemId: string;
+    outcome?: 'approve' | 'reject';
+    resolution?: string;
+  }): Promise<MonitorActionResult>;
+
+  /**
+   * File a non-blocking informational note into the run's review queue. Lower
+   * risk than the other mutating actions, but still only actuated after the
+   * user's explicit confirmation for consistency.
+   */
+  fileNote(input: { title: string; body?: string }): Promise<MonitorActionResult>;
 }
 
 /**
@@ -454,10 +782,12 @@ export interface MonitorSession {
    *      synchronous, so ordering holds). When a `MonitorActions` actuator is
    *      wired, this step OPTIONALLY actuates: the query runs as a structured
    *      `{ reply, action? }` request instead of a plain text answer, and — only
-   *      when the user explicitly asked for it — an at-most-one host action
-   *      (`retry_step`, or the one-way `switch_to_orchestrated` handover) comes
-   *      back attached to the reply. Without an actuator wired, this step is the
-   *      plain `answer()` path, unchanged.
+   *      when the user explicitly asked for it AND (for every kind but a bare
+   *      retry) explicitly confirmed on a later turn — an at-most-one host action
+   *      (one of 10 kinds: `retry_step` / `switch_to_orchestrated` plus 8
+   *      non-stopping steering actions — task mutations, step control, review-queue
+   *      resolution) comes back attached to the reply. Without an actuator wired,
+   *      this step is the plain `answer()` path, unchanged.
    *   3. INJECT the monitor's reply as an assistant turn.
    *   4. If an action came back, EXECUTE it via the actuator (host-validated) and
    *      INJECT a follow-up assistant turn reporting the outcome. Fail-soft: a
@@ -491,10 +821,10 @@ export interface DefaultMonitorSessionDeps {
   /**
    * The monitor-actuation seam: when present, `converse` upgrades its query from a
    * plain text answer to a structured `{ reply, action? }` request and may execute
-   * an at-most-one host action (`retry_step`, or the one-way `switch_to_orchestrated`
-   * handover) the user explicitly asked for. Wired only in production (where real
-   * `retryRunHandler` / `handoverRunHandler`-backed executors exist); absent here
-   * ⇒ `converse` behaves byte-identically to before this seam existed.
+   * an at-most-one host action (one of 10 kinds — see `MonitorActions`) the user
+   * explicitly asked for. Wired only in production (where real host-executed
+   * handlers exist); absent here ⇒ `converse` behaves byte-identically to before
+   * this seam existed.
    */
   actions?: MonitorActions;
   logger?: LoggerLike;
@@ -668,20 +998,15 @@ export class DefaultMonitorSession implements MonitorSession {
   /**
    * Execute a requested action via the host actuator and inject a follow-up
    * assistant turn reporting the outcome (`▶` on success, `⚠` on a reported
-   * failure) — the SAME outcome-turn shape for both `retry_step` (→
-   * `actions.retryStep`) and `switch_to_orchestrated` (→
-   * `actions.switchToOrchestrated`, the one-way handover). Fail-soft: a throwing
-   * actuator injects a generic apology turn instead of escaping — the exchange's
-   * reply has already been returned by the time this runs, so a throw here must
-   * never surface to `converse`'s caller.
+   * failure) — the SAME outcome-turn shape for all 10 action kinds. Fail-soft: a
+   * throwing actuator injects a per-kind apology turn instead of escaping — the
+   * exchange's reply has already been returned by the time this runs, so a throw
+   * here must never surface to `converse`'s caller.
    */
   private async actuate(action: ConverseAction): Promise<void> {
     if (!this.actions) return;
     try {
-      const result =
-        action.kind === 'switch_to_orchestrated'
-          ? await this.actions.switchToOrchestrated(action.reason)
-          : await this.actions.retryStep(action.stepId);
+      const result = await this.runAction(this.actions, action);
       this.tryInject(buildAssistantTextEvent(result.ok ? `▶ ${result.message}` : `⚠ ${result.message}`));
     } catch (err) {
       this.logger?.warn('[Monitor] converse action failed (fail-soft)', {
@@ -689,11 +1014,67 @@ export class DefaultMonitorSession implements MonitorSession {
         kind: action.kind,
         error: err instanceof Error ? err.message : String(err),
       });
-      const fallback =
-        action.kind === 'switch_to_orchestrated'
-          ? '⚠ The handover action failed unexpectedly.'
-          : '⚠ The retry action failed unexpectedly.';
-      this.tryInject(buildAssistantTextEvent(fallback));
+      this.tryInject(buildAssistantTextEvent(actuationFailureFallback(action.kind)));
+    }
+  }
+
+  /**
+   * Dispatch one parsed action to its `MonitorActions` method, mapping the
+   * action's fields onto the method's input shape. `MonitorActions`' 10 methods
+   * are required members of the interface, so whenever `actions` (the bag) is
+   * present every method is too under the type system — the `typeof ... ===
+   * 'function'` checks below are a defensive runtime guard (mirrors the
+   * pre-expansion ternary's tolerance for a not-yet-wired method) rather than a
+   * type-level possibility; a bag missing a method resolves to a graceful
+   * `{ ok: false, ... }` instead of throwing.
+   */
+  private async runAction(actions: MonitorActions, action: ConverseAction): Promise<MonitorActionResult> {
+    switch (action.kind) {
+      case 'retry_step':
+        return typeof actions.retryStep === 'function' ? actions.retryStep(action.stepId) : ACTION_UNAVAILABLE;
+      case 'switch_to_orchestrated':
+        return typeof actions.switchToOrchestrated === 'function'
+          ? actions.switchToOrchestrated(action.reason)
+          : ACTION_UNAVAILABLE;
+      case 'add_task':
+        return typeof actions.addTask === 'function'
+          ? actions.addTask({ title: action.title, body: action.body, priority: action.priority })
+          : ACTION_UNAVAILABLE;
+      case 'remove_task':
+        return typeof actions.removeTask === 'function'
+          ? actions.removeTask({ taskRef: action.taskRef })
+          : ACTION_UNAVAILABLE;
+      case 'edit_task':
+        return typeof actions.editTask === 'function'
+          ? actions.editTask({
+              taskRef: action.taskRef,
+              title: action.title,
+              body: action.body,
+              priority: action.priority,
+            })
+          : ACTION_UNAVAILABLE;
+      case 'skip_step':
+        return typeof actions.skipStep === 'function' ? actions.skipStep({ stepId: action.stepId }) : ACTION_UNAVAILABLE;
+      case 'unskip_step':
+        return typeof actions.unskipStep === 'function'
+          ? actions.unskipStep({ stepId: action.stepId })
+          : ACTION_UNAVAILABLE;
+      case 'steer_step':
+        return typeof actions.steerStep === 'function'
+          ? actions.steerStep({ stepId: action.stepId, guidance: action.guidance })
+          : ACTION_UNAVAILABLE;
+      case 'resolve_review_item':
+        return typeof actions.resolveReviewItem === 'function'
+          ? actions.resolveReviewItem({
+              reviewItemId: action.reviewItemId,
+              outcome: action.outcome,
+              resolution: action.resolution,
+            })
+          : ACTION_UNAVAILABLE;
+      case 'file_note':
+        return typeof actions.fileNote === 'function'
+          ? actions.fileNote({ title: action.title, body: action.body })
+          : ACTION_UNAVAILABLE;
     }
   }
 

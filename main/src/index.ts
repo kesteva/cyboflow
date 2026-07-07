@@ -65,9 +65,22 @@ import { RunShellManager } from './services/runShellManager';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
-import { setReviewItemsRunProbe } from './orchestrator/trpc/routers/reviewItems';
+import {
+  setReviewItemsRunProbe,
+  resumeWouldStrandEndedWalk,
+} from './orchestrator/trpc/routers/reviewItems';
 import { setMonitorRehydrator } from './orchestrator/trpc/routers/monitor';
 import { createMonitorRehydrator } from './orchestrator/programmatic/monitorRehydration';
+import { resolveReviewItem as resolveReviewItemCore } from './orchestrator/resolveReviewItemHandler';
+import {
+  addTaskToRun,
+  removeTaskFromRun,
+  editRunTask,
+  type TaskMutationDeps,
+  type TaskMutationResult,
+  type TaskMutationNoOpReason,
+} from './orchestrator/taskMutationHandler';
+import { resolveWorkflowDefinition } from '../../shared/types/workflows';
 import { handoverRunHandler, type HandoverRunDeps } from './orchestrator/handoverRunHandler';
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
@@ -167,6 +180,34 @@ let monitorRetryStep: ((runId: string, stepId?: string) => Promise<MonitorAction
 let monitorSwitchToOrchestrated:
   | ((runId: string, reason: string) => Promise<MonitorActionResult>)
   | null = null;
+// Monitor-actuation seam (the 8 NON-STOPPING steering actions: add/remove/edit
+// task, skip/unskip/steer step, resolve review item, file note). Same
+// late-binding pattern as the two above — bound in the tRPC dep-wiring block
+// where db / runExecutor / the routers are all live. Grouped into one holder
+// object (rather than 8 separate module vars) since they share a wiring site.
+// Null until wired → each action reports "not available yet" instead of acting.
+interface MonitorSteeringActions {
+  addTask(runId: string, input: { title: string; body?: string; priority?: string }): Promise<MonitorActionResult>;
+  removeTask(runId: string, input: { taskRef: string }): Promise<MonitorActionResult>;
+  editTask(
+    runId: string,
+    input: { taskRef: string; title?: string; body?: string; priority?: string },
+  ): Promise<MonitorActionResult>;
+  skipStep(runId: string, input: { stepId: string }): Promise<MonitorActionResult>;
+  unskipStep(runId: string, input: { stepId: string }): Promise<MonitorActionResult>;
+  steerStep(runId: string, input: { stepId: string; guidance: string }): Promise<MonitorActionResult>;
+  resolveReviewItem(
+    runId: string,
+    input: { reviewItemId: string; outcome?: 'approve' | 'reject'; resolution?: string },
+  ): Promise<MonitorActionResult>;
+  fileNote(runId: string, input: { title: string; body?: string }): Promise<MonitorActionResult>;
+}
+let monitorSteeringActions: MonitorSteeringActions | null = null;
+/** Fallback when a steering action fires before the dep-wiring block ran. */
+const STEERING_NOT_WIRED: MonitorActionResult = {
+  ok: false,
+  message: "That action isn't available yet — try again in a moment.",
+};
 // Monitor-session construction closure (monitor lazy-rehydration): assigned when
 // the monitorFactory is built in initializeServices() and reused by the lazy
 // rehydrator wired in the tRPC dep-wiring block, so a session REVIVED after an
@@ -1146,6 +1187,41 @@ async function initializeServices() {
                     ok: false,
                     message: 'Handover is not wired yet — try again in a moment.',
                   }),
+            // The 8 non-stopping steering actions, all delegating to the single
+            // late-bound monitorSteeringActions holder (wired in the dep-wiring
+            // block). Each threads the session's own runId.
+            addTask: (input) =>
+              monitorSteeringActions
+                ? monitorSteeringActions.addTask(ctx.runId, input)
+                : Promise.resolve(STEERING_NOT_WIRED),
+            removeTask: (input) =>
+              monitorSteeringActions
+                ? monitorSteeringActions.removeTask(ctx.runId, input)
+                : Promise.resolve(STEERING_NOT_WIRED),
+            editTask: (input) =>
+              monitorSteeringActions
+                ? monitorSteeringActions.editTask(ctx.runId, input)
+                : Promise.resolve(STEERING_NOT_WIRED),
+            skipStep: (input) =>
+              monitorSteeringActions
+                ? monitorSteeringActions.skipStep(ctx.runId, input)
+                : Promise.resolve(STEERING_NOT_WIRED),
+            unskipStep: (input) =>
+              monitorSteeringActions
+                ? monitorSteeringActions.unskipStep(ctx.runId, input)
+                : Promise.resolve(STEERING_NOT_WIRED),
+            steerStep: (input) =>
+              monitorSteeringActions
+                ? monitorSteeringActions.steerStep(ctx.runId, input)
+                : Promise.resolve(STEERING_NOT_WIRED),
+            resolveReviewItem: (input) =>
+              monitorSteeringActions
+                ? monitorSteeringActions.resolveReviewItem(ctx.runId, input)
+                : Promise.resolve(STEERING_NOT_WIRED),
+            fileNote: (input) =>
+              monitorSteeringActions
+                ? monitorSteeringActions.fileNote(ctx.runId, input)
+                : Promise.resolve(STEERING_NOT_WIRED),
           },
           logger: cyboflowLogger,
         });
@@ -2047,6 +2123,169 @@ app.whenReady().then(async () => {
       return { ok: false, message: messages[result.reason] ?? `Handover refused (${result.reason}).` };
     };
     console.log('[Main] monitor switch_to_orchestrated action wired');
+
+    // Monitor steering actions (the 8 non-stopping backlog/step/review edits).
+    // All route through chokepoints (TaskChangeRouter / SprintLaneStore /
+    // ReviewItemRouter) that own their OWN serialization, so none touches the
+    // run's held PQueue — they work while the walk is mid-DAG. skip/unskip/steer
+    // write the live RunDirectives the controller reads at the loop head / the
+    // SpawnStepRunner reads via its per-step guidance thunk.
+    const taskMutationDeps: TaskMutationDeps = {
+      db,
+      applyTaskChange: (projectId, change) =>
+        TaskChangeRouter.getInstance().applyChange(projectId, change),
+      laneStore: {
+        addLane: (laneArgs) => SprintLaneStore.getInstance().addLane(laneArgs),
+        removeLane: (laneArgs) => SprintLaneStore.getInstance().removeLane(laneArgs),
+      },
+      logger: loggerLike,
+    };
+
+    // Map the task-mutation handler's discriminated refusal to a chat-friendly pair.
+    const mapTaskResult = (r: TaskMutationResult): MonitorActionResult => {
+      if (r.ok) return { ok: true, message: r.message };
+      const messages: Record<TaskMutationNoOpReason, string> = {
+        not_found: 'Run not found.',
+        not_programmatic: 'Only programmatic sprint runs support backlog edits.',
+        no_batch: r.detail ?? 'This run has no active sprint batch to edit.',
+        task_not_found: `No task matching '${r.detail ?? ''}' in this run's project.`,
+        not_eligible: "The task couldn't be made sprint-eligible.",
+        already_started: "That task has already started and can't be removed.",
+        duplicate: 'That task is already in the sprint.',
+        nothing_to_change: 'Nothing to change — give a new title, body, or priority.',
+        lane_error: r.detail ? `Sprint update failed: ${r.detail}` : 'Sprint update failed unexpectedly.',
+      };
+      return { ok: false, message: messages[r.reason] };
+    };
+
+    // A run's project id (review-item + note actions are project-scoped).
+    const runProjectId = (runId: string): number | undefined => {
+      const row = db
+        .prepare('SELECT project_id AS projectId FROM workflow_runs WHERE id = ?')
+        .get(runId) as { projectId?: number } | undefined;
+      return typeof row?.projectId === 'number' ? row.projectId : undefined;
+    };
+
+    // Validate a stepId belongs to a programmatic run's effective workflow
+    // definition — so skip/unskip/steer give "unknown step" feedback instead of
+    // silently stashing a directive the controller will never honor.
+    const validateRunStep = (
+      runId: string,
+      stepId: string,
+    ): { ok: true } | { ok: false; message: string } => {
+      const row = db
+        .prepare(
+          `SELECT wr.execution_model AS executionModel, w.name AS workflowName, w.spec_json AS specJson
+             FROM workflow_runs wr JOIN workflows w ON w.id = wr.workflow_id WHERE wr.id = ?`,
+        )
+        .get(runId) as
+        | { executionModel: string | null; workflowName: string; specJson: string | null }
+        | undefined;
+      if (!row) return { ok: false, message: 'Run not found.' };
+      if (row.executionModel !== 'programmatic')
+        return { ok: false, message: 'Only programmatic runs support step control.' };
+      const def = resolveWorkflowDefinition(row.workflowName, row.specJson);
+      if (!def) return { ok: false, message: "This run's workflow definition could not be resolved." };
+      const exists = def.phases.some((p) => p.steps.some((s) => s.id === stepId));
+      if (!exists) return { ok: false, message: `Step '${stepId}' isn't part of this workflow.` };
+      return { ok: true };
+    };
+
+    monitorSteeringActions = {
+      addTask: (runId, input) => addTaskToRun(runId, input, taskMutationDeps).then(mapTaskResult),
+      removeTask: (runId, input) => removeTaskFromRun(runId, input, taskMutationDeps).then(mapTaskResult),
+      editTask: (runId, input) => editRunTask(runId, input, taskMutationDeps).then(mapTaskResult),
+      skipStep: async (runId, input) => {
+        const v = validateRunStep(runId, input.stepId);
+        if (!v.ok) return { ok: false, message: v.message };
+        runExecutor.addUserSkip(runId, input.stepId);
+        return {
+          ok: true,
+          message: `Step '${input.stepId}' will be skipped when the run reaches it (no effect if it has already run).`,
+        };
+      },
+      unskipStep: async (runId, input) => {
+        const v = validateRunStep(runId, input.stepId);
+        if (!v.ok) return { ok: false, message: v.message };
+        runExecutor.removeUserSkip(runId, input.stepId);
+        return { ok: true, message: `Cleared the pending skip on step '${input.stepId}'.` };
+      },
+      steerStep: async (runId, input) => {
+        const v = validateRunStep(runId, input.stepId);
+        if (!v.ok) return { ok: false, message: v.message };
+        runExecutor.setStepGuidance(runId, input.stepId, input.guidance);
+        return {
+          ok: true,
+          message: `Added your guidance to step '${input.stepId}' — it'll be included when that step runs (no effect if it has already run).`,
+        };
+      },
+      resolveReviewItem: async (runId, input) => {
+        const projectId = runProjectId(runId);
+        if (projectId === undefined) return { ok: false, message: 'Run not found.' };
+        const result = await resolveReviewItemCore(
+          {
+            projectId,
+            reviewItemId: input.reviewItemId,
+            ...(input.outcome !== undefined ? { outcome: input.outcome } : {}),
+            ...(input.resolution !== undefined ? { resolution: input.resolution } : {}),
+          },
+          {
+            db,
+            applyReviewItemResolve: (pid, resolveArgs) =>
+              ReviewItemRouter.getInstance().applyReviewItem(pid, {
+                op: 'resolve',
+                actor: resolveArgs.actor,
+                reviewItemId: resolveArgs.reviewItemId,
+                ...(resolveArgs.resolution != null ? { resolution: resolveArgs.resolution } : {}),
+              }),
+            promotePendingDraftsForRun: (rid) =>
+              QuestionRouter.getInstance().promotePendingDraftsForRun(rid),
+            deleteRunCreatedEntities: (pid, rid) =>
+              TaskChangeRouter.getInstance().deleteRunCreatedEntities(pid, rid),
+            maybeResumeRun: (rid) => HumanStepManager.getInstance().maybeResumeRun(rid),
+            wouldStrandEndedWalk: resumeWouldStrandEndedWalk,
+            logger: loggerLike,
+          },
+        );
+        if (result.ok) {
+          const verb =
+            result.outcome === 'reject'
+              ? 'Rejected'
+              : result.outcome === 'approve'
+                ? 'Approved'
+                : 'Resolved';
+          return {
+            ok: true,
+            message: `${verb} the review item${result.resumed ? ' — the run is resuming.' : '.'}`,
+          };
+        }
+        return { ok: false, message: result.message };
+      },
+      fileNote: async (runId, input) => {
+        const projectId = runProjectId(runId);
+        if (projectId === undefined) return { ok: false, message: 'Run not found.' };
+        try {
+          await ReviewItemRouter.getInstance().applyReviewItem(projectId, {
+            op: 'create',
+            actor: 'orchestrator',
+            kind: 'human_task',
+            title: input.title,
+            ...(input.body !== undefined ? { body: input.body } : {}),
+            blocking: false,
+            source: 'monitor',
+            runId,
+          });
+          return { ok: true, message: `Filed a note in the review queue: '${input.title}'.` };
+        } catch (err) {
+          loggerLike.warn('[Main] monitor fileNote failed', {
+            runId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return { ok: false, message: 'Could not file the note.' };
+        }
+      },
+    };
+    console.log('[Main] monitor steering actions wired');
 
     // Lazy monitor rehydration: after an app restart the in-process
     // MonitorRegistry is empty, and boot recovery only re-drives
