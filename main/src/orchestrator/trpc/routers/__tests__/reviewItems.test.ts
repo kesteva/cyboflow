@@ -27,6 +27,11 @@ import { TRPCError } from '@trpc/server';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { appRouter } from '../../router';
+import {
+  setReviewItemsRunProbe,
+  _resetReviewItemsRunProbeForTesting,
+  type ReviewItemsRunProbe,
+} from '../reviewItems';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { ReviewItemRouter } from '../../../reviewItemRouter';
@@ -96,7 +101,13 @@ afterEach(() => {
   TaskChangeRouter._resetForTesting();
   HumanStepManager._resetForTesting();
   QuestionRouter._resetForTesting();
+  _resetReviewItemsRunProbeForTesting();
 });
+
+/** A fake run-execution probe reporting a fixed hasActiveExecution verdict. */
+function fakeRunProbe(active: boolean): ReviewItemsRunProbe {
+  return { hasActiveExecution: () => active };
+}
 
 describe('cyboflow.reviewItems.list / get', () => {
   it('list returns shaped ReviewItem[] filtered by status, newest-first', async () => {
@@ -824,5 +835,94 @@ describe('cyboflow.reviewItems — blocking findings', () => {
 
     const items = await caller.cyboflow.reviewItems.list({ projectId: 1, status: 'pending' });
     expect(items.map((i) => i.id)).toContain('rvw_r');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FIX — drained-rest race: the trailing auto-resume must never revive a run
+// whose programmatic walk has ENDED. When the resolved gate is the run's LAST
+// step, the walk finishes + rests the run in awaiting_review BEFORE this trailing
+// maybeResumeRun runs; without the probe guard the resume flips it to 'running'
+// with no walk alive and strands it forever (observed 2026-07-06 17:36:20).
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.reviewItems — drained-rest resume guard (run-execution probe)', () => {
+  /** Seed a parked (awaiting_review) run + a single blocking, run-bound finding. */
+  function seedParkedRunWithBlockingItem(
+    db: Database.Database,
+    opts: { runId: string; findingId: string },
+  ): void {
+    db.prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name) VALUES ('wf-g', 1, 'ship')`).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, branch_name, status, policy_json)
+       VALUES (?, 'wf-g', 1, '/w/g', 'b/g', 'awaiting_review', '{}')`,
+    ).run(opts.runId);
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, entity_type, entity_id, kind, status, blocking,
+          title, body, severity, source, payload_json, created_at, updated_at, resolved_by, resolution)
+       VALUES (?, 1, ?, NULL, NULL, 'finding', 'pending', 1, 'A blocking finding', 'body', 'error', 'agent:executor', NULL, ?, ?, NULL, NULL)`,
+    ).run(opts.findingId, opts.runId, now, now);
+  }
+
+  function runStatus(db: Database.Database, runId: string): string {
+    return (db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string }).status;
+  }
+
+  it('resolve: probe hasActiveExecution=false SKIPS the resume — the ended walk stays awaiting_review', async () => {
+    const { caller, db } = buildCaller();
+    setReviewItemsRunProbe(fakeRunProbe(false)); // walk has ended (drained-rest)
+    seedParkedRunWithBlockingItem(db, { runId: 'run-end', findingId: 'rvw_end' });
+
+    const res = await caller.cyboflow.reviewItems.resolve({ projectId: 1, reviewItemId: 'rvw_end' });
+
+    expect(res.resumed).toBe(false);
+    expect(res.runStatus).toBe('awaiting_review'); // skip path surfaces the resting status
+    expect(runStatus(db, 'run-end')).toBe('awaiting_review'); // NOT revived to 'running'
+  });
+
+  it('resolve: probe hasActiveExecution=true RESUMES as before (walk parked mid-gate)', async () => {
+    const { caller, db } = buildCaller();
+    setReviewItemsRunProbe(fakeRunProbe(true)); // live walk still holds the run
+    seedParkedRunWithBlockingItem(db, { runId: 'run-mid', findingId: 'rvw_mid' });
+
+    const res = await caller.cyboflow.reviewItems.resolve({ projectId: 1, reviewItemId: 'rvw_mid' });
+
+    expect(res.resumed).toBe(true);
+    expect(runStatus(db, 'run-mid')).toBe('running'); // aggregate-unblock resumed it
+  });
+
+  it('resolve: probe UNSET preserves legacy behavior (resume fires)', async () => {
+    const { caller, db } = buildCaller();
+    // no setReviewItemsRunProbe() — unset, as in legacy boot / unrelated tests
+    seedParkedRunWithBlockingItem(db, { runId: 'run-legacy', findingId: 'rvw_legacy' });
+
+    const res = await caller.cyboflow.reviewItems.resolve({ projectId: 1, reviewItemId: 'rvw_legacy' });
+
+    expect(res.resumed).toBe(true);
+    expect(runStatus(db, 'run-legacy')).toBe('running');
+  });
+
+  it('dismiss: probe hasActiveExecution=false SKIPS the resume — the ended walk stays awaiting_review', async () => {
+    const { caller, db } = buildCaller();
+    setReviewItemsRunProbe(fakeRunProbe(false));
+    seedParkedRunWithBlockingItem(db, { runId: 'run-dend', findingId: 'rvw_dend' });
+
+    const res = await caller.cyboflow.reviewItems.dismiss({ projectId: 1, reviewItemId: 'rvw_dend' });
+
+    expect(res.resumed).toBe(false);
+    expect(runStatus(db, 'run-dend')).toBe('awaiting_review'); // NOT revived to 'running'
+  });
+
+  it('dismiss: probe hasActiveExecution=true RESUMES as before', async () => {
+    const { caller, db } = buildCaller();
+    setReviewItemsRunProbe(fakeRunProbe(true));
+    seedParkedRunWithBlockingItem(db, { runId: 'run-dmid', findingId: 'rvw_dmid' });
+
+    const res = await caller.cyboflow.reviewItems.dismiss({ projectId: 1, reviewItemId: 'rvw_dmid' });
+
+    expect(res.resumed).toBe(true);
+    expect(runStatus(db, 'run-dmid')).toBe('running');
   });
 });

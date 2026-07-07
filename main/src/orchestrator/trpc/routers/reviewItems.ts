@@ -68,6 +68,74 @@ function humanGateStepId(kind: string | undefined, source: string | null | undef
 }
 
 // ---------------------------------------------------------------------------
+// Run-execution probe (drained-rest race guard)
+//
+// A settable dep — NOT an import of RunExecutor — so this module keeps the
+// standalone-typecheck invariant (no imports from 'electron', 'better-sqlite3',
+// or main/src/services/*). The composition root (main/src/index.ts) wires the
+// live RunExecutor, which satisfies this shape structurally
+// (RunExecutor.hasActiveExecution). Left UNSET in unit tests / legacy boot,
+// in which case the trailing aggregate-unblock resume keeps its pre-guard
+// behavior (always calls maybeResumeRun).
+// ---------------------------------------------------------------------------
+
+/**
+ * Structural view of the live RunExecutor used by the trailing auto-resume to
+ * decide whether a run still has a walk alive. Mirrors
+ * RunExecutor.hasActiveExecution (true while a walk is between start and
+ * teardownRun for this run — e.g. parked at an open human gate, or mid-step).
+ */
+export interface ReviewItemsRunProbe {
+  hasActiveExecution(runId: string): boolean;
+}
+
+let reviewItemsRunProbe: ReviewItemsRunProbe | null = null;
+
+/**
+ * Wire the run-execution probe at boot (composition root). Idempotent — may be
+ * called again to replace the probe; tests install a fake per case and clear it
+ * via {@link _resetReviewItemsRunProbeForTesting}.
+ */
+export function setReviewItemsRunProbe(probe: ReviewItemsRunProbe): void {
+  reviewItemsRunProbe = probe;
+}
+
+/** Test-only: clear the wired probe so a case starts from the unset (legacy) state. */
+export function _resetReviewItemsRunProbeForTesting(): void {
+  reviewItemsRunProbe = null;
+}
+
+/**
+ * True when the trailing aggregate-unblock resume MUST be SKIPPED because the
+ * run's programmatic walk has already ENDED (no live executor holds it).
+ *
+ * WHY this guard exists — the drained-rest race (reproduced 2026-07-06
+ * 17:36:20 on two runs). Resolving/dismissing a blocking gate emits the
+ * chokepoint 'resolved' review-item event, which settles the WorkflowController
+ * walk's gate Promise. When the resolved gate is the run's LAST step, the walk
+ * finishes within ~1ms and rests the run in awaiting_review (RunExecutor's
+ * drained-rest) BEFORE this trailing maybeResumeRun runs. maybeResumeRun would
+ * then flip that resting awaiting_review -> running with NO walk alive,
+ * stranding the run 'running' forever. Skipping the resume leaves the run in its
+ * resting awaiting_review state, where retryStep and the summary-panel CTAs are
+ * valid.
+ *
+ * Two cases the probe distinguishes:
+ *  - MID-WALK gate — the walk is parked at the gate and still holds its
+ *    execution slot (hasActiveExecution TRUE): resume PROCEEDS, since the live
+ *    walk is awaiting the awaiting_review -> running transition to advance.
+ *  - END-OF-WALK gate — the walk finished and rested the run
+ *    (hasActiveExecution FALSE): resume is SKIPPED so the resting
+ *    awaiting_review state survives this trailing call.
+ *
+ * Probe UNSET (unit tests / legacy) => returns false so today's behavior
+ * (always call maybeResumeRun) is preserved.
+ */
+function resumeWouldStrandEndedWalk(runId: string): boolean {
+  return reviewItemsRunProbe !== null && !reviewItemsRunProbe.hasActiveExecution(runId);
+}
+
+// ---------------------------------------------------------------------------
 // Error mapping
 // ---------------------------------------------------------------------------
 
@@ -409,22 +477,47 @@ export const reviewItemsRouter = router({
           let resumed = false;
           let runStatus: string | undefined;
           if (before?.blocking === 1 && before.runId && input.outcome !== 'reject') {
-            resumed = await HumanStepManager.getInstance().maybeResumeRun(before.runId);
-            if (!resumed) {
-              // The resume is a guarded awaiting_review -> running UPDATE, so a
-              // run in any OTHER state no-ops. Legitimate when a sibling blocking
-              // item is still pending; a ZOMBIE when the run sits 'running' with
-              // a dead session (seen 2026-07-06: an agent-filed fallback decision
-              // item on a run whose AskUserQuestion gate never committed). Never
-              // let that stay silent — report the actual status to the log and
-              // the caller.
+            if (resumeWouldStrandEndedWalk(before.runId)) {
+              // END-OF-WALK case (drained-rest race): the resolved gate was the
+              // run's last step, so the settle woke the walk and it finished +
+              // rested the run in awaiting_review BEFORE this trailing call ran.
+              // hasActiveExecution is now false — no walk holds the run — so a
+              // resume here would flip its resting awaiting_review -> running with
+              // nothing alive to drive it, stranding it 'running' forever. Skip
+              // the resume; the resting awaiting_review state survives, where
+              // retryStep and the summary-panel CTAs are valid. (Contrast the
+              // MID-WALK case below: a walk parked at the gate still holds its
+              // execution slot -> hasActiveExecution true -> the resume proceeds.)
               const runRow = db
                 .prepare('SELECT status FROM workflow_runs WHERE id = ?')
                 .get(before.runId) as { status?: string } | undefined;
               runStatus = runRow?.status;
               console.warn(
-                `[reviewItems.resolve] blocking item ${reviewItemId} resolved for run ${before.runId} but the run did NOT resume (status='${runStatus ?? 'unknown'}'; resume only fires from awaiting_review with no other pending blocking items)`,
+                `[reviewItems.resolve] blocking item ${reviewItemId} resolved for run ${before.runId} but resume was SKIPPED: no active walk (status='${runStatus ?? 'unknown'}'). The walk has already ended and rested the run; resuming would strand it 'running' with no live walk.`,
               );
+            } else {
+              // MID-WALK case (walk parked at the gate) OR probe unset
+              // (tests/legacy): attempt the guarded awaiting_review -> running
+              // resume.
+              resumed = await HumanStepManager.getInstance().maybeResumeRun(before.runId);
+              if (!resumed) {
+                // maybeResumeRun REFUSED: the resume is a guarded
+                // awaiting_review -> running UPDATE, so a run in any OTHER state
+                // no-ops. Legitimate when a sibling blocking item is still
+                // pending; a ZOMBIE when the run sits 'running' with a dead
+                // session (seen 2026-07-06: an agent-filed fallback decision item
+                // on a run whose AskUserQuestion gate never committed). Never let
+                // that stay silent — report the actual status to the log and the
+                // caller. (Distinct from the SKIPPED path above: there we never
+                // called maybeResumeRun; here it ran and refused.)
+                const runRow = db
+                  .prepare('SELECT status FROM workflow_runs WHERE id = ?')
+                  .get(before.runId) as { status?: string } | undefined;
+                runStatus = runRow?.status;
+                console.warn(
+                  `[reviewItems.resolve] blocking item ${reviewItemId} resolved for run ${before.runId} but the run did NOT resume — maybeResumeRun refused (status='${runStatus ?? 'unknown'}'; resume only fires from awaiting_review with no other pending blocking items)`,
+                );
+              }
             }
           }
           return { reviewItemId, resumed, ...(runStatus !== undefined ? { runStatus } : {}) };
@@ -466,7 +559,17 @@ export const reviewItemsRouter = router({
         });
         let resumed = false;
         if (before?.blocking === 1 && before.runId) {
-          resumed = await HumanStepManager.getInstance().maybeResumeRun(before.runId);
+          // Same drained-rest race guard as resolve: when dismissing the run's
+          // LAST blocking gate, the settle wakes the walk, which can finish and
+          // rest the run in awaiting_review BEFORE this trailing call runs
+          // (hasActiveExecution false). A resume then would flip that resting run
+          // to 'running' with no live walk and strand it forever, so SKIP it and
+          // let the resting awaiting_review state survive. MID-WALK (walk parked
+          // at the gate, execution slot still held -> hasActiveExecution true) OR
+          // probe unset (tests/legacy) => resume proceeds as before.
+          if (!resumeWouldStrandEndedWalk(before.runId)) {
+            resumed = await HumanStepManager.getInstance().maybeResumeRun(before.runId);
+          }
         }
         return { reviewItemId, resumed };
       } catch (err) {

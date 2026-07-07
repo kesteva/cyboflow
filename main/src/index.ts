@@ -65,6 +65,7 @@ import { RunShellManager } from './services/runShellManager';
 import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
+import { setReviewItemsRunProbe } from './orchestrator/trpc/routers/reviewItems';
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
 import { resolveMcpServerScriptPath } from './orchestrator/mcpServer/scriptPath';
@@ -1899,6 +1900,17 @@ app.whenReady().then(async () => {
     };
     setRetryRunDeps(retryRunDepsBag);
     console.log('[Main] runs.retryStep deps wired');
+
+    // Drained-rest race guard (reviewItems.resolve/dismiss trailing auto-resume):
+    // the trailing maybeResumeRun must never revive a run whose walk has ENDED —
+    // when the resolved gate was the run's LAST step, the walk finishes and rests
+    // the run in awaiting_review before the trailing call runs, and a resume then
+    // strands it 'running' with no live walk. The probe is the SAME
+    // hasActiveExecution the retry pre-flight consumes.
+    setReviewItemsRunProbe({
+      hasActiveExecution: (runId) => runExecutor.hasActiveExecution(runId),
+    });
+    console.log('[Main] reviewItems run-execution probe wired');
 
     // Monitor-actuation binding (retry_step): route the monitor's validated
     // retry action through the SAME retryRunHandler + deps bag as the tRPC
