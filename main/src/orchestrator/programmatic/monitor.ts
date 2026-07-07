@@ -231,11 +231,13 @@ Answer concisely and concretely, grounding your reply in the run's history above
  * with a `MonitorActions` actuator wired (the monitor-actuation seam). Same digest
  * scaffolding as `buildAnswerPrompt`, but the hard "do NOT try to run ... steps" line
  * is replaced with a capabilities contract: the monitor may attach AT MOST ONE
- * `retry_step` action to its reply, and ONLY when the user explicitly asks for a
- * retry/resume/re-run of a failed or skipped step. The host (not the monitor)
- * validates run state and executes the action — the monitor never claims success
- * itself. Pure (output depends only on its args); structured output shape is
- * `{ reply, action? }` per `MONITOR_CONVERSE_SCHEMA`.
+ * action to its reply, and ONLY when the user explicitly asks for it — either a
+ * `retry_step` (retry/resume/re-run of a failed or skipped step) or a ONE-WAY
+ * `switch_to_orchestrated` handover of the whole run when the request exceeds
+ * step-by-step execution. The host (not the monitor) validates run state and
+ * executes the action — the monitor never claims success itself. Pure (output
+ * depends only on its args); structured output shape is `{ reply, action? }` per
+ * `MONITOR_CONVERSE_SCHEMA`.
  */
 export function buildActionAnswerPrompt(
   ctx: MonitorContext,
@@ -256,11 +258,12 @@ ${question}
 Capabilities:
 - You may attach AT MOST ONE action per reply, and ONLY when the user EXPLICITLY asks for it — a retry, a resume, or a re-run of a failed or skipped step. This covers two cases: a FAILED or RESTING run, where it revives the run at the failed/skipped step; and a run currently PAUSED on a usage-limit item, where the host resolves that pause instead. Either way the host picks the right mechanism for the run's actual state and reports back which one happened.
 - Action "retry_step": set \`stepId\` to the exact step id from the timeline above when the user names a step or the timeline makes clear which step failed/skipped; omit \`stepId\` to default to the run's failed step. The HOST validates the run's state and reports the outcome back to the user — you never claim the retry succeeded yourself.
-- For a pure question (no explicit retry/resume/re-run request), return no action.
+- Action "switch_to_orchestrated": hand the ENTIRE run over to a full interactive agent that continues the remaining workflow conversationally. Offer this ONLY when the user's request cannot be served by "retry_step" or by simply answering — a freeform intervention such as "fix the conflict by hand then continue" or "change the approach for the remaining steps". NEVER attach it merely because a retry failed. Because it is ONE-WAY — the run does NOT return to step-by-step execution afterward — SUGGEST it in your reply first and WAIT for the user's EXPLICIT confirmation on a later turn before attaching it. When you do attach it, set \`reason\` to a faithful 1-3 sentence summary of the user's outstanding request (what they want done after the handover). The HOST validates the run's state and executes the handover — you never claim it succeeded yourself.
+- For a pure question (no explicit action request), return no action.
 
 Answer concisely and concretely, grounding your reply in the run's history above. You have read-only tools (Read/Grep/Glob) for inspecting the worktree — use them when needed to answer accurately.
 
-Return your response as structured output: { reply: string, action?: { kind: "retry_step", stepId?: string } }. \`reply\` is the message shown to the user.`;
+Return your response as structured output: { reply: string, action?: { kind: "retry_step", stepId?: string } | { kind: "switch_to_orchestrated", reason: string } }. \`reply\` is the message shown to the user.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -269,10 +272,16 @@ Return your response as structured output: { reply: string, action?: { kind: "re
 
 /**
  * JSON schema the SDK `outputFormat` enforces for a structured converse reply: a
- * required `reply` string plus an OPTIONAL `action` object (currently only
- * `retry_step`). `additionalProperties: false` at every level so the SDK rejects
- * any extra fields. Used only when a `MonitorActions` actuator is wired
+ * required `reply` string plus an OPTIONAL `action` object (`retry_step` or
+ * `switch_to_orchestrated`). `additionalProperties: false` at every level so the
+ * SDK rejects any extra fields. Used only when a `MonitorActions` actuator is wired
  * (`converseOnce` picks this over `MONITOR_TRIAGE_SCHEMA` / plain text).
+ *
+ * The two action fields are kind-specific and both optional at the schema level:
+ * `stepId` is `retry_step`-only; `reason` is `switch_to_orchestrated`-only but
+ * REQUIRED in practice for that kind (a 1-3 sentence faithful summary of what the
+ * user wants done after the handover) — `parseConverseAction` drops a
+ * `switch_to_orchestrated` action whose `reason` is missing/blank.
  */
 export const MONITOR_CONVERSE_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -285,10 +294,16 @@ export const MONITOR_CONVERSE_SCHEMA: Record<string, unknown> = {
       additionalProperties: false,
       required: ['kind'],
       properties: {
-        kind: { type: 'string', enum: ['retry_step'] },
+        kind: { type: 'string', enum: ['retry_step', 'switch_to_orchestrated'] },
         stepId: {
           type: 'string',
-          description: 'Exact step id to retry; omit to default to the run\'s failed step.',
+          description:
+            'retry_step only: exact step id to retry; omit to default to the run\'s failed step.',
+        },
+        reason: {
+          type: 'string',
+          description:
+            'switch_to_orchestrated only (REQUIRED in practice): a faithful 1-3 sentence summary of what the user wants done after the handover.',
         },
       },
     },
@@ -301,24 +316,50 @@ export interface ConverseRetryStepAction {
   stepId?: string;
 }
 
-/** Narrow + sanitize a candidate `action` field into a `ConverseRetryStepAction`, or drop it. */
-function parseConverseAction(v: unknown): ConverseRetryStepAction | undefined {
+/**
+ * A parsed `switch_to_orchestrated` action from a converse structured reply: a
+ * ONE-WAY handover of the whole run from the programmatic plane to the orchestrated
+ * plane. `reason` is a required, non-empty faithful summary of the user's
+ * outstanding request (the host seeds it as the handover brief).
+ */
+export interface ConverseSwitchToOrchestratedAction {
+  kind: 'switch_to_orchestrated';
+  reason: string;
+}
+
+/** Any host-executable action a converse reply may attach (at most one). */
+export type ConverseAction = ConverseRetryStepAction | ConverseSwitchToOrchestratedAction;
+
+/**
+ * Narrow + sanitize a candidate `action` field into a `ConverseAction`, or drop it.
+ * `retry_step` keeps its optional-`stepId` contract; `switch_to_orchestrated`
+ * REQUIRES a non-empty trimmed `reason` (a missing/blank reason drops the action —
+ * the same failure mode as an unknown `kind`), and stores it verbatim.
+ */
+function parseConverseAction(v: unknown): ConverseAction | undefined {
   if (typeof v !== 'object' || v === null) return undefined;
   const o = v as Record<string, unknown>;
-  if (o.kind !== 'retry_step') return undefined;
-  if (o.stepId !== undefined && typeof o.stepId !== 'string') return undefined;
-  return typeof o.stepId === 'string' ? { kind: 'retry_step', stepId: o.stepId } : { kind: 'retry_step' };
+  if (o.kind === 'retry_step') {
+    if (o.stepId !== undefined && typeof o.stepId !== 'string') return undefined;
+    return typeof o.stepId === 'string' ? { kind: 'retry_step', stepId: o.stepId } : { kind: 'retry_step' };
+  }
+  if (o.kind === 'switch_to_orchestrated') {
+    if (typeof o.reason !== 'string' || o.reason.trim().length === 0) return undefined;
+    return { kind: 'switch_to_orchestrated', reason: o.reason };
+  }
+  return undefined;
 }
 
 /**
  * Parse the SDK's structured-output object into a converse `{ reply, action? }`.
  * Lenient and never throws: a missing/non-string `reply` becomes `''` (the caller
- * substitutes `NO_ANSWER`); an unknown action `kind` or malformed action shape is
+ * substitutes `NO_ANSWER`); an unknown action `kind` or malformed action shape (an
+ * invalid `stepId`, or a `switch_to_orchestrated` with no usable `reason`) is
  * silently dropped (action omitted) rather than surfaced as an error.
  */
 export function parseConverseOutput(
   structured: unknown,
-): { reply: string; action?: ConverseRetryStepAction } {
+): { reply: string; action?: ConverseAction } {
   if (typeof structured !== 'object' || structured === null) return { reply: '' };
   const o = structured as Record<string, unknown>;
   const reply = typeof o.reply === 'string' ? o.reply : '';
@@ -358,6 +399,25 @@ export interface MonitorActions {
    * run's current state and reports back which one happened.
    */
   retryStep(stepId?: string): Promise<MonitorActionResult>;
+
+  /**
+   * Hand the ENTIRE run over from the programmatic plane to the ORCHESTRATED
+   * plane — a ONE-WAY escalation for a request that exceeds programmatic
+   * step-by-step capability (e.g. "fix the conflict by hand then continue",
+   * "change the approach for the remaining steps", or any freeform intervention).
+   * Host-validated (the run must be `programmatic` AND non-terminal) and
+   * host-executed via the production `handoverRunHandler` at the composition root;
+   * the monitor brain never validates or executes this itself — it only requests
+   * it and relays the host's reported outcome, never claiming success on its own.
+   *
+   * `reason` is a faithful 1-3 sentence summary of the user's outstanding request;
+   * the host seeds it into the FRESH orchestrated conversation as the handover
+   * brief (programmatic runs carry no `claude_session_id`, so the seeded nudge
+   * yields a fresh, non-resumed conversation). The monitor session stays
+   * registered and reachable across the flip — the run does NOT return to
+   * step-by-step execution afterward.
+   */
+  switchToOrchestrated(reason: string): Promise<MonitorActionResult>;
 }
 
 /**
@@ -394,9 +454,10 @@ export interface MonitorSession {
    *      synchronous, so ordering holds). When a `MonitorActions` actuator is
    *      wired, this step OPTIONALLY actuates: the query runs as a structured
    *      `{ reply, action? }` request instead of a plain text answer, and — only
-   *      when the user explicitly asked for it — an at-most-one `retry_step`
-   *      action comes back attached to the reply. Without an actuator wired, this
-   *      step is the plain `answer()` path, unchanged.
+   *      when the user explicitly asked for it — an at-most-one host action
+   *      (`retry_step`, or the one-way `switch_to_orchestrated` handover) comes
+   *      back attached to the reply. Without an actuator wired, this step is the
+   *      plain `answer()` path, unchanged.
    *   3. INJECT the monitor's reply as an assistant turn.
    *   4. If an action came back, EXECUTE it via the actuator (host-validated) and
    *      INJECT a follow-up assistant turn reporting the outcome. Fail-soft: a
@@ -430,8 +491,9 @@ export interface DefaultMonitorSessionDeps {
   /**
    * The monitor-actuation seam: when present, `converse` upgrades its query from a
    * plain text answer to a structured `{ reply, action? }` request and may execute
-   * an at-most-one `retry_step` action the user explicitly asked for. Wired only in
-   * production (where a real `retryRunHandler`-backed executor exists); absent here
+   * an at-most-one host action (`retry_step`, or the one-way `switch_to_orchestrated`
+   * handover) the user explicitly asked for. Wired only in production (where real
+   * `retryRunHandler` / `handoverRunHandler`-backed executors exist); absent here
    * ⇒ `converse` behaves byte-identically to before this seam existed.
    */
   actions?: MonitorActions;
@@ -579,7 +641,7 @@ export class DefaultMonitorSession implements MonitorSession {
   private async answerOrAct(
     text: string,
     signal?: AbortSignal,
-  ): Promise<{ reply: string; action?: ConverseRetryStepAction }> {
+  ): Promise<{ reply: string; action?: ConverseAction }> {
     if (!this.actions) {
       return { reply: await this.answer(text, signal) };
     }
@@ -604,24 +666,34 @@ export class DefaultMonitorSession implements MonitorSession {
   }
 
   /**
-   * Execute a requested `retry_step` action via the host actuator and inject a
-   * follow-up assistant turn reporting the outcome (`▶` on success, `⚠` on a
-   * reported failure). Fail-soft: a throwing actuator injects a generic apology
-   * turn instead of escaping — the exchange's reply has already been returned by
-   * the time this runs, so a throw here must never surface to `converse`'s caller.
+   * Execute a requested action via the host actuator and inject a follow-up
+   * assistant turn reporting the outcome (`▶` on success, `⚠` on a reported
+   * failure) — the SAME outcome-turn shape for both `retry_step` (→
+   * `actions.retryStep`) and `switch_to_orchestrated` (→
+   * `actions.switchToOrchestrated`, the one-way handover). Fail-soft: a throwing
+   * actuator injects a generic apology turn instead of escaping — the exchange's
+   * reply has already been returned by the time this runs, so a throw here must
+   * never surface to `converse`'s caller.
    */
-  private async actuate(action: ConverseRetryStepAction): Promise<void> {
+  private async actuate(action: ConverseAction): Promise<void> {
     if (!this.actions) return;
     try {
-      const result = await this.actions.retryStep(action.stepId);
+      const result =
+        action.kind === 'switch_to_orchestrated'
+          ? await this.actions.switchToOrchestrated(action.reason)
+          : await this.actions.retryStep(action.stepId);
       this.tryInject(buildAssistantTextEvent(result.ok ? `▶ ${result.message}` : `⚠ ${result.message}`));
     } catch (err) {
-      this.logger?.warn('[Monitor] retry_step action failed (fail-soft)', {
+      this.logger?.warn('[Monitor] converse action failed (fail-soft)', {
         runId: this.ctx.runId,
-        stepId: action.stepId,
+        kind: action.kind,
         error: err instanceof Error ? err.message : String(err),
       });
-      this.tryInject(buildAssistantTextEvent('⚠ The retry action failed unexpectedly.'));
+      const fallback =
+        action.kind === 'switch_to_orchestrated'
+          ? '⚠ The handover action failed unexpectedly.'
+          : '⚠ The retry action failed unexpectedly.';
+      this.tryInject(buildAssistantTextEvent(fallback));
     }
   }
 

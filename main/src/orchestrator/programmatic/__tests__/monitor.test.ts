@@ -239,16 +239,39 @@ describe('parseConverseOutput', () => {
     expect(parseConverseOutput({})).toEqual({ reply: '' });
     expect(parseConverseOutput({ reply: 42 })).toEqual({ reply: '' });
   });
+
+  it('parses a switch_to_orchestrated action with a reason (stored verbatim)', () => {
+    expect(
+      parseConverseOutput({
+        reply: 'handing over',
+        action: { kind: 'switch_to_orchestrated', reason: '  Fix the merge conflict by hand, then keep going.  ' },
+      }),
+    ).toEqual({
+      reply: 'handing over',
+      // reason is validated on its trimmed form but stored verbatim (surrounding whitespace preserved).
+      action: { kind: 'switch_to_orchestrated', reason: '  Fix the merge conflict by hand, then keep going.  ' },
+    });
+  });
+
+  it('drops a switch_to_orchestrated action with a missing / blank / non-string reason', () => {
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'switch_to_orchestrated' } })).toEqual({ reply: 'ok' });
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'switch_to_orchestrated', reason: '   ' } })).toEqual({ reply: 'ok' });
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'switch_to_orchestrated', reason: 42 } })).toEqual({ reply: 'ok' });
+  });
 });
 
 describe('MONITOR_CONVERSE_SCHEMA', () => {
-  it('requires reply, makes action optional, and enforces the retry_step kind enum', () => {
+  it('requires reply, makes action optional, and enforces the kind enum (retry_step + switch_to_orchestrated)', () => {
     expect(MONITOR_CONVERSE_SCHEMA.required).toEqual(['reply']);
     expect(MONITOR_CONVERSE_SCHEMA.additionalProperties).toBe(false);
     const props = MONITOR_CONVERSE_SCHEMA.properties as Record<string, Record<string, unknown>>;
     expect(props.action.additionalProperties).toBe(false);
-    const actionProps = props.action.properties as Record<string, { enum?: string[] }>;
-    expect(actionProps.kind.enum).toEqual(['retry_step']);
+    expect(props.action.required).toEqual(['kind']);
+    const actionProps = props.action.properties as Record<string, { type?: string; enum?: string[] }>;
+    expect(actionProps.kind.enum).toEqual(['retry_step', 'switch_to_orchestrated']);
+    // Both kind-specific fields are declared (stepId = retry_step, reason = switch_to_orchestrated) and optional at the schema level.
+    expect(actionProps.stepId.type).toBe('string');
+    expect(actionProps.reason.type).toBe('string');
   });
 });
 
@@ -267,6 +290,17 @@ describe('buildActionAnswerPrompt', () => {
     expect(p).not.toContain('(for example, after a usage-limit reset)');
     expect(p).toContain('PAUSED on a usage-limit item');
     expect(p).toContain('host resolves that pause');
+  });
+
+  it('offers switch_to_orchestrated with the explicit-confirmation + one-way framing', () => {
+    const history: MonitorHistory = { conversation: [], steps: [] };
+    const p = buildActionAnswerPrompt(ctx, 'fix the conflict by hand then continue', history);
+    expect(p).toContain('switch_to_orchestrated');
+    expect(p).toContain('EXPLICIT confirmation'); // must wait for a later-turn confirmation
+    expect(p).toContain('ONE-WAY'); // the run does not return to step-by-step execution
+    expect(p).toContain('reason'); // attach a faithful summary
+    // Existing framing stays intact: explicit-ask-only + never-claim-success.
+    expect(p).toContain('you never claim it succeeded yourself');
   });
 });
 
@@ -438,7 +472,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
     const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({ reply: 'the run is on step 3' });
     const textQuery: TextQueryFn = vi.fn();
     const retryStep = vi.fn<MonitorActions['retryStep']>();
-    const actions: MonitorActions = { retryStep };
+    const actions: MonitorActions = { retryStep, switchToOrchestrated: vi.fn<MonitorActions['switchToOrchestrated']>() };
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({
       ctx,
@@ -469,7 +503,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
       .fn()
       .mockResolvedValue({ reply: 'retrying tasks now.', action: { kind: 'retry_step', stepId: 'tasks' } });
     const retryStep = vi.fn<MonitorActions['retryStep']>().mockResolvedValue({ ok: true, message: 'run resumed from tasks' });
-    const actions: MonitorActions = { retryStep };
+    const actions: MonitorActions = { retryStep, switchToOrchestrated: vi.fn<MonitorActions['switchToOrchestrated']>() };
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({
       ctx,
@@ -498,7 +532,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
       .fn()
       .mockResolvedValue({ reply: 'attempting retry.', action: { kind: 'retry_step' } });
     const retryStep = vi.fn<MonitorActions['retryStep']>().mockResolvedValue({ ok: false, message: 'run is not failed or resting' });
-    const actions: MonitorActions = { retryStep };
+    const actions: MonitorActions = { retryStep, switchToOrchestrated: vi.fn<MonitorActions['switchToOrchestrated']>() };
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({
       ctx,
@@ -521,7 +555,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
       .fn()
       .mockResolvedValue({ reply: 'retrying now.', action: { kind: 'retry_step', stepId: 'tasks' } });
     const retryStep = vi.fn<MonitorActions['retryStep']>().mockRejectedValue(new Error('handler exploded'));
-    const actions: MonitorActions = { retryStep };
+    const actions: MonitorActions = { retryStep, switchToOrchestrated: vi.fn<MonitorActions['switchToOrchestrated']>() };
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({
       ctx,
@@ -544,7 +578,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
       .fn()
       .mockResolvedValue({ action: { kind: 'retry_step', stepId: 42 } });
     const retryStep = vi.fn<MonitorActions['retryStep']>();
-    const actions: MonitorActions = { retryStep };
+    const actions: MonitorActions = { retryStep, switchToOrchestrated: vi.fn<MonitorActions['switchToOrchestrated']>() };
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({
       ctx,
@@ -569,7 +603,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
     const { reader } = fakeHistory({ conversation: [], steps: [] });
     const structuredQuery: StructuredQueryFn = vi.fn().mockRejectedValue(new Error('sdk down'));
     const retryStep = vi.fn<MonitorActions['retryStep']>();
-    const actions: MonitorActions = { retryStep };
+    const actions: MonitorActions = { retryStep, switchToOrchestrated: vi.fn<MonitorActions['switchToOrchestrated']>() };
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({
       ctx,
@@ -585,6 +619,71 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
     expect(reply.toLowerCase()).toContain('sorry');
     expect(retryStep).not.toHaveBeenCalled();
     expect(injected.at(-1)?.text.toLowerCase()).toContain('sorry');
+  });
+
+  it('a switch_to_orchestrated action calls switchToOrchestrated(reason) and injects a ▶-prefixed success turn; retryStep untouched', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
+      reply: 'Handing this run over to an interactive agent now.',
+      action: { kind: 'switch_to_orchestrated', reason: 'Fix the conflict by hand, then finish the remaining steps.' },
+    });
+    const retryStep = vi.fn<MonitorActions['retryStep']>();
+    const switchToOrchestrated = vi
+      .fn<MonitorActions['switchToOrchestrated']>()
+      .mockResolvedValue({ ok: true, message: 'run handed over to the orchestrated plane' });
+    const actions: MonitorActions = { retryStep, switchToOrchestrated };
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    const reply = await session.converse('fix the conflict by hand then continue');
+
+    expect(reply).toBe('Handing this run over to an interactive agent now.');
+    expect(switchToOrchestrated).toHaveBeenCalledTimes(1);
+    expect(switchToOrchestrated).toHaveBeenCalledWith('Fix the conflict by hand, then finish the remaining steps.');
+    expect(retryStep).not.toHaveBeenCalled();
+    expect(injected).toEqual([
+      { role: 'user', text: 'fix the conflict by hand then continue' },
+      { role: 'assistant', text: 'Handing this run over to an interactive agent now.' },
+      { role: 'assistant', text: '▶ run handed over to the orchestrated plane' },
+    ]);
+  });
+
+  it('a switch_to_orchestrated action resolving ok:false injects a ⚠-prefixed turn', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
+      reply: 'attempting handover.',
+      action: { kind: 'switch_to_orchestrated', reason: 'take over the rest of the run' },
+    });
+    const switchToOrchestrated = vi
+      .fn<MonitorActions['switchToOrchestrated']>()
+      .mockResolvedValue({ ok: false, message: 'run is already terminal' });
+    const actions: MonitorActions = { retryStep: vi.fn<MonitorActions['retryStep']>(), switchToOrchestrated };
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    await session.converse('take over the rest');
+
+    expect(switchToOrchestrated).toHaveBeenCalledWith('take over the rest of the run');
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '⚠ run is already terminal' });
+  });
+
+  it('a throwing switchToOrchestrated fails soft: injects a generic handover-warning turn, converse still resolves with the reply', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
+      reply: 'handing over.',
+      action: { kind: 'switch_to_orchestrated', reason: 'take over' },
+    });
+    const switchToOrchestrated = vi
+      .fn<MonitorActions['switchToOrchestrated']>()
+      .mockRejectedValue(new Error('handover exploded'));
+    const actions: MonitorActions = { retryStep: vi.fn<MonitorActions['retryStep']>(), switchToOrchestrated };
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    const reply = await session.converse('take over the run');
+
+    expect(reply).toBe('handing over.');
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '⚠ The handover action failed unexpectedly.' });
   });
 });
 

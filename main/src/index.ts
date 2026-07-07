@@ -66,6 +66,7 @@ import * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import { SprintLaneStore } from './orchestrator/sprintLaneStore';
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import { setReviewItemsRunProbe } from './orchestrator/trpc/routers/reviewItems';
+import { handoverRunHandler, type HandoverRunDeps } from './orchestrator/handoverRunHandler';
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
 import { resolveMcpServerScriptPath } from './orchestrator/mcpServer/scriptPath';
@@ -157,6 +158,13 @@ let runExecutor: RunExecutor;
 // reports "not wired" instead of acting.
 let monitorRetryStep: ((runId: string, stepId?: string) => Promise<MonitorActionResult>) | null =
   null;
+// Monitor-actuation seam (switch_to_orchestrated): same late-binding pattern as
+// monitorRetryStep — bound in the tRPC dep-wiring block to the handoverRunHandler
+// chokepoint (the one-way programmatic -> orchestrated handover). Null until
+// wired → the action reports "not wired" instead of acting.
+let monitorSwitchToOrchestrated:
+  | ((runId: string, reason: string) => Promise<MonitorActionResult>)
+  | null = null;
 // Module-scoped (permission-mode redesign §3d / Slice 5) so the tRPC boot wiring
 // block (setSetPermissionModeDeps) can reach the SAME shared session-mode write
 // chokepoint deps the RunLauncher was constructed with in initializeServices().
@@ -1110,6 +1118,13 @@ async function initializeServices() {
                     ok: false,
                     message: 'Retry is not wired yet — try again in a moment.',
                   }),
+            switchToOrchestrated: (reason) =>
+              monitorSwitchToOrchestrated
+                ? monitorSwitchToOrchestrated(ctx.runId, reason)
+                : Promise.resolve({
+                    ok: false,
+                    message: 'Handover is not wired yet — try again in a moment.',
+                  }),
           },
           logger: cyboflowLogger,
         });
@@ -1962,6 +1977,53 @@ app.whenReady().then(async () => {
       return { ok: false, message: messages[result.reason] ?? `Retry refused (${result.reason}).` };
     };
     console.log('[Main] monitor retry_step action wired');
+
+    // Monitor-actuation binding (switch_to_orchestrated): the one-way
+    // programmatic -> orchestrated handover, routed through handoverRunHandler
+    // (walk abort -> the sanctioned execution_model flip -> gate sweep ->
+    // handover-brief nudge -> orchestrated re-drive). Reuses the SAME db /
+    // runQueues / runExecutor / runStatusEvents as the retry bag; the prompt
+    // body rides WorkflowRegistry.getById + readWorkflowPromptForRow (keyed by
+    // workflow ID — names are not unique across projects), fail-soft to null so
+    // a missing prompt degrades to a brief that says so.
+    const handoverRunDepsBag: HandoverRunDeps = {
+      db,
+      runQueues,
+      runExecutor,
+      emitRunStatusChanged: (runId, status) =>
+        runStatusEvents.emit('changed', { runId, status }),
+      clearPendingGateItems: (runId) => HumanStepManager.getInstance().clearPendingForRun(runId),
+      stopLiveRun: (runId: string) => substrateFacade.abort(runId),
+      readWorkflowPrompt: (workflowId) => {
+        try {
+          const row = workflowRegistry.getById(workflowId);
+          return row ? readWorkflowPromptForRow(row).prompt : null;
+        } catch {
+          return null;
+        }
+      },
+      listStepResults: (runId) => StepResultStore.tryGetInstance()?.listForRun(runId) ?? [],
+      logger: loggerLike,
+    };
+    monitorSwitchToOrchestrated = async (runId, reason) => {
+      const result = await handoverRunHandler(runId, reason, handoverRunDepsBag);
+      if ('delivered' in result) {
+        return {
+          ok: true,
+          message:
+            'Handing the run over to an interactive agent — it will address your request and continue the remaining workflow steps in this chat.',
+        };
+      }
+      const messages: Record<string, string> = {
+        not_found: 'Run not found.',
+        not_programmatic: 'This run is already running as an interactive agent.',
+        not_switchable:
+          "The run isn't in a state that can be handed over — it must be running, resting, or failed.",
+        race: 'The run changed state mid-handover — try again.',
+      };
+      return { ok: false, message: messages[result.reason] ?? `Handover refused (${result.reason}).` };
+    };
+    console.log('[Main] monitor switch_to_orchestrated action wired');
 
     setStartRunDeps({
       runLauncher,
