@@ -50,6 +50,17 @@ export interface SpawnStepRunnerOptions {
    */
   agentPermissionMode?: () => PermissionMode | undefined;
   /**
+   * Per-step operator-GUIDANCE resolver (RunDirectives live steering). Invoked
+   * ONCE per `runStep` (NOT captured at construction), mirroring the
+   * `agentPermissionMode` thunk pattern above, so guidance the operator adds
+   * mid-run is honored on the step's NEXT spawn. Returns the guidance text for
+   * this step id (appended to the composed prompt) or `undefined` (the thunk
+   * absent OR returning undefined ⇒ no guidance section — byte-identical to the
+   * no-guidance path). Wired by DefaultProgrammaticRunner to the run's
+   * RunDirectives `stepGuidance` map.
+   */
+  stepGuidance?: (stepId: string) => string | undefined;
+  /**
    * The sprint's task-scope block (the `# Sprint tasks` body), resolved once per
    * run by DefaultProgrammaticRunner from the run's batch_id. Threaded into EVERY
    * step prompt (each step is a fresh SDK session with no memory of prior steps),
@@ -70,12 +81,17 @@ export class SpawnStepRunner implements StepRunner {
     // Already canceled before we even spawn — short-circuit.
     if (ctx.signal?.aborted) return { status: 'aborted' };
 
+    // Re-resolve any operator guidance for this step PER STEP (RunDirectives live
+    // steering) — never captured at construction — so guidance added mid-run is
+    // honored on this step's next spawn, exactly like agentPermissionMode below.
+    const userGuidance = this.opts.stepGuidance?.(step.id);
     const prompt = composeStepPrompt({
       step,
       workflowName: this.opts.workflowName,
       attempt: ctx.attempt,
       ...(ctx.item ? { item: ctx.item } : {}),
       ...(this.opts.taskScope ? { taskScope: this.opts.taskScope } : {}),
+      ...(userGuidance ? { userGuidance } : {}),
     });
     // Re-resolve the agent permission mode PER STEP (permission-mode redesign
     // §3c#2) — never captured at construction — so a mid-run mode change is

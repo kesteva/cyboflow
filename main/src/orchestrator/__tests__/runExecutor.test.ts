@@ -19,6 +19,7 @@ import { join } from 'path';
 import { RunExecutor } from '../runExecutor';
 import type { ClaudeSpawnerLike, WorkflowRegistryLike, ClaudeSpawnerOptions, WorkflowPromptReaderLike, ProgrammaticRunner, ProgrammaticRunContext, QueuedInputDelivererLike } from '../runExecutor';
 import { buildAssistantTextEvent } from '../programmatic/syntheticEvents';
+import type { RunDirectives } from '../programmatic/runDirectives';
 import { RunQueueRegistry } from '../RunQueueRegistry';
 import { RunLauncher } from '../runLauncher';
 import type {
@@ -272,6 +273,93 @@ describe('RunExecutor.execute — execution-model branch (Stage 1)', () => {
 
     // After teardown the controller is gone → no-op again.
     expect(executor.requestProgrammaticCancel(run.id)).toBe(false);
+  });
+
+  // ── operator-steering directives (RunDirectives accessors) ──────────────────
+  it('peekRunDirectives returns undefined until a steering action creates the run entry', () => {
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(null),
+      getById: vi.fn().mockReturnValue(null),
+    };
+    const executor = makeExecutor(makeSpawner(), registry);
+    expect(executor.peekRunDirectives('run-x')).toBeUndefined();
+  });
+
+  it('addUserSkip / removeUserSkip / setStepGuidance lazily create + mutate ONE per-run object', () => {
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(null),
+      getById: vi.fn().mockReturnValue(null),
+    };
+    const executor = makeExecutor(makeSpawner(), registry);
+
+    executor.addUserSkip('run-x', 'stepB');
+    const d = executor.peekRunDirectives('run-x');
+    expect(d?.userSkippedStepIds.has('stepB')).toBe(true);
+
+    // Every mutator resolves the SAME object (the controller holds it by reference).
+    executor.setStepGuidance('run-x', 'stepC', 'use the flag');
+    expect(executor.peekRunDirectives('run-x')).toBe(d);
+    expect(d?.stepGuidance.get('stepC')).toBe('use the flag');
+
+    executor.removeUserSkip('run-x', 'stepB');
+    expect(d?.userSkippedStepIds.has('stepB')).toBe(false);
+  });
+
+  it('disposeMonitorResources clears the run directives (terminal close-out); a read never resurrects them', () => {
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(null),
+      getById: vi.fn().mockReturnValue(null),
+    };
+    const executor = makeExecutor(makeSpawner(), registry);
+    executor.addUserSkip('run-x', 'stepB');
+    expect(executor.peekRunDirectives('run-x')).toBeDefined();
+
+    executor.disposeMonitorResources('run-x');
+    expect(executor.peekRunDirectives('run-x')).toBeUndefined();
+  });
+
+  it('threads the SAME directives object into runner.run and PERSISTS it across walk-drain teardown (cleared only at close-out)', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/wt', execution_model: 'programmatic' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    let captured: RunDirectives | undefined;
+    let release: (() => void) | undefined;
+    const runner: ProgrammaticRunner = {
+      run: vi.fn((ctx: ProgrammaticRunContext) => {
+        captured = ctx.directives;
+        return new Promise<void>((r) => {
+          release = r;
+        });
+      }),
+    };
+    const executor = makeExecutor(makeSpawner(), registry, runner);
+
+    // A skip set BEFORE the run starts (the per-run object already exists).
+    executor.addUserSkip(run.id, 'early');
+
+    const p = executor.execute(run.id);
+    for (let i = 0; i < 20 && captured === undefined; i++) await new Promise((r) => setTimeout(r, 0));
+
+    // The runner received the SAME object RunExecutor holds, carrying the pre-set skip.
+    expect(captured).toBe(executor.peekRunDirectives(run.id));
+    expect(captured?.userSkippedStepIds.has('early')).toBe(true);
+
+    // A mid-flight steer is visible on the captured (by-reference) object.
+    executor.setStepGuidance(run.id, 'impl', 'stay behind the flag');
+    expect(captured?.stepGuidance.get('impl')).toBe('stay behind the flag');
+
+    release?.();
+    await p;
+
+    // teardownRun fired at walk-drain, but directives PERSIST (they must survive a
+    // re-drive) — they are cleared only at terminal close-out.
+    expect(executor.peekRunDirectives(run.id)).toBe(captured);
+
+    executor.disposeMonitorResources(run.id);
+    expect(executor.peekRunDirectives(run.id)).toBeUndefined();
   });
 
   it('falls through to the orchestrated spawn when stamped programmatic but no runner is injected', async () => {

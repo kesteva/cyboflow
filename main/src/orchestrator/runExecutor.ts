@@ -29,6 +29,7 @@ import { buildSeedTasksBlock } from './seedTasksBlock';
 import type { FindingTagBucket } from '../../../shared/types/reviews';
 import { findingBucket } from '../../../shared/types/reviews';
 import { ReviewItemRouter } from './reviewItemRouter';
+import { createRunDirectives, type RunDirectives } from './programmatic/runDirectives';
 
 // ---------------------------------------------------------------------------
 // Narrow interfaces (no concrete imports)
@@ -241,6 +242,15 @@ export interface ProgrammaticRunContext {
    * construction path), so callers can invoke it unconditionally.
    */
   injectEvent: (event: ClaudeStreamEvent) => void;
+  /**
+   * Live operator-steering directives for this run (RunDirectives). RunExecutor
+   * owns the per-run object (a `Map<runId, RunDirectives>`) and threads it in so
+   * the WorkflowController can read skip decisions at its loop head and the
+   * SpawnStepRunner can read per-step guidance — both MID-WALK, honored on the
+   * next step turn. Absent (tests / no monitor wiring) ⇒ the runner defaults to an
+   * empty no-op set (byte-identical walk).
+   */
+  directives?: RunDirectives;
 }
 
 /**
@@ -425,6 +435,20 @@ export class RunExecutor {
    * skips individually-completed steps; cleared by teardownRun().
    */
   private readonly pendingCompletedSteps: Map<string, ReadonlySet<string>> = new Map();
+
+  /**
+   * Per-run LIVE operator-steering directives (RunDirectives), keyed by runId.
+   * Written by the monitor's steering actions via the public mutators
+   * (addUserSkip / removeUserSkip / setStepGuidance) and read BY REFERENCE inside
+   * the running WorkflowController (skip) + SpawnStepRunner (steer), so a
+   * mid-walk change is honored on the next step turn. Unlike the pending* maps
+   * above (consumed once per turn, cleared by teardownRun), a run's directives
+   * must PERSIST across execute() re-drives — a steer/skip set before a retry has
+   * to survive it — so they are cleared at TERMINAL close-out
+   * (disposeMonitorResources), alongside the monitor inject plumbing, NOT at
+   * walk-drain. Empty for orchestrated runs (no host-driven walk).
+   */
+  private readonly runDirectives: Map<string, RunDirectives> = new Map();
 
   /**
    * Per-run 'turn-end' listeners bound to the `source` EventEmitter, keyed by
@@ -827,6 +851,10 @@ export class RunExecutor {
           agentPermissionMode: this.resolveLiveAgentPermissionMode(runId, run),
           signal: abort.signal,
           injectEvent,
+          // Live operator steering (RunDirectives): pass the run's persistent
+          // directives object BY REFERENCE so a monitor skip/steer issued mid-walk
+          // (or between re-drives) is read live by the controller/runner.
+          directives: this.getOrCreateRunDirectives(runId),
           ...(resumeFromStepId ? { resumeFromStepId } : {}),
           ...(completedStepIds ? { completedStepIds } : {}),
         });
@@ -893,6 +921,67 @@ export class RunExecutor {
       progSource.removeAllListeners();
       this.progSources.delete(runId);
     }
+    // Live operator-steering directives share the monitor's lifetime: they must
+    // survive walk-drain (teardownRun) so a skip/steer set while the run rests
+    // between turns still applies on the next re-drive, and are cleared HERE at
+    // terminal close-out (where the worktree is removed) alongside the inject
+    // plumbing. Idempotent; a no-op for orchestrated runs (no entry).
+    this.runDirectives.delete(runId);
+  }
+
+  /**
+   * Get (lazily creating) the run's LIVE operator-steering directives object
+   * (RunDirectives). The SAME object is threaded by reference into the running
+   * WorkflowController + SpawnStepRunner, so a mutation via the public mutators
+   * below is read live on the next step turn. The object persists across
+   * execute() re-drives (a steer/skip survives a retry) and is cleared only at
+   * terminal close-out (disposeMonitorResources).
+   */
+  private getOrCreateRunDirectives(runId: string): RunDirectives {
+    let d = this.runDirectives.get(runId);
+    if (!d) {
+      d = createRunDirectives();
+      this.runDirectives.set(runId, d);
+    }
+    return d;
+  }
+
+  /**
+   * Peek a run's operator-steering directives WITHOUT creating an entry — returns
+   * undefined when none exist yet (e.g. an orchestrated run, or before any
+   * steering action). For read-only inspection (tests / tRPC read seams).
+   */
+  peekRunDirectives(runId: string): RunDirectives | undefined {
+    return this.runDirectives.get(runId);
+  }
+
+  /**
+   * Operator action: SKIP a not-yet-run step of an in-flight programmatic run.
+   * The controller consults the run's `userSkippedStepIds` at its loop head (and
+   * per fan-out inner step), so a targeted step that has not been reached yet is
+   * skipped on the next turn; a step already run/settled is a natural no-op. A
+   * skipped REQUIRED step advances the walk (it does NOT fail the run).
+   */
+  addUserSkip(runId: string, stepId: string): void {
+    this.getOrCreateRunDirectives(runId).userSkippedStepIds.add(stepId);
+  }
+
+  /**
+   * Operator action: UN-SKIP a step previously marked skipped — as long as the
+   * walk has not yet reached it, the step then runs normally. A no-op when the
+   * step was not skipped (or the walk already passed it).
+   */
+  removeUserSkip(runId: string, stepId: string): void {
+    this.getOrCreateRunDirectives(runId).userSkippedStepIds.delete(stepId);
+  }
+
+  /**
+   * Operator action: STEER a step by attaching free-text guidance appended to its
+   * composed prompt the next time it spawns (SpawnStepRunner re-reads the run's
+   * `stepGuidance` map per step). Overwrites any prior guidance for the step id.
+   */
+  setStepGuidance(runId: string, stepId: string, text: string): void {
+    this.getOrCreateRunDirectives(runId).stepGuidance.set(stepId, text);
   }
 
   /**

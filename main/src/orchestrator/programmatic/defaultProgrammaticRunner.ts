@@ -30,6 +30,7 @@ import type { ClaudeSpawnerLike, ProgrammaticRunner, ProgrammaticRunContext } fr
 import type { LoggerLike } from '../types';
 import type { FanOutDriver, StepReport } from './types';
 import { WorkflowController } from './workflowController';
+import { createRunDirectives } from './runDirectives';
 import { SpawnStepRunner } from './spawnStepRunner';
 import { ProgrammaticRunHost, type StepReporter } from './programmaticRunHost';
 import type { HumanGateResolver } from './humanGate';
@@ -125,6 +126,13 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       typeof ctx.run.batch_id === 'string' && ctx.run.batch_id.length > 0 ? ctx.run.batch_id : null;
     const taskScope = batchId ? (this.deps.seedTasksProvider?.(batchId) ?? undefined) : undefined;
 
+    // Live operator steering for this run (RunDirectives). RunExecutor owns the
+    // per-run object and threads it in; absent (tests / no monitor wiring) ⇒ an
+    // empty no-op set so the walk is byte-identical. Read by reference at the
+    // controller loop head (skip) and by the SpawnStepRunner stepGuidance thunk
+    // (steer) below — both re-read live, so a mutation lands on the next turn.
+    const directives = ctx.directives ?? createRunDirectives();
+
     const runner = new SpawnStepRunner(
       this.deps.spawner,
       {
@@ -137,6 +145,9 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         // invokes this each step, reading the run's session-resolved mode off the
         // context rather than the demoted `permission_mode_snapshot` audit column.
         agentPermissionMode: () => ctx.agentPermissionMode,
+        // Per-step operator-guidance resolver (RunDirectives live steering): read
+        // this step's guidance off the SAME directives object each turn.
+        stepGuidance: (stepId) => directives.stepGuidance.get(stepId),
         ...(taskScope ? { taskScope } : {}),
       },
       this.deps.logger,
@@ -194,6 +205,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       ctx.signal,
       ctx.resumeFromStepId,
       ctx.completedStepIds,
+      directives,
     );
 
     if (result.outcome === 'failed') {

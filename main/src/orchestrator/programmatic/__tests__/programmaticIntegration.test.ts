@@ -588,8 +588,15 @@ describe('programmatic integration — host-driven fanOut walk drives lanes to i
     // (completed) once every lane integrates.
     await expect(runner.run(fanOutCtx('run-fan', specJson, 'batch-fan'))).resolves.toBeUndefined();
 
-    // resolveItems was consulted once for the fanOut step, keyed 'tasks'.
-    expect(driver.resolveCalls).toEqual([{ runId: 'run-fan', over: 'tasks' }]);
+    // resolveItems is consulted for the fanOut step keyed 'tasks': once by the
+    // controller to enter fan-out, then RE-RESOLVED at each wave boundary (the
+    // add_task/remove_task live-steering enabler). This 3-item batch fits one wave
+    // (≤ cap, no deps), so it is exactly two calls — the entry resolve + one
+    // wave-boundary re-resolution — both keyed 'tasks'.
+    expect(driver.resolveCalls).toEqual([
+      { runId: 'run-fan', over: 'tasks' },
+      { runId: 'run-fan', over: 'tasks' },
+    ]);
 
     // EVERY lane reached 'integrated' and walked the full inner chain in order:
     // 'running' seeds inner[0], then one currentStepId update per inner step ⇒

@@ -7,6 +7,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { WorkflowController, MAX_STEP_LOOPBACKS } from '../workflowController';
+import { createRunDirectives } from '../runDirectives';
 import type {
   ControllerHost,
   FanOutDriver,
@@ -631,6 +632,72 @@ describe('WorkflowController', () => {
     expect(result.outcome).toBe('completed'); // no false "execution bound exceeded" throw
   });
 
+  // ── operator SKIP (RunDirectives — live mid-walk steering) ───────────────────
+  describe('operator skip', () => {
+    it('skips a not-yet-run REQUIRED step on operator request, ADVANCING (not failing) the run', async () => {
+      const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' }), step({ id: 'c' })])]);
+      const runner = makeRunner();
+      const host = makeHost();
+      const directives = createRunDirectives();
+      directives.userSkippedStepIds.add('b'); // 'b' is required (no optional flag)
+
+      const result = await new WorkflowController(runner, host).run('r', d, undefined, undefined, undefined, directives);
+
+      // The run COMPLETES — an operator skip of a required step is not a failure.
+      expect(result.outcome).toBe('completed');
+      // 'b' never hit the runner; 'a' and 'c' did.
+      expect(runner.calls.map((c) => c.id)).toEqual(['a', 'c']);
+      // 'b' is recorded skipped (trace + timeline), never done.
+      expect(result.steps.find((s) => s.stepId === 'b')).toMatchObject({ outcome: 'skipped' });
+      expect(host.reports).toContainEqual({ id: 'b', status: 'skipped' });
+      expect(host.reports.some((rp) => rp.id === 'b' && rp.status === 'done')).toBe(false);
+    });
+
+    it('runs a step normally when it was un-skipped before the walk reached it', async () => {
+      const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' })])]);
+      const runner = makeRunner();
+      const host = makeHost();
+      const directives = createRunDirectives();
+      // Skipped then un-skipped (add + delete) before the walk starts — nets to run.
+      directives.userSkippedStepIds.add('b');
+      directives.userSkippedStepIds.delete('b');
+
+      const result = await new WorkflowController(runner, host).run('r', d, undefined, undefined, undefined, directives);
+
+      expect(result.outcome).toBe('completed');
+      expect(runner.calls.map((c) => c.id)).toEqual(['a', 'b']); // 'b' ran normally
+      expect(host.reports.some((rp) => rp.id === 'b' && rp.status === 'skipped')).toBe(false);
+    });
+
+    it('does not skip a step whose skip was requested only AFTER the walk already ran it', async () => {
+      // 'a' runs first; a mid-walk skip of 'a' arrives too late (natural no-op) —
+      // and skipping 'b' (not yet reached) still takes effect on its turn.
+      const d = def([phase('p1', [step({ id: 'a' }), step({ id: 'b' })])]);
+      const host = makeHost();
+      const directives = createRunDirectives();
+      const ran: string[] = [];
+      const runner: StepRunner = {
+        async runStep(s) {
+          ran.push(s.id);
+          if (s.id === 'a') {
+            // Operator skips BOTH the already-running 'a' (too late) and 'b' (in time).
+            directives.userSkippedStepIds.add('a');
+            directives.userSkippedStepIds.add('b');
+          }
+          return { status: 'ok' };
+        },
+      };
+
+      const result = await new WorkflowController(runner, host).run('r', d, undefined, undefined, undefined, directives);
+
+      expect(result.outcome).toBe('completed');
+      // 'a' completed normally (skip landed too late); 'b' was skipped in time.
+      expect(ran).toEqual(['a']);
+      expect(host.reports).toContainEqual({ id: 'a', status: 'done' });
+      expect(host.reports).toContainEqual({ id: 'b', status: 'skipped' });
+    });
+  });
+
   // ── host-driven parallel fan-out (programmatic plane) ────────────────────────
   describe('fan-out', () => {
     /** A recording fake FanOutDriver: resolves a fixed item set + logs lane writes. */
@@ -1117,6 +1184,168 @@ describe('WorkflowController', () => {
       expect(runner.calls.length).toBe(0); // neither task could ever run
       const failedLanes = base.lanes.filter((l) => l.status === 'failed').map((l) => l.itemId);
       expect(new Set(failedLanes)).toEqual(new Set(['t1', 't2']));
+    });
+
+    // ── operator skip of a fan-out INNER step (RunDirectives) ─────────────────
+    it('skips a fan-out inner step for every lane on operator request, running the rest', async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'])])]);
+      const driver = makeFanOutDriver(['t1', 't2']);
+      const seen: Array<{ itemId?: string; stepId: string }> = [];
+      const runner: StepRunner = {
+        async runStep(s, ctx) {
+          seen.push({ itemId: ctx.item?.id, stepId: s.id });
+          return { status: 'ok' };
+        },
+      };
+      const directives = createRunDirectives();
+      directives.userSkippedStepIds.add('verify'); // skip the inner 'verify' step
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run(
+        'r', d, undefined, undefined, undefined, directives,
+      );
+
+      expect(result.outcome).toBe('completed');
+      // Only 'implement' ran (per lane); 'verify' was skipped for both lanes.
+      expect(seen.filter((x) => x.stepId === 'implement').map((x) => x.itemId)).toEqual(['t1', 't2']);
+      expect(seen.some((x) => x.stepId === 'verify')).toBe(false);
+      // The lane is never driven onto the skipped step, but still integrates.
+      expect(driver.lanes.some((l) => l.currentStepId === 'verify')).toBe(false);
+      for (const item of ['t1', 't2']) {
+        expect(driver.lanes.filter((l) => l.itemId === item).at(-1)?.status).toBe('integrated');
+      }
+    });
+
+    // ── live fan-out RE-RESOLUTION at wave boundaries (add/remove enabler) ─────
+    describe('live re-resolution', () => {
+      /**
+       * A FanOutDriver whose resolved item set is MUTABLE between waves (via
+       * setItems) — models add_task/remove_task on the batch mid-run. Records the
+       * lane writes like makeFanOutDriver. Optional static `dependencies`.
+       */
+      function makeMutableDriver(
+        initial: string[],
+        deps?: Map<string, string[]>,
+      ): FanOutDriver & {
+        lanes: Array<{ itemId: string; status?: SprintBatchTaskStatus; currentStepId?: string | null }>;
+        setItems: (next: string[]) => void;
+      } {
+        let items = [...initial];
+        const lanes: Array<{ itemId: string; status?: SprintBatchTaskStatus; currentStepId?: string | null }> = [];
+        return {
+          lanes,
+          setItems: (next) => {
+            items = [...next];
+          },
+          resolveItems: () => [...items],
+          ...(deps ? { dependencies: () => new Map(deps) } : {}),
+          driveLane: ({ itemId, status, currentStepId }) => {
+            lanes.push({ itemId, status, currentStepId });
+          },
+        };
+      }
+
+      const integratedOf = (
+        lanes: Array<{ itemId: string; status?: SprintBatchTaskStatus }>,
+      ): Set<string> =>
+        new Set(lanes.filter((l) => l.status === 'integrated').map((l) => l.itemId));
+
+      it('produces identical waves for a STATIC batch (re-resolution is a no-op)', async () => {
+        // Sequential deps force one lane per wave, so re-resolution runs between
+        // every wave — yet with no mutation the outcome is byte-identical.
+        const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+        const deps = new Map([
+          ['t2', ['t1']],
+          ['t3', ['t2']],
+        ]);
+        const driver = makeMutableDriver(['t1', 't2', 't3'], deps);
+        const order: string[] = [];
+        const runner: StepRunner = {
+          async runStep(_s, ctx) {
+            if (ctx.item) order.push(ctx.item.id);
+            return { status: 'ok' };
+          },
+        };
+
+        const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(order).toEqual(['t1', 't2', 't3']); // strict sequence, each once
+        expect(integratedOf(driver.lanes)).toEqual(new Set(['t1', 't2', 't3']));
+      });
+
+      it('picks up a lane ADDED between waves and dispatches it in a later wave', async () => {
+        // t2 depends on t1 ⇒ wave 1 = [t1]. While t1 runs, the operator adds t3.
+        const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+        const driver = makeMutableDriver(['t1', 't2'], new Map([['t2', ['t1']]]));
+        const order: string[] = [];
+        const runner: StepRunner = {
+          async runStep(_s, ctx) {
+            if (ctx.item) {
+              order.push(ctx.item.id);
+              if (ctx.item.id === 't1') driver.setItems(['t1', 't2', 't3']); // add t3 mid-run
+            }
+            return { status: 'ok' };
+          },
+        };
+
+        const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(order[0]).toBe('t1'); // t1 first (alone)
+        expect(new Set(order)).toEqual(new Set(['t1', 't2', 't3'])); // t3 was dispatched
+        expect(integratedOf(driver.lanes)).toEqual(new Set(['t1', 't2', 't3']));
+      });
+
+      it('drops a QUEUED lane removed between waves — it is never dispatched', async () => {
+        // t2 & t3 depend on t1 ⇒ wave 1 = [t1], wave 2 = [t2, t3]. While t1 runs,
+        // the operator removes the still-queued t3 before it is ever dispatched.
+        const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+        const driver = makeMutableDriver(
+          ['t1', 't2', 't3'],
+          new Map([
+            ['t2', ['t1']],
+            ['t3', ['t1']],
+          ]),
+        );
+        const order: string[] = [];
+        const runner: StepRunner = {
+          async runStep(_s, ctx) {
+            if (ctx.item) {
+              order.push(ctx.item.id);
+              if (ctx.item.id === 't1') driver.setItems(['t1', 't2']); // remove queued t3
+            }
+            return { status: 'ok' };
+          },
+        };
+
+        const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+        // A removed queued lane is NOT a failure — the run completes clean.
+        expect(result.outcome).toBe('completed');
+        expect(order).toEqual(['t1', 't2']); // t3 never ran
+        expect(driver.lanes.some((l) => l.itemId === 't3')).toBe(false); // no t3 lane write at all
+        expect(integratedOf(driver.lanes)).toEqual(new Set(['t1', 't2']));
+      });
+
+      it('never re-dispatches an already-dispatched lane still present in the re-resolved set', async () => {
+        // t2 depends on t1 ⇒ two waves; t1 stays in the (naive) resolved set across
+        // both, yet the controller's own settled-tracking prevents a re-dispatch.
+        const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+        const driver = makeMutableDriver(['t1', 't2'], new Map([['t2', ['t1']]]));
+        const counts = new Map<string, number>();
+        const runner: StepRunner = {
+          async runStep(_s, ctx) {
+            if (ctx.item) counts.set(ctx.item.id, (counts.get(ctx.item.id) ?? 0) + 1);
+            return { status: 'ok' };
+          },
+        };
+
+        const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+        expect(result.outcome).toBe('completed');
+        expect(counts.get('t1')).toBe(1); // dispatched exactly once despite staying in fresh
+        expect(counts.get('t2')).toBe(1);
+      });
     });
   });
 });

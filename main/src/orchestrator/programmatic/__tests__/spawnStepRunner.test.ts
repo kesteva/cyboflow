@@ -188,4 +188,60 @@ describe('SpawnStepRunner', () => {
     // so the spawner defaults spawnKey to panelId and every non-fan-out path stays byte-identical.
     expect('spawnKey' in passed).toBe(false);
   });
+
+  // ── operator guidance thunk (RunDirectives live steering) ──────────────────
+  it('appends operator guidance to the composed prompt when the stepGuidance thunk returns text', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, {
+      ...opts,
+      stepGuidance: (id) => (id === 'implement' ? 'prefer the streaming API' : undefined),
+    });
+
+    await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).toContain('## Operator guidance');
+    expect(passed.prompt).toContain('prefer the streaming API');
+  });
+
+  it('adds NO guidance section when no stepGuidance thunk is bound (byte-identity)', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, opts); // opts has no stepGuidance
+
+    await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).not.toContain('## Operator guidance');
+  });
+
+  it('adds NO guidance section when the bound thunk returns undefined for this step id', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, { ...opts, stepGuidance: () => undefined });
+
+    await runner.runStep(step({ id: 'implement', agent: 'implement' }), ctx);
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).not.toContain('## Operator guidance');
+  });
+
+  it('RE-RESOLVES stepGuidance per step — invokes the thunk each runStep, honoring a mid-run change', async () => {
+    const spawner = makeSpawner();
+    // A resolver whose return value CHANGES between steps (mirrors the operator
+    // adding guidance mid-run): the thunk must be read PER runStep, not frozen at
+    // construction, so the second step's spawn carries the freshly-added text.
+    const guidance = new Map<string, string>();
+    const resolve = vi.fn<(id: string) => string | undefined>((id) => guidance.get(id));
+    const runner = new SpawnStepRunner(spawner, { ...opts, stepGuidance: resolve });
+
+    // First step: no guidance yet.
+    await runner.runStep(step({ id: 's1', agent: 's1' }), ctx);
+    // Operator adds guidance for s2 AFTER the runner was constructed.
+    guidance.set('s2', 'watch the null case');
+    await runner.runStep(step({ id: 's2', agent: 's2' }), ctx);
+
+    expect(resolve).toHaveBeenCalledTimes(2);
+    const calls = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls;
+    expect((calls[0][0] as ClaudeSpawnerOptions).prompt).not.toContain('## Operator guidance');
+    expect((calls[1][0] as ClaudeSpawnerOptions).prompt).toContain('watch the null case');
+  });
 });

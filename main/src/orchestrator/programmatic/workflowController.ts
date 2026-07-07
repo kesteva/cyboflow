@@ -35,6 +35,7 @@ import type {
   StepRunner,
   SupervisorEvent,
 } from './types';
+import { createRunDirectives, type RunDirectives } from './runDirectives';
 
 /**
  * Maximum number of intra-phase loopback JUMPS allowed per step id across a whole
@@ -82,6 +83,16 @@ export class WorkflowController {
   ) {}
 
   /**
+   * Live operator steering for THIS run (skip / steer), read MID-WALK — unlike
+   * the constructor-frozen resumeFromStepId/completedStepIds. Set at the top of
+   * `run()`; defaults to an empty (no-op) set so every existing caller/test that
+   * passes no directives is byte-identical. Read at the loop head (skip), inside
+   * the fan-out inner loop (inner-step skip), and by the SpawnStepRunner
+   * `stepGuidance` thunk the runner threads (steer).
+   */
+  private directives: RunDirectives = createRunDirectives();
+
+  /**
    * Walk `def` to a terminal result. Resolves with the outcome + the ordered
    * execution trace; it never throws for a normal step failure (that is a
    * 'failed'/'rejected'/'canceled' outcome), only for an internal invariant
@@ -97,6 +108,12 @@ export class WorkflowController {
    * that step (re-running it, which is safe: an interrupted agent step re-runs and
    * a gate re-attaches to its still-pending review item). An unknown id (e.g. the
    * workflow was edited) falls back to starting from the beginning.
+   *
+   * `directives` (optional) is the LIVE operator-steering object the host mutates
+   * mid-walk (skip / un-skip / steer a not-yet-run step). It is read by reference
+   * at the loop head and threaded to the runner's `stepGuidance` thunk, so a
+   * change lands on the next step turn. Defaults to an empty (no-op) set so every
+   * existing caller is unchanged.
    */
   async run(
     runId: string,
@@ -104,7 +121,9 @@ export class WorkflowController {
     signal?: AbortSignal,
     resumeFromStepId?: string,
     completedStepIds?: ReadonlySet<string>,
+    directives: RunDirectives = createRunDirectives(),
   ): Promise<ControllerResult> {
+    this.directives = directives;
     const steps: StepReport[] = [];
     // Per-step-id loopback counters, shared across the whole run so a target that
     // is revisited from multiple failing steps still terminates. Gate-revise
@@ -209,6 +228,28 @@ export class WorkflowController {
         // `remainingCompleted` is purged the moment the walk revisits a region, so a
         // deliberate loopback/revise into pre-restart work re-runs it (see below).
         if (remainingCompleted.has(step.id)) {
+          i += 1;
+          continue;
+        }
+
+        // Operator SKIP (RunDirectives — live mid-walk steering). The monitor
+        // asked to skip this not-yet-run step; consulted HERE at the loop head so
+        // a step the operator UN-skipped before the walk reached it still runs
+        // normally. A REQUIRED step skipped by the operator does NOT fail the run
+        // — the operator explicitly chose to skip it, so advance exactly like the
+        // optional-skip path. NOTE: this also skips a PURE human-gate step if its
+        // id was targeted — the gate then never opens (acceptable for v1: the
+        // operator asked to skip it; we do not special-case gates).
+        if (this.directives.userSkippedStepIds.has(step.id)) {
+          this.pushStep(steps, {
+            stepId: step.id,
+            phaseId: phase.id,
+            outcome: 'skipped',
+            attempts: 0,
+            error: 'skipped by operator',
+          });
+          this.host.log?.('warn', `step '${step.id}' skipped by operator request`);
+          this.host.reportStep(step.id, 'skipped');
           i += 1;
           continue;
         }
@@ -567,6 +608,16 @@ export class WorkflowController {
       for (let k = 0; k < inner.length; k++) {
         if (signal?.aborted) return 'aborted';
         const innerStep = inner[k];
+        // Operator SKIP (RunDirectives): skip this inner step for the lane,
+        // mirroring the optional-inner-skip idiom below — advance to the next
+        // inner step without driving the lane onto a step the operator suppressed.
+        if (this.directives.userSkippedStepIds.has(innerStep.id)) {
+          this.host.log?.(
+            'warn',
+            `fan-out item '${itemId}': step '${innerStep.id}' skipped by operator request`,
+          );
+          continue;
+        }
         driver.driveLane({ runId, itemId, currentStepId: innerStep.id, allowedStepIds });
 
         // Synthesize a minimal WorkflowStep for the inner step + thread item
@@ -640,7 +691,9 @@ export class WorkflowController {
 
     const integrated = new Set<string>();
     const failed = new Set<string>();
-    const remaining = new Set(items);
+    // MUTABLE (reassigned each wave by the live re-resolution below), so the
+    // markBlocked closure + the settle loop always see the current working set.
+    let remaining = new Set(items);
     let incompleteCount = 0;
 
     /** Mark a lane failed (a blocked/unrunnable task) and count it incomplete. */
@@ -654,6 +707,58 @@ export class WorkflowController {
 
     while (remaining.size > 0) {
       if (signal?.aborted) return { terminal: true, incompleteCount };
+
+      // ── Live fan-out re-resolution (add_task / remove_task enabler) ─────────
+      // Re-resolve the item set at each wave boundary so a lane ADDED or REMOVED
+      // mid-run is honored on the NEXT wave, rather than the frozen `items`
+      // snapshot the caller passed. Recompute `remaining` = fresh − settled,
+      // iterating `fresh` in resolve order so wave composition (the cap-sized
+      // slice) is preserved. For a STATIC batch `fresh` equals `items` on every
+      // call, so `remaining` equals `items − settled` — byte-identical to the
+      // incremental mutation this replaces: a settled lane sits in
+      // `integrated`/`failed`; a systemic-paused lane (DB status still 'running',
+      // so the production driver keeps returning it) stays in `fresh` and is
+      // preserved; a removed queued lane vanishes from `fresh` before dispatch; an
+      // added lane appears and joins a later wave. Already-settled lanes are never
+      // re-dispatched or un-settled (they are excluded by the settled filter).
+      // Fail-soft: a throw keeps the current set (degrade to the frozen snapshot
+      // rather than crash the walk), mirroring the caller's resolveItems contract.
+      let fresh: string[] | undefined;
+      try {
+        fresh = driver.resolveItems(runId, fanOut.over);
+      } catch (err) {
+        this.host.log?.(
+          'warn',
+          `fan-out re-resolveItems('${fanOut.over}') threw; keeping the current lane set: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      if (fresh !== undefined) {
+        // Newly-appeared lanes (added since the last wave): extend the in-scope
+        // set + resolve their blocking prereqs ONCE so they are DAG-gated like any
+        // other lane. Guarded on ACTUAL growth so a static batch never re-reads
+        // dependencies (and a fan-out whose driver exposes none is untouched).
+        const appeared = fresh.filter((id) => !inScope.has(id));
+        if (appeared.length > 0) {
+          for (const id of fresh) inScope.add(id);
+          let freshDeps: Map<string, string[]> | undefined;
+          try {
+            freshDeps = driver.dependencies?.(runId, fanOut.over);
+          } catch (err) {
+            this.host.log?.(
+              'warn',
+              `fan-out re-dependencies('${fanOut.over}') threw; added lanes run without DAG ordering: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+          for (const id of appeared) {
+            prereqs.set(id, (freshDeps?.get(id) ?? []).filter((p) => inScope.has(p) && p !== id));
+          }
+        }
+        // Rebuild the working set: keep only not-yet-settled lanes, in resolve
+        // order (a removed queued lane is simply absent from `fresh`; a settled
+        // lane is filtered by integrated/failed).
+        remaining = new Set(fresh.filter((id) => !integrated.has(id) && !failed.has(id)));
+        if (remaining.size === 0) break;
+      }
 
       const ready: string[] = [];
       let blockedThisPass = false;

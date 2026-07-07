@@ -66,6 +66,13 @@ export interface ComposeStepPromptArgs {
    * step agent in the real task set so it never has to DISCOVER scope on disk.
    */
   taskScope?: string;
+  /**
+   * Operator GUIDANCE for this step (RunDirectives live steering) — free-text the
+   * operator added mid-run via the monitor to steer this step, appended as a tail
+   * section when non-empty. Absent / empty ⇒ no guidance section (output
+   * unchanged). Unlike `taskScope`/`item` this is per-STEP, not per-run.
+   */
+  userGuidance?: string;
 }
 
 /**
@@ -113,6 +120,10 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
       ? `\n\n# Sprint tasks\n\n${args.taskScope.trim()}\n\nThese are the EXACT tasks in scope for this sprint — the cyboflow database is their source of truth. When this step needs the task set (e.g. dependency analysis or per-task work), use THIS list and pass it to your subagent; do NOT hunt for task files in the worktree to discover scope (cyboflow keeps no task files on disk, so you will find none and wrongly conclude there is nothing to do).`
       : '';
   const artifactNote = step.outputArtifact !== undefined ? artifactFollowUp(step.outputArtifact) : '';
+  const userGuidance =
+    args.userGuidance !== undefined && args.userGuidance.trim().length > 0
+      ? `\n\n## Operator guidance\n\nThe operator added mid-run guidance for this step — follow it:\n\n${args.userGuidance.trim()}`
+      : '';
 
   return `You are executing **one step** of the "${workflowName}" workflow in this git worktree.
 
@@ -124,5 +135,5 @@ Do ONLY this step:
 2. **Commit atomically.** Make ONE git commit for this step (\`<type>: <what changed>\`), staging only the files this step touched.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${artifactNote}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${artifactNote}${userGuidance}${retryNote}`;
 }

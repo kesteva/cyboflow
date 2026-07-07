@@ -198,4 +198,40 @@ describe('composeStepPrompt', () => {
     expect(out).toContain('## Artifact to report');
     expect(out).toContain('cyboflow_report_artifact');
   });
+
+  // -------------------------------------------------------------------------
+  // Operator guidance — mid-run steering text (RunDirectives) appended as a tail
+  // section. Present ONLY when the operator steered this step; empty/whitespace
+  // or absent ⇒ no section (output unchanged).
+  // -------------------------------------------------------------------------
+
+  it('renders an Operator guidance section when userGuidance is provided', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'implement', name: 'Implement', agent: 'implement' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      userGuidance: 'Keep the change under the feature flag.',
+    });
+    expect(out).toContain('## Operator guidance');
+    expect(out).toContain('Keep the change under the feature flag.');
+  });
+
+  it('omits the Operator guidance section when userGuidance is undefined', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'a' }),
+      workflowName: 'sprint',
+      attempt: 1,
+    });
+    expect(out).not.toContain('## Operator guidance');
+  });
+
+  it('omits the Operator guidance section when userGuidance is empty / whitespace', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'a' }),
+      workflowName: 'sprint',
+      attempt: 1,
+      userGuidance: '   ',
+    });
+    expect(out).not.toContain('## Operator guidance');
+  });
 });
