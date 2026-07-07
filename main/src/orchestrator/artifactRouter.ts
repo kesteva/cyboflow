@@ -61,6 +61,7 @@ import {
   type ArtifactChangeAction,
   type ArtifactRenderMode,
   type ArtifactType,
+  type ScreenshotsArtifactPayload,
 } from '../../../shared/types/artifacts';
 
 // ---------------------------------------------------------------------------
@@ -88,7 +89,18 @@ export type ArtifactErrorCode =
   | 'invalid_atype'
   | 'already_committed'
   | 'run_not_found'
-  | 'wrong_project';
+  | 'wrong_project'
+  /**
+   * S5 server-side accept-baseline gate (trust-boundary fix): the screenshots
+   * artifact exists but does NOT authorize accepting the requested fileNames as
+   * a baseline — no verdict, a non-'pass' verdict, a baselineKey mismatch, or a
+   * requested fileName outside the judged/captured set. Kept distinct from
+   * 'invalid_atype' (malformed REQUEST shape) because this is a well-formed
+   * request the DATA doesn't authorize — callers that branch on the code (the
+   * tRPC + MCP surfaces) can tell "fix your request" apart from "this run's
+   * verdict doesn't clear the bar yet".
+   */
+  | 'not_verified';
 
 export class ArtifactError extends Error {
   constructor(
@@ -564,13 +576,23 @@ export class ArtifactRouter {
 
   /**
    * S5 — run the Accept-as-baseline GIT action. Validates the run belongs to
-   * `projectId` and that a 'screenshots' artifact exists for it (you only accept what
-   * was verified), records ONE audit entity_event under that artifact, then delegates
-   * the fs-copy (run artifacts → baselines tree) + `git add`/`git commit` to the
-   * injected BaselineAcceptor (the router imports no fs/git). The copy/commit runs
-   * OUTSIDE any DB txn (it is filesystem + git work). Throws `not_found` when no
-   * acceptor is wired or no screenshots artifact / run exists; `invalid_atype` (BAD
-   * REQUEST domain) when fileNames is empty.
+   * `projectId` and that a 'screenshots' artifact exists for it, THEN re-derives +
+   * enforces the same invariant the renderer's Accept button gates on client-side
+   * (the tRPC mutation is the real trust boundary — a client-supplied fileNames /
+   * baselineKey must never be trusted verbatim):
+   *   - the artifact's payload must carry a verdict with `status === 'pass'`,
+   *   - `change.baselineKey` must equal `verdict.baselineKey` (no filing PASS PNGs
+   *     from one deliverable under another's baseline namespace),
+   *   - every requested fileName must be present in BOTH `verdict.judgedFileNames`
+   *     (the PNGs the VLM actually judged) AND the artifact's captured
+   *     `payload.fileNames` (the PNGs that actually exist on disk for this run).
+   * Only once all of that holds does it record ONE audit entity_event under the
+   * artifact and delegate the fs-copy (run artifacts → baselines tree) +
+   * `git add`/`git commit` to the injected BaselineAcceptor (the router imports no
+   * fs/git). The copy/commit runs OUTSIDE any DB txn (it is filesystem + git work).
+   * Throws `not_found` when no acceptor is wired or no screenshots artifact / run
+   * exists; `invalid_atype` (BAD REQUEST domain) when fileNames is empty;
+   * `not_verified` when the artifact's verdict doesn't authorize the request.
    */
   private async runAcceptBaseline(
     projectId: number,
@@ -599,10 +621,58 @@ export class ArtifactRouter {
     }
     // You only accept what was verified: a 'screenshots' artifact must exist for the run.
     const shots = this.db
-      .prepare("SELECT id FROM artifacts WHERE run_id = ? AND atype = 'screenshots'")
-      .get(change.runId) as { id: string } | undefined;
+      .prepare("SELECT id, payload_json AS payloadJson FROM artifacts WHERE run_id = ? AND atype = 'screenshots'")
+      .get(change.runId) as { id: string; payloadJson: string | null } | undefined;
     if (!shots) {
       throw new ArtifactError('not_found', `no screenshots artifact for run ${change.runId}`);
+    }
+
+    // Server-side re-derivation of the client's Accept-button invariant (see
+    // ArtifactTabRenderer's VerdictBanner canAccept): a PASS verdict, a matching
+    // baselineKey, and every requested fileName inside BOTH the judged set and the
+    // artifact's captured set. Parsed defensively — malformed/absent JSON reads as
+    // "no verdict" rather than throwing, since a corrupt payload must never be
+    // mistaken for an authorizing one.
+    let payload: ScreenshotsArtifactPayload = {};
+    if (shots.payloadJson) {
+      try {
+        payload = JSON.parse(shots.payloadJson) as ScreenshotsArtifactPayload;
+      } catch {
+        payload = {};
+      }
+    }
+    const verdict = payload.verdict;
+    if (!verdict || verdict.status !== 'pass') {
+      throw new ArtifactError(
+        'not_verified',
+        `accept-baseline requires a PASS verdict on the screenshots artifact for run ${change.runId}`,
+      );
+    }
+    if (!verdict.baselineKey || verdict.baselineKey !== change.baselineKey) {
+      throw new ArtifactError(
+        'not_verified',
+        `accept-baseline baselineKey mismatch: request baselineKey '${change.baselineKey}' does not match verdict baselineKey '${verdict.baselineKey ?? ''}'`,
+      );
+    }
+    const judgedFileNames = new Set(
+      Array.isArray(verdict.judgedFileNames) ? verdict.judgedFileNames : [],
+    );
+    const capturedFileNames = new Set(
+      Array.isArray(payload.fileNames) ? payload.fileNames : [],
+    );
+    for (const name of change.fileNames) {
+      if (!judgedFileNames.has(name)) {
+        throw new ArtifactError(
+          'not_verified',
+          `accept-baseline fileName '${name}' was not judged by the verdict for run ${change.runId}`,
+        );
+      }
+      if (!capturedFileNames.has(name)) {
+        throw new ArtifactError(
+          'not_verified',
+          `accept-baseline fileName '${name}' was not captured for run ${change.runId}`,
+        );
+      }
     }
 
     // Delegate the fs-copy + git commit (injected service work, never imported here).

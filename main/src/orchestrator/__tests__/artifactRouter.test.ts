@@ -36,7 +36,8 @@ import {
 } from '../artifactRouter';
 import { snapshotPathFor, resolveArtifactCommitDir } from '../artifactSnapshot';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
-import type { ArtifactChangedEvent } from '../../../../shared/types/artifacts';
+import type { ArtifactChangedEvent, ScreenshotsArtifactPayload } from '../../../../shared/types/artifacts';
+import type { VerdictV1 } from '../../../../shared/types/visualVerification';
 
 // ---------------------------------------------------------------------------
 // Test DB: projects + 006 + 011 + 014 + 015 + 016 + 029.
@@ -523,10 +524,28 @@ describe('ArtifactRouter', () => {
 
   // --- S5: accept-as-baseline op (injected committer, no real fs/git) ---------
 
+  /** A minimal-but-complete VerdictV1 carrying a PASS + the given judged/baseline data. */
+  function passVerdict(overrides: {
+    judgedFileNames: string[];
+    baselineKey: string;
+  }): VerdictV1 {
+    return {
+      status: 'pass',
+      confidence: 0.95,
+      issues: [],
+      feedback: 'looks good',
+      judgedFileNames: overrides.judgedFileNames,
+      baselineUsed: false,
+      model: 'test-vlm',
+      baselineKey: overrides.baselineKey,
+    };
+  }
+
   it('accept-baseline delegates the PNG copy + commit to the injected committer and logs an audit event', async () => {
     const db = buildDb();
     seedRun(db, 'run-1');
-    // You only accept what was verified — a screenshots artifact must exist.
+    // You only accept what was verified — a screenshots artifact must exist AND
+    // carry a PASS verdict authorizing exactly these fileNames/baselineKey.
     const acceptCalls: Array<{ runId: string; baselineKey: string; fileNames: string[] }> = [];
     const router = ArtifactRouter.initialize(
       dbAdapter(db),
@@ -537,9 +556,13 @@ describe('ArtifactRouter', () => {
         return { baselineKey };
       },
     );
+    const payload: ScreenshotsArtifactPayload = {
+      fileNames: ['desktop.png', 'mobile.png'],
+      verdict: passVerdict({ judgedFileNames: ['desktop.png', 'mobile.png'], baselineKey: 'home' }),
+    };
     const { artifactId } = await router.apply(1, {
       op: 'create', runId: 'run-1', atype: 'screenshots', label: '2 shots',
-      payloadJson: '{"fileNames":["desktop.png","mobile.png"]}', actor: 'orchestrator',
+      payloadJson: JSON.stringify(payload), actor: 'orchestrator',
     });
 
     const res = await router.acceptAsBaseline(1, {
@@ -560,6 +583,31 @@ describe('ArtifactRouter', () => {
     });
     // An audit event was appended under the screenshots artifact (create + accept).
     expect(countEvents(db, artifactId)).toBe(2);
+  });
+
+  it('accept-baseline delegates only the requested subset when fewer than all judged fileNames are sent', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const acceptCalls: Array<{ fileNames: string[] }> = [];
+    const router = ArtifactRouter.initialize(
+      dbAdapter(db), undefined, undefined,
+      async ({ fileNames, baselineKey }) => {
+        acceptCalls.push({ fileNames });
+        return { baselineKey };
+      },
+    );
+    const payload: ScreenshotsArtifactPayload = {
+      fileNames: ['desktop.png', 'mobile.png'],
+      verdict: passVerdict({ judgedFileNames: ['desktop.png', 'mobile.png'], baselineKey: 'home' }),
+    };
+    await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'screenshots', label: '2 shots',
+      payloadJson: JSON.stringify(payload), actor: 'orchestrator',
+    });
+    await router.acceptAsBaseline(1, {
+      op: 'accept-baseline', runId: 'run-1', baselineKey: 'home', fileNames: ['desktop.png'], actor: 'user',
+    });
+    expect(acceptCalls).toEqual([{ fileNames: ['desktop.png'] }]);
   });
 
   it('accept-baseline throws not_found when no committer is wired', async () => {
@@ -620,5 +668,155 @@ describe('ArtifactRouter', () => {
         op: 'accept-baseline', runId: 'run-2', baselineKey: 'home', fileNames: ['a.png'], actor: 'user',
       }),
     ).rejects.toMatchObject({ code: 'wrong_project' });
+  });
+
+  // --- Server-side accept-baseline verdict validation (trust-boundary fix) ---
+
+  it('accept-baseline rejects when the screenshots artifact carries no verdict', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    let called = false;
+    const router = ArtifactRouter.initialize(
+      dbAdapter(db), undefined, undefined,
+      async ({ baselineKey }) => { called = true; return { baselineKey }; },
+    );
+    const payload: ScreenshotsArtifactPayload = { fileNames: ['desktop.png'] };
+    await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'screenshots', label: 's',
+      payloadJson: JSON.stringify(payload), actor: 'orchestrator',
+    });
+    await expect(
+      router.acceptAsBaseline(1, {
+        op: 'accept-baseline', runId: 'run-1', baselineKey: 'home', fileNames: ['desktop.png'], actor: 'user',
+      }),
+    ).rejects.toMatchObject({ code: 'not_verified' });
+    expect(called).toBe(false);
+  });
+
+  it("accept-baseline rejects a 'failed' verdict", async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    let called = false;
+    const router = ArtifactRouter.initialize(
+      dbAdapter(db), undefined, undefined,
+      async ({ baselineKey }) => { called = true; return { baselineKey }; },
+    );
+    const payload: ScreenshotsArtifactPayload = {
+      fileNames: ['desktop.png'],
+      verdict: { ...passVerdict({ judgedFileNames: ['desktop.png'], baselineKey: 'home' }), status: 'fail' },
+    };
+    await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'screenshots', label: 's',
+      payloadJson: JSON.stringify(payload), actor: 'orchestrator',
+    });
+    await expect(
+      router.acceptAsBaseline(1, {
+        op: 'accept-baseline', runId: 'run-1', baselineKey: 'home', fileNames: ['desktop.png'], actor: 'user',
+      }),
+    ).rejects.toMatchObject({ code: 'not_verified' });
+    expect(called).toBe(false);
+  });
+
+  it("accept-baseline rejects a 'low_confidence' verdict", async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    let called = false;
+    const router = ArtifactRouter.initialize(
+      dbAdapter(db), undefined, undefined,
+      async ({ baselineKey }) => { called = true; return { baselineKey }; },
+    );
+    const payload: ScreenshotsArtifactPayload = {
+      fileNames: ['desktop.png'],
+      verdict: {
+        ...passVerdict({ judgedFileNames: ['desktop.png'], baselineKey: 'home' }),
+        status: 'low_confidence',
+      },
+    };
+    await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'screenshots', label: 's',
+      payloadJson: JSON.stringify(payload), actor: 'orchestrator',
+    });
+    await expect(
+      router.acceptAsBaseline(1, {
+        op: 'accept-baseline', runId: 'run-1', baselineKey: 'home', fileNames: ['desktop.png'], actor: 'user',
+      }),
+    ).rejects.toMatchObject({ code: 'not_verified' });
+    expect(called).toBe(false);
+  });
+
+  it('accept-baseline rejects a baselineKey mismatch between the request and the verdict', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    let called = false;
+    const router = ArtifactRouter.initialize(
+      dbAdapter(db), undefined, undefined,
+      async ({ baselineKey }) => { called = true; return { baselineKey }; },
+    );
+    const payload: ScreenshotsArtifactPayload = {
+      fileNames: ['desktop.png'],
+      verdict: passVerdict({ judgedFileNames: ['desktop.png'], baselineKey: 'home' }),
+    };
+    await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'screenshots', label: 's',
+      payloadJson: JSON.stringify(payload), actor: 'orchestrator',
+    });
+    await expect(
+      router.acceptAsBaseline(1, {
+        // Client claims a DIFFERENT baseline namespace than the verdict was judged under.
+        op: 'accept-baseline', runId: 'run-1', baselineKey: 'other-deliverable', fileNames: ['desktop.png'], actor: 'user',
+      }),
+    ).rejects.toMatchObject({ code: 'not_verified' });
+    expect(called).toBe(false);
+  });
+
+  it('accept-baseline rejects a requested fileName not in the verdict judgedFileNames', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    let called = false;
+    const router = ArtifactRouter.initialize(
+      dbAdapter(db), undefined, undefined,
+      async ({ baselineKey }) => { called = true; return { baselineKey }; },
+    );
+    const payload: ScreenshotsArtifactPayload = {
+      fileNames: ['desktop.png', 'sneaky.png'],
+      verdict: passVerdict({ judgedFileNames: ['desktop.png'], baselineKey: 'home' }),
+    };
+    await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'screenshots', label: 's',
+      payloadJson: JSON.stringify(payload), actor: 'orchestrator',
+    });
+    await expect(
+      router.acceptAsBaseline(1, {
+        // 'sneaky.png' was captured but never judged by the VLM.
+        op: 'accept-baseline', runId: 'run-1', baselineKey: 'home', fileNames: ['desktop.png', 'sneaky.png'], actor: 'user',
+      }),
+    ).rejects.toMatchObject({ code: 'not_verified' });
+    expect(called).toBe(false);
+  });
+
+  it('accept-baseline rejects a requested fileName that is judged but was never captured for this run', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    let called = false;
+    const router = ArtifactRouter.initialize(
+      dbAdapter(db), undefined, undefined,
+      async ({ baselineKey }) => { called = true; return { baselineKey }; },
+    );
+    // A tampered/stale verdict claims to have judged a file that was never actually
+    // captured into payload.fileNames for this run.
+    const payload: ScreenshotsArtifactPayload = {
+      fileNames: ['desktop.png'],
+      verdict: passVerdict({ judgedFileNames: ['desktop.png', 'phantom.png'], baselineKey: 'home' }),
+    };
+    await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'screenshots', label: 's',
+      payloadJson: JSON.stringify(payload), actor: 'orchestrator',
+    });
+    await expect(
+      router.acceptAsBaseline(1, {
+        op: 'accept-baseline', runId: 'run-1', baselineKey: 'home', fileNames: ['phantom.png'], actor: 'user',
+      }),
+    ).rejects.toMatchObject({ code: 'not_verified' });
+    expect(called).toBe(false);
   });
 });

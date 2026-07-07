@@ -50,6 +50,7 @@ function rethrowAsTRPCError(err: unknown): never {
       already_committed: 'CONFLICT',
       run_not_found: 'NOT_FOUND',
       wrong_project: 'NOT_FOUND',
+      not_verified: 'BAD_REQUEST',
     };
     throw new TRPCError({ code: codeMap[err.code], message: `${err.code}: ${err.message}`, cause: err });
   }
