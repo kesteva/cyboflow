@@ -1422,6 +1422,12 @@ describe('McpQueryHandler', () => {
       db.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
       db.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
       db.exec(readFileSync(join(migDir, '042_collapse_board.sql'), 'utf-8'));
+      // Migration 049 adds the A/B experiment sandbox tag to all three entity
+      // tables; the read-side UNION (selectProjectBacklog) now projects
+      // experiment_id, so the fixture needs it.
+      db.exec('ALTER TABLE ideas ADD COLUMN experiment_id TEXT');
+      db.exec('ALTER TABLE epics ADD COLUMN experiment_id TEXT');
+      db.exec('ALTER TABLE tasks ADD COLUMN experiment_id TEXT');
       return db;
     }
 
