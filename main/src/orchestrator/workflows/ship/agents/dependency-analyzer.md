@@ -25,8 +25,16 @@ Do **NOT** propose an edge when two tasks are independent — independent tasks 
 parallel, which is the whole point of the sprint. When in doubt, leave tasks
 unordered. Keep the graph **acyclic**: never propose A → B and B → A.
 
+The task set the orchestrator hands you is **complete and authoritative** — it is
+exactly the sprint's scope. Analyze edges among **all** of those tasks and only
+those tasks. **Never** read on-disk or worktree state files to decide which tasks
+are in scope or whether a task is already done — any task-tracking file or plugin
+state directory a target repo may carry is NOT cyboflow's source of truth and may
+be stale. A task you were handed is in scope regardless of what any such file
+claims; never drop one on that basis.
+
 You run in your own context window. You use **read-only** tools (Read / Grep / Glob)
-to confirm the file/symbol relationships you infer from the task descriptions, and
+ONLY to confirm the file/symbol relationships between the tasks you were handed, and
 you do **NOT** write cyboflow state — you only return proposed edges. The
 orchestrator records each edge through the add-task-dependency tool (it is the
 single writer) and cycle-checks each one.
