@@ -42,36 +42,22 @@ import {
 import { TaskChangeRouter, TaskChangeError } from '../../taskChangeRouter';
 import { HumanStepManager } from '../../humanStepManager';
 import { QuestionRouter } from '../../questionRouter';
+import { resolveReviewItem } from '../../resolveReviewItemHandler';
 import { eventToAsyncIterable } from './events';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../../../../shared/types/cyboflow';
 
 // ---------------------------------------------------------------------------
-// Programmatic human-gate constants (mirror humanStepManager + questionRouter).
+// AskUserQuestion recovery-gate source (the other programmatic human-gate
+// constants + `humanGateStepId` moved to resolveReviewItemHandler.ts, which the
+// resolve mutation now delegates to).
 // ---------------------------------------------------------------------------
 
-/** Source prefix stamped on a programmatic human-gate decision review_item. */
-const HUMAN_GATE_SOURCE_PREFIX = 'gate:human-step:';
-/** The plan-review gate whose Approve REVEALS the run's pending draft entities. */
-const APPROVE_PLAN_STEP_ID = 'approve-plan';
 /**
  * Source stamped on a durable AskUserQuestion recovery gate (mirror of
  * ASK_USER_QUESTION_RECOVERY_SOURCE in reviewItemListing.ts). These gates must be
  * settled by runs.answerRecoveryGate — never the generic resolve/dismiss route.
  */
 const ASK_USER_QUESTION_RECOVERY_SOURCE = 'gate:ask-user-question-recovery';
-
-/**
- * The step id encoded in a `gate:human-step:<stepId>` source, or null when the
- * source is not a programmatic human-gate decision item. Used by the resolve
- * mutation to decide whether an explicit approve/reject outcome must drive the
- * Q1 reveal (approve-plan approve) or the draft-decline cleanup (approve-plan
- * reject) BEFORE the gate item resolves and the WorkflowController advances.
- */
-function humanGateStepId(kind: string | undefined, source: string | null | undefined): string | null {
-  if (kind !== 'decision' || typeof source !== 'string') return null;
-  if (!source.startsWith(HUMAN_GATE_SOURCE_PREFIX)) return null;
-  return source.slice(HUMAN_GATE_SOURCE_PREFIX.length) || null;
-}
 
 // ---------------------------------------------------------------------------
 // Run-execution probe (drained-rest race guard)
@@ -136,8 +122,12 @@ export function _resetReviewItemsRunProbeForTesting(): void {
  *
  * Probe UNSET (unit tests / legacy) => returns false so today's behavior
  * (always call maybeResumeRun) is preserved.
+ *
+ * EXPORTED so the shared resolveReviewItem handler (via the resolve wrapper below)
+ * and the monitor's resolveReviewItem action both consume the SAME probe-backed
+ * verdict — one copy of the drained-rest guard, read from the one wired probe.
  */
-function resumeWouldStrandEndedWalk(runId: string): boolean {
+export function resumeWouldStrandEndedWalk(runId: string): boolean {
   return reviewItemsRunProbe !== null && !reviewItemsRunProbe.hasActiveExecution(runId);
 }
 
@@ -462,101 +452,47 @@ export const reviewItemsRouter = router({
         ctx,
       }): Promise<{ reviewItemId: string; resumed: boolean; runStatus?: string }> => {
         const db = requireDb(ctx.db, 'resolve');
-        // Read the item's run binding + blocking flag + gate provenance BEFORE
-        // resolving (the resolve changes none of them) so we know whether to apply
-        // aggregate-unblock and whether an explicit outcome drives gate side effects.
-        const before = db
-          .prepare(
-            'SELECT run_id AS runId, blocking, kind, source FROM review_items WHERE id = ? AND project_id = ?',
-          )
-          .get(input.reviewItemId, input.projectId) as
-          | { runId?: string | null; blocking?: number; kind?: string; source?: string | null }
-          | undefined;
-
+        // Open-question precondition (tRPC-layer): a PENDING question-sourced decision
+        // must be settled by ANSWERING its AskUserQuestion (questions.respond), never
+        // resolved here. Kept in the wrapper (NOT the shared handler): it only ever
+        // fires for a `source='question'` item, which the monitor's gate/finding/
+        // permission resolveReviewItem action never touches.
         assertNotOpenQuestionGate(db, input.reviewItemId, input.projectId);
         assertNotRecoveryGate(db, input.reviewItemId, input.projectId);
 
-        const gateStepId = humanGateStepId(before?.kind, before?.source);
-        // The stored resolution the WorkflowController parses into its verdict. An
-        // explicit outcome wins over free text (deterministic verdict); otherwise
-        // the caller's free-text resolution is passed through unchanged.
-        const resolution = input.outcome !== undefined ? input.outcome : input.resolution;
-
         try {
-          // Approve-plan side effects run BEFORE the resolve so they beat the
-          // controller (the chokepoint's post-commit 'resolved' emit is what makes
-          // it advance). Both are fail-soft + idempotent, so awaiting them here can
-          // never strand the resolve.
-          if (gateStepId === APPROVE_PLAN_STEP_ID && before?.runId) {
-            if (input.outcome === 'approve') {
-              await QuestionRouter.getInstance().promotePendingDraftsForRun(before.runId);
-            } else if (input.outcome === 'reject') {
-              await TaskChangeRouter.getInstance()
-                .deleteRunCreatedEntities(input.projectId, before.runId)
-                .catch(() => {
-                  /* self-gated + best-effort — never block the reject resolve */
-                });
-            }
-          }
-
-          const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
-            op: 'resolve',
-            actor: 'user',
-            reviewItemId: input.reviewItemId,
-            ...(resolution !== undefined ? { resolution } : {}),
+          // Delegate to the SHARED gate-resolution core (also driven by the monitor's
+          // resolveReviewItem action) so the Q1 reveal (approve-plan promote/decline)
+          // and the drained-rest strand guard have ONE implementation. The wrapper
+          // only wires the concrete singletons + the probe-backed strand guard.
+          const result = await resolveReviewItem(input, {
+            db,
+            applyReviewItemResolve: (projectId, args) =>
+              ReviewItemRouter.getInstance().applyReviewItem(projectId, {
+                op: 'resolve',
+                actor: args.actor,
+                reviewItemId: args.reviewItemId,
+                ...(args.resolution !== undefined ? { resolution: args.resolution } : {}),
+              }),
+            promotePendingDraftsForRun: (runId) =>
+              QuestionRouter.getInstance().promotePendingDraftsForRun(runId),
+            deleteRunCreatedEntities: (projectId, runId) =>
+              TaskChangeRouter.getInstance().deleteRunCreatedEntities(projectId, runId),
+            maybeResumeRun: (runId) => HumanStepManager.getInstance().maybeResumeRun(runId),
+            wouldStrandEndedWalk: resumeWouldStrandEndedWalk,
           });
 
-          // Aggregate-unblock auto-resume for a blocking, run-bound item. An
-          // explicit REJECT never auto-resumes: the programmatic controller owns
-          // the terminal 'rejected' transition, so resuming the run as if
-          // approved would be wrong.
-          let resumed = false;
-          let runStatus: string | undefined;
-          if (before?.blocking === 1 && before.runId && input.outcome !== 'reject') {
-            if (resumeWouldStrandEndedWalk(before.runId)) {
-              // END-OF-WALK case (drained-rest race): the resolved gate was the
-              // run's last step, so the settle woke the walk and it finished +
-              // rested the run in awaiting_review BEFORE this trailing call ran.
-              // hasActiveExecution is now false — no walk holds the run — so a
-              // resume here would flip its resting awaiting_review -> running with
-              // nothing alive to drive it, stranding it 'running' forever. Skip
-              // the resume; the resting awaiting_review state survives, where
-              // retryStep and the summary-panel CTAs are valid. (Contrast the
-              // MID-WALK case below: a walk parked at the gate still holds its
-              // execution slot -> hasActiveExecution true -> the resume proceeds.)
-              const runRow = db
-                .prepare('SELECT status FROM workflow_runs WHERE id = ?')
-                .get(before.runId) as { status?: string } | undefined;
-              runStatus = runRow?.status;
-              console.warn(
-                `[reviewItems.resolve] blocking item ${reviewItemId} resolved for run ${before.runId} but resume was SKIPPED: no active walk (status='${runStatus ?? 'unknown'}'). The walk has already ended and rested the run; resuming would strand it 'running' with no live walk.`,
-              );
-            } else {
-              // MID-WALK case (walk parked at the gate) OR probe unset
-              // (tests/legacy): attempt the guarded awaiting_review -> running
-              // resume.
-              resumed = await HumanStepManager.getInstance().maybeResumeRun(before.runId);
-              if (!resumed) {
-                // maybeResumeRun REFUSED: the resume is a guarded
-                // awaiting_review -> running UPDATE, so a run in any OTHER state
-                // no-ops. Legitimate when a sibling blocking item is still
-                // pending; a ZOMBIE when the run sits 'running' with a dead
-                // session (seen 2026-07-06: an agent-filed fallback decision item
-                // on a run whose AskUserQuestion gate never committed). Never let
-                // that stay silent — report the actual status to the log and the
-                // caller. (Distinct from the SKIPPED path above: there we never
-                // called maybeResumeRun; here it ran and refused.)
-                const runRow = db
-                  .prepare('SELECT status FROM workflow_runs WHERE id = ?')
-                  .get(before.runId) as { status?: string } | undefined;
-                runStatus = runRow?.status;
-                console.warn(
-                  `[reviewItems.resolve] blocking item ${reviewItemId} resolved for run ${before.runId} but the run did NOT resume — maybeResumeRun refused (status='${runStatus ?? 'unknown'}'; resume only fires from awaiting_review with no other pending blocking items)`,
-                );
-              }
-            }
+          if (!result.ok) {
+            // Rebuild the SAME TRPCError the mutation threw today from the chokepoint's
+            // discriminated refusal (not_found -> NOT_FOUND, invalid_status -> CONFLICT).
+            rethrowAsTRPCError(new ReviewItemError(result.reason, result.message));
           }
-          return { reviewItemId, resumed, ...(runStatus !== undefined ? { runStatus } : {}) };
+
+          return {
+            reviewItemId: result.reviewItemId,
+            resumed: result.resumed,
+            ...(result.runStatus !== undefined ? { runStatus: result.runStatus } : {}),
+          };
         } catch (err) {
           rethrowAsTRPCError(err);
         }
