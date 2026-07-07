@@ -6,6 +6,53 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.18] — 2026-07-07
+
+### Added
+
+- **In-place quick sessions (worktree opt-out).** A quick session can now run
+  directly in the main checkout instead of an isolated git worktree — chosen via
+  a tri-state **Workspace** control in the wizard's Advanced options, with a
+  global default in a new **Settings → Quick Sessions** section. In-place
+  sessions run on the interactive substrate, **never auto-commit**, and **refuse
+  workflow runs** (with a warn-and-redirect); the interactive PreToolUse gate and
+  MCP config are delivered without writing into the checkout, and close-out
+  degrades gracefully with a rail badge. [migration 047]
+- **Resilient programmatic runs — systemic-pause, retry, and handover.**
+  - A **systemic-error classifier** detects usage / session / rate-limit / auth
+    failures (parsing reset times) and **pauses the walk** instead of burning
+    budget or skipping steps; a review-queue gate **auto-resumes at limit
+    reset**.
+  - A failed programmatic run can be **retried at its failed/skipped step**
+    (`runs.retryStep`) — via a **Retry-failed-step** CTA on the summary panel or
+    a validated retry action from the run chat.
+  - A one-way **programmatic → orchestrated handover** lets a programmatic run
+    switch to the orchestrated plane mid-flight.
+  - **Pause/Resume now works for programmatic runs.**
+- **First-class "notification" review items.** A dedicated notification kind in
+  the review queue. [migration 046]
+
+### Changed
+
+- **Flow prose hardening.** The context agent is now intent-first with
+  complexity-scaled questions; sprint review/verify subagents are scoped to the
+  task's own file list; write-tests gains a no-infra decision ladder; the
+  compounder gets a durability bar and doc-edit guardrails; and ship's
+  dependency-analyzer is re-synced with the sprint hardening.
+- Dynamic-workflow review items now offer only **Dismiss**.
+
+### Fixed
+
+- **ui-prototype / arch-design artifacts are minted on programmatic runs** (via a
+  step-prompt follow-up), matching orchestrated runs.
+- The **Workflow-complete card** is gated on the walk actually reaching its last
+  step, so it no longer appears early.
+- Retry / systemic-pause hardening: a `retryStep` pre-flight outside the held
+  queue with a TOCTOU guard, sticky systemic give-up, resume-set purging on
+  deliberate revisits, and the human gate owning the run-resume before waking the
+  walk.
+- The session branch is now **deleted on dismiss / project-delete close-out**.
+
 ## [0.1.17] — 2026-07-06
 
 ### Added
