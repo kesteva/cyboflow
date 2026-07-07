@@ -218,7 +218,12 @@ calls in one message); as each returns, you continue that task's chain.
 2. **write-tests** → delegate to `cyboflow-write-tests` with the task + diff
    summary (including the files touched). If its `## Tests` outcome reports a
    failing test, loop back to `cyboflow-implement` to fix the cause before
-   continuing.
+   continuing. Read its final `TESTS:` line — on `TESTS: skipped(<reason>)`,
+   record a **non-blocking finding** via `cyboflow_report_finding` (category
+   `test-infra` when the reason is missing infrastructure, else `test-gap`; name
+   the task ref and the reason) so the gap lands in the review queue instead of
+   silently vanishing, then continue the chain. A skip never fails the lane by
+   itself.
 3. **code-review** → delegate to `cyboflow-code-review` with the task **and the
    files it touched** (implement's list, plus any test files write-tests added) so
    it reviews this task's diff and not other lanes' in-flight work. For each entry
