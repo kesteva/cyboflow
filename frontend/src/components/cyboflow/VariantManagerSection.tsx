@@ -28,6 +28,16 @@ import type { WorkflowVariantStatus } from '../../../../shared/types/experiments
 export interface VariantManagerSectionProps {
   workflowId: string;
   projectId: number;
+  /**
+   * The host editor's unsaved-graph state (WorkflowEditorModal.isDirty). Variants
+   * snapshot the workflow's LAST SAVED spec_json from the DB — NOT the live graph
+   * — so with unsaved edits "Create variant from current" would silently ignore
+   * what the user sees. When true the create button is disabled with an inline
+   * "save first" hint. Optional (defaults false) so non-editor callers are
+   * unaffected. Variant Edit/updateVariant re-snapshot from the DB row and are NOT
+   * gated by this.
+   */
+  editorDirty?: boolean;
 }
 
 /** Display label + badge tone per variant status. */
@@ -57,7 +67,11 @@ function StatusPill({ status }: { status: WorkflowVariantStatus }): React.JSX.El
   );
 }
 
-export function VariantManagerSection({ workflowId, projectId }: VariantManagerSectionProps): React.JSX.Element {
+export function VariantManagerSection({
+  workflowId,
+  projectId,
+  editorDirty = false,
+}: VariantManagerSectionProps): React.JSX.Element {
   const { variants, loading, error: loadError } = useWorkflowVariants(workflowId);
   const [actionError, setActionError] = useState<string | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
@@ -135,12 +149,24 @@ export function VariantManagerSection({ workflowId, projectId }: VariantManagerS
         <button
           type="button"
           onClick={() => setCreateDialogOpen(true)}
+          disabled={editorDirty}
+          title={
+            editorDirty
+              ? 'Save the workflow first — variants snapshot the last saved definition.'
+              : undefined
+          }
           data-testid="variant-manager-create-button"
-          className="ml-auto rounded-button border border-border-primary bg-bg-primary px-2 py-1 text-[11px] font-medium text-text-primary hover:bg-bg-hover"
+          className="ml-auto rounded-button border border-border-primary bg-bg-primary px-2 py-1 text-[11px] font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
           Create variant from current
         </button>
       </div>
+
+      {editorDirty && (
+        <p className="text-[11px] text-text-tertiary" data-testid="variant-manager-dirty-hint">
+          Save the workflow first — variants snapshot the last saved definition.
+        </p>
+      )}
 
       {loading && variants.length === 0 && (
         <p className="text-xs text-text-secondary">Loading variants…</p>

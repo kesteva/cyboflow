@@ -209,4 +209,20 @@ describe('VariantManagerSection', () => {
     fireEvent.click(screen.getByTestId('variant-edit-button-wfv_1'));
     expect(screen.getByTestId('mock-variant-editor-modal')).toHaveTextContent('Variant A');
   });
+
+  it('(i) create button is DISABLED with a save-first hint when the editor is dirty', () => {
+    mockUseWorkflowVariants.mockReturnValue({ variants: [], loading: false, error: null });
+    render(<VariantManagerSection workflowId="wf-1" projectId={1} editorDirty />);
+
+    expect(screen.getByTestId('variant-manager-create-button')).toBeDisabled();
+    expect(screen.getByTestId('variant-manager-dirty-hint')).toHaveTextContent(/save the workflow first/i);
+  });
+
+  it('(j) create button is ENABLED with no hint when the editor is clean (default)', () => {
+    mockUseWorkflowVariants.mockReturnValue({ variants: [], loading: false, error: null });
+    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+
+    expect(screen.getByTestId('variant-manager-create-button')).not.toBeDisabled();
+    expect(screen.queryByTestId('variant-manager-dirty-hint')).not.toBeInTheDocument();
+  });
 });

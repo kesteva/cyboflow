@@ -644,7 +644,7 @@ export function WorkflowEditorModal({
         {/* Variant management (migration 048 / workflow A/B testing) — a variant
             always snapshots an EXISTING workflow row, so this is edit-mode only. */}
         {mode === 'edit' && !isLoading && (
-          <VariantManagerSection workflowId={workflowId} projectId={projectId} />
+          <VariantManagerSection workflowId={workflowId} projectId={projectId} editorDirty={isDirty} />
         )}
       </div>
 

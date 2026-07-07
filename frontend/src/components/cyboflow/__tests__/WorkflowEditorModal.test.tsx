@@ -263,6 +263,21 @@ describe('WorkflowEditorModal — edit mode', () => {
     await waitFor(() => expect(saveBtn).not.toBeDisabled());
   });
 
+  it('threads its dirty state into VariantManagerSection — the create-variant button gates on unsaved edits', async () => {
+    await renderEditMode();
+
+    // Clean editor: the variant create button is enabled and no dirty hint shows.
+    expect(screen.getByTestId('variant-manager-create-button')).not.toBeDisabled();
+    expect(screen.queryByTestId('variant-manager-dirty-hint')).not.toBeInTheDocument();
+
+    // Make an edit → editor dirty → the create-variant button disables + hint appears
+    // (variants snapshot the LAST SAVED definition, so an unsaved graph must save first).
+    fireEvent.change(screen.getByTestId('inspector-name-input'), { target: { value: 'Context (edited)' } });
+
+    await waitFor(() => expect(screen.getByTestId('variant-manager-create-button')).toBeDisabled());
+    expect(screen.getByTestId('variant-manager-dirty-hint')).toBeInTheDocument();
+  });
+
   it('Save → "Save globally" calls workflows.updateSpec.mutate with the edited definition', async () => {
     const { onSaved } = await renderEditMode();
 
