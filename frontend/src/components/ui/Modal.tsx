@@ -77,11 +77,26 @@ export const Modal: React.FC<ModalProps> = ({
   };
   
   const handleOverlayMouseDown = (e: React.MouseEvent) => {
+    // A nested Modal (e.g. a name-prompt dialog rendered as a JSX child of this
+    // one) portals to its own DOM node under document.body, but React still
+    // bubbles its synthetic events through the REACT tree — so this handler
+    // can fire for a mousedown that never actually touched this modal's DOM
+    // subtree. Ignore those; the nested modal's own overlay handler owns them.
+    if (!(e.currentTarget instanceof Node) || !(e.target instanceof Node) || !e.currentTarget.contains(e.target)) {
+      return;
+    }
     // Store where the mouse down occurred
     mouseDownTargetRef.current = e.target;
   };
-  
+
   const handleOverlayClick = (e: React.MouseEvent) => {
+    // Same cross-portal guard as handleOverlayMouseDown: a click inside a
+    // nested Modal is a DOM descendant of THAT modal's wrapper, not this one's,
+    // even though it reaches this handler via React-tree event bubbling. Bail
+    // out rather than misreading it as an outside click on this modal.
+    if (!(e.currentTarget instanceof Node) || !(e.target instanceof Node) || !e.currentTarget.contains(e.target)) {
+      return;
+    }
     // Check if the click target is the modal content or its children
     const modalContent = modalRef.current;
     const isClickInsideModal = modalContent && e.target && e.target instanceof Node && modalContent.contains(e.target);

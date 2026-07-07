@@ -456,6 +456,44 @@ describe('AgentEditorModal — duplicate', () => {
     });
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith('implement-copy'));
   });
+
+  it('clicking into the name input does not close the dialog or the editor (nested-modal overlay-click regression)', async () => {
+    // Regression: FlowNameDialog's own <Modal> is a JSX child of the editor's
+    // <Modal>, so both portal to separate DOM nodes under document.body but
+    // React still bubbles the click through the REACT tree. The editor's
+    // overlay-click handler used to mistake that bubbled click for an outside
+    // click (DOM containment against its own modalRef failed) and closed.
+    const { onClose } = await renderModal();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('agent-editor-duplicate-button'));
+    });
+    const nameInput = await screen.findByTestId('flow-name-input');
+
+    fireEvent.mouseDown(nameInput);
+    fireEvent.click(nameInput);
+
+    expect(screen.getByTestId('flow-name-input')).toBeInTheDocument();
+    expect(screen.getByTestId('agent-editor-modal')).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('a genuine click on the name dialog\'s own backdrop still closes just the dialog, not the editor', async () => {
+    const { onClose } = await renderModal();
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('agent-editor-duplicate-button'));
+    });
+    await screen.findByTestId('flow-name-input');
+
+    // The last-mounted overlay is the nested name dialog's own backdrop.
+    const backdrops = document.querySelectorAll('.z-modal-backdrop');
+    const nameDialogBackdrop = backdrops[backdrops.length - 1] as HTMLElement;
+    fireEvent.mouseDown(nameDialogBackdrop);
+    fireEvent.click(nameDialogBackdrop);
+
+    await waitFor(() => expect(screen.queryByTestId('flow-name-input')).not.toBeInTheDocument());
+    expect(screen.getByTestId('agent-editor-modal')).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });
 
 describe('AgentEditorModal — create (new custom agent)', () => {
