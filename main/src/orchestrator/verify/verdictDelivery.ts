@@ -28,15 +28,19 @@
  *     The action returned decides the finding's `blocking` flag below.
  *
  *  3. ReviewItemRouter.applyReviewItem(projectId, { op:'create', kind:'finding' })
- *     raises ONE finding on a FAIL, low_confidence, or timeout terminal verdict (PASS
- *     raises none; skipped raises none — R4). Severity is mapped from the worst issue;
- *     the finding is soft-linked to the run's task when one exists. In merge-gate mode
+ *     raises ONE finding on a FAIL, low_confidence, timeout, or skipped terminal
+ *     verdict (PASS raises none). Severity is mapped from the worst issue; the
+ *     finding is soft-linked to the run's task when one exists. In merge-gate mode
  *     a FAIL finding is BLOCKING (it holds this lane's integration until re-verified /
  *     escalated — isMergeGateBlocking); low_confidence stays NON-blocking (advisory
- *     human review, never an auto-loop); a timeout finding is NON-blocking too
- *     (advance-with-visibility — the lane advanced, but verification did not run).
- *     This is called once per terminal verdict (the scheduler delivers a request's
- *     verdict exactly once), so it does not spam a finding per drain.
+ *     human review, never an auto-loop); timeout AND skipped findings are NON-blocking
+ *     too (advance-with-visibility — the lane advanced, but verification did not run).
+ *     A `verification_requests` row only exists because a flow agent explicitly asked
+ *     for verification of a deliverable, so a skip is never a no-op from the human's
+ *     perspective — it means the check was requested but never ran (missing TCC grant,
+ *     unhealthy dev-server backend, no usable backend in the chain, or an unparseable
+ *     deliverable). This is called once per terminal verdict (the scheduler delivers a
+ *     request's verdict exactly once), so it does not spam a finding per drain.
  *
  * Standalone-typecheck invariant: this file imports ONLY the electron-free
  * orchestrator routers + the merge-gate driver + shared types + the narrow
@@ -64,14 +68,14 @@ export interface VerdictDeliveryDeps {
 
 /**
  * The terminal request statuses that warrant a finding: FAIL + low confidence, PLUS
- * `timeout` (R4). A timeout ADVANCES the lane (an environment failure must never
- * wedge a sprint) but raises a NON-blocking finding so a human sees that verification
- * did not actually run — advance-with-visibility. `skipped` is deliberately ABSENT
- * (a missing precondition raises no finding). The blocking flag is still derived from
- * the merge-gate action (isMergeGateBlocking), which is false for a timeout's
- * advance-integrated / non-sprint noop — so a timeout finding is always non-blocking.
+ * `timeout` and `skipped` (R4, revised). Both timeout and skipped ADVANCE the lane
+ * (an environment failure or missing precondition must never wedge a sprint) but each
+ * raises a NON-blocking finding so a human sees that verification did not actually
+ * run — advance-with-visibility. The blocking flag is still derived from the
+ * merge-gate action (isMergeGateBlocking), which is false for both statuses'
+ * advance-integrated / non-sprint noop — so these findings are always non-blocking.
  */
-const FINDING_STATUSES: ReadonlySet<string> = new Set(['failed', 'low_confidence', 'timeout']);
+const FINDING_STATUSES: ReadonlySet<string> = new Set(['failed', 'low_confidence', 'timeout', 'skipped']);
 
 /**
  * Map a VlmJudge issue severity ('low'|'medium'|'high') to the review_items
@@ -121,6 +125,7 @@ function worstIssueSeverity(verdict: VerdictV1 | undefined): 'low' | 'medium' | 
 function buildFindingText(
   status: string,
   verdict: VerdictV1 | undefined,
+  skipReason?: string | null,
 ): { title: string; body: string } {
   // R4: timeout is advance-with-visibility — the lane was ADVANCED (not looped back),
   // and no visual check actually ran, so it gets its own environment-failure framing
@@ -130,6 +135,20 @@ function buildFindingText(
       title: 'Visual verification did not run (timed out)',
       body: 'Visual verification timed out before producing a verdict (the dev server never became ready, capture/judge exceeded the deadline, or the request was orphaned by a process restart). The lane was advanced so the sprint is not wedged, but NO visual check actually ran — verify this deliverable manually or re-run verification.',
     };
+  }
+  // R4 (revised): skipped is ALSO advance-with-visibility. A verification_requests
+  // row only exists because a flow agent explicitly asked for verification of a UI
+  // deliverable, so a skip always means "requested but never ran" — a missing
+  // precondition (no TCC grant, unhealthy/absent dev-server backend, no port-capable
+  // rung for the deliverable, or an unparseable deliverable), never a deliberate
+  // no-op. The lane was advanced so the sprint is not wedged, but the body should
+  // carry the concrete reason when one was persisted (see skipReason above).
+  if (status === 'skipped') {
+    const body = [
+      'Visual verification did not run (a missing precondition — an unhealthy or absent backend, no capable rung for this deliverable, or an unparseable deliverable — prevented it). The lane was advanced so the sprint is not wedged, but NO visual check actually ran — verify this deliverable manually or fix the environment and re-run verification.',
+      ...(skipReason ? [`Reason: ${skipReason}`] : []),
+    ].join('\n\n');
+    return { title: 'Visual verification did not run (skipped)', body };
   }
   const title =
     status === 'low_confidence'
@@ -176,6 +195,29 @@ function resolveRunTaskId(db: DatabaseLike, runId: string, logger?: LoggerLike):
 }
 
 /**
+ * Read the concrete skip reason the scheduler persisted on
+ * `verification_requests.error_message` (markTerminalAndDeliver callers pass
+ * `{ error: skipReason ?? 'no usable backend' }` for every skip exit — see
+ * verificationScheduler.ts). Fail-soft: a missing row or a read failure returns
+ * null and the finding body falls back to its generic (but still actionable) text
+ * rather than throwing or blocking the finding.
+ */
+function resolveSkipReason(db: DatabaseLike, requestId: string, logger?: LoggerLike): string | null {
+  try {
+    const row = db
+      .prepare('SELECT error_message FROM verification_requests WHERE id = ?')
+      .get(requestId) as { error_message: string | null } | undefined;
+    return row?.error_message ?? null;
+  } catch (err) {
+    logger?.warn('[verdictDelivery] could not resolve skip reason (fail-soft)', {
+      requestId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/**
  * Build the concrete `OnVerdict` callback the scheduler fires after a terminal
  * outcome. Fail-soft end to end: a router error is logged and swallowed (the
  * scheduler's own deliver() wrapper also catches, but we never want a delivery
@@ -184,7 +226,7 @@ function resolveRunTaskId(db: DatabaseLike, runId: string, logger?: LoggerLike):
 export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
   const { db, logger } = deps;
 
-  return async ({ runId, projectId, status, verdict, fileNames, input }) => {
+  return async ({ requestId, runId, projectId, status, verdict, fileNames, input }) => {
     // ---- 1. Enrich the SAME 'screenshots' artifact (idempotent UPSERT) ----
     // Gated on a PRESENT verdict only: a judged outcome (passed/failed/low_confidence
     // WITH a verdict) carries the verdict block to enrich. A verdict-LESS FAIL
@@ -249,7 +291,8 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
     try {
       const taskId = resolveRunTaskId(db, runId, logger);
       const severity = toReviewSeverity(worstIssueSeverity(verdict));
-      const { title, body } = buildFindingText(status, verdict);
+      const skipReason = status === 'skipped' ? resolveSkipReason(db, requestId, logger) : null;
+      const { title, body } = buildFindingText(status, verdict, skipReason);
       const findingPayload: FindingPayload = {
         kind: 'finding',
         category: 'visual-regression',

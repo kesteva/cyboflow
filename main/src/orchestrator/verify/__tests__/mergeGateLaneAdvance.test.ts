@@ -158,8 +158,8 @@ describe('decideMergeGate (pure loopback policy)', () => {
   it('skipped / timeout ADVANCE the lane (R4 — un-park; never wedge, never loop)', () => {
     // R4: a terminal skipped/timeout drives a parked lane OFF awaiting-verify exactly
     // like a PASS (advance-integrated). Neither loops back or fails the lane; the
-    // visibility split (skipped = no finding, timeout = non-blocking finding) is in
-    // verdictDelivery, not this pure decision.
+    // visibility (both now raise a non-blocking finding) is in verdictDelivery, not
+    // this pure decision.
     expect(decideMergeGate({ status: 'skipped', verdict: undefined, currentAttempts: 0 })).toEqual({
       kind: 'advance-integrated',
     });

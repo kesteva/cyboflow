@@ -34,12 +34,11 @@
  *                         a parked lane OFF the `awaiting-verify` step: skipped == a
  *                         missing precondition and timeout == an environment failure,
  *                         and NEITHER may wedge an orchestrated (SDK) sprint that
- *                         forbids advancing until PASSED. The visibility difference
- *                         is in the FINDING (raised by verdictDelivery, not here):
- *                         skipped raises NONE; timeout raises a NON-blocking one so a
- *                         human sees that verification did not actually run. A
- *                         BLOCKING treatment would reintroduce the wedge class R1–R3
- *                         just removed.
+ *                         forbids advancing until PASSED. Both raise a NON-blocking
+ *                         finding (via verdictDelivery, not here) so a human sees
+ *                         that verification did not actually run. A BLOCKING
+ *                         treatment would reintroduce the wedge class R1–R3 just
+ *                         removed.
  *
  * ACTUATION CAVEAT (the honest boundary of this slice — see followUps): writing
  * the lane back to `implement` makes the loopback VISIBLE and records the bumped
@@ -84,7 +83,8 @@ export type MergeGateAction =
  *   passed                     → advance-integrated
  *   low_confidence             → advance-integrated (advisory; never auto-loop)
  *   skipped|timeout            → advance-integrated (un-park the lane; R4 — the
- *                                visibility split is in the finding, not the lane)
+ *                                finding, raised by verdictDelivery for both, is
+ *                                what carries visibility, not the lane action)
  *   failed, currentAttempts<cap→ loopback-implement (nextAttempt = max(currentAttempts,1)+1)
  *   failed, currentAttempts>=cap→ mark-failed
  *   queued|leased|running      → noop (not a terminal verdict)
@@ -130,8 +130,8 @@ export function decideMergeGate(args: {
   // skipped == missing precondition, timeout == environment failure (R4). NEITHER
   // is a block: both ADVANCE the lane toward integrated exactly like a PASS, so an
   // orchestrated (SDK) lane parked at awaiting-verify is driven OFF the park step
-  // instead of wedging the sprint. The visibility split is in the finding
-  // (verdictDelivery): skipped raises none; timeout raises a NON-blocking one.
+  // instead of wedging the sprint. Both raise a NON-blocking finding in
+  // verdictDelivery so a human sees that verification did not actually run.
   if (status === 'skipped' || status === 'timeout') return { kind: 'advance-integrated' };
 
   // queued / leased / running (not a terminal verdict) — no gate action.

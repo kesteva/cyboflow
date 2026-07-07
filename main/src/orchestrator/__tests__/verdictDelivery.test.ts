@@ -8,7 +8,8 @@
  *  - FAIL           → screenshots artifact enriched WITH the verdict block + 1 finding
  *  - PASS           → screenshots artifact enriched WITH the verdict block + 0 findings
  *  - low_confidence → screenshots artifact enriched + 1 finding
- *  - skipped (no verdict) → NOTHING enriched, 0 findings
+ *  - skipped (no verdict) → NOTHING enriched, 1 NON-blocking finding (advance-with-
+ *    visibility — a verification_requests row only exists because it was requested)
  *  - the finding soft-links to the run's task when workflow_runs.task_id is set,
  *    and omits the entity link (both null) when it is not
  *  - the enrich is idempotent — a pre-existing screenshots artifact is UPDATED
@@ -42,6 +43,7 @@ const MIGRATIONS = [
   '015_entity_model_rebuild.sql',
   '016_review_items.sql',
   '035_artifacts.sql',
+  '048_visual_verification.sql',
 ];
 
 function buildDb(): Database.Database {
@@ -74,6 +76,19 @@ function seedRun(db: Database.Database, runId: string, taskId?: string): void {
     `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id)
      VALUES (?, 'wf-1', 1, 'running', 'default', ?)`,
   ).run(runId, taskId ?? null);
+}
+
+/** Seed a verification_requests row so resolveSkipReason's SELECT by id resolves. */
+function seedVerificationRequest(
+  db: Database.Database,
+  requestId: string,
+  runId: string,
+  errorMessage?: string,
+): void {
+  db.prepare(
+    `INSERT INTO verification_requests (id, run_id, project_id, status, verify_type, deliverable_json, error_message)
+     VALUES (?, ?, 1, 'skipped', 'native-desktop', '{}', ?)`,
+  ).run(requestId, runId, errorMessage ?? null);
 }
 
 function screenshotsRows(db: Database.Database, runId: string): Array<{ id: string; payload_json: string | null }> {
@@ -256,8 +271,12 @@ describe('verdictDelivery (P8a)', () => {
     expect(findings[0].title).toMatch(/human review/i);
   });
 
-  it('skipped (no verdict) → enriches NOTHING and raises 0 findings', async () => {
+  it('skipped (no verdict) → enriches NOTHING but raises exactly 1 NON-blocking finding', async () => {
+    // Revised policy: a verification_requests row only exists because a flow agent
+    // explicitly asked for verification, so a skip always means "requested but never
+    // ran" (missing precondition) — it must be visible, not silent, mirroring timeout.
     seedRun(db, 'run-4');
+    seedVerificationRequest(db, 'vr_4', 'run-4');
     const deliver = createVerdictDelivery({ db: dbAdapter(db) });
 
     await deliver({
@@ -270,8 +289,64 @@ describe('verdictDelivery (P8a)', () => {
       fileNames: [],
     });
 
+    // No verdict → nothing to enrich on the screenshots artifact.
     expect(screenshotsRows(db, 'run-4')).toHaveLength(0);
-    expect(findingRows(db, 'run-4')).toHaveLength(0);
+
+    const findings = findingRows(db, 'run-4');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].source).toBe('visual-verify');
+    expect(findings[0].blocking).toBe(0);
+    expect(findings[0].severity).toBe('warning');
+    expect(findings[0].title).toMatch(/did not run|skipped/i);
+  });
+
+  it('skipped → finding body threads the concrete skip reason from verification_requests.error_message', async () => {
+    seedRun(db, 'run-4b');
+    seedVerificationRequest(db, 'vr_4b', 'run-4b', 'no healthy backend for static-render-snapshot');
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+
+    await deliver({
+      requestId: 'vr_4b',
+      runId: 'run-4b',
+      projectId: 1,
+      type: 'native-desktop',
+      status: 'skipped',
+      verdict: undefined,
+      fileNames: [],
+    });
+
+    const findings = findingRows(db, 'run-4b');
+    expect(findings).toHaveLength(1);
+    const fp = db
+      .prepare('SELECT body FROM review_items WHERE id = ?')
+      .get(findings[0].id) as { body: string };
+    expect(fp.body).toMatch(/Reason: no healthy backend for static-render-snapshot/);
+  });
+
+  it('skipped → missing verification_requests row still produces the generic fail-soft body', async () => {
+    // No seedVerificationRequest call — the row the hook tries to read is absent
+    // (e.g. a fixture gap or FK cascade). resolveSkipReason must fail soft: no
+    // 'Reason:' line, but the finding still fires with the generic body.
+    seedRun(db, 'run-4c');
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+
+    await deliver({
+      requestId: 'vr_missing',
+      runId: 'run-4c',
+      projectId: 1,
+      type: 'native-desktop',
+      status: 'skipped',
+      verdict: undefined,
+      fileNames: [],
+    });
+
+    const findings = findingRows(db, 'run-4c');
+    expect(findings).toHaveLength(1);
+    const fp = db
+      .prepare('SELECT body FROM review_items WHERE id = ?')
+      .get(findings[0].id) as { body: string };
+    expect(fp.body).not.toMatch(/Reason:/);
+    expect(fp.body).toMatch(/did not run/i);
   });
 
   it('verdict-LESS FAIL (capture-fail / judge-throw) → enriches NOTHING but raises exactly 1 finding', async () => {
@@ -452,6 +527,7 @@ const SPRINT_MIGRATIONS = [
   '023_sprint_lane_step.sql',
   '025_sprint_lane_attempts.sql',
   '035_artifacts.sql',
+  '048_visual_verification.sql',
 ];
 
 function buildSprintDb(): Database.Database {
@@ -652,8 +728,10 @@ describe('verdictDelivery (P8b — merge-gate)', () => {
     expect(screenshotsRows(db, 'run-s4')).toHaveLength(0);
   });
 
-  it('R4: SKIPPED on a sprint lane ADVANCES it to integrated with NO finding', async () => {
-    // R4: a skipped is a missing precondition — advance, no finding, no side effects.
+  it('R4 (revised): SKIPPED on a sprint lane ADVANCES it to integrated AND raises a NON-blocking finding', async () => {
+    // Revised policy: skipped now gets the SAME advance-with-visibility treatment as
+    // timeout — the lane still un-parks (never wedges the sprint), but a human sees
+    // that verification was requested and never ran.
     db.prepare(
       `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id)
        VALUES ('tsk_sk', 1, 'TASK-005', 'E', 'board-1-default', 'stage-board-1-default-5')`,
@@ -662,6 +740,7 @@ describe('verdictDelivery (P8b — merge-gate)', () => {
     const { batchId } = store.createForRun(1, 'sdk', ['tsk_sk']);
     seedSprintRun(db, 'run-s5', batchId, 'tsk_sk');
     store.updateLane({ runId: 'run-s5', batchId, taskId: 'tsk_sk', status: 'running', currentStepId: 'awaiting-verify' });
+    seedVerificationRequest(db, 'vr_s5', 'run-s5');
 
     const deliver = createVerdictDelivery({ db: dbAdapter(db) });
     await deliver({
@@ -679,7 +758,13 @@ describe('verdictDelivery (P8b — merge-gate)', () => {
       .prepare('SELECT status FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
       .get(batchId, 'tsk_sk') as { status: string };
     expect(lane.status).toBe('integrated'); // un-parked
-    expect(findingRows(db, 'run-s5')).toHaveLength(0); // skipped raises NO finding
+
+    const findings = findingRows(db, 'run-s5');
+    expect(findings).toHaveLength(1);
+    expect(findings[0].blocking).toBe(0); // advance-integrated is never blocking
+    expect(findings[0].severity).toBe('warning');
+    expect(findings[0].source).toBe('visual-verify');
+    expect(findings[0].title).toMatch(/did not run|skipped/i);
     expect(screenshotsRows(db, 'run-s5')).toHaveLength(0);
   });
 });
