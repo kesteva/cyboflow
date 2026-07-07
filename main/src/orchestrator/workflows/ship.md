@@ -49,9 +49,17 @@ creating a new idea, check the existing backlog with `cyboflow_list_tasks` /
 ### Phase 1 — Plan
 
 1. **context** → delegate to `cyboflow-context`. Pass the `# Selected idea` block
-   if one was chosen at launch, otherwise the user's raw prompt. It returns a
-   self-contained `## Idea spec` plus a `SCOPE: small|large` line and the design
-   flags `UI_PROTOTYPE: yes|no` / `ARCH_DESIGN: yes|no` (they decide steps 4–5 —
+   if one was chosen at launch, otherwise the user's raw prompt. The agent works
+   **intent-first**: unless the idea is trivially unambiguous, its first reply is
+   an `## Intent probe` — its riskiest assumptions plus `## Open questions`, each
+   with 2–4 proposed options and a recommended default — and NO spec yet. Ask those
+   questions with **AskUserQuestion** (use the agent's options, putting its
+   recommended default first), then re-delegate to `cyboflow-context` with the
+   user's answers in a `# Answers` block. Allow up to **2** question rounds when
+   answers surface new ambiguity; after that require the spec. The spec round
+   returns a self-contained `## Idea spec` (including an `### Assumptions`
+   subsection) plus a `SCOPE: small|large` line and the design flags
+   `UI_PROTOTYPE: yes|no` / `ARCH_DESIGN: yes|no` (they decide steps 4–5 —
    remember them).
    - Persist the spec with the rich `## Idea spec` markdown in **`body`** (the
      canonical field the idea artifact renders) and a SHORT one-line caption in
@@ -64,15 +72,14 @@ creating a new idea, check the existing backlog with `cyboflow_list_tasks` /
    - If NO `# Selected idea` block is present: create the idea via
      `cyboflow_create_task(task_type='idea', body=<full spec>, summary=<one-line
      caption>)` (one row per distinct idea; a broad prompt may yield more than one).
-   If it returns `## Open questions`, ask them with **AskUserQuestion**, then
-   re-delegate to `cyboflow-context` with the answers folded in.
 2. **research** (optional) → when the idea needs external context, delegate to
    `cyboflow-research` and fold its `## Research notes` into the idea body via
    `cyboflow_*`. Skip when the idea is already well understood.
 3. **approve-idea** → **human gate, inline.** Use **AskUserQuestion** (header
-   `Approve idea`, options Approve / Revise / Reject; put the full spec in the
-   option markdown preview). Do **not** proceed to refinement until the user
-   answers Approve.
+   `Approve idea`, options Approve / Revise / Reject; put the full spec — including
+   its `### Assumptions` subsection, so the user sees what was assumed without
+   being asked — in the option markdown preview). Do **not** proceed to refinement
+   until the user answers Approve.
 
 ### Phase 2 — Refine
 
