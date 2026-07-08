@@ -149,6 +149,45 @@ describe('nudgeRunHandler — guard matrix', () => {
     expect(result).toEqual({ noOp: true, reason: 'no_session' });
     db.close();
   });
+
+  it('ignoreBlockingReviewItemId excludes that gate so it does not block its own resume', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'awaiting_review' });
+    setSession(db, runId, 'sess-1');
+    seedBlockingReviewItem(db, runId); // inserts id `rvw-${runId}`
+    const executor = makeFakeExecutor();
+    // Without the ignore it would be `blocked`; excluding the only blocking item
+    // lets the resume proceed to delivery.
+    const result = await nudgeRunHandler(
+      runId,
+      'Approve',
+      { db: dbAdapter(db), runQueues: new RunQueueRegistry(), runExecutor: executor },
+      { ignoreBlockingReviewItemId: `rvw-${runId}` },
+    );
+    expect(result).toEqual({ delivered: true });
+    expect(executor.execute).toHaveBeenCalledWith(runId);
+    db.close();
+  });
+
+  it('ignoreBlockingReviewItemId still blocks when ANOTHER blocking item is pending', async () => {
+    const db = makeDb();
+    const { runId } = seedRun(db, { status: 'awaiting_review' });
+    setSession(db, runId, 'sess-1');
+    seedBlockingReviewItem(db, runId); // `rvw-${runId}`
+    // A second, unrelated blocking item that must still gate the run.
+    db.prepare(
+      `INSERT INTO review_items (id, project_id, run_id, kind, status, blocking, title)
+       VALUES ('rvw-other', 1, ?, 'finding', 'pending', 1, 'other')`,
+    ).run(runId);
+    const result = await nudgeRunHandler(
+      runId,
+      'Approve',
+      { db: dbAdapter(db), runQueues: new RunQueueRegistry(), runExecutor: makeFakeExecutor() },
+      { ignoreBlockingReviewItemId: `rvw-${runId}` },
+    );
+    expect(result).toEqual({ noOp: true, reason: 'blocked' });
+    db.close();
+  });
 });
 
 // ---------------------------------------------------------------------------

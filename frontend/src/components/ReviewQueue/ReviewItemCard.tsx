@@ -115,6 +115,31 @@ function recoveredQuestions(item: ReviewItem): QuestionPayload[] {
 }
 
 /**
+ * A human-readable explanation for a REFUSED recovery-gate resume, so the card
+ * can stay visible with actionable context instead of silently swallowing the
+ * answer. `nudge` is the runs.answerRecoveryGate result's nudge outcome.
+ */
+function recoveryResumeErrorMessage(nudge: { noOp?: true; reason?: string } | { delivered?: true }): string {
+  const reason = 'reason' in nudge ? nudge.reason : undefined;
+  switch (reason) {
+    case 'no_session':
+      return "This run has no saved session to resume — it can't be answered from here.";
+    case 'not_idle':
+      return 'The run is busy right now — wait for it to settle, then try again.';
+    case 'blocked':
+      return 'Another blocking item must be cleared before this run can resume.';
+    case 'race':
+      return 'The run just changed state — please try again.';
+    case 'execute_failed':
+      return 'The run failed to resume — check the run and try again.';
+    case 'terminal':
+      return 'This run has already ended.';
+    default:
+      return 'Could not resume the run — the gate is still open, try again.';
+  }
+}
+
+/**
  * The accept-routing hint for a finding (or null when absent / malformed).
  * Parsed defensively (unknown + guards) so a payload missing or carrying a
  * non-union proposedTarget behaves EXACTLY like no payload — the card then keeps
@@ -132,6 +157,9 @@ function findingProposedTarget(item: ReviewItem): FindingProposedTarget | null {
 export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewItemCardProps): React.ReactElement {
   const { pendingItemId, error, resolve, acceptFinding, dismiss, promoteToTask } = useReviewItemActions();
   const [approvalBusy, setApprovalBusy] = React.useState(false);
+  // Set when a recovery-gate resume was REFUSED — the gate stays open and this
+  // explains why, so the answer is never silently lost.
+  const [recoveryError, setRecoveryError] = React.useState<string | null>(null);
 
   const busy = pendingItemId === item.id || approvalBusy;
   // Accept-routing hint (findings only); null = legacy actions, zero change.
@@ -205,18 +233,24 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
   };
 
   // Answer a durable ask-user-question-recovery gate: the chosen option label is
-  // resolved + delivered to the run as a resumed turn (runs.answerRecoveryGate).
-  // Plain resolve/dismiss would clear the gate but NOT re-drive the drained SDK
-  // session, so the agent would never see the answer.
+  // delivered to the run as a resumed turn AND the gate is resolved — but ONLY if
+  // the resume actually lands (the backend leaves the gate PENDING on a refused
+  // resume so the answer is never lost). So the card is removed only on a
+  // confirmed `resolved`; otherwise it stays visible with the failure reason.
   const handleRecoveryAnswer = (answerText: string): void => {
     setApprovalBusy(true);
+    setRecoveryError(null);
     void trpc.cyboflow.runs.answerRecoveryGate
       .mutate({ projectId: item.project_id, reviewItemId: item.id, answerText })
-      .then(() => {
-        trackEvent('review_item_resolved', { kind: item.kind, action: 'resolve', blocking: item.blocking });
-        onResolved?.();
+      .then((result) => {
+        if (result.resolved) {
+          trackEvent('review_item_resolved', { kind: item.kind, action: 'resolve', blocking: item.blocking });
+          onResolved?.();
+        } else {
+          setRecoveryError(recoveryResumeErrorMessage(result.nudge));
+        }
       })
-      .catch(() => { /* leave card visible on error */ })
+      .catch(() => { setRecoveryError('Could not answer the gate — please try again.'); })
       .finally(() => { setApprovalBusy(false); });
   };
 
@@ -435,6 +469,12 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
       {error && pendingItemId === item.id && (
         <p className="mt-2 text-xs text-status-error" role="alert">
           {error}
+        </p>
+      )}
+
+      {recoveryError && (
+        <p className="mt-2 text-xs text-status-error" role="alert" data-testid="recovery-gate-error">
+          {recoveryError}
         </p>
       )}
     </div>

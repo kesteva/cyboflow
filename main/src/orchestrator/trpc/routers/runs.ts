@@ -50,6 +50,10 @@ import {
   type NudgeRunResult,
 } from '../../nudgeRunHandler';
 import {
+  answerRecoveryGateHandler,
+  type AnswerRecoveryGateResult,
+} from '../../answerRecoveryGateHandler';
+import {
   pauseRunHandler,
   type PauseRunDeps,
   type PauseRunResult,
@@ -1529,23 +1533,16 @@ export const runsRouter = router({
     }),
 
   /**
-   * Answer an `ask-user-question-recovery` decision gate: resolve the blocking
-   * review item AND re-drive the run with the chosen answer as a resumed turn.
+   * Answer an `ask-user-question-recovery` decision gate: resume the run with the
+   * chosen answer as a `--resume` turn AND resolve the blocking review item —
+   * but resolve ONLY once the resume is confirmed delivered, so a refused resume
+   * never loses the answer (see answerRecoveryGateHandler for the ordering
+   * rationale). A plain reviewItems.resolve is NOT enough here: its
+   * aggregate-unblock path uses HumanStepManager.maybeResumeRun, which only flips
+   * a run's status and cannot re-spawn a DRAINED SDK turn.
    *
-   * This backs the durable fallback for a dropped SDK AskUserQuestion gate (see
-   * ClaudeCodeManager.synthesizeAskUserQuestionRecoveryGate). A plain
-   * reviewItems.resolve is NOT enough here: its aggregate-unblock path uses
-   * HumanStepManager.maybeResumeRun, which only flips a run's status and cannot
-   * re-spawn a DRAINED SDK turn (there is no live walk to wake). So we resolve
-   * the item directly (clearing the blocking gate) and then use the nudge
-   * primitive (execute + `--resume`) with the chosen option label as the reply —
-   * exactly the answer the agent's degraded free-text gate was waiting on.
-   *
-   * Order matters: resolve FIRST so countPendingBlockingReviewItems hits 0,
-   * otherwise nudge would refuse with `{ noOp: 'blocked' }`.
-   *
-   * Idempotent / defensive: a non-recovery item, an already-resolved item, or an
-   * item with no run binding returns a `noOp` without touching the run.
+   * Returns `{ resolved, nudge }` — the UI keeps the card visible (for retry)
+   * whenever `resolved` is false.
    */
   answerRecoveryGate: protectedProcedure
     .input(
@@ -1555,7 +1552,7 @@ export const runsRouter = router({
         answerText: z.string().min(1),
       }),
     )
-    .mutation(async ({ ctx, input }): Promise<{ resolved: boolean; nudge: NudgeRunResult }> => {
+    .mutation(async ({ ctx, input }): Promise<AnswerRecoveryGateResult> => {
       if (!nudgeRunDeps) {
         throw new TRPCError({
           code: 'METHOD_NOT_SUPPORTED',
@@ -1565,32 +1562,16 @@ export const runsRouter = router({
       if (!ctx.db) {
         throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
       }
-      const item = ctx.db
-        .prepare(
-          'SELECT run_id AS runId, kind, source, status FROM review_items WHERE id = ? AND project_id = ?',
-        )
-        .get(input.reviewItemId, input.projectId) as
-        | { runId?: string | null; kind?: string; source?: string | null; status?: string }
-        | undefined;
-
-      if (!item || item.kind !== 'decision' || item.source !== 'gate:ask-user-question-recovery') {
-        return { resolved: false, nudge: { noOp: true, reason: 'not_found' } };
-      }
-      if (!item.runId) {
-        return { resolved: false, nudge: { noOp: true, reason: 'not_found' } };
-      }
-      // Resolve first (idempotent: applyReviewItem guards on status='pending', so a
-      // double-answer is a silent no-op) so the blocking gate clears before nudge.
-      if (item.status === 'pending') {
-        await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
-          op: 'resolve',
-          actor: 'user',
-          reviewItemId: input.reviewItemId,
-          resolution: input.answerText,
-        });
-      }
-      const nudge = await nudgeRunHandler(item.runId, input.answerText, nudgeRunDeps);
-      return { resolved: true, nudge };
+      const deps = nudgeRunDeps;
+      return answerRecoveryGateHandler(input.projectId, input.reviewItemId, input.answerText, {
+        db: ctx.db,
+        nudge: (runId, text, opts) => nudgeRunHandler(runId, text, deps, opts),
+        resolveReviewItem: (projectId, reviewItemId, resolution) =>
+          ReviewItemRouter.getInstance()
+            .applyReviewItem(projectId, { op: 'resolve', actor: 'user', reviewItemId, resolution })
+            .then(() => undefined),
+        logger: deps.logger,
+      });
     }),
 
   /**

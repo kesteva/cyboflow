@@ -189,6 +189,29 @@ describe('ReviewItemCard', () => {
     expect(mockResolve).not.toHaveBeenCalled();
   });
 
+  it('keeps the recovery card + shows an error when the resume is refused (answer not lost)', async () => {
+    mockAnswerRecovery.mockResolvedValueOnce({ resolved: false, nudge: { noOp: true, reason: 'no_session' } });
+    const item = makeItem(
+      'decision',
+      { id: 'rvw_rec_fail', blocking: true, source: 'gate:ask-user-question-recovery' },
+      {
+        kind: 'decision',
+        gate: 'ask-user-question-recovery',
+        recoveredQuestions: [
+          { question: 'Approve the plan?', header: 'Approve', multiSelect: false, options: [{ label: 'Approve' }] },
+        ],
+      },
+    );
+    const onResolved = vi.fn();
+    render(<ReviewItemCard item={item} onResolved={onResolved} />);
+    fireEvent.click(screen.getByText('Approve'));
+    await waitFor(() => expect(screen.getByTestId('recovery-gate-error')).toBeInTheDocument());
+    // The card is NOT removed — the gate stays open for retry.
+    expect(onResolved).not.toHaveBeenCalled();
+    // The answer buttons are still present.
+    expect(screen.getByTestId('recovery-gate-answer')).toBeInTheDocument();
+  });
+
   it('a recovery gate with no recovered options falls back to the generic gate buttons', () => {
     const item = makeItem(
       'decision',

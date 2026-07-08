@@ -429,14 +429,28 @@ function transitionReviewItemRow(
  * reaches 0 (ALL blocking items resolved/dismissed). Returns 0 when the table is
  * absent (the legacy no-inbox path has no aggregate gate).
  */
-export function countPendingBlockingReviewItems(db: DatabaseLike, runId: string): number {
+export function countPendingBlockingReviewItems(
+  db: DatabaseLike,
+  runId: string,
+  excludeReviewItemId?: string,
+): number {
   if (!hasReviewItemsTable(db)) return 0;
-  const row = db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM review_items
-        WHERE run_id = ? AND blocking = 1 AND status = 'pending'`,
-    )
-    .get(runId) as { n: number };
+  // `excludeReviewItemId` lets a caller that is IN THE ACT of clearing a specific
+  // blocking gate (answerRecoveryGate → nudge) ask "is the run blocked by anything
+  // OTHER than this gate?" — so the gate does not block its own resume.
+  const row = excludeReviewItemId
+    ? (db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM review_items
+            WHERE run_id = ? AND blocking = 1 AND status = 'pending' AND id != ?`,
+        )
+        .get(runId, excludeReviewItemId) as { n: number })
+    : (db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM review_items
+            WHERE run_id = ? AND blocking = 1 AND status = 'pending'`,
+        )
+        .get(runId) as { n: number });
   return row.n;
 }
 
