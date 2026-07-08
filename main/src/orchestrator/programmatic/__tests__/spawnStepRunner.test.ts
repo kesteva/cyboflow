@@ -244,4 +244,24 @@ describe('SpawnStepRunner', () => {
     expect((calls[0][0] as ClaudeSpawnerOptions).prompt).not.toContain('## Operator guidance');
     expect((calls[1][0] as ClaudeSpawnerOptions).prompt).toContain('watch the null case');
   });
+
+  it('RE-RENDERS taskScope per step — a lane added mid-run appears in the next step prompt', async () => {
+    const spawner = makeSpawner();
+    // The task-scope resolver reads the batch LIVE (mirrors buildSeedTasksBlock):
+    // a task added mid-run must appear in the block rendered for the NEXT step,
+    // not a frozen run-start snapshot — this is what grounds a monitor-added lane.
+    let scope = '## TASK-001: Scaffold\n\nInitial task.';
+    const resolveScope = vi.fn<() => string | undefined>(() => scope);
+    const runner = new SpawnStepRunner(spawner, { ...opts, taskScope: resolveScope });
+
+    await runner.runStep(step({ id: 's1', agent: 's1' }), ctx);
+    // Operator adds a task AFTER the runner was constructed (next wave picks it up).
+    scope = '## TASK-001: Scaffold\n\nInitial task.\n\n## TASK-002: Added mid-run\n\nDo the new thing.';
+    await runner.runStep(step({ id: 's2', agent: 's2' }), ctx);
+
+    expect(resolveScope).toHaveBeenCalledTimes(2);
+    const calls = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls;
+    expect((calls[0][0] as ClaudeSpawnerOptions).prompt).not.toContain('TASK-002');
+    expect((calls[1][0] as ClaudeSpawnerOptions).prompt).toContain('TASK-002: Added mid-run');
+  });
 });

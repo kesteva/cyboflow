@@ -119,12 +119,18 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       );
     }
 
-    // Resolve the sprint batch + task scope up front: a seeded sprint (non-empty
-    // batch_id) gets its `# Sprint tasks` block threaded into every step prompt so
-    // the step agent always sees the real task set. Non-sprint runs ⇒ no block.
+    // A seeded sprint (non-empty batch_id) threads its `# Sprint tasks` block into
+    // every step prompt so the step agent always sees the real task set. The block
+    // is resolved PER STEP (a thunk, not a run-start snapshot) so a lane the monitor
+    // adds mid-run — dispatched by the fan-out's wave-boundary re-resolution — is
+    // grounded with its real title/body on first dispatch. buildSeedTasksBlock reads
+    // the batch's lanes live, so re-invoking it picks up the added lane. Non-sprint
+    // runs ⇒ no block.
     const batchId =
       typeof ctx.run.batch_id === 'string' && ctx.run.batch_id.length > 0 ? ctx.run.batch_id : null;
-    const taskScope = batchId ? (this.deps.seedTasksProvider?.(batchId) ?? undefined) : undefined;
+    const taskScope = batchId
+      ? () => this.deps.seedTasksProvider?.(batchId) ?? undefined
+      : undefined;
 
     // Live operator steering for this run (RunDirectives). RunExecutor owns the
     // per-run object and threads it in; absent (tests / no monitor wiring) ⇒ an

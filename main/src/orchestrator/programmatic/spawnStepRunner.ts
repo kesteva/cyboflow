@@ -61,13 +61,17 @@ export interface SpawnStepRunnerOptions {
    */
   stepGuidance?: (stepId: string) => string | undefined;
   /**
-   * The sprint's task-scope block (the `# Sprint tasks` body), resolved once per
-   * run by DefaultProgrammaticRunner from the run's batch_id. Threaded into EVERY
-   * step prompt (each step is a fresh SDK session with no memory of prior steps),
-   * so a sprint step agent always sees the real task set instead of hunting on
-   * disk. Absent for non-sprint runs ⇒ no task block (output unchanged).
+   * Per-step sprint TASK-SCOPE resolver (the `# Sprint tasks` body). Invoked ONCE
+   * per `runStep` (NOT captured at construction), mirroring the `agentPermissionMode`
+   * / `stepGuidance` thunks above, so the block is RE-RENDERED from the run's live
+   * batch each step. This is load-bearing for mid-run `add_task`: a lane added
+   * after run start is dispatched by the fan-out's wave-boundary re-resolution, and
+   * re-rendering here means its title/body appear in the scope block the step agent
+   * sees (a run-start snapshot would list only the original tasks, leaving the added
+   * lane grounded by opaque id alone). Absent for non-sprint runs, or returning
+   * undefined ⇒ no task block (output unchanged).
    */
-  taskScope?: string;
+  taskScope?: () => string | undefined;
 }
 
 export class SpawnStepRunner implements StepRunner {
@@ -85,12 +89,16 @@ export class SpawnStepRunner implements StepRunner {
     // steering) — never captured at construction — so guidance added mid-run is
     // honored on this step's next spawn, exactly like agentPermissionMode below.
     const userGuidance = this.opts.stepGuidance?.(step.id);
+    // Re-render the sprint task-scope block PER STEP (never captured at
+    // construction) so a lane added mid-run is grounded with its real title/body
+    // on its first dispatch, exactly like userGuidance/agentPermissionMode.
+    const taskScope = this.opts.taskScope?.();
     const prompt = composeStepPrompt({
       step,
       workflowName: this.opts.workflowName,
       attempt: ctx.attempt,
       ...(ctx.item ? { item: ctx.item } : {}),
-      ...(this.opts.taskScope ? { taskScope: this.opts.taskScope } : {}),
+      ...(taskScope ? { taskScope } : {}),
       ...(userGuidance ? { userGuidance } : {}),
     });
     // Re-resolve the agent permission mode PER STEP (permission-mode redesign
