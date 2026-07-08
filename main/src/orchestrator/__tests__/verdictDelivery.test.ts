@@ -43,7 +43,7 @@ const MIGRATIONS = [
   '015_entity_model_rebuild.sql',
   '016_review_items.sql',
   '035_artifacts.sql',
-  '048_visual_verification.sql',
+  '055_visual_verification.sql',
 ];
 
 function buildDb(): Database.Database {
@@ -527,7 +527,7 @@ const SPRINT_MIGRATIONS = [
   '023_sprint_lane_step.sql',
   '025_sprint_lane_attempts.sql',
   '035_artifacts.sql',
-  '048_visual_verification.sql',
+  '055_visual_verification.sql',
 ];
 
 function buildSprintDb(): Database.Database {
