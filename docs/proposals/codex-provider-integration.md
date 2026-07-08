@@ -592,6 +592,14 @@ Do not add provider tabs by default. Filtering by provider can be a later advanc
 - Verify whether per-run nested `mcp_servers` config works through SDK config overrides. If not, prove the per-run `CODEX_HOME/config.toml` fallback.
 - Verify how Codex usage/cost fields are exposed and what normalization is required for `run_usage`.
 
+Findings from the initial docs and local CLI spike:
+
+- ChatGPT auth is viable as the first auth path. `codex login status` reports a ChatGPT login on a configured machine, and the official Codex auth path uses ChatGPT by default when no valid CLI session is available.
+- The interactive PTY path should launch `codex` directly. The CLI accepts `--model`, `--sandbox`, `--ask-for-approval`, `--cd`, and `--no-alt-screen`, which are enough for a constrained quick-session terminal runtime.
+- The TypeScript SDK does not currently appear to expose a Claude-style in-process approval callback equivalent to `canUseTool`. It exposes approval policy configuration, but a blocking Cyboflow review-queue bridge likely needs a Codex hook or app-server protocol bridge.
+- The SDK exposes constructor-level `env` and `config` controls. First try a per-run Codex client with nested `config.mcp_servers`; if that does not provide complete isolation, use a per-run `CODEX_HOME/config.toml`.
+- `codex exec --json` is useful for diagnostics, fixture capture, and event-shape exploration. Keep `codex-exec` internal-only; do not promote it to a user-facing workflow runtime.
+
 Exit criteria:
 
 - Can start a Codex turn in a worktree.
@@ -601,6 +609,7 @@ Exit criteria:
 - Can answer whether Codex can be approval-bridged into `ApprovalRouter` for v1 parity.
 - Can answer whether Cyboflow MCP can be injected without mutating the user's global Codex config.
 - Can map Codex usage to Cyboflow usage fields without assuming Claude's `total_cost_usd` shape.
+- Can decide whether a Codex hook bridge or app-server protocol bridge is required before promising review-queue parity.
 
 ### Phase 1: Schema And UI Plumbing
 
