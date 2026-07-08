@@ -96,7 +96,6 @@ import { makePairwiseJudgeQuery } from './orchestrator/eval/pairwiseJudgeQuery';
 import { handleTerminalStatusEvent } from './orchestrator/terminalEvalSubscriber';
 import { resolveRunFrozenSpec } from './orchestrator/runFrozenSpec';
 import type { WorkflowStepTransitionEvent } from '../../shared/types/workflows';
-import { resolveWorkflowDefinition } from '../../shared/types/workflows';
 import type { RunGitDiff } from '../../shared/types/runFiles';
 import type { RunStatusChangedEvent } from '../../shared/types/cyboflow';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../shared/types/cyboflow';
