@@ -44,7 +44,7 @@ vi.mock('../../trpc/client', () => ({
   },
 }));
 
-import { applyReviewItemChangeToList, useReviewItemsSlice } from '../reviewItemsSlice';
+import { applyReviewItemChangeToList, pendingReviewItemsForRun, useReviewItemsSlice } from '../reviewItemsSlice';
 
 function makeItem(id: string, overrides: Partial<ReviewItem> = {}): ReviewItem {
   return {
@@ -106,6 +106,71 @@ describe('applyReviewItemChangeToList', () => {
     const snapshot = base.slice();
     applyReviewItemChangeToList(base, makeEvent(makeItem('a', { title: 'x' })));
     expect(base).toEqual(snapshot);
+  });
+});
+
+describe('pendingReviewItemsForRun', () => {
+  it('filters to only the given run_id', () => {
+    const items = [
+      makeItem('a', { run_id: 'run-1' }),
+      makeItem('b', { run_id: 'run-2' }),
+      makeItem('c', { run_id: 'run-1' }),
+    ];
+    const result = pendingReviewItemsForRun(items, 'run-1');
+    expect(result.map((i) => i.id)).toEqual(['a', 'c']);
+  });
+
+  it('filters to only pending status (excludes resolved/dismissed)', () => {
+    const items = [
+      makeItem('a', { run_id: 'run-1', status: 'pending' }),
+      makeItem('b', { run_id: 'run-1', status: 'resolved' }),
+      makeItem('c', { run_id: 'run-1', status: 'dismissed' }),
+    ];
+    const result = pendingReviewItemsForRun(items, 'run-1');
+    expect(result.map((i) => i.id)).toEqual(['a']);
+  });
+
+  it('sorts blocking items before non-blocking items', () => {
+    const items = [
+      makeItem('a', { run_id: 'run-1', blocking: false }),
+      makeItem('b', { run_id: 'run-1', blocking: true }),
+      makeItem('c', { run_id: 'run-1', blocking: false }),
+      makeItem('d', { run_id: 'run-1', blocking: true }),
+    ];
+    const result = pendingReviewItemsForRun(items, 'run-1');
+    expect(result.map((i) => i.id)).toEqual(['b', 'd', 'a', 'c']);
+  });
+
+  it('preserves stable relative order within each blocking group', () => {
+    const items = [
+      makeItem('z', { run_id: 'run-1', blocking: true }),
+      makeItem('y', { run_id: 'run-1', blocking: false }),
+      makeItem('x', { run_id: 'run-1', blocking: true }),
+      makeItem('w', { run_id: 'run-1', blocking: false }),
+      makeItem('v', { run_id: 'run-1', blocking: true }),
+    ];
+    const result = pendingReviewItemsForRun(items, 'run-1');
+    expect(result.map((i) => i.id)).toEqual(['z', 'x', 'v', 'y', 'w']);
+  });
+
+  it('does not mutate the input array', () => {
+    const items = [
+      makeItem('a', { run_id: 'run-1', blocking: false }),
+      makeItem('b', { run_id: 'run-1', blocking: true }),
+    ];
+    const snapshot = items.slice();
+    const result = pendingReviewItemsForRun(items, 'run-1');
+    expect(items).toEqual(snapshot);
+    expect(result).not.toBe(items);
+  });
+
+  it('returns an empty array for a run with no pending items', () => {
+    const items = [
+      makeItem('a', { run_id: 'run-2', status: 'pending' }),
+      makeItem('b', { run_id: 'run-1', status: 'resolved' }),
+    ];
+    const result = pendingReviewItemsForRun(items, 'run-1');
+    expect(result).toEqual([]);
   });
 });
 

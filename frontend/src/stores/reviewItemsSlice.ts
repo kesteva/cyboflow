@@ -92,6 +92,31 @@ export function applyReviewItemChangeToList(
 }
 
 // ---------------------------------------------------------------------------
+// Pure selector — exported for unit testing.
+// ---------------------------------------------------------------------------
+
+/**
+ * Filter a flat item list down to the PENDING review items for a single run,
+ * sorted blocking-first. Stable within each blocking group (preserves input
+ * relative order). Returns a NEW array; the input is never mutated.
+ */
+export function pendingReviewItemsForRun(
+  items: ReviewItem[],
+  runId: string,
+): ReviewItem[] {
+  return items
+    .filter((it) => it.run_id === runId && it.status === 'pending')
+    .map((it, index) => ({ it, index }))
+    .sort((a, b) => {
+      if (a.it.blocking !== b.it.blocking) {
+        return a.it.blocking ? -1 : 1;
+      }
+      return a.index - b.index;
+    })
+    .map(({ it }) => it);
+}
+
+// ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
 
