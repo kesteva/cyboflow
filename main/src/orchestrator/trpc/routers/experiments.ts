@@ -133,6 +133,8 @@ export interface ExperimentsDeps {
   getProjectPath: (projectId: number) => string | null;
   setVariantStatus: (variantId: string, status: WorkflowVariantStatus) => void;
   setVariantWeight: (variantId: string, weight: number) => void;
+  /** Opt the workflow's live baseline into/out of rotation (migration 054). */
+  setBaselineRotation: (workflowId: string, patch: { inRotation?: boolean; weight?: number }) => void;
   /** Adopt a parsed WorkflowDefinition as the base workflow's spec (workflowRegistry.updateSpec). */
   adoptWorkflowSpec: (workflowId: string, definition: WorkflowDefinition) => void;
   /** Optional: resolve the pairwise decision review item (slice C). Fail-soft when absent. */
@@ -1106,6 +1108,45 @@ export function promoteVariant(
   return { experimentId, promotedVariantId: variantId, promotedArm: arm };
 }
 
+/**
+ * "Switch to randomized": turn a settled head-to-head into an ongoing A/B rotation
+ * between its two arms — WHICHEVER they are. A real-variant arm is activated
+ * (status='active'); a BASELINE arm opts the workflow's live baseline into rotation
+ * (migration 054) so it competes on equal footing. This is what makes the canonical
+ * "baseline vs variant" experiment switchable to rotation. Requires the experiment
+ * settled (same precondition as promote/rerun).
+ */
+export function switchToRotationExperiment(
+  deps: ExperimentsDeps,
+  experimentId: string,
+  weights?: { a: number; b: number },
+): DecideResult {
+  const exp = getExperiment(deps.db, experimentId);
+  if (!exp) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: `experiment ${experimentId} not found` });
+  }
+  if (!isExperimentSettled(exp.status)) {
+    throw new TRPCError({
+      code: 'CONFLICT',
+      message: `experiment ${experimentId} must be decided/abandoned before switching to rotation`,
+    });
+  }
+  const activateArm = (variantId: string, weight: number | undefined): void => {
+    if (isBaselineArm(variantId)) {
+      deps.setBaselineRotation(exp.workflow_id, {
+        inRotation: true,
+        ...(weight !== undefined ? { weight } : {}),
+      });
+      return;
+    }
+    deps.setVariantStatus(variantId, 'active');
+    if (weight !== undefined) deps.setVariantWeight(variantId, weight);
+  };
+  activateArm(exp.variant_a_id, weights?.a);
+  activateArm(exp.variant_b_id, weights?.b);
+  return { experimentId: exp.id, status: exp.status, winnerRunId: exp.winner_run_id };
+}
+
 // ---------------------------------------------------------------------------
 // Comparison reads (slice C) — assemble the compare-view payloads
 // ---------------------------------------------------------------------------
@@ -1307,34 +1348,7 @@ export const experimentsRouter = router({
       }),
     )
     .mutation(async ({ input }): Promise<DecideResult> => {
-      const deps = requireDeps();
-      const exp = getExperiment(deps.db, input.experimentId);
-      if (!exp) {
-        throw new TRPCError({ code: 'NOT_FOUND', message: `experiment ${input.experimentId} not found` });
-      }
-      if (!isExperimentSettled(exp.status)) {
-        throw new TRPCError({
-          code: 'CONFLICT',
-          message: `experiment ${input.experimentId} must be decided/abandoned before switching to rotation`,
-        });
-      }
-      // Rotation activates BOTH arms as variants — a baseline arm has no variant
-      // row to activate, so an experiment with a baseline arm cannot switch to
-      // rotation. Reject up front (the compare-view button is also disabled).
-      if (isBaselineArm(exp.variant_a_id) || isBaselineArm(exp.variant_b_id)) {
-        throw new TRPCError({
-          code: 'PRECONDITION_FAILED',
-          message:
-            'switching to rotation requires two real variants — create a variant from the current workflow first',
-        });
-      }
-      deps.setVariantStatus(exp.variant_a_id, 'active');
-      deps.setVariantStatus(exp.variant_b_id, 'active');
-      if (input.weights) {
-        deps.setVariantWeight(exp.variant_a_id, input.weights.a);
-        deps.setVariantWeight(exp.variant_b_id, input.weights.b);
-      }
-      return { experimentId: exp.id, status: exp.status, winnerRunId: exp.winner_run_id };
+      return switchToRotationExperiment(requireDeps(), input.experimentId, input.weights);
     }),
 
   /**

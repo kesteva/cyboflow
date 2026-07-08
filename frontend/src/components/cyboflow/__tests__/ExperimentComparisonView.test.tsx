@@ -378,18 +378,23 @@ describe('ExperimentComparisonView', () => {
     expect(await screen.findByTestId('experiment-switch-to-rotation')).toBeDisabled();
   });
 
-  it('disables "Switch to randomized" with a visible reason when an arm is the baseline', async () => {
-    // Settled experiment, but arm A is the current-workflow baseline (sentinel):
-    // rotation has no variant row to activate for that arm, so the button stays
-    // disabled and an always-visible hint explains why (the hover title is not
-    // discoverable on a greyed control).
+  it('enables "Switch to randomized" when an arm is the baseline (baseline vs variant rotation)', async () => {
+    // Settled experiment where arm A is the current-workflow baseline (sentinel).
+    // "Switch to randomized" turns this into a baseline-vs-variant rotation — the
+    // baseline opts into rotation server-side — so the button is ENABLED, not greyed.
     getQuery.mockResolvedValue(makeExp({ status: 'decided', variant_a_id: '__baseline__' }));
     getComparisonQuery.mockResolvedValue(makePayload());
     getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+    switchToRotationMutate.mockResolvedValue({ experimentId: 'exp_1', status: 'decided', winnerRunId: null });
 
     render(<ExperimentComparisonView experimentId="exp_1" />);
-    expect(await screen.findByTestId('experiment-switch-to-rotation')).toBeDisabled();
-    expect(screen.getByTestId('experiment-rotation-baseline-hint')).toBeInTheDocument();
+    const btn = await screen.findByTestId('experiment-switch-to-rotation');
+    expect(btn).not.toBeDisabled();
+    expect(screen.queryByTestId('experiment-rotation-baseline-hint')).not.toBeInTheDocument();
+    fireEvent.click(btn);
+    expect(switchToRotationMutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Switch to rotation'));
+    await waitFor(() => expect(switchToRotationMutate).toHaveBeenCalledWith({ experimentId: 'exp_1' }));
   });
 
   it('"Run another experiment" is disabled until the experiment is settled', async () => {

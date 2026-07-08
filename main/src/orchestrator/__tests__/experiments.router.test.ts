@@ -17,6 +17,7 @@ import {
   decideExperiment,
   abandonExperiment,
   promoteVariant,
+  switchToRotationExperiment,
   type ExperimentsDeps,
 } from '../trpc/routers/experiments';
 import { getExperiment, listExperimentSeedTasks } from '../experimentStore';
@@ -86,6 +87,12 @@ interface RecordedAdoptedSpec {
   definition: unknown;
 }
 
+/** One recorded setBaselineRotation call (switchToRotation with a baseline arm). */
+interface RecordedBaselineRotation {
+  workflowId: string;
+  patch: { inRotation?: boolean; weight?: number };
+}
+
 interface Harness {
   db: Database.Database;
   deps: ExperimentsDeps;
@@ -94,6 +101,7 @@ interface Harness {
   activated: string[];
   launches: RecordedLaunch[];
   adoptedSpecs: RecordedAdoptedSpec[];
+  baselineRotations: RecordedBaselineRotation[];
   failArmB: { value: boolean };
 }
 
@@ -106,6 +114,7 @@ function makeHarness(): Harness {
   const activated: string[] = [];
   const launches: RecordedLaunch[] = [];
   const adoptedSpecs: RecordedAdoptedSpec[] = [];
+  const baselineRotations: RecordedBaselineRotation[] = [];
   const failArmB = { value: false };
 
   const deps: ExperimentsDeps = {
@@ -150,11 +159,14 @@ function makeHarness(): Harness {
       activated.push(id);
     },
     setVariantWeight: () => {},
+    setBaselineRotation: (workflowId, patch) => {
+      baselineRotations.push({ workflowId, patch });
+    },
     adoptWorkflowSpec: (workflowId, definition) => {
       adoptedSpecs.push({ workflowId, definition });
     },
   };
-  return { db: raw, deps, dismissed, canceled, activated, launches, adoptedSpecs, failArmB };
+  return { db: raw, deps, dismissed, canceled, activated, launches, adoptedSpecs, baselineRotations, failArmB };
 }
 
 /** Simulate an arm agent creating an epic + child task under its run (tagged via run.experiment_id). */
@@ -828,6 +840,45 @@ describe('experiments router orchestration (slice B)', () => {
 
       promoteVariant(deps, res.experimentId, 'A');
       expect(() => promoteVariant(deps, res.experimentId, 'B')).toThrow(/already promoted/);
+    });
+  });
+
+  describe('switchToRotation', () => {
+    it('rejects when the experiment is not yet settled (CONFLICT)', async () => {
+      const h = makeHarness();
+      const res = await startExperiment(h.deps, {
+        projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB',
+      });
+      expect(() => switchToRotationExperiment(h.deps, res.experimentId)).toThrow(/must be decided\/abandoned/);
+    });
+
+    it('variant vs variant: activates BOTH variants, touches no baseline rotation', async () => {
+      const h = makeHarness();
+      const res = await settledExperiment(h, { variantAId: 'vA', variantBId: 'vB' });
+      switchToRotationExperiment(h.deps, res.experimentId);
+      expect(h.activated).toEqual(expect.arrayContaining(['vA', 'vB']));
+      expect(h.baselineRotations).toEqual([]);
+    });
+
+    it('baseline vs variant: opts the baseline into rotation AND activates the variant', async () => {
+      const h = makeHarness();
+      const res = await settledExperiment(h, { variantAId: '__baseline__', variantBId: 'vB' });
+      const activatedBefore = h.activated.length;
+      switchToRotationExperiment(h.deps, res.experimentId);
+      // The baseline arm opted the workflow's live baseline into rotation...
+      expect(h.baselineRotations).toEqual([{ workflowId: 'wf', patch: { inRotation: true } }]);
+      // ...and only the real-variant arm was activated (no setVariantStatus('__baseline__')).
+      expect(h.activated.slice(activatedBefore)).toEqual(['vB']);
+    });
+
+    it('threads explicit weights to both arms (baseline weight + variant weight)', async () => {
+      const h = makeHarness();
+      const res = await settledExperiment(h, { variantAId: '__baseline__', variantBId: 'vB' });
+      const weightsSet: Array<{ id: string; weight: number }> = [];
+      const deps: ExperimentsDeps = { ...h.deps, setVariantWeight: (id, weight) => weightsSet.push({ id, weight }) };
+      switchToRotationExperiment(deps, res.experimentId, { a: 3, b: 7 });
+      expect(h.baselineRotations).toEqual([{ workflowId: 'wf', patch: { inRotation: true, weight: 3 } }]);
+      expect(weightsSet).toEqual([{ id: 'vB', weight: 7 }]);
     });
   });
 

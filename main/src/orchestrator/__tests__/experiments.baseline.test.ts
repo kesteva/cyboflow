@@ -140,6 +140,7 @@ function makeHarness(): Harness {
       activated.push(id);
     },
     setVariantWeight: () => {},
+    setBaselineRotation: () => {},
     adoptWorkflowSpec: () => {},
   };
   return { db: raw, deps, launches, getVariantCalls, activated };
@@ -216,9 +217,13 @@ describe('baseline-arm experiments', () => {
     expect(h.launches).toHaveLength(0);
   });
 
-  it('switchToRotation rejects an experiment with a baseline arm (PRECONDITION_FAILED)', async () => {
+  it('switchToRotation opts the baseline into rotation and activates the variant (baseline arm)', async () => {
     const h = makeHarness();
-    setExperimentsDeps(h.deps);
+    const baselineRotations: Array<{ workflowId: string; patch: { inRotation?: boolean; weight?: number } }> = [];
+    setExperimentsDeps({
+      ...h.deps,
+      setBaselineRotation: (workflowId, patch) => baselineRotations.push({ workflowId, patch }),
+    });
     const exp = insertExperiment(h.deps.db, {
       projectId: 1,
       workflowId: 'wf',
@@ -231,11 +236,12 @@ describe('baseline-arm experiments', () => {
     updateExperimentStatus(h.deps.db, exp.id, 'abandoned');
 
     const caller = experimentsRouter.createCaller(createContext({ db: h.deps.db }));
-    await expect(caller.switchToRotation({ experimentId: exp.id })).rejects.toThrow(
-      /two real variants|create a variant from the current workflow first/i,
-    );
-    // The baseline guard fired BEFORE any variant activation.
-    expect(h.activated).toHaveLength(0);
+    const out = await caller.switchToRotation({ experimentId: exp.id });
+    expect(out.status).toBe('abandoned');
+    // The baseline arm opted the live baseline into rotation (migration 054)...
+    expect(baselineRotations).toEqual([{ workflowId: 'wf', patch: { inRotation: true } }]);
+    // ...and only the real-variant arm was activated (no setVariantStatus('__baseline__')).
+    expect(h.activated).toEqual(['vB']);
   });
 
   it('switchToRotation still activates BOTH variants for a two-real-variant experiment', async () => {

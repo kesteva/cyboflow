@@ -206,12 +206,10 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
   const expSettled = exp !== null && isExperimentSettled(exp.status);
   const canDecide = exp !== null && payload !== null && !expSettled && bothSettled;
   const canRerunComparison = exp !== null && (exp.status === 'running' || exp.status === 'grading');
-  // "Switch to randomized" activates BOTH arms as rotation variants — impossible when
-  // an arm is the current-workflow baseline (there is no variant row to activate). The
-  // backend also rejects (PRECONDITION_FAILED); this disables the button up front.
-  const hasBaselineArm =
-    exp !== null && (isBaselineArm(exp.variant_a_id) || isBaselineArm(exp.variant_b_id));
-  const canSwitchToRotation = exp !== null && expSettled && !hasBaselineArm;
+  // "Switch to randomized" turns the head-to-head into an ongoing A/B rotation between
+  // the two arms — WHICHEVER they are, including "baseline vs variant" (the baseline
+  // opts into rotation via migration 054). Available once the experiment is settled.
+  const canSwitchToRotation = exp !== null && expSettled;
   // Variant-outcome (piece 2) is gated on the changes decision (piece 1) being
   // concluded, and is one-way — a settled experiment can promote at most once.
   const alreadyPromoted = exp !== null && exp.promoted_variant_id !== null;
@@ -566,11 +564,7 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
                   data-testid="experiment-switch-to-rotation"
                   disabled={!canSwitchToRotation || actionBusy !== null}
                   title={
-                    canSwitchToRotation
-                      ? undefined
-                      : hasBaselineArm
-                        ? 'Rotation requires two real variants — one arm is the current workflow (baseline).'
-                        : 'Available once the experiment is decided or abandoned'
+                    canSwitchToRotation ? undefined : 'Available once the experiment is decided or abandoned'
                   }
                   onClick={() => setRotationConfirmOpen(true)}
                   className="inline-flex items-center gap-1.5 rounded-button border border-border-primary px-3 py-1.5 text-xs font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
@@ -582,11 +576,6 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
                 {!expSettled && (
                   <span className="text-xs text-text-muted" data-testid="experiment-variant-outcome-hint">
                     Available once you record a changes decision above.
-                  </span>
-                )}
-                {expSettled && hasBaselineArm && (
-                  <span className="text-xs text-text-muted" data-testid="experiment-rotation-baseline-hint">
-                    Randomized rotation needs two real variants — this experiment ran a variant against the current workflow (baseline), so rotation isn’t available.
                   </span>
                 )}
               </div>

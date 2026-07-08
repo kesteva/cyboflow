@@ -257,6 +257,7 @@ function makeExpHarness(t: TestDb, registry: WorkflowRegistry, tcr: TaskChangeRo
     getProjectPath: () => '/tmp/ab-proj',
     setVariantStatus: (id, status) => registry.setVariantStatus(id, status),
     setVariantWeight: (id, weight) => registry.updateVariant(id, { weight }),
+    setBaselineRotation: (workflowId, patch) => registry.setBaselineRotation(workflowId, patch),
     adoptWorkflowSpec: (workflowId, definition) => registry.updateSpec(workflowId, definition),
     // Fail-soft resolve of the pairwise decision item at decide-time — kicked off
     // async (the seam is sync `=> void`); collected so the test can await it.
