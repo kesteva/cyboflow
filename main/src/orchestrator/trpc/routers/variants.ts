@@ -163,4 +163,56 @@ export const variantsRouter = router({
       }
       return { ok: true };
     }),
+
+  /**
+   * Read a workflow's BASELINE rotation participation (migration 054). The baseline
+   * is the workflow's live definition; when in rotation it competes with active
+   * variants (weight = its share). NOT_FOUND when the workflow is missing.
+   */
+  getBaselineRotation: protectedProcedure
+    .input(z.object({ workflowId: z.string().min(1) }))
+    .query(async ({ ctx, input }): Promise<{ inRotation: boolean; weight: number }> => {
+      if (!ctx.workflowRegistry) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'workflowRegistry not wired into tRPC context',
+        });
+      }
+      const row = ctx.workflowRegistry.getBaselineRotation(input.workflowId);
+      if (row === null) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: `workflow ${input.workflowId} not found` });
+      }
+      return row;
+    }),
+
+  /**
+   * Patch a workflow's BASELINE rotation participation (migration 054): opt the live
+   * baseline into/out of rotation (`inRotation`) and/or set its rotation `weight`.
+   * NOT_FOUND when the workflow is missing; BAD_REQUEST on a negative weight.
+   */
+  setBaselineRotation: protectedProcedure
+    .input(
+      z.object({
+        workflowId: z.string().min(1),
+        inRotation: z.boolean().optional(),
+        weight: z.number().int().min(0).optional(),
+      }),
+    )
+    .mutation(async ({ ctx, input }): Promise<{ ok: true }> => {
+      if (!ctx.workflowRegistry) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: 'workflowRegistry not wired into tRPC context',
+        });
+      }
+      try {
+        ctx.workflowRegistry.setBaselineRotation(input.workflowId, {
+          ...(input.inRotation !== undefined ? { inRotation: input.inRotation } : {}),
+          ...(input.weight !== undefined ? { weight: input.weight } : {}),
+        });
+      } catch (err) {
+        throw mapRegistryError(err);
+      }
+      return { ok: true };
+    }),
 });

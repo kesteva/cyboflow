@@ -570,6 +570,52 @@ export class WorkflowRegistry {
   }
 
   /**
+   * Read a workflow's BASELINE rotation participation (migration 054). The baseline
+   * is the workflow's own live definition; when `inRotation` it competes in the
+   * randomized rotation on equal footing with active variants (weight = its share).
+   * Returns null when the workflow row is missing.
+   */
+  getBaselineRotation(workflowId: string): { inRotation: boolean; weight: number } | null {
+    const row = this.db
+      .prepare(
+        'SELECT baseline_in_rotation AS inRotation, baseline_rotation_weight AS weight FROM workflows WHERE id = ?',
+      )
+      .get(workflowId) as { inRotation: number; weight: number } | undefined;
+    if (!row) return null;
+    return { inRotation: row.inRotation === 1, weight: row.weight };
+  }
+
+  /**
+   * Patch a workflow's BASELINE rotation participation (migration 054). Any subset
+   * of `{ inRotation, weight }` may be supplied. `weight` must be a non-negative
+   * integer. Throws 'not found' when the workflow is missing (→ NOT_FOUND upstream).
+   */
+  setBaselineRotation(workflowId: string, patch: { inRotation?: boolean; weight?: number }): void {
+    if (patch.weight !== undefined && (!Number.isInteger(patch.weight) || patch.weight < 0)) {
+      throw new Error('WorkflowRegistry.setBaselineRotation: weight must be a non-negative integer');
+    }
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    if (patch.inRotation !== undefined) {
+      sets.push('baseline_in_rotation = ?');
+      params.push(patch.inRotation ? 1 : 0);
+    }
+    if (patch.weight !== undefined) {
+      sets.push('baseline_rotation_weight = ?');
+      params.push(patch.weight);
+    }
+    if (sets.length === 0) return;
+    const stmt = this.db.prepare(`UPDATE workflows SET ${sets.join(', ')} WHERE id = ?`);
+    const tx = this.db.transaction(() => {
+      const result = stmt.run(...params, workflowId);
+      if (result.changes === 0) {
+        throw new Error(`WorkflowRegistry.setBaselineRotation: workflow ${workflowId} not found`);
+      }
+    });
+    tx();
+  }
+
+  /**
    * Create a brand-new custom workflow row from an edited definition
    * ("Save as new flow" / "Create a project-specific copy").
    *

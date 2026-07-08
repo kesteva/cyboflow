@@ -100,6 +100,10 @@ export interface WorkflowRegistryLike {
   setVariantStatus(variantId: string, status: WorkflowVariantStatus): void;
   /** Delete a variant. Throws 'run history' when runs reference it; 'not found' when missing. */
   deleteVariant(variantId: string): void;
+  /** Read a workflow's baseline rotation participation (migration 054). Null when missing. */
+  getBaselineRotation(workflowId: string): { inRotation: boolean; weight: number } | null;
+  /** Patch a workflow's baseline rotation participation (migration 054). Throws 'not found' when missing. */
+  setBaselineRotation(workflowId: string, patch: { inRotation?: boolean; weight?: number }): void;
 }
 
 /**

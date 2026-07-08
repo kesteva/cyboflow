@@ -7,7 +7,10 @@
  *   - explicit pin (requestedVariantId) → load that variant regardless of status
  *     (restart + experiment arms pin paused/retired variants; pickers only OFFER
  *     active ones);
- *   - otherwise → weighted random over `status='active' AND weight>0`;
+ *   - otherwise → weighted random over `status='active' AND weight>0` variants PLUS
+ *     the live BASELINE when the workflow opted it in (`baseline_in_rotation=1 AND
+ *     baseline_rotation_weight>0`, migration 054) — the baseline competes on equal
+ *     footing so "baseline vs variant" rotation works; a baseline win → null;
  *   - none / __quick__ → null (a baseline live-spec run, zero behaviour change).
  *
  * Standalone-typecheck invariant: reads through the narrow DatabaseLike surface
@@ -61,8 +64,12 @@ export class VariantResolver {
     // direct createRun in ipc/session.ts and never reaches RunLauncher.launch, so
     // this is belt-and-suspenders.)
     const workflow = this.db
-      .prepare('SELECT name AS name FROM workflows WHERE id = ?')
-      .get(workflowId) as { name?: unknown } | undefined;
+      .prepare(
+        'SELECT name AS name, baseline_in_rotation AS baselineInRotation, baseline_rotation_weight AS baselineWeight FROM workflows WHERE id = ?',
+      )
+      .get(workflowId) as
+      | { name?: unknown; baselineInRotation?: unknown; baselineWeight?: unknown }
+      | undefined;
     if (workflow && workflow.name === '__quick__') return null;
 
     if (requestedVariantId !== undefined) {
@@ -82,17 +89,31 @@ export class VariantResolver {
     // deterministically — never fall through to rotation.
     if (opts?.baseline) return null;
 
-    const candidates = this.db
+    const variants = this.db
       .prepare(
         `SELECT * FROM workflow_variants
           WHERE workflow_id = ? AND status = 'active' AND weight > 0
           ORDER BY id`,
       )
       .all(workflowId) as WorkflowVariantRow[];
-    if (candidates.length === 0) return null;
 
-    const picked = this.weightedPick(candidates);
-    return picked ? this.toResolved(picked) : null;
+    // A `variant: null` candidate represents the live baseline (variant_id NULL run).
+    const pool: Array<{ weight: number; variant: WorkflowVariantRow | null }> = variants.map((v) => ({
+      weight: Math.max(0, v.weight),
+      variant: v,
+    }));
+
+    // The baseline joins rotation only when the workflow opted it in (migration 054).
+    const baselineInRotation = Number(workflow?.baselineInRotation ?? 0) === 1;
+    const baselineWeight = Math.max(0, Math.trunc(Number(workflow?.baselineWeight ?? 0)) || 0);
+    if (baselineInRotation && baselineWeight > 0) {
+      pool.push({ weight: baselineWeight, variant: null });
+    }
+
+    if (pool.length === 0) return null;
+
+    const picked = this.weightedPick(pool);
+    return picked && picked.variant ? this.toResolved(picked.variant) : null;
   }
 
   /** Load a single variant row by id (any status). */
@@ -104,12 +125,13 @@ export class VariantResolver {
   }
 
   /**
-   * Weighted random pick over the candidates using the injected rng. `total =
-   * Σweight; r = rng()*total`; walk cumulative weight and return the first variant
-   * whose running sum is `> r`. With `rng()=0` this deterministically picks the
-   * first candidate.
+   * Weighted random pick over `{ weight }`-bearing candidates using the injected
+   * rng. `total = Σweight; r = rng()*total`; walk cumulative weight and return the
+   * first candidate whose running sum is `> r`. With `rng()=0` this deterministically
+   * picks the first candidate. Generic over the candidate shape so both variant rows
+   * and the synthetic baseline candidate flow through the same pick.
    */
-  private weightedPick(candidates: WorkflowVariantRow[]): WorkflowVariantRow | null {
+  private weightedPick<T extends { weight: number }>(candidates: T[]): T | null {
     const total = candidates.reduce((sum, v) => sum + Math.max(0, v.weight), 0);
     if (total <= 0) return null;
     const r = this.rng() * total;

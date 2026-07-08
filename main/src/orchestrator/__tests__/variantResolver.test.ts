@@ -22,7 +22,9 @@ function makeDb(): Database.Database {
   db.exec(`
     CREATE TABLE workflows (
       id TEXT PRIMARY KEY, project_id INTEGER, name TEXT NOT NULL,
-      spec_json TEXT NOT NULL DEFAULT '{}'
+      spec_json TEXT NOT NULL DEFAULT '{}',
+      baseline_in_rotation INTEGER NOT NULL DEFAULT 0,
+      baseline_rotation_weight INTEGER NOT NULL DEFAULT 1
     );
     CREATE TABLE workflow_variants (
       id TEXT PRIMARY KEY,
@@ -165,6 +167,44 @@ describe('VariantResolver', () => {
   it('returns null for the __quick__ sentinel workflow', () => {
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
     expect(resolver.resolveForLaunch('wf-q')).toBeNull();
+  });
+
+  // -- Baseline as a rotation participant (migration 054) --------------------
+  describe('baseline rotation participation', () => {
+    function optBaselineIn(weight: number, workflowId = WF): void {
+      db.prepare(
+        'UPDATE workflows SET baseline_in_rotation = 1, baseline_rotation_weight = ? WHERE id = ?',
+      ).run(weight, workflowId);
+    }
+
+    it('does NOT include the baseline by default — activating a variant is 100% variant', () => {
+      seedVariant(db, 'v1', { weight: 1, status: 'active' });
+      // rng()=0.99 would land in the baseline slice IF the baseline were in the pool.
+      const resolver = new VariantResolver(dbAdapter(db), () => 0.99);
+      expect(resolver.resolveForLaunch(WF)?.variantId).toBe('v1');
+    });
+
+    it('adds the baseline to the weighted pool when opted in — a baseline win → null', () => {
+      seedVariant(db, 'v1', { weight: 1, status: 'active' });
+      optBaselineIn(3); // pool: v1(1) + baseline(3), total 4
+      // rng()=0 → r=0 → first candidate (v1).
+      expect(new VariantResolver(dbAdapter(db), () => 0).resolveForLaunch(WF)?.variantId).toBe('v1');
+      // rng()=0.5 → r=2; cumulative after v1 is 1 (not > 2) → baseline slice → null.
+      expect(new VariantResolver(dbAdapter(db), () => 0.5).resolveForLaunch(WF)).toBeNull();
+    });
+
+    it('excludes the baseline when opted in but weight=0', () => {
+      seedVariant(db, 'v1', { weight: 1, status: 'active' });
+      optBaselineIn(0);
+      const resolver = new VariantResolver(dbAdapter(db), () => 0.99);
+      expect(resolver.resolveForLaunch(WF)?.variantId).toBe('v1');
+    });
+
+    it('baseline-only rotation (no active variants) resolves to the baseline run (null)', () => {
+      optBaselineIn(5);
+      const resolver = new VariantResolver(dbAdapter(db), () => 0);
+      expect(resolver.resolveForLaunch(WF)).toBeNull();
+    });
   });
 
   it('threads model / executionModel / agentOverridesJson / specJson from the row', () => {

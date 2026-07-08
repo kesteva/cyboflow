@@ -33,6 +33,9 @@ function setupDb(): Database.Database {
     );
     CREATE UNIQUE INDEX idx_workflow_variants_wf_label ON workflow_variants(workflow_id, label);
   `);
+  // Migration 054: the baseline rotation-participation columns on workflows.
+  db.exec('ALTER TABLE workflows ADD COLUMN baseline_in_rotation INTEGER NOT NULL DEFAULT 0');
+  db.exec('ALTER TABLE workflows ADD COLUMN baseline_rotation_weight INTEGER NOT NULL DEFAULT 1');
   // A built-in planner workflow with the empty live spec (resolves to the static graph).
   db.prepare("INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, NULL, 'planner', '{}')").run(WF_PLANNER);
   return db;
@@ -132,5 +135,32 @@ describe('WorkflowRegistry variants', () => {
     expect(ids).toContain(a.id);
     expect(ids).toContain(b.id);
     expect(ids).toHaveLength(2);
+  });
+
+  // -- Baseline rotation participation (migration 054) ------------------------
+
+  it('getBaselineRotation defaults to off with weight 1', () => {
+    expect(registry.getBaselineRotation(WF_PLANNER)).toEqual({ inRotation: false, weight: 1 });
+  });
+
+  it('getBaselineRotation returns null for a missing workflow', () => {
+    expect(registry.getBaselineRotation('nope')).toBeNull();
+  });
+
+  it('setBaselineRotation patches inRotation and weight independently', () => {
+    registry.setBaselineRotation(WF_PLANNER, { inRotation: true });
+    expect(registry.getBaselineRotation(WF_PLANNER)).toEqual({ inRotation: true, weight: 1 });
+    registry.setBaselineRotation(WF_PLANNER, { weight: 4 });
+    expect(registry.getBaselineRotation(WF_PLANNER)).toEqual({ inRotation: true, weight: 4 });
+    registry.setBaselineRotation(WF_PLANNER, { inRotation: false });
+    expect(registry.getBaselineRotation(WF_PLANNER)).toEqual({ inRotation: false, weight: 4 });
+  });
+
+  it('setBaselineRotation rejects a negative weight', () => {
+    expect(() => registry.setBaselineRotation(WF_PLANNER, { weight: -1 })).toThrow(/non-negative/);
+  });
+
+  it('setBaselineRotation throws "not found" for a missing workflow', () => {
+    expect(() => registry.setBaselineRotation('nope', { inRotation: true })).toThrow(/not found/);
   });
 });
