@@ -390,10 +390,24 @@ describe('parseConverseOutput', () => {
     expect(parseConverseOutput({ reply: 'ok', action: { kind: 'file_note' } })).toEqual({ reply: 'ok' });
     expect(parseConverseOutput({ reply: 'ok', action: { kind: 'file_note', title: '' } })).toEqual({ reply: 'ok' });
   });
+
+  it('maps a confirm signal to control (never a ConverseAction)', () => {
+    expect(parseConverseOutput({ reply: 'confirming.', action: { kind: 'confirm' } })).toEqual({
+      reply: 'confirming.',
+      control: 'confirm',
+    });
+  });
+
+  it('maps a cancel signal to control (never a ConverseAction)', () => {
+    expect(parseConverseOutput({ reply: 'discarding.', action: { kind: 'cancel' } })).toEqual({
+      reply: 'discarding.',
+      control: 'cancel',
+    });
+  });
 });
 
 describe('MONITOR_CONVERSE_SCHEMA', () => {
-  it('requires reply, makes action optional, and enforces the kind enum (all 10 action kinds)', () => {
+  it('requires reply, makes action optional, and enforces the kind enum (10 actions + 2 control signals)', () => {
     expect(MONITOR_CONVERSE_SCHEMA.required).toEqual(['reply']);
     expect(MONITOR_CONVERSE_SCHEMA.additionalProperties).toBe(false);
     const props = MONITOR_CONVERSE_SCHEMA.properties as Record<string, Record<string, unknown>>;
@@ -411,6 +425,8 @@ describe('MONITOR_CONVERSE_SCHEMA', () => {
       'steer_step',
       'resolve_review_item',
       'file_note',
+      'confirm',
+      'cancel',
     ]);
     // Every kind-specific field is declared and optional at the schema level (only
     // the fields relevant to the chosen `kind` should be set).
@@ -485,13 +501,20 @@ describe('buildActionAnswerPrompt', () => {
     expect(p).toContain('fields relevant to the chosen');
   });
 
-  it('requires explicit confirmation on a later turn before actuating any mutating action, including the low-risk file_note', () => {
+  it('describes the host-enforced two-phase confirmation protocol (stage → confirm/cancel) for mutating actions, including the low-risk file_note', () => {
     const history: MonitorHistory = { conversation: [], steps: [] };
     const p = buildActionAnswerPrompt(ctx, 'add a task to fix the flaky test', history);
-    expect(p).toContain('CONFIRM BEFORE YOU ACT');
+    expect(p).toContain('CONFIRM BEFORE YOU ACT (host-enforced)');
+    expect(p).toContain('STAGE it'); // host stages, does not execute on the first turn
+    expect(p).toContain('kind "confirm"'); // model confirms on the next turn
+    expect(p).toContain('kind "cancel"'); // or discards
+    expect(p).toContain('EXPIRES'); // a staged proposal expires if the next turn isn't a confirmation
     expect(p).toContain('file_note');
     expect(p).toContain('low-risk');
-    expect(p).toContain('WAIT for the user\'s EXPLICIT confirmation on a LATER turn');
+    // The excluded kinds are called out as NOT staged.
+    expect(p).toContain('"retry_step" and "switch_to_orchestrated" are NOT staged');
+    // The return-shape enum now lists the two control signals.
+    expect(p).toContain('"confirm" | "cancel"');
   });
 });
 
@@ -658,6 +681,20 @@ function makeActions(overrides: Partial<MonitorActions> = {}): MonitorActions {
     fileNote: vi.fn<MonitorActions['fileNote']>(),
     ...overrides,
   };
+}
+
+/**
+ * A `structuredQuery` that returns one queued value per successive turn (for
+ * multi-turn stage → confirm flows). Falls back to the LAST value once the queue is
+ * exhausted so any extra calls stay well-defined.
+ */
+function seqStructuredQuery(...values: unknown[]): StructuredQueryFn {
+  let i = 0;
+  return vi.fn().mockImplementation(() => {
+    const v = values[Math.min(i, values.length - 1)];
+    i += 1;
+    return Promise.resolve(v);
+  }) as unknown as StructuredQueryFn;
 }
 
 describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', () => {
@@ -899,78 +936,117 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
   });
 });
 
-describe('DefaultMonitorSession.converse — expanded actuation (8 new steering actions)', () => {
-  it.each([
+describe('DefaultMonitorSession.converse — expanded actuation (8 new steering actions, host-staged)', () => {
+  const steeringCases = [
     {
       name: 'add_task',
       action: { kind: 'add_task', title: 'Fix flaky test', body: 'see CI run 123', priority: 'high' },
       method: 'addTask' as const,
       expectedInput: { title: 'Fix flaky test', body: 'see CI run 123', priority: 'high' },
+      stageText: 'Ready to add task "Fix flaky test".',
     },
     {
       name: 'remove_task',
       action: { kind: 'remove_task', taskRef: 'TASK-1' },
       method: 'removeTask' as const,
       expectedInput: { taskRef: 'TASK-1' },
+      stageText: 'Ready to remove task TASK-1.',
     },
     {
       name: 'edit_task',
       action: { kind: 'edit_task', taskRef: 'TASK-1', title: 'Renamed task' },
       method: 'editTask' as const,
       expectedInput: { taskRef: 'TASK-1', title: 'Renamed task', body: undefined, priority: undefined },
+      stageText: 'Ready to edit task TASK-1.',
     },
     {
       name: 'skip_step',
       action: { kind: 'skip_step', stepId: 'tasks' },
       method: 'skipStep' as const,
       expectedInput: { stepId: 'tasks' },
+      stageText: 'Ready to skip step tasks.',
     },
     {
       name: 'unskip_step',
       action: { kind: 'unskip_step', stepId: 'tasks' },
       method: 'unskipStep' as const,
       expectedInput: { stepId: 'tasks' },
+      stageText: 'Ready to un-skip step tasks.',
     },
     {
       name: 'steer_step',
       action: { kind: 'steer_step', stepId: 'tasks', guidance: 'be extra careful with the migration' },
       method: 'steerStep' as const,
       expectedInput: { stepId: 'tasks', guidance: 'be extra careful with the migration' },
+      stageText: 'Ready to steer step tasks.',
     },
     {
       name: 'resolve_review_item',
       action: { kind: 'resolve_review_item', reviewItemId: 'RI-1', outcome: 'approve' },
       method: 'resolveReviewItem' as const,
       expectedInput: { reviewItemId: 'RI-1', outcome: 'approve', resolution: undefined },
+      stageText: 'Ready to resolve review item RI-1.',
     },
     {
       name: 'file_note',
       action: { kind: 'file_note', title: 'Heads up about the flaky test' },
       method: 'fileNote' as const,
       expectedInput: { title: 'Heads up about the flaky test', body: undefined },
+      stageText: 'Ready to file a note titled "Heads up about the flaky test".',
     },
-  ])('a $name action routes to actions.$method with the mapped input and injects a ▶ success turn', async ({ action, method, expectedInput }) => {
+  ];
+
+  it.each(steeringCases)(
+    'a $name action STAGES on the first turn (no actuation) and injects a ⏸ pause turn',
+    async ({ action, method, stageText }) => {
+      const { reader } = fakeHistory({ conversation: [], steps: [] });
+      const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({ reply: 'doing it.', action });
+      const fn = vi.fn().mockResolvedValue({ ok: true, message: 'done' });
+      const actions = makeActions({ [method]: fn } as Partial<MonitorActions>);
+      const { injectEvent, injected } = collectInjected();
+      const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+      const reply = await session.converse('please do the thing');
+
+      expect(reply).toBe('doing it.');
+      // The actuator is NOT called on the first turn — the action is staged pending.
+      expect(fn).not.toHaveBeenCalled();
+      expect(injected).toEqual([
+        { role: 'user', text: 'please do the thing' },
+        { role: 'assistant', text: 'doing it.' },
+        { role: 'assistant', text: `⏸ ${stageText} Reply to confirm, or say cancel.` },
+      ]);
+    },
+  );
+
+  it.each(steeringCases)(
+    'a $name action, once confirmed on the next turn, routes to actions.$method with the mapped input and injects a ▶ success turn',
+    async ({ action, method, expectedInput }) => {
+      const { reader } = fakeHistory({ conversation: [], steps: [] });
+      const structuredQuery = seqStructuredQuery(
+        { reply: 'staging it.', action },
+        { reply: 'confirmed.', action: { kind: 'confirm' } },
+      );
+      const fn = vi.fn().mockResolvedValue({ ok: true, message: 'done' });
+      const actions = makeActions({ [method]: fn } as Partial<MonitorActions>);
+      const { injectEvent, injected } = collectInjected();
+      const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+      await session.converse('please do the thing');
+      await session.converse('yes, do it');
+
+      expect(fn).toHaveBeenCalledTimes(1);
+      expect(fn).toHaveBeenCalledWith(expectedInput);
+      expect(injected.at(-1)).toEqual({ role: 'assistant', text: '▶ done' });
+    },
+  );
+
+  it('a resolve_review_item action, once confirmed, resolving ok:false injects a ⚠-prefixed turn', async () => {
     const { reader } = fakeHistory({ conversation: [], steps: [] });
-    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({ reply: 'doing it.', action });
-    const fn = vi.fn().mockResolvedValue({ ok: true, message: 'done' });
-    const actions = makeActions({ [method]: fn } as Partial<MonitorActions>);
-    const { injectEvent, injected } = collectInjected();
-    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
-
-    const reply = await session.converse('please do the thing');
-
-    expect(reply).toBe('doing it.');
-    expect(fn).toHaveBeenCalledTimes(1);
-    expect(fn).toHaveBeenCalledWith(expectedInput);
-    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '▶ done' });
-  });
-
-  it('a resolve_review_item action resolving ok:false injects a ⚠-prefixed turn', async () => {
-    const { reader } = fakeHistory({ conversation: [], steps: [] });
-    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
-      reply: 'resolving it.',
-      action: { kind: 'resolve_review_item', reviewItemId: 'RI-1', outcome: 'reject' },
-    });
+    const structuredQuery = seqStructuredQuery(
+      { reply: 'resolving it.', action: { kind: 'resolve_review_item', reviewItemId: 'RI-1', outcome: 'reject' } },
+      { reply: 'confirmed.', action: { kind: 'confirm' } },
+    );
     const resolveReviewItem = vi
       .fn<MonitorActions['resolveReviewItem']>()
       .mockResolvedValue({ ok: false, message: 'review item already resolved' });
@@ -979,34 +1055,36 @@ describe('DefaultMonitorSession.converse — expanded actuation (8 new steering 
     const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
 
     await session.converse('reject it');
+    await session.converse('yes, reject it');
 
     expect(resolveReviewItem).toHaveBeenCalledWith({ reviewItemId: 'RI-1', outcome: 'reject', resolution: undefined });
     expect(injected.at(-1)).toEqual({ role: 'assistant', text: '⚠ review item already resolved' });
   });
 
-  it('a throwing addTask fails soft: injects the add_task-specific apology, converse still resolves with the reply', async () => {
+  it('a throwing addTask, once confirmed, fails soft: injects the add_task-specific apology, converse still resolves with the reply', async () => {
     const { reader } = fakeHistory({ conversation: [], steps: [] });
-    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
-      reply: 'adding the task now.',
-      action: { kind: 'add_task', title: 'New task' },
-    });
+    const structuredQuery = seqStructuredQuery(
+      { reply: 'staging the task.', action: { kind: 'add_task', title: 'New task' } },
+      { reply: 'adding the task now.', action: { kind: 'confirm' } },
+    );
     const addTask = vi.fn<MonitorActions['addTask']>().mockRejectedValue(new Error('router exploded'));
     const actions = makeActions({ addTask });
     const { injectEvent, injected } = collectInjected();
     const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
 
-    const reply = await session.converse('add a task for this');
+    await session.converse('add a task for this');
+    const reply = await session.converse('yes, add it');
 
     expect(reply).toBe('adding the task now.');
     expect(injected.at(-1)).toEqual({ role: 'assistant', text: '⚠ Adding the task failed unexpectedly.' });
   });
 
-  it('a bag missing the corresponding method resolves to the graceful "not available" fallback instead of throwing', async () => {
+  it('a bag missing the corresponding method, once confirmed, resolves to the graceful "not available" fallback instead of throwing', async () => {
     const { reader } = fakeHistory({ conversation: [], steps: [] });
-    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
-      reply: 'skipping it.',
-      action: { kind: 'skip_step', stepId: 'tasks' },
-    });
+    const structuredQuery = seqStructuredQuery(
+      { reply: 'staging the skip.', action: { kind: 'skip_step', stepId: 'tasks' } },
+      { reply: 'skipping it.', action: { kind: 'confirm' } },
+    );
     // A bag that type-satisfies MonitorActions but was constructed without skipStep
     // wired (e.g. an older host binding) — the defensive `typeof === 'function'`
     // guard in `runAction` must catch this rather than throwing. Cast through
@@ -1025,10 +1103,214 @@ describe('DefaultMonitorSession.converse — expanded actuation (8 new steering 
       actions: partialActions,
     });
 
-    const reply = await session.converse('skip that step');
+    await session.converse('skip that step');
+    const reply = await session.converse('yes, skip it');
 
     expect(reply).toBe('skipping it.');
     expect(injected.at(-1)).toEqual({ role: 'assistant', text: '⚠ That action is not available for this run.' });
+  });
+});
+
+describe('DefaultMonitorSession.converse — two-phase confirmation gate', () => {
+  it('(a) a mutating action on the first turn does NOT actuate; stages pending and injects a ⏸ pause turn', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({
+      reply: 'sure, I can add that.',
+      action: { kind: 'add_task', title: 'Fix flaky test' },
+    });
+    const addTask = vi.fn<MonitorActions['addTask']>().mockResolvedValue({ ok: true, message: 'task added' });
+    const actions = makeActions({ addTask });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    const reply = await session.converse('add a task to fix the flaky test');
+
+    expect(reply).toBe('sure, I can add that.');
+    expect(addTask).not.toHaveBeenCalled();
+    expect(injected).toEqual([
+      { role: 'user', text: 'add a task to fix the flaky test' },
+      { role: 'assistant', text: 'sure, I can add that.' },
+      { role: 'assistant', text: '⏸ Ready to add task "Fix flaky test". Reply to confirm, or say cancel.' },
+    ]);
+  });
+
+  it('(b) a following confirm actuates once with the staged action, then clears pending', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery = seqStructuredQuery(
+      { reply: 'staging it.', action: { kind: 'add_task', title: 'Fix flaky test' } },
+      { reply: 'confirmed, adding it.', action: { kind: 'confirm' } },
+      { reply: 'confirming again.', action: { kind: 'confirm' } },
+    );
+    const addTask = vi.fn<MonitorActions['addTask']>().mockResolvedValue({ ok: true, message: 'task added' });
+    const actions = makeActions({ addTask });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    await session.converse('add a task to fix the flaky test');
+    await session.converse('yes, add it');
+
+    expect(addTask).toHaveBeenCalledTimes(1);
+    expect(addTask).toHaveBeenCalledWith({ title: 'Fix flaky test', body: undefined, priority: undefined });
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '▶ task added' });
+
+    // Pending is cleared by the confirm: a further confirm has nothing staged.
+    await session.converse('confirm again');
+    expect(addTask).toHaveBeenCalledTimes(1);
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: 'There is no pending action to confirm.' });
+  });
+
+  it('(c) a confirm with nothing staged does not actuate and injects a no-pending message', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi.fn().mockResolvedValue({ reply: 'ok.', action: { kind: 'confirm' } });
+    const addTask = vi.fn<MonitorActions['addTask']>();
+    const actions = makeActions({ addTask });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    await session.converse('yes');
+
+    expect(addTask).not.toHaveBeenCalled();
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: 'There is no pending action to confirm.' });
+  });
+
+  it('(d) a cancel after a stage clears pending, does not actuate, and injects a discard turn', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery = seqStructuredQuery(
+      { reply: 'staging it.', action: { kind: 'remove_task', taskRef: 'TASK-9' } },
+      { reply: 'okay, dropping it.', action: { kind: 'cancel' } },
+      { reply: 'confirming.', action: { kind: 'confirm' } },
+    );
+    const removeTask = vi.fn<MonitorActions['removeTask']>().mockResolvedValue({ ok: true, message: 'removed' });
+    const actions = makeActions({ removeTask });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    await session.converse('remove TASK-9');
+    await session.converse('actually never mind');
+
+    expect(removeTask).not.toHaveBeenCalled();
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '✖ Discarded the proposed action.' });
+
+    // Pending is cleared by the cancel: a later confirm finds nothing to confirm.
+    await session.converse('confirm');
+    expect(removeTask).not.toHaveBeenCalled();
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: 'There is no pending action to confirm.' });
+  });
+
+  it('(e) a different mutating action supersedes a staged one; a following confirm executes the NEW action', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery = seqStructuredQuery(
+      { reply: 'staging add.', action: { kind: 'add_task', title: 'First' } },
+      { reply: 'staging remove instead.', action: { kind: 'remove_task', taskRef: 'TASK-1' } },
+      { reply: 'confirmed.', action: { kind: 'confirm' } },
+    );
+    const addTask = vi.fn<MonitorActions['addTask']>().mockResolvedValue({ ok: true, message: 'added' });
+    const removeTask = vi.fn<MonitorActions['removeTask']>().mockResolvedValue({ ok: true, message: 'removed' });
+    const actions = makeActions({ addTask, removeTask });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    await session.converse('add a task First');
+    await session.converse('actually remove TASK-1 instead');
+    await session.converse('yes do it');
+
+    expect(addTask).not.toHaveBeenCalled();
+    expect(removeTask).toHaveBeenCalledTimes(1);
+    expect(removeTask).toHaveBeenCalledWith({ taskRef: 'TASK-1' });
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '▶ removed' });
+  });
+
+  it('(f) re-attaching the identical staged action also confirms it (belt-and-suspenders)', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const action = { kind: 'skip_step', stepId: 'tasks' };
+    const structuredQuery = seqStructuredQuery(
+      { reply: 'staging skip.', action },
+      { reply: 'still want to skip.', action },
+    );
+    const skipStep = vi.fn<MonitorActions['skipStep']>().mockResolvedValue({ ok: true, message: 'skip queued' });
+    const actions = makeActions({ skipStep });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    await session.converse('skip the tasks step');
+    await session.converse('skip the tasks step');
+
+    expect(skipStep).toHaveBeenCalledTimes(1);
+    expect(skipStep).toHaveBeenCalledWith({ stepId: 'tasks' });
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '▶ skip queued' });
+  });
+
+  it('(g) retry_step executes on the FIRST turn (not staged)', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ reply: 'retrying.', action: { kind: 'retry_step', stepId: 'tasks' } });
+    const retryStep = vi.fn<MonitorActions['retryStep']>().mockResolvedValue({ ok: true, message: 'resumed' });
+    const actions = makeActions({ retryStep });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    await session.converse('retry it');
+
+    expect(retryStep).toHaveBeenCalledTimes(1);
+    expect(retryStep).toHaveBeenCalledWith('tasks');
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '▶ resumed' });
+  });
+
+  it('(g) switch_to_orchestrated executes on the FIRST turn (not staged)', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery: StructuredQueryFn = vi
+      .fn()
+      .mockResolvedValue({ reply: 'handing over.', action: { kind: 'switch_to_orchestrated', reason: 'take over' } });
+    const switchToOrchestrated = vi
+      .fn<MonitorActions['switchToOrchestrated']>()
+      .mockResolvedValue({ ok: true, message: 'handed over' });
+    const actions = makeActions({ switchToOrchestrated });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    await session.converse('take over the run');
+
+    expect(switchToOrchestrated).toHaveBeenCalledTimes(1);
+    expect(switchToOrchestrated).toHaveBeenCalledWith('take over');
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '▶ handed over' });
+  });
+
+  it('(h) a staged proposal EXPIRES: after a plain-answer turn, a confirm finds nothing to confirm', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery = seqStructuredQuery(
+      { reply: 'staging it.', action: { kind: 'file_note', title: 'Heads up' } },
+      { reply: 'here is a plain answer.' }, // no action, no control → clears the stale proposal
+      { reply: 'confirming.', action: { kind: 'confirm' } },
+    );
+    const fileNote = vi.fn<MonitorActions['fileNote']>().mockResolvedValue({ ok: true, message: 'filed' });
+    const actions = makeActions({ fileNote });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    await session.converse('file a note titled Heads up');
+    await session.converse('wait, what is the run doing?');
+    await session.converse('okay, confirm the note');
+
+    expect(fileNote).not.toHaveBeenCalled();
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: 'There is no pending action to confirm.' });
+  });
+
+  it('(i) with no actuator wired, the confirmation gate is inert (plain answer path unchanged)', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const textQuery: TextQueryFn = vi.fn().mockResolvedValue('plain answer');
+    const structuredQuery: StructuredQueryFn = vi.fn();
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery, injectEvent });
+
+    const reply = await session.converse('add a task to fix the flaky test');
+
+    expect(reply).toBe('plain answer');
+    expect(structuredQuery).not.toHaveBeenCalled();
+    expect(injected).toEqual([
+      { role: 'user', text: 'add a task to fix the flaky test' },
+      { role: 'assistant', text: 'plain answer' },
+    ]);
   });
 });
 

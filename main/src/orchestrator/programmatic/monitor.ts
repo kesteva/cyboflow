@@ -234,12 +234,16 @@ Answer concisely and concretely, grounding your reply in the run's history above
  * handover (`retry_step`, the ONE-WAY `switch_to_orchestrated`), task mutations
  * (`add_task`/`remove_task`/`edit_task`), step control (`skip_step`/`unskip_step`/
  * `steer_step`), and review-queue actions (`resolve_review_item`/`file_note`). The
- * monitor may attach AT MOST ONE action per reply; every kind (including the
- * low-risk `file_note`) requires the user's EXPLICIT confirmation on a later turn
- * before it is attached — never actuated purely on inference. The host (not the
- * monitor) validates run state and executes the action — the monitor never claims
- * success itself. Pure (output depends only on its args); structured output shape
- * is `{ reply, action? }` per `MONITOR_CONVERSE_SCHEMA`.
+ * monitor may attach AT MOST ONE action per reply. The eight steering kinds (task
+ * mutations, step control, review-queue, `file_note`) are HOST-STAGED: the model
+ * attaches the action, the host stages it (does NOT execute) and shows a pause marker,
+ * and the model executes it on a LATER turn by attaching a `confirm` control (or
+ * abandons it with `cancel`) — the confirmation is ENFORCED by the host, not merely
+ * requested of the model. `retry_step` is single-turn (executes immediately) and
+ * `switch_to_orchestrated` keeps its own suggest-first-in-reply contract. The host
+ * (not the monitor) validates run state and executes the action — the monitor never
+ * claims success itself. Pure (output depends only on its args); structured output
+ * shape is `{ reply, action? }` per `MONITOR_CONVERSE_SCHEMA`.
  */
 export function buildActionAnswerPrompt(
   ctx: MonitorContext,
@@ -275,11 +279,11 @@ Capabilities:
   - Action "file_note": file a non-blocking informational note into the run's review queue. Set \`title\` (required) and optionally \`body\`.
 - For a pure question (no explicit action request), return no action.
 
-CONFIRM BEFORE YOU ACT: for every action kind — including "file_note", which is low-risk but still confirmed for consistency — first SUGGEST the action in your reply and WAIT for the user's EXPLICIT confirmation on a LATER turn before attaching it. NEVER actuate a task edit, step-control, review-queue, or handover action purely on inference from the user's first mention of it. You may ask a clarifying question instead of confirming when the request is ambiguous (e.g. which task, which step, which review item).
+CONFIRM BEFORE YOU ACT (host-enforced): when the user clearly wants a mutating action — any task edit, step-control, review-queue, or "file_note" action — ATTACH that action. The host will STAGE it (it does NOT execute yet) and show the user a pause marker asking them to confirm, so do NOT claim you already performed it. After the user EXPLICITLY confirms on the NEXT turn, attach an action of kind "confirm" to execute the staged action; if they decline or change their mind, attach kind "cancel" (or simply answer normally). A "confirm" with nothing staged does nothing, and a staged proposal EXPIRES if the very next turn is not a confirmation. "file_note" is low-risk but is still staged and confirmed the same way, for consistency. You may ask a clarifying question instead of attaching when the request is ambiguous (e.g. which task, which step, which review item). "retry_step" and "switch_to_orchestrated" are NOT staged this way — "retry_step" executes immediately, and "switch_to_orchestrated" keeps its own suggest-first-in-reply contract described above.
 
 Answer concisely and concretely, grounding your reply in the run's history above. You have read-only tools (Read/Grep/Glob) for inspecting the worktree — use them when needed to answer accurately.
 
-Return your response as structured output: { reply: string, action?: { kind: "retry_step" | "switch_to_orchestrated" | "add_task" | "remove_task" | "edit_task" | "skip_step" | "unskip_step" | "steer_step" | "resolve_review_item" | "file_note", ...fields } }, where only the fields relevant to the chosen \`kind\` (see Capabilities above) should be set. \`reply\` is the message shown to the user.`;
+Return your response as structured output: { reply: string, action?: { kind: "retry_step" | "switch_to_orchestrated" | "add_task" | "remove_task" | "edit_task" | "skip_step" | "unskip_step" | "steer_step" | "resolve_review_item" | "file_note" | "confirm" | "cancel", ...fields } }, where only the fields relevant to the chosen \`kind\` (see Capabilities above) should be set ("confirm"/"cancel" carry no fields). \`reply\` is the message shown to the user.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,12 +292,15 @@ Return your response as structured output: { reply: string, action?: { kind: "re
 
 /**
  * JSON schema the SDK `outputFormat` enforces for a structured converse reply: a
- * required `reply` string plus an OPTIONAL `action` object (one of 10 kinds —
- * `retry_step` / `switch_to_orchestrated` plus 8 non-stopping steering actions:
- * task mutations, step control, and review-queue actions). `additionalProperties:
- * false` at every level so the SDK rejects any extra fields. Used only when a
- * `MonitorActions` actuator is wired (`converseOnce` picks this over
- * `MONITOR_TRIAGE_SCHEMA` / plain text).
+ * required `reply` string plus an OPTIONAL `action` object (one of 10 host-action
+ * kinds — `retry_step` / `switch_to_orchestrated` plus 8 non-stopping steering
+ * actions: task mutations, step control, and review-queue actions) PLUS two
+ * host-side control signals (`confirm` / `cancel`) that drive the two-phase
+ * confirmation gate. The control signals are NOT host actions: `parseConverseOutput`
+ * maps them to a `control` field and they never enter `parseConverseAction` / the
+ * `runAction` switch. `additionalProperties: false` at every level so the SDK rejects
+ * any extra fields. Used only when a `MonitorActions` actuator is wired
+ * (`converseOnce` picks this over `MONITOR_TRIAGE_SCHEMA` / plain text).
  *
  * Every field below is kind-specific and optional at the schema level (only the
  * fields relevant to the chosen `kind` should be set) — `parseConverseAction`
@@ -313,6 +320,8 @@ export const MONITOR_CONVERSE_SCHEMA: Record<string, unknown> = {
       properties: {
         kind: {
           type: 'string',
+          description:
+            'The action to attach — one of the 10 host actions, OR a host-side control signal: "confirm" executes a previously-staged action, "cancel" discards it. The two control signals are NOT host actions.',
           enum: [
             'retry_step',
             'switch_to_orchestrated',
@@ -324,6 +333,10 @@ export const MONITOR_CONVERSE_SCHEMA: Record<string, unknown> = {
             'steer_step',
             'resolve_review_item',
             'file_note',
+            // Host-side two-phase-confirmation CONTROL signals (NOT host actions):
+            // parseConverseOutput maps these to `control`, never a ConverseAction.
+            'confirm',
+            'cancel',
           ],
         },
         stepId: {
@@ -470,6 +483,14 @@ export type ConverseAction =
   | ConverseResolveReviewItemAction
   | ConverseFileNoteAction;
 
+/**
+ * A host-side two-phase-confirmation CONTROL signal — NOT a `ConverseAction`. It
+ * never enters `parseConverseAction` or the `runAction` switch; the host consumes it
+ * in `handleControlAndAction` to execute (`confirm`) or discard (`cancel`) a
+ * previously-STAGED pending action.
+ */
+export type ConverseControl = 'confirm' | 'cancel';
+
 /** True iff `v` is a string with non-whitespace content (the drop-if-missing check below). */
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === 'string' && v.trim().length > 0;
@@ -572,20 +593,103 @@ function parseConverseAction(v: unknown): ConverseAction | undefined {
 }
 
 /**
- * Parse the SDK's structured-output object into a converse `{ reply, action? }`.
- * Lenient and never throws: a missing/non-string `reply` becomes `''` (the caller
- * substitutes `NO_ANSWER`); an unknown action `kind` or malformed action shape (an
- * invalid `stepId`, or a `switch_to_orchestrated` with no usable `reason`) is
- * silently dropped (action omitted) rather than surfaced as an error.
+ * Parse the SDK's structured-output object into a converse
+ * `{ reply, action?, control? }`. Lenient and never throws: a missing/non-string
+ * `reply` becomes `''` (the caller substitutes `NO_ANSWER`); an unknown action
+ * `kind` or malformed action shape (an invalid `stepId`, or a
+ * `switch_to_orchestrated` with no usable `reason`) is silently dropped (action
+ * omitted) rather than surfaced as an error.
+ *
+ * A raw action whose `kind` is `confirm` or `cancel` is a host-side CONTROL signal,
+ * not a host action: it is returned as `{ reply, control }` with NO `action` (it
+ * never reaches `parseConverseAction` / the `runAction` switch).
  */
 export function parseConverseOutput(
   structured: unknown,
-): { reply: string; action?: ConverseAction } {
+): { reply: string; action?: ConverseAction; control?: ConverseControl } {
   if (typeof structured !== 'object' || structured === null) return { reply: '' };
   const o = structured as Record<string, unknown>;
   const reply = typeof o.reply === 'string' ? o.reply : '';
+  // CONTROL signals (confirm/cancel) are detected on the RAW action object before it
+  // is narrowed to a ConverseAction — they carry no fields and never become actions.
+  if (typeof o.action === 'object' && o.action !== null) {
+    const kind = (o.action as Record<string, unknown>).kind;
+    if (kind === 'confirm' || kind === 'cancel') return { reply, control: kind };
+  }
   const action = parseConverseAction(o.action);
   return action ? { reply, action } : { reply };
+}
+
+// ---------------------------------------------------------------------------
+// Two-phase confirmation gate (host-enforced)
+// ---------------------------------------------------------------------------
+
+/**
+ * The EIGHT steering kinds that must be STAGED and explicitly confirmed on a later
+ * turn before the host actuates them (the host-enforced two-phase confirmation gate).
+ *
+ * `retry_step` and `switch_to_orchestrated` are DELIBERATELY excluded: `retry_step`
+ * is a recovery affordance (the un-stick-my-run action) that must stay single-turn so
+ * a wedged run can always be revived in one message, and `switch_to_orchestrated`
+ * keeps its own pre-existing suggest-first-in-reply prompt contract (the model offers
+ * it in prose and waits for confirmation before attaching). Both were live-verified
+ * single-turn in a prior batch and intentionally stay single-turn here.
+ */
+const CONFIRMATION_REQUIRED_KINDS: ReadonlySet<ConverseAction['kind']> = new Set([
+  'add_task',
+  'remove_task',
+  'edit_task',
+  'skip_step',
+  'unskip_step',
+  'steer_step',
+  'resolve_review_item',
+  'file_note',
+]);
+
+/** True iff `kind` is one of the eight steering actions gated behind staged confirmation. */
+function requiresConfirmation(kind: ConverseAction['kind']): boolean {
+  return CONFIRMATION_REQUIRED_KINDS.has(kind);
+}
+
+/**
+ * A stable, canonical string of an action's kind + fields, used ONLY for equality (is
+ * a re-attached proposal the SAME as the staged one?). Deterministic: entries are
+ * sorted so key order never affects the result. Opaque — never parsed back.
+ */
+function actionFingerprint(a: ConverseAction): string {
+  const entries = Object.entries(a as unknown as Record<string, unknown>).sort(([l], [r]) =>
+    l < r ? -1 : l > r ? 1 : 0,
+  );
+  return JSON.stringify(entries);
+}
+
+/**
+ * A concise, human-readable one-liner describing a staged action, shown in the pause
+ * turn that asks the user to confirm. The switch covers the eight confirmation-
+ * required kinds; the generic fallback exists only for exhaustiveness (the two
+ * excluded kinds never reach here, since they are actuated without staging).
+ */
+function stageDescription(a: ConverseAction): string {
+  switch (a.kind) {
+    case 'add_task':
+      return `Ready to add task "${a.title}".`;
+    case 'remove_task':
+      return `Ready to remove task ${a.taskRef}.`;
+    case 'edit_task':
+      return `Ready to edit task ${a.taskRef}.`;
+    case 'skip_step':
+      return `Ready to skip step ${a.stepId}.`;
+    case 'unskip_step':
+      return `Ready to un-skip step ${a.stepId}.`;
+    case 'steer_step':
+      return `Ready to steer step ${a.stepId}.`;
+    case 'resolve_review_item':
+      return `Ready to resolve review item ${a.reviewItemId}.`;
+    case 'file_note':
+      return `Ready to file a note titled "${a.title}".`;
+    default:
+      return 'Ready to perform the requested action.';
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -852,6 +956,14 @@ export class DefaultMonitorSession implements MonitorSession {
   private readonly logger?: LoggerLike;
   /** Tail of the serialized converse chain — see `converse`. */
   private sendChain: Promise<unknown> = Promise.resolve();
+  /**
+   * The action STAGED by the previous converse turn, awaiting an explicit confirm on
+   * the immediately-next turn (the host-enforced two-phase confirmation gate — see
+   * `handleControlAndAction`). The session instance persists in `MonitorRegistry`
+   * across turns, so instance state is the correct home; on restart the session is
+   * rebuilt fresh and any pending is safely dropped (nothing to confirm).
+   */
+  private pendingAction: ConverseAction | undefined;
 
   constructor(deps: DefaultMonitorSessionDeps) {
     this.ctx = deps.ctx;
@@ -947,16 +1059,73 @@ export class DefaultMonitorSession implements MonitorSession {
   /** One full chat exchange (serialized by `converse`). */
   private async converseOnce(text: string, signal?: AbortSignal): Promise<string> {
     this.tryInject(buildUserTextEvent(text));
-    const { reply, action } = await this.answerOrAct(text, signal);
+    const { reply, action, control } = await this.answerOrAct(text, signal);
     // A successful-but-EMPTY reply ('' from textQuery / the structured answer) would
     // render as nothing — the user would see their question with no answer. Always
     // render something (review: empty-monitor-reply-dropped).
     const rendered = reply.trim().length > 0 ? reply : NO_ANSWER;
     this.tryInject(buildAssistantTextEvent(rendered));
-    if (action) {
-      await this.actuate(action);
-    }
+    await this.handleControlAndAction(control, action);
     return rendered;
+  }
+
+  /**
+   * The host-enforced two-phase confirmation state machine (review: monitor actions
+   * execute without an enforceable confirmation state). A mutating steering action is
+   * never actuated on the turn it is first proposed — it is STAGED as `pendingAction`
+   * and executed only when the immediately-next turn confirms it. Excluded kinds
+   * (`retry_step` / `switch_to_orchestrated`) stay single-turn.
+   *
+   * The pending proposal is valid for EXACTLY the next turn: we snapshot it and clear
+   * `pendingAction` up front, so any turn that is not a matching confirmation (a plain
+   * answer, a `cancel`, or a different action) discards the stale proposal — a
+   * confirmation can never re-fire an old, superseded, or abandoned proposal.
+   */
+  private async handleControlAndAction(
+    control: ConverseControl | undefined,
+    action: ConverseAction | undefined,
+  ): Promise<void> {
+    // Snapshot + clear: a proposal is valid ONLY for the immediately-next turn.
+    const priorPending = this.pendingAction;
+    this.pendingAction = undefined;
+
+    if (control === 'cancel') {
+      // Only acknowledge a discard when there was actually something staged.
+      if (priorPending) {
+        this.tryInject(buildAssistantTextEvent('✖ Discarded the proposed action.'));
+      }
+      return;
+    }
+    if (control === 'confirm') {
+      if (priorPending) {
+        await this.actuate(priorPending);
+      } else {
+        this.tryInject(buildAssistantTextEvent('There is no pending action to confirm.'));
+      }
+      return;
+    }
+
+    // No action attached: a plain-answer turn clears any stale proposal (done above).
+    if (!action) return;
+
+    // Excluded kinds actuate immediately (single-turn) — no staging.
+    if (!requiresConfirmation(action.kind)) {
+      await this.actuate(action);
+      return;
+    }
+
+    // Belt-and-suspenders: re-attaching the IDENTICAL staged action also confirms it.
+    if (priorPending && actionFingerprint(priorPending) === actionFingerprint(action)) {
+      await this.actuate(action);
+      return;
+    }
+
+    // First proposal, or a DIFFERENT action superseding a prior pending one: STAGE it
+    // and ask the user to confirm on the next turn. Do NOT execute.
+    this.pendingAction = action;
+    this.tryInject(
+      buildAssistantTextEvent(`⏸ ${stageDescription(action)} Reply to confirm, or say cancel.`),
+    );
   }
 
   /**
@@ -971,8 +1140,12 @@ export class DefaultMonitorSession implements MonitorSession {
   private async answerOrAct(
     text: string,
     signal?: AbortSignal,
-  ): Promise<{ reply: string; action?: ConverseAction }> {
+  ): Promise<{ reply: string; action?: ConverseAction; control?: ConverseControl }> {
     if (!this.actions) {
+      // CRITICAL INVARIANT: with no actuator wired, this returns { reply } only (no
+      // action, no control), so `handleControlAndAction(undefined, undefined)` just
+      // clears the (always-empty) pending and returns — byte-identical to the
+      // pre-seam `answer()` path.
       return { reply: await this.answer(text, signal) };
     }
     try {
