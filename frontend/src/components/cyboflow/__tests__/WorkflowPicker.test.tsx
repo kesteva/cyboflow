@@ -248,6 +248,8 @@ describe('WorkflowPicker — Quick Session button', () => {
       projectId: 1,
       agentPermissionMode: 'default',
       substrate: 'sdk',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-sdk',
       // The Quick Session button now threads the picker model (default Opus), which
       // rides as claudeConfig for the interactive eager spawn.
       claudeConfig: { model: 'opus', fastMode: false },
@@ -259,9 +261,9 @@ describe('WorkflowPicker — Quick Session button', () => {
     // PTY-backed quick session — not a silent SDK fallback (review finding F1).
     render(<WorkflowPicker projectId={1} />);
 
-    const substrateSelect = await screen.findByLabelText('Select CLI substrate');
+    const substrateSelect = await screen.findByLabelText('Select agent runtime');
     await act(async () => {
-      fireEvent.change(substrateSelect, { target: { value: 'interactive' } });
+      fireEvent.change(substrateSelect, { target: { value: 'claude-interactive' } });
     });
 
     await act(async () => {
@@ -272,6 +274,37 @@ describe('WorkflowPicker — Quick Session button', () => {
     expect(mockCreateQuick).toHaveBeenCalledWith(
       expect.objectContaining({ substrate: 'interactive' }),
     );
+  });
+
+  it('selects Codex PTY for Quick Session only and threads Codex model/provider fields', async () => {
+    render(<WorkflowPicker projectId={1} />);
+
+    const runtimeSelect = await screen.findByLabelText('Select agent runtime');
+    await act(async () => {
+      fireEvent.change(runtimeSelect, { target: { value: 'codex-pty' } });
+    });
+
+    expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /GPT-5\.5/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Start Run' })).toBeDisabled();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select Codex model'), { target: { value: 'gpt-5.5' } });
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('quick-session-button'));
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: 1,
+        agentProvider: 'codex',
+        agentRuntime: 'codex-pty',
+        agentModel: 'gpt-5.5',
+      }),
+    );
+    expect(mockCreateQuick.mock.calls[0]?.[0]).not.toHaveProperty('substrate');
+    expect(mockCreateQuick.mock.calls[0]?.[0]).not.toHaveProperty('claudeConfig');
   });
 
   it('Quick Session success path creates both Claude and Terminal panels', async () => {
@@ -399,7 +432,7 @@ describe('WorkflowPicker — Start Run double-submit guard', () => {
   });
 });
 
-describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
+describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () => {
   beforeEach(() => {
     mockRunStart.mockClear();
     // Re-point the workflows list at a CUSTOM (direct-launch) flow — see the
@@ -410,13 +443,17 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
     ]);
   });
 
-  it("renders a substrate selector that defaults to 'sdk'", async () => {
+  it("renders an agent runtime selector before model, defaults to Claude SDK, and disables Codex runtimes", async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const substrateSelect = (await screen.findByLabelText('Select CLI substrate')) as HTMLSelectElement;
-    expect(substrateSelect).toBeInTheDocument();
+    const runtimeSelect = (await screen.findByLabelText('Select agent runtime')) as HTMLSelectElement;
+    const modelSelect = screen.getByLabelText('Select Claude model');
+    expect(runtimeSelect).toBeInTheDocument();
+    expect(runtimeSelect.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Default reflects ConfigManager.defaultSubstrate floor ('sdk').
-    expect(substrateSelect.value).toBe('sdk');
+    expect(runtimeSelect.value).toBe('claude-sdk');
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
   });
 
   it("forwards the default substrate ('sdk') in the runs.start.mutate payload", async () => {
@@ -435,6 +472,8 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
       workflowId: 'wf-1',
       projectId: 1,
       substrate: 'sdk',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-sdk',
       sessionId: 'session-quick-001',
       permissionMode: 'default',
       // Per-run model pin (migration 037) — the Configure picker defaults to Opus.
@@ -445,9 +484,9 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
   it("includes substrate: 'interactive' in the mutate payload when 'interactive' is picked", async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const substrateSelect = await screen.findByLabelText('Select CLI substrate');
+    const substrateSelect = await screen.findByLabelText('Select agent runtime');
     await act(async () => {
-      fireEvent.change(substrateSelect, { target: { value: 'interactive' } });
+      fireEvent.change(substrateSelect, { target: { value: 'claude-interactive' } });
     });
 
     const startRunBtn = await findEnabledStartRun();
@@ -460,6 +499,8 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
       workflowId: 'wf-1',
       projectId: 1,
       substrate: 'interactive',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-interactive',
       sessionId: 'session-quick-001',
       permissionMode: 'default',
       model: 'opus',
@@ -484,7 +525,7 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
 
   it("does NOT render the interactive caveats while 'sdk' is selected", async () => {
     render(<WorkflowPicker projectId={1} />);
-    await screen.findByLabelText('Select CLI substrate');
+    await screen.findByLabelText('Select agent runtime');
 
     expect(screen.queryByTestId('workflow-picker-substrate-caveats')).toBeNull();
   });
@@ -492,9 +533,9 @@ describe('WorkflowPicker — substrate selector (IDEA-013 / TASK-812)', () => {
   it("renders the unconditional interactive v1 caveats when 'interactive' is selected, and NOT the approval-routing caveat (Probe A passed)", async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const substrateSelect = await screen.findByLabelText('Select CLI substrate');
+    const substrateSelect = await screen.findByLabelText('Select agent runtime');
     await act(async () => {
-      fireEvent.change(substrateSelect, { target: { value: 'interactive' } });
+      fireEvent.change(substrateSelect, { target: { value: 'claude-interactive' } });
     });
 
     const caveats = screen.getByTestId('workflow-picker-substrate-caveats');
@@ -689,6 +730,8 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
       workflowId: 'wf-planner',
       projectId: 1,
       substrate: 'sdk',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-sdk',
       sessionId: 'session-quick-001',
       permissionMode: 'default',
       model: 'opus',
@@ -843,6 +886,8 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
         workflowId: 'wf-1',
         projectId: 1,
         substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
         sessionId: 'session-quick-001',
         permissionMode: 'default',
         model: 'opus',
@@ -878,6 +923,8 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
       workflowId: 'wf-1',
       projectId: 1,
       substrate: 'sdk',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-sdk',
       sessionId: 'session-existing-007',
       permissionMode: 'default',
       model: 'opus',
@@ -946,6 +993,8 @@ describe('WorkflowPicker — Ship idea-selection gate (feat/ship-workflow)', () 
       workflowId: 'wf-ship',
       projectId: 1,
       substrate: 'sdk',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-sdk',
       sessionId: 'session-quick-001',
       permissionMode: 'default',
       model: 'opus',
@@ -1015,6 +1064,8 @@ describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)',
       workflowId: 'wf-sprint',
       projectId: 1,
       substrate: 'sdk',
+      agentProvider: 'claude',
+      agentRuntime: 'claude-sdk',
       sessionId: 'session-quick-001',
       permissionMode: 'default',
       model: 'opus',

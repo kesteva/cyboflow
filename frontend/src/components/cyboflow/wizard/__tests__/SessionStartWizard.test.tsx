@@ -308,7 +308,12 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
   it('shows substrate + blueprint editor for a WORKFLOW selection', async () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
-    expect(screen.getByLabelText('Select CLI substrate')).toBeInTheDocument();
+    const runtimeSelect = screen.getByLabelText('Select agent runtime');
+    const modelSelect = screen.getByLabelText('Select Claude model');
+    expect(runtimeSelect).toBeInTheDocument();
+    expect(runtimeSelect.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
+    expect(screen.queryByRole('option', { name: /Codex PTY/i })).toBeNull();
     expect(screen.getByTestId('wizard-edit-flow')).toBeInTheDocument();
     expect(screen.getByTestId('wizard-new-flow')).toBeInTheDocument();
     // Permission selector + summary always present.
@@ -322,7 +327,9 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
 
     // Quick sessions prompt for the CLI substrate the same way workflow
     // launches do (opt-in interactive PTY quick sessions).
-    expect(screen.getByLabelText('Select CLI substrate')).toBeInTheDocument();
+    expect(screen.getByLabelText('Select agent runtime')).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
     expect(screen.queryByTestId('wizard-edit-flow')).toBeNull();
     expect(screen.queryByTestId('wizard-new-flow')).toBeNull();
     // Permission selector + summary still present.
@@ -348,8 +355,8 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     // disabledMcpjsonServers + enabledPlugins via --settings), so the Advanced
     // controls stay visible when Interactive is selected.
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select CLI substrate'), {
-        target: { value: 'interactive' },
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'claude-interactive' },
       });
     });
     expect(screen.getByTestId('wizard-advanced-toggle')).toBeInTheDocument();
@@ -392,8 +399,8 @@ describe('SessionStartWizard — Workspace tri-state (quick)', () => {
 
     // Interactive substrate → still selectable (no SDK-only constraint).
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select CLI substrate'), {
-        target: { value: 'interactive' },
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'claude-interactive' },
       });
     });
     expect(screen.getByTestId('wizard-worktree-inplace')).not.toBeDisabled();
@@ -430,8 +437,8 @@ describe('SessionStartWizard — Workspace tri-state (quick)', () => {
 
     // Flipping to interactive no longer resets the choice — in-place works there.
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select CLI substrate'), {
-        target: { value: 'interactive' },
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'claude-interactive' },
       });
     });
     expect(screen.getByTestId('wizard-worktree-inplace')).toHaveAttribute('aria-checked', 'true');
@@ -471,6 +478,8 @@ describe('SessionStartWizard — step ③ launch threading', () => {
         projectId: 1,
         sessionId: 'session-ensured-001',
         substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
         permissionMode: 'default',
       }),
     );
@@ -632,14 +641,19 @@ describe('SessionStartWizard — step ③ launch threading', () => {
       fireEvent.click(screen.getByLabelText('Permission mode: Auto'));
     });
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select CLI substrate'), { target: { value: 'interactive' } });
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'claude-interactive' } });
     });
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
     });
 
     expect(mockRunStart).toHaveBeenCalledWith(
-      expect.objectContaining({ substrate: 'interactive', permissionMode: 'auto' }),
+      expect.objectContaining({
+        substrate: 'interactive',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-interactive',
+        permissionMode: 'auto',
+      }),
     );
   });
 
@@ -679,7 +693,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     await selectQuickAndConfigure();
 
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select CLI substrate'), { target: { value: 'interactive' } });
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'claude-interactive' } });
     });
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
@@ -687,7 +701,12 @@ describe('SessionStartWizard — step ③ launch threading', () => {
 
     expect(mockRunStart).not.toHaveBeenCalled();
     expect(mockCreateQuick).toHaveBeenCalledWith(
-      expect.objectContaining({ projectId: 1, substrate: 'interactive' }),
+      expect.objectContaining({
+        projectId: 1,
+        substrate: 'interactive',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-interactive',
+      }),
     );
   });
 
@@ -754,7 +773,7 @@ describe('SessionStartWizard — Ultracode configure + launch', () => {
     expect(screen.queryByTestId('wizard-fast-mode-row')).toBeNull();
 
     // Substrate is pinned to interactive — no selector.
-    expect(screen.queryByLabelText('Select CLI substrate')).toBeNull();
+    expect(screen.queryByLabelText('Select agent runtime')).toBeNull();
 
     // Advanced (MCP/plugin) disclosure is offered, same as a quick launch.
     expect(screen.getByTestId('wizard-advanced-toggle')).toBeInTheDocument();
@@ -775,6 +794,8 @@ describe('SessionStartWizard — Ultracode configure + launch', () => {
       expect.objectContaining({
         projectId: 1,
         substrate: 'interactive',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-interactive',
         effort: 'ultracode',
         claudeConfig: { model: 'fable', fastMode: false },
       }),
@@ -876,6 +897,8 @@ describe('SessionStartWizard — Sprint batch gate', () => {
         projectId: 1,
         sessionId: 'session-ensured-001',
         substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
         permissionMode: 'default',
         taskIds: ['IDEA-1', 'IDEA-2'],
       }),
@@ -998,6 +1021,8 @@ describe('SessionStartWizard — Ship idea gate', () => {
         projectId: 1,
         sessionId: 'session-ensured-001',
         substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
         permissionMode: 'default',
         ideaId: 'IDEA-7',
       }),
@@ -1132,6 +1157,8 @@ describe('SessionStartWizard — compound finding seed (D4)', () => {
         sessionId: 'session-ensured-001',
         // substrate + permission still flow from the step-③ controls.
         substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
         permissionMode: 'default',
         findingIds: ['finding-1', 'finding-2', 'finding-3'],
       }),
@@ -1177,8 +1204,8 @@ describe('SessionStartWizard — compound finding seed (D4)', () => {
       fireEvent.click(screen.getByLabelText('Permission mode: Auto'));
     });
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select CLI substrate'), {
-        target: { value: 'interactive' },
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'claude-interactive' },
       });
     });
     await act(async () => {
@@ -1188,6 +1215,8 @@ describe('SessionStartWizard — compound finding seed (D4)', () => {
     expect(mockRunStart).toHaveBeenCalledWith(
       expect.objectContaining({
         substrate: 'interactive',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-interactive',
         permissionMode: 'auto',
         findingIds: ['finding-1'],
       }),

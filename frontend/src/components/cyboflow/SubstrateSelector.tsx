@@ -1,6 +1,6 @@
 /**
- * SubstrateSelector — per-run CLI substrate choice (SDK | Interactive PTY) plus
- * the unconditional interactive v1 caveats (IDEA-013 / TASK-812). Controlled
+ * SubstrateSelector — per-launch agent runtime choice, currently backed by the
+ * legacy Claude CLI substrate choice (SDK | Interactive PTY). Controlled
  * (value/onChange), but self-locks to the global PTY-only setting (see below).
  *
  * Substrate is honored on BOTH launch paths:
@@ -25,8 +25,12 @@
  * caveats text + lock behavior are single-sourced (no drift).
  */
 import { useEffect } from 'react';
-import { type CliSubstrate } from '../../../../shared/types/substrate';
+import {
+  isSessionAgentRuntime,
+  isWorkflowAgentRuntime,
+} from '../../../../shared/types/agentRuntime';
 import { useForcedSubstrate } from '../../hooks/useForcedSubstrate';
+import type { LaunchAgentRuntime } from './agentRuntimeUi';
 
 /**
  * The v1 limits of the interactive PTY substrate, surfaced when 'interactive' is
@@ -41,14 +45,16 @@ export const INTERACTIVE_CAVEATS: readonly string[] = [
 ];
 
 interface SubstrateSelectorProps {
-  value: CliSubstrate;
-  onChange: (substrate: CliSubstrate) => void;
+  value: LaunchAgentRuntime;
+  onChange: (runtime: LaunchAgentRuntime) => void;
   /** DOM id for the <select> (label association). */
   id?: string;
   /** Heading text above the select. */
   label?: string;
   /** data-testid for the caveats panel (per-surface to keep existing selectors stable). */
   caveatsTestId?: string;
+  /** Which launch surface owns the runtime choice. Codex PTY is session-only. */
+  runtimeScope?: 'workflow' | 'session' | 'mixed';
 }
 
 function InteractiveCaveats({ testId }: { testId: string }): React.JSX.Element {
@@ -72,8 +78,9 @@ export function SubstrateSelector({
   value,
   onChange,
   id = 'substrate-select',
-  label = 'CLI substrate',
+  label = 'Agent runtime',
   caveatsTestId = 'substrate-caveats',
+  runtimeScope = 'workflow',
 }: SubstrateSelectorProps): React.JSX.Element {
   // Global forced-substrate pin (see file header), mirroring the backend
   // precedence: demo → 'sdk', else interactivePtyOnly → 'interactive', else null.
@@ -86,7 +93,7 @@ export function SubstrateSelector({
   // backend forces 'sdk' regardless). After value reaches 'interactive' the
   // guard stops re-firing (safe with an unstable onChange identity).
   useEffect(() => {
-    if (forced === 'interactive' && value !== 'interactive') onChange('interactive');
+    if (forced === 'interactive' && value !== 'claude-interactive') onChange('claude-interactive');
   }, [forced, value, onChange]);
 
   // Only the user-facing interactive lock gets the read-only locked UI. Demo
@@ -98,14 +105,14 @@ export function SubstrateSelector({
         <label className="text-xs font-medium text-text-secondary">{label}</label>
         <div
           data-testid="substrate-locked"
-          aria-label="CLI substrate locked to interactive PTY"
+          aria-label="Agent runtime locked to Claude interactive PTY"
           className="w-full rounded-input border border-border-primary bg-bg-secondary px-2 py-1 text-sm text-text-secondary"
         >
-          Interactive (PTY) — locked
+          Claude interactive (PTY) — locked
         </div>
         <p className="text-xs text-text-tertiary">
-          SDK is disabled globally (Settings → AI Integration → CLI runtime). Every run uses the
-          interactive PTY substrate.
+          Claude SDK is disabled globally (Settings → AI Integration → CLI runtime). Every run uses
+          the interactive PTY runtime.
         </p>
         <InteractiveCaveats testId={caveatsTestId} />
       </div>
@@ -120,15 +127,29 @@ export function SubstrateSelector({
       <select
         id={id}
         value={value}
-        onChange={(e) => onChange(e.target.value === 'interactive' ? 'interactive' : 'sdk')}
+        onChange={(e) => {
+          const next = e.target.value;
+          if (isSessionAgentRuntime(next) || isWorkflowAgentRuntime(next)) onChange(next);
+        }}
         className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
-        aria-label="Select CLI substrate"
+        aria-label="Select agent runtime"
       >
-        <option value="sdk">SDK (default)</option>
-        <option value="interactive">Interactive (PTY)</option>
+        <option value="claude-sdk">Claude SDK (default)</option>
+        <option value="claude-interactive">Claude interactive (PTY)</option>
+        <option value="codex-sdk" disabled>
+          Codex SDK — unavailable in this build
+        </option>
+        {runtimeScope !== 'workflow' && (
+          <option value="codex-pty">
+            Codex PTY — quick sessions only
+          </option>
+        )}
       </select>
+      <p className="text-xs text-text-tertiary">
+        Codex PTY is available for quick sessions. Workflow runs use workflow-capable runtimes.
+      </p>
 
-      {value === 'interactive' && <InteractiveCaveats testId={caveatsTestId} />}
+      {value === 'claude-interactive' && <InteractiveCaveats testId={caveatsTestId} />}
     </div>
   );
 }

@@ -21,12 +21,20 @@ import { WorkflowEditorModal } from './WorkflowEditorModal';
 import { IdeaPickerModal } from './IdeaPickerModal';
 import { AgentPermissionModeSelector } from './AgentPermissionModeSelector';
 import { SubstrateSelector } from './SubstrateSelector';
-import { ModelSelector, DEFAULT_WORKFLOW_MODEL } from './ModelSelector';
+import { ModelSelector, DEFAULT_CODEX_MODEL, DEFAULT_WORKFLOW_MODEL } from './ModelSelector';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
 import { VariantSelector } from './VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from './variantSelectorLogic';
 import { type WorkflowRow, CYBOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
-import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
+import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
+import { DEFAULT_SESSION_AGENT_RUNTIME } from '../../../../shared/types/agentRuntime';
+import type { LaunchAgentRuntime } from './agentRuntimeUi';
+import {
+  isCodexRuntime,
+  providerForRuntime,
+  substrateForRuntime,
+  workflowRuntimeForLaunch,
+} from './agentRuntimeUi';
 import { trackEvent } from '../../utils/telemetry';
 import type { TelemetryFlow } from '../../../../shared/types/telemetry';
 import { notifyWorkflowRunStarted } from '../../utils/onboarding';
@@ -51,15 +59,11 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   const [error, setError] = useState<string | null>(null);
 
   /**
-   * The per-launch CLI substrate choice. Defaults to DEFAULT_SUBSTRATE ('sdk') —
-   * the global ConfigManager.defaultSubstrate floor — and is threaded into
-   * runs.start.mutate for workflow launches AND into useQuickSession.start
-   * (→ sessions.substrate) for the Quick Session button, since both share this
-   * surface's selector. The mutate input type is AppRouter-inferred (no local
-   * mirror of the substrate field), and CliSubstrate is imported from the S1
-   * shared type, never re-declared here.
+   * The per-launch agent runtime choice. Claude runtimes project onto the legacy
+   * substrate field; Codex PTY is quick-session-only and disables Start Run on
+   * this mixed launch surface while leaving Quick Session available.
    */
-  const [substrate, setSubstrate] = useState<CliSubstrate>(DEFAULT_SUBSTRATE);
+  const [agentRuntime, setAgentRuntime] = useState<LaunchAgentRuntime>(DEFAULT_SESSION_AGENT_RUNTIME);
 
   /**
    * The per-run Claude model choice (Configure model dropdown). Defaults to Opus
@@ -68,6 +72,13 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
    * launches, and into useQuickSession.start for the Quick Session button.
    */
   const [model, setModel] = useState<string>(DEFAULT_WORKFLOW_MODEL);
+  useEffect(() => {
+    if (isCodexRuntime(agentRuntime)) {
+      if (model !== DEFAULT_CODEX_MODEL && model !== 'gpt-5.5') setModel(DEFAULT_CODEX_MODEL);
+      return;
+    }
+    if (model === 'gpt-5.5') setModel(DEFAULT_WORKFLOW_MODEL);
+  }, [agentRuntime, model]);
 
   /**
    * The per-run A/B variant choice (migration 048, VariantSelector). Defaults to
@@ -199,6 +210,11 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       setError(null);
       setIsStarting(true);
       try {
+        const workflowRuntime = workflowRuntimeForLaunch(agentRuntime);
+        if (workflowRuntime === null) {
+          throw new Error('Codex PTY is available for Quick Session only. Choose a workflow runtime to start a run.');
+        }
+        const launchSubstrate = substrateForRuntime(workflowRuntime);
         // Ensure the run executes INSIDE a session (active one if selected, else
         // a freshly created session). The id is threaded into runs.start so the
         // run runs in that session's worktree, and used to nest the run under
@@ -208,7 +224,9 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         const result = await trpc.cyboflow.runs.start.mutate({
           workflowId,
           projectId,
-          substrate,
+          ...(launchSubstrate ? { substrate: launchSubstrate } : {}),
+          agentProvider: providerForRuntime(workflowRuntime),
+          agentRuntime: workflowRuntime,
           sessionId,
           permissionMode,
           model,
@@ -223,7 +241,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         trackEvent('workflow_run_started', {
           launch_surface: 'topbar',
           flow: flowOf(workflowId),
-          substrate,
+          ...(launchSubstrate ? { substrate: launchSubstrate } : {}),
           permission_mode: permissionMode,
         });
         notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'topbar' });
@@ -236,7 +254,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projectId, substrate, permissionMode, model, variantSelection, onWorkflowStarted, forceNewSession, workflows],
+    [projectId, agentRuntime, permissionMode, model, variantSelection, onWorkflowStarted, forceNewSession, workflows],
   );
 
   /**
@@ -256,11 +274,18 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       setError(null);
       setIsStarting(true);
       try {
+        const workflowRuntime = workflowRuntimeForLaunch(agentRuntime);
+        if (workflowRuntime === null) {
+          throw new Error('Codex PTY is available for Quick Session only. Choose a workflow runtime to start a run.');
+        }
+        const launchSubstrate = substrateForRuntime(workflowRuntime);
         const sessionId = await ensureSessionForLaunch(projectId, { forceNew: forceNewSession });
         const result = await trpc.cyboflow.runs.start.mutate({
           workflowId,
           projectId,
-          substrate,
+          ...(launchSubstrate ? { substrate: launchSubstrate } : {}),
+          agentProvider: providerForRuntime(workflowRuntime),
+          agentRuntime: workflowRuntime,
           sessionId,
           permissionMode,
           model,
@@ -271,7 +296,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         trackEvent('workflow_run_started', {
           launch_surface: 'topbar',
           flow: flowOf(workflowId),
-          substrate,
+          ...(launchSubstrate ? { substrate: launchSubstrate } : {}),
           permission_mode: permissionMode,
         });
         notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'topbar' });
@@ -284,7 +309,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [projectId, substrate, permissionMode, model, variantSelection, onWorkflowStarted, forceNewSession, workflows],
+    [projectId, agentRuntime, permissionMode, model, variantSelection, onWorkflowStarted, forceNewSession, workflows],
   );
 
   const handleStartRun = async () => {
@@ -346,6 +371,9 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   );
 
   const combinedError = error ?? quickError;
+  const workflowRuntimeBlocked = workflowRuntimeForLaunch(agentRuntime) === null;
+  const selectedSubstrate = substrateForRuntime(agentRuntime);
+  const selectedProvider = providerForRuntime(agentRuntime);
 
   return (
     <div className="flex flex-col gap-3">
@@ -373,12 +401,13 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         </select>
       )}
 
-      {/* Substrate selector + interactive v1 caveats (IDEA-013 / TASK-812). */}
+      {/* Agent runtime selector + interactive v1 caveats (IDEA-013 / TASK-812). */}
       <SubstrateSelector
-        value={substrate}
-        onChange={setSubstrate}
+        value={agentRuntime}
+        onChange={setAgentRuntime}
         id="workflow-picker-substrate"
         caveatsTestId="workflow-picker-substrate-caveats"
+        runtimeScope="mixed"
       />
 
       {/* Session permission selector — an explicit choice permanently sets the
@@ -390,7 +419,18 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       {/* Per-run model selector — pins the model a workflow run (or quick session)
           spawns with (default Opus). Workflow: threaded into runs.start as `model`
           → workflow_runs.model (migration 037). Quick: into useQuickSession. */}
-      <ModelSelector value={model} onChange={setModel} id="workflow-picker-model" />
+      <ModelSelector
+        value={model}
+        onChange={setModel}
+        id="workflow-picker-model"
+        agentProvider={selectedProvider}
+        agentRuntime={agentRuntime}
+      />
+      {workflowRuntimeBlocked && (
+        <p className="text-xs text-text-tertiary">
+          Codex PTY is quick-session-only. Pick a Claude runtime before starting a workflow run.
+        </p>
+      )}
 
       {/* Per-run A/B variant selector (migration 048) — hidden entirely for a
           workflow with zero variants. Threaded into runs.start as variantId /
@@ -413,7 +453,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       <div className="flex gap-2">
         <button
           onClick={handleStartRun}
-          disabled={selectedId === null || isLoading || isStarting || isQuickStarting}
+          disabled={selectedId === null || isLoading || isStarting || isQuickStarting || workflowRuntimeBlocked}
           className="flex-1 rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
           Start Run
@@ -463,7 +503,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         <TaskBatchPickerModal
           isOpen
           projectId={projectId}
-          substrate={substrate}
+          substrate={selectedSubstrate ?? DEFAULT_SUBSTRATE}
           onClose={() => setBatchPickerOpen(false)}
           onPicked={handleBatchPicked}
         />
@@ -472,7 +512,20 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       <div className="mt-2 flex flex-col gap-2 border-t border-border-primary pt-3">
         <p className="text-xs text-text-secondary">Or start without a workflow:</p>
         <button
-          onClick={() => void startQuickSession(permissionMode, substrate, undefined, model)}
+          onClick={() =>
+            void startQuickSession(
+              permissionMode,
+              selectedSubstrate,
+              undefined,
+              model,
+              undefined,
+              undefined,
+              undefined,
+              undefined,
+              selectedProvider,
+              agentRuntime,
+            )
+          }
           disabled={isQuickStarting || isStarting}
           className="rounded-button border border-interactive bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="quick-session-button"

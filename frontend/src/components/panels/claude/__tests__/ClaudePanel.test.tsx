@@ -1,8 +1,8 @@
 /**
  * ClaudePanel component tests — the interactive-PTY render swap.
  *
- * For PTY-backed quick sessions, ClaudePanel branches on the session's CLI
- * substrate (mirroring RunChatView's swap for workflow runs):
+ * For PTY-backed quick sessions, ClaudePanel branches on the session's default
+ * runtime / CLI substrate (mirroring RunChatView's swap for workflow runs):
  *   - substrate 'interactive' + non-null runId → the live PTY xterm
  *     (InteractiveTerminalView, keyed by the sentinel __quick__ run id, with
  *     guardFirstInteraction={false}) REPLACES the SDK structured surface;
@@ -293,6 +293,24 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
 
     fireEvent.keyDown(window, { key: 'g', ctrlKey: true });
     expect(get()).toHaveAttribute('data-pty-open', 'false');
+  });
+
+  it('agentRuntime codex-pty renders the terminal and skips Claude resume probing', () => {
+    renderWithProvider(
+      makeSession({
+        substrate: 'interactive',
+        agentProvider: 'codex',
+        agentRuntime: 'codex-pty',
+        runId: 'run-codex',
+      }),
+    );
+
+    expect(screen.getByTestId('interactive-terminal-view')).toHaveTextContent(
+      'InteractiveTerminalView:run-codex',
+    );
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'interactive');
+    expect(screen.getByTestId('quick-session-composer')).toHaveAttribute('data-interactive', 'true');
+    expect(mockGetResumeState).not.toHaveBeenCalled();
   });
 
   it('substrate undefined: renders the SDK surface + the SDK (non-interactive) composer', () => {

@@ -15,6 +15,7 @@
  */
 import { MODEL_OPTIONS } from './unified/ModelPill';
 import { useModelAvailability } from '../../stores/modelAvailabilityStore';
+import type { AgentProvider, AgentRuntime } from '../../../../shared/types/agentRuntime';
 
 /** The quick-session default model — Opus, per product direction. */
 export const DEFAULT_QUICK_MODEL = 'opus';
@@ -37,6 +38,16 @@ export const ULTRACODE_DEFAULT_MODEL = 'fable';
  * default; this constant only seeds the user-facing pickers.
  */
 export const DEFAULT_WORKFLOW_MODEL = 'opus';
+export const DEFAULT_CODEX_MODEL = 'auto';
+
+const CODEX_MODEL_OPTIONS: ReadonlyArray<{
+  id: string;
+  label: string;
+  description: string;
+}> = [
+  { id: DEFAULT_CODEX_MODEL, label: 'Auto/default', description: 'Use the Codex runtime default' },
+  { id: 'gpt-5.5', label: 'GPT-5.5', description: 'Frontier Codex coding model' },
+];
 
 interface ModelSelectorProps {
   value: string;
@@ -45,6 +56,9 @@ interface ModelSelectorProps {
   id?: string;
   /** Heading text above the select. */
   label?: string;
+  /** Runtime context; model availability is provider/runtime scoped. */
+  agentProvider?: AgentProvider;
+  agentRuntime?: AgentRuntime;
 }
 
 export function ModelSelector({
@@ -52,8 +66,12 @@ export function ModelSelector({
   onChange,
   id = 'model-select',
   label = 'Model',
+  agentProvider = 'claude',
+  agentRuntime = 'claude-sdk',
 }: ModelSelectorProps): React.JSX.Element {
-  const active = MODEL_OPTIONS.find((o) => o.id === value);
+  const isCodexRuntime = agentProvider === 'codex' || agentRuntime.startsWith('codex-');
+  const codexActive = CODEX_MODEL_OPTIONS.find((o) => o.id === value);
+  const claudeActive = MODEL_OPTIONS.find((o) => o.id === value);
   const { isAliasUsable, unavailableReason } = useModelAvailability();
   const activeReason = unavailableReason(value);
 
@@ -67,25 +85,37 @@ export function ModelSelector({
         value={value}
         onChange={(e) => onChange(e.target.value)}
         className="w-full rounded-input border border-border-primary bg-bg-primary px-2 py-1 text-sm text-text-primary"
-        aria-label="Select Claude model"
+        aria-label={isCodexRuntime ? 'Select Codex model' : 'Select Claude model'}
       >
-        {MODEL_OPTIONS.map((o) => {
-          const disabled = !isAliasUsable(o.id);
-          return (
-            <option key={o.id} value={o.id} disabled={disabled}>
-              {o.context ? `${o.label} · ${o.context}` : o.label} — {o.description}
-              {disabled ? ' (unavailable)' : ''}
+        {isCodexRuntime ? (
+          CODEX_MODEL_OPTIONS.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.label} — {o.description}
             </option>
-          );
-        })}
+          ))
+        ) : (
+          MODEL_OPTIONS.map((o) => {
+            const disabled = !isAliasUsable(o.id);
+            return (
+              <option key={o.id} value={o.id} disabled={disabled}>
+                {o.context ? `${o.label} · ${o.context}` : o.label} — {o.description}
+                {disabled ? ' (unavailable)' : ''}
+              </option>
+            );
+          })
+        )}
       </select>
-      {active !== undefined && (
+      {isCodexRuntime ? (
+        <p className="text-xs text-text-tertiary">
+          {codexActive?.description ?? 'Choose a Codex model for this runtime.'}
+        </p>
+      ) : claudeActive !== undefined && (
         <p className="text-xs text-text-tertiary">
           {activeReason
-            ? `${active.label} is currently unavailable — runs will use Opus.`
-            : active.context
-              ? `${active.description} · ${active.context} context`
-              : active.description}
+            ? `${claudeActive.label} is currently unavailable — runs will use Opus.`
+            : claudeActive.context
+              ? `${claudeActive.description} · ${claudeActive.context} context`
+              : claudeActive.description}
         </p>
       )}
     </div>
