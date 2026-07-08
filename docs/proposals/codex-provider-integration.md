@@ -34,17 +34,18 @@ export type AgentRuntime =
   | 'codex-pty'
   | 'codex-exec';
 
+export type SessionAgentRuntime = Exclude<AgentRuntime, 'codex-exec'>;
 export type WorkflowAgentRuntime = Exclude<AgentRuntime, 'codex-pty' | 'codex-exec'>;
 ```
 
-Backfill existing runs as:
+Backfill existing session and workflow runtime rows from the Claude-era `substrate` columns as:
 
 ```ts
 agent_provider = 'claude'
 agent_runtime = substrate === 'interactive' ? 'claude-interactive' : 'claude-sdk'
 ```
 
-Keep `workflow_runs.substrate` during the migration window as a Claude compatibility projection, then stop exposing it as the primary UI concept.
+Keep `sessions.substrate` and `workflow_runs.substrate` during the migration window as Claude compatibility projections, then stop exposing them as the primary UI concept.
 
 ## Goals
 
@@ -120,7 +121,36 @@ Using the Responses API directly would bypass Codex's local coding-agent runtime
 
 ## Data Model
 
-Add migration `048`:
+Add migration `048`.
+
+Session defaults need their own storage. The existing `sessions.substrate` column only captures the Claude-era quick-session runtime (`'sdk' | 'interactive'`) and cannot represent Codex provider state or `codex-pty` without silently dropping the new `SessionAgentConfig` shape.
+
+Add session columns:
+
+```sql
+ALTER TABLE sessions
+  ADD COLUMN agent_provider TEXT NOT NULL DEFAULT 'claude'
+    CHECK (agent_provider IN ('claude','codex'));
+
+ALTER TABLE sessions
+  ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk'
+    CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk','codex-pty'));
+
+ALTER TABLE sessions
+  ADD COLUMN agent_model TEXT;
+
+UPDATE sessions
+SET agent_runtime =
+  CASE substrate
+    WHEN 'interactive' THEN 'claude-interactive'
+    ELSE 'claude-sdk'
+  END
+WHERE agent_provider = 'claude';
+```
+
+`sessions.agent_runtime` should use `SessionAgentRuntime`, not the narrower workflow runtime set. `codex-pty` is valid here because it is a quick-session runtime. `codex-exec` is not valid here because it remains an internal diagnostic runner.
+
+Add workflow run columns:
 
 ```sql
 ALTER TABLE workflow_runs
@@ -142,7 +172,9 @@ WHERE agent_provider = 'claude';
 
 Keep model in `workflow_runs.model`, but interpret it as provider-scoped. The label renderer should use `(agent_provider, model)` rather than a single global model label map.
 
-For v1, keep provider/runtime/model run-scoped. This gets one Codex-backed workflow running end to end before Cyboflow takes on the extra UI and resolver complexity of mixed-provider steps. `workflow_runs.agent_runtime` should use `WorkflowAgentRuntime`, not the broader session runtime set.
+Keep session default model in `sessions.agent_model`, also interpreted as provider-scoped. If null, the effective session model is "auto/default for the selected runtime."
+
+For v1, keep workflow provider/runtime/model run-scoped. This gets one Codex-backed workflow running end to end before Cyboflow takes on the extra UI and resolver complexity of mixed-provider steps. `workflow_runs.agent_runtime` should use `WorkflowAgentRuntime`, not the broader session runtime set.
 
 For the fast-follow mixed-provider workflow work, add step-scoped agent configuration to workflow definitions or workflow run steps:
 
@@ -204,7 +236,7 @@ external_session_id TEXT
 Later cleanup:
 
 - Rename UI-facing `substrate` labels to runtime.
-- Keep `substrate` as a compatibility field for old run rows and tests until all callers move to provider/runtime.
+- Keep `sessions.substrate` and `workflow_runs.substrate` as compatibility fields for old rows and tests until all callers move to provider/runtime.
 
 ## Runtime Architecture
 
@@ -217,7 +249,7 @@ The session record owns the default runtime agent:
 ```ts
 interface SessionAgentConfig {
   provider: AgentProvider;
-  runtime: AgentRuntime;
+  runtime: SessionAgentRuntime;
   model?: string;
   permissionMode: PermissionMode;
 }
@@ -554,10 +586,10 @@ Exit criteria:
 ### Phase 1: Schema And UI Plumbing
 
 - Add provider/runtime shared types.
-- Add DB migration.
+- Add DB migration for both `sessions` and `workflow_runs`.
 - Add tRPC input fields with Claude defaults.
 - Add provider selector UI.
-- Add session default agent config.
+- Add session default agent config backed by `sessions.agent_provider`, `sessions.agent_runtime`, and `sessions.agent_model`.
 - Add runtime capability guards so `codex-pty` is valid for quick sessions but invalid for workflows.
 - Keep workflow agent config run-scoped for v1. Document mixed-provider per-step config as a fast-follow, not as required v1 schema.
 - Keep all launches defaulting to Claude SDK.
@@ -568,6 +600,7 @@ Exit criteria:
 
 - Existing tests pass.
 - Existing Claude runs are byte-identical except for new read-model fields.
+- Existing `sessions.substrate` and `workflow_runs.substrate` rows backfill to equivalent Claude provider/runtime values.
 - Existing model alias behavior remains unchanged for Claude.
 - Codex model choices do not pass through Claude-scoped alias resolution.
 - Workflow launch validation rejects `codex-pty`.
@@ -634,7 +667,7 @@ Exit criteria:
 Add focused unit coverage first:
 
 - Provider/runtime resolver.
-- DB migration parity.
+- DB migration parity for `sessions` and `workflow_runs`.
 - Provider-scoped model alias resolution.
 - Codex event normalizer fixtures.
 - Provider-neutral `AgentStreamEvent` projection.
