@@ -126,6 +126,12 @@ vi.mock('../../../trpc/client', () => ({
         onQuestionCreated: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
         onQuestionAnswered: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
       },
+      // Unified review_items inbox — RunPendingInputStrip (mounted inside
+      // RunCenterPane, present regardless of tab) reads this on mount.
+      reviewItems: {
+        list: { query: vi.fn().mockResolvedValue([]) },
+        onReviewItemChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+      },
       // On-demand monitor — the run-chat composer (ChatInput) probes isActive for
       // an SDK run to decide whether to enable the composer. Inactive here, so the
       // composer stays in its default (disabled) state.

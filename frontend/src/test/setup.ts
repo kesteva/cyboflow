@@ -68,6 +68,20 @@ vi.mock('../trpc/client', () => ({
       approvals: {
         listPending: { query: vi.fn().mockResolvedValue([]) },
       },
+      // Live AskUserQuestion queue (questionStore) — RunPendingInputStrip mounts
+      // unconditionally inside RunCenterPane, so any test rendering it needs this
+      // stubbed even without a dedicated trpc mock. Empty by default.
+      questions: {
+        listPending: { query: vi.fn().mockResolvedValue([]) },
+        onQuestionCreated: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+        onQuestionAnswered: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+      },
+      // Unified review_items inbox (reviewItemsSlice) — same rationale: mounted
+      // unconditionally inside RunCenterPane via RunPendingInputStrip.
+      reviewItems: {
+        list: { query: vi.fn().mockResolvedValue([]) },
+        onReviewItemChanged: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },
+      },
     },
   },
 }));

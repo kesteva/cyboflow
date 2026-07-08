@@ -22,6 +22,7 @@ import { CenterPaneTabStrip } from './CenterPaneTabStrip';
 import { FileTabRenderer } from './FileTabRenderer';
 import { ArtifactTabRenderer } from './ArtifactTabRenderer';
 import { TerminalDock } from './TerminalDock';
+import { RunPendingInputStrip } from './RunPendingInputStrip';
 import { useCenterPaneStore, useCenterPaneSession } from '../../stores/centerPaneStore';
 import { ARTIFACT_COLORS, ARTIFACT_GLYPHS } from '../../../../shared/types/artifacts';
 import { useArtifactsList, useSessionArtifactsList } from '../../hooks/useArtifactsList';
@@ -272,6 +273,7 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
         )}
       </div>
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>{renderActiveTab()}</div>
+      <RunPendingInputStrip runId={activeRunId} projectId={projectId} />
       <TerminalDock
         open={session.terminalOpen}
         onToggle={() => toggleTerminal(sessionKey)}
