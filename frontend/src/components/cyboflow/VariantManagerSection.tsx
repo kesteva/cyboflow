@@ -243,20 +243,22 @@ export function VariantManagerSection({
                   Baseline <span className="font-normal text-text-tertiary">(current workflow)</span>
                 </span>
                 <BaselinePill inRotation={baseline.inRotation} />
-                <label className="ml-2 flex items-center gap-1 text-[10px] text-text-tertiary">
-                  Weight
-                  <input
-                    type="number"
-                    min={0}
-                    value={weightValue}
-                    disabled={isBusy}
-                    onChange={(e) => setBaselineWeightDraft(e.target.value)}
-                    onBlur={(e) => void commitBaselineWeight(e.target.value)}
-                    className="w-14 rounded-input border border-border-primary bg-bg-primary px-1.5 py-0.5 text-[11px] text-text-primary"
-                    aria-label="Baseline rotation weight"
-                    data-testid="baseline-weight-input"
-                  />
-                </label>
+                {baseline.inRotation && (
+                  <label className="ml-2 flex items-center gap-1 text-[10px] text-text-tertiary">
+                    Weight
+                    <input
+                      type="number"
+                      min={0}
+                      value={weightValue}
+                      disabled={isBusy}
+                      onChange={(e) => setBaselineWeightDraft(e.target.value)}
+                      onBlur={(e) => void commitBaselineWeight(e.target.value)}
+                      className="w-14 rounded-input border border-border-primary bg-bg-primary px-1.5 py-0.5 text-[11px] text-text-primary"
+                      aria-label="Baseline rotation weight"
+                      data-testid="baseline-weight-input"
+                    />
+                  </label>
+                )}
                 <div className="ml-auto flex items-center gap-1.5">
                   {baseline.inRotation ? (
                     <button
@@ -294,22 +296,24 @@ export function VariantManagerSection({
               >
                 <span className="text-xs font-medium text-text-primary truncate">{variant.label}</span>
                 <StatusPill status={variant.status} />
-                <label className="ml-2 flex items-center gap-1 text-[10px] text-text-tertiary">
-                  Weight
-                  <input
-                    type="number"
-                    min={0}
-                    value={weightValue}
-                    disabled={isBusy}
-                    onChange={(e) =>
-                      setWeightDrafts((prev) => ({ ...prev, [variant.id]: e.target.value }))
-                    }
-                    onBlur={(e) => void commitWeight(variant.id, e.target.value)}
-                    className="w-14 rounded-input border border-border-primary bg-bg-primary px-1.5 py-0.5 text-[11px] text-text-primary"
-                    aria-label={`${variant.label} rotation weight`}
-                    data-testid={`variant-weight-input-${variant.id}`}
-                  />
-                </label>
+                {variant.status === 'active' && (
+                  <label className="ml-2 flex items-center gap-1 text-[10px] text-text-tertiary">
+                    Weight
+                    <input
+                      type="number"
+                      min={0}
+                      value={weightValue}
+                      disabled={isBusy}
+                      onChange={(e) =>
+                        setWeightDrafts((prev) => ({ ...prev, [variant.id]: e.target.value }))
+                      }
+                      onBlur={(e) => void commitWeight(variant.id, e.target.value)}
+                      className="w-14 rounded-input border border-border-primary bg-bg-primary px-1.5 py-0.5 text-[11px] text-text-primary"
+                      aria-label={`${variant.label} rotation weight`}
+                      data-testid={`variant-weight-input-${variant.id}`}
+                    />
+                  </label>
+                )}
                 <div className="ml-auto flex items-center gap-1.5">
                   <button
                     type="button"

@@ -11,28 +11,32 @@
 -- This adds two columns to `workflows` so the baseline can join rotation on equal
 -- footing with variants:
 --   - baseline_in_rotation  (0/1) — whether the live baseline participates in the
---     weighted rotation pool. DEFAULT 0 = OFF, preserving the pre-054 behaviour
---     exactly (activating a variant still yields 100% variant until the user opts the
---     baseline in). This is the baseline's analogue of workflow_variants.status:
---     'active'.
+--     weighted rotation pool. DEFAULT 1 = the baseline is the CHAMPION and is ON by
+--     default (a challenger variant is added ALONGSIDE it, not in place of it). The
+--     baseline is the workflow's live definition and is always the fallback when no
+--     variant is active, so defaulting it into rotation is the champion/challenger
+--     model users expect. This is the baseline's analogue of
+--     workflow_variants.status:'active' — except variants default to draft (OFF) and
+--     the baseline defaults to in-rotation (ON).
 --   - baseline_rotation_weight (INTEGER) — the baseline's share of the weighted pick
 --     when in rotation (analogue of workflow_variants.weight). DEFAULT 1.
 --
 -- The VariantResolver reads these and, when baseline_in_rotation=1 AND weight>0, adds
 -- a synthetic baseline candidate to the weighted pick; if the baseline candidate wins
 -- the run launches with variant_id NULL (live spec), i.e. the existing zero-behaviour
--- baseline path. "Switch to randomized" from a baseline-vs-variant experiment turns
--- this on for the workflow (and activates the variant arm).
+-- baseline path. With NO active variants the pool is baseline-only → 100% baseline
+-- (no behaviour change until the user activates a variant). "Switch to randomized"
+-- from a baseline-vs-variant experiment leaves this on and activates the variant arm.
 --
--- No backfill needed: DEFAULT 0/1 gives every existing workflow the pre-054 semantics.
--- PRAGMA foreign_keys is OFF during migration (database.ts); ALTER ADD COLUMN is
--- idempotent via the filename-keyed ledger and runs inside runFileBasedMigrations'
--- transaction wrapper.
+-- No backfill needed: DEFAULT 1/1 puts every existing workflow's baseline in rotation
+-- with weight 1 (harmless until a variant is activated). PRAGMA foreign_keys is OFF
+-- during migration (database.ts); ALTER ADD COLUMN is idempotent via the
+-- filename-keyed ledger and runs inside runFileBasedMigrations' transaction wrapper.
 --
 -- ⚠️ MIGRATION-NUMBER COLLISION: numbers through 053 were claimed at various points by
 -- sibling branches (see the collision notes on 049-053). The ledger is filename-keyed;
 -- whichever branch lands second must renumber. The integrator MUST verify no other
 -- 054_*.sql exists at merge time (`ls main/src/database/migrations/`).
 
-ALTER TABLE workflows ADD COLUMN baseline_in_rotation INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workflows ADD COLUMN baseline_in_rotation INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE workflows ADD COLUMN baseline_rotation_weight INTEGER NOT NULL DEFAULT 1;

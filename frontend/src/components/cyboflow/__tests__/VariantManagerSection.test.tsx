@@ -153,9 +153,9 @@ describe('VariantManagerSection', () => {
     });
   });
 
-  it('(e) committing a weight edit (blur) calls variants.update with the parsed weight', async () => {
+  it('(e) committing a weight edit (blur) on an ACTIVE variant calls variants.update with the parsed weight', async () => {
     mockUseWorkflowVariants.mockReturnValue({
-      variants: [makeVariant({ weight: 1 })],
+      variants: [makeVariant({ weight: 1, status: 'active' })],
       baseline: null,
       loading: false,
       error: null,
@@ -170,6 +170,19 @@ describe('VariantManagerSection', () => {
       expect(mockUpdate).toHaveBeenCalledWith({ variantId: 'wfv_1', weight: 5 });
     });
     expect(mockInvalidate).toHaveBeenCalledWith('wf-1');
+  });
+
+  it('(e2) a DRAFT (not-in-rotation) variant hides the weight field entirely', () => {
+    mockUseWorkflowVariants.mockReturnValue({
+      variants: [makeVariant({ status: 'draft' })],
+      baseline: null,
+      loading: false,
+      error: null,
+    });
+    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+
+    expect(screen.queryByTestId('variant-weight-input-wfv_1')).not.toBeInTheDocument();
+    expect(screen.getByTestId('variant-activate-button-wfv_1')).toBeInTheDocument();
   });
 
   it('(f) delete happy path calls variants.delete then invalidates', async () => {
@@ -257,8 +270,23 @@ describe('VariantManagerSection', () => {
     expect(screen.getByTestId('variant-row-baseline')).toHaveTextContent('Baseline');
     expect(screen.getByTestId('baseline-status-pill')).toHaveTextContent('Baseline');
     expect(screen.getByTestId('baseline-activate-button')).toBeInTheDocument();
+    // Out of rotation → the weight field is hidden.
+    expect(screen.queryByTestId('baseline-weight-input')).not.toBeInTheDocument();
     // Still surfaces the "no variants yet" hint alongside the baseline row.
     expect(screen.getByTestId('variant-manager-empty-hint')).toBeInTheDocument();
+  });
+
+  it('(k2) an IN-ROTATION baseline shows its weight field', () => {
+    mockUseWorkflowVariants.mockReturnValue({
+      variants: [],
+      baseline: { inRotation: true, weight: 2 },
+      loading: false,
+      error: null,
+    });
+    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+
+    expect(screen.getByTestId('baseline-status-pill')).toHaveTextContent('In rotation');
+    expect(screen.getByTestId('baseline-weight-input')).toBeInTheDocument();
   });
 
   it('(l) baseline "Add to rotation" calls setBaselineRotation({ inRotation: true }) then invalidates', async () => {

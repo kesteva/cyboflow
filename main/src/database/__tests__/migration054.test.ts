@@ -3,8 +3,9 @@
  *
  * 054 adds `baseline_in_rotation` (0/1) + `baseline_rotation_weight` (INTEGER) to
  * `workflows` so the live BASELINE can join randomized rotation on equal footing
- * with active variants. DEFAULT 0/1 preserves the pre-054 behaviour exactly (the
- * baseline is out of rotation until the user opts it in), so no backfill is needed.
+ * with active variants. DEFAULT 1/1 puts the baseline in rotation by default (the
+ * champion): harmless until a variant is activated (baseline-only pool → 100%
+ * baseline), so no backfill is needed.
  *
  * Applies against a minimal workflows table via the production transaction wrapper.
  */
@@ -50,14 +51,14 @@ describe('Migration 054: workflows baseline rotation columns', () => {
     db.close();
   });
 
-  it('DEFAULTs existing rows to out-of-rotation (0) with weight 1', () => {
+  it('DEFAULTs existing rows to in-rotation (1) with weight 1 (baseline is the champion)', () => {
     const db = buildDb();
     db.prepare("INSERT INTO workflows (id, project_id, name) VALUES ('wf-1', 1, 'planner')").run();
     runMigrationViaProductionPath(db, readMigration('054_baseline_rotation.sql'));
     const row = db
       .prepare('SELECT baseline_in_rotation AS inR, baseline_rotation_weight AS w FROM workflows WHERE id = ?')
       .get('wf-1') as { inR: number; w: number };
-    expect(row.inR).toBe(0);
+    expect(row.inR).toBe(1);
     expect(row.w).toBe(1);
     db.close();
   });

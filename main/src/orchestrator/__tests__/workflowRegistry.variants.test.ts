@@ -33,8 +33,9 @@ function setupDb(): Database.Database {
     );
     CREATE UNIQUE INDEX idx_workflow_variants_wf_label ON workflow_variants(workflow_id, label);
   `);
-  // Migration 054: the baseline rotation-participation columns on workflows.
-  db.exec('ALTER TABLE workflows ADD COLUMN baseline_in_rotation INTEGER NOT NULL DEFAULT 0');
+  // Migration 054: the baseline rotation-participation columns on workflows (the
+  // baseline is the champion — in rotation by DEFAULT 1).
+  db.exec('ALTER TABLE workflows ADD COLUMN baseline_in_rotation INTEGER NOT NULL DEFAULT 1');
   db.exec('ALTER TABLE workflows ADD COLUMN baseline_rotation_weight INTEGER NOT NULL DEFAULT 1');
   // A built-in planner workflow with the empty live spec (resolves to the static graph).
   db.prepare("INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, NULL, 'planner', '{}')").run(WF_PLANNER);
@@ -139,8 +140,8 @@ describe('WorkflowRegistry variants', () => {
 
   // -- Baseline rotation participation (migration 054) ------------------------
 
-  it('getBaselineRotation defaults to off with weight 1', () => {
-    expect(registry.getBaselineRotation(WF_PLANNER)).toEqual({ inRotation: false, weight: 1 });
+  it('getBaselineRotation defaults to IN rotation with weight 1 (baseline is the champion)', () => {
+    expect(registry.getBaselineRotation(WF_PLANNER)).toEqual({ inRotation: true, weight: 1 });
   });
 
   it('getBaselineRotation returns null for a missing workflow', () => {

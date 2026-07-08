@@ -23,6 +23,9 @@ function makeDb(): Database.Database {
     CREATE TABLE workflows (
       id TEXT PRIMARY KEY, project_id INTEGER, name TEXT NOT NULL,
       spec_json TEXT NOT NULL DEFAULT '{}',
+      -- Fixture pins the baseline OUT of rotation by default (production defaults it IN
+      -- via migration 054) so the variant-rotation tests below isolate pure variant
+      -- picks; the 'baseline rotation participation' describe block opts it in explicitly.
       baseline_in_rotation INTEGER NOT NULL DEFAULT 0,
       baseline_rotation_weight INTEGER NOT NULL DEFAULT 1
     );
@@ -177,7 +180,10 @@ describe('VariantResolver', () => {
       ).run(weight, workflowId);
     }
 
-    it('does NOT include the baseline by default — activating a variant is 100% variant', () => {
+    it('excludes the baseline from the pool when it is out of rotation (100% variant)', () => {
+      // The test fixture pins baseline_in_rotation=0 (see makeDb) to isolate variant
+      // rotation; PRODUCTION defaults the baseline IN (migration 054), covered by the
+      // migration054 + workflowRegistry.variants tests.
       seedVariant(db, 'v1', { weight: 1, status: 'active' });
       // rng()=0.99 would land in the baseline slice IF the baseline were in the pool.
       const resolver = new VariantResolver(dbAdapter(db), () => 0.99);
