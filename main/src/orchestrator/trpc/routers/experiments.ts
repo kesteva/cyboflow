@@ -542,6 +542,16 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
     rerunOfExperimentId: input.rerunOfExperimentId ?? null,
   });
 
+  // Seed-clone ids created in step 5, tracked in FUNCTION scope so the rollback
+  // ladder can sweep clones that were created but whose ids are not yet persisted
+  // (setExperimentRuns / insertExperimentSeedTasks) when a later clone or mapping
+  // insert throws — reading them back from the experiments row / mapping table (as
+  // the ladder does for the committed case) would miss exactly those orphans.
+  let createdIdeaCloneA: string | null = null;
+  let createdIdeaCloneB: string | null = null;
+  const createdTaskClonesA: string[] = [];
+  const createdTaskClonesB: string[] = [];
+
   // Everything past here is compensated on failure via the rollback ladder.
   const rollback = async (detail: string): Promise<never> => {
     const cur = getExperiment(db, exp.id);
@@ -562,20 +572,22 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
       .deleteExperimentArmEntities(input.projectId, {
         experimentId: exp.id,
         runId: cur?.run_a_id ?? '',
-        seedCloneId: cur?.seed_idea_clone_a_id,
+        seedCloneId: createdIdeaCloneA ?? cur?.seed_idea_clone_a_id,
         // Seed TASK clones (migration 051) are created in step 5 BEFORE either arm
         // launches, so an arm can own tagged clones even when its run was never
-        // stamped — sweep them via the mapping table (empty for an idea-seeded /
-        // pre-clone abort).
-        seedTaskCloneIds: seedTaskCloneIdsForArm(db, exp.id, 'A'),
+        // stamped. Prefer the function-scope list (populated the instant each clone
+        // is created) over the mapping table, which is written only AFTER both arms'
+        // clones exist — so a failure mid-clone leaves the mapping empty but the
+        // orphans still tracked here.
+        seedTaskCloneIds: createdTaskClonesA.length > 0 ? createdTaskClonesA : seedTaskCloneIdsForArm(db, exp.id, 'A'),
       })
       .catch(() => {});
     await deps.taskChangeRouter
       .deleteExperimentArmEntities(input.projectId, {
         experimentId: exp.id,
         runId: cur?.run_b_id ?? '',
-        seedCloneId: cur?.seed_idea_clone_b_id,
-        seedTaskCloneIds: seedTaskCloneIdsForArm(db, exp.id, 'B'),
+        seedCloneId: createdIdeaCloneB ?? cur?.seed_idea_clone_b_id,
+        seedTaskCloneIds: createdTaskClonesB.length > 0 ? createdTaskClonesB : seedTaskCloneIdsForArm(db, exp.id, 'B'),
       })
       .catch(() => {});
     deleteExperimentSeedTasks(db, exp.id);
@@ -588,30 +600,28 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
     //    task-seeded → one hidden, approved task clone per selected task per arm,
     //    recorded in the experiment_seed_tasks mapping. The two are mutually
     //    exclusive (validated in 1c), so at most one branch runs.
-    let cloneA: string | null = null;
-    let cloneB: string | null = null;
-    let taskCloneIdsA: string[] | null = null;
-    let taskCloneIdsB: string[] | null = null;
     if (seed) {
-      cloneA = await cloneSeedIdea(deps, input.projectId, exp.id, seed);
-      cloneB = await cloneSeedIdea(deps, input.projectId, exp.id, seed);
-      setExperimentRuns(db, exp.id, { seedIdeaCloneAId: cloneA, seedIdeaCloneBId: cloneB });
+      // Assign each clone id the instant it is created so a failure on the SECOND
+      // create (or later) still exposes the first to the rollback ladder.
+      createdIdeaCloneA = await cloneSeedIdea(deps, input.projectId, exp.id, seed);
+      createdIdeaCloneB = await cloneSeedIdea(deps, input.projectId, exp.id, seed);
+      setExperimentRuns(db, exp.id, { seedIdeaCloneAId: createdIdeaCloneA, seedIdeaCloneBId: createdIdeaCloneB });
     } else if (seedTasks) {
-      taskCloneIdsA = [];
-      for (const st of seedTasks) taskCloneIdsA.push(await cloneSeedTask(deps, input.projectId, exp.id, st));
-      taskCloneIdsB = [];
-      for (const st of seedTasks) taskCloneIdsB.push(await cloneSeedTask(deps, input.projectId, exp.id, st));
+      // Push each clone id as it is created (BEFORE the mapping insert) so a mid-loop
+      // OR mapping-insert failure leaves every created clone tracked for rollback.
+      for (const st of seedTasks) createdTaskClonesA.push(await cloneSeedTask(deps, input.projectId, exp.id, st));
+      for (const st of seedTasks) createdTaskClonesB.push(await cloneSeedTask(deps, input.projectId, exp.id, st));
       insertExperimentSeedTasks(
         db,
         exp.id,
         'A',
-        seedTasks.map((st, i) => ({ originalTaskId: st.id, cloneTaskId: (taskCloneIdsA as string[])[i] })),
+        seedTasks.map((st, i) => ({ originalTaskId: st.id, cloneTaskId: createdTaskClonesA[i] })),
       );
       insertExperimentSeedTasks(
         db,
         exp.id,
         'B',
-        seedTasks.map((st, i) => ({ originalTaskId: st.id, cloneTaskId: (taskCloneIdsB as string[])[i] })),
+        seedTasks.map((st, i) => ({ originalTaskId: st.id, cloneTaskId: createdTaskClonesB[i] })),
       );
     }
 
@@ -624,11 +634,11 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
       projectPath,
       input.substrate,
       undefined,
-      cloneA ?? undefined,
+      createdIdeaCloneA ?? undefined,
       sessionA.sessionId,
       input.permissionMode,
       undefined,
-      taskCloneIdsA ?? undefined,
+      createdTaskClonesA.length > 0 ? createdTaskClonesA : undefined,
       input.projectId,
       undefined,
       undefined,
@@ -648,11 +658,11 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
       projectPath,
       input.substrate,
       undefined,
-      cloneB ?? undefined,
+      createdIdeaCloneB ?? undefined,
       sessionB.sessionId,
       input.permissionMode,
       undefined,
-      taskCloneIdsB ?? undefined,
+      createdTaskClonesB.length > 0 ? createdTaskClonesB : undefined,
       input.projectId,
       undefined,
       undefined,
@@ -819,14 +829,21 @@ export async function decideExperiment(
       const cloneRow = db.prepare('SELECT body FROM ideas WHERE id = ?').get(winnerCloneId) as
         | { body?: unknown }
         | undefined;
-      const cloneBody = typeof cloneRow?.body === 'string' ? cloneRow.body : null;
-      await deps.taskChangeRouter.applyChange(exp.project_id, {
-        actor: 'orchestrator',
-        entityType: 'idea',
-        taskId: exp.seed_idea_id,
-        fields: { body: cloneBody },
-        kind: 'experiment-promote-fold',
-      });
+      // A MISSING clone row means a prior decide attempt already folded this body and
+      // swept the clone (step 3 runs only AFTER the fold succeeds), then crashed before
+      // stamping 'decided'. Re-folding a now-absent clone's (null) body would WIPE the
+      // user's original idea, so skip — the fold is already durable. Only an existing
+      // clone row is folded (its body may legitimately be null/empty).
+      if (cloneRow !== undefined) {
+        const cloneBody = typeof cloneRow.body === 'string' ? cloneRow.body : null;
+        await deps.taskChangeRouter.applyChange(exp.project_id, {
+          actor: 'orchestrator',
+          entityType: 'idea',
+          taskId: exp.seed_idea_id,
+          fields: { body: cloneBody },
+          kind: 'experiment-promote-fold',
+        });
+      }
     }
 
     // 1b. (sprint task-seeded) Fold each winner TASK clone back onto its ORIGINAL
@@ -839,8 +856,13 @@ export async function decideExperiment(
       const cloneRow = db.prepare('SELECT body AS body, stage_id AS stageId FROM tasks WHERE id = ?').get(
         row.clone_task_id,
       ) as { body?: unknown; stageId?: unknown } | undefined;
-      const cloneBody = typeof cloneRow?.body === 'string' ? cloneRow.body : null;
-      const cloneStageId = typeof cloneRow?.stageId === 'string' ? cloneRow.stageId : undefined;
+      // A MISSING clone row means a prior decide attempt already folded + swept it
+      // (step 3 runs only after the fold succeeds) then crashed before stamping
+      // 'decided'; re-folding a now-null body would WIPE the user's original task.
+      // Skip — the fold is already durable.
+      if (cloneRow === undefined) continue;
+      const cloneBody = typeof cloneRow.body === 'string' ? cloneRow.body : null;
+      const cloneStageId = typeof cloneRow.stageId === 'string' ? cloneRow.stageId : undefined;
       await deps.taskChangeRouter.applyChange(exp.project_id, {
         actor: 'orchestrator',
         entityType: 'task',
@@ -1051,16 +1073,23 @@ export function promoteVariant(
       message: `variant ${variantId} has an invalid spec and cannot be promoted`,
     });
   }
-  deps.adoptWorkflowSpec(exp.workflow_id, definition);
-
   // Retire the now-redundant variant IFF it is spec-only. A variant carrying agent
   // deltas / model / execution-model pins is NOT redundant (the base workflow has
   // no slot for those), so it is kept as a named version.
   const specOnly =
     variant.agent_overrides_json === null && variant.model === null && variant.execution_model === null;
-  if (specOnly) deps.setVariantStatus(variantId, 'retired');
 
-  setExperimentPromotion(db, experimentId, { promotedVariantId: variantId, promotedArm: arm, promotedAt: now });
+  // Adopt the spec, (optionally) retire the variant, and stamp the verdict as ONE
+  // transaction. Without it, a throw AFTER adoptWorkflowSpec would leave the base
+  // workflow already running the promoted spec while the experiment still looks
+  // unpromoted (retryable) — divergent, ambiguous state. All three writes hit the
+  // same connection; updateSpec's own inner transaction nests as a savepoint.
+  const applyPromotion = db.transaction(() => {
+    deps.adoptWorkflowSpec(exp.workflow_id, definition);
+    if (specOnly) deps.setVariantStatus(variantId, 'retired');
+    setExperimentPromotion(db, experimentId, { promotedVariantId: variantId, promotedArm: arm, promotedAt: now });
+  });
+  applyPromotion();
   return { experimentId, promotedVariantId: variantId, promotedArm: arm };
 }
 

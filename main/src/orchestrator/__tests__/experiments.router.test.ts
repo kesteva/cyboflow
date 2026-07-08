@@ -830,4 +830,145 @@ describe('experiments router orchestration (slice B)', () => {
       expect(() => promoteVariant(deps, res.experimentId, 'B')).toThrow(/already promoted/);
     });
   });
+
+  // --- Adversarial-review hardening: rollback of un-persisted clones, fold
+  //     idempotency on decide retry, and promotion atomicity -------------------
+  describe('adversarial-review hardening', () => {
+    it('rollback sweeps a seed IDEA clone created before its id was persisted (clone B create fails)', async () => {
+      const h = makeHarness();
+      const idea = await h.deps.taskChangeRouter.applyChange(1, {
+        actor: 'user', entityType: 'idea', title: 'seed', body: 'orig',
+      });
+      // Fail the SECOND idea seed-clone create — arm A's clone already exists but its
+      // id has NOT been persisted (setExperimentRuns runs only after BOTH clones).
+      let cloneCreates = 0;
+      const failingDeps: ExperimentsDeps = {
+        ...h.deps,
+        taskChangeRouter: {
+          applyChange: (pid, change) => {
+            if (change.kind === 'experiment-seed-clone' && change.entityType === 'idea') {
+              cloneCreates += 1;
+              if (cloneCreates === 2) return Promise.reject(new Error('boom-idea-clone-B'));
+            }
+            return h.deps.taskChangeRouter.applyChange(pid, change);
+          },
+          deleteExperimentArmEntities: (pid, opts) => h.deps.taskChangeRouter.deleteExperimentArmEntities(pid, opts),
+        },
+      };
+
+      await expect(
+        startExperiment(failingDeps, {
+          projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB', seedIdeaId: idea.taskId,
+        }),
+      ).rejects.toThrow(/side-by-side launch failed/);
+
+      const expId = (h.db.prepare('SELECT id FROM experiments').get() as { id: string }).id;
+      expect(getExperiment(dbAdapter(h.db), expId)!.status).toBe('abandoned');
+      // The un-persisted arm-A clone must have been swept — no idea still carries the
+      // experiment tag (with the pre-fix ladder, clone A leaks because the experiments
+      // row never recorded its id).
+      const tagged = h.db.prepare('SELECT COUNT(*) AS n FROM ideas WHERE experiment_id = ?').get(expId) as { n: number };
+      expect(tagged.n).toBe(0);
+      // The user's ORIGINAL seed idea is untouched.
+      expect(exists(h.db, 'ideas', idea.taskId)).toBe(true);
+    });
+
+    it('rollback sweeps seed TASK clones created before the mapping rows exist (arm B clone create fails)', async () => {
+      const h = makeHarness();
+      const t1 = await seedEligibleTask(h, 'T1', 'orig-1');
+      // Fail arm B's clone create — arm A's clone (create + approve) already exists and
+      // the experiment_seed_tasks mapping has NOT been inserted yet.
+      let cloneCreates = 0;
+      const failingDeps: ExperimentsDeps = {
+        ...h.deps,
+        taskChangeRouter: {
+          applyChange: (pid, change) => {
+            if (change.kind === 'experiment-seed-clone' && change.entityType === 'task') {
+              cloneCreates += 1;
+              if (cloneCreates === 2) return Promise.reject(new Error('boom-task-clone-B'));
+            }
+            return h.deps.taskChangeRouter.applyChange(pid, change);
+          },
+          deleteExperimentArmEntities: (pid, opts) => h.deps.taskChangeRouter.deleteExperimentArmEntities(pid, opts),
+        },
+      };
+
+      await expect(
+        startExperiment(failingDeps, {
+          projectId: 1, workflowId: 'wf-sprint', variantAId: 'vA-sprint', variantBId: 'vB-sprint', seedTaskIds: [t1],
+        }),
+      ).rejects.toThrow(/side-by-side launch failed/);
+
+      const expId = (h.db.prepare('SELECT id FROM experiments').get() as { id: string }).id;
+      expect(getExperiment(dbAdapter(h.db), expId)!.status).toBe('abandoned');
+      // Arm A's orphan clone (created before the mapping insert) must be swept via the
+      // function-scope tracking — the mapping table is empty, so the pre-fix ladder
+      // would have missed it.
+      const tagged = h.db.prepare('SELECT COUNT(*) AS n FROM tasks WHERE experiment_id = ?').get(expId) as { n: number };
+      expect(tagged.n).toBe(0);
+      expect(exists(h.db, 'tasks', t1)).toBe(true);
+      expect(field(h.db, 'tasks', t1, 'body')).toBe('orig-1');
+    });
+
+    it('decide retry after the winner TASK clone was already swept does NOT overwrite the original with null', async () => {
+      const h = makeHarness();
+      const t1 = await seedEligibleTask(h, 'T1', 'orig-1');
+      const res = await startExperiment(h.deps, {
+        projectId: 1, workflowId: 'wf-sprint', variantAId: 'vA-sprint', variantBId: 'vB-sprint', seedTaskIds: [t1],
+      });
+      const rows = listExperimentSeedTasks(dbAdapter(h.db), res.experimentId);
+      const cloneA = rows.find((r) => r.arm === 'A')!.clone_task_id;
+      setRunStatus(h.db, res.armA.runId, 'awaiting_review');
+      setRunStatus(h.db, res.armB.runId, 'awaiting_review');
+
+      // Simulate a crashed PRIOR decide: it folded the winner outcome onto the original
+      // and swept the winner clone, but died before stamping 'decided' — the mapping
+      // rows + 'running' status remain, so decide is retried.
+      h.db.prepare('UPDATE tasks SET body = ? WHERE id = ?').run('FOLDED-OUTCOME', t1);
+      h.db.prepare('DELETE FROM tasks WHERE id = ?').run(cloneA);
+
+      const dec = await decideExperiment(h.deps, res.experimentId, res.armA.runId);
+      expect(dec.status).toBe('decided');
+      // The absent clone is SKIPPED, not folded as null — the original keeps its body.
+      expect(field(h.db, 'tasks', t1, 'body')).toBe('FOLDED-OUTCOME');
+    });
+
+    it('decide retry after the winner IDEA clone was already swept does NOT overwrite the original idea with null', async () => {
+      const h = makeHarness();
+      const { res, exp0 } = await settledSeededExperiment(h);
+      const origIdeaId = exp0.seed_idea_id as string;
+      // Simulate a crashed prior decide of arm A: folded onto the original + swept the
+      // winner idea clone, no 'decided' stamp.
+      h.db.prepare('UPDATE ideas SET body = ? WHERE id = ?').run('FOLDED-IDEA', origIdeaId);
+      h.db.prepare('DELETE FROM ideas WHERE id = ?').run(exp0.seed_idea_clone_a_id as string);
+
+      const dec = await decideExperiment(h.deps, res.experimentId, res.armA.runId);
+      expect(dec.status).toBe('decided');
+      expect(field(h.db, 'ideas', origIdeaId, 'body')).toBe('FOLDED-IDEA');
+    });
+
+    it('promoteVariant is atomic: a throw after adoptWorkflowSpec rolls back the adopted spec', async () => {
+      const h = makeHarness();
+      const res = await settledExperiment(h);
+      const specBefore = field(h.db, 'workflows', 'wf', 'spec_json');
+      // A real adoptWorkflowSpec that WRITES the workflow spec, and a setVariantStatus
+      // that throws AFTER it — the promotion transaction must revert the spec write.
+      const deps: ExperimentsDeps = {
+        ...h.deps,
+        getVariant: (id) => (id === 'vA' ? validVariant('vA') : null),
+        adoptWorkflowSpec: (workflowId, definition) => {
+          h.db.prepare('UPDATE workflows SET spec_json = ? WHERE id = ?').run(JSON.stringify(definition), workflowId);
+        },
+        setVariantStatus: () => {
+          throw new Error('boom-retire');
+        },
+      };
+
+      expect(() => promoteVariant(deps, res.experimentId, 'A')).toThrow(/boom-retire/);
+      // The spec write was rolled back with the failing transaction.
+      expect(field(h.db, 'workflows', 'wf', 'spec_json')).toBe(specBefore);
+      // The experiment is left unpromoted (retryable) — no partial verdict.
+      expect(getExperiment(dbAdapter(h.db), res.experimentId)!.promoted_variant_id).toBeNull();
+    });
+  });
 });
