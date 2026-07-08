@@ -7,6 +7,8 @@
  * main/src/orchestrator/reviewItemRouter.ts must all match these shapes
  * field-for-field. entitySchemaParity.test.ts pins ReviewItemRow <-> the table.
  *
+ * (This module stays runtime-free; the QuestionPayload import below is type-only.)
+ *
  * The review queue is the unified human-attention inbox. Five item kinds funnel
  * into one table:
  *   - finding      — non-blocking observation emitted by a Sprint agent (P3).
@@ -28,6 +30,8 @@
 // ---------------------------------------------------------------------------
 // Scalar enums
 // ---------------------------------------------------------------------------
+
+import type { QuestionPayload } from './questions';
 
 /** The five review-item kinds (DB CHECK on review_items.kind). */
 export type ReviewItemKind = 'finding' | 'permission' | 'decision' | 'human_task' | 'notification';
@@ -142,14 +146,31 @@ export interface PermissionPayload {
 }
 
 /**
- * Decision payload — an approve-idea / approve-plan gate. `gate` discriminates
- * which gate opened it; resolving auto-resumes the run (P4, aggregate-unblock).
+ * Decision payload — an approve-idea / approve-plan gate, OR an
+ * ask-user-question-recovery gate. `gate` discriminates which gate opened it;
+ * resolving auto-resumes the run (P4, aggregate-unblock).
+ *
+ * `ask-user-question-recovery` is a DURABLE fallback for the SDK substrate: when
+ * an in-turn `AskUserQuestion` gate fails (the SDK control channel intermittently
+ * drops with "Stream closed"), the agent degrades to a free-text question and its
+ * turn drains — the run would otherwise rest in `awaiting_review` and render as
+ * "Workflow complete", stranding the human decision. Detecting the failed
+ * tool_result in the stream synthesizes THIS gate instead, carrying the original
+ * `recoveredQuestions` so the review queue can re-offer the same options; picking
+ * one resolves the item AND re-drives the run with the chosen answer as a resumed
+ * turn. See main/src/orchestrator/askUserQuestionFailureDetector.ts.
  */
 export interface DecisionPayload {
   kind: 'decision';
-  gate: 'approve-idea' | 'approve-plan';
+  gate: 'approve-idea' | 'approve-plan' | 'ask-user-question-recovery';
   /** Optional summary the gate wants the human to confirm. */
   summary?: string;
+  /**
+   * Only for `gate: 'ask-user-question-recovery'`: the original AskUserQuestion
+   * payload the SDK gate failed to surface, so the review UI can re-offer the
+   * exact same questions/options. The chosen option label becomes the resume text.
+   */
+  recoveredQuestions?: QuestionPayload[];
 }
 
 /**

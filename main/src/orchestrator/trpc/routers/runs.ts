@@ -30,6 +30,7 @@ import type { SprintLaneRow, SprintLaneChangedEvent } from '../../../../../share
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../../shared/types/sprintBatch';
 import { sprintLaneEvents, sprintLaneChannel, SprintLaneStore } from '../../sprintLaneStore';
 import { countPendingBlockingReviewItems } from '../../reviewItemListing';
+import { ReviewItemRouter } from '../../reviewItemRouter';
 import { ApprovalRouter } from '../../approvalRouter';
 import { QuestionRouter } from '../../questionRouter';
 import { TaskChangeRouter } from '../../taskChangeRouter';
@@ -1525,6 +1526,71 @@ export const runsRouter = router({
         });
       }
       return nudgeRunHandler(input.runId, input.text, nudgeRunDeps);
+    }),
+
+  /**
+   * Answer an `ask-user-question-recovery` decision gate: resolve the blocking
+   * review item AND re-drive the run with the chosen answer as a resumed turn.
+   *
+   * This backs the durable fallback for a dropped SDK AskUserQuestion gate (see
+   * ClaudeCodeManager.synthesizeAskUserQuestionRecoveryGate). A plain
+   * reviewItems.resolve is NOT enough here: its aggregate-unblock path uses
+   * HumanStepManager.maybeResumeRun, which only flips a run's status and cannot
+   * re-spawn a DRAINED SDK turn (there is no live walk to wake). So we resolve
+   * the item directly (clearing the blocking gate) and then use the nudge
+   * primitive (execute + `--resume`) with the chosen option label as the reply —
+   * exactly the answer the agent's degraded free-text gate was waiting on.
+   *
+   * Order matters: resolve FIRST so countPendingBlockingReviewItems hits 0,
+   * otherwise nudge would refuse with `{ noOp: 'blocked' }`.
+   *
+   * Idempotent / defensive: a non-recovery item, an already-resolved item, or an
+   * item with no run binding returns a `noOp` without touching the run.
+   */
+  answerRecoveryGate: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.number().int().positive(),
+        reviewItemId: z.string().min(1),
+        answerText: z.string().min(1),
+      }),
+    )
+    .mutation(async ({ ctx, input }): Promise<{ resolved: boolean; nudge: NudgeRunResult }> => {
+      if (!nudgeRunDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'nudge dependencies not wired yet. Call setNudgeRunDeps() at boot.',
+        });
+      }
+      if (!ctx.db) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
+      }
+      const item = ctx.db
+        .prepare(
+          'SELECT run_id AS runId, kind, source, status FROM review_items WHERE id = ? AND project_id = ?',
+        )
+        .get(input.reviewItemId, input.projectId) as
+        | { runId?: string | null; kind?: string; source?: string | null; status?: string }
+        | undefined;
+
+      if (!item || item.kind !== 'decision' || item.source !== 'gate:ask-user-question-recovery') {
+        return { resolved: false, nudge: { noOp: true, reason: 'not_found' } };
+      }
+      if (!item.runId) {
+        return { resolved: false, nudge: { noOp: true, reason: 'not_found' } };
+      }
+      // Resolve first (idempotent: applyReviewItem guards on status='pending', so a
+      // double-answer is a silent no-op) so the blocking gate clears before nudge.
+      if (item.status === 'pending') {
+        await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
+          op: 'resolve',
+          actor: 'user',
+          reviewItemId: input.reviewItemId,
+          resolution: input.answerText,
+        });
+      }
+      const nudge = await nudgeRunHandler(item.runId, input.answerText, nudgeRunDeps);
+      return { resolved: true, nudge };
     }),
 
   /**

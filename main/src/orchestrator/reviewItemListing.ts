@@ -35,6 +35,7 @@ import type {
   FindingProposedTarget,
   FindingPriority,
 } from '../../../shared/types/reviews';
+import type { QuestionPayload } from '../../../shared/types/questions';
 import { ReviewItemRouter, type ReviewItemDbRow } from './reviewItemRouter';
 
 /** The (entity_type, entity_id) entity_events key reused for review items (mirrors reviewItemRouter). */
@@ -189,6 +190,53 @@ export interface CoWriteDecisionArgs {
   payload?: DecisionPayload | null;
   /** ISO timestamp shared with the enclosing transaction's other writes. */
   now: string;
+}
+
+/**
+ * `review_items.source` for a durable AskUserQuestion recovery gate. A distinct
+ * value (NOT 'question') so it flows through the normal reviewItems.resolve /
+ * runs.answerRecoveryGate path — assertNotOpenQuestionGate only special-cases
+ * source==='question' (which has a live hook awaiting a promise; a recovery gate
+ * never does — its SDK session has ended).
+ */
+export const ASK_USER_QUESTION_RECOVERY_SOURCE = 'gate:ask-user-question-recovery';
+
+/**
+ * Build the {@link CoWriteDecisionArgs} for a DURABLE AskUserQuestion recovery
+ * gate — the single source of truth both mint sites share:
+ *   - ClaudeCodeManager.synthesizeAskUserQuestionRecoveryGate (the gate FAILED
+ *     in-turn with "Stream closed" and never opened), and
+ *   - QuestionRouter.clearPendingForRun (the gate opened but its SDK session
+ *     EXPIRED before the human answered).
+ *
+ * Both cases must yield an identical, blocking `decision` item carrying the
+ * original `recoveredQuestions`, so the review UI re-offers the same options and
+ * runs.answerRecoveryGate can re-drive the run with the chosen label. The caller
+ * co-writes it via {@link coWriteDecisionReviewItem} inside its own transaction
+ * and emits the change after commit.
+ */
+export function buildAskUserQuestionRecoveryGate(
+  runId: string,
+  questions: QuestionPayload[],
+  now: string,
+): CoWriteDecisionArgs {
+  const first = questions[0]?.question?.trim();
+  const title = first
+    ? `Answer needed: ${first.length > 80 ? `${first.slice(0, 79)}…` : first}`
+    : 'The agent asked a question — answer to continue';
+  return {
+    runId,
+    title,
+    source: ASK_USER_QUESTION_RECOVERY_SOURCE,
+    payload: {
+      kind: 'decision',
+      gate: 'ask-user-question-recovery',
+      summary:
+        'The in-session question gate ended (SDK "Stream closed" or session expiry). Answer here to resume the run.',
+      recoveredQuestions: questions,
+    },
+    now,
+  };
 }
 
 /**

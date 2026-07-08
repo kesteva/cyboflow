@@ -36,8 +36,10 @@ import { SprintLaneStore } from '../../../orchestrator/sprintLaneStore';
 import { loadMergedPermissionRules, isToolAllowed } from '../../../orchestrator/permissionRules';
 import type { MergedPermissionRules } from '../../../orchestrator/permissionRules';
 import { isAcceptEditsAutoApprovable } from '../../../orchestrator/permissionModeMapper';
-import { ReviewItemRouter, ReviewItemError } from '../../../orchestrator/reviewItemRouter';
+import { ReviewItemRouter, ReviewItemError, emitReviewItemChangedById } from '../../../orchestrator/reviewItemRouter';
 import type { ReviewItemCreate } from '../../../orchestrator/reviewItemRouter';
+import { coWriteDecisionReviewItem, buildAskUserQuestionRecoveryGate } from '../../../orchestrator/reviewItemListing';
+import { AskUserQuestionFailureDetector } from '../../../orchestrator/askUserQuestionFailureDetector';
 import { DynamicWorkflowTracker } from '../../../orchestrator/dynamicWorkflows';
 import type { PermissionPayload } from '../../../../../shared/types/reviews';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
@@ -60,9 +62,21 @@ import { isPermissionMode, type PermissionMode } from '../../../../../shared/typ
  * Human gates (AskUserQuestion sign-off, permission approvals) legitimately sit
  * unanswered for a long time; the CLI's default hook timeout is 600s, which
  * killed a ship run's final sign-off gate after exactly 10 minutes (2026-07-05).
- * 24h is effectively "wait for the human" without being literally unbounded.
+ *
+ * A human must be able to answer a gate hours or DAYS later, so this is pushed to
+ * its safe ceiling: the CLI arms the hook via setTimeout(seconds * 1000), and
+ * Node clamps a delay above ~2^31-1 ms (~24.8 days) to fire IMMEDIATELY — so
+ * anything larger would paradoxically kill the gate at once. 2,000,000s (~23
+ * days) stays comfortably under that boundary.
+ *
+ * This is only the ceiling for the FAST in-band path (answer flows back into the
+ * live turn). Beyond it — or on any earlier session drop — the gate is NOT lost:
+ * QuestionRouter.clearPendingForRun({ preserveGates }) re-homes the pending gate
+ * into a durable `ask-user-question-recovery` review item that never expires, and
+ * runs.answerRecoveryGate resumes the run when the human finally answers. So the
+ * effective human wait is unbounded; this value only bounds the in-band optimization.
  */
-const PRE_TOOL_USE_HOOK_TIMEOUT_SECONDS = 86_400;
+const PRE_TOOL_USE_HOOK_TIMEOUT_SECONDS = 2_000_000;
 
 /**
  * MODEL-ELIGIBILITY GUARD for native auto-mode.
@@ -926,6 +940,20 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // First-event watchdog (see SDK_FIRST_EVENT_TIMEOUT_MS): armed per attempt,
     // cleared by the first event and in the finally. Report-only — never aborts.
     let firstEventTimer: ReturnType<typeof setTimeout> | null = null;
+    // Durable gate recovery: watch this turn's stream for an AskUserQuestion gate
+    // that failed at the SDK control-channel layer ("Stream closed"). On failure
+    // synthesize a blocking review-queue decision so the run parks as
+    // awaiting-decision instead of silently false-completing. Fires at most once
+    // per turn. Skipped for fan-out lanes (spawnKey ≠ runId) — sprint lanes never
+    // open gates and share a runId, so a lane must not mint a run-level gate.
+    const gateRecoveryDetector =
+      spawnKey === runId
+        ? new AskUserQuestionFailureDetector({
+            onFailure: (questions) =>
+              this.synthesizeAskUserQuestionRecoveryGate(runId, questions),
+            logger: makeLoggerLike(this.logger),
+          })
+        : null;
     try {
       retry: while (true) {
         attempt++;
@@ -1013,6 +1041,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
             // paused on this — fire-and-forget, errors are swallowed.
             this.maybeFoldAutoDenyVisibility(runId, event);
 
+            // Durable gate recovery — feed the typed event through the detector
+            // so an AskUserQuestion gate that failed with "Stream closed" mints a
+            // blocking recovery gate (see synthesizeAskUserQuestionRecoveryGate).
+            gateRecoveryDetector?.handleEvent(typed);
+
             try {
               router.emitForRun(runId, typed);
             } catch (routerErr) {
@@ -1082,7 +1115,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // requestApproval() / requestQuestion() via makePreToolUseHook. STAYS on
       // runId (run-scoped, not per-lane) — see M5 for the fan-out hazard.
       ApprovalRouter.getInstance().clearPendingForRun(runId);
-      QuestionRouter.getInstance().clearPendingForRun(runId);
+      // preserveGates: a CLEAN drain (not aborted) means the SDK session EXPIRED
+      // with a gate still pending — re-home it into a durable recovery gate so the
+      // human can still answer + resume. An ABORT is a user cancel: destroy the
+      // gate with the run. Only for a non-lane spawn (spawnKey === runId); a
+      // fan-out lane must never mint a run-level gate.
+      QuestionRouter.getInstance().clearPendingForRun(runId, {
+        preserveGates: spawnKey === runId && !abortController.signal.aborted,
+      });
       // Remove the run's cyboflow-* command/agent bundle on normal completion
       // (cleanupCliResources only fires on the abort path) — single-sourced with
       // it via removeBundleForSession so the bundleWorktrees entry never leaks.
@@ -1290,6 +1330,57 @@ export class ClaudeCodeManager extends AbstractCliManager {
         }`,
       );
     });
+  }
+
+  /**
+   * Synthesize a DURABLE blocking `decision` review item when an in-turn
+   * AskUserQuestion gate failed at the SDK control-channel layer (see
+   * AskUserQuestionFailureDetector). Without this, the agent's turn drains with
+   * no open gate and the run rests in `awaiting_review` rendering as "Workflow
+   * complete" — the human decision is stranded and unresumable.
+   *
+   * Written SYNCHRONOUSLY via the folded co-write (coWriteDecisionReviewItem)
+   * inside a single transaction — not the async ReviewItemRouter chokepoint — so
+   * the blocking row EXISTS before this turn's stream drains and the run rests.
+   * That closes the race where the run could briefly present as end-eligible (and
+   * `runs.end` — which guards on countPendingBlockingReviewItems — could complete
+   * it) before an async write landed. Emits the change AFTER commit so the
+   * renderer's queue/landing subscriptions refresh, mirroring QuestionRouter.
+   *
+   * The recovery gate carries `recoveredQuestions` so the review UI re-offers the
+   * exact same options; picking one resolves the item AND re-drives the run with
+   * the chosen label as a resumed turn (reviewItems.answerRecoveryGate).
+   *
+   * Fail-soft: a missing project_id (quick session), an absent review_items
+   * table, or any write error is logged and swallowed — a recovery-gate failure
+   * must never crash the run lifecycle.
+   */
+  private synthesizeAskUserQuestionRecoveryGate(
+    runId: string,
+    questions: QuestionPayload[],
+  ): void {
+    try {
+      const now = new Date().toISOString();
+      const args = buildAskUserQuestionRecoveryGate(runId, questions, now);
+
+      let reviewItemId: string | null = null;
+      this.db.transaction(() => {
+        reviewItemId = coWriteDecisionReviewItem(this.db, args);
+      })();
+
+      if (reviewItemId) {
+        emitReviewItemChangedById(this.db, reviewItemId, 'created');
+        this.logger?.info(
+          `[ClaudeCodeManager] synthesized AskUserQuestion recovery gate ${reviewItemId} for run ${runId} (gate dropped mid-turn)`,
+        );
+      }
+    } catch (err) {
+      this.logger?.warn(
+        `[ClaudeCodeManager] AskUserQuestion recovery-gate synthesis failed (fail-soft) for run ${runId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   /**

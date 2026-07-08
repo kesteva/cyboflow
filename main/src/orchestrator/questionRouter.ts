@@ -49,6 +49,7 @@ import {
   resolveReviewItemById,
   hasReviewItemsTable,
   countPendingBlockingReviewItems,
+  buildAskUserQuestionRecoveryGate,
 } from './reviewItemListing';
 import { emitReviewItemChangedById } from './reviewItemRouter';
 import { runStatusEvents } from './trpc/routers/events';
@@ -1111,9 +1112,23 @@ export class QuestionRouter extends EventEmitter {
    *   idempotency with a concurrent respond() that may have already settled the row.
    * - DB errors during shutdown are swallowed with console.warn so they never
    *   surface as unhandled rejections during process teardown.
+   *
+   * `opts.preserveGates` (SDK-session-EXPIRY teardown, NOT a cancel): a human gate
+   * must outlive the SDK call that opened it — the human may answer hours or days
+   * later. When the query's turn drains cleanly with a gate still pending (the SDK
+   * session expired — hook timeout, dropped control channel, or process exit —
+   * before the human answered), we still settle the in-band question row + its
+   * folded 'question' review item (they are dead: no live hook, no live socket),
+   * but we MINT a fresh DURABLE recovery gate carrying the same questions. That
+   * blocking `decision` item keeps the run out of "Workflow complete" and lets
+   * runs.answerRecoveryGate re-drive it via `--resume`. A genuine CANCEL passes
+   * `preserveGates: false` (the default) so the gate is destroyed with the run.
    */
-  clearPendingForRun(runId: string): void {
+  clearPendingForRun(runId: string, opts: { preserveGates?: boolean } = {}): void {
     const emptyAnswer: QuestionAnswer = { answers: {} };
+    const preserveGates = opts.preserveGates === true;
+    // Recovery-gate ids minted below, emitted AFTER the loop's DB writes commit.
+    const mintedRecoveryGateIds: string[] = [];
 
     // Collect entries first, then mutate the map to avoid iterating-while-deleting.
     const toClose: Array<{ questionId: string; entry: PendingEntry }> = [];
@@ -1130,14 +1145,25 @@ export class QuestionRouter extends EventEmitter {
         const now = new Date().toISOString();
         // Guarded UPDATE for idempotency: if respond() already settled the row,
         // status will no longer be 'pending' and changes will be 0 — that is fine.
-        this.db.prepare(
+        const timedOut = this.db.prepare(
           `UPDATE questions SET status = 'timed_out', answered_at = ?
            WHERE id = ? AND status = 'pending'`,
-        ).run(now, questionId);
+        ).run(now, questionId) as { changes: number };
         // Resolve the folded decision review_item too (idempotent).
         if (entry.reviewItemId !== null) {
           resolveReviewItemById(this.db, entry.reviewItemId, 'system', 'run_terminated', now, runId);
           emitReviewItemChangedById(this.db, entry.reviewItemId, 'resolved');
+        }
+        // SDK-session EXPIRY (not cancel): re-home the just-settled gate into a
+        // DURABLE recovery gate so the human decision survives the dead session.
+        // Guarded on `timedOut.changes > 0` so a gate a concurrent respond()
+        // already answered is NOT resurrected as a spurious recovery item.
+        if (preserveGates && timedOut.changes > 0) {
+          const minted = coWriteDecisionReviewItem(
+            this.db,
+            buildAskUserQuestionRecoveryGate(runId, [...entry.request.questions], now),
+          );
+          if (minted !== null) mintedRecoveryGateIds.push(minted);
         }
       } catch (err) {
         // Swallow DB errors during shutdown — do not throw.
@@ -1149,6 +1175,19 @@ export class QuestionRouter extends EventEmitter {
       // Resolve the awaiting Promise — do NOT invoke socketReply.
       entry.resolve(emptyAnswer);
       this.emit('questionAnswered', { questionId, status: 'timed_out' });
+    }
+
+    // Broadcast the durable recovery gates (minted on SDK-session-expiry teardown)
+    // so the review queue / landing subscriptions surface them immediately. After
+    // the loop's writes so a mint never races its own emit.
+    for (const id of mintedRecoveryGateIds) {
+      try {
+        emitReviewItemChangedById(this.db, id, 'created');
+      } catch (err) {
+        console.warn(
+          `[QuestionRouter] clearPendingForRun: recovery-gate emit failed for ${id} (run ${runId}): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
 
     // Settle the OWNING run if it is still wedged at 'awaiting_input'.
