@@ -248,8 +248,13 @@ describe('ExperimentComparisonView', () => {
     expect(screen.getByTestId('experiment-discard-both')).toBeDisabled();
   });
 
-  it('Accept A calls decide with armA.runId and closes the comparison', async () => {
-    getQuery.mockResolvedValue(makeExp());
+  it('Accept A calls decide with armA.runId, keeps the view open, and enables the variant-outcome group', async () => {
+    // Mount sees a not-yet-settled experiment; after decide the re-fetch returns
+    // the settled row so piece 2 ("Which version wins?") enables IN PLACE. The view
+    // must NOT close — that previously stranded the user before the variant decision.
+    getQuery
+      .mockResolvedValueOnce(makeExp())
+      .mockResolvedValue(makeExp({ status: 'decided', winner_run_id: 'run-a', winner_arm: 'A' }));
     getComparisonQuery.mockResolvedValue(makePayload());
     getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
     decideMutate.mockResolvedValue({ experimentId: 'exp_1', status: 'decided', winnerRunId: 'run-a' });
@@ -262,7 +267,14 @@ describe('ExperimentComparisonView', () => {
     await waitFor(() =>
       expect(decideMutate).toHaveBeenCalledWith({ experimentId: 'exp_1', winnerRunId: 'run-a' }),
     );
-    await waitFor(() => expect(closeExperimentComparison).toHaveBeenCalledTimes(1));
+    // View stays open: the changes summary renders and the promote CTAs enable.
+    expect(await screen.findByTestId('experiment-changes-decision-summary')).toHaveTextContent(
+      "Accepted arm A's changes",
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId('experiment-promote-variant-a')).not.toBeDisabled(),
+    );
+    expect(closeExperimentComparison).not.toHaveBeenCalled();
   });
 
   it('Discard both calls decide with winnerRunId: null', async () => {
@@ -364,6 +376,20 @@ describe('ExperimentComparisonView', () => {
 
     render(<ExperimentComparisonView experimentId="exp_1" />);
     expect(await screen.findByTestId('experiment-switch-to-rotation')).toBeDisabled();
+  });
+
+  it('disables "Switch to randomized" with a visible reason when an arm is the baseline', async () => {
+    // Settled experiment, but arm A is the current-workflow baseline (sentinel):
+    // rotation has no variant row to activate for that arm, so the button stays
+    // disabled and an always-visible hint explains why (the hover title is not
+    // discoverable on a greyed control).
+    getQuery.mockResolvedValue(makeExp({ status: 'decided', variant_a_id: '__baseline__' }));
+    getComparisonQuery.mockResolvedValue(makePayload());
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    expect(await screen.findByTestId('experiment-switch-to-rotation')).toBeDisabled();
+    expect(screen.getByTestId('experiment-rotation-baseline-hint')).toBeInTheDocument();
   });
 
   it('"Run another experiment" is disabled until the experiment is settled', async () => {

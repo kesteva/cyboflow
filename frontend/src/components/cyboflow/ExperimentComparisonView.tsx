@@ -225,9 +225,16 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
     setActionError(null);
     try {
       await trpc.cyboflow.experiments.decide.mutate({ experimentId, winnerRunId });
-      useNavigationStore.getState().closeExperimentComparison();
+      // Piece 1 (CHANGES) is now recorded. Keep the comparison OPEN and re-fetch the
+      // experiment so it flips to `decided` (expSettled → true): the Changes group
+      // collapses to its summary line and the piece-2 "Which version wins?" group
+      // (promote / switch-to-rotation / run-again) enables in place. Previously this
+      // closed the view, stranding the user before the variant-outcome decision.
+      const fresh = await trpc.cyboflow.experiments.get.query({ experimentId });
+      setExp(fresh);
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : 'Failed to record the decision');
+    } finally {
       setActionBusy(null);
     }
   };
@@ -575,6 +582,11 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
                 {!expSettled && (
                   <span className="text-xs text-text-muted" data-testid="experiment-variant-outcome-hint">
                     Available once you record a changes decision above.
+                  </span>
+                )}
+                {expSettled && hasBaselineArm && (
+                  <span className="text-xs text-text-muted" data-testid="experiment-rotation-baseline-hint">
+                    Randomized rotation needs two real variants — this experiment ran a variant against the current workflow (baseline), so rotation isn’t available.
                   </span>
                 )}
               </div>
