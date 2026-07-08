@@ -403,4 +403,63 @@ describe('ABTestLaunchModal — sprint (task-driven) workflow', () => {
     await waitFor(() => expect(mockStartSideBySide).toHaveBeenCalledTimes(1));
     expect(mockStartSideBySide.mock.calls[0][0].seedTaskIds.sort()).toEqual(['t1', 't2']);
   });
+
+  // A GLOBAL flow (e.g. sprint) launches with a guessed default project; the
+  // picker (>1 project) lets the user retarget the seed backlog. Switching the
+  // project must re-query tasks for it and thread THAT project id into submit —
+  // this is the fix for "ready tasks exist but none are selectable" when the
+  // default guess pointed at the wrong project.
+  it('project picker: switching project re-queries seed tasks and submits with the picked project id', async () => {
+    // Project 1 has no eligible tasks (the wrong-project default); project 2 does.
+    mockTasksList.mockImplementation(({ projectId }: { projectId: number }) =>
+      Promise.resolve(projectId === 2 ? [eligibleTask('t9', 'TSK-9', 'On project 2')] : []),
+    );
+    render(
+      <ABTestLaunchModal
+        isOpen
+        projectId={1}
+        projects={[
+          { id: 1, name: 'Alpha' },
+          { id: 2, name: 'Beta' },
+        ]}
+        workflowId="wf-1"
+        workflowName="sprint"
+        onClose={vi.fn()}
+      />,
+    );
+
+    // Defaults to project 1 → the empty-state message (no eligible tasks).
+    expect(await screen.findByTestId('ab-test-no-seed-tasks')).toBeInTheDocument();
+
+    // Switch to project 2 → its eligible task appears.
+    fireEvent.change(screen.getByTestId('ab-test-project'), { target: { value: '2' } });
+    expect(await screen.findByTestId('ab-test-seed-task-item-t9')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText('Select TSK-9'));
+    fireEvent.click(screen.getByTestId('ab-test-submit'));
+    await waitFor(() => expect(mockStartSideBySide).toHaveBeenCalledTimes(1));
+    const args = mockStartSideBySide.mock.calls[0][0];
+    expect(args.projectId).toBe(2);
+    expect(args.seedTaskIds).toEqual(['t9']);
+  });
+
+  it('project picker is hidden with 0–1 projects', () => {
+    mockTasksList.mockResolvedValue([]);
+    const { rerender } = render(
+      <ABTestLaunchModal isOpen projectId={1} workflowId="wf-1" workflowName="sprint" onClose={vi.fn()} />,
+    );
+    expect(screen.queryByTestId('ab-test-project')).not.toBeInTheDocument();
+
+    rerender(
+      <ABTestLaunchModal
+        isOpen
+        projectId={1}
+        projects={[{ id: 1, name: 'Alpha' }]}
+        workflowId="wf-1"
+        workflowName="sprint"
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.queryByTestId('ab-test-project')).not.toBeInTheDocument();
+  });
 });

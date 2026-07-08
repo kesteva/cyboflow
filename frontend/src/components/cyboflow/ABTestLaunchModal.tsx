@@ -42,7 +42,20 @@ import { useNavigationStore } from '../../stores/navigationStore';
 
 export interface ABTestLaunchModalProps {
   isOpen: boolean;
+  /**
+   * The default launch project. For a GLOBAL flow (e.g. the built-in `sprint`)
+   * the caller can only guess a project, so the modal renders a project picker
+   * (when {@link projects} has >1 entry) letting the user pick the project whose
+   * backlog the seed tasks/ideas come from. The picked project is threaded into
+   * both the seed query and the experiment submit.
+   */
   projectId: number;
+  /**
+   * All selectable projects (id + name). When more than one is supplied the
+   * modal shows a project picker seeded to {@link projectId}; with 0–1 it stays
+   * hidden and the modal uses {@link projectId} directly.
+   */
+  projects?: { id: number; name: string }[];
   workflowId: string;
   /**
    * The workflow's built-in name. `sprint` is the only task-driven flow (v1): it
@@ -62,11 +75,17 @@ const SEED_TASK_CAP = SPRINT_BATCH_MAX_TASKS.sdk;
 export function ABTestLaunchModal({
   isOpen,
   projectId,
+  projects,
   workflowId,
   workflowName,
   onClose,
 }: ABTestLaunchModalProps): React.JSX.Element {
   const isSprint = workflowName === 'sprint';
+  // The project whose backlog seeds this experiment. Defaults to the caller's
+  // `projectId` (for a GLOBAL flow, a guess); a >1-project picker lets the user
+  // correct it. The modal unmounts on close, so this re-initialises per open.
+  const [selectedProjectId, setSelectedProjectId] = useState<number>(projectId);
+  const showProjectPicker = (projects?.length ?? 0) > 1;
   const { variants, loaded } = useWorkflowVariants(workflowId);
   const options = pickableVariants(variants);
 
@@ -117,8 +136,8 @@ export function ABTestLaunchModal({
     setTasksLoading(true);
     setError(null);
     Promise.all([
-      trpc.cyboflow.tasks.list.query({ projectId }),
-      trpc.cyboflow.tasks.boardsForProject.query({ projectId }),
+      trpc.cyboflow.tasks.list.query({ projectId: selectedProjectId }),
+      trpc.cyboflow.tasks.boardsForProject.query({ projectId: selectedProjectId }),
     ])
       .then(([rows, boards]) => {
         if (cancelled) return;
@@ -150,7 +169,7 @@ export function ABTestLaunchModal({
     return () => {
       cancelled = true;
     };
-  }, [isOpen, isSprint, projectId]);
+  }, [isOpen, isSprint, selectedProjectId]);
 
   const reset = (): void => {
     setSeedIdeaId(null);
@@ -184,6 +203,18 @@ export function ABTestLaunchModal({
     onClose();
   };
 
+  // Switching the project invalidates any prior seed selection (task ids + seed
+  // idea belong to the previous project's backlog); the seed-task effect reloads
+  // for the new project on the next tick.
+  const handleProjectChange = (nextProjectId: number): void => {
+    if (nextProjectId === selectedProjectId) return;
+    setSelectedProjectId(nextProjectId);
+    setSelectedTaskIds(new Set());
+    setSeedTasks([]);
+    setSeedIdeaId(null);
+    setSeedIdeaLabel(null);
+  };
+
   const handleIdeaPicked = (ideaId: string): void => {
     setIdeaPickerOpen(false);
     setSeedIdeaId(ideaId);
@@ -213,7 +244,7 @@ export function ABTestLaunchModal({
     setError(null);
     try {
       const result = await trpc.cyboflow.experiments.startSideBySide.mutate({
-        projectId,
+        projectId: selectedProjectId,
         workflowId,
         variantAId,
         variantBId,
@@ -228,7 +259,7 @@ export function ABTestLaunchModal({
       // navigate straight to it.
       await bootstrapArmSessionPanels(result.armA.sessionId);
       useCyboflowStore.getState().setActiveRun(result.armA.runId, result.armA.sessionId);
-      useNavigationStore.getState().setActiveProjectId(projectId);
+      useNavigationStore.getState().setActiveProjectId(selectedProjectId);
       useNavigationStore.getState().goToSession();
 
       reset();
@@ -249,6 +280,25 @@ export function ABTestLaunchModal({
       <ModalHeader>Run an A/B test</ModalHeader>
       <ModalBody>
         <div className="flex flex-col gap-3">
+          {showProjectPicker && (
+            <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
+              Project
+              <select
+                value={selectedProjectId}
+                onChange={(e) => handleProjectChange(Number(e.target.value))}
+                className="rounded-input border border-border-primary bg-input-bg px-2 py-1.5 text-sm text-input-text"
+                aria-label="Select project"
+                data-testid="ab-test-project"
+              >
+                {projects?.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+
           {!loaded && <p className="text-xs text-text-secondary">Loading variants…</p>}
 
           {insufficientVariants && (
@@ -447,7 +497,7 @@ export function ABTestLaunchModal({
       {ideaPickerOpen && (
         <IdeaPickerModal
           isOpen
-          projectId={projectId}
+          projectId={selectedProjectId}
           onClose={() => setIdeaPickerOpen(false)}
           onPicked={handleIdeaPicked}
         />

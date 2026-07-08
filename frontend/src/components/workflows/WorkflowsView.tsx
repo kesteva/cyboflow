@@ -555,6 +555,7 @@ export function WorkflowsView(): React.JSX.Element {
         <ABTestLaunchModal
           isOpen
           projectId={abTestTarget.projectId}
+          projects={projectList}
           workflowId={abTestTarget.workflowId}
           workflowName={abTestTarget.workflowName}
           onClose={() => setAbTestTarget(null)}
