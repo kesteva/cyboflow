@@ -212,15 +212,41 @@ describe('ReviewItemCard', () => {
     expect(screen.getByTestId('recovery-gate-answer')).toBeInTheDocument();
   });
 
-  it('a recovery gate with no recovered options falls back to the generic gate buttons', () => {
+  it('an OPTION-LESS recovery gate offers a free-text answer, NOT the generic gate buttons (adversarial-review regression)', () => {
     const item = makeItem(
       'decision',
       { id: 'rvw_rec3', blocking: true, source: 'gate:ask-user-question-recovery' },
       { kind: 'decision', gate: 'ask-user-question-recovery', recoveredQuestions: [] },
     );
     render(<ReviewItemCard item={item} />);
-    expect(screen.queryByTestId('recovery-gate-answer')).not.toBeInTheDocument();
-    expect(screen.getByTestId('decision-resolve')).toBeInTheDocument();
+    // Free-text answer path is present…
+    expect(screen.getByTestId('recovery-gate-input')).toBeInTheDocument();
+    expect(screen.getByTestId('recovery-gate-free-answer')).toBeInTheDocument();
+    // …and the generic resolve/dismiss buttons are NOT — those would clear the
+    // gate without delivering the answer (the data-loss hole Codex flagged).
+    expect(screen.queryByTestId('decision-resolve')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('decision-reject')).not.toBeInTheDocument();
+  });
+
+  it('answering an OPTION-LESS recovery gate delivers the typed text via answerRecoveryGate, never reviewItems.resolve', async () => {
+    const item = makeItem(
+      'decision',
+      { id: 'rvw_rec4', blocking: true, source: 'gate:ask-user-question-recovery' },
+      { kind: 'decision', gate: 'ask-user-question-recovery', recoveredQuestions: [] },
+    );
+    const onResolved = vi.fn();
+    render(<ReviewItemCard item={item} onResolved={onResolved} />);
+    // Submit is disabled until the human types something.
+    expect(screen.getByTestId('recovery-gate-free-answer')).toBeDisabled();
+    fireEvent.change(screen.getByTestId('recovery-gate-input'), { target: { value: '  Ship it  ' } });
+    fireEvent.click(screen.getByTestId('recovery-gate-free-answer'));
+    await waitFor(() =>
+      expect(mockAnswerRecovery).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_rec4', answerText: 'Ship it' }),
+    );
+    await waitFor(() => expect(onResolved).toHaveBeenCalled());
+    // The generic triage route is never taken.
+    expect(mockResolve).not.toHaveBeenCalled();
+    expect(mockDismiss).not.toHaveBeenCalled();
   });
 
   it('finding Promote mints a task via promoteToTask', async () => {

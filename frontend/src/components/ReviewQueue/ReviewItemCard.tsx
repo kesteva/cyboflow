@@ -95,20 +95,30 @@ function permissionApprovalId(item: ReviewItem): string | null {
 }
 
 /**
+ * True for a durable `ask-user-question-recovery` decision gate — keyed on the
+ * payload discriminant, INDEPENDENT of whether any options were recovered. A
+ * recovery gate MUST be answered via `runs.answerRecoveryGate` (which delivers the
+ * answer as a `--resume` turn); the generic resolve/dismiss route only flips run
+ * status and would strand a drained SDK session unanswered. So even an option-less
+ * (malformed-payload) recovery gate stays on the recovery answer path, never the
+ * generic Approve/Reject — the backend rejects generic triage on these too.
+ */
+function isRecoveryGate(item: ReviewItem): boolean {
+  if (item.kind !== 'decision') return false;
+  const payload = item.payload;
+  return Boolean(payload && payload.kind === 'decision' && payload.gate === 'ask-user-question-recovery');
+}
+
+/**
  * The recovered AskUserQuestion options for a durable `ask-user-question-recovery`
  * decision gate (empty for any other item). Parsed defensively so a malformed
- * payload degrades to no options — the card then falls back to a plain
- * resolve/dismiss so the gate can still be cleared and the run resumed.
+ * payload degrades to no options — the card then offers a FREE-TEXT answer (still
+ * routed through answerRecoveryGate), never a plain resolve/dismiss.
  */
 function recoveredQuestions(item: ReviewItem): QuestionPayload[] {
-  if (item.kind !== 'decision') return [];
+  if (!isRecoveryGate(item)) return [];
   const payload = item.payload;
-  if (
-    payload &&
-    payload.kind === 'decision' &&
-    payload.gate === 'ask-user-question-recovery' &&
-    Array.isArray(payload.recoveredQuestions)
-  ) {
+  if (payload && payload.kind === 'decision' && Array.isArray(payload.recoveredQuestions)) {
     return payload.recoveredQuestions;
   }
   return [];
@@ -160,6 +170,9 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
   // Set when a recovery-gate resume was REFUSED — the gate stays open and this
   // explains why, so the answer is never silently lost.
   const [recoveryError, setRecoveryError] = React.useState<string | null>(null);
+  // Free-text answer for an OPTION-LESS recovery gate (malformed AskUserQuestion
+  // payload → no recovered options). Still delivered via answerRecoveryGate.
+  const [recoveryText, setRecoveryText] = React.useState('');
 
   const busy = pendingItemId === item.id || approvalBusy;
   // Accept-routing hint (findings only); null = legacy actions, zero change.
@@ -292,29 +305,65 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
         );
       case 'decision': {
         // A durable ask-user-question-recovery gate: the in-session gate dropped
-        // or its SDK session expired, so re-offer the ORIGINAL options here. Each
-        // click resolves the gate AND resumes the run with that label. When the
-        // options are missing (malformed payload) fall back to Approve/Reject so
-        // the gate can still be cleared + the run resumed.
-        const recovered = recoveredQuestions(item);
-        if (recovered.length > 0) {
-          const options = recovered.flatMap((q) => q.options.map((o) => o.label));
-          const unique = Array.from(new Set(options));
+        // or its SDK session expired, so re-offer the ORIGINAL options here. Every
+        // exit routes through answerRecoveryGate (resolve-first/resume-on-delivered)
+        // — NEVER the generic resolve/dismiss, which only flips status and would
+        // strand a drained SDK session unanswered (the false-complete this gate
+        // exists to prevent; the backend rejects generic triage on these too).
+        if (isRecoveryGate(item)) {
+          const recovered = recoveredQuestions(item);
+          if (recovered.length > 0) {
+            // Options survived: re-offer each label; a click answers + resumes.
+            const options = recovered.flatMap((q) => q.options.map((o) => o.label));
+            const unique = Array.from(new Set(options));
+            return (
+              <>
+                {unique.map((label) => (
+                  <Button
+                    key={label}
+                    variant="primary"
+                    size="sm"
+                    disabled={busy}
+                    onClick={() => handleRecoveryAnswer(label)}
+                    data-testid="recovery-gate-answer"
+                  >
+                    {label}
+                  </Button>
+                ))}
+              </>
+            );
+          }
+          // Option-less (malformed payload): still keep the human on the answer
+          // path with a free-text reply delivered via answerRecoveryGate. Falling
+          // back to generic resolve/dismiss here is exactly the data-loss hole.
+          const submit = (): void => {
+            const text = recoveryText.trim();
+            if (text !== '') handleRecoveryAnswer(text);
+          };
           return (
-            <>
-              {unique.map((label) => (
-                <Button
-                  key={label}
-                  variant="primary"
-                  size="sm"
-                  disabled={busy}
-                  onClick={() => handleRecoveryAnswer(label)}
-                  data-testid="recovery-gate-answer"
-                >
-                  {label}
-                </Button>
-              ))}
-            </>
+            <div className="flex flex-1 flex-wrap items-center gap-2">
+              <input
+                type="text"
+                value={recoveryText}
+                onChange={(e) => setRecoveryText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') submit();
+                }}
+                placeholder="Type your answer…"
+                disabled={busy}
+                data-testid="recovery-gate-input"
+                className="min-w-[12rem] flex-1 rounded border border-border-primary bg-bg-secondary px-2 py-1 text-xs text-text-primary"
+              />
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={busy || recoveryText.trim() === ''}
+                onClick={submit}
+                data-testid="recovery-gate-free-answer"
+              >
+                Answer &amp; resume
+              </Button>
+            </div>
           );
         }
         // A question-sourced decision is an OPEN AskUserQuestion: the run is

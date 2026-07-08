@@ -538,6 +538,58 @@ describe('cyboflow.reviewItems open-question guard (regression)', () => {
   });
 });
 
+describe('cyboflow.reviewItems recovery-gate guard (adversarial-review regression)', () => {
+  // A durable ask-user-question-recovery gate must be answered via
+  // runs.answerRecoveryGate (which delivers the answer as a --resume turn), NEVER
+  // through the generic resolve/dismiss route — that only flips status and would
+  // clear the gate while leaving the run unanswered (the false-complete this gate
+  // exists to prevent). Both routes must refuse it and leave it pending.
+  async function seedRecoveryGate(caller: ReturnType<typeof buildCaller>['caller'], db: Database.Database) {
+    db.prepare(`INSERT INTO workflows (id, project_id, name) VALUES ('wf-1-ship', 1, 'ship')`).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, branch_name, status, policy_json)
+       VALUES ('run-rec', 'wf-1-ship', 1, '/w/rec', 'b/rec', 'awaiting_review', '{}')`,
+    ).run();
+    // Option-less recovery gate (the malformed-payload case Codex flagged): still
+    // must not be clearable through generic triage.
+    const created = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create',
+      actor: 'agent:ship',
+      kind: 'decision',
+      title: 'A gate dropped mid-run',
+      source: 'gate:ask-user-question-recovery',
+      blocking: true,
+      runId: 'run-rec',
+    });
+    void caller;
+    return created.reviewItemId;
+  }
+
+  it('rejects resolving a pending recovery gate through generic triage (CONFLICT) + leaves it pending', async () => {
+    const { caller, db } = buildCaller();
+    const reviewItemId = await seedRecoveryGate(caller, db);
+
+    await expect(
+      caller.cyboflow.reviewItems.resolve({ projectId: 1, reviewItemId }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'CONFLICT');
+
+    const row = db.prepare('SELECT status FROM review_items WHERE id = ?').get(reviewItemId) as { status: string };
+    expect(row.status).toBe('pending');
+  });
+
+  it('rejects dismissing a pending recovery gate through generic triage (CONFLICT) + leaves it pending', async () => {
+    const { caller, db } = buildCaller();
+    const reviewItemId = await seedRecoveryGate(caller, db);
+
+    await expect(
+      caller.cyboflow.reviewItems.dismiss({ projectId: 1, reviewItemId }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'CONFLICT');
+
+    const row = db.prepare('SELECT status FROM review_items WHERE id = ?').get(reviewItemId) as { status: string };
+    expect(row.status).toBe('pending');
+  });
+});
+
 describe('cyboflow.reviewItems.promoteToTask (two-chokepoint seam)', () => {
   it('mints a real task via TaskChangeRouter AND resolves the item with promoted:<taskId>', async () => {
     const { caller, db } = buildCaller();

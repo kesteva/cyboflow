@@ -53,6 +53,12 @@ import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../../../../shared/types/cybofl
 const HUMAN_GATE_SOURCE_PREFIX = 'gate:human-step:';
 /** The plan-review gate whose Approve REVEALS the run's pending draft entities. */
 const APPROVE_PLAN_STEP_ID = 'approve-plan';
+/**
+ * Source stamped on a durable AskUserQuestion recovery gate (mirror of
+ * ASK_USER_QUESTION_RECOVERY_SOURCE in reviewItemListing.ts). These gates must be
+ * settled by runs.answerRecoveryGate — never the generic resolve/dismiss route.
+ */
+const ASK_USER_QUESTION_RECOVERY_SOURCE = 'gate:ask-user-question-recovery';
 
 /**
  * The step id encoded in a `gate:human-step:<stepId>` source, or null when the
@@ -233,6 +239,35 @@ function assertNotOpenQuestionGate(db: DatabaseLike, reviewItemId: string, proje
       code: 'CONFLICT',
       message:
         'invalid_status: this decision is an open question — answer it from the session chat; resolving it here would strand the waiting agent',
+    });
+  }
+}
+
+/**
+ * Guard: a PENDING `ask-user-question-recovery` decision gate must be settled by
+ * runs.answerRecoveryGate — which delivers the human's answer to the run as a
+ * `--resume` turn — NEVER by the generic resolve/dismiss triage route. The generic
+ * aggregate-unblock path only flips run status (maybeResumeRun); for a drained /
+ * expired SDK session it never re-spawns the turn with the answer, so clearing the
+ * gate here would leave the run UNANSWERED while the gate disappears — the exact
+ * false-complete this durable gate exists to prevent. The legitimate answer path
+ * resolves via ReviewItemRouter directly, so it bypasses this router-level guard.
+ * Throws CONFLICT so the client routes through answerRecoveryGate instead.
+ */
+function assertNotRecoveryGate(db: DatabaseLike, reviewItemId: string, projectId: number): void {
+  const item = db
+    .prepare('SELECT kind, source, status FROM review_items WHERE id = ? AND project_id = ?')
+    .get(reviewItemId, projectId) as { kind?: string; source?: string | null; status?: string } | undefined;
+  if (
+    item &&
+    item.kind === 'decision' &&
+    item.source === ASK_USER_QUESTION_RECOVERY_SOURCE &&
+    item.status === 'pending'
+  ) {
+    throw new TRPCError({
+      code: 'CONFLICT',
+      message:
+        'invalid_status: this is a recovery gate — answer it via the recovery answer path so the run is actually resumed; it cannot be cleared through generic triage',
     });
   }
 }
@@ -439,6 +474,7 @@ export const reviewItemsRouter = router({
           | undefined;
 
         assertNotOpenQuestionGate(db, input.reviewItemId, input.projectId);
+        assertNotRecoveryGate(db, input.reviewItemId, input.projectId);
 
         const gateStepId = humanGateStepId(before?.kind, before?.source);
         // The stored resolution the WorkflowController parses into its verdict. An
@@ -550,6 +586,7 @@ export const reviewItemsRouter = router({
         .prepare('SELECT run_id AS runId, blocking FROM review_items WHERE id = ? AND project_id = ?')
         .get(input.reviewItemId, input.projectId) as { runId?: string | null; blocking?: number } | undefined;
       assertNotOpenQuestionGate(db, input.reviewItemId, input.projectId);
+      assertNotRecoveryGate(db, input.reviewItemId, input.projectId);
       try {
         const { reviewItemId } = await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
           op: 'dismiss',
