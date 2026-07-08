@@ -41,6 +41,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   const [globalSystemPrompt, setGlobalSystemPrompt] = useState('');
   const [claudeExecutablePath, setClaudeExecutablePath] = useState('');
   const [devMode, setDevMode] = useState(false);
+  // DEV-ONLY: forces the next AskUserQuestion gate to fail so the durable recovery
+  // gate can be exercised live. Hidden in the stable DMG; inert in packaged builds.
+  const [forceAskUserQuestionGateFailure, setForceAskUserQuestionGateFailure] = useState(false);
   const [demoMode, setDemoMode] = useState(false);
   // demoMode is read once at app startup, so the saved value only takes effect
   // after a relaunch — track the loaded value to detect a toggle on save.
@@ -117,6 +120,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setGlobalSystemPrompt(data.systemPromptAppend || '');
       setClaudeExecutablePath(data.claudeExecutablePath || '');
       setDevMode(data.devMode || false);
+      setForceAskUserQuestionGateFailure(data.forceAskUserQuestionGateFailure ?? false);
       setDemoMode(data.demoMode || false);
       setInitialDemoMode(data.demoMode || false);
       setEnableCyboflowFooter(data.enableCyboflowFooter !== false); // Default to true
@@ -162,6 +166,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         systemPromptAppend: globalSystemPrompt,
         claudeExecutablePath,
         devMode,
+        forceAskUserQuestionGateFailure,
         demoMode,
         enableCyboflowFooter,
         defaultAgentPermissionMode,
@@ -669,6 +674,25 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                     Adds a "Messages" tab to each session showing raw JSON responses from Claude Code. Useful for debugging and development.
                   </p>
                 </div>
+
+                {/* Dev-only: force the AskUserQuestion gate-failure path so the
+                    durable recovery gate can be verified live. Hidden in the
+                    stable DMG; only takes effect in dev (unpackaged) runs. */}
+                {buildVariant !== 'stable' && (
+                  <div className="mt-4">
+                    <Checkbox
+                      label="Force AskUserQuestion gate failure"
+                      checked={forceAskUserQuestionGateFailure}
+                      onChange={(e) => setForceAskUserQuestionGateFailure(e.target.checked)}
+                    />
+                    <p className="text-xs text-text-tertiary mt-1">
+                      Testing only: fails the next AskUserQuestion gate on purpose and mints a durable
+                      recovery card in the review queue — so the "Stream closed" recovery flow can be
+                      exercised without waiting for a real drop. Only takes effect in dev (<code>pnpm dev</code>);
+                      never fires in a packaged release.
+                    </p>
+                  </div>
+                )}
               </SettingsSection>
 
               <SettingsSection

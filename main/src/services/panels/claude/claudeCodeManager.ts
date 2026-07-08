@@ -81,15 +81,17 @@ const PRE_TOOL_USE_HOOK_TIMEOUT_SECONDS = 2_000_000;
 /**
  * DEV-ONLY escape hatch to exercise the durable AskUserQuestion recovery gate
  * end-to-end (the intermittent "Stream closed" drop can't be forced on demand).
- * When `CYBOFLOW_DEV_FORCE_GATE_STREAM_CLOSED=1` AND the app is NOT packaged, the
- * NEXT AskUserQuestion gate is failed on purpose: a durable recovery gate is
- * synthesized (exactly as the stream detector would) and the tool is denied so
- * the agent ends its turn — landing the run in the review queue with an
- * answerable "Answer needed" card. NEVER fires in a packaged build (the
- * app.isPackaged guard), so it cannot leak into a release.
+ * Enabled by EITHER the `CYBOFLOW_DEV_FORCE_GATE_STREAM_CLOSED=1` env var OR the
+ * Settings → Advanced → Debugging "Force AskUserQuestion gate failure" toggle
+ * (config `forceAskUserQuestionGateFailure`), passed in as `configFlag`. When
+ * enabled AND the app is NOT packaged, the NEXT AskUserQuestion gate is failed on
+ * purpose: a durable recovery gate is synthesized (exactly as the stream detector
+ * would) and the tool is denied so the agent ends its turn — landing the run in
+ * the review queue with an answerable "Answer needed" card. NEVER fires in a
+ * packaged build (the app.isPackaged guard), so it cannot leak into a release.
  */
-function isDevForceGateStreamClosed(): boolean {
-  return !app.isPackaged && process.env.CYBOFLOW_DEV_FORCE_GATE_STREAM_CLOSED === '1';
+function isDevForceGateStreamClosed(configFlag: boolean): boolean {
+  return !app.isPackaged && (process.env.CYBOFLOW_DEV_FORCE_GATE_STREAM_CLOSED === '1' || configFlag);
 }
 
 /**
@@ -2153,7 +2155,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // in the review queue with an answerable recovery card. The deny reason is
       // deliberately worded to NOT match the detector signature, so the detector
       // does not ALSO mint a duplicate on this turn's stream.
-      if (isDevForceGateStreamClosed()) {
+      if (isDevForceGateStreamClosed(this.configManager?.getConfig()?.forceAskUserQuestionGateFailure ?? false)) {
         loggerLike.warn(
           `[ClaudeCodeManager] DEV_FORCE_GATE_STREAM_CLOSED: failing AskUserQuestion for run ${panelId} and minting a recovery gate`,
         );

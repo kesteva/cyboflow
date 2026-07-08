@@ -50,6 +50,10 @@ export interface AppConfig {
     notifyOnComplete: boolean;
   };
   devMode?: boolean;
+  // DEV-ONLY testing affordance: forces the next AskUserQuestion gate to fail so
+  // the durable recovery gate can be exercised live. Only takes effect in dev
+  // (unpackaged) runs; never fires in a packaged release.
+  forceAskUserQuestionGateFailure?: boolean;
   // Demo mode: throwaway demo database + sandbox repo with scripted agent runs.
   // Read once at startup — toggling relaunches the app.
   demoMode?: boolean;

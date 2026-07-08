@@ -68,6 +68,11 @@ export interface AppConfig {
   };
   // Dev mode for debugging
   devMode?: boolean;
+  // DEV-ONLY testing affordance: when true (and the app is unpackaged), the NEXT
+  // AskUserQuestion gate is failed on purpose so the durable recovery gate can be
+  // exercised live. Mirrors the CYBOFLOW_DEV_FORCE_GATE_STREAM_CLOSED env var.
+  // Floored to false when unset; never fires in a packaged release.
+  forceAskUserQuestionGateFailure?: boolean;
   // Demo mode: boots the app against a throwaway demo database + sandbox repo
   // with scripted agent runs. Read ONCE at startup — toggling relaunches the app.
   demoMode?: boolean;
@@ -138,6 +143,8 @@ export interface UpdateConfigRequest {
     notifyOnComplete: boolean;
   };
   devMode?: boolean;
+  // DEV-ONLY testing affordance (see AppConfig.forceAskUserQuestionGateFailure).
+  forceAskUserQuestionGateFailure?: boolean;
   // Demo mode (see AppConfig.demoMode) — applied on next launch.
   demoMode?: boolean;
   // Telemetry settings (see AppConfig.telemetry). Opt-OUT model: both flags default
