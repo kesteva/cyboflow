@@ -567,7 +567,7 @@ describe('TASK-758: AskUserQuestion wiring', () => {
   // ─── PreToolUse hook timeout (production bug: 600s CLI default killed a ────
   // ─── 10-minute-unanswered human gate, falling through to canUseTool) ───────
 
-  it('composeHookOptions carries a PreToolUse matcher timeout of 86400s (24h), not the CLI 600s default', async () => {
+  it('composeHookOptions carries a PreToolUse matcher timeout at the safe ~23d ceiling, not the CLI 600s default', async () => {
     const sessionManager = createMockSessionManager();
     const mgr = new ClaudeCodeManager(
       sessionManager,
@@ -591,7 +591,11 @@ describe('TASK-758: AskUserQuestion wiring', () => {
 
     const matchers = fakeSdk.lastOptions?.hooks?.PreToolUse as HookCallbackMatcher[] | undefined;
     expect(matchers).toBeDefined();
-    expect(matchers?.[0]?.timeout).toBe(86_400);
+    // Pushed to the safe setTimeout ceiling (~23d) so a human can answer a gate
+    // hours/days later; beyond it the durable recovery gate keeps the wait
+    // unbounded. Must stay under ~2^31-1 ms (÷1000) or Node fires it immediately.
+    expect(matchers?.[0]?.timeout).toBe(2_000_000);
+    expect(matchers?.[0]?.timeout).toBeLessThan(2_147_483);
   });
 
   // ─── routeAskUserQuestion happy path: updatedInput shape ─────────────────
