@@ -22,7 +22,19 @@
  * passes SprintLaneStore.filterEligibleTaskIds, then enrolls a queued lane. The
  * 'orchestrator' actor is used deliberately: the monitor relays a human's
  * explicit in-chat confirmation, and the approved/stage writes are
- * orchestrator-only authority.
+ * orchestrator-only authority. add_task is atomic-IN-EFFECT rather than in a
+ * single DB transaction: if laneStore.addLane fails after the task was created
+ * + promoted + approved, the handler compensates by hard-deleting the
+ * just-created task (via the injected applyTaskDelete) before returning the
+ * error, so a refused add never leaves an orphan approved/Ready-for-Dev task
+ * sitting in the backlog outside the sprint. The compensating delete is
+ * fail-soft (logged, never masks the original addLane error).
+ *
+ * edit_task additionally requires the task to hold a still-QUEUED lane in
+ * THIS run's batch — not merely that the ref resolves to a task in the same
+ * project. This keeps edits scoped to not-yet-started sprint work: a task with
+ * no lane in this batch, or whose lane has already started/finished, is
+ * refused rather than silently edited underneath (or unrelated to) the walk.
  *
  * Standalone-typecheck invariant: no imports from 'electron', 'better-sqlite3',
  * or main/src/services/* — every collaborator is injected.
@@ -65,6 +77,15 @@ export interface TaskMutationDeps {
   db: DatabaseLike;
   /** TaskChangeRouter.getInstance().applyChange (bound at the composition root). */
   applyTaskChange: (projectId: number, change: TaskChange) => Promise<{ taskId: string }>;
+  /**
+   * TaskChangeRouter.getInstance().applyDelete (bound at the composition root).
+   * Used ONLY to compensate a just-created task when addTaskToRun's lane
+   * enrollment fails — see the module docblock's "atomic-in-effect" note.
+   */
+  applyTaskDelete: (
+    projectId: number,
+    opts: { actor: 'orchestrator'; taskId: string; entityType: 'task'; runId?: string },
+  ) => Promise<{ taskId: string; deletedIds: string[] }>;
   laneStore: TaskMutationLaneStore;
   logger?: LoggerLike;
 }
@@ -80,7 +101,8 @@ export type TaskMutationNoOpReason =
   | 'no_batch' // add/remove need a materialized sprint batch (workflow_runs.batch_id)
   | 'task_not_found' // remove/edit: the ref/id did not resolve to a task
   | 'not_eligible' // add: the task could not be made sprint-eligible
-  | 'already_started' // remove: the lane is running/finished — too late
+  | 'already_started' // remove/edit: the lane is running/finished — too late
+  | 'not_in_sprint' // edit: the task holds no lane in THIS run's batch
   | 'duplicate' // add: the task is already enrolled in this batch
   | 'nothing_to_change' // edit: no title/body/priority supplied
   | 'lane_error'; // an unexpected SprintLaneStore failure
@@ -137,6 +159,14 @@ function batchIsLive(db: DatabaseLike, batchId: string): boolean {
   return row !== undefined && !TERMINAL_BATCH_STATUSES.has(row.status ?? '');
 }
 
+/** The lane's status for (batchId, taskId), or undefined when no lane exists there. */
+function readLaneStatus(db: DatabaseLike, batchId: string, taskId: string): string | undefined {
+  const row = db
+    .prepare('SELECT status FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+    .get(batchId, taskId) as { status?: string } | undefined;
+  return row?.status;
+}
+
 /** The SprintLaneError code, read structurally so this handler stays decoupled. */
 function laneErrorCode(err: unknown): string | undefined {
   if (err && typeof err === 'object' && 'code' in err) {
@@ -178,54 +208,85 @@ export async function addTaskToRun(
     kind: 'operator-added',
   });
 
-  // 2. Promote to Ready-for-Dev so it clears the sprint-eligibility stage floor.
-  const taskRow = deps.db
-    .prepare('SELECT board_id AS boardId, stage_id AS stageId FROM tasks WHERE id = ?')
-    .get(taskId) as { boardId?: string | null; stageId?: string | null } | undefined;
-  const boardId = typeof taskRow?.boardId === 'string' ? taskRow.boardId : null;
-  if (boardId) {
-    const stageRow = deps.db
-      .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
-      .get(boardId, READY_FOR_DEV_POSITION) as { id?: string } | undefined;
-    const readyStageId = typeof stageRow?.id === 'string' ? stageRow.id : null;
-    if (readyStageId && readyStageId !== taskRow?.stageId) {
-      await deps.applyTaskChange(projectId, {
-        actor: 'orchestrator',
+  // Any failure AFTER the create — the stage promotion, the approval stamp, or
+  // lane enrollment — must not leave the just-created task as an orphan,
+  // backlog-visible task outside the sprint. Compensate by hard-deleting it,
+  // fail-soft (a failed compensating delete is logged, never masks the original
+  // error). This makes add_task atomic-in-EFFECT across ALL post-create steps.
+  const compensateOrphan = async (): Promise<void> => {
+    try {
+      await deps.applyTaskDelete(projectId, { actor: 'orchestrator', taskId, entityType: 'task', runId });
+    } catch (deleteErr) {
+      deps.logger?.warn('[taskMutation] compensating delete failed', {
         runId,
-        entityType: 'task',
         taskId,
-        stageId: readyStageId,
-        kind: 'operator-added',
+        error: deleteErr instanceof Error ? deleteErr.message : String(deleteErr),
       });
     }
-  }
+  };
 
-  // 3. Stamp approved (the Q1 reveal — makes it backend-visible + sprint-eligible).
-  await deps.applyTaskChange(projectId, {
-    actor: 'orchestrator',
-    runId,
-    entityType: 'task',
-    taskId,
-    approved: true,
-    kind: 'operator-added',
-  });
-
-  // 4. Enroll a queued lane; the next fan-out wave re-resolution dispatches it.
   try {
-    deps.laneStore.addLane({ projectId, batchId, taskId });
+    // 2. Promote to Ready-for-Dev so it clears the sprint-eligibility stage floor.
+    const taskRow = deps.db
+      .prepare('SELECT board_id AS boardId, stage_id AS stageId FROM tasks WHERE id = ?')
+      .get(taskId) as { boardId?: string | null; stageId?: string | null } | undefined;
+    const boardId = typeof taskRow?.boardId === 'string' ? taskRow.boardId : null;
+    if (boardId) {
+      const stageRow = deps.db
+        .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = ?')
+        .get(boardId, READY_FOR_DEV_POSITION) as { id?: string } | undefined;
+      const readyStageId = typeof stageRow?.id === 'string' ? stageRow.id : null;
+      if (readyStageId && readyStageId !== taskRow?.stageId) {
+        await deps.applyTaskChange(projectId, {
+          actor: 'orchestrator',
+          runId,
+          entityType: 'task',
+          taskId,
+          stageId: readyStageId,
+          kind: 'operator-added',
+        });
+      }
+    }
+
+    // 3. Stamp approved (the Q1 reveal — makes it backend-visible + sprint-eligible).
+    await deps.applyTaskChange(projectId, {
+      actor: 'orchestrator',
+      runId,
+      entityType: 'task',
+      taskId,
+      approved: true,
+      kind: 'operator-added',
+    });
+
+    // 4. Enroll a queued lane; the next fan-out wave re-resolution dispatches it.
+    try {
+      deps.laneStore.addLane({ projectId, batchId, taskId });
+    } catch (err) {
+      const code = laneErrorCode(err);
+      deps.logger?.warn('[taskMutation] addLane failed', {
+        runId,
+        taskId,
+        code,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await compensateOrphan();
+      // The task was just created + approved + promoted, and the batch was
+      // pre-checked live, so 'no_eligible_tasks' / 'bad_request' (duplicate /
+      // terminal batch) are all defensive here — none should fire in practice.
+      if (code === 'no_eligible_tasks') return { ok: false, reason: 'not_eligible', detail: input.title };
+      if (code === 'bad_request') return { ok: false, reason: 'duplicate', detail: input.title };
+      return { ok: false, reason: 'lane_error', detail: err instanceof Error ? err.message : undefined };
+    }
   } catch (err) {
-    const code = laneErrorCode(err);
-    deps.logger?.warn('[taskMutation] addLane failed', {
+    // A stage-promotion or approval-stamp failure (steps 2-3): compensate the
+    // orphan too, then surface a generic lane_error (addLane's own failures are
+    // mapped to precise codes in the inner catch above and never reach here).
+    await compensateOrphan();
+    deps.logger?.warn('[taskMutation] add_task failed before enrollment; compensated', {
       runId,
       taskId,
-      code,
       error: err instanceof Error ? err.message : String(err),
     });
-    // The task was just created + approved + promoted, and the batch was
-    // pre-checked live, so 'no_eligible_tasks' / 'bad_request' (duplicate /
-    // terminal batch) are all defensive here — none should fire in practice.
-    if (code === 'no_eligible_tasks') return { ok: false, reason: 'not_eligible', detail: input.title };
-    if (code === 'bad_request') return { ok: false, reason: 'duplicate', detail: input.title };
     return { ok: false, reason: 'lane_error', detail: err instanceof Error ? err.message : undefined };
   }
 
@@ -292,10 +353,22 @@ export async function editRunTask(
   const run = loadRun(deps.db, runId);
   if (!run) return { ok: false, reason: 'not_found' };
   if (run.executionModel !== 'programmatic') return { ok: false, reason: 'not_programmatic' };
-  const { projectId } = run;
+  if (!run.batchId) return { ok: false, reason: 'no_batch' };
+  const { projectId, batchId } = run;
 
   const taskId = resolveTaskId(deps.db, projectId, input.taskRef);
   if (!taskId) return { ok: false, reason: 'task_not_found', detail: input.taskRef };
+
+  // Scope edits to not-yet-started work IN THIS run's batch: a ref that
+  // resolves to a task with no lane here, or whose lane already moved past
+  // 'queued', is refused rather than silently edited underneath the walk.
+  const laneStatus = readLaneStatus(deps.db, batchId, taskId);
+  if (laneStatus === undefined) {
+    return { ok: false, reason: 'not_in_sprint', detail: input.taskRef };
+  }
+  if (laneStatus !== 'queued') {
+    return { ok: false, reason: 'already_started', detail: input.taskRef };
+  }
 
   const fields: { title?: string; body?: string; priority?: Priority } = {};
   if (input.title !== undefined) fields.title = input.title;
@@ -320,6 +393,6 @@ export async function editRunTask(
     taskRef,
     message: `Updated task ${taskRef ?? input.taskRef}${
       fields.title ? ` (now '${fields.title}')` : ''
-    }. If its lane has already started, the change won't reach the running agent.`,
+    }.`,
   };
 }

@@ -33,6 +33,7 @@ function makeDb(): Database.Database {
       id TEXT PRIMARY KEY, project_id INTEGER, batch_id TEXT, execution_model TEXT
     );
     CREATE TABLE sprint_batches (id TEXT PRIMARY KEY, status TEXT);
+    CREATE TABLE sprint_batch_tasks (batch_id TEXT, task_id TEXT, status TEXT);
     CREATE TABLE boards (id TEXT PRIMARY KEY, project_id INTEGER);
     CREATE TABLE board_stages (id TEXT PRIMARY KEY, board_id TEXT, position INTEGER, is_terminal INTEGER DEFAULT 0);
     CREATE TABLE tasks (
@@ -66,6 +67,14 @@ function seedRun(
 
 function seedBatch(db: Database.Database, id: string, status = 'running'): void {
   db.prepare('INSERT INTO sprint_batches (id, status) VALUES (?, ?)').run(id, status);
+}
+
+function seedLane(db: Database.Database, batchId: string, taskId: string, status = 'queued'): void {
+  db.prepare('INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES (?, ?, ?)').run(
+    batchId,
+    taskId,
+    status,
+  );
 }
 
 function seedTask(
@@ -136,18 +145,26 @@ class SprintLaneError extends Error {
 function makeDeps(
   db: Database.Database,
   laneStore: Partial<TaskMutationLaneStore> = {},
-): { deps: TaskMutationDeps; applySpy: ReturnType<typeof vi.fn> } {
+): { deps: TaskMutationDeps; applySpy: ReturnType<typeof vi.fn>; deleteSpy: ReturnType<typeof vi.fn> } {
   const { fn, spy } = makeApplyTaskChange(db);
+  // Fake applyTaskDelete (TaskChangeRouter.applyDelete at the composition root) —
+  // injected for every test, not just Finding-3's compensation cases, so any
+  // addTaskToRun call site that hits the addLane-failure path has a real dep.
+  const deleteSpy = vi.fn(async (_projectId: number, opts: { taskId: string }) => ({
+    taskId: opts.taskId,
+    deletedIds: [opts.taskId],
+  }));
   const deps: TaskMutationDeps = {
     db: dbAdapter(db),
     applyTaskChange: fn,
+    applyTaskDelete: deleteSpy as unknown as TaskMutationDeps['applyTaskDelete'],
     laneStore: {
       addLane: laneStore.addLane ?? (vi.fn(() => ({}) as never) as never),
       removeLane: laneStore.removeLane ?? (vi.fn(() => ({ removed: true })) as never),
     },
     logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   };
-  return { deps, applySpy: spy };
+  return { deps, applySpy: spy, deleteSpy };
 }
 
 // ---------------------------------------------------------------------------
@@ -164,11 +181,13 @@ describe('addTaskToRun', () => {
     seedRun(db, { id: 'run-1', batchId: 'batch-1' });
     seedBatch(db, 'batch-1', 'running');
     const addLane = vi.fn((_args: { projectId: number; batchId: string; taskId: string }) => ({}) as never);
-    const { deps, applySpy } = makeDeps(db, { addLane });
+    const { deps, applySpy, deleteSpy } = makeDeps(db, { addLane });
 
     const res = await addTaskToRun('run-1', { title: 'New task', body: 'do it' }, deps);
 
     expect(res.ok).toBe(true);
+    // No compensation on the happy path — nothing to undo.
+    expect(deleteSpy).not.toHaveBeenCalled();
     // The created task ends up approved + at Ready-for-Dev.
     const t = db.prepare('SELECT stage_id, approved_at FROM tasks ORDER BY rowid DESC LIMIT 1').get() as {
       stage_id: string;
@@ -203,22 +222,74 @@ describe('addTaskToRun', () => {
   it('refuses a terminal batch WITHOUT creating an orphan task', async () => {
     seedRun(db, { id: 'run-2', batchId: 'batch-done' });
     seedBatch(db, 'batch-done', 'completed');
-    const { deps, applySpy } = makeDeps(db);
+    const { deps, applySpy, deleteSpy } = makeDeps(db);
 
     const res = await addTaskToRun('run-2', { title: 'late' }, deps);
     expect(res).toMatchObject({ ok: false, reason: 'no_batch' });
     expect(applySpy).not.toHaveBeenCalled();
     expect(db.prepare('SELECT COUNT(*) AS n FROM tasks').get()).toMatchObject({ n: 0 });
+    expect(deleteSpy).not.toHaveBeenCalled();
   });
 
-  it('maps a lane no_eligible_tasks failure to not_eligible', async () => {
+  it('maps a lane no_eligible_tasks failure to not_eligible AND compensates by deleting the orphaned task', async () => {
     seedRun(db, { id: 'run-3', batchId: 'batch-1' });
     seedBatch(db, 'batch-1', 'running');
-    const addLane = vi.fn(() => {
+    const addLane = vi.fn((_args: { projectId: number; batchId: string; taskId: string }) => {
       throw new SprintLaneError('no_eligible_tasks', 'nope');
     });
-    const { deps } = makeDeps(db, { addLane: addLane as never });
-    expect(await addTaskToRun('run-3', { title: 'x' }, deps)).toMatchObject({ ok: false, reason: 'not_eligible' });
+    const { deps, deleteSpy } = makeDeps(db, { addLane: addLane as never });
+
+    const res = await addTaskToRun('run-3', { title: 'x' }, deps);
+    expect(res).toMatchObject({ ok: false, reason: 'not_eligible' });
+
+    // Compensation: the task created + promoted + approved above must be
+    // deleted so the refused add leaves no orphan behind.
+    const createdTaskId = addLane.mock.calls[0][0].taskId;
+    expect(deleteSpy).toHaveBeenCalledTimes(1);
+    expect(deleteSpy).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ actor: 'orchestrator', taskId: createdTaskId, entityType: 'task' }),
+    );
+  });
+
+  it('compensates the orphan when the approval stamp (step 3) throws — never reaching enrollment', async () => {
+    seedRun(db, { id: 'run-3b', batchId: 'batch-1' });
+    seedBatch(db, 'batch-1', 'running');
+
+    // applyTaskChange: create + stage-move succeed, but the approve stamp throws.
+    const createdId = 'task-approve-fail';
+    const applyTaskChange = vi.fn(async (projectId: number, change: TaskChange) => {
+      if (!change.taskId) {
+        db.prepare(
+          `INSERT INTO tasks (id, project_id, ref, title, board_id, stage_id, approved_at)
+           VALUES (?, ?, 'TASK-9', ?, 'board-1', 'stage-backlog', NULL)`,
+        ).run(createdId, projectId, change.title ?? null);
+        return { taskId: createdId };
+      }
+      if (change.approved === true) throw new Error('approve boom');
+      if (change.stageId) db.prepare('UPDATE tasks SET stage_id = ? WHERE id = ?').run(change.stageId, change.taskId);
+      return { taskId: change.taskId };
+    });
+    const deleteSpy = vi.fn(async (_p: number, opts: { taskId: string }) => ({
+      taskId: opts.taskId,
+      deletedIds: [opts.taskId],
+    }));
+    const addLane = vi.fn(() => ({}) as never);
+    const deps: TaskMutationDeps = {
+      db: dbAdapter(db),
+      applyTaskChange: applyTaskChange as never,
+      applyTaskDelete: deleteSpy as unknown as TaskMutationDeps['applyTaskDelete'],
+      laneStore: { addLane: addLane as never, removeLane: vi.fn(() => ({ removed: true })) as never },
+      logger: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    };
+
+    const res = await addTaskToRun('run-3b', { title: 'boom' }, deps);
+    expect(res).toMatchObject({ ok: false, reason: 'lane_error' });
+    // The failure was before enrollment, so no lane was created...
+    expect(addLane).not.toHaveBeenCalled();
+    // ...and the orphaned task was compensated away.
+    expect(deleteSpy).toHaveBeenCalledTimes(1);
+    expect(deleteSpy).toHaveBeenCalledWith(1, expect.objectContaining({ taskId: createdId, entityType: 'task' }));
   });
 });
 
@@ -288,9 +359,11 @@ describe('editRunTask', () => {
     db = makeDb();
   });
 
-  it('updates title/body/priority via the chokepoint (no batch required)', async () => {
-    seedRun(db, { id: 'run-1', batchId: null });
+  it('updates title/body/priority via the chokepoint (queued lane in this batch)', async () => {
+    seedRun(db, { id: 'run-1', batchId: 'batch-1' });
+    seedBatch(db, 'batch-1');
     seedTask(db, { id: 'task-a', ref: 'TASK-1' });
+    seedLane(db, 'batch-1', 'task-a', 'queued');
     const { deps, applySpy } = makeDeps(db);
 
     // 'high' is coerced to the canonical Priority 'P0'.
@@ -304,8 +377,10 @@ describe('editRunTask', () => {
   });
 
   it('refuses nothing_to_change and task_not_found', async () => {
-    seedRun(db, { id: 'run-1', batchId: null });
+    seedRun(db, { id: 'run-1', batchId: 'batch-1' });
+    seedBatch(db, 'batch-1');
     seedTask(db, { id: 'task-a', ref: 'TASK-1' });
+    seedLane(db, 'batch-1', 'task-a', 'queued');
     const { deps, applySpy } = makeDeps(db);
 
     expect(await editRunTask('run-1', { taskRef: 'TASK-1' }, deps)).toMatchObject({
@@ -320,14 +395,56 @@ describe('editRunTask', () => {
   });
 
   it('drops an unrecognized priority (only that field) → nothing_to_change when it was the sole edit', async () => {
-    seedRun(db, { id: 'run-1', batchId: null });
+    seedRun(db, { id: 'run-1', batchId: 'batch-1' });
+    seedBatch(db, 'batch-1');
     seedTask(db, { id: 'task-a', ref: 'TASK-1' });
+    seedLane(db, 'batch-1', 'task-a', 'queued');
     const { deps, applySpy } = makeDeps(db);
 
     // 'someday' is not a valid Priority and maps to nothing, so the edit is empty.
     expect(await editRunTask('run-1', { taskRef: 'TASK-1', priority: 'someday' }, deps)).toMatchObject({
       ok: false,
       reason: 'nothing_to_change',
+    });
+    expect(applySpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a task whose lane already started (running) as already_started', async () => {
+    seedRun(db, { id: 'run-1', batchId: 'batch-1' });
+    seedBatch(db, 'batch-1');
+    seedTask(db, { id: 'task-a', ref: 'TASK-1' });
+    seedLane(db, 'batch-1', 'task-a', 'running');
+    const { deps, applySpy } = makeDeps(db);
+
+    expect(await editRunTask('run-1', { taskRef: 'TASK-1', title: 'x' }, deps)).toMatchObject({
+      ok: false,
+      reason: 'already_started',
+    });
+    expect(applySpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a task with no lane in this batch as not_in_sprint', async () => {
+    seedRun(db, { id: 'run-1', batchId: 'batch-1' });
+    seedBatch(db, 'batch-1');
+    // task-a exists (same project) but was never enrolled as a lane in batch-1.
+    seedTask(db, { id: 'task-a', ref: 'TASK-1' });
+    const { deps, applySpy } = makeDeps(db);
+
+    expect(await editRunTask('run-1', { taskRef: 'TASK-1', title: 'x' }, deps)).toMatchObject({
+      ok: false,
+      reason: 'not_in_sprint',
+    });
+    expect(applySpy).not.toHaveBeenCalled();
+  });
+
+  it('refuses a run with no batchId as no_batch', async () => {
+    seedRun(db, { id: 'run-1', batchId: null });
+    seedTask(db, { id: 'task-a', ref: 'TASK-1' });
+    const { deps, applySpy } = makeDeps(db);
+
+    expect(await editRunTask('run-1', { taskRef: 'TASK-1', title: 'x' }, deps)).toMatchObject({
+      ok: false,
+      reason: 'no_batch',
     });
     expect(applySpy).not.toHaveBeenCalled();
   });

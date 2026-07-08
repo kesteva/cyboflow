@@ -2134,6 +2134,7 @@ app.whenReady().then(async () => {
       db,
       applyTaskChange: (projectId, change) =>
         TaskChangeRouter.getInstance().applyChange(projectId, change),
+      applyTaskDelete: (projectId, opts) => TaskChangeRouter.getInstance().applyDelete(projectId, opts),
       laneStore: {
         addLane: (laneArgs) => SprintLaneStore.getInstance().addLane(laneArgs),
         removeLane: (laneArgs) => SprintLaneStore.getInstance().removeLane(laneArgs),
@@ -2150,7 +2151,8 @@ app.whenReady().then(async () => {
         no_batch: r.detail ?? 'This run has no active sprint batch to edit.',
         task_not_found: `No task matching '${r.detail ?? ''}' in this run's project.`,
         not_eligible: "The task couldn't be made sprint-eligible.",
-        already_started: "That task has already started and can't be removed.",
+        already_started: 'That task has already started — too late to change it.',
+        not_in_sprint: `Task ${r.detail ?? ''} isn't in this sprint — I can only edit tasks still queued in this run's batch.`,
         duplicate: 'That task is already in the sprint.',
         nothing_to_change: 'Nothing to change — give a new title, body, or priority.',
         lane_error: r.detail ? `Sprint update failed: ${r.detail}` : 'Sprint update failed unexpectedly.',
