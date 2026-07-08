@@ -8,6 +8,7 @@ import type { Session as DbSession, CreateSessionData, UpdateSessionData, Conver
 import { getShellPath } from '../utils/shellPath';
 import { TerminalSessionManager } from './terminalSessionManager';
 import type { BaseAIPanelState, ToolPanelState, ToolPanel } from '../../../shared/types/panels';
+import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { formatForDisplay } from '../utils/timestampUtils';
 import { scriptExecutionTracker } from './scriptExecutionTracker';
@@ -239,6 +240,9 @@ export class SessionManager extends EventEmitter {
       // __quick__ sentinel chat turns gate on (Role-G). NULL until minted on read.
       chatRunId: dbSession.chat_run_id ?? null,
       substrate: dbSession.substrate,
+      agentProvider: dbSession.agent_provider,
+      agentRuntime: dbSession.agent_runtime,
+      agentModel: dbSession.agent_model ?? null,
       effort: dbSession.effort,
       agentPermissionMode: dbSession.agent_permission_mode,
       // Per-session MCP/plugin toggles (migration 037). Parse the JSON columns
@@ -317,7 +321,10 @@ export class SessionManager extends EventEmitter {
     baseBranch?: string,
     commitMode?: 'structured' | 'checkpoint' | 'disabled',
     commitModeSettings?: string,
-    inPlace?: boolean
+    inPlace?: boolean,
+    agentProvider?: AgentProvider,
+    agentRuntime?: SessionAgentRuntime,
+    agentModel?: string | null
   ): Promise<Session> {
     return await withLock(`session-creation`, async () => {
       return this.createSessionWithId(
@@ -336,7 +343,10 @@ export class SessionManager extends EventEmitter {
         baseBranch,
         commitMode,
         commitModeSettings,
-        inPlace
+        inPlace,
+        agentProvider,
+        agentRuntime,
+        agentModel
       );
     });
   }
@@ -357,7 +367,10 @@ export class SessionManager extends EventEmitter {
     baseBranch?: string,
     commitMode?: 'structured' | 'checkpoint' | 'disabled',
     commitModeSettings?: string,
-    inPlace?: boolean
+    inPlace?: boolean,
+    agentProvider?: AgentProvider,
+    agentRuntime?: SessionAgentRuntime,
+    agentModel?: string | null
   ): Session {
     // Ensure this session ID isn't already being created
     if (this.activeSessions.has(id) || this.db.getSession(id)) {
@@ -397,6 +410,9 @@ export class SessionManager extends EventEmitter {
       permission_mode: permissionMode,
       is_main_repo: isMainRepo,
       in_place: inPlace,
+      agent_provider: agentProvider,
+      agent_runtime: agentRuntime,
+      agent_model: agentModel,
       auto_commit: autoCommit,
       // Model is now managed at panel level
       base_commit: baseCommit,

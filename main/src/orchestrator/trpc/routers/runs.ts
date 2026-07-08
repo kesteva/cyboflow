@@ -848,6 +848,11 @@ export const runsRouter = router({
       workflowId: z.string().min(1),
       projectId: z.number().int().positive(),
       substrate: z.enum(['sdk', 'interactive']).optional(),
+      // Provider/runtime are the forward-compatible agent selection surface.
+      // Codex runtime execution is not wired yet; Claude runtimes project back to
+      // the existing substrate path during the migration window.
+      agentProvider: z.enum(['claude', 'codex']).optional(),
+      agentRuntime: z.enum(['claude-sdk', 'claude-interactive', 'codex-sdk']).optional(),
       // Optional native-task link (migration 014). When supplied, the launcher
       // records workflow_runs.task_id and derives the task's execution stage.
       taskId: z.string().min(1).optional(),
@@ -965,6 +970,25 @@ export const runsRouter = router({
           message: `Project ${input.projectId} not found`,
         });
       }
+      if (input.agentProvider === 'codex' || input.agentRuntime === 'codex-sdk') {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'Codex workflow runtimes are not wired yet. Use Claude for this build.',
+        });
+      }
+      const substrateFromRuntime =
+        input.agentRuntime === 'claude-interactive'
+          ? 'interactive'
+          : input.agentRuntime === 'claude-sdk'
+            ? 'sdk'
+            : undefined;
+      if (input.substrate && substrateFromRuntime && input.substrate !== substrateFromRuntime) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: `substrate ${input.substrate} conflicts with agentRuntime ${input.agentRuntime}`,
+        });
+      }
+      const launchSubstrate = input.substrate ?? substrateFromRuntime;
       // Substrate-keyed sprint selection cap (defense in depth — the batch
       // picker also enforces it client-side). Keyed off the forced pin FIRST
       // (demo 'sdk' / interactive-PTY-only lock 'interactive'), mirroring both
@@ -973,7 +997,7 @@ export const runsRouter = router({
       // back to the requested substrate or the 'sdk' default.
       if (input.taskIds !== undefined) {
         const forced = ctx.getForcedSubstrate?.() ?? null;
-        const capSubstrate: CliSubstrate = forced ?? input.substrate ?? 'sdk';
+        const capSubstrate: CliSubstrate = forced ?? launchSubstrate ?? 'sdk';
         const max = SPRINT_BATCH_MAX_TASKS[capSubstrate];
         if (input.taskIds.length > max) {
           throw new TRPCError({
@@ -1054,7 +1078,7 @@ export const runsRouter = router({
       const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
         input.workflowId,
         project.path,
-        input.substrate,
+        launchSubstrate,
         input.taskId,
         input.ideaId,
         input.sessionId,

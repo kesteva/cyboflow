@@ -121,30 +121,40 @@ Using the Responses API directly would bypass Codex's local coding-agent runtime
 
 ## Data Model
 
-Add migration `048`.
+Add migrations `048` through `053`. Keep each `ALTER TABLE ADD COLUMN` in its own migration file, then run one idempotent backfill migration. This avoids the file-migration runner's coarse duplicate-column handling marking a multi-`ALTER` migration applied after only the first column exists.
 
 Session defaults need their own storage. The existing `sessions.substrate` column only captures the Claude-era quick-session runtime (`'sdk' | 'interactive'`) and cannot represent Codex provider state or `codex-pty` without silently dropping the new `SessionAgentConfig` shape.
 
 Add session columns:
 
 ```sql
+-- 048_session_agent_provider.sql
 ALTER TABLE sessions
   ADD COLUMN agent_provider TEXT NOT NULL DEFAULT 'claude'
     CHECK (agent_provider IN ('claude','codex'));
 
+-- 049_session_agent_runtime.sql
 ALTER TABLE sessions
   ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk'
     CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk','codex-pty'));
 
+-- 050_session_agent_model.sql
 ALTER TABLE sessions
   ADD COLUMN agent_model TEXT;
+```
 
+Backfill after all new columns exist:
+
+```sql
+-- 053_agent_provider_runtime_backfill.sql
 UPDATE sessions
-SET agent_runtime =
-  CASE substrate
-    WHEN 'interactive' THEN 'claude-interactive'
-    ELSE 'claude-sdk'
-  END
+SET
+  agent_provider = 'claude',
+  agent_runtime =
+    CASE substrate
+      WHEN 'interactive' THEN 'claude-interactive'
+      ELSE 'claude-sdk'
+    END
 WHERE agent_provider = 'claude';
 ```
 
@@ -153,20 +163,29 @@ WHERE agent_provider = 'claude';
 Add workflow run columns:
 
 ```sql
+-- 051_workflow_run_agent_provider.sql
 ALTER TABLE workflow_runs
   ADD COLUMN agent_provider TEXT NOT NULL DEFAULT 'claude'
     CHECK (agent_provider IN ('claude','codex'));
 
+-- 052_workflow_run_agent_runtime.sql
 ALTER TABLE workflow_runs
   ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk'
     CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk'));
+```
 
+Backfill after all new columns exist:
+
+```sql
+-- 053_agent_provider_runtime_backfill.sql
 UPDATE workflow_runs
-SET agent_runtime =
-  CASE substrate
-    WHEN 'interactive' THEN 'claude-interactive'
-    ELSE 'claude-sdk'
-  END
+SET
+  agent_provider = 'claude',
+  agent_runtime =
+    CASE substrate
+      WHEN 'interactive' THEN 'claude-interactive'
+      ELSE 'claude-sdk'
+    END
 WHERE agent_provider = 'claude';
 ```
 

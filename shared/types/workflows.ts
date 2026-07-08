@@ -7,6 +7,7 @@
  */
 
 import type { CliSubstrate } from './substrate';
+import type { AgentProvider, WorkflowAgentRuntime } from './agentRuntime';
 import type { ExecutionModel } from './executionModel';
 import type { VerificationType } from './visualVerification';
 import type { WorkflowRunStatus } from './cyboflow';
@@ -129,6 +130,13 @@ export interface WorkflowRunRow {
   /** CLI substrate stamped at launch ('sdk' | 'interactive'). Resolved once and immutable for the run. Reads back 'sdk' for every legacy row. IDEA-013 / TASK-806. */
   substrate?: CliSubstrate;
   /**
+   * Provider/runtime stamps (migrations 051-052). These supersede the Claude-only
+   * substrate concept for new integrations. Existing substrate remains a
+   * compatibility projection during migration.
+   */
+  agent_provider?: AgentProvider;
+  agent_runtime?: WorkflowAgentRuntime;
+  /**
    * Execution model stamped at launch ('orchestrated' | 'programmatic') — the
    * sibling immutable stamp to `substrate` (migration 032). Decides WHO walks the
    * run's DAG: the orchestrator agent ('orchestrated', today's behavior + the
@@ -236,6 +244,9 @@ export interface WorkflowRunListRow {
    * IDEA-013 / TASK-806.
    */
   substrate?: CliSubstrate;
+  /** Provider/runtime stamps surfaced additively for migrations 051-052. */
+  agent_provider?: AgentProvider;
+  agent_runtime?: WorkflowAgentRuntime;
   /** Parent session (migration 019) — soft link to sessions.id, NULL for legacy parentless flow runs. The left-rail will group runs by session_id in Phase 3. */
   session_id?: string | null;
   /** Sprint lane batch (migration 022) — soft link to sprint_batches.id; stamped on seeded 'sprint' runs, NULL for every other run. */

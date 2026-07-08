@@ -18,6 +18,7 @@ import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
 import { isCyboflowWorkflowName, resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
+import { claudeRuntimeFromSubstrate } from '../../../shared/types/agentRuntime';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type {
   ExperimentArm,
@@ -1049,6 +1050,8 @@ export class WorkflowRegistry {
           globalDefaultSubstrate: this.config?.getDefaultSubstrate(),
           env: process.env,
         });
+    const agentProvider = 'claude';
+    const agentRuntime = claudeRuntimeFromSubstrate(substrate);
 
     // Resolve the execution model (orchestrated vs programmatic) — the sibling
     // immutable stamp that decides WHO walks the run's DAG. The interactive
@@ -1135,8 +1138,8 @@ export class WorkflowRegistry {
     const specHash = computeSpecHash(effectiveSpecJson);
 
     const insert = this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, session_id, spec_hash, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id)
-      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, session_id, spec_hash, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id)
+      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const createTx = this.db.transaction(() => {
@@ -1161,6 +1164,8 @@ export class WorkflowRegistry {
         runProjectId,
         permissionMode,
         substrate,
+        agentProvider,
+        agentRuntime,
         executionModel,
         model,
         evalEnabled,
@@ -1196,7 +1201,7 @@ export class WorkflowRegistry {
    */
   getRunById(runId: string): WorkflowRunRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, seed_idea_ids, outcome, base_branch, base_sha, steps_snapshot_json, substrate, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, merge_sha, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
+      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, seed_idea_ids, outcome, base_branch, base_sha, steps_snapshot_json, substrate, agent_provider, agent_runtime, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, merge_sha, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
     );
     const row = stmt.get(runId) as WorkflowRunRow | undefined;
     return row ?? null;

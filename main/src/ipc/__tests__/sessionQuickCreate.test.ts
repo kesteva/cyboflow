@@ -449,13 +449,13 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     // The invalid value is never persisted — sessions.substrate is ALWAYS
     // stamped with the RESOLVED value from createRun ('sdk' here), never the
     // raw request value.
-    const stamps = dbRunCalls.filter((c) => c.sql.includes('UPDATE sessions SET substrate'));
+    const stamps = dbRunCalls.filter((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
     expect(stamps).toHaveLength(2);
     // The second invoke resolves the SECOND emitted session (the claimed-session
     // set hands each create-quick caller a distinct session).
     expect(stamps.map((c) => c.args)).toEqual([
-      ['sdk', 'sess-001'],
-      ['sdk', 'sess-002'],
+      ['sdk', 'claude-sdk', null, 'sess-001'],
+      ['sdk', 'claude-sdk', null, 'sess-002'],
     ]);
   });
 
@@ -482,9 +482,9 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
       substrate: 'interactive',
     });
 
-    const stamp = dbRunCalls.find((c) => c.sql.includes('UPDATE sessions SET substrate'));
+    const stamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
     expect(stamp).toBeDefined();
-    expect(stamp?.args).toEqual(['interactive', 'sess-001']);
+    expect(stamp?.args).toEqual(['interactive', 'claude-interactive', null, 'sess-001']);
   });
 
   it('persists sessions.effort = ultracode when the Ultracode card is chosen (migration 029)', async () => {
@@ -581,8 +581,8 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     expect(result.success).toBe(true);
     expect(result.data?.claudePanelId).toBe('panel-quick-1');
 
-    const stamp = dbRunCalls.find((c) => c.sql.includes('UPDATE sessions SET substrate'));
-    expect(stamp?.args).toEqual(['interactive', 'sess-001']);
+    const stamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
+    expect(stamp?.args).toEqual(['interactive', 'claude-interactive', null, 'sess-001']);
 
     expect(fakeInteractiveCliManager.startPanel).toHaveBeenCalledTimes(1);
     expect(fakeRegisterLivePanel).toHaveBeenCalledWith('test-run-id-abc', 'panel-quick-1');

@@ -79,6 +79,9 @@ function sessionHostedDb(): Database.Database {
       base_branch TEXT,
       run_id TEXT,
       substrate TEXT,
+      agent_provider TEXT DEFAULT 'claude',
+      agent_runtime TEXT DEFAULT 'claude-sdk',
+      agent_model TEXT,
       in_place BOOLEAN DEFAULT 0,
       is_main_repo BOOLEAN DEFAULT 0
     )
@@ -1769,6 +1772,9 @@ describe('RunLauncher.launch session-hosted (Phase 1)', () => {
         base_branch TEXT,
         run_id TEXT,
         substrate TEXT,
+        agent_provider TEXT DEFAULT 'claude',
+        agent_runtime TEXT DEFAULT 'claude-sdk',
+        agent_model TEXT,
         in_place BOOLEAN DEFAULT 0,
         is_main_repo BOOLEAN DEFAULT 0
       )

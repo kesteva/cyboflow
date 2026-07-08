@@ -75,6 +75,8 @@ describe('Full-chain migration continuity', () => {
     // on workflow_runs — a representative sampling from the tail of the chain.
     const wrCols = columnNames(raw, 'workflow_runs');
     expect(wrCols).toContain('eval_enabled'); // 044
+    expect(wrCols).toContain('agent_provider'); // 051
+    expect(wrCols).toContain('agent_runtime'); // 052
     expect(wrCols).toContain('execution_model'); // 032
     expect(wrCols).toContain('substrate'); // 013
 
@@ -91,6 +93,9 @@ describe('Full-chain migration continuity', () => {
     const sessCols = columnNames(raw, 'sessions');
     expect(sessCols).toContain('disabled_mcp_servers_json'); // 039
     expect(sessCols).toContain('enabled_plugins_json'); // 039
+    expect(sessCols).toContain('agent_provider'); // 048
+    expect(sessCols).toContain('agent_runtime'); // 049
+    expect(sessCols).toContain('agent_model'); // 050
 
     raw.close();
   });

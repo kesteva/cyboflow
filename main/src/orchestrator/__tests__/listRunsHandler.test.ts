@@ -150,9 +150,15 @@ function seedRunWithSubstrate(
 
   db.prepare(
     `INSERT INTO workflow_runs
-       (id, workflow_id, project_id, worktree_path, status, policy_json, substrate)
-     VALUES (?, ?, ?, '/tmp/test', 'running', '{}', ?)`,
-  ).run(runId, workflowId, projectId, substrate);
+       (id, workflow_id, project_id, worktree_path, status, policy_json, substrate, agent_provider, agent_runtime)
+     VALUES (?, ?, ?, '/tmp/test', 'running', '{}', ?, 'claude', ?)`,
+  ).run(
+    runId,
+    workflowId,
+    projectId,
+    substrate,
+    substrate === 'interactive' ? 'claude-interactive' : 'claude-sdk',
+  );
 }
 
 describe('listRunsHandler substrate round-trip', () => {
@@ -173,6 +179,8 @@ describe('listRunsHandler substrate round-trip', () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].substrate).toBe('interactive');
+    expect(result[0].agent_provider).toBe('claude');
+    expect(result[0].agent_runtime).toBe('claude-interactive');
   });
 
   // (b) A run inserted WITHOUT a substrate value (the shared seedRun, which
@@ -185,6 +193,8 @@ describe('listRunsHandler substrate round-trip', () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].substrate).toBe('sdk');
+    expect(result[0].agent_provider).toBe('claude');
+    expect(result[0].agent_runtime).toBe('claude-sdk');
   });
 });
 

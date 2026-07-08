@@ -31,6 +31,7 @@ import { makeDatabaseLike } from '../orchestrator/loggerAdapter';
 import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
 import { pruneSessionOnlyArtifacts } from '../orchestrator/artifactLifecycle';
 import { isCliSubstrate } from '../../../shared/types/substrate';
+import { claudeRuntimeFromSubstrate, isAgentProvider, isSessionAgentRuntime } from '../../../shared/types/agentRuntime';
 import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 import { encodeCwd } from '../services/panels/claude/transcript/encodeCwd';
@@ -340,6 +341,26 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         return { success: false, error: 'Task queue not initialized' };
       }
 
+      const requestedAgentProvider = isAgentProvider(request.agentProvider)
+        ? request.agentProvider
+        : undefined;
+      const requestedAgentRuntime = isSessionAgentRuntime(request.agentRuntime)
+        ? request.agentRuntime
+        : undefined;
+      if (
+        requestedAgentProvider === 'codex' ||
+        requestedAgentRuntime === 'codex-sdk' ||
+        requestedAgentRuntime === 'codex-pty'
+      ) {
+        return {
+          success: false,
+          error: 'Codex runtimes are not wired yet. Use Claude for this build.',
+        };
+      }
+      const projectedAgentRuntime =
+        requestedAgentRuntime ??
+        (isCliSubstrate(request.substrate) ? claudeRuntimeFromSubstrate(request.substrate) : undefined);
+
       const count = request.count || 1;
 
       if (count > 1) {
@@ -355,7 +376,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           request.commitMode,
           request.commitModeSettings,
           request.claudeConfig,
-          request.folderId
+          request.folderId,
+          requestedAgentProvider,
+          projectedAgentRuntime,
+          request.agentModel ?? request.claudeConfig?.model ?? null
         );
 
         // Note: Model is now stored at panel level, not session level
@@ -373,7 +397,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           toolType: request.toolType,
           commitMode: request.commitMode,
           commitModeSettings: request.commitModeSettings,
-          claudeConfig: request.claudeConfig
+          claudeConfig: request.claudeConfig,
+          agentProvider: requestedAgentProvider,
+          agentRuntime: projectedAgentRuntime,
+          agentModel: request.agentModel ?? request.claudeConfig?.model ?? null,
         });
 
         // Note: Model is now stored at panel level, not session level
@@ -464,10 +491,38 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         ? request.agentPermissionMode
         : undefined;
 
+      const requestedAgentProvider = isAgentProvider(request.agentProvider)
+        ? request.agentProvider
+        : undefined;
+      const requestedAgentRuntime = isSessionAgentRuntime(request.agentRuntime)
+        ? request.agentRuntime
+        : undefined;
+
+      if (
+        requestedAgentProvider === 'codex' ||
+        requestedAgentRuntime === 'codex-sdk' ||
+        requestedAgentRuntime === 'codex-pty'
+      ) {
+        return {
+          success: false,
+          error: 'Codex runtimes are not wired yet. Use Claude for this build.',
+        };
+      }
+
+      const substrateFromAgentRuntime =
+        requestedAgentRuntime === 'claude-interactive'
+          ? 'interactive'
+          : requestedAgentRuntime === 'claude-sdk'
+            ? 'sdk'
+            : undefined;
+
       // Opt-in CLI substrate for the quick session (migration 027). Validate the
       // untyped IPC value; an absent/invalid value leaves the run + session on
-      // the SDK default (byte-identical to before).
-      const requestedSubstrate = isCliSubstrate(request.substrate) ? request.substrate : undefined;
+      // the SDK default (byte-identical to before). During provider/runtime
+      // migration, a Claude agentRuntime request projects back to substrate.
+      const requestedSubstrate = isCliSubstrate(request.substrate)
+        ? request.substrate
+        : substrateFromAgentRuntime;
 
       // Opt-in agent effort (the "Ultracode" wizard card). 'ultracode' launches
       // the interactive REPL with the ultracode setting; any other value is
@@ -565,8 +620,18 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // session behaved SDK. NULL remains the legacy/SDK meaning for
       // pre-migration rows only; new quick sessions always carry the resolved
       // value.
-      db.prepare(`UPDATE sessions SET substrate = ? WHERE id = ?`).run(
+      const resolvedSessionAgentRuntime = claudeRuntimeFromSubstrate(resolvedSubstrate);
+      db.prepare(
+        `UPDATE sessions
+            SET substrate = ?,
+                agent_provider = 'claude',
+                agent_runtime = ?,
+                agent_model = ?
+          WHERE id = ?`,
+      ).run(
         resolvedSubstrate,
+        resolvedSessionAgentRuntime,
+        request.agentModel ?? requestedModel ?? null,
         session.id,
       );
 

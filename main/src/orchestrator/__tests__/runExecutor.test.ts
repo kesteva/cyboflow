@@ -2432,6 +2432,9 @@ function enqueueIntegrationDb(): ReturnType<typeof createTestDb> {
       base_branch TEXT,
       run_id TEXT,
       substrate TEXT,
+      agent_provider TEXT DEFAULT 'claude',
+      agent_runtime TEXT DEFAULT 'claude-sdk',
+      agent_model TEXT,
       in_place BOOLEAN DEFAULT 0,
       is_main_repo BOOLEAN DEFAULT 0
     )

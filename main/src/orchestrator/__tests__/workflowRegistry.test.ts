@@ -1444,6 +1444,8 @@ describe('WorkflowRegistry', () => {
         expect(run).not.toBeNull();
         expect(run!.substrate).toBe(substrate);
         expect(run!.substrate).toBe('sdk');
+        expect(run!.agent_provider).toBe('claude');
+        expect(run!.agent_runtime).toBe('claude-sdk');
       });
     });
 
@@ -1461,6 +1463,8 @@ describe('WorkflowRegistry', () => {
         expect(substrate).toBe('interactive');
         const run = registry.getRunById(runId);
         expect(run!.substrate).toBe('interactive');
+        expect(run!.agent_provider).toBe('claude');
+        expect(run!.agent_runtime).toBe('claude-interactive');
       });
     });
 
