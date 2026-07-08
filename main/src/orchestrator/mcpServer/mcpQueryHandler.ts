@@ -71,6 +71,7 @@ import type { CliSubstrate } from '../../../../shared/types/substrate';
 import { runStatusEvents } from '../trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../../shared/types/cyboflow';
 import type { BacklogTaskItem, Priority, TaskType } from '../../../../shared/types/tasks';
+import type { ExperimentArm } from '../../../../shared/types/experiments';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import type {
   FindingPayload,
@@ -1285,12 +1286,71 @@ export class McpQueryHandler {
       return;
     }
 
+    // A/B SANDBOX read scoping (migration 053). A hidden experiment entity must
+    // never surface to a by-id/by-ref fetch from outside its OWNING arm — otherwise
+    // an arm that learns the sibling arm's id/ref could read (and then, via the
+    // write guard's now-arm-scoped denial message, target) the other arm's work.
+    // Return it ONLY when this run is the owning arm; else 'not_found', deliberately
+    // indistinguishable from a genuine miss so the tool can't probe the sibling
+    // sandbox. (list_tasks already hides ALL tagged rows via selectProjectBacklog.)
+    if (item.experiment_id !== null) {
+      const runCtx = this.runExperimentContext(msg.runId);
+      const entityArm = this.entityExperimentArm(item.type, item.id);
+      const ownedByThisArm =
+        runCtx.experimentId !== null &&
+        runCtx.experimentId === item.experiment_id &&
+        runCtx.arm !== null &&
+        runCtx.arm === entityArm;
+      if (!ownedByThisArm) {
+        this.writeResponse(client, {
+          type: 'mcp-query-response',
+          requestId: msg.requestId,
+          ok: false,
+          error: 'not_found',
+        });
+        return;
+      }
+    }
+
     this.writeResponse(client, {
       type: 'mcp-query-response',
       requestId: msg.requestId,
       ok: true,
       data: { task: McpQueryHandler.toFullTask(item) },
     });
+  }
+
+  /**
+   * A/B SANDBOX read scoping (migration 053): the (experimentId, arm) THIS run
+   * belongs to, or nulls when the run is not an experiment arm. Fail-soft on a
+   * pre-048/053 DB (missing columns → nulls). Used only by handleGetTask.
+   */
+  private runExperimentContext(runId: string): { experimentId: string | null; arm: ExperimentArm | null } {
+    try {
+      const row = this.db
+        .prepare('SELECT experiment_id AS experimentId, experiment_arm AS arm FROM workflow_runs WHERE id = ?')
+        .get(runId) as { experimentId?: unknown; arm?: unknown } | undefined;
+      const experimentId =
+        typeof row?.experimentId === 'string' && row.experimentId.length > 0 ? row.experimentId : null;
+      const arm = row?.arm;
+      return { experimentId, arm: arm === 'A' || arm === 'B' ? arm : null };
+    } catch {
+      return { experimentId: null, arm: null };
+    }
+  }
+
+  /** The experiment_arm tag on one entity row (migration 053), or null. Fail-soft. */
+  private entityExperimentArm(type: TaskType, id: string): ExperimentArm | null {
+    const table = type === 'idea' ? 'ideas' : type === 'epic' ? 'epics' : 'tasks';
+    try {
+      const row = this.db.prepare(`SELECT experiment_arm AS arm FROM ${table} WHERE id = ?`).get(id) as
+        | { arm?: unknown }
+        | undefined;
+      const arm = row?.arm;
+      return arm === 'A' || arm === 'B' ? arm : null;
+    } catch {
+      return null;
+    }
   }
 
   // --------------------------------------------------------------------------

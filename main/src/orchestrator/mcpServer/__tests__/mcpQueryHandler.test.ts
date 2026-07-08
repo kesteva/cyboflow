@@ -1424,10 +1424,17 @@ describe('McpQueryHandler', () => {
       db.exec(readFileSync(join(migDir, '042_collapse_board.sql'), 'utf-8'));
       // Migration 049 adds the A/B experiment sandbox tag to all three entity
       // tables; the read-side UNION (selectProjectBacklog) now projects
-      // experiment_id, so the fixture needs it.
+      // experiment_id, so the fixture needs it. Migration 048 stamps
+      // experiment_id/experiment_arm on runs, 053 stamps experiment_arm on
+      // entities — both needed for the get_task arm-scoping read guard.
       db.exec('ALTER TABLE ideas ADD COLUMN experiment_id TEXT');
       db.exec('ALTER TABLE epics ADD COLUMN experiment_id TEXT');
       db.exec('ALTER TABLE tasks ADD COLUMN experiment_id TEXT');
+      db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT');
+      db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_arm TEXT');
+      db.exec('ALTER TABLE ideas ADD COLUMN experiment_arm TEXT');
+      db.exec('ALTER TABLE epics ADD COLUMN experiment_arm TEXT');
+      db.exec('ALTER TABLE tasks ADD COLUMN experiment_arm TEXT');
       return db;
     }
 
@@ -1440,6 +1447,24 @@ describe('McpQueryHandler', () => {
            (id, workflow_id, project_id, status, current_step_id, steps_snapshot_json)
          VALUES (?, 'wf-list', ?, 'running', 'plan', ?)`,
       ).run(runId, projectId, JSON.stringify({ plan: 'planner' }));
+    }
+
+    /** Seed an experiment-ARM run (migration 048) so its creates are tagged + arm-scoped. */
+    function listSeedArmRun(
+      db: Database.Database,
+      runId: string,
+      experimentId: string,
+      arm: 'A' | 'B',
+      projectId = 1,
+    ): void {
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-list', ?, 'sprint', '{}')`,
+      ).run(projectId);
+      db.prepare(
+        `INSERT INTO workflow_runs
+           (id, workflow_id, project_id, status, current_step_id, steps_snapshot_json, experiment_id, experiment_arm)
+         VALUES (?, 'wf-list', ?, 'running', 'plan', ?, ?, ?)`,
+      ).run(runId, projectId, JSON.stringify({ plan: 'planner' }), experimentId, arm);
     }
 
     let listDb: Database.Database;
@@ -1666,6 +1691,50 @@ describe('McpQueryHandler', () => {
         const response = parseLastWrite(writes);
         expect(response.ok).toBe(false);
         expect(response.error).toBe('not_found');
+      });
+
+      it('ARM SCOPING (migration 053): the sibling arm gets "not_found"; the owning arm fetches its own entity', async () => {
+        // Arm A creates a hidden, experiment-tagged idea.
+        listSeedArmRun(listDb, 'run-arm-a', 'exp-ab', 'A');
+        const armAEntity = await createEntity('run-arm-a', 'Arm A work');
+
+        // The SIBLING arm (same experiment_id 'exp-ab', arm B) knows the id but must
+        // NOT be able to read it — the pre-053 guard allowed this because both arms
+        // shared experiment_id. Indistinguishable from a genuine miss.
+        listSeedArmRun(listDb, 'run-arm-b', 'exp-ab', 'B');
+        {
+          const { socket, writes } = makeSocketDouble();
+          await listHandler.handleMessage(
+            { type: 'mcp-get-task', requestId: 'gt-arm-b', runId: 'run-arm-b', taskId: armAEntity.id },
+            socket,
+          );
+          const response = parseLastWrite(writes);
+          expect(response.ok).toBe(false);
+          expect(response.error).toBe('not_found');
+        }
+
+        // A NON-experiment run is likewise denied the hidden entity.
+        listSeedRun(listDb, 'run-plain');
+        {
+          const { socket, writes } = makeSocketDouble();
+          await listHandler.handleMessage(
+            { type: 'mcp-get-task', requestId: 'gt-plain', runId: 'run-plain', taskId: armAEntity.id },
+            socket,
+          );
+          expect(parseLastWrite(writes).error).toBe('not_found');
+        }
+
+        // The OWNING arm (A) fetches its own entity normally (control).
+        {
+          const { socket, writes } = makeSocketDouble();
+          await listHandler.handleMessage(
+            { type: 'mcp-get-task', requestId: 'gt-arm-a', runId: 'run-arm-a', taskId: armAEntity.id },
+            socket,
+          );
+          const response = parseLastWrite(writes);
+          expect(response.ok).toBe(true);
+          expect((response.data as { task: Record<string, unknown> }).task['id']).toBe(armAEntity.id);
+        }
       });
     });
   });

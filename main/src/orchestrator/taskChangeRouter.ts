@@ -51,6 +51,7 @@ import type {
   TaskType,
 } from '../../../shared/types/tasks';
 import { resolveStepAgentKey } from '../../../shared/types/agentIdentity';
+import type { ExperimentArm } from '../../../shared/types/experiments';
 import { listRunCreatedEpicIds, listRunCreatedIdeaIds, listRunCreatedTaskIds } from './runEntityOwnership';
 
 // ---------------------------------------------------------------------------
@@ -236,6 +237,15 @@ export interface TaskChange {
    */
   experimentId?: string;
   /**
+   * CREATE path: stamp `experiment_arm` (migration 053) — WHICH arm of the
+   * experiment owns this entity. Like `experimentId` it is supplied EXPLICITLY for
+   * the orchestrator-created per-arm seed clones; for a run-created entity it is
+   * derived from the creating run's own experiment_arm. Non-null exactly when
+   * `experiment_id` is non-null. The sandbox guard requires BOTH to match so one
+   * arm can never mutate the other arm's hidden entities.
+   */
+  experimentArm?: ExperimentArm;
+  /**
    * UPDATE path, ORCHESTRATOR-ONLY: clear the entity's `experiment_id` (SET NULL),
    * revealing it out of the sandbox. Minted as its own entity_event + broadcast so
    * a mounted board sees it appear. Used by experiments.decide on promote. Rejected
@@ -317,6 +327,8 @@ interface EntityDbRow {
   attachments: string | null;
   /** A/B experiment sandbox tag (migration 049); NULL on a normal board entity + pre-049 DBs. */
   experiment_id: string | null;
+  /** A/B experiment ARM ownership (migration 053); non-null iff experiment_id is, else NULL. */
+  experiment_arm: ExperimentArm | null;
   /** Post-merge bug attribution (migration 049); the run that introduced this entity, else NULL. */
   caused_by_run_id: string | null;
   version: number;
@@ -1001,6 +1013,11 @@ export class TaskChangeRouter {
       // OR the creating run's own experiment_id (run-created drafts). A non-null
       // value hides the entity from the board + sandbox-scopes its future updates.
       const createExperimentId = this.resolveCreateExperimentId(change);
+      // A/B SANDBOX (migration 053): the ARM that owns this entity — resolved by the
+      // SAME precedence as createExperimentId (explicit change.experimentArm for the
+      // per-arm seed clones, else the creating run's own arm). Non-null iff
+      // createExperimentId is; the sandbox guard requires BOTH to match.
+      const createExperimentArm = this.resolveCreateExperimentArm(change);
 
       // Q1 GUARD: an epic/task created during an UNAPPROVED plan-gated run lands
       // PENDING (approved_at NULL = backend-invisible + sprint-ineligible) until
@@ -1029,6 +1046,7 @@ export class TaskChangeRouter {
         parentEpicId,
         originatingIdeaId,
         experimentId: createExperimentId,
+        experimentArm: createExperimentArm,
         now,
       });
 
@@ -1075,6 +1093,8 @@ export class TaskChangeRouter {
       originatingIdeaId: string | null;
       /** A/B experiment sandbox tag (migration 049); null = normal board entity. */
       experimentId: string | null;
+      /** A/B experiment ARM ownership (migration 053); non-null iff experimentId is. */
+      experimentArm: ExperimentArm | null;
       now: string;
     },
   ): void {
@@ -1102,6 +1122,13 @@ export class TaskChangeRouter {
     if (this.columnExists(desc.table, 'experiment_id')) {
       cols.push('experiment_id');
       vals.push(v.experimentId);
+    }
+    // A/B experiment ARM ownership (migration 053). Gated on the column existing so
+    // pre-053 / partial-migration test DBs keep inserting; non-null only on an
+    // experiment-created entity (mirrors experiment_id, same non-null-together rule).
+    if (this.columnExists(desc.table, 'experiment_arm')) {
+      cols.push('experiment_arm');
+      vals.push(v.experimentArm);
     }
     if (desc.hasEntryStage) {
       cols.push('entry_stage_id');
@@ -1200,6 +1227,54 @@ export class TaskChangeRouter {
         : null;
     } catch {
       return null; // pre-049 DB (no experiment_id column) -> untagged
+    }
+  }
+
+  /**
+   * A/B SANDBOX (migration 053): resolve the experiment ARM a CREATED entity
+   * belongs to — SAME precedence as {@link resolveCreateExperimentId}: an EXPLICIT
+   * `change.experimentArm` (the per-arm seed clones) wins, else the creating run's
+   * own experiment_arm. Non-null exactly when resolveCreateExperimentId is.
+   */
+  private resolveCreateExperimentArm(change: TaskChange): ExperimentArm | null {
+    if (change.experimentArm === 'A' || change.experimentArm === 'B') {
+      return change.experimentArm;
+    }
+    return this.runExperimentArmFor(change.runId);
+  }
+
+  /**
+   * The experiment_arm stamped on a run (migration 048), or null. Fail-soft: no
+   * runId, a vanished run, or a pre-048 DB (no experiment_arm column) all yield
+   * null. Peer of {@link runExperimentIdFor} for the arm dimension of the guard.
+   */
+  private runExperimentArmFor(runId?: string): ExperimentArm | null {
+    if (!runId) return null;
+    try {
+      const run = this.db
+        .prepare('SELECT experiment_arm AS arm FROM workflow_runs WHERE id = ?')
+        .get(runId) as { arm?: unknown } | undefined;
+      const arm = run?.arm;
+      return arm === 'A' || arm === 'B' ? arm : null;
+    } catch {
+      return null; // pre-048 DB (no experiment_arm column) -> untagged
+    }
+  }
+
+  /**
+   * The experiment_arm tag on a TASK row (migration 053), or null. Fail-soft: a
+   * vanished task or a pre-053 DB yields null. Peer of {@link taskExperimentIdFor}
+   * for the add-dependency guard, which has no located-entity row to read.
+   */
+  private taskExperimentArmFor(taskId: string): ExperimentArm | null {
+    try {
+      const row = this.db
+        .prepare('SELECT experiment_arm AS arm FROM tasks WHERE id = ?')
+        .get(taskId) as { arm?: unknown } | undefined;
+      const arm = row?.arm;
+      return arm === 'A' || arm === 'B' ? arm : null;
+    } catch {
+      return null; // pre-053 DB (no experiment_arm column) -> untagged
     }
   }
 
@@ -1318,23 +1393,30 @@ export class TaskChangeRouter {
         );
       }
 
-      // A/B SANDBOX GUARD (migration 049) — BIDIRECTIONAL, before every per-kind
-      // branch so ALL update kinds (fields/stage/archive/reparent/originatingIdea)
-      // are denied uniformly. The orchestrator is EXEMPT — only its promote/fold/
-      // sweep/reveal (clearExperiment) paths legitimately cross the boundary.
+      // A/B SANDBOX GUARD (migration 049 + arm scoping, migration 053) —
+      // BIDIRECTIONAL, before every per-kind branch so ALL update kinds
+      // (fields/stage/archive/reparent/originatingIdea) are denied uniformly. The
+      // orchestrator is EXEMPT — only its promote/fold/sweep/reveal
+      // (clearExperiment) paths legitimately cross the boundary.
       //   (a) an experiment-tagged run may write ONLY entities of its OWN
-      //       experiment (blocks mutating the original seed idea, the main board,
-      //       or a different experiment's entities);
+      //       experiment AND its OWN arm (blocks mutating the original seed idea,
+      //       the main board, a different experiment, OR — the arm-scoping fix —
+      //       the SIBLING arm's hidden entities, which share this experiment_id);
       //   (b) an untagged actor (user edit / other run) may NOT write a hidden
       //       experiment-tagged entity (it is sandboxed until decide reveals it).
       if (change.actor !== 'orchestrator') {
         const runExperimentId = this.runExperimentIdFor(change.runId);
         const entityExperimentId = current.experiment_id ?? null;
         if (runExperimentId !== null) {
-          if (entityExperimentId !== runExperimentId) {
+          const runArm = this.runExperimentArmFor(change.runId);
+          const entityArm = current.experiment_arm ?? null;
+          // Require BOTH the experiment AND the arm to match. runArm/entityArm null
+          // (a partially-stamped row) also fails closed — an arm write only ever
+          // touches its OWN, fully-stamped entities.
+          if (entityExperimentId !== runExperimentId || runArm === null || entityArm !== runArm) {
             throw new TaskChangeError(
               'experiment_sandboxed',
-              `entity ${taskId} is outside this experiment arm's sandbox — create a new entity instead of editing shared/main-board entities`,
+              `entity ${taskId} is outside this experiment arm's sandbox — create a new entity instead of editing shared/main-board or sibling-arm entities`,
             );
           }
         } else if (entityExperimentId !== null) {
@@ -1427,6 +1509,13 @@ export class TaskChangeRouter {
           sets.push('experiment_id = ?');
           params.push(null);
           deltas.push({ field: 'experiment_id', from: current.experiment_id, to: null });
+        }
+        // Clear experiment_arm in lockstep (migration 053) — the two are non-null
+        // together, so a revealed entity must carry neither.
+        if (this.columnExists(desc.table, 'experiment_arm') && current.experiment_arm !== null) {
+          sets.push('experiment_arm = ?');
+          params.push(null);
+          deltas.push({ field: 'experiment_arm', from: current.experiment_arm, to: null });
         }
       }
 
@@ -1826,13 +1915,14 @@ export class TaskChangeRouter {
         throw new TaskChangeError('invalid_dependency', 'a task cannot depend on itself');
       }
 
-      // A/B SANDBOX GUARD (migration 049) — BIDIRECTIONAL, mirroring runUpdate.
-      // The DAG edge mutates the blocked task's dependency state + mints a
-      // 'dependency-added' event/broadcast on it, so the same sandbox boundary
-      // applies here as to any other update. The orchestrator is EXEMPT (its
-      // promote/reveal paths legitimately span cleared entities):
+      // A/B SANDBOX GUARD (migration 049 + arm scoping, migration 053) —
+      // BIDIRECTIONAL, mirroring runUpdate. The DAG edge mutates the blocked task's
+      // dependency state + mints a 'dependency-added' event/broadcast on it, so the
+      // same sandbox boundary applies here as to any other update. The orchestrator
+      // is EXEMPT (its promote/reveal paths legitimately span cleared entities):
       //   (a) an experiment-tagged run may only add an edge when BOTH endpoints
-      //       belong to its OWN experiment (never touch main-board / other arms);
+      //       belong to its OWN experiment AND its OWN arm (never touch main-board,
+      //       another experiment, or — the arm-scoping fix — the sibling arm);
       //   (b) an untagged actor may NOT add an edge touching a hidden
       //       experiment-tagged task (sandboxed until decide reveals it).
       if (change.actor !== 'orchestrator') {
@@ -1840,10 +1930,19 @@ export class TaskChangeRouter {
         const blockedExperimentId = this.taskExperimentIdFor(blockedId);
         const prereqExperimentId = this.taskExperimentIdFor(prereqId);
         if (runExperimentId !== null) {
-          if (blockedExperimentId !== runExperimentId || prereqExperimentId !== runExperimentId) {
+          const runArm = this.runExperimentArmFor(change.runId);
+          const blockedArm = this.taskExperimentArmFor(blockedId);
+          const prereqArm = this.taskExperimentArmFor(prereqId);
+          const sameArm = (arm: ExperimentArm | null): boolean => runArm !== null && arm === runArm;
+          if (
+            blockedExperimentId !== runExperimentId ||
+            prereqExperimentId !== runExperimentId ||
+            !sameArm(blockedArm) ||
+            !sameArm(prereqArm)
+          ) {
             throw new TaskChangeError(
               'experiment_sandboxed',
-              'dependency endpoints are outside this experiment arm\'s sandbox — both tasks must belong to this experiment',
+              "dependency endpoints are outside this experiment arm's sandbox — both tasks must belong to this experiment and arm",
             );
           }
         } else if (blockedExperimentId !== null || prereqExperimentId !== null) {
@@ -1978,13 +2077,17 @@ export class TaskChangeRouter {
     const experimentId = this.columnExists(desc.table, 'experiment_id')
       ? 'experiment_id'
       : 'NULL AS experiment_id';
+    // A/B experiment ARM ownership (migration 053), fail-soft on pre-053 / partial test DBs.
+    const experimentArm = this.columnExists(desc.table, 'experiment_arm')
+      ? 'experiment_arm'
+      : 'NULL AS experiment_arm';
     const causedByRunId = this.columnExists(desc.table, 'caused_by_run_id')
       ? 'caused_by_run_id'
       : 'NULL AS caused_by_run_id';
     const row = this.db
       .prepare(
         `SELECT id, project_id, ref, title, summary, body, priority, repo, board_id, stage_id, archived_at,
-                ${decomposedAt}, ${approvedAt}, ${experimentId}, ${causedByRunId}, version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
+                ${decomposedAt}, ${approvedAt}, ${experimentId}, ${experimentArm}, ${causedByRunId}, version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
            FROM ${desc.table} WHERE id = ? AND project_id = ?`,
       )
       .get(id, projectId) as EntityDbRow | undefined;

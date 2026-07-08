@@ -206,11 +206,12 @@ function readSeedIdea(db: DatabaseLike, ideaId: string, projectId: number): Seed
   };
 }
 
-/** Clone the seed idea for one arm (hidden + tagged); returns the clone id. */
+/** Clone the seed idea for one arm (hidden + arm-tagged); returns the clone id. */
 async function cloneSeedIdea(
   deps: ExperimentsDeps,
   projectId: number,
   experimentId: string,
+  arm: ExperimentArm,
   seed: SeedIdeaFields,
 ): Promise<string> {
   let attachments: unknown = undefined;
@@ -230,6 +231,7 @@ async function cloneSeedIdea(
     scope: seed.scope,
     ...(Array.isArray(attachments) ? { attachments: attachments as never } : {}),
     experimentId,
+    experimentArm: arm,
     kind: 'experiment-seed-clone',
   });
   return result.taskId;
@@ -313,6 +315,7 @@ async function cloneSeedTask(
   deps: ExperimentsDeps,
   projectId: number,
   experimentId: string,
+  arm: ExperimentArm,
   seed: SeedTaskFields,
 ): Promise<string> {
   const created = await deps.taskChangeRouter.applyChange(projectId, {
@@ -324,6 +327,7 @@ async function cloneSeedTask(
     priority: seed.priority,
     repo: seed.repo,
     experimentId,
+    experimentArm: arm,
     kind: 'experiment-seed-clone',
   });
   await deps.taskChangeRouter.applyChange(projectId, {
@@ -603,14 +607,14 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
     if (seed) {
       // Assign each clone id the instant it is created so a failure on the SECOND
       // create (or later) still exposes the first to the rollback ladder.
-      createdIdeaCloneA = await cloneSeedIdea(deps, input.projectId, exp.id, seed);
-      createdIdeaCloneB = await cloneSeedIdea(deps, input.projectId, exp.id, seed);
+      createdIdeaCloneA = await cloneSeedIdea(deps, input.projectId, exp.id, 'A', seed);
+      createdIdeaCloneB = await cloneSeedIdea(deps, input.projectId, exp.id, 'B', seed);
       setExperimentRuns(db, exp.id, { seedIdeaCloneAId: createdIdeaCloneA, seedIdeaCloneBId: createdIdeaCloneB });
     } else if (seedTasks) {
       // Push each clone id as it is created (BEFORE the mapping insert) so a mid-loop
       // OR mapping-insert failure leaves every created clone tracked for rollback.
-      for (const st of seedTasks) createdTaskClonesA.push(await cloneSeedTask(deps, input.projectId, exp.id, st));
-      for (const st of seedTasks) createdTaskClonesB.push(await cloneSeedTask(deps, input.projectId, exp.id, st));
+      for (const st of seedTasks) createdTaskClonesA.push(await cloneSeedTask(deps, input.projectId, exp.id, 'A', st));
+      for (const st of seedTasks) createdTaskClonesB.push(await cloneSeedTask(deps, input.projectId, exp.id, 'B', st));
       insertExperimentSeedTasks(
         db,
         exp.id,

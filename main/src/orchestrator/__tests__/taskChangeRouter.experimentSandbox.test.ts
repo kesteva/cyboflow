@@ -35,24 +35,38 @@ function buildDb(): Database.Database {
   db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
   db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
-  // migration 048 (experiment_id on runs) + 049 (sandbox tag + attribution).
+  // migration 048 (experiment_id + experiment_arm on runs) + 049 (sandbox tag +
+  // attribution) + 053 (experiment_arm on entities).
   db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT;');
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_arm TEXT;');
   for (const t of ['ideas', 'epics', 'tasks']) {
     db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
+    db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_arm TEXT;`);
     db.exec(`ALTER TABLE ${t} ADD COLUMN caused_by_run_id TEXT;`);
   }
   return db;
 }
 
-/** Seed a workflow_runs row (optionally experiment-tagged). */
-function seedRun(db: Database.Database, runId: string, experimentId: string | null): void {
+/**
+ * Seed a workflow_runs row (optionally experiment-tagged). A tagged run defaults
+ * to arm 'A' unless one is given, so the existing single-arm tests keep passing
+ * under the arm-scoped guard (a run with a null arm can never edit its own tagged
+ * entity — arm null fails closed).
+ */
+function seedRun(
+  db: Database.Database,
+  runId: string,
+  experimentId: string | null,
+  arm?: 'A' | 'B',
+): void {
+  const armVal = arm ?? (experimentId !== null ? 'A' : null);
   db.prepare(
     `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
   ).run();
   db.prepare(
-    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, experiment_id)
-     VALUES (?, 'wf-1', 1, 'running', 'default', ?)`,
-  ).run(runId, experimentId);
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, experiment_id, experiment_arm)
+     VALUES (?, 'wf-1', 1, 'running', 'default', ?, ?)`,
+  ).run(runId, experimentId, armVal);
 }
 
 function expField(db: Database.Database, table: string, id: string, col: string): unknown {
@@ -206,5 +220,86 @@ describe('TaskChangeRouter — experiment sandbox (migration 049)', () => {
     const gone = (t: string, id: string) => db.prepare(`SELECT 1 FROM ${t} WHERE id = ?`).get(id) === undefined;
     expect(gone('tasks', child.taskId)).toBe(false);
     expect(gone('epics', epic.taskId)).toBe(false);
+  });
+
+  describe('arm scoping (migration 053)', () => {
+    it('create by an experiment run stamps experiment_arm from the run', async () => {
+      const db = buildDb();
+      seedRun(db, 'runA', 'exp-1', 'A');
+      seedRun(db, 'runB', 'exp-1', 'B');
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+
+      const a = await router.applyChange(1, { actor: 'agent:planner', entityType: 'task', title: 'a', runId: 'runA' });
+      const b = await router.applyChange(1, { actor: 'agent:planner', entityType: 'task', title: 'b', runId: 'runB' });
+      expect(expField(db, 'tasks', a.taskId, 'experiment_arm')).toBe('A');
+      expect(expField(db, 'tasks', b.taskId, 'experiment_arm')).toBe('B');
+    });
+
+    it('explicit change.experimentArm stamps a per-arm seed clone (no runId)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const clone = await router.applyChange(1, {
+        actor: 'orchestrator', entityType: 'idea', title: 'clone', experimentId: 'exp-9', experimentArm: 'B',
+      });
+      expect(expField(db, 'ideas', clone.taskId, 'experiment_arm')).toBe('B');
+    });
+
+    it('update guard DENIES editing the SIBLING arm (same experiment, different arm)', async () => {
+      const db = buildDb();
+      seedRun(db, 'runA', 'exp-1', 'A');
+      seedRun(db, 'runB', 'exp-1', 'B');
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+
+      // Arm B creates a task; arm A (same experiment) must NOT be able to edit it —
+      // the pre-053 guard allowed this because both share experiment_id 'exp-1'.
+      const bTask = await router.applyChange(1, { actor: 'agent:planner', entityType: 'task', title: 'bWork', runId: 'runB' });
+      await expect(
+        router.applyChange(1, { actor: 'agent:planner', taskId: bTask.taskId, fields: { title: 'hijack' }, runId: 'runA' }),
+      ).rejects.toMatchObject({ code: 'experiment_sandboxed' } as Partial<TaskChangeError>);
+
+      // Arm B may still edit its OWN task (control — the guard is not over-broad).
+      await expect(
+        router.applyChange(1, { actor: 'agent:planner', taskId: bTask.taskId, fields: { title: 'bWork2' }, runId: 'runB' }),
+      ).resolves.toBeTruthy();
+    });
+
+    it('add-dependency guard DENIES an edge touching the SIBLING arm task', async () => {
+      const db = buildDb();
+      seedRun(db, 'runA', 'exp-1', 'A');
+      seedRun(db, 'runB', 'exp-1', 'B');
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+
+      const aTask = await router.applyChange(1, { actor: 'agent:planner', entityType: 'task', title: 'aWork', runId: 'runA' });
+      const aTask2 = await router.applyChange(1, { actor: 'agent:planner', entityType: 'task', title: 'aWork2', runId: 'runA' });
+      const bTask = await router.applyChange(1, { actor: 'agent:planner', entityType: 'task', title: 'bWork', runId: 'runB' });
+
+      // Arm A wiring an edge to arm B's task (prereq in the sibling arm) — denied.
+      await expect(
+        router.applyChange(1, {
+          actor: 'agent:planner', taskId: aTask.taskId, dependsOnTaskId: bTask.taskId, runId: 'runA',
+        }),
+      ).rejects.toMatchObject({ code: 'experiment_sandboxed' } as Partial<TaskChangeError>);
+
+      // A within-arm edge (both endpoints arm A) is allowed (control).
+      await expect(
+        router.applyChange(1, {
+          actor: 'agent:planner', taskId: aTask.taskId, dependsOnTaskId: aTask2.taskId, runId: 'runA',
+        }),
+      ).resolves.toBeTruthy();
+    });
+
+    it('promote reveal (clearExperiment) also clears experiment_arm', async () => {
+      const db = buildDb();
+      seedRun(db, 'runA', 'exp-1', 'A');
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const epic = await router.applyChange(1, { actor: 'agent:planner', entityType: 'epic', title: 'E', runId: 'runA' });
+      expect(expField(db, 'epics', epic.taskId, 'experiment_arm')).toBe('A');
+
+      await router.applyChange(1, {
+        actor: 'orchestrator', entityType: 'epic', taskId: epic.taskId, approved: true, clearExperiment: true,
+      });
+      expect(expField(db, 'epics', epic.taskId, 'experiment_id')).toBeNull();
+      expect(expField(db, 'epics', epic.taskId, 'experiment_arm')).toBeNull();
+    });
   });
 });
