@@ -5,6 +5,7 @@ import type { SessionManager } from './sessionManager';
 import { AbstractCliManager } from './panels/cli/AbstractCliManager';
 import { ClaudeCodeManager } from './panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './panels/claude/interactiveClaudeManager';
+import { CodexPtyManager } from './panels/codex/codexPtyManager';
 import {
   CliToolRegistry,
   CliToolDefinition,
@@ -97,7 +98,7 @@ export class CliManagerFactory {
       // WorkflowRegistry.createRun pins every demo run/session substrate to
       // 'sdk' via ConfigManager.getForcedSubstrate, so the interactive manager
       // is constructed but never engaged while demo mode is on.
-      if (this.configManager?.isDemoMode() && toolId !== 'claude-interactive') {
+      if (this.configManager?.isDemoMode() && toolId !== 'claude-interactive' && toolId !== 'codex-pty') {
         const existing = this.demoManagers.get(toolId);
         if (existing) return existing;
         const db = config.additionalOptions?.db;
@@ -205,6 +206,9 @@ export class CliManagerFactory {
     // Registered with a LOWER priority than 'claude' (100) so getDefaultTool()
     // still prefers the SDK path; the manager body is a stub until TASK-808/S3.
     this.registerInteractiveClaudeTool();
+
+    // Register Codex PTY quick-session runtime.
+    this.registerCodexPtyTool();
 
     // Future tools can be registered here:
     // this.registerAiderTool();
@@ -373,6 +377,55 @@ export class CliManagerFactory {
     this.registry.registerTool(interactiveDefinition, {
       priority: 50, // Below 'claude' (100) so getDefaultTool() prefers the SDK path
       validateOnRegister: false // Stub body — never probe availability this slice
+    });
+  }
+
+  private registerCodexPtyTool(): void {
+    const codexPtyManagerFactory: ManagerFactoryFunction = (
+      sessionManager: unknown,
+      logger?: Logger,
+      configManager?: ConfigManager,
+    ) => {
+      return new CodexPtyManager(
+        sessionManager as SessionManager,
+        logger,
+        configManager,
+      );
+    };
+
+    const codexPtyDefinition: CliToolDefinition = {
+      id: 'codex-pty',
+      name: 'Codex (PTY)',
+      description: 'OpenAI Codex running as an interactive PTY quick-session runtime',
+      version: '1.0.0',
+      capabilities: {
+        supportsResume: false,
+        supportsMultipleModels: true,
+        supportsPermissions: true,
+        supportsFileOperations: true,
+        supportsGitIntegration: true,
+        supportsSystemPrompts: false,
+        supportsStructuredOutput: false,
+        outputFormats: [
+          CLI_OUTPUT_FORMATS.TEXT,
+        ],
+        supportedPanelTypes: ['claude'],
+      },
+      config: {
+        requiredEnvVars: [],
+        optionalEnvVars: [],
+        requiredConfigKeys: [],
+        optionalConfigKeys: [],
+        defaultExecutable: 'codex',
+        alternativeExecutables: ['codex'],
+        minimumVersion: undefined,
+      },
+      managerFactory: codexPtyManagerFactory,
+    };
+
+    this.registry.registerTool(codexPtyDefinition, {
+      priority: 40,
+      validateOnRegister: false,
     });
   }
 

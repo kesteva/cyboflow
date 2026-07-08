@@ -25,6 +25,7 @@ import { CliManagerFactory } from './services/cliManagerFactory';
 import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
+import { CodexPtyManager } from './services/panels/codex/codexPtyManager';
 import { SubstrateDispatchFacade } from './services/substrateDispatchFacade';
 import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
@@ -295,6 +296,7 @@ let sessionManager: SessionManager;
 let worktreeManager: WorktreeManager;
 let cliManagerFactory: CliManagerFactory;
 let defaultCliManager: AbstractCliManager;
+let codexPtyManager: CodexPtyManager;
 let gitDiffManager: GitDiffManager;
 let gitStatusManager: GitStatusManager;
 let executionTracker: ExecutionTracker;
@@ -725,6 +727,17 @@ async function initializeServices() {
   if (!(interactiveCliManager instanceof InteractiveClaudeManager)) {
     throw new Error('[Main] cliManagerFactory returned a non-InteractiveClaudeManager for claude-interactive');
   }
+
+  const createdCodexPtyManager = await cliManagerFactory.createManager('codex-pty', {
+    sessionManager,
+    logger,
+    configManager,
+    skipValidation: true,
+  });
+  if (!(createdCodexPtyManager instanceof CodexPtyManager)) {
+    throw new Error('[Main] cliManagerFactory returned a non-CodexPtyManager for codex-pty');
+  }
+  codexPtyManager = createdCodexPtyManager;
   gitDiffManager = new GitDiffManager(logger);
   gitStatusManager = new GitStatusManager(sessionManager, worktreeManager, gitDiffManager, logger);
   executionTracker = new ExecutionTracker(sessionManager, gitDiffManager);
@@ -1415,6 +1428,7 @@ async function initializeServices() {
     interactiveCliManager,
     workflowRegistry,
     cyboflowLogger,
+    [codexPtyManager],
   );
 
   // LifecycleTransitions adapter — keeps RunExecutor free of services/* imports by
@@ -2074,6 +2088,7 @@ async function initializeServices() {
     cliManagerFactory,
     claudeCodeManager: defaultCliManager, // Backward compatibility
     interactiveCliManager, // PTY substrate sibling (narrowed to the concrete class above)
+    codexPtyManager,
     // Live-session close-out seams for quick sessions (IDEA-030): route the
     // session merge/rebase/dismiss handlers through the SubstrateDispatchFacade
     // so a quick session's persistent process is never orphaned — interactive
@@ -2089,6 +2104,8 @@ async function initializeServices() {
     // 'pty-output'/'turn-end').
     registerLivePanel: (runId: string, panelId: string) =>
       substrateFacade.registerInteractivePanel(runId, panelId),
+    registerCodexPtyPanel: (runId: string, panelId: string) =>
+      substrateFacade.registerPtyPanel(runId, panelId, codexPtyManager),
     gitDiffManager,
     gitStatusManager,
     executionTracker,
