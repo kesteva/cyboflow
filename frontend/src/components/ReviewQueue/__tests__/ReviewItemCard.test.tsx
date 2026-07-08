@@ -29,12 +29,14 @@ const {
   mockPromote,
   mockApprovalApprove,
   mockApprovalReject,
+  mockAnswerRecovery,
 } = vi.hoisted(() => ({
   mockResolve: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_1', resumed: true }),
   mockDismiss: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_1' }),
   mockPromote: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_1', taskId: 'tsk_1' }),
   mockApprovalApprove: vi.fn().mockResolvedValue(undefined),
   mockApprovalReject: vi.fn().mockResolvedValue(undefined),
+  mockAnswerRecovery: vi.fn().mockResolvedValue({ resolved: true, nudge: { delivered: true } }),
 }));
 
 vi.mock('../../../trpc/client', () => ({
@@ -48,6 +50,9 @@ vi.mock('../../../trpc/client', () => ({
       approvals: {
         approve: { mutate: mockApprovalApprove },
         reject: { mutate: mockApprovalReject },
+      },
+      runs: {
+        answerRecoveryGate: { mutate: mockAnswerRecovery },
       },
     },
   },
@@ -94,6 +99,7 @@ beforeEach(() => {
   mockPromote.mockClear();
   mockApprovalApprove.mockClear();
   mockApprovalReject.mockClear();
+  mockAnswerRecovery.mockClear();
 });
 
 describe('ReviewItemCard', () => {
@@ -135,6 +141,63 @@ describe('ReviewItemCard', () => {
       expect(mockResolve).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_dec_r', outcome: 'reject' }),
     );
     expect(mockDismiss).not.toHaveBeenCalled();
+  });
+
+  it('ask-user-question-recovery gate renders the recovered options as answer buttons', () => {
+    const item = makeItem(
+      'decision',
+      { id: 'rvw_rec', blocking: true, source: 'gate:ask-user-question-recovery' },
+      {
+        kind: 'decision',
+        gate: 'ask-user-question-recovery',
+        recoveredQuestions: [
+          {
+            question: 'Approve the plan?',
+            header: 'Approve',
+            multiSelect: false,
+            options: [{ label: 'Approve' }, { label: 'Revise' }, { label: 'Reject' }],
+          },
+        ],
+      },
+    );
+    render(<ReviewItemCard item={item} />);
+    const answers = screen.getAllByTestId('recovery-gate-answer');
+    expect(answers.map((b) => b.textContent)).toEqual(['Approve', 'Revise', 'Reject']);
+    // NOT the generic approve/reject gate buttons.
+    expect(screen.queryByTestId('decision-resolve')).not.toBeInTheDocument();
+  });
+
+  it('answering a recovery gate calls runs.answerRecoveryGate with the chosen label', async () => {
+    const item = makeItem(
+      'decision',
+      { id: 'rvw_rec2', blocking: true, source: 'gate:ask-user-question-recovery' },
+      {
+        kind: 'decision',
+        gate: 'ask-user-question-recovery',
+        recoveredQuestions: [
+          { question: 'Approve the plan?', header: 'Approve', multiSelect: false, options: [{ label: 'Approve' }, { label: 'Reject' }] },
+        ],
+      },
+    );
+    const onResolved = vi.fn();
+    render(<ReviewItemCard item={item} onResolved={onResolved} />);
+    fireEvent.click(screen.getByText('Approve'));
+    await waitFor(() =>
+      expect(mockAnswerRecovery).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_rec2', answerText: 'Approve' }),
+    );
+    await waitFor(() => expect(onResolved).toHaveBeenCalled());
+    expect(mockResolve).not.toHaveBeenCalled();
+  });
+
+  it('a recovery gate with no recovered options falls back to the generic gate buttons', () => {
+    const item = makeItem(
+      'decision',
+      { id: 'rvw_rec3', blocking: true, source: 'gate:ask-user-question-recovery' },
+      { kind: 'decision', gate: 'ask-user-question-recovery', recoveredQuestions: [] },
+    );
+    render(<ReviewItemCard item={item} />);
+    expect(screen.queryByTestId('recovery-gate-answer')).not.toBeInTheDocument();
+    expect(screen.getByTestId('decision-resolve')).toBeInTheDocument();
   });
 
   it('finding Promote mints a task via promoteToTask', async () => {

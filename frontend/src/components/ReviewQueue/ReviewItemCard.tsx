@@ -34,6 +34,7 @@ import { formatAge } from '../../utils/approvalFormatters';
 import { trackEvent } from '../../utils/telemetry';
 import { trpc } from '../../trpc/client';
 import type { ReviewItem, ReviewItemKind, FindingProposedTarget } from '../../../../shared/types/reviews';
+import type { QuestionPayload } from '../../../../shared/types/questions';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useNavigationStore } from '../../stores/navigationStore';
@@ -91,6 +92,26 @@ function permissionApprovalId(item: ReviewItem): string | null {
     return payload.approvalId;
   }
   return null;
+}
+
+/**
+ * The recovered AskUserQuestion options for a durable `ask-user-question-recovery`
+ * decision gate (empty for any other item). Parsed defensively so a malformed
+ * payload degrades to no options — the card then falls back to a plain
+ * resolve/dismiss so the gate can still be cleared and the run resumed.
+ */
+function recoveredQuestions(item: ReviewItem): QuestionPayload[] {
+  if (item.kind !== 'decision') return [];
+  const payload = item.payload;
+  if (
+    payload &&
+    payload.kind === 'decision' &&
+    payload.gate === 'ask-user-question-recovery' &&
+    Array.isArray(payload.recoveredQuestions)
+  ) {
+    return payload.recoveredQuestions;
+  }
+  return [];
 }
 
 /**
@@ -183,6 +204,22 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
     useNavigationStore.getState().goToSession();
   };
 
+  // Answer a durable ask-user-question-recovery gate: the chosen option label is
+  // resolved + delivered to the run as a resumed turn (runs.answerRecoveryGate).
+  // Plain resolve/dismiss would clear the gate but NOT re-drive the drained SDK
+  // session, so the agent would never see the answer.
+  const handleRecoveryAnswer = (answerText: string): void => {
+    setApprovalBusy(true);
+    void trpc.cyboflow.runs.answerRecoveryGate
+      .mutate({ projectId: item.project_id, reviewItemId: item.id, answerText })
+      .then(() => {
+        trackEvent('review_item_resolved', { kind: item.kind, action: 'resolve', blocking: item.blocking });
+        onResolved?.();
+      })
+      .catch(() => { /* leave card visible on error */ })
+      .finally(() => { setApprovalBusy(false); });
+  };
+
   // Permission items reuse the real-time approval resolution path.
   const handleApprovalDecision = (decision: 'approve' | 'reject'): void => {
     const approvalId = permissionApprovalId(item);
@@ -219,7 +256,33 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
             </Button>
           </>
         );
-      case 'decision':
+      case 'decision': {
+        // A durable ask-user-question-recovery gate: the in-session gate dropped
+        // or its SDK session expired, so re-offer the ORIGINAL options here. Each
+        // click resolves the gate AND resumes the run with that label. When the
+        // options are missing (malformed payload) fall back to Approve/Reject so
+        // the gate can still be cleared + the run resumed.
+        const recovered = recoveredQuestions(item);
+        if (recovered.length > 0) {
+          const options = recovered.flatMap((q) => q.options.map((o) => o.label));
+          const unique = Array.from(new Set(options));
+          return (
+            <>
+              {unique.map((label) => (
+                <Button
+                  key={label}
+                  variant="primary"
+                  size="sm"
+                  disabled={busy}
+                  onClick={() => handleRecoveryAnswer(label)}
+                  data-testid="recovery-gate-answer"
+                >
+                  {label}
+                </Button>
+              ))}
+            </>
+          );
+        }
         // A question-sourced decision is an OPEN AskUserQuestion: the run is
         // awaiting_input on a specific answer, so plain resolve/dismiss would
         // strand the waiting agent (the backend rejects it too). The only
@@ -250,6 +313,7 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
             </Button>
           </>
         );
+      }
       case 'notification':
         // An informational FYI — the work already ran, so there is no follow-up
         // to track. Acknowledging (Dismiss) is the only triage.
