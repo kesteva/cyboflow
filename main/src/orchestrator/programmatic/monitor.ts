@@ -652,18 +652,6 @@ function requiresConfirmation(kind: ConverseAction['kind']): boolean {
 }
 
 /**
- * A stable, canonical string of an action's kind + fields, used ONLY for equality (is
- * a re-attached proposal the SAME as the staged one?). Deterministic: entries are
- * sorted so key order never affects the result. Opaque — never parsed back.
- */
-function actionFingerprint(a: ConverseAction): string {
-  const entries = Object.entries(a as unknown as Record<string, unknown>).sort(([l], [r]) =>
-    l < r ? -1 : l > r ? 1 : 0,
-  );
-  return JSON.stringify(entries);
-}
-
-/**
  * A concise, human-readable one-liner describing a staged action, shown in the pause
  * turn that asks the user to confirm. The switch covers the eight confirmation-
  * required kinds; the generic fallback exists only for exhaustiveness (the two
@@ -1114,12 +1102,12 @@ export class DefaultMonitorSession implements MonitorSession {
       return;
     }
 
-    // Belt-and-suspenders: re-attaching the IDENTICAL staged action also confirms it.
-    if (priorPending && actionFingerprint(priorPending) === actionFingerprint(action)) {
-      await this.actuate(action);
-      return;
-    }
-
+    // Any next-turn action (even an identical re-attach of the staged one) is
+    // NOT a confirmation: a mutating action executes ONLY via an explicit
+    // `confirm` control against a matching pending proposal. So a re-attach
+    // (re)STAGES and re-asks rather than auto-confirming — this keeps the trust
+    // boundary honest against persistent prompt-injected content that would
+    // otherwise re-emit the same action every turn and self-confirm.
     // First proposal, or a DIFFERENT action superseding a prior pending one: STAGE it
     // and ask the user to confirm on the next turn. Do NOT execute.
     this.pendingAction = action;

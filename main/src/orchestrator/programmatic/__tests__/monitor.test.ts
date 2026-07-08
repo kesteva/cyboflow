@@ -1220,7 +1220,7 @@ describe('DefaultMonitorSession.converse — two-phase confirmation gate', () =>
     expect(injected.at(-1)).toEqual({ role: 'assistant', text: '▶ removed' });
   });
 
-  it('(f) re-attaching the identical staged action also confirms it (belt-and-suspenders)', async () => {
+  it('(f) re-attaching the identical staged action does NOT confirm it — execution needs an explicit confirm control', async () => {
     const { reader } = fakeHistory({ conversation: [], steps: [] });
     const action = { kind: 'skip_step', stepId: 'tasks' };
     const structuredQuery = seqStructuredQuery(
@@ -1235,9 +1235,13 @@ describe('DefaultMonitorSession.converse — two-phase confirmation gate', () =>
     await session.converse('skip the tasks step');
     await session.converse('skip the tasks step');
 
-    expect(skipStep).toHaveBeenCalledTimes(1);
-    expect(skipStep).toHaveBeenCalledWith({ stepId: 'tasks' });
-    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '▶ skip queued' });
+    // No `confirm` control was ever sent, so the mutating action NEVER executes —
+    // a re-attach only re-stages and re-asks (closes the persistent-injection self-confirm hole).
+    expect(skipStep).not.toHaveBeenCalled();
+    expect(injected.at(-1)).toEqual({
+      role: 'assistant',
+      text: '⏸ Ready to skip step tasks. Reply to confirm, or say cancel.',
+    });
   });
 
   it('(g) retry_step executes on the FIRST turn (not staged)', async () => {
