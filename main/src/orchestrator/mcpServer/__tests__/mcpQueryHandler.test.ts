@@ -3305,11 +3305,9 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     // includeWorkflowRunTaskColumns gives current_step_id + steps_snapshot_json,
     // which resolveReviewItemRunContext SELECTs to derive the actor.
     vdb = createTestDb({ disableForeignKeys: true, includeWorkflowRunTaskColumns: true });
-    // Layer migration 055's verify stamp columns + verification_requests table
-    // onto the GATE_SCHEMA test DB (the fixture stops before 036).
-    vdb.exec('ALTER TABLE workflow_runs ADD COLUMN verify_enabled INTEGER NOT NULL DEFAULT 0');
-    vdb.exec('ALTER TABLE workflow_runs ADD COLUMN verify_type TEXT');
-    vdb.exec('ALTER TABLE workflow_runs ADD COLUMN verify_chain TEXT');
+    // The migration-055 verify stamp columns are provided by createTestDb's
+    // includeWorkflowRunTaskColumns block; here we layer only the
+    // verification_requests table onto the GATE_SCHEMA test DB.
     vdb.exec(`
       CREATE TABLE verification_requests (
         id TEXT PRIMARY KEY,

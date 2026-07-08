@@ -141,6 +141,20 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN eval_enabled INTEGER');
     evalEnabledAdded = true;
   };
+  // Migration 055 (visual-verification run stamp): createRun stamps the three
+  // immutable columns verify_enabled / verify_type / verify_chain, and getRunById
+  // projects verify_enabled. Same read-model surfaces as
+  // eval_enabled, folded in idempotently. Matches the real migration defs
+  // (verify_enabled INTEGER NOT NULL DEFAULT 0 — the resolver always stamps 0/1,
+  // never NULL; type/chain nullable). Additive — never widens GATE_SCHEMA.
+  let verifyColumnsAdded = false;
+  const addVerifyColumnsOnce = (): void => {
+    if (verifyColumnsAdded) return;
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN verify_enabled INTEGER NOT NULL DEFAULT 0');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN verify_type TEXT');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN verify_chain TEXT');
+    verifyColumnsAdded = true;
+  };
   // Migration 048 (A/B testing): createRun stamps + getRunById projects four new
   // workflow_runs tagging columns (experiment_id / experiment_arm / variant_id /
   // variant_label). Both read-model surfaces (includeSubstrate) and the row-level
@@ -185,6 +199,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addModelColumnOnce();
     // Migration 044: getRunById projects eval_enabled beside model.
     addEvalEnabledColumnOnce();
+    // Migration 055: getRunById projects verify_enabled beside eval_enabled.
+    addVerifyColumnsOnce();
     // Migration 048: getRunById projects the four A/B tagging columns.
     addVariantColumnsOnce();
   }
@@ -228,6 +244,8 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addModelColumnOnce();
     // Migration 044: getRunById projects eval_enabled (per-run eval override).
     addEvalEnabledColumnOnce();
+    // Migration 055: getRunById projects verify_enabled.
+    addVerifyColumnsOnce();
     // Migration 048: getRunById projects the four A/B tagging columns.
     addVariantColumnsOnce();
   }

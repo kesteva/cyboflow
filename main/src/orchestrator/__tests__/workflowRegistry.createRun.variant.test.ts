@@ -26,12 +26,9 @@ function setupDb(): Database.Database {
   db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
-  // createRun also stamps the three immutable visual-verification columns
-  // (migration 055) — layer the additive ALTERs so the variant/experiment INSERT
-  // resolves; with no verify config injected every run stamps the DISABLED posture.
-  db.exec('ALTER TABLE workflow_runs ADD COLUMN verify_enabled INTEGER NOT NULL DEFAULT 0');
-  db.exec('ALTER TABLE workflow_runs ADD COLUMN verify_type TEXT');
-  db.exec('ALTER TABLE workflow_runs ADD COLUMN verify_chain TEXT');
+  // The migration-055 verify stamp columns (verify_enabled / verify_type /
+  // verify_chain) that createRun writes are provided by createTestDb's
+  // includeWorkflowRunTaskColumns block above — no manual ALTER needed here.
   db.exec(`
     CREATE TABLE workflow_revisions (
       id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id TEXT NOT NULL, spec_hash TEXT NOT NULL,

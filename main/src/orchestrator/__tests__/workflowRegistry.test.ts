@@ -144,15 +144,9 @@ describe('WorkflowRegistry', () => {
     // getRunById projects it; the column is provided by the
     // includeWorkflowRunTaskColumns block above (folded in alongside
     // execution_model), so no manual ALTER is needed here.
-    // createRun now also stamps the three immutable visual-verification columns
-    // (migration 055) — verify_enabled / verify_type / verify_chain, the sibling
-    // run-stamp to substrate / execution_model that getRunById also projects.
-    // Layer the additive ALTERs on top (mirrors the migration's ADD COLUMNs;
-    // never widens GATE_SCHEMA). With the master switch OFF (no config injected)
-    // every run stamps verify_enabled=0 / verify_type=NULL / verify_chain=NULL.
-    db.exec('ALTER TABLE workflow_runs ADD COLUMN verify_enabled INTEGER NOT NULL DEFAULT 0');
-    db.exec('ALTER TABLE workflow_runs ADD COLUMN verify_type TEXT');
-    db.exec('ALTER TABLE workflow_runs ADD COLUMN verify_chain TEXT');
+    // createRun also stamps the migration-055 verify columns (verify_enabled /
+    // verify_type / verify_chain); like model above they are provided by the
+    // includeWorkflowRunTaskColumns block, so no manual ALTER is needed here.
     db.exec(`
       CREATE TABLE workflow_revisions (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
