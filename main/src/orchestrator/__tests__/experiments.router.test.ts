@@ -970,5 +970,83 @@ describe('experiments router orchestration (slice B)', () => {
       // The experiment is left unpromoted (retryable) — no partial verdict.
       expect(getExperiment(dbAdapter(h.db), res.experimentId)!.promoted_variant_id).toBeNull();
     });
+
+    /**
+     * Force the arm-A seed-task-clone hard delete to fail with a NON-'not_found'
+     * error inside the REAL sweep, by shadowing the router instance's applyDelete
+     * (deleteExperimentArmEntities calls this.applyDelete). `failDeleteOf` is
+     * mutable so a test can lift the failure and prove the idempotent retry.
+     */
+    function injectSweepDeleteFailure(h: Harness, targetId: string): { clear: () => void } {
+      const router = h.deps.taskChangeRouter as unknown as {
+        applyDelete: (
+          pid: number,
+          opts: { actor: string; taskId: string; entityType?: string; runId?: string },
+        ) => Promise<unknown>;
+      };
+      const real = router.applyDelete.bind(router);
+      const state = { failDeleteOf: targetId as string | null };
+      router.applyDelete = (pid, opts) =>
+        opts.taskId === state.failDeleteOf ? Promise.reject(new Error('boom-sweep-delete')) : real(pid, opts);
+      return { clear: () => { state.failDeleteOf = null; } };
+    }
+
+    async function settledSprintExperiment(h: Harness): Promise<{
+      res: Awaited<ReturnType<typeof startExperiment>>;
+      cloneA: string;
+    }> {
+      const t1 = await seedEligibleTask(h, 'T1', 'orig-1');
+      const res = await startExperiment(h.deps, {
+        projectId: 1, workflowId: 'wf-sprint', variantAId: 'vA-sprint', variantBId: 'vB-sprint', seedTaskIds: [t1],
+      });
+      setRunStatus(h.db, res.armA.runId, 'awaiting_review');
+      setRunStatus(h.db, res.armB.runId, 'awaiting_review');
+      const cloneA = listExperimentSeedTasks(dbAdapter(h.db), res.experimentId).find((r) => r.arm === 'A')!.clone_task_id;
+      return { res, cloneA };
+    }
+
+    it('decide (discard-both) FAILS CLOSED when a sweep delete throws — status + seed mappings preserved, then a retry succeeds', async () => {
+      const h = makeHarness();
+      const { res, cloneA } = await settledSprintExperiment(h);
+      const injected = injectSweepDeleteFailure(h, cloneA);
+
+      // The real sweep must collect the failure and throw experiment_sweep_failed
+      // rather than swallow it — decide aborts BEFORE stamping/dropping mappings.
+      await expect(decideExperiment(h.deps, res.experimentId, null)).rejects.toThrow(/sweep failed/);
+
+      expect(getExperiment(dbAdapter(h.db), res.experimentId)!.status).toBe('running');
+      expect(listExperimentSeedTasks(dbAdapter(h.db), res.experimentId).length).toBeGreaterThan(0);
+      expect(exists(h.db, 'tasks', cloneA)).toBe(true);
+
+      // Retry once the underlying cause is fixed — the idempotent sweep completes.
+      injected.clear();
+      const dec = await decideExperiment(h.deps, res.experimentId, null);
+      expect(dec.status).toBe('decided');
+      expect(exists(h.db, 'tasks', cloneA)).toBe(false);
+      expect(listExperimentSeedTasks(dbAdapter(h.db), res.experimentId).length).toBe(0);
+    });
+
+    it('abandon FAILS CLOSED when a sweep delete throws — status, sessions, and seed mappings preserved, then a retry succeeds', async () => {
+      const h = makeHarness();
+      const { res, cloneA } = await settledSprintExperiment(h);
+      const exp0 = getExperiment(dbAdapter(h.db), res.experimentId)!;
+      const injected = injectSweepDeleteFailure(h, cloneA);
+
+      await expect(abandonExperiment(h.deps, res.experimentId)).rejects.toThrow(/sweep failed/);
+
+      // NOT abandoned, mappings survive, and — crucially — the arm sessions were NOT
+      // torn down (dismissal now runs only AFTER a successful sweep + status stamp).
+      expect(getExperiment(dbAdapter(h.db), res.experimentId)!.status).toBe('running');
+      expect(listExperimentSeedTasks(dbAdapter(h.db), res.experimentId).length).toBeGreaterThan(0);
+      expect(h.dismissed).not.toContain(exp0.session_a_id);
+      expect(h.dismissed).not.toContain(exp0.session_b_id);
+
+      // Retry — the idempotent sweep completes; now the experiment is abandoned + torn down.
+      injected.clear();
+      const ab = await abandonExperiment(h.deps, res.experimentId);
+      expect(ab.status).toBe('abandoned');
+      expect(exists(h.db, 'tasks', cloneA)).toBe(false);
+      expect(h.dismissed).toContain(exp0.session_a_id);
+    });
   });
 });

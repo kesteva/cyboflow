@@ -971,8 +971,9 @@ export async function abandonExperiment(deps: ExperimentsDeps, experimentId: str
     throw new TRPCError({ code: 'CONFLICT', message: `experiment ${experimentId} is already ${exp.status}` });
   }
 
-  // Cancel still-running arms FIRST, then dismiss both sessions via the FULL path
-  // (which also cancels any hosted run — belt-and-braces).
+  // Cancel still-running arms FIRST so neither arm keeps minting entities while we
+  // sweep (the explicit cancel is the pre-sweep barrier; the sessions are torn
+  // down only AFTER a successful sweep + status stamp, below).
   const statusA = runStatus(db, exp.run_a_id);
   const statusB = runStatus(db, exp.run_b_id);
   if (exp.run_a_id && statusA !== null && !isExperimentArmSettled(statusA)) {
@@ -981,33 +982,41 @@ export async function abandonExperiment(deps: ExperimentsDeps, experimentId: str
   if (exp.run_b_id && statusB !== null && !isExperimentArmSettled(statusB)) {
     await deps.cancelRun(exp.run_b_id).catch(() => {});
   }
-  if (exp.session_a_id) await deps.dismissSession(exp.session_a_id).catch(() => {});
-  if (exp.session_b_id) await deps.dismissSession(exp.session_b_id).catch(() => {});
 
-  // Sweep both arms' entities (incl. seed TASK clones), then drop the mapping rows.
+  // Sweep both arms' entities (incl. seed TASK clones) — FAIL-CLOSED. A sweep that
+  // throws (experiment_sweep_failed) propagates OUT of abandon BEFORE the seed
+  // mapping-drop, the 'abandoned' stamp, and the session teardown below, leaving
+  // the experiment recoverable (mappings intact, status still 'running') for a
+  // retry once the delete cause is fixed. The sweep is idempotent, so the retry
+  // re-runs cleanly. (The prior .catch(() => {}) swallowed sweep failures and
+  // stamped the experiment abandoned on top of leaked, still-tagged orphans.)
   if (exp.run_a_id) {
-    await deps.taskChangeRouter
-      .deleteExperimentArmEntities(exp.project_id, {
-        experimentId,
-        runId: exp.run_a_id,
-        seedCloneId: exp.seed_idea_clone_a_id,
-        seedTaskCloneIds: seedTaskCloneIdsForArm(db, experimentId, 'A'),
-      })
-      .catch(() => {});
+    await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
+      experimentId,
+      runId: exp.run_a_id,
+      seedCloneId: exp.seed_idea_clone_a_id,
+      seedTaskCloneIds: seedTaskCloneIdsForArm(db, experimentId, 'A'),
+    });
   }
   if (exp.run_b_id) {
-    await deps.taskChangeRouter
-      .deleteExperimentArmEntities(exp.project_id, {
-        experimentId,
-        runId: exp.run_b_id,
-        seedCloneId: exp.seed_idea_clone_b_id,
-        seedTaskCloneIds: seedTaskCloneIdsForArm(db, experimentId, 'B'),
-      })
-      .catch(() => {});
+    await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
+      experimentId,
+      runId: exp.run_b_id,
+      seedCloneId: exp.seed_idea_clone_b_id,
+      seedTaskCloneIds: seedTaskCloneIdsForArm(db, experimentId, 'B'),
+    });
   }
   deleteExperimentSeedTasks(db, experimentId);
 
   updateExperimentStatus(db, experimentId, 'abandoned');
+
+  // Only now (sweep succeeded + status stamped) tear down the arm worktrees via
+  // the FULL session-delete path (which also cancels any hosted run — belt-and-
+  // braces). A sweep failure above returned before reaching here, leaving the
+  // sessions intact so the user can inspect the arm whose sweep failed.
+  if (exp.session_a_id) await deps.dismissSession(exp.session_a_id).catch(() => {});
+  if (exp.session_b_id) await deps.dismissSession(exp.session_b_id).catch(() => {});
+
   return { experimentId, status: 'abandoned', winnerRunId: null };
 }
 

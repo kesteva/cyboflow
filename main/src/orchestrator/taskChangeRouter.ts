@@ -127,7 +127,14 @@ export type TaskChangeErrorCode =
   // experiment, OR an untagged actor (user / other run) tried to mutate a
   // hidden experiment-tagged entity. Surfaced to the agent as a tool-error so
   // the flow fails soft (it creates its own entity instead).
-  | 'experiment_sandboxed';
+  | 'experiment_sandboxed'
+  // A/B experiments (migration 049): the discard/abandon SWEEP could not
+  // hard-delete one or more still-tagged entities (a non-'not_found' delete
+  // failure). Raised by deleteExperimentArmEntities so the caller (decide /
+  // abandon) fails CLOSED — it must NOT stamp the experiment settled or drop the
+  // seed-clone mapping rows while tagged orphans remain, so a retry can sweep
+  // them once the underlying cause is fixed.
+  | 'experiment_sweep_failed';
 
 /** Edge kind for a task->task dependency (mirrors the task_dependencies.kind CHECK). */
 export type TaskDependencyKind = 'blocking' | 'related';
@@ -757,7 +764,14 @@ export class TaskChangeRouter {
    * HARD-delete, not archive: experiment entities were NEVER on the board (hidden
    * by the tag the whole time), so archiving would surface throwaway drafts as
    * clutter; the winner's content is preserved via the fold+reparent BEFORE the
-   * loser is swept (see experiments.decide). Best-effort per entity.
+   * loser is swept (see experiments.decide).
+   *
+   * FAIL-CLOSED: a row already gone ('not_found' — cascade-claimed or vanished) is
+   * a successful no-op, but any OTHER delete failure is collected and, after every
+   * delete has been attempted, THROWS `experiment_sweep_failed`. The caller must
+   * NOT stamp the experiment settled or drop the seed-clone mapping rows while
+   * tagged orphans remain — a retry re-runs the (idempotent) sweep once the cause
+   * is fixed.
    */
   async deleteExperimentArmEntities(
     projectId: number,
@@ -790,6 +804,28 @@ export class TaskChangeRouter {
       }
     };
 
+    // FAIL-CLOSED sweep. A delete that fails for any reason OTHER than the row
+    // already being gone ('not_found' — cascade-claimed by a parent, or vanished
+    // between the matchesExperiment SELECT and the delete, both a successful
+    // no-op) is COLLECTED here. After every delete has been ATTEMPTED (so one
+    // pass sweeps everything it can), a non-empty failure set THROWS — the caller
+    // (experiments.decide / abandon) must then abort BEFORE stamping the
+    // experiment settled or dropping the seed-clone mapping rows, so a retry can
+    // sweep the remaining tagged orphans once the underlying cause is fixed. The
+    // old behaviour swallowed every failure, letting decide/abandon settle the
+    // experiment on top of leaked, still-tagged entities with no recovery path.
+    const sweepFailures: Array<{ id: string; reason: string }> = [];
+    const attemptDelete = async (entityType: TaskType, id: string): Promise<void> => {
+      try {
+        await this.applyDelete(projectId, { actor: 'orchestrator', entityType, taskId: id, runId });
+      } catch (err) {
+        if (err instanceof TaskChangeError && err.code === 'not_found') {
+          return; // already gone (cascade-claimed / vanished) — a successful no-op
+        }
+        sweepFailures.push({ id, reason: err instanceof Error ? err.message : String(err) });
+      }
+    };
+
     const runCreatedTaskIds = new Set(listRunCreatedTaskIds(this.db, runId));
 
     // Run-created EPICS first (their applyDelete cascade claims child tasks). If a
@@ -807,49 +843,29 @@ export class TaskChangeRouter {
       if (foreignChild) {
         for (const child of childIds) {
           if (!runCreatedTaskIds.has(child.id) || !matchesExperiment('tasks', child.id)) continue;
-          try {
-            await this.applyDelete(projectId, { actor: 'orchestrator', entityType: 'task', taskId: child.id, runId });
-          } catch {
-            /* best-effort */
-          }
+          await attemptDelete('task', child.id);
         }
         continue;
       }
-      try {
-        await this.applyDelete(projectId, { actor: 'orchestrator', entityType: 'epic', taskId: epicId, runId });
-      } catch {
-        /* best-effort */
-      }
+      await attemptDelete('epic', epicId);
     }
 
     // Run-created ORPHAN tasks (read after epic deletions so cascade-claimed ones are gone).
     for (const taskId of listRunCreatedTaskIds(this.db, runId)) {
       if (!matchesExperiment('tasks', taskId)) continue;
-      try {
-        await this.applyDelete(projectId, { actor: 'orchestrator', entityType: 'task', taskId, runId });
-      } catch {
-        /* best-effort */
-      }
+      await attemptDelete('task', taskId);
     }
 
     // Run-created IDEAS (a raw-prompt arm may mint its own idea).
     for (const ideaId of listRunCreatedIdeaIds(this.db, runId)) {
       if (!matchesExperiment('ideas', ideaId)) continue;
-      try {
-        await this.applyDelete(projectId, { actor: 'orchestrator', entityType: 'idea', taskId: ideaId, runId });
-      } catch {
-        /* best-effort */
-      }
+      await attemptDelete('idea', ideaId);
     }
 
     // The explicit orchestrator-created seed IDEA clone (no run-created event links
     // it). Its applyDelete cascade claims any epics/tasks still parented under it.
     if (seedCloneId && matchesExperiment('ideas', seedCloneId)) {
-      try {
-        await this.applyDelete(projectId, { actor: 'orchestrator', entityType: 'idea', taskId: seedCloneId, runId });
-      } catch {
-        /* best-effort */
-      }
+      await attemptDelete('idea', seedCloneId);
     }
 
     // The explicit orchestrator-created seed TASK clones (migration 051 — one per
@@ -859,12 +875,19 @@ export class TaskChangeRouter {
     if (seedTaskCloneIds && seedTaskCloneIds.length > 0) {
       for (const cloneTaskId of seedTaskCloneIds) {
         if (!matchesExperiment('tasks', cloneTaskId)) continue;
-        try {
-          await this.applyDelete(projectId, { actor: 'orchestrator', entityType: 'task', taskId: cloneTaskId, runId });
-        } catch {
-          /* best-effort */
-        }
+        await attemptDelete('task', cloneTaskId);
       }
+    }
+
+    // Fail-CLOSED finalization: any non-'not_found' delete failure aborts the
+    // caller before it can settle the experiment / drop the seed mappings.
+    if (sweepFailures.length > 0) {
+      throw new TaskChangeError(
+        'experiment_sweep_failed',
+        `experiment ${experimentId} arm sweep failed for ${sweepFailures.length} entit${
+          sweepFailures.length === 1 ? 'y' : 'ies'
+        } (${sweepFailures.map((f) => `${f.id}: ${f.reason}`).join('; ')}); experiment left unsettled — fix the cause and retry`,
+      );
     }
   }
 

@@ -164,6 +164,7 @@ function rethrowAsTRPCError(err: unknown): never {
       invalid_dependency: 'BAD_REQUEST',
       dependency_cycle: 'CONFLICT',
       experiment_sandboxed: 'CONFLICT',
+      experiment_sweep_failed: 'INTERNAL_SERVER_ERROR',
     };
     throw new TRPCError({
       code: codeMap[err.code],
