@@ -6,6 +6,58 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.19] — 2026-07-08
+
+### Added
+
+- **Workflow A/B testing — variants, experiments, and baseline rotation.**
+  A workflow can now carry named **variants** alongside its baseline spec, and a
+  run picks an arm by **randomized rotation** executing against a **frozen spec**
+  so a mid-experiment edit can't skew results. **Experiments** run arms
+  side-by-side over a shared task set: each arm gets an **arm-scoped entity
+  sandbox** (one arm can never touch another's ideas/epics/tasks), a **pairwise
+  judge** auto-evaluates outcomes, and a **comparison view** + experiments
+  dashboard route the decision (adopt / rerun / abandon). The winning variant can
+  be **promoted to baseline**, and the **baseline is a first-class rotation
+  participant** (the champion, shown as a row in the Variants list with its
+  weight hidden unless it's in rotation). Sprint experiments launch from a
+  **task-picker modal** that seeds each arm with per-task clones and folds results
+  back. [migrations 048–054]
+- **Durable human gates that survive SDK-session expiry.** Human gates now
+  persist across an SDK session expiring and resume gracefully; boot recovery
+  **mints durable recovery gates** for open question gates, and the
+  ask-user-question-recovery gate **renders and is answerable in the review
+  queue** (option-less gates stay on the answer path, never generic triage). The
+  PreToolUse hook timeout is pinned to a safe ~23-day ceiling.
+- **Live monitor steering (RunDirectives).** Eight **non-stopping monitor
+  steering actions** plus a live **RunDirectives** seam let an operator skip or
+  steer a run and re-resolve a fan-out mid-flight, all behind a
+  **stage-then-confirm** gate (host-enforced; no auto-confirm on re-attach).
+  `SprintLaneStore` gains add/remove lane so tasks can be edited mid-run, and the
+  monitor **lazily rehydrates after an app restart**.
+- **Sidebar update-available pill.** A pill driven by `useUpdater` surfaces when
+  a new build is available. The workflow timeline now renders **failed/skipped
+  step states**.
+- **Dev-only force-gate-failure affordance.** A settings-gated trigger to force
+  the AskUserQuestion gate-failure path, for exercising the durable-gate recovery
+  flow.
+
+### Changed
+
+- **Review-item invariants + flow docs aligned** (PR #6). The
+  `ReviewItemRouter` invariant now documents the sanctioned **folded run-pause
+  co-write** exception; cancel-path dismiss (`humanStepManager`) and app-restart
+  stale recovery (`questionRouter`) now append the same `entity_events` deltas
+  and emit change events, so those transitions are visible to the queue. Docs
+  (README / ARCHITECTURE / CODE-PATTERNS / CLAUDE.md) updated to the current
+  **four** built-in flows including **Ship**, and the stale "12-stage board"
+  wording corrected to the 4-stage board.
+- **Sprint task scope re-renders per step** so tasks added mid-run are grounded
+  in the agent's context, and `edit_task` is scoped to queued lanes with orphaned
+  `add_task` rolled back.
+- **Nested modals no longer close the outer modal** on a click (cross-portal
+  event bubbling fixed).
+
 ## [0.1.18] — 2026-07-07
 
 ### Added
