@@ -12,8 +12,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { WorkflowVariantRow } from '../variantsStore';
 
-const { mockVariantsListQuery } = vi.hoisted(() => ({
+const { mockVariantsListQuery, mockGetBaselineRotationQuery } = vi.hoisted(() => ({
   mockVariantsListQuery: vi.fn<(input: { workflowId: string }) => Promise<WorkflowVariantRow[]>>(),
+  mockGetBaselineRotationQuery:
+    vi.fn<(input: { workflowId: string }) => Promise<{ inRotation: boolean; weight: number }>>(),
 }));
 
 vi.mock('../../trpc/client', () => ({
@@ -22,6 +24,9 @@ vi.mock('../../trpc/client', () => ({
       variants: {
         list: {
           query: mockVariantsListQuery,
+        },
+        getBaselineRotation: {
+          query: mockGetBaselineRotationQuery,
         },
       },
     },
@@ -49,15 +54,24 @@ function makeVariant(overrides: Partial<WorkflowVariantRow> = {}): WorkflowVaria
 
 beforeEach(() => {
   mockVariantsListQuery.mockReset();
-  useVariantsStore.setState({ byWorkflowId: {}, loadedWorkflowIds: {}, loading: {}, error: {} });
+  mockGetBaselineRotationQuery.mockReset().mockResolvedValue({ inRotation: false, weight: 1 });
+  useVariantsStore.setState({
+    byWorkflowId: {},
+    baselineByWorkflowId: {},
+    loadedWorkflowIds: {},
+    loading: {},
+    error: {},
+  });
 });
 
 describe('variantsStore.fetch', () => {
-  it('(a) populates byWorkflowId + loadedWorkflowIds on success', async () => {
+  it('(a) populates byWorkflowId + baselineByWorkflowId + loadedWorkflowIds on success', async () => {
     mockVariantsListQuery.mockResolvedValue([makeVariant()]);
+    mockGetBaselineRotationQuery.mockResolvedValue({ inRotation: true, weight: 3 });
     await useVariantsStore.getState().fetch('wf-1');
 
     expect(useVariantsStore.getState().byWorkflowId['wf-1']).toHaveLength(1);
+    expect(useVariantsStore.getState().baselineByWorkflowId['wf-1']).toEqual({ inRotation: true, weight: 3 });
     expect(useVariantsStore.getState().loadedWorkflowIds['wf-1']).toBe(true);
     expect(useVariantsStore.getState().loading['wf-1']).toBe(false);
     expect(useVariantsStore.getState().error['wf-1']).toBeNull();

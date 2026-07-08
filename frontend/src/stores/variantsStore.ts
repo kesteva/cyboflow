@@ -22,9 +22,14 @@ type RouterOutputs = inferRouterOutputs<AppRouter>;
 /** AppRouter-inferred variant row — never a local mirror (CLAUDE.md IPC rule). */
 export type WorkflowVariantRow = RouterOutputs['cyboflow']['variants']['list'][number];
 
+/** AppRouter-inferred baseline rotation participation (migration 054). */
+export type BaselineRotation = RouterOutputs['cyboflow']['variants']['getBaselineRotation'];
+
 export interface VariantsState {
   /** Variant rows keyed by workflowId. Absent key = never fetched. */
   byWorkflowId: Record<string, WorkflowVariantRow[]>;
+  /** Baseline rotation participation keyed by workflowId (migration 054). */
+  baselineByWorkflowId: Record<string, BaselineRotation>;
   /** True once `fetch` has resolved at least once for a workflowId. */
   loadedWorkflowIds: Record<string, boolean>;
   /** True while a fetch is in flight for a workflowId (re-entrancy guard). */
@@ -32,7 +37,7 @@ export interface VariantsState {
   /** Last fetch failure's message per workflowId; null when clean. */
   error: Record<string, string | null>;
 
-  /** Fetch (or re-fetch) a workflow's variant list. No-op while already loading. */
+  /** Fetch (or re-fetch) a workflow's variant list + baseline rotation. No-op while already loading. */
   fetch: (workflowId: string) => Promise<void>;
   /** Alias for `fetch` — call after any variants.* mutation to keep the list live. */
   invalidate: (workflowId: string) => Promise<void>;
@@ -40,6 +45,7 @@ export interface VariantsState {
 
 export const useVariantsStore = create<VariantsState>((set, get) => ({
   byWorkflowId: {},
+  baselineByWorkflowId: {},
   loadedWorkflowIds: {},
   loading: {},
   error: {},
@@ -51,9 +57,13 @@ export const useVariantsStore = create<VariantsState>((set, get) => ({
       error: { ...s.error, [workflowId]: null },
     }));
     try {
-      const rows = await trpc.cyboflow.variants.list.query({ workflowId });
+      const [rows, baseline] = await Promise.all([
+        trpc.cyboflow.variants.list.query({ workflowId }),
+        trpc.cyboflow.variants.getBaselineRotation.query({ workflowId }),
+      ]);
       set((s) => ({
         byWorkflowId: { ...s.byWorkflowId, [workflowId]: rows },
+        baselineByWorkflowId: { ...s.baselineByWorkflowId, [workflowId]: baseline },
         loadedWorkflowIds: { ...s.loadedWorkflowIds, [workflowId]: true },
         loading: { ...s.loading, [workflowId]: false },
       }));
@@ -73,9 +83,13 @@ export const useVariantsStore = create<VariantsState>((set, get) => ({
     // mutation should never be skipped just because the seed fetch is settling).
     set((s) => ({ error: { ...s.error, [workflowId]: null } }));
     try {
-      const rows = await trpc.cyboflow.variants.list.query({ workflowId });
+      const [rows, baseline] = await Promise.all([
+        trpc.cyboflow.variants.list.query({ workflowId }),
+        trpc.cyboflow.variants.getBaselineRotation.query({ workflowId }),
+      ]);
       set((s) => ({
         byWorkflowId: { ...s.byWorkflowId, [workflowId]: rows },
+        baselineByWorkflowId: { ...s.baselineByWorkflowId, [workflowId]: baseline },
         loadedWorkflowIds: { ...s.loadedWorkflowIds, [workflowId]: true },
       }));
     } catch (err: unknown) {
@@ -96,12 +110,15 @@ export const useVariantsStore = create<VariantsState>((set, get) => ({
  */
 export function useWorkflowVariants(workflowId: string | null): {
   variants: WorkflowVariantRow[];
+  /** Baseline rotation participation (migration 054); null until first fetch resolves. */
+  baseline: BaselineRotation | null;
   loaded: boolean;
   loading: boolean;
   error: string | null;
 } {
   const fetchFn = useVariantsStore((s) => s.fetch);
   const variants = useVariantsStore((s) => (workflowId ? s.byWorkflowId[workflowId] : undefined)) ?? [];
+  const baseline = useVariantsStore((s) => (workflowId ? s.baselineByWorkflowId[workflowId] : undefined)) ?? null;
   const loaded = useVariantsStore((s) => (workflowId ? s.loadedWorkflowIds[workflowId] : false)) ?? false;
   const loading = useVariantsStore((s) => (workflowId ? s.loading[workflowId] : false)) ?? false;
   const error = useVariantsStore((s) => (workflowId ? s.error[workflowId] : null)) ?? null;
@@ -110,5 +127,5 @@ export function useWorkflowVariants(workflowId: string | null): {
     if (workflowId) void fetchFn(workflowId);
   }, [workflowId, fetchFn]);
 
-  return { variants, loaded, loading, error };
+  return { variants, baseline, loaded, loading, error };
 }
