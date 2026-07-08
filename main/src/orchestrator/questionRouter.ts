@@ -1254,6 +1254,9 @@ export class QuestionRouter extends EventEmitter {
    */
   recoverStaleAwaitingInput(): number {
     const resolvedReviewItemIds: string[] = [];
+    // Durable recovery gates minted for RESUMABLE runs below, emitted AFTER the
+    // transaction commits (mirrors clearPendingForRun's minted-then-emit order).
+    const mintedRecoveryGateIds: string[] = [];
     const transition = this.db.transaction(() => {
       const staleRuns = this.db
         .prepare(
@@ -1297,6 +1300,47 @@ export class QuestionRouter extends EventEmitter {
           .run(...failedIds);
       }
 
+      // Re-home each RESUMABLE run's still-open gate into a durable
+      // ask-user-question-recovery item BEFORE we time the questions out below —
+      // otherwise a crash / force-quit / update-restart while a human question is
+      // open would drop the answerable card and the human decision would be lost
+      // (the run reappears as a bare awaiting_review). This is the boot-time
+      // analogue of clearPendingForRun's turn-drain re-home: the in-memory pending
+      // map is gone after a restart, so we read the SAME payload from the persisted
+      // `questions_json`. Scoped to RESUMABLE runs only — a FAILED run is a dead end
+      // (unresumable), so a blocking recovery card on it would be un-actionable.
+      if (hasReviewItemsTable(this.db) && resumableIds.length > 0) {
+        const now = new Date().toISOString();
+        const rPh = resumableIds.map(() => '?').join(',');
+        const pendingQ = this.db
+          .prepare(
+            `SELECT run_id AS runId, questions_json AS questionsJson FROM questions
+              WHERE status = 'pending' AND run_id IN (${rPh})
+              ORDER BY created_at ASC`,
+          )
+          .all(...resumableIds) as Array<{ runId: string; questionsJson: string }>;
+        // Aggregate each run's pending question payloads into ONE recovery gate
+        // (one blocking card per run, carrying every open question's options).
+        const byRun = new Map<string, QuestionPayload[]>();
+        for (const q of pendingQ) {
+          let parsed: QuestionPayload[] = [];
+          try {
+            parsed = JSON.parse(q.questionsJson) as QuestionPayload[];
+          } catch {
+            // Malformed payload → option-less recovery gate (the card falls back
+            // to a free-text answer, still delivered via answerRecoveryGate).
+            console.warn(`[QuestionRouter] recoverStaleAwaitingInput: failed to parse questions_json for run ${q.runId}`);
+          }
+          const acc = byRun.get(q.runId) ?? [];
+          acc.push(...parsed);
+          byRun.set(q.runId, acc);
+        }
+        for (const [rid, questions] of byRun.entries()) {
+          const minted = coWriteDecisionReviewItem(this.db, buildAskUserQuestionRecoveryGate(rid, questions, now));
+          if (minted !== null) mintedRecoveryGateIds.push(minted);
+        }
+      }
+
       // Settle the dead gate for ALL recovered runs (both buckets).
       const allPh = allIds.map(() => '?').join(',');
       this.db
@@ -1331,11 +1375,23 @@ export class QuestionRouter extends EventEmitter {
     for (const reviewItemId of resolvedReviewItemIds) {
       emitReviewItemChangedById(this.db, reviewItemId, 'resolved');
     }
+    // Broadcast the durable recovery gates so the review queue / landing surfaces
+    // the answerable card immediately (after the transaction's writes commit).
+    for (const reviewItemId of mintedRecoveryGateIds) {
+      try {
+        emitReviewItemChangedById(this.db, reviewItemId, 'created');
+      } catch (err) {
+        console.warn(
+          `[QuestionRouter] recoverStaleAwaitingInput: recovery-gate emit failed for ${reviewItemId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
     const total = resumable + failed;
     if (total > 0) {
       console.log(
         `[QuestionRouter] Boot recovery: ${total} stale awaiting_input run(s) — ` +
-        `${resumable} rested in awaiting_review (resumable), ${failed} failed (no session / stale > ${STALE_RESUMABLE_RECOVERY_DAYS}d)`,
+        `${resumable} rested in awaiting_review (resumable, ${mintedRecoveryGateIds.length} recovery gate(s) minted), ` +
+        `${failed} failed (no session / stale > ${STALE_RESUMABLE_RECOVERY_DAYS}d)`,
       );
     }
     return total;

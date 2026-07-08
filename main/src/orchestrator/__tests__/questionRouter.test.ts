@@ -734,6 +734,106 @@ describe('QuestionRouter', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Boot recovery re-homes an unanswered gate into a durable recovery item
+// (adversarial-review regression): a crash / force-quit / update-restart while a
+// human question is open must NOT drop the answerable card. The in-memory pending
+// map is gone after a restart, so recoverStaleAwaitingInput reads the persisted
+// questions_json and mints an ask-user-question-recovery gate for RESUMABLE runs.
+// ---------------------------------------------------------------------------
+
+describe('QuestionRouter boot recovery mints durable recovery gates', () => {
+  // Full chain THROUGH migration 016 (review_items) so coWriteDecisionReviewItem
+  // can mint the gate; + claude_session_id (migration 018) for the resumability key.
+  function buildDb(): Database.Database {
+    const db = new Database(':memory:');
+    db.pragma('foreign_keys = ON');
+    db.exec(`
+      CREATE TABLE projects (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        path TEXT NOT NULL UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    db.prepare('INSERT INTO projects (id, name, path) VALUES (1, ?, ?)').run('Proj', '/tmp/p1');
+    const migDir = join(__dirname, '..', '..', 'database', 'migrations');
+    db.exec(readFileSync(join(migDir, '006_cyboflow_schema.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '007_add_stuck_reason.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '010_questions.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '011_workflow_step_tracking.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '014_native_tasks.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
+    db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
+    return db;
+  }
+
+  function seedParkedRun(
+    db: Database.Database,
+    opts: { runId: string; sessionId: string | null; questionsJson: string },
+  ): void {
+    db.prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-b', 1, 'ship', '{}')`).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, status, claude_session_id, updated_at)
+       VALUES (?, 'wf-b', 1, 'awaiting_input', ?, CURRENT_TIMESTAMP)`,
+    ).run(opts.runId, opts.sessionId);
+    db.prepare(
+      `INSERT INTO questions (id, run_id, tool_use_id, questions_json, status)
+       VALUES (?, ?, ?, ?, 'pending')`,
+    ).run(`q-${opts.runId}`, opts.runId, `tu-${opts.runId}`, opts.questionsJson);
+  }
+
+  afterEach(() => QuestionRouter._resetForTesting());
+
+  it('re-homes a RESUMABLE run\'s open question into a blocking recovery gate carrying its options', () => {
+    const db = buildDb();
+    const router = QuestionRouter.initialize(dbAdapter(db));
+    const questions = [
+      { question: 'Ship it?', header: 'Ship', multiSelect: false, options: [{ label: 'Approve' }, { label: 'Revise' }, { label: 'Reject' }] },
+    ];
+    seedParkedRun(db, { runId: 'brun-1', sessionId: 'sess-live', questionsJson: JSON.stringify(questions) });
+
+    router.recoverStaleAwaitingInput();
+
+    // The run rests resumable, and the dead in-session question is timed out.
+    const run = db.prepare("SELECT status FROM workflow_runs WHERE id = 'brun-1'").get() as { status: string };
+    expect(run.status).toBe('awaiting_review');
+    const q = db.prepare("SELECT status FROM questions WHERE id = 'q-brun-1'").get() as { status: string };
+    expect(q.status).toBe('timed_out');
+    // A NEW durable blocking recovery gate carries the ORIGINAL options so the
+    // answerable card survives the restart.
+    const gate = db
+      .prepare(
+        "SELECT kind, blocking, status, payload_json AS payloadJson FROM review_items WHERE run_id = 'brun-1' AND source = 'gate:ask-user-question-recovery'",
+      )
+      .get() as { kind: string; blocking: number; status: string; payloadJson: string } | undefined;
+    expect(gate).toBeDefined();
+    expect(gate?.kind).toBe('decision');
+    expect(gate?.blocking).toBe(1);
+    expect(gate?.status).toBe('pending');
+    const payload = JSON.parse(gate!.payloadJson) as { gate: string; recoveredQuestions: QuestionPayload[] };
+    expect(payload.gate).toBe('ask-user-question-recovery');
+    expect(payload.recoveredQuestions[0].options.map((o) => o.label)).toEqual(['Approve', 'Revise', 'Reject']);
+  });
+
+  it('does NOT mint a recovery gate for a sessionless (failed) run', () => {
+    const db = buildDb();
+    const router = QuestionRouter.initialize(dbAdapter(db));
+    seedParkedRun(db, { runId: 'brun-2', sessionId: null, questionsJson: '[]' });
+
+    router.recoverStaleAwaitingInput();
+
+    const run = db.prepare("SELECT status FROM workflow_runs WHERE id = 'brun-2'").get() as { status: string };
+    expect(run.status).toBe('failed');
+    const gate = db
+      .prepare("SELECT id FROM review_items WHERE run_id = 'brun-2' AND source = 'gate:ask-user-question-recovery'")
+      .get();
+    expect(gate).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // FIX-STAGE-MODEL (D): answering the approve-plan gate with Approve flips the
 // tasks the run CREATED (entity_events kind='created', run_id=<run>) to Ready
 // for development (position 6). Ownership is derived from the created-event
