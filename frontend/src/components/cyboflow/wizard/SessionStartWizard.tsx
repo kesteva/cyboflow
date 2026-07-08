@@ -245,6 +245,11 @@ export default function SessionStartWizard(): React.JSX.Element {
   // 044). Meaningless for a quick session (evals only fire for built-in flows), so
   // the control is not shown there. Default 'inherit' keeps launches byte-identical.
   const [evalOverride, setEvalOverride] = useState<'inherit' | 'on' | 'off'>('inherit');
+  // Advanced (Configure ③, WORKFLOW only): per-run visual-verification override.
+  // 'inherit' → omit `verifyEnabled` (the run inherits the global visualVerify.enabled
+  // setting / project `.cyboflow/verify.json`); 'on'/'off' → send true/false →
+  // workflow_runs.verify_enabled. Default 'inherit' keeps launches byte-identical.
+  const [verifyOverride, setVerifyOverride] = useState<'inherit' | 'on' | 'off'>('inherit');
   // Advanced (Configure ③, WORKFLOW only): per-run execution-model override.
   // 'inherit' → omit `executionModel` (the run resolves via the global
   // defaultExecutionModel setting → env → the 'orchestrated' floor); an explicit
@@ -535,6 +540,7 @@ export default function SessionStartWizard(): React.JSX.Element {
           // 'inherit' omits the field (inherit the global setting); on/off send a
           // boolean. A per-run ON does NOT unlock quick/custom flows server-side.
           ...(evalOverride !== 'inherit' ? { evalEnabled: evalOverride === 'on' } : {}),
+          ...(verifyOverride !== 'inherit' ? { verifyEnabled: verifyOverride === 'on' } : {}),
           // Per-run execution-model override — Advanced options. 'inherit' omits the
           // field (the resolver ladder decides); an explicit choice is the
           // highest-precedence rung of resolveExecutionModel.
@@ -570,7 +576,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride, executionModelOverride, selectedFindingIds, variantSelection],
+    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, selectedFindingIds, variantSelection],
   );
 
   // Sprint launch — ONE session-hosted run seeded with the multi-selected task
@@ -599,6 +605,7 @@ export default function SessionStartWizard(): React.JSX.Element {
           model,
           // Per-run code-review-eval override (migration 044) — Advanced options.
           ...(evalOverride !== 'inherit' ? { evalEnabled: evalOverride === 'on' } : {}),
+          ...(verifyOverride !== 'inherit' ? { verifyEnabled: verifyOverride === 'on' } : {}),
           // Per-run execution-model override — Advanced options (see launchRun).
           ...(executionModelOverride !== 'inherit' ? { executionModel: executionModelOverride } : {}),
           taskIds,
@@ -619,7 +626,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         setIsLaunching(false);
       }
     },
-    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride, executionModelOverride, variantSelection],
+    [selectedProjectId, workflowMetas, banner.name, substrate, permissionMode, model, evalOverride, verifyOverride, executionModelOverride, variantSelection],
   );
 
   const handleStart = useCallback(() => {
@@ -1098,6 +1105,45 @@ export default function SessionStartWizard(): React.JSX.Element {
                           className={cn(
                             'flex-1 rounded-button border px-2 py-1.5 text-xs font-medium transition-colors',
                             evalOverride === value
+                              ? 'border-interactive bg-interactive-surface text-text-primary'
+                              : 'border-border-secondary bg-bg-primary text-text-secondary hover:bg-surface-hover',
+                          )}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Per-run visual-verification override. 'Use global setting'
+                        omits the field (inherit visualVerify.enabled / project
+                        `.cyboflow/verify.json`); On/Off pin
+                        workflow_runs.verify_enabled for this run. */}
+                    <div className="mt-1 flex flex-col gap-0.5">
+                      <span className="text-sm font-medium text-text-primary">Visual verification</span>
+                      <span className="text-xs text-text-tertiary">
+                        Capture + LLM-judge this run's UI deliverables at the verify step
+                      </span>
+                    </div>
+                    <div
+                      className="flex gap-1.5"
+                      role="radiogroup"
+                      aria-label="Visual verification"
+                    >
+                      {([
+                        { value: 'inherit', label: 'Use global setting' },
+                        { value: 'on', label: 'On' },
+                        { value: 'off', label: 'Off' },
+                      ] as const).map(({ value, label }) => (
+                        <button
+                          key={value}
+                          type="button"
+                          role="radio"
+                          aria-checked={verifyOverride === value}
+                          onClick={() => setVerifyOverride(value)}
+                          data-testid={`wizard-verify-${value}`}
+                          className={cn(
+                            'flex-1 rounded-button border px-2 py-1.5 text-xs font-medium transition-colors',
+                            verifyOverride === value
                               ? 'border-interactive bg-interactive-surface text-text-primary'
                               : 'border-border-secondary bg-bg-primary text-text-secondary hover:bg-surface-hover',
                           )}

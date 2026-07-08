@@ -326,7 +326,7 @@ describe('cyboflow.runs.start', () => {
       // projectId (10th slot), so createRun can stamp both workflow_runs.session_id
       // and project_id even for a GLOBAL flow (workflow.project_id NULL).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined, undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-abc', '/projects/my-project', undefined, undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined, undefined);
     } finally {
       // Reset module state regardless of test outcome.
       setStartRunDeps({
@@ -362,7 +362,7 @@ describe('cyboflow.runs.start', () => {
       // 10th slot — so the launcher writes workflow_runs.seed_idea_id directly (no
       // stage derivation).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-planner', '/projects/my-project', undefined, undefined, 'IDEA-7', 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -397,7 +397,7 @@ describe('cyboflow.runs.start', () => {
       // launch projectId (migration 030) in the 10th slot — so the launcher hosts
       // the run inside the session's existing worktree.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-7', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -432,7 +432,7 @@ describe('cyboflow.runs.start', () => {
       // seedTaskIds (9th) undefined, and the explicit launch projectId (migration
       // 030) in the 10th slot.
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-1', 'auto', undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-1', 'auto', undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -461,11 +461,45 @@ describe('cyboflow.runs.start', () => {
       const caller = appRouter.createCaller(createContext());
       await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, sessionId: 'sess-1', evalEnabled: false });
 
-      // evalEnabled=false lands in the 14th (last) launch slot, AFTER requestedModel
-      // (13th, undefined here). Every other optional arg stays undefined except the
+      // evalEnabled=false lands in the 14th launch slot, AFTER requestedModel
+      // (13th, undefined here); verifyEnabled (15th) stays undefined since it was
+      // not requested. Every other optional arg stays undefined except the
       // required sessionId (6th) and the always-threaded projectId (10th).
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, false, undefined);
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, false, undefined, undefined);
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a11) verifyEnabled supplied (Configure Advanced) → full-form launch carrying
+  // the per-run visual-verification override into the 15th launch slot.
+  // -------------------------------------------------------------------------
+  it('(a11) verifyEnabled=true → forwards the full-form launch with the per-run verify override in the 15th slot', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-verify',
+      worktreePath: '/tmp/wt/verify',
+      branchName: 'cyboflow/sprint/verify123',
+    });
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({ workflowId: 'wf-sprint', projectId: 1, sessionId: 'sess-1', verifyEnabled: true });
+
+      // verifyEnabled=true lands in the 15th launch slot, AFTER requestedEvalEnabled
+      // (14th, undefined here). Every other optional arg stays undefined except the
+      // required sessionId (6th) and the always-threaded projectId (10th).
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock).toHaveBeenCalledWith('wf-sprint', '/projects/my-project', undefined, undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, true, undefined);
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -553,7 +587,8 @@ describe('cyboflow.runs.start', () => {
         ['rvw_a', 'rvw_b'], // findingIds (12th)
         undefined, // requestedModel (13th — not requested)
         undefined, // requestedEvalEnabled (14th — not requested)
-        undefined, // launchOptions (15th, LAST — no variant pin)
+        undefined, // requestedVerifyEnabled (15th — not requested)
+        undefined, // launchOptions (16th, LAST — no variant pin)
       );
     } finally {
       setStartRunDeps({
@@ -599,7 +634,8 @@ describe('cyboflow.runs.start', () => {
         undefined, // findingIds (12th — omitted)
         undefined, // requestedModel (13th — omitted)
         undefined, // requestedEvalEnabled (14th — omitted)
-        undefined, // launchOptions (15th, LAST — no variant pin)
+        undefined, // requestedVerifyEnabled (15th — omitted)
+        undefined, // launchOptions (16th, LAST — no variant pin)
       );
     } finally {
       setStartRunDeps({
@@ -645,7 +681,8 @@ describe('cyboflow.runs.start', () => {
         undefined, // findingIds (12th)
         'opus', // requestedModel (13th)
         undefined, // requestedEvalEnabled (14th — not requested)
-        undefined, // launchOptions (15th, LAST — no variant pin)
+        undefined, // requestedVerifyEnabled (15th — not requested)
+        undefined, // launchOptions (16th, LAST — no variant pin)
       );
     } finally {
       setStartRunDeps({
@@ -657,7 +694,7 @@ describe('cyboflow.runs.start', () => {
 
   // -------------------------------------------------------------------------
   // (a8) A/B testing (migration 048): variantId supplied → forwarded as the
-  // trailing (15th) launchOptions object as an EXPLICIT variant pin.
+  // trailing (16th) launchOptions object as an EXPLICIT variant pin.
   // -------------------------------------------------------------------------
   it('(a8) variantId supplied → forwards { requestedVariantId } as the trailing launchOptions', async () => {
     const launchMock = vi.fn().mockResolvedValue({
@@ -673,7 +710,7 @@ describe('cyboflow.runs.start', () => {
       await caller.cyboflow.runs.start({ workflowId: 'wf-planner', projectId: 1, sessionId: 'sess-1', variantId: 'wfv_7' });
 
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock.mock.calls[0][14]).toEqual({ requestedVariantId: 'wfv_7' });
+      expect(launchMock.mock.calls[0][15]).toEqual({ requestedVariantId: 'wfv_7' });
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -684,7 +721,7 @@ describe('cyboflow.runs.start', () => {
 
   // -------------------------------------------------------------------------
   // (a9) A/B testing: baseline:true (and no variantId) → forwarded as the
-  // trailing (15th) launchOptions object as { baseline: true }, pinning the
+  // trailing (16th) launchOptions object as { baseline: true }, pinning the
   // baseline (live-spec, no-rotation) run — VariantSelector's "Baseline (no
   // variant)" option.
   // -------------------------------------------------------------------------
@@ -702,7 +739,7 @@ describe('cyboflow.runs.start', () => {
       await caller.cyboflow.runs.start({ workflowId: 'wf-planner', projectId: 1, sessionId: 'sess-1', baseline: true });
 
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock.mock.calls[0][14]).toEqual({ baseline: true });
+      expect(launchMock.mock.calls[0][15]).toEqual({ baseline: true });
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -737,7 +774,7 @@ describe('cyboflow.runs.start', () => {
       });
 
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock.mock.calls[0][14]).toEqual({ requestedVariantId: 'wfv_7' });
+      expect(launchMock.mock.calls[0][15]).toEqual({ requestedVariantId: 'wfv_7' });
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },

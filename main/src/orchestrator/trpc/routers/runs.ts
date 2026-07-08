@@ -317,7 +317,7 @@ export interface RunLauncherLike {
    * workflow_runs.model and resolved to a concrete snapshot at the spawn seam; when
    * omitted the run pins no model and falls through to the SDK default.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean }): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean }): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -898,6 +898,14 @@ export const runsRouter = router({
       // workflow_runs.eval_enabled. A per-run ON does NOT unlock quick/custom flows
       // (the trigger's built-ins-only isCyboflowWorkflowName gate is unchanged).
       evalEnabled: z.boolean().optional(),
+      // Optional per-run visual-verification override. true = force the verify
+      // step ON for this run, false = force it OFF, omitted = no per-run pin →
+      // inherit the global visualVerify.enabled toggle / project
+      // `.cyboflow/verify.json` at the resolver ladder. Set from the launch
+      // Configure surface's Advanced "Visual verification" tri-state (flow
+      // launches only). Forwarded to RunLauncher.launch → WorkflowRegistry.createRun,
+      // which stamps workflow_runs.verify_enabled.
+      verifyEnabled: z.boolean().optional(),
       // Optional per-run execution-model override — the HIGHEST-precedence rung of
       // resolveExecutionModel (above frontmatter / project config / the global
       // defaultExecutionModel / env). 'programmatic' hands the run's DAG walk to the
@@ -1021,6 +1029,7 @@ export const runsRouter = router({
         input.findingIds,
         input.model,
         input.evalEnabled,
+        input.verifyEnabled,
         // A/B testing (migration 048): the trailing launchOptions object. An
         // explicit variant pin wins over a baseline pin (VariantSelector only ever
         // sends one or the other); rotation (neither supplied) and experiment
@@ -1161,6 +1170,12 @@ export const runsRouter = router({
         // Copy the failed run's per-run eval pin (1/0 → true/false; NULL → inherit
         // the global setting) so a restart preserves the launch-time choice.
         row.eval_enabled === null ? undefined : row.eval_enabled === 1,
+        // Restart does NOT copy verify_enabled: unlike eval_enabled (which stores
+        // the nullable per-run REQUEST), verify_enabled is the NOT-NULL RESOLVED
+        // posture (always 0/1), so copying it would freeze an inherited default
+        // into a forced pin. Passing undefined lets the restart re-inherit the
+        // current global visualVerify.enabled / project verify.json.
+        undefined,
         // A/B testing (migration 048): INHERIT the failed run's variant (no re-roll)
         // so per-variant stats stay coherent. An explicit pin loads regardless of
         // status, so a paused/retired variant still restarts correctly. Baseline

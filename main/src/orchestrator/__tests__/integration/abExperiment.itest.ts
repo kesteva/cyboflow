@@ -207,6 +207,7 @@ function makeExpHarness(t: TestDb, registry: WorkflowRegistry, tcr: TaskChangeRo
         _fids,
         _model,
         _ev,
+        _verify,
         opts,
       ) => {
         const variant = opts?.requestedVariantId

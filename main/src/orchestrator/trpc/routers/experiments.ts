@@ -86,6 +86,7 @@ export interface ExperimentsLaunchLike {
     findingIds?: string[],
     requestedModel?: string,
     requestedEvalEnabled?: boolean,
+    requestedVerifyEnabled?: boolean,
     launchOptions?: {
       requestedVariantId?: string;
       experiment?: { experimentId: string; arm: ExperimentArm };
@@ -650,6 +651,7 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
       undefined,
       undefined,
       undefined,
+      undefined,
       // A baseline arm launches as baseline (variant_id NULL): pass `baseline: true`
       // so the launcher's VariantResolver returns null WITHOUT rotating. A real-variant
       // arm pins its variant explicitly. Both carry the experiment/arm stamp.
@@ -670,6 +672,7 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
       undefined,
       createdTaskClonesB.length > 0 ? createdTaskClonesB : undefined,
       input.projectId,
+      undefined,
       undefined,
       undefined,
       undefined,

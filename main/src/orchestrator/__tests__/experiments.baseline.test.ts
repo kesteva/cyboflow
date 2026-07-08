@@ -108,7 +108,7 @@ function makeHarness(): Harness {
   const deps: ExperimentsDeps = {
     db,
     runLauncher: {
-      launch: async (_wf, _pp, _sub, _tid, ideaId, _sid, _pm, _bb, _stids, _pid, _em, _fids, _model, _ev, opts) => {
+      launch: async (_wf, _pp, _sub, _tid, ideaId, _sid, _pm, _bb, _stids, _pid, _em, _fids, _model, _ev, _verify, opts) => {
         launches.push({ arm: opts?.experiment?.arm, opts });
         const runId = `run_${randomUUID().replace(/-/g, '').slice(0, 8)}`;
         raw

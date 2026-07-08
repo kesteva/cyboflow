@@ -289,6 +289,16 @@ export class RunLauncher {
     // requestedModel there is no resolver ladder; the value is read at the trigger
     // (snapshotRunForEval). OPTIONAL — omitted for every legacy/one-click call site.
     requestedEvalEnabled?: boolean,
+    // The user's explicit per-run VISUAL-VERIFICATION choice (Configure surface →
+    // runs.start → here). true = force the verify step ON for this run, false =
+    // force it OFF, undefined = no per-run pin → inherit the global
+    // visualVerify.enabled toggle / project `.cyboflow/verify.json` at the
+    // resolver ladder. Threaded into WorkflowRegistry.createRun, which stamps it
+    // onto workflow_runs.verify_enabled (migration 055). Like
+    // requestedEvalEnabled there is no resolver ladder here; the value is one
+    // rung consumed by the visual-verify resolver. OPTIONAL — omitted for every
+    // legacy/one-click call site.
+    requestedVerifyEnabled?: boolean,
     // A/B testing (migration 048). ONE trailing options object (resolves the
     // variant-pin + experiment-stamp surface without adding two positionals):
     //   - requestedVariantId — an EXPLICIT variant pin (UI selection / restart
@@ -425,6 +435,7 @@ export class RunLauncher {
       requestedExecutionModel !== undefined ||
       requestedModel !== undefined ||
       requestedEvalEnabled !== undefined ||
+      requestedVerifyEnabled !== undefined ||
       rv !== null ||
       experiment !== undefined ||
       projectVerifyConfig !== null
@@ -433,6 +444,7 @@ export class RunLauncher {
             ...(requestedExecutionModel !== undefined ? { requestedExecutionModel } : {}),
             ...(requestedModel !== undefined ? { requestedModel } : {}),
             ...(requestedEvalEnabled !== undefined ? { requestedEvalEnabled } : {}),
+            ...(requestedVerifyEnabled !== undefined ? { requestedVerifyEnabled } : {}),
             ...(rv !== null
               ? {
                   variantId: rv.variantId,

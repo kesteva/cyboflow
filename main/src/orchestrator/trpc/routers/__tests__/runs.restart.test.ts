@@ -89,21 +89,53 @@ describe('cyboflow.runs.restart', () => {
     // Full-form launch: workflow, project path, substrate, taskId(undef), ideaId,
     // sessionId, permissionMode, baseBranch(undef), seedTaskIds(undef), projectId,
     // requestedExecutionModel(undef), findingIds(undef), model, evalEnabled
-    // (per-run pin 1 → true; NULL would thread undefined = inherit global), then
-    // the trailing A/B launchOptions — `{ baseline: true }` here because the failed
-    // run is a baseline run (variant_id NULL): the resolver must PIN baseline and NOT
-    // rotate, reproducing the retried config even if the workflow gained active
-    // variants ("restart inherits, no re-roll").
+    // (per-run pin 1 → true; NULL would thread undefined = inherit global),
+    // verifyEnabled (restart always threads undefined — verify_enabled is the
+    // resolved posture, not a request, so a restart re-inherits it),
+    // then the trailing A/B launchOptions — `{ baseline: true }` here because the
+    // failed run is a baseline run (variant_id NULL): the resolver must PIN
+    // baseline and NOT rotate, reproducing the retried config even if the workflow
+    // gained active variants ("restart inherits, no re-roll").
     expect(launchMock).toHaveBeenCalledOnce();
     expect(launchMock).toHaveBeenCalledWith(
       workflowId, '/projects/p', 'interactive', undefined, 'IDEA-9', 'sess-host',
       'acceptEdits', undefined, undefined, 1, undefined, undefined, 'opus', true,
-      { baseline: true },
+      undefined, { baseline: true },
     );
 
     // The failed run stays terminal — restart never mutates it.
     const after = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
     expect(after.status).toBe('failed');
+  });
+
+  // -------------------------------------------------------------------------
+  // (a2) Restart re-inherits verify (never copies the resolved verify_enabled).
+  // -------------------------------------------------------------------------
+  it('(a2) threads undefined verifyEnabled on restart even when the failed run had verify enabled', async () => {
+    const { runId } = seedRun(db, { id: 'run-verify', status: 'failed', projectId: 1 });
+    db.prepare(
+      `UPDATE workflow_runs
+          SET session_id = 'sess-v', model = 'opus', verify_enabled = 1
+        WHERE id = ?`,
+    ).run(runId);
+
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-restarted-v',
+      worktreePath: '/projects/p/.worktrees/sess-v',
+      branchName: 'cyboflow/planner/v',
+    });
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/p' }) },
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.restart({ runId });
+
+    expect(launchMock).toHaveBeenCalledOnce();
+    // verifyEnabled is the 15th positional arg (index 14): always undefined on
+    // restart — verify_enabled is the resolved posture, so a restart re-inherits.
+    expect(launchMock.mock.calls[0][14]).toBeUndefined();
   });
 
   // -------------------------------------------------------------------------
@@ -148,8 +180,8 @@ describe('cyboflow.runs.restart', () => {
     await caller.cyboflow.runs.restart({ runId });
 
     expect(launchMock).toHaveBeenCalledOnce();
-    // The 15th positional arg is the A/B launchOptions object.
-    expect(launchMock.mock.calls[0][14]).toEqual({ requestedVariantId: 'wfv_42' });
+    // The 16th positional arg is the A/B launchOptions object.
+    expect(launchMock.mock.calls[0][15]).toEqual({ requestedVariantId: 'wfv_42' });
   });
 
   // -------------------------------------------------------------------------

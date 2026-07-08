@@ -120,7 +120,7 @@ function makeHarness(): Harness {
   const deps: ExperimentsDeps = {
     db,
     runLauncher: {
-      launch: async (workflowId, _pp, _sub, _tid, ideaId, _sid, _pm, _bb, seedTaskIds, _pid, _em, _fids, _model, _ev, opts) => {
+      launch: async (workflowId, _pp, _sub, _tid, ideaId, _sid, _pm, _bb, seedTaskIds, _pid, _em, _fids, _model, _ev, _verify, opts) => {
         if (opts?.experiment?.arm === 'B' && failArmB.value) {
           throw new Error('simulated arm B launch failure');
         }

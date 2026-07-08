@@ -538,6 +538,57 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ evalEnabled: true }));
   });
 
+  it('omits verifyEnabled when the Visual verification control is left on "Use global setting"', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    // The Advanced section is collapsed by default — the control is not yet mounted.
+    expect(screen.queryByTestId('wizard-verify-off')).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    // Default 'inherit' → the field is not sent, so the run inherits the global toggle.
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    const startArg = mockRunStart.mock.calls[0][0] as Record<string, unknown>;
+    expect(startArg).not.toHaveProperty('verifyEnabled');
+  });
+
+  it('threads verifyEnabled=false when the Visual verification override is set to Off (Advanced)', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-workflow-advanced-toggle'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-verify-off'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ verifyEnabled: false }));
+  });
+
+  it('threads verifyEnabled=true when the Visual verification override is set to On (Advanced)', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-workflow-advanced-toggle'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-verify-on'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({ verifyEnabled: true }));
+  });
+
   it('always forces a NEW session — never absorbs the selected quick session', async () => {
     // Regression: the wizard IS the explicit "Start a new session" surface, so it
     // must call ensureSessionForLaunch with forceNew:true. Without this it silently
