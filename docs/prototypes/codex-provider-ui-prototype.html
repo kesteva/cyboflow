@@ -1,0 +1,814 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cyboflow Codex Configure Prototype</title>
+  <style>
+    :root {
+      --bg-primary: #fbfaf7;
+      --surface-primary: #fffefa;
+      --surface-secondary: #f4efe3;
+      --surface-hover: #eee7d8;
+      --surface-sunken: #e6ddca;
+      --border-primary: #cfc4aa;
+      --border-secondary: #ddd3bd;
+      --border-emphasized: #a89975;
+      --text-primary: #22201b;
+      --text-secondary: #625b4d;
+      --text-tertiary: #8b816e;
+      --text-muted: #9c927e;
+      --interactive: #2d8a5b;
+      --interactive-hover: #26764e;
+      --interactive-surface: #e2f1e8;
+      --status-success: #287a46;
+      --status-warning: #8a5b16;
+      --status-error: #a33b3b;
+      --font: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text-primary);
+      font-family: var(--font);
+      letter-spacing: 0;
+      background-color: var(--bg-primary);
+      background-image:
+        linear-gradient(to right, rgba(216,207,184,0.35) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(216,207,184,0.35) 1px, transparent 1px);
+      background-size: 24px 24px;
+    }
+
+    button,
+    select,
+    input {
+      font: inherit;
+    }
+
+    .page {
+      min-height: 100vh;
+      overflow-y: auto;
+      padding: 32px 24px;
+    }
+
+    .paper {
+      width: min(720px, 100%);
+      margin: 0 auto;
+      border: 1px solid var(--border-primary);
+      background: var(--surface-primary);
+    }
+
+    .stripe {
+      height: 8px;
+      width: 100%;
+      background-image: repeating-linear-gradient(135deg, #2d8a5b 0 8px, #26764e 8px 16px);
+    }
+
+    .inner {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      padding: 24px;
+    }
+
+    .step-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      border-bottom: 1px solid var(--border-primary);
+      padding-bottom: 12px;
+    }
+
+    .eyebrow {
+      font-size: 10px;
+      line-height: 1.2;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+    }
+
+    .rail {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-tertiary);
+    }
+
+    .rail .active {
+      color: var(--text-primary);
+      font-weight: 700;
+    }
+
+    .rail .dash {
+      color: var(--text-muted);
+    }
+
+    .back {
+      border: 0;
+      background: transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+      padding: 0;
+    }
+
+    .back:hover {
+      color: var(--interactive);
+    }
+
+    .configure {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .project-card {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      border: 1px solid var(--border-emphasized);
+      background: var(--surface-primary);
+      padding: 12px;
+    }
+
+    .project-line {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .project-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    .branch {
+      margin-left: auto;
+      min-width: 0;
+      max-width: 210px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--status-success);
+      font-size: 12px;
+    }
+
+    .path {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text-secondary);
+      font-size: 12px;
+    }
+
+    .field {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .label {
+      color: var(--text-secondary);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .permission-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .option-row {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border: 1px solid var(--border-secondary);
+      background: var(--surface-secondary);
+      color: var(--text-primary);
+      padding: 8px 12px;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .option-row.selected {
+      border-color: var(--interactive);
+      background: var(--interactive-surface);
+    }
+
+    .option-row strong {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .option-row span {
+      color: var(--text-tertiary);
+      font-size: 12px;
+      text-align: right;
+    }
+
+    .provider-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .provider-card {
+      min-height: 70px;
+      border: 1px solid var(--border-secondary);
+      background: var(--surface-secondary);
+      color: var(--text-primary);
+      padding: 10px 12px;
+      text-align: left;
+      cursor: pointer;
+    }
+
+    .provider-card.selected {
+      border-color: var(--interactive);
+      background: var(--interactive-surface);
+    }
+
+    .provider-card strong {
+      display: block;
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .provider-card span {
+      display: block;
+      color: var(--text-tertiary);
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .select {
+      width: 100%;
+      min-height: 32px;
+      border: 1px solid var(--border-primary);
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      padding: 4px 8px;
+      font-size: 14px;
+      border-radius: 0;
+    }
+
+    .hint {
+      color: var(--text-tertiary);
+      font-size: 12px;
+      line-height: 1.35;
+      margin: 0;
+    }
+
+    .notice {
+      border: 1px solid var(--border-secondary);
+      background: var(--surface-secondary);
+      color: var(--text-secondary);
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .notice.warning {
+      border-color: #c7a15f;
+      background: #fff8e7;
+      color: #654512;
+    }
+
+    .advanced {
+      border: 1px solid var(--border-secondary);
+      background: var(--surface-secondary);
+    }
+
+    .advanced-toggle {
+      width: 100%;
+      border: 0;
+      background: transparent;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .advanced-body {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      border-top: 1px solid var(--border-secondary);
+      padding: 12px;
+    }
+
+    .advanced-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .advanced-row strong {
+      display: block;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .advanced-row span {
+      display: block;
+      color: var(--text-tertiary);
+      font-size: 12px;
+      line-height: 1.35;
+      margin-top: 2px;
+    }
+
+    .pill-button {
+      border: 1px solid var(--border-primary);
+      background: var(--surface-primary);
+      color: var(--text-primary);
+      padding: 5px 9px;
+      cursor: pointer;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+
+    .segmented {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border: 1px solid var(--border-primary);
+      background: var(--surface-primary);
+    }
+
+    .segmented button {
+      border: 0;
+      border-right: 1px solid var(--border-primary);
+      background: transparent;
+      color: var(--text-secondary);
+      min-height: 30px;
+      cursor: pointer;
+      font-size: 12px;
+    }
+
+    .segmented button:last-child {
+      border-right: 0;
+    }
+
+    .segmented button.selected {
+      background: var(--interactive-surface);
+      color: var(--text-primary);
+      font-weight: 700;
+    }
+
+    .summary {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      border: 1px solid var(--border-primary);
+      background: var(--surface-secondary);
+      padding: 12px;
+    }
+
+    .summary-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      min-width: 0;
+    }
+
+    .summary-row .key {
+      flex: 0 0 auto;
+      color: var(--text-muted);
+    }
+
+    .summary-row .value {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      color: var(--text-primary);
+      font-size: 12px;
+      text-align: right;
+    }
+
+    .blueprint-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    .secondary {
+      border: 1px solid var(--border-primary);
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      padding: 7px 12px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .cta {
+      width: 100%;
+      border: 0;
+      background: var(--interactive);
+      color: #fffefa;
+      padding: 9px 16px;
+      cursor: pointer;
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .cta:hover {
+      background: var(--interactive-hover);
+    }
+
+    .toggle {
+      position: relative;
+      width: 42px;
+      height: 22px;
+      flex: 0 0 auto;
+    }
+
+    .toggle input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      inset: 0;
+      border: 1px solid var(--border-primary);
+      background: var(--surface-sunken);
+      cursor: pointer;
+    }
+
+    .slider:before {
+      content: "";
+      position: absolute;
+      width: 16px;
+      height: 16px;
+      left: 2px;
+      top: 2px;
+      background: var(--surface-primary);
+      border: 1px solid var(--border-primary);
+      transition: transform 140ms ease;
+    }
+
+    .toggle input:checked + .slider {
+      background: var(--interactive-surface);
+      border-color: var(--interactive);
+    }
+
+    .toggle input:checked + .slider:before {
+      transform: translateX(18px);
+      border-color: var(--interactive);
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 640px) {
+      .page {
+        padding: 16px 12px;
+      }
+
+      .inner {
+        padding: 18px;
+      }
+
+      .step-header,
+      .advanced-row {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .provider-grid,
+      .two-col,
+      .blueprint-row {
+        grid-template-columns: 1fr;
+      }
+
+      .option-row {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .option-row span {
+        text-align: left;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <section class="paper" aria-labelledby="configure-title">
+      <h1 id="configure-title" class="sr-only">Configure workflow launch</h1>
+      <div class="stripe" aria-hidden="true"></div>
+      <div class="inner">
+        <header class="step-header">
+          <div class="rail eyebrow" aria-label="Wizard step">
+            <span class="muted">2. Workflow</span>
+            <span class="dash">--</span>
+            <span class="active">3. Configure</span>
+          </div>
+          <button class="back eyebrow" type="button"><- Back to workflow</button>
+        </header>
+
+        <div class="configure" data-testid="wizard-step3">
+          <div class="project-card">
+            <div class="project-line">
+              <span aria-hidden="true">[repo]</span>
+              <span class="project-name">cyboflow</span>
+              <span class="branch">branch main</span>
+            </div>
+            <span class="path">/Users/raimundoesteva/Projects/cyboflow</span>
+          </div>
+
+          <div class="field">
+            <span class="label">Agent</span>
+            <div class="provider-grid" role="group" aria-label="Agent provider">
+              <button id="providerClaude" class="provider-card" type="button">
+                <strong>Claude</strong>
+                <span>Existing Claude Code SDK or live PTY runtime.</span>
+              </button>
+              <button id="providerCodex" class="provider-card selected" type="button">
+                <strong>Codex</strong>
+                <span>OpenAI Codex SDK with local worktree sandboxing.</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="field">
+            <span class="label">Session permission</span>
+            <div id="claudePermission" class="permission-list hidden">
+              <button class="option-row selected" type="button">
+                <strong>Ask before edits</strong>
+                <span>Prompt for each edit</span>
+              </button>
+              <button class="option-row" type="button">
+                <strong>Allow edits</strong>
+                <span>Auto-allow edits, safe reads & git</span>
+              </button>
+              <button class="option-row" type="button">
+                <strong>Auto</strong>
+                <span>Native Claude classifier</span>
+              </button>
+              <button class="option-row" type="button">
+                <strong>Don't ask</strong>
+                <span>No prompts - skip permissions</span>
+              </button>
+            </div>
+
+            <div id="codexPermission" class="permission-list">
+              <button class="option-row selected" type="button">
+                <strong>Ask when needed</strong>
+                <span>Codex pauses at sandbox or policy boundaries</span>
+              </button>
+              <button class="option-row" type="button">
+                <strong>Auto-review eligible prompts</strong>
+                <span>Reviewer agent handles low-risk approvals</span>
+              </button>
+              <button class="option-row" type="button">
+                <strong>Never ask</strong>
+                <span>Use only in isolated worktrees</span>
+              </button>
+            </div>
+          </div>
+
+          <div id="claudeControls" class="hidden">
+            <div class="field">
+              <label class="label" for="claudeRuntime">CLI substrate</label>
+              <select id="claudeRuntime" class="select" aria-label="Select CLI substrate">
+                <option>SDK (default)</option>
+                <option>Interactive (PTY)</option>
+              </select>
+              <p class="hint">Runtime is selected before model because each runtime has different model support.</p>
+            </div>
+
+            <div class="field" style="margin-top: 16px;">
+              <label class="label" for="claudeModel">Model</label>
+              <select id="claudeModel" class="select" aria-label="Select Claude model">
+                <option>Opus - 1M context - most capable</option>
+                <option>Sonnet - 1M context - balanced</option>
+                <option>Fable - frontier</option>
+                <option>Haiku - fast</option>
+                <option>Auto - SDK default</option>
+              </select>
+              <p class="hint">Most capable Claude model for workflow runs.</p>
+            </div>
+          </div>
+
+          <div id="codexControls">
+            <div class="field">
+              <div class="two-col runtime-grid">
+              <div class="field">
+                <label class="label" for="codexRuntime">Runtime</label>
+                <select id="codexRuntime" class="select" aria-label="Select Codex runtime">
+                  <option>Codex SDK - workflows</option>
+                  <option disabled>Codex PTY - quick sessions only</option>
+                </select>
+              </div>
+            </div>
+              <p class="hint">Runtime comes first. Workflows use Codex SDK for structured events; PTY is limited to quick sessions.</p>
+            </div>
+
+            <div class="field" style="margin-top: 16px;">
+              <label class="label" for="codexModel">Model</label>
+              <select id="codexModel" class="select" aria-label="Select Codex model">
+                <option>GPT-5.5 - strongest coding agent</option>
+                <option>GPT-5.4 mini - faster, lower cost</option>
+                <option>Auto - Codex recommended default</option>
+                <option>Custom model...</option>
+              </select>
+              <p class="hint">Provider-scoped model picker is filtered by the selected Codex runtime.</p>
+            </div>
+
+            <div class="notice warning" style="margin-top: 12px;">
+              Review queue parity depends on a Codex approval bridge. Until that lands, Codex should be marked beta in this configure step.
+            </div>
+          </div>
+
+          <div class="advanced">
+            <button id="advancedToggle" class="advanced-toggle" type="button" aria-expanded="true">
+              <span>Advanced</span>
+              <span id="advancedIcon">^</span>
+            </button>
+            <div id="advancedBody" class="advanced-body">
+              <div class="advanced-row">
+                <div>
+                  <strong>MCP servers</strong>
+                  <span>Disable servers this session should not load</span>
+                </div>
+                <button class="pill-button" type="button">3 enabled</button>
+              </div>
+
+              <div class="advanced-row">
+                <div>
+                  <strong>Plugins</strong>
+                  <span>Reflects your enabled plugins - turn any off for this session</span>
+                </div>
+                <button class="pill-button" type="button">Default set</button>
+              </div>
+
+              <div id="codexAdvancedRows">
+                <div class="advanced-row">
+                  <div>
+                    <strong>Network access</strong>
+                    <span>Allow model-run commands to use outbound network inside the sandbox</span>
+                  </div>
+                  <label class="toggle" aria-label="Network access">
+                    <input type="checkbox">
+                    <span class="slider"></span>
+                  </label>
+                </div>
+
+                <div class="advanced-row" style="margin-top: 12px;">
+                  <div>
+                    <strong>Web search</strong>
+                    <span>Permit Codex to use live web search for this run</span>
+                  </div>
+                  <label class="toggle" aria-label="Web search">
+                    <input type="checkbox" checked>
+                    <span class="slider"></span>
+                  </label>
+                </div>
+              </div>
+
+              <div class="field">
+                <span class="label">Workspace</span>
+                <div class="segmented" role="group" aria-label="Workspace mode">
+                  <button class="selected" type="button">Use global</button>
+                  <button type="button">Worktree</button>
+                  <button type="button">In place</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="blueprint-row">
+            <button class="secondary" type="button">Edit blueprint</button>
+            <button class="secondary" type="button">New flow</button>
+          </div>
+
+          <div class="summary" data-testid="wizard-launch-summary">
+            <span class="eyebrow" style="color: var(--text-secondary);">Launch summary</span>
+            <div class="summary-row">
+              <span class="key eyebrow">Project</span>
+              <span class="value">cyboflow</span>
+            </div>
+            <div class="summary-row">
+              <span class="key eyebrow">Branch</span>
+              <span class="value">main</span>
+            </div>
+            <div class="summary-row">
+              <span class="key eyebrow">Mode</span>
+              <span class="value">/planner</span>
+            </div>
+            <div class="summary-row">
+              <span class="key eyebrow">Agent</span>
+              <span id="summaryAgent" class="value">Codex</span>
+            </div>
+            <div class="summary-row">
+              <span class="key eyebrow">Runtime</span>
+              <span id="summaryRuntime" class="value">Codex SDK</span>
+            </div>
+            <div class="summary-row">
+              <span class="key eyebrow">Permission</span>
+              <span id="summaryPermission" class="value">Ask when needed</span>
+            </div>
+            <div class="summary-row">
+              <span class="key eyebrow">Model</span>
+              <span id="summaryModel" class="value">GPT-5.5</span>
+            </div>
+            <div class="summary-row">
+              <span class="key eyebrow">Safety</span>
+              <span id="summarySafety" class="value">Ask when needed / workspace-write</span>
+            </div>
+          </div>
+
+          <button id="cta" class="cta" type="button">Run /planner with Codex</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const providerClaude = document.getElementById('providerClaude');
+    const providerCodex = document.getElementById('providerCodex');
+    const claudeControls = document.getElementById('claudeControls');
+    const codexControls = document.getElementById('codexControls');
+    const claudePermission = document.getElementById('claudePermission');
+    const codexPermission = document.getElementById('codexPermission');
+    const codexAdvancedRows = document.getElementById('codexAdvancedRows');
+    const summaryAgent = document.getElementById('summaryAgent');
+    const summaryRuntime = document.getElementById('summaryRuntime');
+    const summaryPermission = document.getElementById('summaryPermission');
+    const summaryModel = document.getElementById('summaryModel');
+    const summarySafety = document.getElementById('summarySafety');
+    const cta = document.getElementById('cta');
+    const advancedToggle = document.getElementById('advancedToggle');
+    const advancedBody = document.getElementById('advancedBody');
+    const advancedIcon = document.getElementById('advancedIcon');
+
+    function setProvider(provider) {
+      const codex = provider === 'codex';
+      providerCodex.classList.toggle('selected', codex);
+      providerClaude.classList.toggle('selected', !codex);
+      codexControls.classList.toggle('hidden', !codex);
+      claudeControls.classList.toggle('hidden', codex);
+      codexPermission.classList.toggle('hidden', !codex);
+      claudePermission.classList.toggle('hidden', codex);
+      codexAdvancedRows.classList.toggle('hidden', !codex);
+
+      summaryAgent.textContent = codex ? 'Codex' : 'Claude';
+      summaryRuntime.textContent = codex ? 'Codex SDK' : 'SDK';
+      summaryPermission.textContent = codex ? 'Ask when needed' : 'Ask before edits';
+      summaryModel.textContent = codex ? 'GPT-5.5' : 'Opus';
+      summarySafety.textContent = codex ? 'Ask when needed / workspace-write' : 'Cyboflow approval hook';
+      cta.textContent = codex ? 'Run /planner with Codex' : 'Run /planner with Claude';
+    }
+
+    providerClaude.addEventListener('click', () => setProvider('claude'));
+    providerCodex.addEventListener('click', () => setProvider('codex'));
+
+    advancedToggle.addEventListener('click', () => {
+      const open = !advancedBody.classList.contains('hidden');
+      advancedBody.classList.toggle('hidden', open);
+      advancedToggle.setAttribute('aria-expanded', String(!open));
+      advancedIcon.textContent = open ? 'v' : '^';
+    });
+  </script>
+</body>
+</html>
