@@ -261,11 +261,14 @@ function ExperimentRow({ item }: { item: ExperimentSummary }): React.JSX.Element
 
 function PastExperimentsList({ projectFilter }: { projectFilter: number | null }): React.JSX.Element {
   const [items, setItems] = useState<ExperimentSummary[] | null>(null);
+  // Abandoned (torn-down) experiments are hidden by default; the toggle opts them in
+  // (includeAbandoned threaded to listForDashboard). Changing it refetches.
+  const [showAbandoned, setShowAbandoned] = useState(false);
 
   useEffect(() => {
     let alive = true;
     trpc.cyboflow.experiments.listForDashboard
-      .query({ projectId: projectFilter })
+      .query({ projectId: projectFilter, includeAbandoned: showAbandoned })
       .then((r) => {
         if (alive) setItems(r);
       })
@@ -275,36 +278,57 @@ function PastExperimentsList({ projectFilter }: { projectFilter: number | null }
     return () => {
       alive = false;
     };
-  }, [projectFilter]);
+  }, [projectFilter, showAbandoned]);
 
+  const toggle = (
+    <label className="flex cursor-pointer select-none items-center gap-1.5 text-xs text-text-tertiary">
+      <input
+        type="checkbox"
+        checked={showAbandoned}
+        onChange={(e) => setShowAbandoned(e.target.checked)}
+        className="rounded border-border-primary"
+        data-testid="experiments-show-abandoned-toggle"
+      />
+      <span>Show abandoned</span>
+    </label>
+  );
+
+  let body: React.JSX.Element;
   if (items === null) {
-    return <p className="text-xs text-text-muted">Loading experiments…</p>;
+    body = <p className="text-xs text-text-muted">Loading experiments…</p>;
+  } else if (items.length === 0) {
+    body = <p className="text-xs text-text-muted">No A/B experiments have been run yet.</p>;
+  } else {
+    const groups = groupBySeries(items);
+    body = (
+      <div className="flex flex-col gap-3" data-testid="experiments-past-list">
+        {groups.map((group) => {
+          const aggregate = seriesAggregateLabel(group);
+          return (
+            <div key={group.seriesKey} className="rounded-card border border-border-primary" data-testid={`experiments-series-${group.seriesKey}`}>
+              {aggregate !== null && (
+                <div className="border-b border-border-primary bg-surface-secondary px-2 py-1 text-[11px] font-medium text-text-tertiary" data-testid={`experiments-series-aggregate-${group.seriesKey}`}>
+                  {aggregate}
+                </div>
+              )}
+              <div className="divide-y divide-border-primary/60">
+                {group.items.map((it) => (
+                  <ExperimentRow key={it.experimentId} item={it} />
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
   }
-  if (items.length === 0) {
-    return <p className="text-xs text-text-muted">No A/B experiments have been run yet.</p>;
-  }
-
-  const groups = groupBySeries(items);
 
   return (
-    <div className="flex flex-col gap-3" data-testid="experiments-past-list">
-      {groups.map((group) => {
-        const aggregate = seriesAggregateLabel(group);
-        return (
-          <div key={group.seriesKey} className="rounded-card border border-border-primary" data-testid={`experiments-series-${group.seriesKey}`}>
-            {aggregate !== null && (
-              <div className="border-b border-border-primary bg-surface-secondary px-2 py-1 text-[11px] font-medium text-text-tertiary" data-testid={`experiments-series-aggregate-${group.seriesKey}`}>
-                {aggregate}
-              </div>
-            )}
-            <div className="divide-y divide-border-primary/60">
-              {group.items.map((it) => (
-                <ExperimentRow key={it.experimentId} item={it} />
-              ))}
-            </div>
-          </div>
-        );
-      })}
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-end" data-testid="experiments-show-abandoned">
+        {toggle}
+      </div>
+      {body}
     </div>
   );
 }

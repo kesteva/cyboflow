@@ -378,6 +378,37 @@ function resolveDecisionReviewItem(deps: ExperimentsDeps, experimentId: string):
   }
 }
 
+/**
+ * Resolve the arms' still-pending FINDING review items on abandon. Each finding is
+ * soft-linked to its producing run via review_items.run_id (migration 016), so an
+ * abandoned experiment — whose arm work is being swept — clears its arms' findings
+ * from the review queue rather than leaving them pointing at a torn-down run. This
+ * COMPLEMENTS the entity sweep: deleteExperimentArmEntities dismisses only findings
+ * soft-linked to a DELETED entity (entity_type/entity_id), so a run-scoped finding
+ * with no surviving entity link would otherwise linger. Routes each resolve through
+ * the injected ReviewItemRouter chokepoint (deps.resolveReviewItem); fail-soft when
+ * the dep is absent (pre-slice-C boot) or the query throws (review_items absent).
+ */
+function resolveArmFindings(deps: ExperimentsDeps, runIds: ReadonlyArray<string | null>): void {
+  if (!deps.resolveReviewItem) return;
+  const ids = runIds.filter((r): r is string => typeof r === 'string' && r.length > 0);
+  if (ids.length === 0) return;
+  try {
+    const placeholders = ids.map(() => '?').join(', ');
+    const rows = deps.db
+      .prepare(
+        `SELECT id FROM review_items
+          WHERE kind = 'finding' AND status = 'pending' AND run_id IN (${placeholders})`,
+      )
+      .all(...ids) as Array<{ id?: unknown }>;
+    for (const row of rows) {
+      if (typeof row.id === 'string' && row.id.length > 0) deps.resolveReviewItem(row.id);
+    }
+  } catch {
+    // review_items absent (unexpected) or a malformed query — nothing to clean up.
+  }
+}
+
 /** Random branch-name hint for an arm worktree. */
 function armNameHint(arm: ExperimentArm): string {
   const rand = Math.random().toString(36).slice(2, 10);
@@ -980,9 +1011,21 @@ export async function abandonExperiment(deps: ExperimentsDeps, experimentId: str
     throw new TRPCError({ code: 'CONFLICT', message: `experiment ${experimentId} is already ${exp.status}` });
   }
 
-  // Cancel still-running arms FIRST so neither arm keeps minting entities while we
-  // sweep (the explicit cancel is the pre-sweep barrier; the sessions are torn
-  // down only AFTER a successful sweep + status stamp, below).
+  // Stamp 'abandoned' FIRST — immediately after the settled guard, BEFORE cancelling
+  // the arms. A canceled arm counts as settled (isExperimentArmSettled includes
+  // 'canceled'), which lets the terminal-status subscriber fire the pairwise snapshot;
+  // that worker's guard admits only experiments still running|grading, so flipping to
+  // 'abandoned' up front closes the window in which cancelling an arm could mint a
+  // stale comparison row + a BLOCKING kind='decision' review item (which the review
+  // queue deliberately cannot resolve) for an experiment we are tearing down. The
+  // pre-abandon status is captured so a failed sweep can revert it (fail-closed, below).
+  const prevStatus = exp.status;
+  updateExperimentStatus(db, experimentId, 'abandoned');
+
+  // Cancel still-running arms so neither keeps minting entities while we sweep (the
+  // explicit cancel is the pre-sweep barrier; the sessions are torn down only AFTER a
+  // successful sweep + mapping drop, below). Statuses are read from workflow_runs,
+  // unaffected by the experiment-status stamp above.
   const statusA = runStatus(db, exp.run_a_id);
   const statusB = runStatus(db, exp.run_b_id);
   if (exp.run_a_id && statusA !== null && !isExperimentArmSettled(statusA)) {
@@ -993,31 +1036,46 @@ export async function abandonExperiment(deps: ExperimentsDeps, experimentId: str
   }
 
   // Sweep both arms' entities (incl. seed TASK clones) — FAIL-CLOSED. A sweep that
-  // throws (experiment_sweep_failed) propagates OUT of abandon BEFORE the seed
-  // mapping-drop, the 'abandoned' stamp, and the session teardown below, leaving
-  // the experiment recoverable (mappings intact, status still 'running') for a
-  // retry once the delete cause is fixed. The sweep is idempotent, so the retry
-  // re-runs cleanly. (The prior .catch(() => {}) swallowed sweep failures and
-  // stamped the experiment abandoned on top of leaked, still-tagged orphans.)
-  if (exp.run_a_id) {
-    await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
-      experimentId,
-      runId: exp.run_a_id,
-      seedCloneId: exp.seed_idea_clone_a_id,
-      seedTaskCloneIds: seedTaskCloneIdsForArm(db, experimentId, 'A'),
-    });
-  }
-  if (exp.run_b_id) {
-    await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
-      experimentId,
-      runId: exp.run_b_id,
-      seedCloneId: exp.seed_idea_clone_b_id,
-      seedTaskCloneIds: seedTaskCloneIdsForArm(db, experimentId, 'B'),
-    });
+  // throws (experiment_sweep_failed) REVERTS the 'abandoned' stamp to its pre-abandon
+  // value and propagates OUT of abandon BEFORE the seed mapping-drop, the review-item
+  // cleanup, and the session teardown below — leaving the experiment recoverable
+  // (mappings intact, status restored to running|grading, sessions live) for a retry
+  // once the delete cause is fixed. recoverExperiments() only revisits running|grading
+  // rows, so the revert is what keeps an abandoned-then-failed experiment reachable.
+  // The sweep is idempotent, so the retry re-runs cleanly. (The prior .catch(() => {})
+  // swallowed sweep failures and stamped the experiment abandoned on top of leaked,
+  // still-tagged orphans.)
+  try {
+    if (exp.run_a_id) {
+      await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
+        experimentId,
+        runId: exp.run_a_id,
+        seedCloneId: exp.seed_idea_clone_a_id,
+        seedTaskCloneIds: seedTaskCloneIdsForArm(db, experimentId, 'A'),
+      });
+    }
+    if (exp.run_b_id) {
+      await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
+        experimentId,
+        runId: exp.run_b_id,
+        seedCloneId: exp.seed_idea_clone_b_id,
+        seedTaskCloneIds: seedTaskCloneIdsForArm(db, experimentId, 'B'),
+      });
+    }
+  } catch (err) {
+    // Fail-closed: restore the pre-abandon status so recoverExperiments() revisits it.
+    updateExperimentStatus(db, experimentId, prevStatus);
+    throw err;
   }
   deleteExperimentSeedTasks(db, experimentId);
 
-  updateExperimentStatus(db, experimentId, 'abandoned');
+  // Sweep + mapping-drop succeeded (the experiment was already stamped 'abandoned').
+  // Resolve the blocking pairwise decision review item if one was minted before the
+  // abandon (fail-soft; slice C table) — decide does the same; without it that item
+  // sits unresolvable in the queue behind a torn-down experiment. Then clear the arms'
+  // still-pending findings, which are throwaway now that the arm work is swept.
+  resolveDecisionReviewItem(deps, experimentId);
+  resolveArmFindings(deps, [exp.run_a_id, exp.run_b_id]);
 
   // Only now (sweep succeeded + status stamped) tear down the arm worktrees via
   // the FULL session-delete path (which also cancels any hosted run — belt-and-
@@ -1253,6 +1311,104 @@ function seriesKey(workflowId: string, variantAId: string, variantBId: string): 
   return `${workflowId}:${pair}`;
 }
 
+/** Input for {@link listDashboardExperiments} (mirrors the listForDashboard zod input). */
+export interface ListDashboardInput {
+  projectId?: number | null;
+  workflowId?: string;
+  /**
+   * Include torn-down (status='abandoned') experiments. Default false: an abandoned
+   * head-to-head is noise in the dashboard's default view (its arms are swept + its
+   * sessions dismissed), surfaced only when the "Show abandoned" toggle is on.
+   */
+  includeAbandoned?: boolean;
+}
+
+/**
+ * @internal exported for unit tests — the router calls it via requireDeps().
+ * Assemble the dashboard list rows (verdict + human decision + rerun-chain series
+ * key), filtered by the optional projectId (nullable) + workflowId, hiding abandoned
+ * experiments unless includeAbandoned is set.
+ */
+export function listDashboardExperiments(deps: ExperimentsDeps, input: ListDashboardInput): ExperimentSummary[] {
+  const conds: string[] = [];
+  const params: unknown[] = [];
+  if (input.projectId !== null && input.projectId !== undefined) {
+    conds.push('e.project_id = ?');
+    params.push(input.projectId);
+  }
+  if (input.workflowId) {
+    conds.push('e.workflow_id = ?');
+    params.push(input.workflowId);
+  }
+  // Hide abandoned experiments in the default view (server-side filter).
+  if (!input.includeAbandoned) {
+    conds.push("e.status != 'abandoned'");
+  }
+  const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
+  const rows = deps.db
+    .prepare(
+      `SELECT
+         e.id AS experimentId, e.workflow_id AS workflowId, e.base_branch AS baseBranch,
+         e.variant_a_id AS variantAId, e.variant_b_id AS variantBId,
+         e.status AS status, e.winner_arm AS winnerArm, e.winner_run_id AS winnerRunId,
+         e.decided_at AS decidedAt, e.created_at AS createdAt,
+         e.rerun_of_experiment_id AS rerunOfExperimentId,
+         va.label AS aLabel, vb.label AS bLabel,
+         c.preference AS verdictPreference, c.confidence AS verdictConfidence
+       FROM experiments e
+       LEFT JOIN experiment_comparisons c ON c.experiment_id = e.id
+       LEFT JOIN workflow_variants va ON va.id = e.variant_a_id
+       LEFT JOIN workflow_variants vb ON vb.id = e.variant_b_id
+       ${where}
+       ORDER BY e.created_at DESC, e.id DESC`,
+    )
+    .all(...params) as Array<{
+    experimentId: string;
+    workflowId: string;
+    baseBranch: string;
+    variantAId: string;
+    variantBId: string;
+    status: ExperimentRow['status'];
+    winnerArm: ExperimentArm | null;
+    winnerRunId: string | null;
+    decidedAt: string | null;
+    createdAt: string;
+    rerunOfExperimentId: string | null;
+    aLabel: string | null;
+    bLabel: string | null;
+    verdictPreference: PairwisePreference | null;
+    verdictConfidence: number | null;
+  }>;
+
+  return rows.map((row): ExperimentSummary => {
+    const decision: ExperimentDecision | null =
+      row.status !== 'decided'
+        ? null
+        : row.winnerArm === 'A'
+          ? 'promote_a'
+          : row.winnerArm === 'B'
+            ? 'promote_b'
+            : 'discard';
+    return {
+      experimentId: row.experimentId,
+      workflowId: row.workflowId,
+      baseBranch: row.baseBranch,
+      variantAId: row.variantAId,
+      variantBId: row.variantBId,
+      armALabel: armVariantLabel(row.variantAId, row.aLabel),
+      armBLabel: armVariantLabel(row.variantBId, row.bLabel),
+      verdictPreference: row.verdictPreference,
+      verdictConfidence: row.verdictConfidence,
+      decision,
+      status: row.status,
+      decidedAt: row.decidedAt,
+      createdAt: row.createdAt,
+      rerunOfExperimentId: row.rerunOfExperimentId,
+      seriesKey: seriesKey(row.workflowId, row.variantAId, row.variantBId),
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -1453,90 +1609,19 @@ export const experimentsRouter = router({
 
   /**
    * Dashboard list rows (verdict + human decision + rerun-chain series key).
-   * Optional projectId (nullable) + workflowId filters.
+   * Optional projectId (nullable) + workflowId filters; abandoned experiments are
+   * hidden unless includeAbandoned is set (the "Show abandoned" toggle).
    */
   listForDashboard: protectedProcedure
     .input(
       z.object({
         projectId: z.number().int().positive().nullable().optional(),
         workflowId: z.string().min(1).optional(),
+        includeAbandoned: z.boolean().optional(),
       }),
     )
     .query(async ({ input }): Promise<ExperimentSummary[]> => {
-      const deps = requireDeps();
-      const conds: string[] = [];
-      const params: unknown[] = [];
-      if (input.projectId !== null && input.projectId !== undefined) {
-        conds.push('e.project_id = ?');
-        params.push(input.projectId);
-      }
-      if (input.workflowId) {
-        conds.push('e.workflow_id = ?');
-        params.push(input.workflowId);
-      }
-      const where = conds.length > 0 ? `WHERE ${conds.join(' AND ')}` : '';
-      const rows = deps.db
-        .prepare(
-          `SELECT
-             e.id AS experimentId, e.workflow_id AS workflowId, e.base_branch AS baseBranch,
-             e.variant_a_id AS variantAId, e.variant_b_id AS variantBId,
-             e.status AS status, e.winner_arm AS winnerArm, e.winner_run_id AS winnerRunId,
-             e.decided_at AS decidedAt, e.created_at AS createdAt,
-             e.rerun_of_experiment_id AS rerunOfExperimentId,
-             va.label AS aLabel, vb.label AS bLabel,
-             c.preference AS verdictPreference, c.confidence AS verdictConfidence
-           FROM experiments e
-           LEFT JOIN experiment_comparisons c ON c.experiment_id = e.id
-           LEFT JOIN workflow_variants va ON va.id = e.variant_a_id
-           LEFT JOIN workflow_variants vb ON vb.id = e.variant_b_id
-           ${where}
-           ORDER BY e.created_at DESC, e.id DESC`,
-        )
-        .all(...params) as Array<{
-        experimentId: string;
-        workflowId: string;
-        baseBranch: string;
-        variantAId: string;
-        variantBId: string;
-        status: ExperimentRow['status'];
-        winnerArm: ExperimentArm | null;
-        winnerRunId: string | null;
-        decidedAt: string | null;
-        createdAt: string;
-        rerunOfExperimentId: string | null;
-        aLabel: string | null;
-        bLabel: string | null;
-        verdictPreference: PairwisePreference | null;
-        verdictConfidence: number | null;
-      }>;
-
-      return rows.map((row): ExperimentSummary => {
-        const decision: ExperimentDecision | null =
-          row.status !== 'decided'
-            ? null
-            : row.winnerArm === 'A'
-              ? 'promote_a'
-              : row.winnerArm === 'B'
-                ? 'promote_b'
-                : 'discard';
-        return {
-          experimentId: row.experimentId,
-          workflowId: row.workflowId,
-          baseBranch: row.baseBranch,
-          variantAId: row.variantAId,
-          variantBId: row.variantBId,
-          armALabel: armVariantLabel(row.variantAId, row.aLabel),
-          armBLabel: armVariantLabel(row.variantBId, row.bLabel),
-          verdictPreference: row.verdictPreference,
-          verdictConfidence: row.verdictConfidence,
-          decision,
-          status: row.status,
-          decidedAt: row.decidedAt,
-          createdAt: row.createdAt,
-          rerunOfExperimentId: row.rerunOfExperimentId,
-          seriesKey: seriesKey(row.workflowId, row.variantAId, row.variantBId),
-        };
-      });
+      return listDashboardExperiments(requireDeps(), input);
     }),
 
   /**

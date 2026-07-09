@@ -195,4 +195,25 @@ describe('ExperimentsSection', () => {
     await screen.findByTestId('experiments-row-exp_1');
     expect(screen.queryByTestId('experiments-series-aggregate-wf-1:wfv_a|wfv_b')).not.toBeInTheDocument();
   });
+
+  it('renders the "Show abandoned" toggle (default off) and flips includeAbandoned in the query', async () => {
+    mockWorkflowStats = [];
+    listForDashboardQuery.mockResolvedValue([]);
+
+    render(<ExperimentsSection />);
+
+    const toggle = await screen.findByTestId('experiments-show-abandoned-toggle');
+    // Default off, and the default query excludes abandoned experiments.
+    expect(toggle).not.toBeChecked();
+    await waitFor(() =>
+      expect(listForDashboardQuery).toHaveBeenCalledWith({ projectId: null, includeAbandoned: false }),
+    );
+
+    // Toggling on re-queries with includeAbandoned: true.
+    fireEvent.click(toggle);
+    expect(toggle).toBeChecked();
+    await waitFor(() =>
+      expect(listForDashboardQuery).toHaveBeenCalledWith({ projectId: null, includeAbandoned: true }),
+    );
+  });
 });

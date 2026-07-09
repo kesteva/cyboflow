@@ -18,6 +18,7 @@ import {
   abandonExperiment,
   promoteVariant,
   switchToRotationExperiment,
+  listDashboardExperiments,
   type ExperimentsDeps,
 } from '../trpc/routers/experiments';
 import { getExperiment, listExperimentSeedTasks } from '../experimentStore';
@@ -57,6 +58,29 @@ function buildDb(): Database.Database {
     original_task_id TEXT NOT NULL, clone_task_id TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     UNIQUE (experiment_id, arm, original_task_id), UNIQUE (clone_task_id));`);
+  // Migration 048's workflow_variants table (CREATE only — the run-tagging ALTERs
+  // are applied above) + migration 050's experiment_comparisons table, so
+  // listForDashboard's LEFT JOINs and the decision-review-item resolution path have
+  // real tables to read.
+  db.exec(`CREATE TABLE workflow_variants (
+    id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
+    spec_json TEXT NOT NULL DEFAULT '{}', agent_overrides_json TEXT, model TEXT,
+    execution_model TEXT, weight INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now')));`);
+  db.exec(`CREATE TABLE experiment_comparisons (
+    id TEXT PRIMARY KEY, experiment_id TEXT NOT NULL, run_id_a TEXT NOT NULL, run_id_b TEXT NOT NULL,
+    eval_status TEXT NOT NULL DEFAULT 'pending', base_sha TEXT, diff_a_text TEXT, diff_b_text TEXT,
+    diff_a_stats_json TEXT, diff_b_stats_json TEXT, seed_context TEXT, sample_count INTEGER,
+    per_sample_json TEXT, preference TEXT CHECK (preference IN ('A','B','tie')), confidence REAL,
+    rationale TEXT, a_count INTEGER NOT NULL DEFAULT 0, b_count INTEGER NOT NULL DEFAULT 0,
+    tie_count INTEGER NOT NULL DEFAULT 0, judge_model TEXT, judge_build_id TEXT, prompt_hash TEXT,
+    error TEXT, decision_review_item_id TEXT, snapshot_at TEXT, completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+    UNIQUE (experiment_id),
+    FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id_a) REFERENCES workflow_runs(id) ON DELETE CASCADE,
+    FOREIGN KEY (run_id_b) REFERENCES workflow_runs(id) ON DELETE CASCADE);`);
   db.prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf', 1, 'planner', '{}')`).run();
   // A sprint workflow so the task-seeded experiment path (migration 051) can resolve
   // workflow.name === 'sprint'.
@@ -1098,6 +1122,143 @@ describe('experiments router orchestration (slice B)', () => {
       expect(ab.status).toBe('abandoned');
       expect(exists(h.db, 'tasks', cloneA)).toBe(false);
       expect(h.dismissed).toContain(exp0.session_a_id);
+    });
+  });
+
+  // --- S1: abandon cancel hygiene (stamp-first ordering, decision + finding
+  //     review-item cleanup) + listForDashboard abandoned filter ---------------
+  describe('S1 abandon cancel hygiene + dashboard filter', () => {
+    /** A resolveReviewItem dep mirroring index.ts's wiring: look up the item's project + resolve through the chokepoint. */
+    function makeResolveReviewItem(h: Harness, reviewRouter: ReviewItemRouter): (reviewItemId: string) => void {
+      return (reviewItemId) => {
+        const row = h.db
+          .prepare('SELECT project_id AS projectId FROM review_items WHERE id = ?')
+          .get(reviewItemId) as { projectId?: number } | undefined;
+        if (!row || typeof row.projectId !== 'number') return;
+        void reviewRouter
+          .applyReviewItem(row.projectId, {
+            op: 'resolve',
+            actor: 'orchestrator',
+            reviewItemId,
+            resolution: 'experiment-abandoned',
+          })
+          .catch(() => {});
+      };
+    }
+
+    it('AC1: stamps abandoned BEFORE cancelling the arms', async () => {
+      const h = makeHarness();
+      const res = await startExperiment(h.deps, { projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB' });
+      const statusAtCancel: string[] = [];
+      const deps: ExperimentsDeps = {
+        ...h.deps,
+        cancelRun: async (rid) => {
+          // Read the experiments-row status the instant a cancel fires.
+          statusAtCancel.push(getExperiment(dbAdapter(h.db), res.experimentId)!.status);
+          h.canceled.push(rid);
+        },
+      };
+      await abandonExperiment(deps, res.experimentId);
+      // Both arms were still running → both cancelled, and each saw 'abandoned'.
+      expect(statusAtCancel).toEqual(['abandoned', 'abandoned']);
+      expect(getExperiment(dbAdapter(h.db), res.experimentId)!.status).toBe('abandoned');
+    });
+
+    it('AC2: a sweep failure rethrows AND reverts the abandoned stamp to the pre-abandon status', async () => {
+      const h = makeHarness();
+      const res = await startExperiment(h.deps, { projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB' });
+      const deps: ExperimentsDeps = {
+        ...h.deps,
+        taskChangeRouter: {
+          applyChange: (pid, change) => h.deps.taskChangeRouter.applyChange(pid, change),
+          deleteExperimentArmEntities: () => Promise.reject(new Error('boom-sweep')),
+        },
+      };
+      await expect(abandonExperiment(deps, res.experimentId)).rejects.toThrow(/boom-sweep/);
+      // Status reverted to the pre-abandon value (running); no session torn down.
+      expect(getExperiment(dbAdapter(h.db), res.experimentId)!.status).toBe('running');
+      expect(h.dismissed).toHaveLength(0);
+    });
+
+    it('AC3: abandon resolves an already-minted blocking decision review item', async () => {
+      const h = makeHarness();
+      const reviewRouter = ReviewItemRouter.initialize(h.deps.db);
+      const res = await startExperiment(h.deps, { projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB' });
+
+      // A pairwise decision review item minted (blocking) + linked from the comparison row.
+      const { reviewItemId } = await reviewRouter.applyReviewItem(1, {
+        op: 'create',
+        actor: 'orchestrator',
+        kind: 'decision',
+        title: 'Experiment: pairwise verdict ready',
+        blocking: true,
+      });
+      h.db
+        .prepare(
+          `INSERT INTO experiment_comparisons (id, experiment_id, run_id_a, run_id_b, decision_review_item_id)
+           VALUES (?, ?, ?, ?, ?)`,
+        )
+        .run('cmp_ac3', res.experimentId, res.armA.runId, res.armB.runId, reviewItemId);
+
+      const deps: ExperimentsDeps = { ...h.deps, resolveReviewItem: makeResolveReviewItem(h, reviewRouter) };
+      await abandonExperiment(deps, res.experimentId);
+      await reviewRouter._queueForProject(1).onIdle();
+
+      expect(field(h.db, 'review_items', reviewItemId, 'status')).toBe('resolved');
+    });
+
+    it("resolves the arms' still-pending findings, leaving unrelated findings pending", async () => {
+      const h = makeHarness();
+      const reviewRouter = ReviewItemRouter.initialize(h.deps.db);
+      const res = await startExperiment(h.deps, { projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB' });
+
+      const findingA = (
+        await reviewRouter.applyReviewItem(1, {
+          op: 'create', actor: 'agent:executor', kind: 'finding', title: 'arm A finding', runId: res.armA.runId,
+        })
+      ).reviewItemId;
+      const findingB = (
+        await reviewRouter.applyReviewItem(1, {
+          op: 'create', actor: 'agent:executor', kind: 'finding', title: 'arm B finding', runId: res.armB.runId,
+        })
+      ).reviewItemId;
+      // A finding not tied to either arm run (run_id NULL) must stay pending.
+      const findingOther = (
+        await reviewRouter.applyReviewItem(1, {
+          op: 'create', actor: 'user', kind: 'finding', title: 'manual finding', runId: null,
+        })
+      ).reviewItemId;
+
+      const deps: ExperimentsDeps = { ...h.deps, resolveReviewItem: makeResolveReviewItem(h, reviewRouter) };
+      await abandonExperiment(deps, res.experimentId);
+      await reviewRouter._queueForProject(1).onIdle();
+
+      expect(field(h.db, 'review_items', findingA, 'status')).toBe('resolved');
+      expect(field(h.db, 'review_items', findingB, 'status')).toBe('resolved');
+      expect(field(h.db, 'review_items', findingOther, 'status')).toBe('pending');
+    });
+
+    it('AC4: listForDashboard omits abandoned experiments by default, includes them with includeAbandoned', async () => {
+      const h = makeHarness();
+      // A decided experiment (discard both).
+      const decided = await startExperiment(h.deps, { projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB' });
+      setRunStatus(h.db, decided.armA.runId, 'completed');
+      setRunStatus(h.db, decided.armB.runId, 'completed');
+      await decideExperiment(h.deps, decided.experimentId, null);
+      // An abandoned experiment.
+      const abandoned = await startExperiment(h.deps, { projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB' });
+      await abandonExperiment(h.deps, abandoned.experimentId);
+
+      const defaultView = listDashboardExperiments(h.deps, { projectId: 1 });
+      const defaultIds = defaultView.map((e) => e.experimentId);
+      expect(defaultIds).toContain(decided.experimentId);
+      expect(defaultIds).not.toContain(abandoned.experimentId);
+      expect(defaultView.every((e) => e.status !== 'abandoned')).toBe(true);
+
+      const withAbandoned = listDashboardExperiments(h.deps, { projectId: 1, includeAbandoned: true });
+      expect(withAbandoned.map((e) => e.experimentId)).toEqual(
+        expect.arrayContaining([decided.experimentId, abandoned.experimentId]),
+      );
     });
   });
 });
