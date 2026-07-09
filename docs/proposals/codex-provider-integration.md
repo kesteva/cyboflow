@@ -136,17 +136,17 @@ Session defaults need their own storage. The existing `sessions.substrate` colum
 Add session columns:
 
 ```sql
--- 048_session_agent_provider.sql
+-- 057_session_agent_provider.sql
 ALTER TABLE sessions
   ADD COLUMN agent_provider TEXT NOT NULL DEFAULT 'claude'
     CHECK (agent_provider IN ('claude','codex'));
 
--- 049_session_agent_runtime.sql
+-- 058_session_agent_runtime.sql
 ALTER TABLE sessions
   ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk'
     CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk','codex-pty'));
 
--- 050_session_agent_model.sql
+-- 059_session_agent_model.sql
 ALTER TABLE sessions
   ADD COLUMN agent_model TEXT;
 ```
@@ -154,7 +154,7 @@ ALTER TABLE sessions
 Backfill after all new columns exist:
 
 ```sql
--- 053_agent_provider_runtime_backfill.sql
+-- 062_agent_provider_runtime_backfill.sql
 UPDATE sessions
 SET
   agent_provider = 'claude',
@@ -173,12 +173,12 @@ Do not ship workflow-run columns without parallel session columns. The session o
 Add workflow run columns:
 
 ```sql
--- 051_workflow_run_agent_provider.sql
+-- 060_workflow_run_agent_provider.sql
 ALTER TABLE workflow_runs
   ADD COLUMN agent_provider TEXT NOT NULL DEFAULT 'claude'
     CHECK (agent_provider IN ('claude','codex'));
 
--- 052_workflow_run_agent_runtime.sql
+-- 061_workflow_run_agent_runtime.sql
 ALTER TABLE workflow_runs
   ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk'
     CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk'));
@@ -187,7 +187,7 @@ ALTER TABLE workflow_runs
 Backfill after all new columns exist:
 
 ```sql
--- 053_agent_provider_runtime_backfill.sql
+-- 062_agent_provider_runtime_backfill.sql
 UPDATE workflow_runs
 SET
   agent_provider = 'claude',

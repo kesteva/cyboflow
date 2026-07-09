@@ -178,7 +178,7 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     db.exec('ALTER TABLE workflow_runs ADD COLUMN rotation_experiment_id TEXT');
     variantColumnsAdded = true;
   };
-  // Migration 048-053 (agent provider/runtime): getRunById projects these
+  // Migrations 057-062 (agent provider/runtime): getRunById projects these
   // columns and createRun stamps them from the legacy substrate projection while
   // Codex support is phased in. Folded in idempotently like the sibling runtime
   // columns so includeSubstrate and includeWorkflowRunTaskColumns compose.
@@ -226,7 +226,7 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addVerifyColumnsOnce();
     // Migration 048: getRunById projects the four A/B tagging columns.
     addVariantColumnsOnce();
-    // Migration 048-053: provider/runtime supersede substrate for new integrations.
+    // Migrations 057-062: provider/runtime supersede substrate for new integrations.
     addAgentProviderRuntimeColumnsOnce();
   }
   if (options?.includeQuestionsTable) {
@@ -273,7 +273,7 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     addVerifyColumnsOnce();
     // Migration 048: getRunById projects the four A/B tagging columns.
     addVariantColumnsOnce();
-    // Migration 048-053: getRunById projects agent_provider/agent_runtime.
+    // Migrations 057-062: getRunById projects agent_provider/agent_runtime.
     addAgentProviderRuntimeColumnsOnce();
   }
   return db;

@@ -1,4 +1,4 @@
--- Migration 053: provider/runtime backfill from legacy substrate columns.
+-- Migration 062: provider/runtime backfill from legacy substrate columns.
 --
 -- Keep sessions.substrate and workflow_runs.substrate as Claude compatibility
 -- projections during the migration window, but materialize the new provider /
@@ -23,4 +23,3 @@ SET
       ELSE 'claude-sdk'
     END
 WHERE agent_provider = 'claude';
-

@@ -1,5 +1,5 @@
 /**
- * Integration tests for migrations 048-053 provider/runtime columns.
+ * Integration tests for migrations 057-062 provider/runtime columns.
  *
  * These migrations are intentionally split into one-column ALTER files plus an
  * idempotent backfill file. That avoids the file-migration runner's coarse
@@ -12,12 +12,12 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const MIGRATIONS = [
-  '048_session_agent_provider.sql',
-  '049_session_agent_runtime.sql',
-  '050_session_agent_model.sql',
-  '051_workflow_run_agent_provider.sql',
-  '052_workflow_run_agent_runtime.sql',
-  '053_agent_provider_runtime_backfill.sql',
+  '057_session_agent_provider.sql',
+  '058_session_agent_runtime.sql',
+  '059_session_agent_model.sql',
+  '060_workflow_run_agent_provider.sql',
+  '061_workflow_run_agent_runtime.sql',
+  '062_agent_provider_runtime_backfill.sql',
 ] as const;
 
 function readMigration(name: string): string {
@@ -57,7 +57,7 @@ function columnNames(db: Database.Database, table: string): string[] {
   );
 }
 
-describe('Migrations 048-053: agent provider/runtime columns', () => {
+describe('Migrations 057-062: agent provider/runtime columns', () => {
   it('adds session and workflow provider/runtime columns and backfills from substrate', () => {
     const db = baseDb();
     applyProviderRuntimeMigrations(db);
@@ -107,8 +107,8 @@ describe('Migrations 048-053: agent provider/runtime columns', () => {
 
   it('each column migration has the expected duplicate-column idempotency signal', () => {
     const db = baseDb();
-    db.exec(readMigration('048_session_agent_provider.sql'));
-    expect(() => db.exec(readMigration('048_session_agent_provider.sql'))).toThrow(
+    db.exec(readMigration('057_session_agent_provider.sql'));
+    expect(() => db.exec(readMigration('057_session_agent_provider.sql'))).toThrow(
       /duplicate column name: agent_provider/i,
     );
     db.close();
@@ -117,11 +117,10 @@ describe('Migrations 048-053: agent provider/runtime columns', () => {
   it('the backfill file is idempotent after all columns exist', () => {
     const db = baseDb();
     applyProviderRuntimeMigrations(db);
-    expect(() => db.exec(readMigration('053_agent_provider_runtime_backfill.sql'))).not.toThrow();
+    expect(() => db.exec(readMigration('062_agent_provider_runtime_backfill.sql'))).not.toThrow();
     expect(
       db.prepare('SELECT agent_provider, agent_runtime FROM workflow_runs WHERE id = ?').get('wr-pty'),
     ).toEqual({ agent_provider: 'claude', agent_runtime: 'claude-interactive' });
     db.close();
   });
 });
-
