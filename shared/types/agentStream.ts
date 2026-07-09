@@ -114,3 +114,20 @@ export type AgentStreamEvent =
   | AgentUserMessageEvent
   | AgentResultEvent
   | AgentUnknownEvent;
+
+export const AGENT_STREAM_EVENT_TYPES = [
+  'agent_session_info',
+  'agent_init',
+  'agent_message',
+  'agent_result',
+  'agent_unknown',
+] as const;
+
+export function isAgentStreamEvent(value: unknown): value is AgentStreamEvent {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    typeof (value as { type?: unknown }).type === 'string' &&
+    (AGENT_STREAM_EVENT_TYPES as readonly string[]).includes((value as { type: string }).type)
+  );
+}
