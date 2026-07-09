@@ -203,9 +203,17 @@ export function WorkflowsView(): React.JSX.Element {
   // ── A/B test launcher (Slice B thin launch UI) ──────────────────────────────
   // The card's target workflow + the resolved launch project (mirrors
   // onEditWorkflow's fallback for a GLOBAL flow with no project of its own).
-  const [abTestTarget, setAbTestTarget] = useState<{ projectId: number; workflowId: string; workflowName: string } | null>(
-    null,
-  );
+  // `isGlobal` (workflow row's project_id === null) gates the modal's project
+  // picker: a GLOBAL flow's launch project is only a guess, so the user may
+  // retarget it; a project-scoped flow is locked to its owning project (the
+  // picker is hidden) — startSideBySide would otherwise pair the scoped
+  // workflowId with a foreign projectId the backend doesn't validate.
+  const [abTestTarget, setAbTestTarget] = useState<{
+    projectId: number;
+    workflowId: string;
+    workflowName: string;
+    isGlobal: boolean;
+  } | null>(null);
 
   /**
    * Resolve the project the New / cross-project actions target (v1):
@@ -343,7 +351,12 @@ export function WorkflowsView(): React.JSX.Element {
   const onAbTestWorkflow = (entry: WorkflowGalleryEntry): void => {
     const targetProjectId = entry.row.project_id ?? resolveTargetProjectId();
     if (targetProjectId === null) return;
-    setAbTestTarget({ projectId: targetProjectId, workflowId: entry.row.id, workflowName: entry.row.name });
+    setAbTestTarget({
+      projectId: targetProjectId,
+      workflowId: entry.row.id,
+      workflowName: entry.row.name,
+      isGlobal: entry.row.project_id === null,
+    });
   };
 
   const onNewWorkflow = (): void => {
@@ -555,7 +568,7 @@ export function WorkflowsView(): React.JSX.Element {
         <ABTestLaunchModal
           isOpen
           projectId={abTestTarget.projectId}
-          projects={projectList}
+          projects={abTestTarget.isGlobal ? projectList : undefined}
           workflowId={abTestTarget.workflowId}
           workflowName={abTestTarget.workflowName}
           onClose={() => setAbTestTarget(null)}
