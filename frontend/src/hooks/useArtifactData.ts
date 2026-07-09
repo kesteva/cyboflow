@@ -43,7 +43,11 @@
  */
 import { useEffect, useState } from 'react';
 import { trpc } from '../trpc/client';
-import type { Artifact, ScreenshotsArtifactPayload } from '../../../shared/types/artifacts';
+import type {
+  Artifact,
+  RecommendationsArtifactPayload,
+  ScreenshotsArtifactPayload,
+} from '../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../shared/types/tasks';
 
 /** Parsed `payload_json` shape for the canvas (ui-prototype / generic) embed. */
@@ -64,6 +68,14 @@ export interface CanvasPayload {
 export type ScreenshotsPayload = ScreenshotsArtifactPayload;
 
 /**
+ * Parsed `payload_json` shape for the compound-recommendations doc. Re-exported
+ * alias of the shared {@link RecommendationsArtifactPayload} — the compound
+ * orchestrator writes `{ markdown }`, resolved straight from the payload (no
+ * entity source, no fetch), kept under this local name for renderer imports.
+ */
+export type RecommendationsPayload = RecommendationsArtifactPayload;
+
+/**
  * Discriminated content union the renderer switches on. `kind` mirrors the
  * resolved data source, NOT the atype 1:1 (idea-spec + decomposed-stories both
  * resolve from the entity model but produce different shapes).
@@ -73,6 +85,7 @@ export type ArtifactContent =
   | { kind: 'stories'; idea: BacklogTaskItem }
   | { kind: 'arch'; idea: BacklogTaskItem }
   | { kind: 'screenshots'; payload: ScreenshotsPayload }
+  | { kind: 'recommendations'; payload: RecommendationsPayload }
   | { kind: 'canvas'; payload: CanvasPayload };
 
 export interface ArtifactData {
@@ -110,6 +123,17 @@ export function useArtifactData(artifact: Artifact, projectId: number | null): A
         loading: false,
         error: null,
         data: { kind: 'screenshots', payload: parsePayload(payloadJson) },
+      });
+      return;
+    }
+    // compound-recommendations is payload-backed (no entity source): the
+    // compound orchestrator wrote the doc into payload_json.markdown, so it
+    // resolves synchronously like the canvas/screenshots atypes.
+    if (atype === 'compound-recommendations') {
+      setState({
+        loading: false,
+        error: null,
+        data: { kind: 'recommendations', payload: parsePayload(payloadJson) },
       });
       return;
     }

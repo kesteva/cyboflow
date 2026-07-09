@@ -408,8 +408,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               // 'arch-design' is deliberately absent: auto-mint-only (see the
               // validAtypes comment in the CallTool handler below).
-              enum: ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic'],
-              description: 'Artifact type (required). ui-prototype / generic render an embedded live canvas; screenshots renders an on-disk PNG gallery (you write the files + report their basenames); idea-spec / decomposed-stories / arch-design are the auto-created templates.',
+              enum: ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic', 'compound-recommendations'],
+              description: 'Artifact type (required). ui-prototype / generic render an embedded live canvas; screenshots renders an on-disk PNG gallery (you write the files + report their basenames); compound-recommendations renders a markdown doc from payload_json.markdown (the Compound flow’s summary-of-recommendations); idea-spec / decomposed-stories / arch-design are the auto-created templates.',
             },
             label: { type: 'string', description: 'Short tab/card label for the artifact (required)' },
             payload_json: {
@@ -1228,8 +1228,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // is auto-mint-only (derived from the idea body's '## Architecture design'
       // section by autoMintArtifacts) — an agent-reported arch-design would lack
       // source_ref and render a broken tab, so it is excluded here and from the
-      // ListTools enum above.
-      const validAtypes = ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic'];
+      // ListTools enum above. 'compound-recommendations' IS agent-reportable: it
+      // is payload-backed (payload_json.markdown), so it renders correctly with
+      // source_ref NULL, unlike the entity-backed templated atypes.
+      const validAtypes = ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic', 'compound-recommendations'];
       if (typeof atype !== 'string' || !validAtypes.includes(atype)) {
         return {
           content: [

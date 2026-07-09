@@ -183,6 +183,35 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.getByTestId('artifact-arch-error')).toHaveTextContent('boom');
   });
 
+  // --- compound-recommendations --------------------------------------------
+
+  it('renders the compound-recommendations markdown doc with the violet eyebrow', () => {
+    setHook({
+      loading: false,
+      error: null,
+      data: { kind: 'recommendations', payload: { markdown: '## Quick fixes\n\n- tighten the guard' } },
+    });
+    render(
+      <ArtifactTabRenderer artifact={makeArtifact({ atype: 'compound-recommendations', sourceRef: null })} {...PROPS} />,
+    );
+
+    expect(screen.getByTestId('artifact-compound-recommendations')).toBeInTheDocument();
+    const eyebrow = screen.getByTestId('artifact-eyebrow');
+    expect(eyebrow).toHaveTextContent('Artifact · recommendations');
+    expect(eyebrow).toHaveStyle({ color: '#8b5cf6' });
+    expect(screen.getByTestId('md-preview')).toHaveTextContent('tighten the guard');
+  });
+
+  it('shows the compound-recommendations empty state when the payload has no markdown', () => {
+    setHook({ loading: false, error: null, data: { kind: 'recommendations', payload: {} } });
+    render(
+      <ArtifactTabRenderer artifact={makeArtifact({ atype: 'compound-recommendations', sourceRef: null })} {...PROPS} />,
+    );
+
+    expect(screen.getByTestId('artifact-recommendations-empty')).toHaveTextContent('No recommendations drafted yet.');
+    expect(screen.queryByTestId('md-preview')).not.toBeInTheDocument();
+  });
+
   // --- decomposed-stories --------------------------------------------------
 
   function makeStoriesIdea(): BacklogTaskItem {
@@ -670,6 +699,7 @@ describe('ArtifactTabRenderer', () => {
       { atype: 'ui-prototype', mode: 'canvas', testid: 'artifact-canvas', data: { loading: false, error: null, data: { kind: 'canvas', payload: {} } } },
       { atype: 'generic', mode: 'canvas', testid: 'artifact-canvas', data: { loading: false, error: null, data: { kind: 'canvas', payload: {} } } },
       { atype: 'arch-design', mode: 'template', testid: 'artifact-arch-design', data: { loading: false, error: null, data: { kind: 'arch', idea: makeIdea() } } },
+      { atype: 'compound-recommendations', mode: 'template', testid: 'artifact-compound-recommendations', data: { loading: false, error: null, data: { kind: 'recommendations', payload: { markdown: '## x' } } } },
     ];
     for (const c of cases) {
       setHook(c.data);

@@ -27,7 +27,8 @@ export type ArtifactType =
   | 'screenshots'
   | 'ui-prototype'
   | 'generic'
-  | 'arch-design';
+  | 'arch-design'
+  | 'compound-recommendations';
 
 /** How an artifact tab renders: a bespoke template vs. an embedded live canvas. */
 export type ArtifactRenderMode = 'template' | 'canvas';
@@ -43,6 +44,7 @@ export const ARTIFACT_RENDER_MODE: Record<ArtifactType, ArtifactRenderMode> = {
   'ui-prototype': 'canvas',
   generic: 'canvas',
   'arch-design': 'template',
+  'compound-recommendations': 'template',
 };
 
 /**
@@ -57,6 +59,9 @@ export const ARTIFACT_COLORS: Record<ArtifactType, string> = {
   'ui-prototype': '#c96442',
   generic: '#c96442',
   'arch-design': '#2d7a8a',
+  // Compound's phase color (#8b5cf6, the violet used in the run rail) so the
+  // recommendations tab reads as part of the Compound flow.
+  'compound-recommendations': '#8b5cf6',
 };
 
 /**
@@ -70,6 +75,7 @@ export const ARTIFACT_GLYPHS: Record<ArtifactType, string> = {
   'ui-prototype': '◳',
   generic: '◳',
   'arch-design': '▣',
+  'compound-recommendations': '▧',
 };
 
 /** True when the artifact renders in an embedded live canvas (not a template). */
@@ -224,6 +230,22 @@ export interface ScreenshotsArtifactPayload {
    * never judge input, never a pass/fail signal.
    */
   diagnostics?: string[];
+  [key: string]: unknown;
+}
+
+/**
+ * The parsed `payload_json` shape of a `compound-recommendations` artifact — the
+ * Compound flow's summary-of-recommendations doc surfaced for the approve gate.
+ *
+ * Unlike the entity-backed templated atypes (idea-spec / arch-design re-derive
+ * from an idea body), this doc has NO entity source: the compound orchestrator
+ * composes the markdown from the drafted learnings and reports it verbatim in
+ * `markdown`. The renderer reads it straight from the payload — no fetch, no
+ * source_ref. Extra keys are tolerated (payload is per-atype).
+ */
+export interface RecommendationsArtifactPayload {
+  /** The full recommendations doc, rendered through MarkdownPreview. */
+  markdown?: string;
   [key: string]: unknown;
 }
 

@@ -168,6 +168,30 @@ describe('useArtifactData', () => {
     expect(getQuerySpy).not.toHaveBeenCalled();
   });
 
+  it("resolves 'compound-recommendations' synchronously from payload_json (no fetch, no source entity)", () => {
+    const { result } = renderHook(() =>
+      useArtifactData(
+        // sourceRef null: unlike the entity-backed templated atypes, this must NOT
+        // hit the no-source error path — it is payload-backed.
+        makeArtifact({
+          atype: 'compound-recommendations',
+          sourceRef: null,
+          payloadJson: '{"markdown":"## Recommendations\\n\\n- do the thing"}',
+        }),
+        null,
+      ),
+    );
+
+    expect(result.current.loading).toBe(false);
+    expect(result.current.error).toBeNull();
+    expect(result.current.data).toEqual({
+      kind: 'recommendations',
+      payload: { markdown: '## Recommendations\n\n- do the thing' },
+    });
+    expect(getQuerySpy).not.toHaveBeenCalled();
+    expect(decompositionQuerySpy).not.toHaveBeenCalled();
+  });
+
   // --- live refresh ---------------------------------------------------------
 
   it("does NOT subscribe when projectId is null (one-shot tab)", async () => {
