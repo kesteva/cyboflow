@@ -1153,7 +1153,7 @@ export const runsRouter = router({
    * stays terminal ('failed') — this never mutates it.
    *
    * Provenance is COPIED off the failed row so the caller does not re-thread it:
-   * workflow_id, substrate, model pin, permission_mode_snapshot, and the seed params
+   * workflow_id, substrate, provider/runtime, model pin, permission_mode_snapshot, and the seed params
    * (task_id / seed_idea_id / seed_finding_ids, plus the sprint batch's task ids read
    * back from sprint_batch_tasks). NO lineage column is added — no consumer needs a
    * restarted_from link, so a schema change would be dead weight.
@@ -1184,7 +1184,7 @@ export const runsRouter = router({
         .prepare(
           `SELECT workflow_id, project_id, status, substrate, session_id,
                   permission_mode_snapshot, model, task_id, seed_idea_id, seed_idea_ids, seed_finding_ids, batch_id,
-                  eval_enabled, variant_id, experiment_id
+                  eval_enabled, variant_id, experiment_id, agent_provider, agent_runtime
              FROM workflow_runs WHERE id = ?`,
         )
         .get(input.runId) as
@@ -1204,6 +1204,8 @@ export const runsRouter = router({
             eval_enabled: number | null;
             variant_id: string | null;
             experiment_id: string | null;
+            agent_provider: AgentProvider | null;
+            agent_runtime: WorkflowAgentRuntime | null;
           }
         | undefined;
       if (!row) return { noOp: true, reason: 'not_found' };
@@ -1267,8 +1269,9 @@ export const runsRouter = router({
       }
 
       // SAME chokepoint runs.start uses. session_id is reused so the new run lands in
-      // the failed run's worktree; substrate / permission / model re-resolve through
-      // their seams inside createRun. baseBranch + requestedExecutionModel are not
+      // the failed run's worktree; substrate / provider / runtime / permission /
+      // model re-resolve through their seams inside createRun. baseBranch +
+      // requestedExecutionModel are not
       // threaded over IPC (undefined placeholders), mirroring start.
       const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
         row.workflow_id,
@@ -1306,6 +1309,8 @@ export const runsRouter = router({
           ...(row.variant_id !== null ? { requestedVariantId: row.variant_id } : { baseline: true }),
           ...(ideaIds !== undefined ? { ideaIds } : {}),
         },
+        row.agent_provider ?? undefined,
+        row.agent_runtime ?? undefined,
       );
       return { runId, worktreePath, branchName };
     }),

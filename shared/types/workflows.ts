@@ -146,14 +146,10 @@ export interface WorkflowRunRow {
    */
   execution_model?: ExecutionModel;
   /**
-   * Per-run Claude model alias pinned at launch ('fable' | 'opus' | 'sonnet' |
-   * 'haiku' | 'auto'; legacy 'opus-250k' still resolves for back-compat but is
-   * no longer offered in the picker), resolved to a concrete snapshot at the spawn seam
-   * (modelContext.resolveModelAlias). Stamped once at createRun, immutable for the
-   * run (migration 037). NULL — and the migrated state of every legacy row — means
-   * "no pin": RunExecutor passes no `model` to the spawner so the bundled Agent SDK
-   * uses its own default. 'auto' resolves identically to NULL at the seam. Read
-   * FRESH per spawn by RunExecutor.buildOptionsOverrides.
+   * Per-run provider-scoped model alias pinned at launch ('fable' | 'opus' |
+   * 'sonnet' | 'gpt-*' | 'auto'), normalized against agent_provider at createRun
+   * and resolved to a runtime-specific spawn value at the spawn seam. Stamped once
+   * at createRun, immutable for the run (migration 037). NULL means "no pin".
    */
   model?: string | null;
   /**
@@ -261,9 +257,10 @@ export interface WorkflowRunListRow {
    */
   seed_idea_ids?: string | null;
   /**
-   * Per-run pinned model alias (migration 037) — the user-facing alias stamped
-   * onto workflow_runs.model at launch (Configure surface), resolved to a concrete
-   * snapshot at the spawn seam. Surfaced on the list row so the run composer can
+   * Per-run pinned provider-scoped model alias (migration 037) — the user-facing
+   * alias stamped onto workflow_runs.model at launch (Configure surface), resolved
+   * to a runtime-specific spawn value at the spawn seam. Surfaced on the list row
+   * so the run composer can
    * show a READ-ONLY model pill. NULL/'auto' → no pin (SDK default), so the pill
    * is omitted. Optional + additive, mirroring `substrate?` (fixtures unaffected).
    */

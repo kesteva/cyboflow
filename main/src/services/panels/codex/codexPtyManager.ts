@@ -6,6 +6,7 @@ import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { isPermissionMode, type PermissionMode } from '../../../../../shared/types/workflows';
+import { resolveAgentModelAlias } from '../agentModelContext';
 
 interface CodexPtySpawnOptions {
   panelId: string;
@@ -98,8 +99,9 @@ export class CodexPtyManager extends AbstractCliManager {
     const flags = codexPermissionFlagsForMode(mode);
     args.push('--sandbox', flags.sandbox, '--ask-for-approval', flags.approval);
 
-    if (options.model && options.model !== 'auto' && options.model !== 'default') {
-      args.push('--model', options.model);
+    const resolvedModel = resolveAgentModelAlias('codex', options.model);
+    if (resolvedModel) {
+      args.push('--model', resolvedModel);
     }
 
     if (options.prompt.trim().length > 0) {

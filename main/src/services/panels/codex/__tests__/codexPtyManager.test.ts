@@ -57,6 +57,19 @@ describe('CodexPtyManager.buildCommandArgs', () => {
     ]);
   });
 
+  it('omits --model when a stale Claude model value reaches Codex PTY', () => {
+    const manager = new TestableCodexPtyManager(makeSessionManager('acceptEdits'));
+
+    expect(manager.callBuildCommandArgs({ model: 'opus', prompt: 'implement this' })).toEqual([
+      '--sandbox',
+      'workspace-write',
+      '--ask-for-approval',
+      'on-request',
+      '--',
+      'implement this',
+    ]);
+  });
+
   it('maps legacy ignore to dontAsk for compatibility with old session rows', () => {
     const manager = new TestableCodexPtyManager(makeSessionManager());
 

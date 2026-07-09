@@ -277,13 +277,11 @@ export class RunLauncher {
     // block. OPTIONAL — when omitted the run is not finding-seeded.
     findingIds?: string[],
     // The user's explicit per-run MODEL choice (Configure surface →
-    // runs.start → here), a user-facing alias ('opus' | 'sonnet' | 'haiku' | 'auto';
-    // legacy 'opus-250k' still resolves for back-compat but is no longer offered
-    // in the picker) threaded into WorkflowRegistry.createRun, which stamps it
-    // onto workflow_runs.model (migration 037). OPTIONAL — when omitted the run
-    // pins no model and RunExecutor falls through to the SDK default. There is no
-    // resolver ladder; the value is resolved to a concrete snapshot at the spawn
-    // seam (modelContext.resolveModelAlias).
+    // runs.start → here), a provider-scoped user-facing alias threaded into
+    // WorkflowRegistry.createRun, which drops cross-provider stale values and
+    // stamps the surviving selection onto workflow_runs.model (migration 037).
+    // OPTIONAL — when omitted the run pins no model and the runtime falls through
+    // to its default. Concrete provider translation happens at the spawn seam.
     requestedModel?: string,
     // The user's explicit per-run CODE-REVIEW-EVAL choice (Configure surface →
     // runs.start → here). true = force the eval ON for this run, false = force it

@@ -446,6 +446,68 @@ describe('cyboflow.runs.start', () => {
     }
   });
 
+  it('preserves provider/runtime and model when restarting a failed Codex run', async () => {
+    const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
+    const { runId } = seedRun(db, {
+      id: 'run-failed-codex',
+      workflowId: 'wf-codex-restart',
+      status: 'failed',
+      projectId: 1,
+      workflowName: 'sprint',
+    });
+    db.prepare(
+      `UPDATE workflow_runs
+          SET session_id = ?,
+              substrate = ?,
+              permission_mode_snapshot = ?,
+              model = ?,
+              agent_provider = ?,
+              agent_runtime = ?
+        WHERE id = ?`,
+    ).run('sess-1', 'sdk', 'acceptEdits', 'gpt-5.5', 'codex', 'codex-sdk', runId);
+
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-restarted-codex',
+      worktreePath: '/tmp/wt/codex',
+      branchName: 'cyboflow/sprint/restart',
+    });
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+      await caller.cyboflow.runs.restart({ runId });
+
+      expect(launchMock).toHaveBeenCalledWith(
+        'wf-codex-restart',
+        '/projects/my-project',
+        'sdk',
+        undefined,
+        undefined,
+        'sess-1',
+        'acceptEdits',
+        undefined,
+        undefined,
+        1,
+        undefined,
+        undefined,
+        'gpt-5.5',
+        undefined,
+        'codex',
+        'codex-sdk',
+      );
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+      db.close();
+    }
+  });
+
   // -------------------------------------------------------------------------
   // (a2) ideaId supplied (migration 017) → full-form launch with the seed idea.
   // -------------------------------------------------------------------------

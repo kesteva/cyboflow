@@ -405,6 +405,18 @@ describe('InteractiveClaudeManager', () => {
       }
     });
 
+    it('omits --model when a stale Codex model value reaches Claude interactive', () => {
+      const args = mgr.callBuildCommandArgs({
+        panelId: 'p1',
+        sessionId: 's1',
+        worktreePath: '/tmp/wt',
+        prompt: 'hi',
+        model: 'gpt-5.5',
+      });
+
+      expect(args).not.toContain('--model');
+    });
+
     it('threads --strict-mcp-config iff strictMcpConfig === true', () => {
       const withFlag = mgr.callBuildCommandArgs({
         panelId: 'p1',

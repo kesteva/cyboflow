@@ -10,6 +10,7 @@ import {
   resolveUnavailableDefaultModelFallback,
   sdkModelAndBetas,
 } from '../modelContext';
+import { displayAgentModelSelection, resolveAgentModelAlias } from '../../agentModelContext';
 
 describe('modelContext', () => {
   it('CONTEXT_1M_BETA is the Sonnet 1M beta flag', () => {
@@ -97,6 +98,43 @@ describe('modelContext', () => {
       // both reach 1M without the Sonnet-4.x beta, so the gate returns false.
       expect(modelSupportsContext1M(resolveModelAlias('sonnet'))).toBe(false);
       expect(modelSupportsContext1M(resolveModelAlias('opus'))).toBe(false);
+    });
+  });
+
+  describe('resolveAgentModelAlias', () => {
+    it('resolves Claude aliases only in the Claude provider namespace', () => {
+      expect(resolveAgentModelAlias('claude', 'opus')).toBe('claude-opus-4-8[1m]');
+      expect(resolveAgentModelAlias('claude', ' SONNET ')).toBe('claude-sonnet-5');
+      expect(resolveAgentModelAlias('claude', 'claude-sonnet-5')).toBe('claude-sonnet-5');
+    });
+
+    it('suppresses Codex model ids before a Claude spawn', () => {
+      expect(resolveAgentModelAlias('claude', 'gpt-5.5')).toBeUndefined();
+      expect(resolveAgentModelAlias('claude', 'o4-mini')).toBeUndefined();
+      expect(resolveAgentModelAlias('claude', 'codex-experimental')).toBeUndefined();
+    });
+
+    it('passes Codex model ids through while suppressing Claude models before a Codex spawn', () => {
+      expect(resolveAgentModelAlias('codex', 'gpt-5.5')).toBe('gpt-5.5');
+      expect(resolveAgentModelAlias('codex', 'opus')).toBeUndefined();
+      expect(resolveAgentModelAlias('codex', 'claude-opus-4-8')).toBeUndefined();
+    });
+
+    it('treats auto/default/empty as no explicit model at the spawn seam', () => {
+      expect(resolveAgentModelAlias('claude', 'auto')).toBeUndefined();
+      expect(resolveAgentModelAlias('codex', 'default')).toBeUndefined();
+      expect(resolveAgentModelAlias('codex', '   ')).toBeUndefined();
+    });
+
+    it('keeps future/custom ids that do not belong to the other provider family', () => {
+      expect(resolveAgentModelAlias('claude', 'some-future-claude-model')).toBe('some-future-claude-model');
+      expect(resolveAgentModelAlias('codex', 'some-future-codex-model')).toBe('some-future-codex-model');
+    });
+
+    it('normalizes display labels without resolving Claude aliases to concrete ids', () => {
+      expect(displayAgentModelSelection('claude', 'opus', 'default')).toBe('opus');
+      expect(displayAgentModelSelection('claude', 'gpt-5.5', 'default')).toBe('default');
+      expect(displayAgentModelSelection('codex', 'opus', 'codex-default')).toBe('codex-default');
     });
   });
 

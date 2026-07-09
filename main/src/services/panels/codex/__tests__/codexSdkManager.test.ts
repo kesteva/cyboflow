@@ -185,6 +185,41 @@ describe('CodexSdkManager', () => {
     }
   });
 
+  it('omits the model when a stale Claude model value reaches Codex SDK', async () => {
+    const db = createDb();
+    try {
+      const thread = new FakeThread([]);
+      const client = new FakeCodexClient(thread);
+      const manager = makeManager(db, client);
+
+      await manager.spawnCliProcess({
+        panelId: 'run-1',
+        sessionId: 'run-1',
+        runId: 'run-1',
+        worktreePath: '/tmp/worktree',
+        prompt: 'ship it',
+        agentPermissionMode: 'acceptEdits',
+        model: 'sonnet',
+      });
+
+      expect(client.startThread).toHaveBeenCalledWith({
+        workingDirectory: '/tmp/worktree',
+        sandboxMode: 'workspace-write',
+        approvalPolicy: 'on-request',
+      });
+      expect(thread.runStreamed).toHaveBeenCalledWith('ship it', {
+        signal: expect.any(AbortSignal) as AbortSignal,
+      });
+
+      const sessionInfoRow = db
+        .prepare("SELECT payload_json AS payloadJson FROM raw_events WHERE event_type = 'session_info'")
+        .get() as { payloadJson: string };
+      expect(JSON.parse(sessionInfoRow.payloadJson)).toMatchObject({ model: 'codex-default' });
+    } finally {
+      db.close();
+    }
+  });
+
   it('projects one failure result and rejects the spawn when a turn fails', async () => {
     const db = createDb();
     try {

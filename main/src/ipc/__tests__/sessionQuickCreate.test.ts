@@ -500,6 +500,41 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     expect(stamp?.args).toEqual(['interactive', 'claude', 'claude-interactive', null, 'sess-001']);
   });
 
+  it('drops stale Codex model values from Claude quick sessions and falls back to claudeConfig', async () => {
+    const {
+      services,
+      dbRunCalls,
+      fakeDatabaseService,
+      fakeInteractiveCliManager,
+    } = makeServices();
+    const handlers = registerWith(services);
+
+    await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      substrate: 'interactive',
+      agentModel: 'gpt-5.5',
+      claudeConfig: { model: 'sonnet', fastMode: true },
+    });
+
+    const stamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
+    expect(stamp?.args).toEqual(['interactive', 'claude', 'claude-interactive', 'sonnet', 'sess-001']);
+    expect(fakeDatabaseService.updatePanelSettings).toHaveBeenCalledWith('panel-quick-1', {
+      model: 'sonnet',
+      fastMode: true,
+    });
+    expect(fakeInteractiveCliManager.startPanel).toHaveBeenCalledWith(
+      'panel-quick-1',
+      'sess-001',
+      `/tmp/project/${TEST_BRANCH}`,
+      expect.stringContaining('cyboflow'),
+      undefined,
+      'sonnet',
+      undefined,
+      true,
+    );
+  });
+
   it('refreshes the session read model after stamping default agent fields', async () => {
     const { services, fakeSessionManager } = makeServices();
     const handlers = registerWith(services);
@@ -678,6 +713,39 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     expect(fakeRegisterCodexPtyPanel).toHaveBeenCalledWith('test-run-id-abc', 'panel-quick-1');
     expect(fakeRegisterCodexPtyPanel.mock.invocationCallOrder[0]).toBeLessThan(
       fakeCodexPtyManager.startPanel.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('drops stale Claude model values from Codex PTY quick sessions', async () => {
+    const {
+      services,
+      dbRunCalls,
+      fakeCodexPtyManager,
+      fakeDatabaseService,
+    } = makeServices();
+    const handlers = registerWith(services);
+
+    const result = (await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      agentProvider: 'codex',
+      agentRuntime: 'codex-pty',
+      agentModel: 'opus',
+    })) as { success: boolean; data?: { claudePanelId?: string } };
+
+    expect(result.success).toBe(true);
+
+    const stamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
+    expect(stamp?.args).toEqual(['interactive', 'codex', 'codex-pty', null, 'sess-001']);
+    expect(fakeDatabaseService.updatePanelSettings).not.toHaveBeenCalled();
+    expect(fakeCodexPtyManager.startPanel).toHaveBeenCalledWith(
+      'panel-quick-1',
+      'sess-001',
+      `/tmp/project/${TEST_BRANCH}`,
+      expect.stringContaining('cyboflow'),
+      undefined,
+      undefined,
+      'test-run-id-abc',
     );
   });
 

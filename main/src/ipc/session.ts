@@ -36,6 +36,8 @@ import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
 import { pruneSessionOnlyArtifacts } from '../orchestrator/artifactLifecycle';
 import { isCliSubstrate } from '../../../shared/types/substrate';
 import { claudeRuntimeFromSubstrate, isAgentProvider, isSessionAgentRuntime } from '../../../shared/types/agentRuntime';
+import type { AgentProvider } from '../../../shared/types/agentRuntime';
+import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
 import { isAgentStreamEvent } from '../../../shared/types/agentStream';
 import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
@@ -63,6 +65,29 @@ function interactiveTranscriptExists(
     `${claudeSessionId}.jsonl`,
   );
   return existsSync(file);
+}
+
+type ClaudeConfig = NonNullable<CreateSessionRequest['claudeConfig']>;
+
+function normalizeClaudeConfig(config: ClaudeConfig | undefined): ClaudeConfig | undefined {
+  if (!config) return undefined;
+  const { model: rawModel, ...rest } = config;
+  const model = normalizeAgentModelSelection('claude', rawModel);
+  return {
+    ...rest,
+    ...(model !== undefined ? { model } : {}),
+  };
+}
+
+function firstProviderModel(
+  provider: AgentProvider,
+  ...models: Array<string | null | undefined>
+): string | undefined {
+  for (const model of models) {
+    const normalized = normalizeAgentModelSelection(provider, model);
+    if (normalized !== undefined) return normalized;
+  }
+  return undefined;
 }
 
 /**
@@ -377,6 +402,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       const projectedAgentRuntime =
         requestedAgentRuntime ??
         (isCliSubstrate(request.substrate) ? claudeRuntimeFromSubstrate(request.substrate) : undefined);
+      const normalizedClaudeConfig = normalizeClaudeConfig(request.claudeConfig);
+      const normalizedAgentModel =
+        firstProviderModel(requestedAgentProvider ?? 'claude', request.agentModel, normalizedClaudeConfig?.model) ?? null;
 
       const count = request.count || 1;
 
@@ -392,11 +420,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           request.toolType,
           request.commitMode,
           request.commitModeSettings,
-          request.claudeConfig,
+          normalizedClaudeConfig,
           request.folderId,
           requestedAgentProvider,
           projectedAgentRuntime,
-          request.agentModel ?? request.claudeConfig?.model ?? null
+          normalizedAgentModel
         );
 
         // Note: Model is now stored at panel level, not session level
@@ -414,10 +442,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           toolType: request.toolType,
           commitMode: request.commitMode,
           commitModeSettings: request.commitModeSettings,
-          claudeConfig: request.claudeConfig,
+          claudeConfig: normalizedClaudeConfig,
           agentProvider: requestedAgentProvider,
           agentRuntime: projectedAgentRuntime,
-          agentModel: request.agentModel ?? request.claudeConfig?.model ?? null,
+          agentModel: normalizedAgentModel,
         });
 
         // Note: Model is now stored at panel level, not session level
@@ -561,20 +589,16 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // workflow instead (below) — so the setting only reaches the live spawn.
       const requestedEffort = request.effort === 'ultracode' ? 'ultracode' : undefined;
 
-      // Per-launch Claude config for the quick session (Configure model dropdown +
-      // fast-mode toggle). `claudeConfig.model` is the bare alias (pinned to a
-      // concrete snapshot at the spawn seam); `fastMode` opts THIS session into the
-      // premium Opus fast-mode preview (default off). For the interactive substrate
-      // both are passed to the eager spawn AND persisted on the panel below; for
-      // SDK the frontend persists them on the panel it creates. Either way the
-      // sessions:input respawn re-reads them from panel settings.
-      const requestedModel =
-        typeof request.agentModel === 'string'
-          ? request.agentModel
-          : typeof request.claudeConfig?.model === 'string'
-            ? request.claudeConfig.model
-            : undefined;
-      const requestedFastMode = request.claudeConfig?.fastMode === true;
+      // Per-launch model config for the quick session. Picker values are
+      // provider-scoped so a stale Claude alias cannot be stamped onto Codex.
+      const quickAgentProvider: AgentProvider = useCodexPty ? 'codex' : 'claude';
+      const normalizedClaudeConfig = normalizeClaudeConfig(request.claudeConfig);
+      const requestedModel = firstProviderModel(
+        quickAgentProvider,
+        request.agentModel,
+        normalizedClaudeConfig?.model,
+      );
+      const requestedFastMode = normalizedClaudeConfig?.fastMode === true;
 
       // Resolve where this quick session works (migration 047): the per-launch
       // request wins when valid, otherwise the global Settings default (which
@@ -615,7 +639,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           toolType,
           commitMode: request.commitMode,
           commitModeSettings: request.commitModeSettings,
-          claudeConfig: request.claudeConfig,
+          claudeConfig: quickAgentProvider === 'claude' ? normalizedClaudeConfig : undefined,
           requestedSubstrate,
           requestedAgentMode,
           // In-place quick session (migration 047): the core forces auto-commit off
@@ -670,7 +694,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         resolvedSessionSubstrate,
         resolvedSessionAgentProvider,
         resolvedSessionAgentRuntime,
-        request.agentModel ?? requestedModel ?? null,
+        requestedModel ?? null,
         session.id,
       );
 

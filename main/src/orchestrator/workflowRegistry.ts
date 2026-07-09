@@ -20,6 +20,7 @@ import { isCyboflowWorkflowName, resolveWorkflowDefinition } from '../../../shar
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
 import { claudeRuntimeFromSubstrate } from '../../../shared/types/agentRuntime';
+import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type {
   ExperimentArm,
@@ -1125,14 +1126,13 @@ export class WorkflowRegistry {
 
     // Per-run model pin (migration 037). The explicit launch choice
     // (opts.requestedModel, from the Configure surface → runs.start →
-    // RunLauncher.launch) is a USER-FACING alias ('opus' | 'sonnet' | 'haiku' |
-    // 'auto' | …) resolved to a concrete snapshot at the spawn seam. There is no
-    // resolver ladder (unlike substrate / permission / execution model): a run
-    // either pins a model or it does not. Stamped ONCE here and immutable for the
-    // run; NULL (no pin) is the legacy/zero-behavior-change floor — RunExecutor
-    // then passes no `model` and the SDK uses its own default.
+    // RunLauncher.launch) is a provider-scoped USER-FACING alias. Normalize it
+    // after provider/runtime resolution so a stale picker value from another
+    // runtime is stored as no pin instead of being silently carried into this run.
     // Model ladder (A/B): explicit per-run request > variant default > NULL.
-    const model = opts?.requestedModel ?? opts?.variantModel ?? null;
+    // Runtime spawn seams still do concrete provider-specific translation.
+    const model =
+      normalizeAgentModelSelection(agentProvider, opts?.requestedModel ?? opts?.variantModel) ?? null;
 
     // Per-run code-review-eval override (migration 044). Like model, there is no
     // resolver ladder: a run either pins an explicit ON/OFF or leaves it NULL to

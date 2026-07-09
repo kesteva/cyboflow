@@ -24,6 +24,7 @@ import type {
 } from '../../../../../shared/types/agentStream';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { codexPermissionFlagsForMode } from './codexPtyManager';
+import { resolveAgentModelAlias } from '../agentModelContext';
 
 interface StubCliProcess {
   process: never;
@@ -110,8 +111,9 @@ function codexThreadOptions(
     approvalPolicy: permissionFlags.approval as ApprovalMode,
   };
 
-  if (options.model && options.model !== 'auto' && options.model !== 'default') {
-    threadOptions.model = options.model;
+  const resolvedModel = resolveAgentModelAlias('codex', options.model);
+  if (resolvedModel) {
+    threadOptions.model = resolvedModel;
   }
 
   return threadOptions;
@@ -677,8 +679,7 @@ export class CodexSdkManager extends AbstractCliManager {
   }
 
   private displayModel(model: string | null | undefined): string {
-    if (!model || model === 'auto' || model === 'default') return 'codex-default';
-    return model;
+    return resolveAgentModelAlias('codex', model) ?? 'codex-default';
   }
 
   private describeFileChange(

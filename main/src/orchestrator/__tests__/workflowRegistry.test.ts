@@ -926,6 +926,40 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    it('stamps Codex model selections on codex-sdk workflow runs', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'model-codex.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = registry.createRun(workflowId, undefined, 'sess-model', undefined, {
+          requestedAgentProvider: 'codex',
+          requestedAgentRuntime: 'codex-sdk',
+          requestedModel: 'gpt-5.5',
+        });
+
+        expect(registry.getRunById(result.runId)?.model).toBe('gpt-5.5');
+      });
+    });
+
+    it('drops stale Claude model selections on codex-sdk workflow runs', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'model-codex-stale-claude.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = registry.createRun(workflowId, undefined, 'sess-model', undefined, {
+          requestedAgentProvider: 'codex',
+          requestedAgentRuntime: 'codex-sdk',
+          requestedModel: 'opus',
+        });
+
+        expect(registry.getRunById(result.runId)?.model ?? null).toBeNull();
+      });
+    });
+
     // ───── eval_enabled stamping (migration 044) ─────
 
     it('stamps a NULL eval_enabled when no per-run override is requested (inherit the global)', async () => {

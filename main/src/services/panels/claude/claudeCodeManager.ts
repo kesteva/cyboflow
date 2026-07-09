@@ -17,6 +17,7 @@ import {
   applyModelAvailabilityFallback,
   resolveUnavailableDefaultModelFallback,
 } from './modelContext';
+import { displayAgentModelSelection, resolveAgentModelAlias } from '../agentModelContext';
 import {
   ModelAvailabilityService,
   isModelUsable,
@@ -1312,7 +1313,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
       initial_prompt: options.prompt,
       claude_command: 'sdk-in-process',
       worktree_path: options.worktreePath,
-      model: options.model || 'default',
+      model: displayAgentModelSelection('claude', options.model, 'default'),
       permission_mode: options.permissionMode || DEFAULT_PERMISSION_MODE,
       timestamp: new Date().toISOString(),
     };
@@ -2328,13 +2329,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
       sdkOptions.permissionMode = 'auto';
     }
 
-    // Pin the bare alias ('opus'/'sonnet'/'haiku', incl. '-250k' variants) to the
-    // current concrete snapshot so the SDK can't resolve it to a previous-gen
-    // model (the opus→4.7 / sonnet→250k drift). The resolved id may carry a `[1m]`
-    // window marker; sdkModelAndBetas translates it per-family — Opus keeps its
-    // `[1m]` id, Sonnet's 1M becomes the bare id + the context-1m beta, and the
-    // 250k variants emit neither. 'auto'/undefined/concrete ids pass through.
-    const requestedModel = resolveModelAlias(options.model);
+    // Resolve the model in the Claude provider namespace before pinning. This
+    // keeps stale Codex model ids from a reused session/workflow row from being
+    // handed to Claude, while preserving Claude aliases/concrete ids/custom ids.
+    // The resolved id may carry a `[1m]` window marker; sdkModelAndBetas
+    // translates it per-family — Opus keeps its `[1m]` id, Sonnet's 1M becomes
+    // the bare id + the context-1m beta, and the 250k variants emit neither.
+    const requestedModel = resolveAgentModelAlias('claude', options.model);
     // Graceful fallback: if the pinned model is a guarded model the availability
     // guard reports unavailable (e.g. Fable 5 pulled from release), swap it for its
     // fallback family (Opus) BEFORE the SDK spawn so the turn runs instead of
