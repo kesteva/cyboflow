@@ -85,7 +85,7 @@ describe('buildBuiltInWorkflows', () => {
     expect(body, 'planner uses the `Approve plan` gate header').toMatch(/header\s+`Approve plan`/);
   });
 
-  it('compound gates learnings inline and folds them back via the cyboflow_* MCP tools (no doc writes)', () => {
+  it('compound proposes quick/doc/task improvements (never findings) + a recommendations doc, gated inline', () => {
     const compound = buildBuiltInWorkflows().find((d) => d.name === 'compound');
     expect(compound, 'compound descriptor present').toBeDefined();
     const body = readFileSync(compound!.path, 'utf-8');
@@ -97,18 +97,23 @@ describe('buildBuiltInWorkflows', () => {
       /never silently fold a learning back/,
     );
 
-    // Write-back funnels through the chokepoint MCP tools — tasks via
-    // cyboflow_create_task, findings/decisions via cyboflow_report_finding — and
-    // doc edits land as gated `decision` items, never direct file writes.
-    expect(body, 'compound creates clean-up tasks via cyboflow_create_task').toMatch(
+    // The gate reviews a published summary-of-recommendations artifact rather than
+    // an inline dump of every learning.
+    expect(body, 'compound publishes a compound-recommendations artifact').toMatch(
+      /compound-recommendations/,
+    );
+    expect(body, 'compound reports the recommendations doc via cyboflow_report_artifact').toMatch(
+      /cyboflow_report_artifact/,
+    );
+
+    // Outputs are proposed improvements — quick fixes / doc-edit decisions /
+    // backlog tasks — and NEVER new findings (a finding is Compound's input).
+    expect(body, 'compound creates backlog tasks via cyboflow_create_task').toMatch(
       /cyboflow_create_task/,
     );
-    expect(body, 'compound emits findings via cyboflow_report_finding').toMatch(
-      /cyboflow_report_finding/,
-    );
     expect(body, 'compound proposes doc edits as blocking decision items').toMatch(/decision/);
-    expect(body, 'compound traces regressions to merged work as post-merge-bug').toMatch(
-      /post-merge-bug/,
+    expect(body, "compound must never emit kind:'finding' (a finding is its input)").toMatch(
+      /finding is Compound's input/i,
     );
   });
 
