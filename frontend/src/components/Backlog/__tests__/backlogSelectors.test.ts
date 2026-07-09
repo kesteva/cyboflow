@@ -2,9 +2,10 @@
  * Unit tests for the backlog selectors: archive-in-place filtering
  * (isArchived / filterTasks / countArchived), off-board filtering of decomposed
  * ideas + PENDING entities (isDecomposed / isPending), cross-project stage
- * unification (unifiedStages), position-keyed bucketing (bucketByStage), and the
+ * unification (unifiedStages), position-keyed bucketing (bucketByStage), the
  * stage helpers backing the per-card actions menu (selectableStages /
- * findStageById / friendlyStageError).
+ * findStageById / friendlyStageError), and the same-column reorder rank math
+ * (dropRank / seedPlan / planReorder / compareBacklogOrder).
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -23,6 +24,12 @@ import {
   friendlyStageError,
   isExecutionStage,
   readyForDevChildTaskIds,
+  RANK_GAP,
+  dropRank,
+  movedOrder,
+  seedPlan,
+  planReorder,
+  compareBacklogOrder,
 } from '../backlogSelectors';
 import type { BacklogTaskItem, Board, BoardStage } from '../../../../../shared/types/tasks';
 
@@ -357,6 +364,133 @@ describe('bucketByStage', () => {
     const buckets = bucketByStage([], stages);
     expect(buckets.map((b) => b.stage.position)).toEqual([1, 6, 9, 10]);
     expect(buckets.every((b) => Array.isArray(b.tasks))).toBe(true);
+  });
+});
+
+describe('dropRank', () => {
+  it('returns the fractional midpoint between two ranked neighbours', () => {
+    expect(dropRank(1024, 2048)).toBe(1536);
+    expect(dropRank(0, 1024)).toBe(512);
+  });
+
+  it('handles the open-ended boundaries: top, bottom, and an empty column', () => {
+    expect(dropRank(null, 1024)).toBe(1024 - RANK_GAP); // drop at top → before `next`
+    expect(dropRank(1024, null)).toBe(1024 + RANK_GAP); // drop at bottom → after `prev`
+    expect(dropRank(null, null)).toBe(0); // alone in the column
+  });
+
+  it('detects exhaustion with <=/>= — equal neighbours and adjacent doubles', () => {
+    // Equal neighbours: mid === prev === next → exhausted (needs <=, not <).
+    expect(dropRank(7, 7)).toBe('exhausted');
+    // Adjacent doubles: the midpoint rounds onto one of the neighbours.
+    expect(dropRank(1, 1 + Number.EPSILON)).toBe('exhausted');
+  });
+});
+
+describe('movedOrder', () => {
+  it('moves a card to its post-drop index without mutating the input', () => {
+    const tasks = [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c' })];
+    expect(movedOrder(tasks, 2, 0).map((t) => t.id)).toEqual(['c', 'a', 'b']);
+    expect(movedOrder(tasks, 0, 2).map((t) => t.id)).toEqual(['b', 'c', 'a']);
+    expect(tasks.map((t) => t.id)).toEqual(['a', 'b', 'c']); // untouched
+  });
+});
+
+describe('seedPlan', () => {
+  it('assigns spaced ranks (index × RANK_GAP) in the given order', () => {
+    const ordered = [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c' })];
+    expect(seedPlan(ordered)).toEqual([
+      { task: ordered[0], sortOrder: 0 },
+      { task: ordered[1], sortOrder: 1024 },
+      { task: ordered[2], sortOrder: 2048 },
+    ]);
+  });
+});
+
+describe('planReorder', () => {
+  it('plans a single fractional write when both post-drop neighbours are ranked', () => {
+    const tasks = [
+      item({ id: 'a', sort_order: 1024 }),
+      item({ id: 'b', sort_order: 2048 }),
+      item({ id: 'c', sort_order: 3072 }),
+    ];
+    // Move a between b and c → midpoint of 2048/3072.
+    expect(planReorder(tasks, 0, 1)).toEqual([{ task: tasks[0], sortOrder: 2560 }]);
+  });
+
+  it('plans open-ended writes for a drop at the top or bottom of a ranked column', () => {
+    const tasks = [
+      item({ id: 'a', sort_order: 1024 }),
+      item({ id: 'b', sort_order: 2048 }),
+      item({ id: 'c', sort_order: 3072 }),
+    ];
+    expect(planReorder(tasks, 2, 0)).toEqual([{ task: tasks[2], sortOrder: 1024 - RANK_GAP }]);
+    expect(planReorder(tasks, 0, 2)).toEqual([{ task: tasks[0], sortOrder: 3072 + RANK_GAP }]);
+  });
+
+  it('seeds the whole column in post-drop order on the first drag in an all-NULL column', () => {
+    const tasks = [item({ id: 'a' }), item({ id: 'b' }), item({ id: 'c' })]; // sort_order all null
+    const plan = planReorder(tasks, 2, 0);
+    expect(plan.map((p) => [p.task.id, p.sortOrder])).toEqual([
+      ['c', 0],
+      ['a', 1024],
+      ['b', 2048],
+    ]);
+  });
+
+  it('renumbers the whole column when the fractional midpoint is exhausted', () => {
+    const tasks = [
+      item({ id: 'a', sort_order: 1 }),
+      item({ id: 'b', sort_order: 1 + Number.EPSILON }),
+      item({ id: 'c', sort_order: 5000 }),
+    ];
+    // Move c between a and b → adjacent doubles → full re-seed in post-drop order.
+    const plan = planReorder(tasks, 2, 1);
+    expect(plan.map((p) => [p.task.id, p.sortOrder])).toEqual([
+      ['a', 0],
+      ['c', 1024],
+      ['b', 2048],
+    ]);
+  });
+});
+
+describe('compareBacklogOrder', () => {
+  it('sorts ranked items before unranked ones ((sort_order IS NULL) ASC)', () => {
+    const ranked = item({ id: 'r', sort_order: 9999 });
+    const unranked = item({ id: 'u', sort_order: null });
+    expect([unranked, ranked].sort(compareBacklogOrder).map((t) => t.id)).toEqual(['r', 'u']);
+  });
+
+  it('sorts ranked items by sort_order ascending', () => {
+    const a = item({ id: 'a', sort_order: 2048 });
+    const b = item({ id: 'b', sort_order: 512 });
+    expect([a, b].sort(compareBacklogOrder).map((t) => t.id)).toEqual(['b', 'a']);
+  });
+
+  it('falls back to created_at then ref — identical to the server ORDER BY', () => {
+    // Both unranked: created_at decides…
+    const older = item({ id: 'o', created_at: '2026-06-01T00:00:00Z' });
+    const newer = item({ id: 'n', created_at: '2026-06-02T00:00:00Z' });
+    expect([newer, older].sort(compareBacklogOrder).map((t) => t.id)).toEqual(['o', 'n']);
+    // …then ref for identical created_at (ranked ties fall through the same way).
+    const refA = item({ id: 'x', ref: 'TASK-001', sort_order: 100 });
+    const refB = item({ id: 'y', ref: 'TASK-002', sort_order: 100 });
+    expect([refB, refA].sort(compareBacklogOrder).map((t) => t.id)).toEqual(['x', 'y']);
+  });
+
+  it('bucketByStage renders each bucket in compareBacklogOrder order', () => {
+    const stages = unifiedStages([defaultBoard()], null, false);
+    const tasks = [
+      item({ id: 'unranked', sort_order: null }),
+      item({ id: 'late', sort_order: 2048 }),
+      item({ id: 'early', sort_order: 512 }),
+    ];
+    const buckets = bucketByStage(tasks, stages);
+    expect(buckets.find((b) => b.stage.position === 6)?.tasks.map((t) => t.id)).toEqual([
+      'early',
+      'late',
+      'unranked',
+    ]);
   });
 });
 

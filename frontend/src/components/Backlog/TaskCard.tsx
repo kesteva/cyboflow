@@ -14,8 +14,10 @@
  * filterTasks (archived children already dropped, childCount recomputed), so
  * the card renders `task.children` as given — it never refetches/refilters.
  *
- * Read-only: no drag-and-drop. The breathing-glow on an in-flight card honours
- * prefers-reduced-motion (motion-reduce:* variants in the marker + ring).
+ * The card body itself carries no drag handlers — same-column drag-and-drop
+ * lives on the wrapper slot in KanbanView (which sets `draggable`). The
+ * breathing-glow on an in-flight card honours prefers-reduced-motion
+ * (motion-reduce:* variants in the marker + ring).
  *
  * Launch state is threaded as `launchingTaskId` (not a pre-computed boolean) so
  * nested epic children also reflect their own in-flight launch correctly.

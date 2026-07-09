@@ -289,6 +289,10 @@ export function topLevelTasks(tasks: BacklogTaskItem[]): BacklogTaskItem[] {
  * is not in the visible set (e.g. a Won't-do item while showArchived is off,
  * since that stage carries `hidden_by_default`) is dropped — never an orphaned
  * entry.
+ *
+ * Each bucket is sorted with {@link compareBacklogOrder} (the server ORDER BY
+ * mirrored client-side) so a drag's freshly written `sort_order` renders
+ * immediately off the live-event upsert, which does NOT re-sort the store list.
  */
 export function bucketByStage(
   tasks: BacklogTaskItem[],
@@ -301,7 +305,117 @@ export function bucketByStage(
     const bucket = byPosition.get(item.stage_position);
     if (bucket) bucket.push(item);
   }
-  return stages.map((stage) => ({ stage, tasks: byPosition.get(stage.position) ?? [] }));
+  return stages.map((stage) => ({
+    stage,
+    // Freshly built arrays — safe to sort in place.
+    tasks: (byPosition.get(stage.position) ?? []).sort(compareBacklogOrder),
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Same-column reorder ranks (fractional `sort_order`, migration 057)
+// ---------------------------------------------------------------------------
+
+/**
+ * Spacing between seeded ranks. A gap of 1024 leaves ~10 clean midpoint splits
+ * between any two neighbours before `dropRank` exhausts and the column is
+ * re-seeded.
+ */
+export const RANK_GAP = 1024;
+
+/** One persisted rank write: `tasks.update({ sortOrder })` for this task. */
+export interface RankAssignment {
+  task: BacklogTaskItem;
+  sortOrder: number;
+}
+
+/**
+ * The rank a card should take when dropped between two RANKED neighbours
+ * (`null` = no neighbour on that side):
+ *  - between two: the fractional midpoint `(prev + next) / 2`;
+ *  - at the top: `next - RANK_GAP`; at the bottom: `prev + RANK_GAP`;
+ *  - alone in the column: 0.
+ * Returns 'exhausted' when the doubles between prev and next have run out
+ * (`mid <= prev || mid >= next` — `<=`/`>=`, so equal neighbours exhaust too);
+ * the caller then re-seeds the whole column via {@link seedPlan}.
+ */
+export function dropRank(prev: number | null, next: number | null): number | 'exhausted' {
+  if (prev === null) return next === null ? 0 : next - RANK_GAP;
+  if (next === null) return prev + RANK_GAP;
+  const mid = (prev + next) / 2;
+  return mid <= prev || mid >= next ? 'exhausted' : mid;
+}
+
+/** The column's task list with the card at `fromIndex` moved to `toIndex`. */
+export function movedOrder(
+  tasks: BacklogTaskItem[],
+  fromIndex: number,
+  toIndex: number,
+): BacklogTaskItem[] {
+  const next = tasks.slice();
+  const [moved] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, moved);
+  return next;
+}
+
+/**
+ * Seed a whole column with evenly spaced ranks (`index * RANK_GAP`) in the
+ * given (post-drop) order — the first drag in an all-NULL column, and the
+ * renumber fallback when `dropRank` exhausts. The caller persists the plan via
+ * SEQUENTIAL `tasks.update` calls (one version bump + entity_events delta per
+ * row).
+ */
+export function seedPlan(orderedTasks: BacklogTaskItem[]): RankAssignment[] {
+  return orderedTasks.map((task, index) => ({ task, sortOrder: index * RANK_GAP }));
+}
+
+/**
+ * Plan the rank writes for moving a column's card from `fromIndex` to
+ * `toIndex` (both indices in the column's rendered order):
+ *  - both post-drop neighbours ranked (or absent) → a single fractional
+ *    {@link dropRank} assignment for the moved card;
+ *  - an UNRANKED (NULL) neighbour makes the slot inexpressible as one rank
+ *    (ranked rows always sort before unranked) → re-seed the whole column in
+ *    the post-drop order. Covers the first drag in an all-NULL column;
+ *  - midpoint exhaustion → the same re-seed fallback.
+ */
+export function planReorder(
+  tasks: BacklogTaskItem[],
+  fromIndex: number,
+  toIndex: number,
+): RankAssignment[] {
+  const order = movedOrder(tasks, fromIndex, toIndex);
+  const moved = order[toIndex];
+  const prev = toIndex > 0 ? order[toIndex - 1] : null;
+  const next = toIndex < order.length - 1 ? order[toIndex + 1] : null;
+  if ((prev !== null && prev.sort_order === null) || (next !== null && next.sort_order === null)) {
+    return seedPlan(order);
+  }
+  const rank = dropRank(prev === null ? null : prev.sort_order, next === null ? null : next.sort_order);
+  if (rank === 'exhausted') return seedPlan(order);
+  return [{ task: moved, sortOrder: rank }];
+}
+
+/**
+ * Client-side comparator mirroring the server's `selectProjectBacklog`
+ * ORDER BY EXACTLY: `(sort_order IS NULL) ASC, sort_order ASC, created_at ASC,
+ * ref ASC`. REQUIRED because the store's live-event path
+ * ({@link applyTaskChangeToList}) upserts rows IN PLACE without re-sorting —
+ * without a client-side sort a drag's new order would not render until the
+ * next full sync. Strings compare raw (`<`/`>`, not localeCompare) to mirror
+ * SQLite's binary text collation; ISO-8601 timestamps order correctly that way.
+ */
+export function compareBacklogOrder(a: BacklogTaskItem, b: BacklogTaskItem): number {
+  if (a.sort_order !== null && b.sort_order !== null) {
+    if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order;
+  } else if (a.sort_order !== null) {
+    return -1; // ranked before unranked
+  } else if (b.sort_order !== null) {
+    return 1;
+  }
+  if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1;
+  if (a.ref !== b.ref) return a.ref < b.ref ? -1 : 1;
+  return 0;
 }
 
 // ---------------------------------------------------------------------------

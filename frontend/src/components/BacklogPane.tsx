@@ -12,9 +12,11 @@
  * Layout: header (eyebrow + title + counts line + in-flow / awaiting-review
  * chips + project filter + Archived toggle + Kanban/List segmented toggle) over
  * either KanbanView (one column per visible unified stage) or ListView (group
- * per non-empty visible stage). Read-only — no drag-and-drop. A "+ New"
- * affordance opens NewTaskDialog; each card has a "Run" action that launches a
- * run for the task in ITS project (`task.project_id`, not the pane prop).
+ * per non-empty visible stage). Kanban cards are draggable within their own
+ * column (same-column reorder via fractional `sort_order` — see `reorderTask`
+ * below); cross-column drops are a no-op in v1. A "+ New" affordance opens
+ * NewTaskDialog; each card has a "Run" action that launches a run for the task
+ * in ITS project (`task.project_id`, not the pane prop).
  *
  * Render pipeline: filterTasks (project narrow + archive-in-place visibility)
  * -> unifiedStages (per-project boards collapsed into one column set by stage
@@ -41,7 +43,10 @@ import {
   deriveCounts,
   isExecutionStage,
   readyForDevChildTaskIds,
+  planReorder,
+  friendlyStageError,
 } from './Backlog/backlogSelectors';
+import { trpc } from '../trpc/client';
 import { Dropdown, type DropdownItem } from './ui/Dropdown';
 import { KanbanView } from './Backlog/KanbanView';
 import { ListView } from './Backlog/ListView';
@@ -277,6 +282,7 @@ function BacklogBoard({
   tasks,
   layoutMode,
   onRun,
+  onReorder,
   launchingTaskId,
   now,
 }: {
@@ -286,12 +292,22 @@ function BacklogBoard({
   tasks: BacklogTaskItem[];
   layoutMode: LayoutMode;
   onRun: (task: BacklogTaskItem) => void;
+  /** Same-column re-rank (Kanban DnD only — the List stays read-only). */
+  onReorder: (task: BacklogTaskItem, targetIndex: number) => void;
   launchingTaskId: string | null;
   now: number;
 }): React.JSX.Element {
   const buckets = bucketByStage(tasks, stages);
   if (layoutMode === 'kanban') {
-    return <KanbanView buckets={buckets} onRun={onRun} launchingTaskId={launchingTaskId} now={now} />;
+    return (
+      <KanbanView
+        buckets={buckets}
+        onRun={onRun}
+        onReorder={onReorder}
+        launchingTaskId={launchingTaskId}
+        now={now}
+      />
+    );
   }
   return <ListView buckets={buckets} onRun={onRun} launchingTaskId={launchingTaskId} now={now} />;
 }
@@ -311,6 +327,9 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
 
   const { launchingTaskId, error: launchError, launch, launchSprintBatch } = useTaskRunLauncher();
   const [isNewOpen, setIsNewOpen] = useState(false);
+  // Same-column reorder failure (concurrency conflict etc.) — shares the launch
+  // error banner styling below.
+  const [reorderError, setReorderError] = useState<string | null>(null);
 
   // Sprint batch picker, opened when Run is clicked on an epic that is past
   // planning ("Ready for development" or later). `taskIds` pre-selects the
@@ -367,6 +386,52 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
     void launch(task.id, task.project_id, task.type);
   };
 
+  /**
+   * Shared same-column reorder core — deliberately DnD-independent (takes the
+   * task + its desired POST-DROP index, no drag event objects) so the upcoming
+   * card context menu (Move up / down / to top) can call it directly.
+   *
+   * Re-derives the task's rendered column (same bucketByStage pipeline the
+   * board uses), plans the rank writes via planReorder (fractional midpoint;
+   * whole-column seed/renumber fallback), and persists each assignment
+   * SEQUENTIALLY through `tasks.update` (chokepoint-routed: version bump + one
+   * entity_events delta per row). The updated rows stream back via the store's
+   * onTaskChanged subscription; bucketByStage's compareBacklogOrder sort makes
+   * the new order render immediately. On failure (e.g. a CONFLICT from a stale
+   * expectedVersion) the error surfaces via friendlyStageError and a full task
+   * refetch re-syncs the board — a mid-plan conflict can leave a seed plan
+   * partially applied.
+   */
+  const reorderTask = async (task: BacklogTaskItem, targetIndex: number): Promise<void> => {
+    const bucket = bucketByStage(filteredTasks, stages).find(
+      (b) => b.stage.position === task.stage_position,
+    );
+    const columnTasks = bucket?.tasks ?? [];
+    const fromIndex = columnTasks.findIndex((t) => t.id === task.id);
+    if (fromIndex === -1 || columnTasks.length < 2) return;
+    const toIndex = Math.max(0, Math.min(targetIndex, columnTasks.length - 1));
+    if (fromIndex === toIndex) return;
+    setReorderError(null);
+    try {
+      for (const step of planReorder(columnTasks, fromIndex, toIndex)) {
+        await trpc.cyboflow.tasks.update.mutate({
+          projectId: step.task.project_id,
+          taskId: step.task.id,
+          sortOrder: step.sortOrder,
+          expectedVersion: step.task.version,
+        });
+      }
+    } catch (err: unknown) {
+      setReorderError(friendlyStageError(err));
+      try {
+        const fresh = await trpc.cyboflow.tasks.list.query({ projectId: null });
+        useBacklogStore.getState().replaceTasks(fresh);
+      } catch {
+        // Refetch is best-effort — the live subscription remains the fallback.
+      }
+    }
+  };
+
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-bg-primary" data-testid="backlog-pane">
       <BacklogHeader
@@ -382,9 +447,9 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
         onNew={() => setIsNewOpen(true)}
       />
 
-      {launchError && (
+      {(launchError ?? reorderError) && (
         <div className="flex-shrink-0 border-b border-border-primary bg-status-error/10 px-7 py-1.5 text-xs text-status-error" role="alert">
-          {launchError}
+          {launchError ?? reorderError}
         </div>
       )}
 
@@ -401,6 +466,7 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
             tasks={filteredTasks}
             layoutMode={layoutMode}
             onRun={handleRun}
+            onReorder={(task, targetIndex) => void reorderTask(task, targetIndex)}
             launchingTaskId={launchingTaskId}
             now={now}
           />
