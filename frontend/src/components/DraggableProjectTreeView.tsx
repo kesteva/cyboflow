@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { ChevronRight, ChevronDown, Folder as FolderIcon, FolderOpen, Plus, Settings, GripVertical, GitBranch, RefreshCw, Workflow as WorkflowIcon } from 'lucide-react';
+import { ChevronRight, ChevronDown, Folder as FolderIcon, FolderOpen, Plus, Settings, GripVertical, GitBranch, RefreshCw, Workflow as WorkflowIcon, FlaskConical } from 'lucide-react';
 import { useErrorStore } from '../stores/errorStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
@@ -17,6 +17,15 @@ import type { Session } from '../types/session';
 import { useContextMenu } from '../contexts/ContextMenuContext';
 import { CreateProjectDialog } from './CreateProjectDialog';
 import { formatDistanceToNow } from '../utils/timestampUtils';
+import { useRailExperiments } from '../hooks/useRailExperiments';
+import {
+  groupRailExperiments,
+  railExperimentPill,
+  type RailExperimentGroup,
+  type RailExperimentPillTone,
+} from '../utils/railExperimentGrouping';
+import { experimentDisplayName } from '../utils/experimentDisplay';
+import { ExperimentCancelDialog } from './cyboflow/ExperimentCancelDialog';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -72,6 +81,18 @@ const STATUS_DOT_CLASS: Record<string, string> = {
 function statusDotClass(status: string): string {
   return STATUS_DOT_CLASS[status] ?? 'bg-text-tertiary';
 }
+
+/**
+ * Color for the experiment group-row status pill, keyed by the pure
+ * `railExperimentPill` tone: running (accent), grading (neutral), verdict ready
+ * (amber/warning), <A|B> won (success/green).
+ */
+const EXPERIMENT_PILL_CLASS: Record<RailExperimentPillTone, string> = {
+  running: 'border-interactive/30 bg-interactive/10 text-interactive',
+  grading: 'border-border-primary bg-surface-secondary text-text-tertiary',
+  ready: 'border-status-warning/40 bg-status-warning/10 text-status-warning',
+  won: 'border-status-success/40 bg-status-success/10 text-status-success',
+};
 
 /**
  * Every project id. Projects default to EXPANDED so a running agent under a
@@ -139,6 +160,21 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   const runsByProject = useActiveRunsStore((state) => state.runsByProject);
   const refreshActiveRuns = useActiveRunsStore((state) => state.refresh);
   const { menuState, openMenu, closeMenu, isMenuOpen } = useContextMenu();
+
+  // A/B experiment group rows: per-project experiments + summaries for the rail.
+  const projectIds = projectsWithRuns.map((p) => p.id);
+  const { byProject: experimentsByProject, refetch: refetchExperiments } = useRailExperiments(projectIds);
+  // Experiment group expand/collapse is SESSION-LOCAL (in-memory): the persisted
+  // uiState seam only stores expandedProjects/expandedFolders, and generalizing it
+  // to arbitrary keys would need a main-process handler change (out of this slice's
+  // fence). An explicit per-experiment override wins over the status default
+  // (expanded while running|grading, collapsed once decided).
+  const [experimentExpandOverride, setExperimentExpandOverride] = useState<Record<string, boolean>>({});
+  // Local context menu for a group parent row — the shared ContextMenuContext only
+  // types 'session' | 'folder', so the experiment menu lives here — plus the
+  // cancel-experiment confirm target.
+  const [experimentMenu, setExperimentMenu] = useState<{ group: RailExperimentGroup; name: string; x: number; y: number } | null>(null);
+  const [cancelExperiment, setCancelExperiment] = useState<{ id: string; name: string } | null>(null);
 
   // Performance monitoring
   const renderCountRef = useRef(0);
@@ -928,6 +964,36 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
   };
 
   // ---------------------------------------------------------------------------
+  // Experiment group rows (A/B testing rail treatment)
+  // ---------------------------------------------------------------------------
+
+  /** Default state: expanded while running|grading, collapsed once decided. */
+  const experimentDefaultExpanded = (group: RailExperimentGroup): boolean =>
+    group.experiment.status === 'running' || group.experiment.status === 'grading';
+
+  const isExperimentExpanded = (group: RailExperimentGroup): boolean => {
+    const override = experimentExpandOverride[group.experiment.id];
+    return override !== undefined ? override : experimentDefaultExpanded(group);
+  };
+
+  const toggleExperiment = (group: RailExperimentGroup): void => {
+    const next = !isExperimentExpanded(group);
+    setExperimentExpandOverride((prev) => ({ ...prev, [group.experiment.id]: next }));
+  };
+
+  const handleExperimentContextMenu = (e: React.MouseEvent, group: RailExperimentGroup, name: string): void => {
+    e.preventDefault();
+    e.stopPropagation();
+    setExperimentMenu({ group, name, x: e.clientX, y: e.clientY });
+  };
+
+  // Parent-row click opens the comparison view (docs/SHELL-LAYOUT.md: do NOT also
+  // goToSession — the comparison overlay is its own center surface).
+  const openExperimentGroup = (group: RailExperimentGroup): void => {
+    useNavigationStore.getState().openExperimentComparison(group.experiment.id);
+  };
+
+  // ---------------------------------------------------------------------------
   // Render helpers
   // ---------------------------------------------------------------------------
 
@@ -1107,6 +1173,17 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                 (r) => r.session_id == null || !sessionIdSet.has(r.session_id),
               );
               const parentlessRunCount = parentlessRuns.length;
+              // A/B experiment group rows: collapse an experiment's two arm sessions
+              // into ONE parent group (see railExperimentGrouping). Claimed arm
+              // sessions drop out of the flat `flatSessions` list, but `sessionIdSet`
+              // stays the FULL session set above so their runs still resolve as
+              // non-parentless — they never re-appear as orphan run rows.
+              const projectExperiments = experimentsByProject[project.id];
+              const { groups: railGroups, ungroupedSessions: flatSessions } = groupRailExperiments(
+                projectSessions,
+                projectExperiments?.experiments ?? [],
+                projectExperiments?.summariesById ?? {},
+              );
               const folderCount = project.folders?.length ?? 0;
               const hasChildren = sessionCount > 0 || runCount > 0 || folderCount > 0;
               const isDraggingOver = dragState.overType === 'project' && dragState.overProjectId === project.id;
@@ -1234,14 +1311,130 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                         return renderFolder(folder, project, 1, isLastItem, [!isLastItem]);
                       })}
 
+                      {/* A/B experiment group rows — an experiment's two arm
+                          sessions collapsed under one boxed parent row. Rendered
+                          above the ungrouped sessions. */}
+                      {railGroups.map((group) => {
+                        const exp = group.experiment;
+                        const expanded = isExperimentExpanded(group);
+                        const pill = railExperimentPill(exp, group.summary);
+                        // Resolve the workflow display name off an arm RUN row
+                        // (activeRunsStore stamps workflowName). '' → helper falls
+                        // back to "workflow".
+                        const workflowName =
+                          projectActiveRuns.find((r) => r.experiment_id === exp.id)?.workflowName ??
+                          projectActiveRuns.find((r) => r.id === exp.run_a_id || r.id === exp.run_b_id)
+                            ?.workflowName ??
+                          '';
+                        const name = experimentDisplayName(
+                          workflowName,
+                          { variantId: exp.variant_a_id, label: group.summary?.armALabel ?? '' },
+                          { variantId: exp.variant_b_id, label: group.summary?.armBLabel ?? '' },
+                        );
+                        return (
+                          <div key={`exp-${exp.id}`} className="relative" style={{ marginLeft: '16px' }}>
+                            <div className="absolute inset-0 pointer-events-none">
+                              <div
+                                className="absolute h-px bg-border-secondary"
+                                style={{ left: '8px', right: 'calc(100% - 16px)', top: '16px' }}
+                              />
+                            </div>
+
+                            {/* Boxed cluster so the arm pair reads as one object. */}
+                            <div className="ml-2 rounded-md border border-border-primary bg-surface-secondary/40 overflow-hidden">
+                              {/* Parent row — click opens the comparison view. */}
+                              <div
+                                className="relative flex items-center gap-1.5 px-2 py-1.5 cursor-pointer hover:bg-surface-hover transition-colors"
+                                onClick={() => openExperimentGroup(group)}
+                                onContextMenu={(e) => handleExperimentContextMenu(e, group, name)}
+                                role="button"
+                                tabIndex={0}
+                                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') openExperimentGroup(group); }}
+                              >
+                                <button
+                                  onClick={(e) => { e.stopPropagation(); toggleExperiment(group); }}
+                                  onMouseDown={(e) => e.stopPropagation()}
+                                  className="p-0.5 hover:bg-surface-hover rounded transition-colors"
+                                  aria-label={expanded ? 'Collapse experiment' : 'Expand experiment'}
+                                >
+                                  {expanded ? (
+                                    <ChevronDown className="w-3 h-3 text-text-tertiary" />
+                                  ) : (
+                                    <ChevronRight className="w-3 h-3 text-text-tertiary" />
+                                  )}
+                                </button>
+                                <FlaskConical className="w-3.5 h-3.5 text-interactive flex-shrink-0" />
+                                <span className="text-sm text-text-primary truncate" title={name}>
+                                  {name}
+                                </span>
+                                <span
+                                  className={`ml-auto flex-shrink-0 rounded-badge border px-1.5 py-px text-[9px] font-medium ${EXPERIMENT_PILL_CLASS[pill.tone]}`}
+                                  title={`Experiment ${exp.status}`}
+                                >
+                                  {pill.text}
+                                </span>
+                              </div>
+
+                              {/* Arm rows (indented inside the group). */}
+                              {expanded && (
+                                <div className="border-t border-border-primary/60">
+                                  {group.arms.map((armRow) => {
+                                    const armRun = armRow.runId
+                                      ? projectActiveRuns.find((r) => r.id === armRow.runId)
+                                      : undefined;
+                                    const dotStatus = armRun?.status ?? armRow.session.status;
+                                    const armActivityAt = armRow.session.lastActivity ?? armRow.session.createdAt;
+                                    const rightText = armRun
+                                      ? armRun.status
+                                      : armActivityAt
+                                        ? formatDistanceToNow(armActivityAt)
+                                        : '';
+                                    const isArmSelected = selectedSessionId === armRow.session.id;
+                                    return (
+                                      <div
+                                        key={`arm-${armRow.session.id}`}
+                                        className={`flex items-center gap-2 pl-6 pr-2 py-1.5 cursor-pointer transition-colors ${
+                                          isArmSelected ? 'bg-interactive/10' : 'hover:bg-surface-hover'
+                                        }`}
+                                        onClick={() => handleSessionClick(armRow.session)}
+                                        role="button"
+                                        tabIndex={0}
+                                        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleSessionClick(armRow.session); }}
+                                      >
+                                        <span
+                                          className={`w-2 h-2 rounded-full flex-shrink-0 ${statusDotClass(dotStatus)}`}
+                                          title={dotStatus}
+                                        />
+                                        <span
+                                          className="rounded border border-border-primary bg-bg-secondary px-1 py-px text-[9px] font-semibold text-text-tertiary flex-shrink-0"
+                                          title={`Arm ${armRow.arm}`}
+                                        >
+                                          {armRow.arm}
+                                        </span>
+                                        <span className="text-sm text-text-primary truncate" title={armRow.label}>
+                                          {armRow.label}
+                                        </span>
+                                        <span className="text-xs text-text-tertiary truncate ml-auto">
+                                          {rightText}
+                                        </span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+
                       {/* Active session rows, each with its workflow runs nested beneath */}
-                      {projectSessions.map((session, index) => {
+                      {flatSessions.map((session, index) => {
                         const childRuns = runsForSession(session.id);
                         // A session is "last" (no continuing vertical line) only when no
                         // further top-level rows follow it: the final session AND no
                         // parentless run rows after the session list.
                         const isLastSession =
-                          index === projectSessions.length - 1 && parentlessRunCount === 0;
+                          index === flatSessions.length - 1 && parentlessRunCount === 0;
                         // Show LAST-ACTIVITY time (DB updated_at → lastActivity), not
                         // creation time: an actively-used session should read "a few
                         // minutes ago", not its hours-old creation timestamp. Fall back
@@ -1584,6 +1777,74 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
             Delete
           </button>
         </div>
+      )}
+
+      {/* Experiment group-row context menu (local state — the shared
+          ContextMenuContext only types 'session' | 'folder'). A transparent
+          backdrop catches outside clicks. */}
+      {experimentMenu && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setExperimentMenu(null)} />
+          <div
+            className="context-menu fixed bg-surface-primary border border-border-primary rounded-md shadow-lg py-1 z-50 min-w-[190px]"
+            style={{ top: experimentMenu.y, left: experimentMenu.x }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => {
+                openExperimentGroup(experimentMenu.group);
+                setExperimentMenu(null);
+              }}
+              className="w-full text-left px-4 py-2 text-sm text-text-primary hover:bg-surface-hover"
+            >
+              Open experiment
+            </button>
+            {experimentMenu.group.arms.map((armRow) => (
+              <button
+                key={`menu-arm-${armRow.session.id}`}
+                onClick={() => {
+                  handleSessionClick(armRow.session);
+                  setExperimentMenu(null);
+                }}
+                className="w-full text-left px-4 py-2 text-sm text-text-primary hover:bg-surface-hover"
+              >
+                Open arm {armRow.arm} · {armRow.label}
+              </button>
+            ))}
+            {(experimentMenu.group.experiment.status === 'running' ||
+              experimentMenu.group.experiment.status === 'grading') && (
+              <>
+                <div className="border-t border-border-primary my-1" />
+                <button
+                  onClick={() => {
+                    setCancelExperiment({ id: experimentMenu.group.experiment.id, name: experimentMenu.name });
+                    setExperimentMenu(null);
+                  }}
+                  className="w-full text-left px-4 py-2 text-sm text-status-error hover:bg-surface-hover hover:text-status-error"
+                >
+                  Cancel experiment…
+                </button>
+              </>
+            )}
+          </div>
+        </>
+      )}
+
+      {/* Cancel (abandon) experiment confirm. */}
+      {cancelExperiment && (
+        <ExperimentCancelDialog
+          isOpen={true}
+          experimentId={cancelExperiment.id}
+          experimentName={cancelExperiment.name}
+          onClose={() => setCancelExperiment(null)}
+          onSuccess={() => {
+            // Refetch the owning project's experiments so the group disappears.
+            const owner = projectsWithRuns.find((p) =>
+              experimentsByProject[p.id]?.experiments.some((e) => e.id === cancelExperiment.id),
+            );
+            if (owner) refetchExperiments(owner.id);
+          }}
+        />
       )}
     </>
   );

@@ -77,14 +77,13 @@ export interface ActiveRunRow extends WorkflowRunListRow {
   workflowName: string;
   /**
    * Side-by-side experiment id (migration 049) — soft link to experiments.id.
-   * OPTIONAL, additive widening (mirrors `variant_label?` above): `runs.list`'s
-   * SQL projection (listRunsHandler) does not select this column yet, so it is
-   * `undefined` until that lands — RunCenterPane's experiment chip degrades
-   * silently (stays hidden) rather than drifting from the real payload shape.
-   * NULL/undefined for every non-experiment (or not-yet-surfaced) run.
+   * OPTIONAL, additive widening (mirrors `variant_label?` above). `runs.list`'s
+   * SQL projection (listRunsHandler, runQueries.ts) DOES select this column, so it
+   * is populated for experiment-arm runs and NULL for every non-experiment run.
+   * Kept optional so a caller/consumer that predates the column still type-checks.
    */
   experiment_id?: string | null;
-  /** Which arm of the experiment this run drives; same caveat as `experiment_id?` above. */
+  /** Which arm of the experiment this run drives; selected by listRunsHandler alongside `experiment_id`. */
   experiment_arm?: ExperimentArm | null;
 }
 
