@@ -26,6 +26,28 @@ function isSqliteDatabase(value: unknown): value is Database.Database {
 }
 
 /**
+ * Preserve startup's concrete Codex instanceof guards without invoking either
+ * Codex constructor. The returned object owns DemoCliManager's state and
+ * overrides, while the compatibility prototype supplies only the expected
+ * nominal identity and inherited AbstractCliManager surface.
+ */
+function createDemoCompatibilityAdapter<T extends AbstractCliManager>(
+  demoManager: DemoCliManager,
+  compatibilityPrototype: object,
+): T {
+  const adapter = Object.create(compatibilityPrototype) as T;
+  Object.defineProperties(adapter, Object.getOwnPropertyDescriptors(demoManager));
+
+  for (const propertyName of Object.getOwnPropertyNames(DemoCliManager.prototype)) {
+    if (propertyName === 'constructor') continue;
+    const descriptor = Object.getOwnPropertyDescriptor(DemoCliManager.prototype, propertyName);
+    if (descriptor) Object.defineProperty(adapter, propertyName, descriptor);
+  }
+
+  return adapter;
+}
+
+/**
  * Factory configuration for CLI manager creation
  */
 export interface CliManagerFactoryConfig {
@@ -56,7 +78,9 @@ export class CliManagerFactory {
   private static instance: CliManagerFactory | null = null;
   private readonly registry: CliToolRegistry;
   /** Demo-mode manager cache — one DemoCliManager per toolId (see createManager). */
-  private readonly demoManagers = new Map<string, DemoCliManager>();
+  private readonly demoManagers = new Map<string, AbstractCliManager>();
+  /** Captured from the first demo manager request; later boot calls may omit db. */
+  private demoDatabase: Database.Database | undefined;
 
   private constructor(
     private logger?: Logger,
@@ -96,30 +120,62 @@ export class CliManagerFactory {
       // wiring narrows it to the concrete InteractiveClaudeManager (index.ts
       // AppServices + the sessions:input PTY relay seam) and would throw on a
       // demo stand-in. Safe because demo never routes a spawn to it:
-      // WorkflowRegistry.createRun pins every demo run/session substrate to
-      // 'sdk' via ConfigManager.getForcedSubstrate, so the interactive manager
-      // is constructed but never engaged while demo mode is on.
-      if (
-        this.configManager?.isDemoMode() &&
-        toolId !== 'claude-interactive' &&
-        toolId !== 'codex-sdk' &&
-        toolId !== 'codex-pty'
-      ) {
+      // WorkflowRegistry.createRun pins demo workflow runs to 'sdk', and the
+      // quick-session input seam short-circuits interactive relay in demo, so
+      // this manager is constructed but never engaged while demo mode is on.
+      if (this.configManager?.isDemoMode() && toolId !== 'claude-interactive') {
         const existing = this.demoManagers.get(toolId);
         if (existing) return existing;
-        const db = config.additionalOptions?.db;
+
+        const requestedDb = config.additionalOptions?.db;
+        if (requestedDb !== undefined && !isSqliteDatabase(requestedDb)) {
+          throw new Error('[CliManagerFactory] demo mode requires additionalOptions.db');
+        }
+        const db = requestedDb ?? this.demoDatabase;
         if (!isSqliteDatabase(db)) {
           throw new Error('[CliManagerFactory] demo mode requires additionalOptions.db');
         }
+        this.demoDatabase = db;
         const demoManager = new DemoCliManager(
           config.sessionManager as SessionManager,
           this.logger,
           this.configManager,
           db,
         );
-        this.demoManagers.set(toolId, demoManager);
+
+        // index.ts currently narrows these startup services with instanceof and
+        // calls their runtime-specific setup methods. Supply demo-backed
+        // compatibility objects so those guards remain true while no real Codex
+        // manager constructor or runtime can be reached.
+        const manager: AbstractCliManager = toolId === 'codex-sdk'
+          ? createDemoCompatibilityAdapter<CodexSdkManager>(
+              demoManager,
+              CodexSdkManager.prototype,
+            )
+          : toolId === 'codex-pty'
+            ? createDemoCompatibilityAdapter<CodexPtyManager>(
+                demoManager,
+                CodexPtyManager.prototype,
+              )
+            : demoManager;
+
+        if (toolId === 'codex-sdk') {
+          Object.defineProperty(manager, 'setCyboflowMcpRuntimeConfig', {
+            configurable: true,
+            value: () => {},
+          });
+        } else if (toolId === 'codex-pty') {
+          Object.defineProperties(manager, {
+            relayUserTurn: { configurable: true, value: () => {} },
+            relayRawInput: { configurable: true, value: () => {} },
+            resizePanel: { configurable: true, value: () => {} },
+            getPtyBacklog: { configurable: true, value: () => '' },
+          });
+        }
+
+        this.demoManagers.set(toolId, manager);
         this.logger?.info(`[CliManagerFactory] Demo mode — created DemoCliManager for tool '${toolId}'`);
-        return demoManager;
+        return manager;
       }
 
       const manager = await this.registry.createManager(

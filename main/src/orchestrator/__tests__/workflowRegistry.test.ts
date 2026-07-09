@@ -850,6 +850,34 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    it('forces demo workflow requests onto the Claude SDK provider/runtime', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'demo-safe-workflow.md', '---\n---\n');
+        const demoRegistry = new WorkflowRegistry(dbAdapter(db), logger, {
+          ...makeConfig('default'),
+          getForcedSubstrate: () => 'sdk',
+          isDemoMode: () => true,
+        });
+        demoRegistry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = demoRegistry.createRun(workflowId, 'interactive', TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'codex',
+          requestedAgentRuntime: 'codex-sdk',
+          requestedModel: 'gpt-5.5',
+        });
+
+        const run = demoRegistry.getRunById(result.runId);
+        expect(result.substrate).toBe('sdk');
+        expect(run).not.toBeNull();
+        expect(run!.substrate).toBe('sdk');
+        expect(run!.agent_provider).toBe('claude');
+        expect(run!.agent_runtime).toBe('claude-sdk');
+        expect(run!.model).toBeNull();
+      });
+    });
+
     it('rejects codex-sdk workflow requests that also request the interactive substrate', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'codex-sdk-interactive-conflict.md', '---\n---\n');

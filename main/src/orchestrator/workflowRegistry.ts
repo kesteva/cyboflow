@@ -69,6 +69,8 @@ export interface WorkflowConfigProvider {
    * manager. null (or absent) = no pin, resolve normally.
    */
   getForcedSubstrate?(): CliSubstrate | null;
+  /** True only for the scripted demo boot profile. */
+  isDemoMode?(): boolean;
   /**
    * Global default for the execution model (orchestrated vs programmatic),
    * consulted by resolveExecutionModel below its env level. Optional + absent =>
@@ -1029,10 +1031,12 @@ export class WorkflowRegistry {
     // migration window, Claude runtimes project to the legacy substrate and a
     // Codex SDK workflow stores provider/runtime while keeping substrate='sdk'
     // for compatibility with substrate-only caps, session stamps, and dispatch
-    // seams. Omitted provider/runtime stays Claude and preserves the existing
-    // substrate resolver behavior.
-    const requestedAgentProvider = opts?.requestedAgentProvider;
-    const requestedAgentRuntime = opts?.requestedAgentRuntime;
+    // seams. Demo mode ignores every provider/runtime request: its scripted
+    // manager consumes Claude-shaped events, and no persisted run may resolve to
+    // a real Codex dispatch route.
+    const demoMode = this.config?.isDemoMode?.() === true;
+    const requestedAgentProvider = demoMode ? undefined : opts?.requestedAgentProvider;
+    const requestedAgentRuntime = demoMode ? undefined : opts?.requestedAgentRuntime;
     if (
       requestedAgentProvider === 'codex' &&
       requestedAgentRuntime !== undefined &&
@@ -1075,7 +1079,9 @@ export class WorkflowRegistry {
     // A boot-profile pin (demo mode → 'sdk') outranks the whole ladder,
     // including the explicit per-run UI choice — demo runs must never spawn a
     // real agent regardless of what the launch surface requested.
-    const forcedSubstrate = this.config?.getForcedSubstrate?.() ?? null;
+    const forcedSubstrate = demoMode
+      ? 'sdk'
+      : this.config?.getForcedSubstrate?.() ?? null;
     // Demo carve-out (illustration only): the boot-profile pin is 'sdk', but a
     // quick session that EXPLICITLY requested 'interactive' is honored so the
     // canned PTY terminal can be shown in demo mode. This is safe because the
@@ -1085,7 +1091,7 @@ export class WorkflowRegistry {
     // the __quick__ sentinel so no demo WORKFLOW run can ever resolve interactive
     // (which WOULD dispatch to the real interactive manager via the facade).
     const demoHonorsInteractive =
-      forcedSubstrate === 'sdk' &&
+      demoMode &&
       workflow.name === QUICK_WORKFLOW_NAME &&
       substrateRequest === 'interactive';
     const substrate = demoHonorsInteractive
@@ -1100,10 +1106,14 @@ export class WorkflowRegistry {
         `WorkflowRegistry.createRun: codex-sdk workflow runs require sdk substrate compatibility (got ${substrate})`,
       );
     }
-    const agentProvider: AgentProvider = codexSdkRequested ? 'codex' : 'claude';
-    const agentRuntime: WorkflowAgentRuntime = codexSdkRequested
-      ? 'codex-sdk'
-      : claudeRuntimeFromSubstrate(substrate);
+    const agentProvider: AgentProvider = demoMode
+      ? 'claude'
+      : codexSdkRequested ? 'codex' : 'claude';
+    const agentRuntime: WorkflowAgentRuntime = demoMode
+      ? 'claude-sdk'
+      : codexSdkRequested
+        ? 'codex-sdk'
+        : claudeRuntimeFromSubstrate(substrate);
 
     // Resolve the execution model (orchestrated vs programmatic) — the sibling
     // immutable stamp that decides WHO walks the run's DAG. The interactive
