@@ -18,7 +18,11 @@ import {
   createValidationError
 } from '../utils/sessionValidation';
 import type { SerializedArchiveTask } from '../services/archiveProgressManager';
-import { MessageProjection, TypedEventNarrowing } from '../services/streamParser';
+import {
+  agentStreamEventToClaudeStreamEvent,
+  MessageProjection,
+  TypedEventNarrowing,
+} from '../services/streamParser';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { SessionOutput } from '../types/session';
 import type { Logger } from '../utils/logger';
@@ -32,6 +36,7 @@ import { selectSessionRunTokenTotals } from '../orchestrator/insightsQueries';
 import { pruneSessionOnlyArtifacts } from '../orchestrator/artifactLifecycle';
 import { isCliSubstrate } from '../../../shared/types/substrate';
 import { claudeRuntimeFromSubstrate, isAgentProvider, isSessionAgentRuntime } from '../../../shared/types/agentRuntime';
+import { isAgentStreamEvent } from '../../../shared/types/agentStream';
 import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
 import { encodeCwd } from '../services/panels/claude/transcript/encodeCwd';
@@ -111,7 +116,9 @@ export function projectStoredOutputs(
       continue;
     }
 
-    const event = narrower.narrow(raw);
+    const event = isAgentStreamEvent(raw)
+      ? agentStreamEventToClaudeStreamEvent(raw)
+      : narrower.narrow(raw);
     const projected = projection.project(event);
     if (projected !== null) {
       // Overwrite the MessageProjection-generated timestamp with the persisted one.
