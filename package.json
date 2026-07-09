@@ -91,6 +91,7 @@
     "@aws-sdk/lib-storage": "^3.726.0",
     "@electron/rebuild": "^4.0.1",
     "@playwright/test": "^1.52.0",
+    "@types/better-sqlite3": "^7.6.13",
     "concurrently": "^9.1.0",
     "electron": "^37.6.0",
     "electron-builder": "^26.0.20",
