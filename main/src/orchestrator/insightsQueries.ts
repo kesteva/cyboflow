@@ -50,8 +50,14 @@ import type {
   RunEvalDimension,
 } from '../../../shared/types/insights';
 import { parseSourceStep } from '../../../shared/types/insights';
-import type { VariantStats } from '../../../shared/types/experiments';
-import { MIN_VARIANT_RUNS } from '../../../shared/types/experiments';
+import type {
+  VariantStats,
+  RotationArmStats,
+  RotationExperimentRun,
+  RotationDashboardRow,
+  ExperimentStatus,
+} from '../../../shared/types/experiments';
+import { MIN_VARIANT_RUNS, BASELINE_VARIANT_SENTINEL, isBaselineArm } from '../../../shared/types/experiments';
 // computeSpecHash is the SAME content address workflow_runs.spec_hash was frozen
 // with at createRun; hashing the live workflows.spec_json the identical way lets
 // us flag the current revision. It imports only node:crypto (verified), so it
@@ -1627,6 +1633,423 @@ export function selectVariantStats(
       findingsCount: findingsByVariant.get(row.variantId) ?? 0,
       postMergeBugCount: bugsByVariant.get(row.variantId) ?? 0,
       lowSample: row.runs < MIN_VARIANT_RUNS,
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 8c. selectRotationArmStats / selectRotationExperimentRuns /
+//     selectRotationDashboardRows (rotation-experiment tracking, phase 3 read
+//     surface, migration 057)
+// ---------------------------------------------------------------------------
+
+interface RotationArmBaseRow {
+  armVariantId: string;
+  runs: number;
+  completedRuns: number;
+  failedRuns: number;
+  canceledRuns: number;
+  activeRuns: number;
+  mergedRuns: number;
+  dismissedRuns: number;
+  nullOutcomeRuns: number;
+  outcomeRuns: number;
+  avgDurationMs: number | null;
+  avgTotalTokens: number | null;
+  avgCostUsd: number | null;
+}
+
+/** Human label fallback for an arm id with no snapshot row: "Baseline" for the sentinel, else the raw id. */
+function fallbackArmLabel(armVariantId: string): string {
+  return isBaselineArm(armVariantId) ? 'Baseline' : armVariantId;
+}
+
+/** Build one `RotationArmStats` row; `base` is undefined for a zero-run arm (all counts zeroed, lowSample true). */
+function buildRotationArmStats(
+  armVariantId: string,
+  label: string,
+  base: RotationArmBaseRow | undefined,
+  avgEvalScore: number | null,
+  findingsCount: number,
+  postMergeBugCount: number,
+): RotationArmStats {
+  if (!base) {
+    return {
+      armVariantId,
+      label,
+      runs: 0,
+      completedRuns: 0,
+      failedRuns: 0,
+      canceledRuns: 0,
+      activeRuns: 0,
+      mergedRuns: 0,
+      dismissedRuns: 0,
+      nullOutcomeRuns: 0,
+      successRatePct: 0,
+      avgDurationMs: null,
+      avgTotalTokens: null,
+      avgCostUsd: null,
+      avgEvalScore: null,
+      findingsCount: 0,
+      postMergeBugCount: 0,
+      lowSample: true,
+    };
+  }
+  const successRatePct =
+    base.outcomeRuns === 0 ? 0 : round1((base.mergedRuns / base.outcomeRuns) * 100);
+  return {
+    armVariantId,
+    label,
+    runs: base.runs,
+    completedRuns: base.completedRuns,
+    failedRuns: base.failedRuns,
+    canceledRuns: base.canceledRuns,
+    activeRuns: base.activeRuns,
+    mergedRuns: base.mergedRuns,
+    dismissedRuns: base.dismissedRuns,
+    nullOutcomeRuns: base.nullOutcomeRuns,
+    successRatePct,
+    avgDurationMs: base.avgDurationMs === null ? null : Math.round(base.avgDurationMs),
+    avgTotalTokens: base.avgTotalTokens === null ? null : Math.round(base.avgTotalTokens),
+    avgCostUsd: base.avgCostUsd,
+    avgEvalScore,
+    findingsCount,
+    postMergeBugCount,
+    lowSample: base.runs < MIN_VARIANT_RUNS,
+  };
+}
+
+/**
+ * Per-arm aggregate stats for ONE rotation experiment — the fair
+ * baseline-vs-variant comparison (phase 3 read surface, migration 057).
+ * Modeled on {@link selectVariantStats}'s four-pass shape (base counts/duration/
+ * usage, then SEPARATE grouped passes for eval score / findings / post-merge
+ * bugs, merged in TS so a multi-row join can never fan out the base counts) with
+ * two swaps:
+ *
+ *   - every pass scopes `WHERE r.rotation_experiment_id = ?` — NO project
+ *     scoping. A rotation experiment is cross-project by design (it is
+ *     per-WORKFLOW, and a workflow's rotation can span every project that
+ *     launches it), unlike selectVariantStats's optional per-project filter.
+ *   - the grouping key is `COALESCE(r.variant_id, '__baseline__')` — a
+ *     baseline-arm rotation run carries `variant_id IS NULL`, so the sentinel
+ *     folds those runs onto the baseline arm rather than dropping them.
+ *
+ * The `experiment_rotation_arms` snapshot (not the aggregate rows) is the
+ * DRIVING set: every snapshot arm always yields a row, even with zero runs
+ * (zeroed counts, null averages, `lowSample: true`) — both arms must always
+ * render so the comparison never silently drops an arm with no traffic yet.
+ * Label precedence is the snapshot's own `label` (always set); an aggregate row
+ * whose key is not in the snapshot (should not happen — every attributed run's
+ * arm was live at open) is appended defensively using the fallback label
+ * ("Baseline" for the sentinel, else the raw id).
+ *
+ * @param db           - Narrow DatabaseLike surface.
+ * @param experimentId - The rotation experiment whose arms are aggregated.
+ */
+export function selectRotationArmStats(db: DatabaseLike, experimentId: string): RotationArmStats[] {
+  const baseRows = db
+    .prepare(
+      `SELECT
+         COALESCE(r.variant_id, ?) AS armVariantId,
+         COUNT(r.id) AS runs,
+         SUM(CASE WHEN r.status = 'completed' THEN 1 ELSE 0 END) AS completedRuns,
+         SUM(CASE WHEN r.status = 'failed'    THEN 1 ELSE 0 END) AS failedRuns,
+         SUM(CASE WHEN r.status = 'canceled'  THEN 1 ELSE 0 END) AS canceledRuns,
+         SUM(CASE WHEN r.status NOT IN (${TERMINAL_SQL}) THEN 1 ELSE 0 END) AS activeRuns,
+         SUM(CASE WHEN r.outcome = 'merged'    THEN 1 ELSE 0 END) AS mergedRuns,
+         SUM(CASE WHEN r.outcome = 'dismissed' THEN 1 ELSE 0 END) AS dismissedRuns,
+         SUM(CASE WHEN r.status IN (${TERMINAL_SQL}) AND r.outcome IS NULL THEN 1 ELSE 0 END) AS nullOutcomeRuns,
+         SUM(CASE WHEN r.outcome IS NOT NULL THEN 1 ELSE 0 END) AS outcomeRuns,
+         AVG(CASE
+               WHEN r.status IN (${TERMINAL_SQL})
+                    AND r.started_at IS NOT NULL AND r.ended_at IS NOT NULL
+               THEN (julianday(r.ended_at) - julianday(r.started_at)) * 86400000
+             END) AS avgDurationMs,
+         AVG(u.total_tokens) AS avgTotalTokens,
+         AVG(u.cost_usd)     AS avgCostUsd
+       FROM workflow_runs r
+       LEFT JOIN run_usage u ON u.run_id = r.id
+       WHERE r.rotation_experiment_id = ?
+       GROUP BY armVariantId`,
+    )
+    .all(BASELINE_VARIANT_SENTINEL, experimentId) as RotationArmBaseRow[];
+  const baseByArm = new Map(baseRows.map((row) => [row.armVariantId, row]));
+
+  const evalRows = db
+    .prepare(
+      `SELECT COALESCE(r.variant_id, ?) AS armVariantId, AVG(e.overall_score) AS avgEvalScore
+       FROM run_evals e
+       JOIN workflow_runs r ON r.id = e.run_id
+       WHERE r.rotation_experiment_id = ?
+         AND e.eval_status = 'complete'
+       GROUP BY armVariantId`,
+    )
+    .all(BASELINE_VARIANT_SENTINEL, experimentId) as Array<{
+    armVariantId: string;
+    avgEvalScore: number | null;
+  }>;
+  const evalByArm = new Map(evalRows.map((row) => [row.armVariantId, row.avgEvalScore]));
+
+  const findingRows = db
+    .prepare(
+      `SELECT COALESCE(r.variant_id, ?) AS armVariantId, COUNT(*) AS findingsCount
+       FROM review_items ri
+       JOIN workflow_runs r ON r.id = ri.run_id
+       WHERE r.rotation_experiment_id = ?
+         AND ri.kind = 'finding'
+       GROUP BY armVariantId`,
+    )
+    .all(BASELINE_VARIANT_SENTINEL, experimentId) as Array<{ armVariantId: string; findingsCount: number }>;
+  const findingsByArm = new Map(findingRows.map((row) => [row.armVariantId, row.findingsCount]));
+
+  const bugRows = db
+    .prepare(
+      `SELECT armVariantId, COUNT(*) AS postMergeBugCount FROM (
+         SELECT COALESCE(br.variant_id, ?) AS armVariantId
+           FROM ideas b JOIN workflow_runs br ON br.id = b.caused_by_run_id
+          WHERE b.caused_by_run_id IS NOT NULL AND br.rotation_experiment_id = ?
+         UNION ALL
+         SELECT COALESCE(br.variant_id, ?) AS armVariantId
+           FROM epics b JOIN workflow_runs br ON br.id = b.caused_by_run_id
+          WHERE b.caused_by_run_id IS NOT NULL AND br.rotation_experiment_id = ?
+         UNION ALL
+         SELECT COALESCE(br.variant_id, ?) AS armVariantId
+           FROM tasks b JOIN workflow_runs br ON br.id = b.caused_by_run_id
+          WHERE b.caused_by_run_id IS NOT NULL AND br.rotation_experiment_id = ?
+       )
+       GROUP BY armVariantId`,
+    )
+    .all(
+      BASELINE_VARIANT_SENTINEL,
+      experimentId,
+      BASELINE_VARIANT_SENTINEL,
+      experimentId,
+      BASELINE_VARIANT_SENTINEL,
+      experimentId,
+    ) as Array<{ armVariantId: string; postMergeBugCount: number }>;
+  const bugsByArm = new Map(bugRows.map((row) => [row.armVariantId, row.postMergeBugCount]));
+
+  const armSnapshot = db
+    .prepare(
+      'SELECT variant_id AS variantId, label FROM experiment_rotation_arms WHERE experiment_id = ? ORDER BY created_at, variant_id',
+    )
+    .all(experimentId) as Array<{ variantId: string; label: string }>;
+
+  const results: RotationArmStats[] = armSnapshot.map((arm) =>
+    buildRotationArmStats(
+      arm.variantId,
+      arm.label,
+      baseByArm.get(arm.variantId),
+      evalByArm.get(arm.variantId) ?? null,
+      findingsByArm.get(arm.variantId) ?? 0,
+      bugsByArm.get(arm.variantId) ?? 0,
+    ),
+  );
+
+  // Defensive: an aggregate row whose key is not in the snapshot (should not
+  // happen — every attributed run's arm was live at open) is appended after.
+  const seenArms = new Set(armSnapshot.map((arm) => arm.variantId));
+  for (const base of baseRows) {
+    if (seenArms.has(base.armVariantId)) continue;
+    results.push(
+      buildRotationArmStats(
+        base.armVariantId,
+        fallbackArmLabel(base.armVariantId),
+        base,
+        evalByArm.get(base.armVariantId) ?? null,
+        findingsByArm.get(base.armVariantId) ?? 0,
+        bugsByArm.get(base.armVariantId) ?? 0,
+      ),
+    );
+  }
+  return results;
+}
+
+interface RotationExperimentRunRow {
+  runId: string;
+  armVariantId: string;
+  armLabel: string;
+  status: string;
+  outcome: string | null;
+  sessionId: string | null;
+  projectId: number;
+  createdAt: string;
+  durationMs: number | null;
+  totalTokens: number | null;
+  costUsd: number | null;
+}
+
+/**
+ * The per-run drill-down for ONE rotation experiment — which runs got which
+ * arm (phase 3 read surface, migration 057). One row per `workflow_runs` stamped
+ * with `rotation_experiment_id = ?`; `LEFT JOIN run_usage` (1:1 with a run — no
+ * fan-out) for tokens/cost, `LEFT JOIN experiment_rotation_arms` on the same
+ * `COALESCE(variant_id, '__baseline__')` key as {@link selectRotationArmStats}
+ * for the arm label. `durationMs` mirrors selectVariantStats: only computed for
+ * a terminal run with both timestamps present, else null. Newest run first.
+ *
+ * @param db           - Narrow DatabaseLike surface.
+ * @param experimentId - The rotation experiment whose runs are listed.
+ */
+export function selectRotationExperimentRuns(db: DatabaseLike, experimentId: string): RotationExperimentRun[] {
+  const rows = db
+    .prepare(
+      `SELECT
+         r.id AS runId,
+         COALESCE(r.variant_id, ?) AS armVariantId,
+         COALESCE(a.label, CASE WHEN r.variant_id IS NULL THEN 'Baseline' ELSE r.variant_id END) AS armLabel,
+         r.status AS status,
+         r.outcome AS outcome,
+         r.session_id AS sessionId,
+         r.project_id AS projectId,
+         r.created_at AS createdAt,
+         CASE
+           WHEN r.status IN (${TERMINAL_SQL})
+                AND r.started_at IS NOT NULL AND r.ended_at IS NOT NULL
+           THEN (julianday(r.ended_at) - julianday(r.started_at)) * 86400000
+         END AS durationMs,
+         u.total_tokens AS totalTokens,
+         u.cost_usd     AS costUsd
+       FROM workflow_runs r
+       LEFT JOIN run_usage u ON u.run_id = r.id
+       LEFT JOIN experiment_rotation_arms a
+              ON a.experiment_id = ? AND a.variant_id = COALESCE(r.variant_id, ?)
+       WHERE r.rotation_experiment_id = ?
+       ORDER BY r.created_at DESC, r.id DESC`,
+    )
+    .all(
+      BASELINE_VARIANT_SENTINEL,
+      experimentId,
+      BASELINE_VARIANT_SENTINEL,
+      experimentId,
+    ) as RotationExperimentRunRow[];
+
+  return rows.map((row): RotationExperimentRun => ({
+    runId: row.runId,
+    armVariantId: row.armVariantId,
+    armLabel: row.armLabel,
+    status: row.status,
+    outcome: row.outcome,
+    sessionId: row.sessionId,
+    projectId: row.projectId,
+    createdAt: toIso(row.createdAt) ?? row.createdAt,
+    durationMs: row.durationMs === null ? null : Math.round(row.durationMs),
+    totalTokens: row.totalTokens,
+    costUsd: row.costUsd,
+  }));
+}
+
+interface RotationExperimentRow {
+  experimentId: string;
+  workflowId: string;
+  status: ExperimentStatus;
+  createdAt: string;
+  decidedAt: string | null;
+  promotedVariantId: string | null;
+}
+
+interface RotationArmSnapshotRow {
+  experimentId: string;
+  variantId: string;
+  label: string;
+}
+
+/**
+ * Dashboard rows for ALL rotation experiments (running + settled), so they can
+ * render alongside past side-by-side experiments in Insights section 04 (phase 3
+ * read surface, migration 057). `experiments.listForDashboard`'s `kind =
+ * 'side_by_side'` filter is UNCHANGED — this is the rotation-only sibling query.
+ *
+ * Per experiment: `armLabels` from its arm snapshot (created_at, variant_id
+ * order); `runCount` is a separate grouped COUNT over `workflow_runs` (never a
+ * row-multiplying join against the per-arm snapshot); `winnerLabel` is null
+ * unless `status = 'decided'` (`promoted_variant_id` -> "Baseline" for the
+ * sentinel, else the matching snapshot arm's label, else the raw id);
+ * `seriesKey` is the SAME formula as the side-by-side dashboard's seriesKey
+ * (workflow id + sorted arm-variant-id pair) so an identical matchup groups
+ * identically regardless of experiment kind.
+ *
+ * @param db         - Narrow DatabaseLike surface.
+ * @param workflowId - When non-null, restricts to that workflow's rotations; null = all.
+ */
+export function selectRotationDashboardRows(
+  db: DatabaseLike,
+  workflowId: string | null,
+): RotationDashboardRow[] {
+  const conds = ["e.kind = 'rotation'"];
+  const params: unknown[] = [];
+  if (workflowId !== null) {
+    conds.push('e.workflow_id = ?');
+    params.push(workflowId);
+  }
+  const expRows = db
+    .prepare(
+      `SELECT
+         e.id AS experimentId, e.workflow_id AS workflowId, e.status AS status,
+         e.created_at AS createdAt, e.decided_at AS decidedAt,
+         e.promoted_variant_id AS promotedVariantId
+       FROM experiments e
+       WHERE ${conds.join(' AND ')}
+       ORDER BY e.created_at DESC, e.id DESC`,
+    )
+    .all(...params) as RotationExperimentRow[];
+  if (expRows.length === 0) return [];
+
+  const ids = expRows.map((row) => row.experimentId);
+  const armsByExp = new Map<string, RotationArmSnapshotRow[]>();
+  const runCountByExp = new Map<string, number>();
+  for (const idChunk of chunk(ids, RUN_ID_CHUNK_SIZE)) {
+    const armRows = db
+      .prepare(
+        `SELECT experiment_id AS experimentId, variant_id AS variantId, label
+         FROM experiment_rotation_arms
+         WHERE experiment_id IN (${placeholders(idChunk.length)})
+         ORDER BY created_at, variant_id`,
+      )
+      .all(...idChunk) as RotationArmSnapshotRow[];
+    for (const arm of armRows) {
+      const list = armsByExp.get(arm.experimentId) ?? [];
+      list.push(arm);
+      armsByExp.set(arm.experimentId, list);
+    }
+    const countRows = db
+      .prepare(
+        `SELECT rotation_experiment_id AS experimentId, COUNT(*) AS runCount
+         FROM workflow_runs
+         WHERE rotation_experiment_id IN (${placeholders(idChunk.length)})
+         GROUP BY rotation_experiment_id`,
+      )
+      .all(...idChunk) as Array<{ experimentId: string; runCount: number }>;
+    for (const row of countRows) runCountByExp.set(row.experimentId, row.runCount);
+  }
+
+  return expRows.map((exp): RotationDashboardRow => {
+    const arms = armsByExp.get(exp.experimentId) ?? [];
+    const armLabels = arms.map((arm) => arm.label);
+    const seriesKey = `${exp.workflowId}:${arms
+      .map((arm) => arm.variantId)
+      .sort()
+      .join('|')}`;
+    let winnerLabel: string | null = null;
+    if (exp.status === 'decided' && exp.promotedVariantId !== null) {
+      if (isBaselineArm(exp.promotedVariantId)) {
+        winnerLabel = 'Baseline';
+      } else {
+        const match = arms.find((arm) => arm.variantId === exp.promotedVariantId);
+        winnerLabel = match ? match.label : exp.promotedVariantId;
+      }
+    }
+    return {
+      experimentId: exp.experimentId,
+      workflowId: exp.workflowId,
+      armLabels,
+      status: exp.status,
+      runCount: runCountByExp.get(exp.experimentId) ?? 0,
+      createdAt: toIso(exp.createdAt) ?? exp.createdAt,
+      decidedAt: toIso(exp.decidedAt),
+      winnerLabel,
+      seriesKey,
     };
   });
 }

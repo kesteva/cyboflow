@@ -430,3 +430,78 @@ export interface ExperimentComparisonReadyEvent {
   preference: PairwisePreference;
   status: ComparisonStatus;
 }
+
+// ===========================================================================
+// Phase 3 — rotation-experiment READ surface (migration 057). Backend types for
+// the fair baseline-vs-variant comparison (selectRotationArmStats), the per-run
+// drill-down (selectRotationExperimentRuns), and the Insights-04 dashboard rows
+// (selectRotationDashboardRows). No frontend consumer yet (phase 4).
+// ===========================================================================
+
+/**
+ * Per-arm aggregate stats for ONE rotation experiment (insightsQueries.
+ * selectRotationArmStats). Deliberately field-parallel to {@link VariantStats}
+ * (same names/semantics for every shared field) so phase 4 can render a
+ * side-by-side variant table and a rotation-arm table with one component.
+ *
+ * `armVariantId` is a real variant id or `BASELINE_VARIANT_SENTINEL` — the
+ * ARM's identity within this experiment's snapshot, not necessarily a live
+ * `workflow_variants` row (the variant may since have been deleted; `label`
+ * is the denormalized snapshot label, which survives that).
+ */
+export interface RotationArmStats {
+  armVariantId: string;
+  label: string;
+  runs: number;
+  completedRuns: number;
+  failedRuns: number;
+  canceledRuns: number;
+  activeRuns: number;
+  mergedRuns: number;
+  dismissedRuns: number;
+  nullOutcomeRuns: number;
+  successRatePct: number;
+  avgDurationMs: number | null;
+  avgTotalTokens: number | null;
+  avgCostUsd: number | null;
+  avgEvalScore: number | null;
+  findingsCount: number;
+  postMergeBugCount: number;
+  /** Always true for a zero-run arm; otherwise `runs < MIN_VARIANT_RUNS` (display-only). */
+  lowSample: boolean;
+}
+
+/** One run's row in a rotation experiment's per-run drill-down (insightsQueries.selectRotationExperimentRuns). */
+export interface RotationExperimentRun {
+  runId: string;
+  armVariantId: string;
+  armLabel: string;
+  status: string;
+  outcome: string | null;
+  sessionId: string | null;
+  projectId: number;
+  createdAt: string;
+  durationMs: number | null;
+  totalTokens: number | null;
+  costUsd: number | null;
+}
+
+/**
+ * Dashboard row for ONE rotation experiment (insightsQueries.
+ * selectRotationDashboardRows), rendered alongside past side-by-side experiments
+ * in Insights section 04. `seriesKey` mirrors the side-by-side formula (workflow
+ * id + sorted arm-variant-id pair) so an identical matchup groups identically
+ * regardless of experiment kind.
+ */
+export interface RotationDashboardRow {
+  experimentId: string;
+  workflowId: string;
+  armLabels: string[];
+  status: ExperimentStatus;
+  runCount: number;
+  createdAt: string;
+  decidedAt: string | null;
+  /** Human label of the promoted arm ("Baseline" for the sentinel); null unless status='decided'. */
+  winnerLabel: string | null;
+  seriesKey: string;
+}

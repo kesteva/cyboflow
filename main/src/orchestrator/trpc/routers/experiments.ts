@@ -41,6 +41,9 @@ import type {
   PairwiseSample,
   PairwisePreference,
   RotationExperimentSummary,
+  RotationArmStats,
+  RotationExperimentRun,
+  RotationDashboardRow,
 } from '../../../../../shared/types/experiments';
 import {
   isExperimentArmSettled,
@@ -67,7 +70,14 @@ import {
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../../shared/types/sprintBatch';
 import type { Priority } from '../../../../../shared/types/tasks';
 import { listRunCreatedEpicIds, listRunCreatedIdeaIds, listRunCreatedTaskIds } from '../../runEntityOwnership';
-import { selectRunUsageRollups, selectRunFindings, getRunEval } from '../../insightsQueries';
+import {
+  selectRunUsageRollups,
+  selectRunFindings,
+  getRunEval,
+  selectRotationArmStats,
+  selectRotationExperimentRuns,
+  selectRotationDashboardRows,
+} from '../../insightsQueries';
 import { experimentEvents, eventToAsyncIterable } from './events';
 
 // ---------------------------------------------------------------------------
@@ -1514,6 +1524,26 @@ function requireRunningRotation(deps: ExperimentsDeps, experimentId: string): Ex
 }
 
 /**
+ * Guard + load a rotation experiment for a phase-3 read (stats/runs), regardless
+ * of status — unlike {@link requireRunningRotation}, a SETTLED rotation's history
+ * must still be readable. NOT_FOUND when absent; PRECONDITION_FAILED when the id
+ * names a side-by-side experiment instead.
+ */
+function requireRotationExperiment(deps: ExperimentsDeps, experimentId: string): ExperimentRow {
+  const exp = getExperiment(deps.db, experimentId);
+  if (!exp) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: `experiment ${experimentId} not found` });
+  }
+  if (exp.kind !== 'rotation') {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: `experiment ${experimentId} is not a rotation (kind=${exp.kind})`,
+    });
+  }
+  return exp;
+}
+
+/**
  * Pause every real-variant arm in a rotation's snapshot so the pool drops below 2
  * and the workflow stops rotating. Skips the baseline sentinel (the workflow's
  * baseline_in_rotation flag stays as-is) and any arm whose variant was deleted.
@@ -1979,6 +2009,38 @@ export const experimentsRouter = router({
     .input(z.object({ experimentId: z.string().min(1) }))
     .mutation(({ input }): { experimentId: string; status: 'abandoned' } => {
       return abandonRotationExperiment(requireDeps(), input.experimentId);
+    }),
+
+  // -------------------------------------------------------------------------
+  // Rotation-experiment reads (phase 3) — per-arm stats, per-run drill-down, and
+  // dashboard rows for ALL rotation experiments. Works for a settled rotation
+  // too (requireRotationExperiment has no status guard, unlike decide/abandon).
+  // -------------------------------------------------------------------------
+
+  /** Per-arm aggregate stats for one rotation experiment (the baseline-vs-variant comparison). */
+  rotationStats: protectedProcedure
+    .input(z.object({ experimentId: z.string().min(1) }))
+    .query(async ({ input }): Promise<RotationArmStats[]> => {
+      const deps = requireDeps();
+      requireRotationExperiment(deps, input.experimentId);
+      return selectRotationArmStats(deps.db, input.experimentId);
+    }),
+
+  /** Per-run drill-down for one rotation experiment (which runs got which arm). */
+  rotationRuns: protectedProcedure
+    .input(z.object({ experimentId: z.string().min(1) }))
+    .query(async ({ input }): Promise<RotationExperimentRun[]> => {
+      const deps = requireDeps();
+      requireRotationExperiment(deps, input.experimentId);
+      return selectRotationExperimentRuns(deps.db, input.experimentId);
+    }),
+
+  /** Dashboard rows for ALL rotation experiments (running + settled); optional workflow filter. */
+  listRotationsForDashboard: protectedProcedure
+    .input(z.object({ workflowId: z.string().min(1).optional() }))
+    .query(async ({ input }): Promise<RotationDashboardRow[]> => {
+      const deps = requireDeps();
+      return selectRotationDashboardRows(deps.db, input.workflowId ?? null);
     }),
 
   get: protectedProcedure
