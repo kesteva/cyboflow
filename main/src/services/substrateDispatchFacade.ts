@@ -108,6 +108,8 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   private readonly interactiveSpawnedHandler: ForwardHandler;
   private readonly interactiveOutputHandler: ForwardHandler;
   private readonly interactiveExitHandler: ForwardHandler;
+  private readonly codexSdkOutputHandler: ForwardHandler | null = null;
+  private readonly codexSdkExitHandler: ForwardHandler | null = null;
   // Raw-PTY byte fan-in (TASK-814 / IDEA-030) — interactive manager ONLY. The SDK
   // manager has no PTY and never emits 'pty-output', so it is deliberately NOT
   // subscribed here (the path is interactive-only by construction).
@@ -161,6 +163,7 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     private readonly registry: WorkflowRegistryLike,
     private readonly logger: LoggerLike,
     additionalPtyManagers: AbstractCliManager[] = [],
+    private readonly codexSdkManager?: AbstractCliManager,
   ) {
     super();
 
@@ -208,6 +211,13 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.interactiveManager.on('pty-output', this.interactivePtyHandler);
     this.interactiveManager.on('turn-end', this.interactiveTurnEndHandler);
 
+    if (this.codexSdkManager) {
+      this.codexSdkOutputHandler = (payload) => this.emit('output', payload);
+      this.codexSdkExitHandler = (payload) => this.emit('exit', payload);
+      this.codexSdkManager.on('output', this.codexSdkOutputHandler);
+      this.codexSdkManager.on('exit', this.codexSdkExitHandler);
+    }
+
     for (const manager of additionalPtyManagers) {
       const ptyHandler: ForwardHandler = (payload) => {
         this.recordInteractivePanelMapping(payload, manager);
@@ -235,6 +245,12 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
    */
   private resolveManager(runId: string): AbstractCliManager {
     const run = this.registry.getRunById(runId);
+    if (run?.agent_runtime === 'codex-sdk' || run?.agent_provider === 'codex') {
+      if (!this.codexSdkManager) {
+        throw new Error(`[SubstrateDispatchFacade] run ${runId} requested Codex SDK but no codex-sdk manager is wired`);
+      }
+      return this.codexSdkManager;
+    }
     const substrate: CliSubstrate = run?.substrate ?? DEFAULT_SUBSTRATE;
     return substrate === 'interactive' ? this.interactiveManager : this.sdkManager;
   }
@@ -248,8 +264,9 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     const { panelId } = options;
     const mgr = this.resolveManager(panelId);
     const substrate: CliSubstrate = mgr === this.interactiveManager ? 'interactive' : 'sdk';
+    const runtime = mgr === this.codexSdkManager ? 'codex-sdk' : substrate;
     this.panelOwners.set(panelId, mgr);
-    this.logger.info('[SubstrateDispatchFacade] dispatch spawn', { panelId, substrate });
+    this.logger.info('[SubstrateDispatchFacade] dispatch spawn', { panelId, substrate, runtime });
     // AbstractCliManager.spawnCliProcess accepts the CliSpawnOptions superset of
     // ClaudeSpawnerOptions (it adds an index signature for CLI-specific keys). Binding
     // the method to a ClaudeSpawnerLike-shaped reference narrows the parameter via the
@@ -565,6 +582,10 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
     this.interactiveManager.off('exit', this.interactiveExitHandler);
     this.interactiveManager.off('pty-output', this.interactivePtyHandler);
     this.interactiveManager.off('turn-end', this.interactiveTurnEndHandler);
+    if (this.codexSdkManager && this.codexSdkOutputHandler && this.codexSdkExitHandler) {
+      this.codexSdkManager.off('output', this.codexSdkOutputHandler);
+      this.codexSdkManager.off('exit', this.codexSdkExitHandler);
+    }
     for (const { manager, ptyHandler, exitHandler } of this.additionalPtyHandlers) {
       manager.off('pty-output', ptyHandler);
       manager.off('exit', exitHandler);

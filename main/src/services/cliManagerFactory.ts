@@ -6,6 +6,7 @@ import { AbstractCliManager } from './panels/cli/AbstractCliManager';
 import { ClaudeCodeManager } from './panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './panels/claude/interactiveClaudeManager';
 import { CodexPtyManager } from './panels/codex/codexPtyManager';
+import { CodexSdkManager } from './panels/codex/codexSdkManager';
 import {
   CliToolRegistry,
   CliToolDefinition,
@@ -98,7 +99,12 @@ export class CliManagerFactory {
       // WorkflowRegistry.createRun pins every demo run/session substrate to
       // 'sdk' via ConfigManager.getForcedSubstrate, so the interactive manager
       // is constructed but never engaged while demo mode is on.
-      if (this.configManager?.isDemoMode() && toolId !== 'claude-interactive' && toolId !== 'codex-pty') {
+      if (
+        this.configManager?.isDemoMode() &&
+        toolId !== 'claude-interactive' &&
+        toolId !== 'codex-sdk' &&
+        toolId !== 'codex-pty'
+      ) {
         const existing = this.demoManagers.get(toolId);
         if (existing) return existing;
         const db = config.additionalOptions?.db;
@@ -208,6 +214,7 @@ export class CliManagerFactory {
     this.registerInteractiveClaudeTool();
 
     // Register Codex PTY quick-session runtime.
+    this.registerCodexSdkTool();
     this.registerCodexPtyTool();
 
     // Future tools can be registered here:
@@ -425,6 +432,72 @@ export class CliManagerFactory {
 
     this.registry.registerTool(codexPtyDefinition, {
       priority: 40,
+      validateOnRegister: false,
+    });
+  }
+
+  private registerCodexSdkTool(): void {
+    const codexSdkManagerFactory: ManagerFactoryFunction = (
+      sessionManager: unknown,
+      logger?: Logger,
+      configManager?: ConfigManager,
+      additionalOptions?: unknown,
+    ) => {
+      const options = additionalOptions as Record<string, unknown> | undefined;
+      const dbCandidate = options?.db;
+      if (!dbCandidate) {
+        throw new TypeError('[CliManagerFactory] codex-sdk tool requires `db` in additionalOptions');
+      }
+      if (
+        typeof dbCandidate !== 'object' ||
+        typeof (dbCandidate as { prepare?: unknown }).prepare !== 'function'
+      ) {
+        throw new TypeError(
+          '[CliManagerFactory] codex-sdk tool: additionalOptions.db must be a better-sqlite3 Database instance (received a value lacking a .prepare() method)',
+        );
+      }
+      const db = dbCandidate as Database.Database;
+      return new CodexSdkManager(
+        sessionManager as SessionManager,
+        logger,
+        configManager,
+        db,
+      );
+    };
+
+    const codexSdkDefinition: CliToolDefinition = {
+      id: 'codex-sdk',
+      name: 'Codex SDK',
+      description: 'OpenAI Codex running through the embedded SDK workflow runtime',
+      version: '1.0.0',
+      capabilities: {
+        supportsResume: true,
+        supportsMultipleModels: true,
+        supportsPermissions: true,
+        supportsFileOperations: true,
+        supportsGitIntegration: true,
+        supportsSystemPrompts: false,
+        supportsStructuredOutput: true,
+        outputFormats: [
+          CLI_OUTPUT_FORMATS.JSON,
+          CLI_OUTPUT_FORMATS.STREAM_JSON,
+        ],
+        supportedPanelTypes: ['claude'],
+      },
+      config: {
+        requiredEnvVars: [],
+        optionalEnvVars: [],
+        requiredConfigKeys: [],
+        optionalConfigKeys: [],
+        defaultExecutable: '@openai/codex-sdk',
+        alternativeExecutables: [],
+        minimumVersion: undefined,
+      },
+      managerFactory: codexSdkManagerFactory,
+    };
+
+    this.registry.registerTool(codexSdkDefinition, {
+      priority: 45,
       validateOnRegister: false,
     });
   }

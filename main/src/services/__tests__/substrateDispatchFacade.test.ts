@@ -245,6 +245,38 @@ describe('SubstrateDispatchFacade — substrate-aware dispatch', () => {
     expect(sdk.spawnCliProcess).toHaveBeenCalledOnce();
     expect(interactive.spawnCliProcess).not.toHaveBeenCalled();
   });
+
+  it("routes spawnCliProcess to the Codex SDK manager when run.agent_runtime === 'codex-sdk'", async () => {
+    const run = makeWorkflowRunRow({
+      substrate: 'sdk',
+      agent_provider: 'codex',
+      agent_runtime: 'codex-sdk',
+    });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const codexSdk = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(
+      asManager(sdk),
+      asManager(interactive),
+      registry,
+      makeSpyLogger(),
+      [],
+      asManager(codexSdk),
+    );
+
+    await facade.spawnCliProcess({
+      panelId: run.id,
+      sessionId: run.id,
+      runId: run.id,
+      worktreePath: '/fake/worktree',
+      prompt: 'go',
+    });
+
+    expect(codexSdk.spawnCliProcess).toHaveBeenCalledOnce();
+    expect(sdk.spawnCliProcess).not.toHaveBeenCalled();
+    expect(interactive.spawnCliProcess).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------

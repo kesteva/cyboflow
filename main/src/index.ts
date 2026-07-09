@@ -26,6 +26,7 @@ import { AbstractCliManager } from './services/panels/cli/AbstractCliManager';
 import { ClaudeCodeManager } from './services/panels/claude/claudeCodeManager';
 import { InteractiveClaudeManager } from './services/panels/claude/interactiveClaudeManager';
 import { CodexPtyManager } from './services/panels/codex/codexPtyManager';
+import { CodexSdkManager } from './services/panels/codex/codexSdkManager';
 import { SubstrateDispatchFacade } from './services/substrateDispatchFacade';
 import { setupConsoleWrapper } from './utils/consoleWrapper';
 import { Orchestrator } from './orchestrator/Orchestrator';
@@ -726,6 +727,19 @@ async function initializeServices() {
   // unreachable in practice — it exists purely to narrow the type without a cast.
   if (!(interactiveCliManager instanceof InteractiveClaudeManager)) {
     throw new Error('[Main] cliManagerFactory returned a non-InteractiveClaudeManager for claude-interactive');
+  }
+
+  const createdCodexSdkManager = await cliManagerFactory.createManager('codex-sdk', {
+    sessionManager,
+    logger,
+    configManager,
+    additionalOptions: {
+      db: databaseService.getDb(),
+    },
+    skipValidation: true,
+  });
+  if (!(createdCodexSdkManager instanceof CodexSdkManager)) {
+    throw new Error('[Main] cliManagerFactory returned a non-CodexSdkManager for codex-sdk');
   }
 
   const createdCodexPtyManager = await cliManagerFactory.createManager('codex-pty', {
@@ -1429,6 +1443,7 @@ async function initializeServices() {
     workflowRegistry,
     cyboflowLogger,
     [codexPtyManager],
+    createdCodexSdkManager,
   );
 
   // LifecycleTransitions adapter — keeps RunExecutor free of services/* imports by
