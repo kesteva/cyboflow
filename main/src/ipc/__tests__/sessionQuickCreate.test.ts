@@ -219,6 +219,7 @@ function makeServices(opts?: {
     },
     removeListener: vi.fn(),
     getSession: vi.fn(() => fakeSession),
+    refreshSessionFromDatabase: vi.fn(() => fakeSession),
     updateSession: vi.fn(),
     addSessionOutput: vi.fn(),
   };
@@ -497,6 +498,21 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     const stamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
     expect(stamp).toBeDefined();
     expect(stamp?.args).toEqual(['interactive', 'claude', 'claude-interactive', null, 'sess-001']);
+  });
+
+  it('refreshes the session read model after stamping default agent fields', async () => {
+    const { services, fakeSessionManager } = makeServices();
+    const handlers = registerWith(services);
+
+    await invoke(handlers, 'sessions:create-quick', {
+      projectId: 42,
+      branchName: TEST_BRANCH,
+      agentProvider: 'codex',
+      agentRuntime: 'codex-pty',
+      agentModel: 'gpt-5.5',
+    });
+
+    expect(fakeSessionManager.refreshSessionFromDatabase).toHaveBeenCalledWith('sess-001');
   });
 
   it('persists sessions.effort = ultracode when the Ultracode card is chosen (migration 029)', async () => {

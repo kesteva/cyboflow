@@ -709,6 +709,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         );
       }
 
+      // The session-created event fired before the sentinel/default-agent stamps
+      // above. Refresh the active cache and emit a normal session-updated event
+      // so provider/runtime/model do not silently stay at their INSERT defaults
+      // until a later read or status transition.
+      sessionManager.refreshSessionFromDatabase(session.id);
+
       // EAGER PTY SPAWN (interactive substrate only): create the claude panel
       // server-side (same pattern sessions:input uses) and boot the persistent
       // REPL now, with the cyboflow context briefing as its first prompt, so the

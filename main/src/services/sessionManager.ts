@@ -485,6 +485,18 @@ export class SessionManager extends EventEmitter {
     this.emit('session-created', session);
   }
 
+  refreshSessionFromDatabase(id: string): Session | undefined {
+    const dbSession = this.db.getSession(id);
+    if (!dbSession) {
+      return undefined;
+    }
+
+    const session = this.convertDbSessionToSession(dbSession);
+    this.activeSessions.set(id, session);
+    this.emit('session-updated', session);
+    return session;
+  }
+
   updateSession(id: string, update: SessionUpdate): void {
 
     // Add log entry for important status changes
