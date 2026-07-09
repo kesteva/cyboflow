@@ -292,7 +292,7 @@ function BacklogBoard({
   tasks: BacklogTaskItem[];
   layoutMode: LayoutMode;
   onRun: (task: BacklogTaskItem) => void;
-  /** Same-column re-rank (Kanban DnD only — the List stays read-only). */
+  /** Same-column re-rank (Kanban only, DnD + card-menu Move items — the List stays read-only). */
   onReorder: (task: BacklogTaskItem, targetIndex: number) => void;
   launchingTaskId: string | null;
   now: number;
@@ -388,8 +388,9 @@ export function BacklogPane({ projectId }: BacklogPaneProps): React.JSX.Element 
 
   /**
    * Shared same-column reorder core — deliberately DnD-independent (takes the
-   * task + its desired POST-DROP index, no drag event objects) so the upcoming
-   * card context menu (Move up / down / to top) can call it directly.
+   * task + its desired POST-MOVE index, no drag event objects). Both Kanban
+   * drag-and-drop AND the card ⋯ menu's Move up / down / to top (WCAG 2.5.7)
+   * funnel into it via KanbanView's onReorder — one write path.
    *
    * Re-derives the task's rendered column (same bucketByStage pipeline the
    * board uses), plans the rank writes via planReorder (fractional midpoint;

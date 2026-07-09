@@ -14,9 +14,24 @@
  * run (the chokepoint rejects each with `active_runs`); Unarchive is never
  * guarded. `isArchived` reads the `archived_at` stamp — archiving no longer
  * moves the item to a terminal stage.
+ *
+ * When `onReorder` is wired (Kanban board cards only), the menu also exposes
+ * "Move up" / "Move down" / "Move to top" — the keyboard / single-pointer
+ * alternative to drag-reorder (WCAG 2.5.7), driving the SAME reorder core as
+ * DnD. Without it (ListView, epic children) the Move items are hidden and the
+ * menu renders exactly as before.
  */
 import { useState } from 'react';
-import { MoreHorizontal, ArrowRightLeft, Archive, ArchiveRestore, Trash2 } from 'lucide-react';
+import {
+  MoreHorizontal,
+  ArrowRightLeft,
+  Archive,
+  ArchiveRestore,
+  Trash2,
+  ArrowUp,
+  ArrowDown,
+  ArrowUpToLine,
+} from 'lucide-react';
 import { Dropdown, type DropdownItem } from '../ui/Dropdown';
 import { useBacklogStore } from '../../stores/backlogStore';
 import { trpc } from '../../trpc/client';
@@ -26,11 +41,31 @@ import { ArchiveConfirmDialog } from './ArchiveConfirmDialog';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 
+/** Context-menu reorder direction (translated to a post-move index upstream). */
+export type ReorderDirection = 'up' | 'down' | 'top';
+
 interface CardActionsMenuProps {
   task: BacklogTaskItem;
+  /**
+   * Re-rank the card within its rendered stage column — the keyboard /
+   * single-pointer alternative to drag-reorder (WCAG 2.5.7). Direction→index
+   * translation lives in the caller (KanbanView, which holds the bucket index);
+   * all paths funnel into BacklogPane's shared `reorderTask` core. Omitted in
+   * contexts without reorder — the Move items are then hidden entirely.
+   */
+  onReorder?: (task: BacklogTaskItem, dir: ReorderDirection) => void;
+  /** False on the column's first card — disables Move up / Move to top. */
+  canMoveUp?: boolean;
+  /** False on the column's last card — disables Move down. */
+  canMoveDown?: boolean;
 }
 
-export function CardActionsMenu({ task }: CardActionsMenuProps): React.JSX.Element | null {
+export function CardActionsMenu({
+  task,
+  onReorder,
+  canMoveUp = false,
+  canMoveDown = false,
+}: CardActionsMenuProps): React.JSX.Element | null {
   const boards = useBacklogStore((s) => s.boards);
   const [stageOpen, setStageOpen] = useState(false);
   const [archiveOpen, setArchiveOpen] = useState(false);
@@ -75,7 +110,35 @@ export function CardActionsMenu({ task }: CardActionsMenuProps): React.JSX.Eleme
     }
   };
 
-  const items: DropdownItem[] = [
+  const items: DropdownItem[] = [];
+  if (onReorder !== undefined) {
+    // Reorder is rank-only (no stage write) — deliberately NOT gated on
+    // hasActiveRun; only first/last position disables the inapplicable moves.
+    items.push(
+      {
+        id: 'move-up',
+        label: 'Move up',
+        icon: ArrowUp,
+        disabled: !canMoveUp,
+        onClick: () => onReorder(task, 'up'),
+      },
+      {
+        id: 'move-down',
+        label: 'Move down',
+        icon: ArrowDown,
+        disabled: !canMoveDown,
+        onClick: () => onReorder(task, 'down'),
+      },
+      {
+        id: 'move-to-top',
+        label: 'Move to top',
+        icon: ArrowUpToLine,
+        disabled: !canMoveUp,
+        onClick: () => onReorder(task, 'top'),
+      },
+    );
+  }
+  items.push(
     {
       id: 'change-stage',
       label: 'Change stage…',
@@ -84,7 +147,7 @@ export function CardActionsMenu({ task }: CardActionsMenuProps): React.JSX.Eleme
       ...(runHint ? { description: runHint } : {}),
       onClick: () => setStageOpen(true),
     },
-  ];
+  );
   if (isArchived) {
     // Unarchive is never guarded server-side — no dialog, no active-run gate.
     items.push({

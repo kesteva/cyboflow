@@ -29,7 +29,7 @@ import { trpc } from '../../trpc/client';
 import { useBacklogStore } from '../../stores/backlogStore';
 import { TypeTag, PriorityTag, ArchivedChip, ProjectChip, FlowMarker, ReviewMarker, DoneFlag } from './markers';
 import { compactAgo, isArchived } from './backlogSelectors';
-import { CardActionsMenu } from './CardActionsMenu';
+import { CardActionsMenu, type ReorderDirection } from './CardActionsMenu';
 import { IdeaDetailEditor } from '../IdeaDetailEditor';
 import { EpicDetailEditor } from '../EpicDetailEditor';
 import { TaskDetailModal } from '../cyboflow/TaskDetailModal';
@@ -42,6 +42,17 @@ interface TaskBodyProps {
   launchingTaskId: string | null;
   /** Compact "now" basis so all cards share one clock tick. */
   now: number;
+  /**
+   * Context-menu reorder (Move up / down / to top — WCAG 2.5.7 alternative to
+   * DnD). Only Kanban BOARD cards wire it (KanbanView owns direction→index
+   * translation); ListView and nested epic children leave it undefined, which
+   * hides the Move items in {@link CardActionsMenu}.
+   */
+  onReorder?: (task: BacklogTaskItem, dir: ReorderDirection) => void;
+  /** False on the column's first card — disables Move up / Move to top. */
+  canMoveUp?: boolean;
+  /** False on the column's last card — disables Move down. */
+  canMoveDown?: boolean;
 }
 
 /** The marker row (flow / review / done) — only renders when something applies. */
@@ -68,6 +79,9 @@ function CardFooter({
   loadingRootIdea,
   launchingTaskId,
   now,
+  onReorder,
+  canMoveUp,
+  canMoveDown,
 }: TaskBodyProps & {
   onEdit: (e: React.MouseEvent) => void;
   /** Open the originating idea's detail; rendered only when the card has one. */
@@ -130,8 +144,14 @@ function CardFooter({
           )}
           Run
         </button>
-        {/* Secondary actions (Change stage… / Archive) tucked behind a ⋯ menu. */}
-        <CardActionsMenu task={task} />
+        {/* Secondary actions (Move up/down/top / Change stage… / Archive)
+            tucked behind a ⋯ menu. */}
+        <CardActionsMenu
+          task={task}
+          onReorder={onReorder}
+          canMoveUp={canMoveUp}
+          canMoveDown={canMoveDown}
+        />
       </div>
     </div>
   );
@@ -161,7 +181,15 @@ function DetailEditor({
  * The shared inner body of a task (used by both the Kanban card and the List
  * row).
  */
-export function TaskBody({ task, onRun, launchingTaskId, now }: TaskBodyProps): React.JSX.Element {
+export function TaskBody({
+  task,
+  onRun,
+  launchingTaskId,
+  now,
+  onReorder,
+  canMoveUp,
+  canMoveDown,
+}: TaskBodyProps): React.JSX.Element {
   const [expanded, setExpanded] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   // Root-idea back-link: the fetched originating idea (with its decomposition
@@ -246,6 +274,9 @@ export function TaskBody({ task, onRun, launchingTaskId, now }: TaskBodyProps): 
         loadingRootIdea={loadingRootIdea}
         launchingTaskId={launchingTaskId}
         now={now}
+        onReorder={onReorder}
+        canMoveUp={canMoveUp}
+        canMoveDown={canMoveDown}
       />
 
       {/* Type-appropriate detail editor — opened by the dedicated Edit affordance. */}
@@ -304,7 +335,15 @@ export function TaskChildren({ tasks, onRun, launchingTaskId, now }: TaskChildre
 }
 
 /** The Kanban board card. */
-export function BoardCard({ task, onRun, launchingTaskId, now }: TaskBodyProps): React.JSX.Element {
+export function BoardCard({
+  task,
+  onRun,
+  launchingTaskId,
+  now,
+  onReorder,
+  canMoveUp,
+  canMoveDown,
+}: TaskBodyProps): React.JSX.Element {
   const breathing = task.inFlow.length > 0;
   return (
     <div
@@ -316,7 +355,15 @@ export function BoardCard({ task, onRun, launchingTaskId, now }: TaskBodyProps):
           : 'border-card-border hover:border-border-hover'
       }`}
     >
-      <TaskBody task={task} onRun={onRun} launchingTaskId={launchingTaskId} now={now} />
+      <TaskBody
+        task={task}
+        onRun={onRun}
+        launchingTaskId={launchingTaskId}
+        now={now}
+        onReorder={onReorder}
+        canMoveUp={canMoveUp}
+        canMoveDown={canMoveDown}
+      />
     </div>
   );
 }

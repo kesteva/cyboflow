@@ -9,6 +9,10 @@
  * run; Archive/Delete open their confirm dialogs; the component renders nothing
  * without a board.
  *
+ * Reorder items (WCAG 2.5.7): Move up / Move down / Move to top appear only
+ * when `onReorder` is wired, fire it with the right direction, and disable per
+ * first/last-card position (canMoveUp / canMoveDown).
+ *
  * The backlog store is mocked (mirrors BacklogPane.test.tsx) so the menu reads a
  * fixed board snapshot; the trpc client is mocked for Unarchive + the dialogs.
  */
@@ -196,5 +200,87 @@ describe('CardActionsMenu', () => {
     fireEvent.click(screen.getByText('Delete'));
     expect(screen.getByTestId('delete-confirm-dialog')).toBeInTheDocument();
     expect(mockDelete).not.toHaveBeenCalled();
+  });
+
+  describe('reorder items (WCAG 2.5.7 alternative to drag)', () => {
+    it('hides Move up / Move down / Move to top when onReorder is not wired', () => {
+      render(<CardActionsMenu task={makeTask()} />);
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      expect(screen.queryByText('Move up')).not.toBeInTheDocument();
+      expect(screen.queryByText('Move down')).not.toBeInTheDocument();
+      expect(screen.queryByText('Move to top')).not.toBeInTheDocument();
+      // The rest of the menu is unchanged.
+      expect(screen.getByText('Change stage…')).toBeInTheDocument();
+    });
+
+    it('shows the Move items when onReorder is provided', () => {
+      render(
+        <CardActionsMenu task={makeTask()} onReorder={vi.fn()} canMoveUp canMoveDown />,
+      );
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      expect(screen.getByText('Move up')).toBeInTheDocument();
+      expect(screen.getByText('Move down')).toBeInTheDocument();
+      expect(screen.getByText('Move to top')).toBeInTheDocument();
+    });
+
+    it('fires onReorder with the task and the clicked direction', () => {
+      const onReorder = vi.fn();
+      const task = makeTask();
+      render(<CardActionsMenu task={task} onReorder={onReorder} canMoveUp canMoveDown />);
+      // The menu closes on select — reopen before each click.
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      fireEvent.click(screen.getByText('Move up'));
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      fireEvent.click(screen.getByText('Move down'));
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      fireEvent.click(screen.getByText('Move to top'));
+      expect(onReorder.mock.calls).toEqual([
+        [task, 'up'],
+        [task, 'down'],
+        [task, 'top'],
+      ]);
+    });
+
+    it('disables Move up and Move to top on the first card (canMoveUp=false)', () => {
+      const onReorder = vi.fn();
+      render(
+        <CardActionsMenu task={makeTask()} onReorder={onReorder} canMoveUp={false} canMoveDown />,
+      );
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      expect(screen.getByText('Move up').closest('button')).toBeDisabled();
+      expect(screen.getByText('Move to top').closest('button')).toBeDisabled();
+      expect(screen.getByText('Move down').closest('button')).toBeEnabled();
+      // A click on a disabled item never fires the callback.
+      fireEvent.click(screen.getByText('Move up'));
+      expect(onReorder).not.toHaveBeenCalled();
+    });
+
+    it('disables Move down on the last card (canMoveDown=false)', () => {
+      const onReorder = vi.fn();
+      render(
+        <CardActionsMenu task={makeTask()} onReorder={onReorder} canMoveUp canMoveDown={false} />,
+      );
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      expect(screen.getByText('Move down').closest('button')).toBeDisabled();
+      expect(screen.getByText('Move up').closest('button')).toBeEnabled();
+      expect(screen.getByText('Move to top').closest('button')).toBeEnabled();
+      fireEvent.click(screen.getByText('Move down'));
+      expect(onReorder).not.toHaveBeenCalled();
+    });
+
+    it('keeps the Move items enabled while the card has an active run (rank-only write)', () => {
+      render(
+        <CardActionsMenu
+          task={makeTask({ inFlow: [{ agent: 'planner', runId: 'r1', stepId: null }] })}
+          onReorder={vi.fn()}
+          canMoveUp
+          canMoveDown
+        />,
+      );
+      fireEvent.click(screen.getByTestId('task-actions-trigger'));
+      expect(screen.getByText('Move up').closest('button')).toBeEnabled();
+      expect(screen.getByText('Move down').closest('button')).toBeEnabled();
+      expect(screen.getByText('Move to top').closest('button')).toBeEnabled();
+    });
   });
 });

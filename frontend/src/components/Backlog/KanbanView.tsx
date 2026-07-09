@@ -14,6 +14,11 @@
  * call preventDefault, so the browser rejects the drop and `drop` never fires.
  * Drag state clears in `dragend` (which fires even on cancelled drags), never
  * in `drop`.
+ *
+ * The card ⋯ menu's Move up / Move down / Move to top (WCAG 2.5.7 alternative
+ * to DnD) are wired here too: the bucket index is at hand, so this layer owns
+ * the direction→post-move-index translation and funnels into the SAME
+ * `onReorder` — no second write path.
  */
 import { Fragment, useState } from 'react';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
@@ -24,9 +29,9 @@ interface KanbanViewProps {
   buckets: StageBucket[];
   onRun: (task: BacklogTaskItem) => void;
   /**
-   * Re-rank `task` to `targetIndex` — its desired POST-DROP index within its
-   * own stage column. DnD-independent (a follow-up card context menu reuses
-   * the same core for Move up/down/to top).
+   * Re-rank `task` to `targetIndex` — its desired POST-MOVE index within its
+   * own stage column. DnD-independent: both drag-and-drop and the card menu's
+   * Move up / down / to top funnel into this one callback.
    */
   onReorder: (task: BacklogTaskItem, targetIndex: number) => void;
   launchingTaskId: string | null;
@@ -166,6 +171,13 @@ export function KanbanView({ buckets, onRun, onReorder, launchingTaskId, now }: 
                       onRun={onRun}
                       launchingTaskId={launchingTaskId}
                       now={now}
+                      // Menu reorder: translate direction → post-move index here
+                      // (the bucket index is at hand) and reuse the DnD callback.
+                      onReorder={(t, dir) =>
+                        onReorder(t, dir === 'top' ? 0 : dir === 'up' ? index - 1 : index + 1)
+                      }
+                      canMoveUp={index > 0}
+                      canMoveDown={index < tasks.length - 1}
                     />
                   </div>
                 </Fragment>

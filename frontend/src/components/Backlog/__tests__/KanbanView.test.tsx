@@ -11,6 +11,10 @@
  *   - cross-column dragover does NOT preventDefault and a cross-column drop is
  *     a no-op;
  *   - dragend clears the drag state (indicator gone, later drop inert).
+ *
+ * Context-menu reorder (WCAG 2.5.7): KanbanView owns the direction→post-move
+ * index translation — the stub's buttons stand in for the card menu's Move
+ * items, and canMoveUp/canMoveDown thread the bucket position.
  */
 import '@testing-library/jest-dom';
 import { render, screen, fireEvent, within } from '@testing-library/react';
@@ -18,10 +22,37 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { BacklogTaskItem, BoardStage } from '../../../../../shared/types/tasks';
 import type { StageBucket } from '../backlogSelectors';
 
-// Stub the card body — KanbanView owns the drag wrapper, not the card.
+// Stub the card body — KanbanView owns the drag wrapper + the direction→index
+// translation for the menu's Move items, not the card. The stub exposes the
+// threaded reorder props as buttons/attributes so the translation is testable.
 vi.mock('../TaskCard', () => ({
-  BoardCard: ({ task }: { task: BacklogTaskItem }) => (
-    <div data-testid="board-card">{task.title}</div>
+  BoardCard: ({
+    task,
+    onReorder,
+    canMoveUp,
+    canMoveDown,
+  }: {
+    task: BacklogTaskItem;
+    onReorder?: (task: BacklogTaskItem, dir: 'up' | 'down' | 'top') => void;
+    canMoveUp?: boolean;
+    canMoveDown?: boolean;
+  }) => (
+    <div
+      data-testid="board-card"
+      data-can-move-up={String(canMoveUp)}
+      data-can-move-down={String(canMoveDown)}
+    >
+      {task.title}
+      <button type="button" data-testid="menu-move-up" onClick={() => onReorder?.(task, 'up')}>
+        up
+      </button>
+      <button type="button" data-testid="menu-move-down" onClick={() => onReorder?.(task, 'down')}>
+        down
+      </button>
+      <button type="button" data-testid="menu-move-top" onClick={() => onReorder?.(task, 'top')}>
+        top
+      </button>
+    </div>
   ),
 }));
 
@@ -184,5 +215,40 @@ describe('KanbanView drag-and-drop', () => {
     // Insert-before its own slot → same final index → no callback.
     fireEvent.drop(slotOf('t2'), { dataTransfer: dataTransfer() });
     expect(onReorder).not.toHaveBeenCalled();
+  });
+});
+
+describe('KanbanView context-menu reorder (Move up / down / to top)', () => {
+  it('translates "up" to index-1, "down" to index+1 and "top" to 0', () => {
+    renderView();
+    // t2 sits at index 1 of the Idea column.
+    fireEvent.click(within(slotOf('t2')).getByTestId('menu-move-up'));
+    expect(onReorder).toHaveBeenLastCalledWith(IDEA_TASKS[1], 0);
+    fireEvent.click(within(slotOf('t2')).getByTestId('menu-move-down'));
+    expect(onReorder).toHaveBeenLastCalledWith(IDEA_TASKS[1], 2);
+    // t3 (index 2) to top → 0.
+    fireEvent.click(within(slotOf('t3')).getByTestId('menu-move-top'));
+    expect(onReorder).toHaveBeenLastCalledWith(IDEA_TASKS[2], 0);
+    expect(onReorder).toHaveBeenCalledTimes(3);
+  });
+
+  it('threads canMoveUp/canMoveDown from the bucket position', () => {
+    renderView();
+    // First card of the Idea column: cannot move up, can move down.
+    const first = within(slotOf('t1')).getByTestId('board-card');
+    expect(first).toHaveAttribute('data-can-move-up', 'false');
+    expect(first).toHaveAttribute('data-can-move-down', 'true');
+    // Middle card: both.
+    const middle = within(slotOf('t2')).getByTestId('board-card');
+    expect(middle).toHaveAttribute('data-can-move-up', 'true');
+    expect(middle).toHaveAttribute('data-can-move-down', 'true');
+    // Last card: cannot move down.
+    const last = within(slotOf('t3')).getByTestId('board-card');
+    expect(last).toHaveAttribute('data-can-move-up', 'true');
+    expect(last).toHaveAttribute('data-can-move-down', 'false');
+    // Sole card of the Ready column: neither.
+    const sole = within(slotOf('r1')).getByTestId('board-card');
+    expect(sole).toHaveAttribute('data-can-move-up', 'false');
+    expect(sole).toHaveAttribute('data-can-move-down', 'false');
   });
 });
