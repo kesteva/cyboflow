@@ -455,6 +455,7 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
     expect(screen.getByRole('option', { name: /Codex SDK/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
     expect(screen.getByText(/Codex SDK starts workflow runs/i)).toBeInTheDocument();
+    expect(screen.getByText('Native Claude classifier')).toBeInTheDocument();
   });
 
   it("forwards the default substrate ('sdk') in the runs.start.mutate payload", async () => {
@@ -517,6 +518,9 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
     });
 
     expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
+    expect(screen.getByText('Codex decides when to ask')).toBeInTheDocument();
+    expect(screen.getByText(/Cyboflow review-queue permission prompts are Claude-only/i)).toBeInTheDocument();
+    expect(screen.queryByText('Native Claude classifier')).toBeNull();
     const startRunBtn = await findEnabledStartRun();
     expect(screen.getByTestId('quick-session-button')).toBeDisabled();
 

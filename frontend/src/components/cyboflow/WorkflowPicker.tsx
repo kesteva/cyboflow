@@ -437,7 +437,11 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           host session's mode (the sole execution authority), affecting later chat
           and later flows in that session; the launch still stamps the audit-only
           permission_mode_snapshot. Omitted → the session mode is left untouched. */}
-      <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
+      <AgentPermissionModeSelector
+        value={permissionMode}
+        onChange={setPermissionMode}
+        agentProvider={selectedProvider}
+      />
 
       {/* Per-run model selector — pins the model a workflow run (or quick session)
           spawns with (default Opus). Workflow: threaded into runs.start as `model`

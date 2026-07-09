@@ -318,6 +318,7 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     expect(screen.getByTestId('wizard-new-flow')).toBeInTheDocument();
     // Permission selector + summary always present.
     expect(screen.getByLabelText('Permission mode: Auto')).toBeInTheDocument();
+    expect(screen.getByText('Native Claude classifier')).toBeInTheDocument();
     expect(screen.getByTestId('wizard-launch-summary')).toBeInTheDocument();
   });
 
@@ -666,6 +667,9 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     });
 
     expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
+    expect(screen.getByText('Codex decides when to ask')).toBeInTheDocument();
+    expect(screen.getByText(/Cyboflow review-queue permission prompts are Claude-only/i)).toBeInTheDocument();
+    expect(screen.queryByText('Native Claude classifier')).toBeNull();
     expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('Codex SDK');
 
     await act(async () => {

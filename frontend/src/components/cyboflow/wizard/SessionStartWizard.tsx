@@ -971,15 +971,6 @@ export default function SessionStartWizard(): React.JSX.Element {
           <div className="flex flex-col gap-4" data-testid="wizard-step3">
             {projectBannerCard}
 
-            {/* Session permission — shown for BOTH workflow and quick launches; an
-                explicit choice writes the host session's agent_permission_mode (the
-                sole execution authority) for either launch kind. The wrapper divs
-                here and below carry the onboarding coachmark anchors (tour steps
-                5-7 point at these three controls). */}
-            <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.sessionPermission }}>
-              <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
-            </div>
-
             {/* Agent runtime — shown before the model because runtime controls
                 which model family is available. Workflow launches allow workflow
                 runtimes only; quick launches also allow Codex PTY. Hidden for Ultracode, which always uses Claude
@@ -995,6 +986,18 @@ export default function SessionStartWizard(): React.JSX.Element {
                 />
               </div>
             )}
+
+            {/* Session permission — shown for BOTH workflow and quick launches; an
+                explicit choice writes the host session's agent_permission_mode (the
+                sole execution authority) for either launch kind. Provider-specific
+                copy stays below runtime because runtime controls the provider. */}
+            <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.sessionPermission }}>
+              <AgentPermissionModeSelector
+                value={permissionMode}
+                onChange={setPermissionMode}
+                agentProvider={effectiveProvider}
+              />
+            </div>
 
             {/* Model picker — shown for ALL launch kinds and scoped to the selected
                 runtime/provider. Quick + ultracode thread it into useQuickSession
