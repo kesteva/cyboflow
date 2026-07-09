@@ -48,6 +48,12 @@ export interface CodexClientLike {
 
 export type CodexClientFactory = (options?: CodexOptions) => CodexClientLike | Promise<CodexClientLike>;
 
+export interface CodexMcpRuntimeConfig {
+  orchSocketPath: string;
+  bridgeScriptPath: string;
+  nodeExecutablePath: string;
+}
+
 interface ActiveCodexRun {
   abortController: AbortController;
   panelId: string;
@@ -111,9 +117,30 @@ function codexThreadOptions(
   return threadOptions;
 }
 
+function buildCyboflowMcpCodexConfig(
+  runId: string,
+  runtimeConfig: CodexMcpRuntimeConfig,
+): NonNullable<CodexOptions['config']> {
+  return {
+    mcp_servers: {
+      cyboflow: {
+        command: runtimeConfig.nodeExecutablePath,
+        args: [runtimeConfig.bridgeScriptPath],
+        env: {
+          CYBOFLOW_RUN_ID: runId,
+          CYBOFLOW_ORCH_SOCKET: runtimeConfig.orchSocketPath,
+        },
+        required: true,
+        default_tools_approval_mode: 'approve',
+      },
+    },
+  };
+}
+
 export class CodexSdkManager extends AbstractCliManager {
   private readonly activeRuns = new Map<string, ActiveCodexRun>();
   private readonly spawnKeysByPanelId = new Map<string, Set<string>>();
+  private cyboflowMcpRuntimeConfig: CodexMcpRuntimeConfig | null = null;
 
   constructor(
     sessionManager: SessionManager,
@@ -130,6 +157,10 @@ export class CodexSdkManager extends AbstractCliManager {
 
   protected getCliToolName(): string {
     return 'Codex SDK';
+  }
+
+  setCyboflowMcpRuntimeConfig(config: CodexMcpRuntimeConfig): void {
+    this.cyboflowMcpRuntimeConfig = config;
   }
 
   protected async testCliAvailability(): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {
@@ -246,7 +277,7 @@ export class CodexSdkManager extends AbstractCliManager {
       this.emitProjected(router, runId, displayPanelId, options.sessionId, this.buildSessionInfo(options));
       this.emit('spawned', { panelId: displayPanelId, sessionId: options.sessionId });
 
-      const client = await this.createCodexClient();
+      const client = await this.createCodexClient(this.buildCodexOptions(runId));
       const thread = options.resumeSessionId
         ? client.resumeThread(options.resumeSessionId, threadOptions)
         : client.startThread(threadOptions);
@@ -500,9 +531,19 @@ export class CodexSdkManager extends AbstractCliManager {
       cwd: options.worktreePath,
       model: this.displayModel(threadOptions.model),
       tools: [],
-      mcp_servers: [],
+      mcp_servers: [{ name: 'cyboflow', status: 'connected' }],
       permissionMode: options.agentPermissionMode ?? 'default',
       claude_code_version: '@openai/codex-sdk',
+    };
+  }
+
+  private buildCodexOptions(runId: string): CodexOptions {
+    if (!this.cyboflowMcpRuntimeConfig) {
+      throw new Error('Codex SDK manager missing Cyboflow MCP runtime config');
+    }
+
+    return {
+      config: buildCyboflowMcpCodexConfig(runId, this.cyboflowMcpRuntimeConfig),
     };
   }
 
