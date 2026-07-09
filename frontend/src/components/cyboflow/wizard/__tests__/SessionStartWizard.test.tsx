@@ -15,7 +15,7 @@
  *      + `substrate` into API.sessions.createQuick.
  */
 import '@testing-library/jest-dom';
-import { render, screen, act, fireEvent } from '@testing-library/react';
+import { render, screen, act, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
@@ -312,8 +312,8 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     const modelSelect = screen.getByLabelText('Select Claude model');
     expect(runtimeSelect).toBeInTheDocument();
     expect(runtimeSelect.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
-    expect(screen.queryByRole('option', { name: /Codex PTY/i })).toBeNull();
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex PTY/i })).toBeDisabled();
     expect(screen.getByTestId('wizard-edit-flow')).toBeInTheDocument();
     expect(screen.getByTestId('wizard-new-flow')).toBeInTheDocument();
     // Permission selector + summary always present.
@@ -657,6 +657,37 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     );
   });
 
+  it('threads Codex SDK into a workflow launch without a Claude substrate', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
+    });
+
+    expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
+    expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('Codex SDK');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    const startArg = mockRunStart.mock.calls[0][0] as Record<string, unknown>;
+    expect(startArg).toEqual(
+      expect.objectContaining({
+        workflowId: 'wf-1',
+        projectId: 1,
+        sessionId: 'session-ensured-001',
+        agentProvider: 'codex',
+        agentRuntime: 'codex-sdk',
+        permissionMode: 'default',
+        model: 'auto',
+      }),
+    );
+    expect(startArg).not.toHaveProperty('substrate');
+  });
+
   it('seeds the permission selector from the global default', async () => {
     act(() => {
       useConfigStore.setState({ config: { defaultAgentPermissionMode: 'dontAsk' } as unknown as AppConfig });
@@ -708,6 +739,41 @@ describe('SessionStartWizard — step ③ launch threading', () => {
         agentRuntime: 'claude-interactive',
       }),
     );
+  });
+
+  it('does not carry Codex SDK from workflow configure into a quick-session launch', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
+    });
+    expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-back-to-workflow'));
+    });
+    await selectQuickAndConfigure();
+
+    const runtimeSelect = screen.getByLabelText('Select agent runtime') as HTMLSelectElement;
+    await waitFor(() => expect(runtimeSelect.value).toBe('claude-sdk'));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(mockRunStart).not.toHaveBeenCalled();
+    expect(mockCreateQuick).toHaveBeenCalledOnce();
+    const quickArg = mockCreateQuick.mock.calls[0][0] as unknown as Record<string, unknown>;
+    expect(quickArg).toEqual(
+      expect.objectContaining({
+        projectId: 1,
+        substrate: 'sdk',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
+      }),
+    );
+    expect(quickArg.agentRuntime).not.toBe('codex-sdk');
   });
 
   it('defaults the model to Opus, surfaces the fast-mode toggle (off), and threads both on launch', async () => {

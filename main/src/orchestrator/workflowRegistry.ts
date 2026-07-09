@@ -18,6 +18,7 @@ import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
 import { isCyboflowWorkflowName, resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
+import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
 import { claudeRuntimeFromSubstrate } from '../../../shared/types/agentRuntime';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type {
@@ -973,6 +974,8 @@ export class WorkflowRegistry {
        * threaded from a launch surface.)
        */
       verifyDeliverable?: VerificationRequestInput | null;
+      requestedAgentProvider?: AgentProvider;
+      requestedAgentRuntime?: WorkflowAgentRuntime;
     },
   ): { runId: string; permissionMode: PermissionMode; substrate: CliSubstrate; executionModel: ExecutionModel } {
     const workflow = this.getById(workflowId);
@@ -1021,6 +1024,47 @@ export class WorkflowRegistry {
       globalDefaultMode: this.config?.getDefaultAgentPermissionMode(),
     });
 
+    // Provider/runtime are the forward-compatible agent route. During the
+    // migration window, Claude runtimes project to the legacy substrate and a
+    // Codex SDK workflow stores provider/runtime while keeping substrate='sdk'
+    // for compatibility with substrate-only caps, session stamps, and dispatch
+    // seams. Omitted provider/runtime stays Claude and preserves the existing
+    // substrate resolver behavior.
+    const requestedAgentProvider = opts?.requestedAgentProvider;
+    const requestedAgentRuntime = opts?.requestedAgentRuntime;
+    if (
+      requestedAgentProvider === 'codex' &&
+      requestedAgentRuntime !== undefined &&
+      requestedAgentRuntime !== 'codex-sdk'
+    ) {
+      throw new Error(
+        `WorkflowRegistry.createRun: agentProvider codex conflicts with agentRuntime ${requestedAgentRuntime}`,
+      );
+    }
+    if (requestedAgentProvider === 'claude' && requestedAgentRuntime === 'codex-sdk') {
+      throw new Error(
+        'WorkflowRegistry.createRun: agentProvider claude conflicts with agentRuntime codex-sdk',
+      );
+    }
+    const codexSdkRequested =
+      requestedAgentProvider === 'codex' || requestedAgentRuntime === 'codex-sdk';
+    const substrateFromRuntime: CliSubstrate | undefined =
+      requestedAgentRuntime === 'claude-interactive'
+        ? 'interactive'
+        : requestedAgentRuntime === 'claude-sdk' || codexSdkRequested
+          ? 'sdk'
+          : undefined;
+    if (
+      requestedSubstrate !== undefined &&
+      substrateFromRuntime !== undefined &&
+      requestedSubstrate !== substrateFromRuntime
+    ) {
+      throw new Error(
+        `WorkflowRegistry.createRun: substrate ${requestedSubstrate} conflicts with agentRuntime ${requestedAgentRuntime}`,
+      );
+    }
+    const substrateRequest = requestedSubstrate ?? substrateFromRuntime;
+
     // Resolve the substrate via the override ladder. The explicit per-run UI
     // choice (requestedSubstrate, from WorkflowPicker → runs.start →
     // RunLauncher.launch) is the HIGHEST-precedence level and is threaded here.
@@ -1042,16 +1086,23 @@ export class WorkflowRegistry {
     const demoHonorsInteractive =
       forcedSubstrate === 'sdk' &&
       workflow.name === QUICK_WORKFLOW_NAME &&
-      requestedSubstrate === 'interactive';
+      substrateRequest === 'interactive';
     const substrate = demoHonorsInteractive
       ? 'interactive'
       : forcedSubstrate ?? resolveSubstrate({
-          requestedSubstrate,
+          requestedSubstrate: substrateRequest,
           globalDefaultSubstrate: this.config?.getDefaultSubstrate(),
           env: process.env,
         });
-    const agentProvider = 'claude';
-    const agentRuntime = claudeRuntimeFromSubstrate(substrate);
+    if (codexSdkRequested && substrate !== 'sdk') {
+      throw new Error(
+        `WorkflowRegistry.createRun: codex-sdk workflow runs require sdk substrate compatibility (got ${substrate})`,
+      );
+    }
+    const agentProvider: AgentProvider = codexSdkRequested ? 'codex' : 'claude';
+    const agentRuntime: WorkflowAgentRuntime = codexSdkRequested
+      ? 'codex-sdk'
+      : claudeRuntimeFromSubstrate(substrate);
 
     // Resolve the execution model (orchestrated vs programmatic) — the sibling
     // immutable stamp that decides WHO walks the run's DAG. The interactive

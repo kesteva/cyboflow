@@ -32,6 +32,7 @@ import type { LaunchAgentRuntime } from './agentRuntimeUi';
 import {
   isCodexRuntime,
   providerForRuntime,
+  quickSessionRuntimeForLaunch,
   substrateForRuntime,
   workflowRuntimeForLaunch,
 } from './agentRuntimeUi';
@@ -60,8 +61,9 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
 
   /**
    * The per-launch agent runtime choice. Claude runtimes project onto the legacy
-   * substrate field; Codex PTY is quick-session-only and disables Start Run on
-   * this mixed launch surface while leaving Quick Session available.
+   * substrate field. On this mixed launch surface, Codex SDK is workflow-only
+   * and disables Quick Session; Codex PTY is quick-session-only and disables
+   * Start Run.
    */
   const [agentRuntime, setAgentRuntime] = useState<LaunchAgentRuntime>(DEFAULT_SESSION_AGENT_RUNTIME);
 
@@ -370,8 +372,29 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
     [selectedId, launchRun],
   );
 
+  const handleQuickSession = useCallback(() => {
+    const sessionRuntime = quickSessionRuntimeForLaunch(agentRuntime);
+    if (sessionRuntime === null) {
+      setError('Codex SDK is available for workflow runs only. Choose Codex PTY or a Claude runtime for Quick Session.');
+      return;
+    }
+    void startQuickSession(
+      permissionMode,
+      substrateForRuntime(sessionRuntime),
+      undefined,
+      model,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      providerForRuntime(sessionRuntime),
+      sessionRuntime,
+    );
+  }, [agentRuntime, model, permissionMode, startQuickSession]);
+
   const combinedError = error ?? quickError;
   const workflowRuntimeBlocked = workflowRuntimeForLaunch(agentRuntime) === null;
+  const quickRuntimeBlocked = quickSessionRuntimeForLaunch(agentRuntime) === null;
   const selectedSubstrate = substrateForRuntime(agentRuntime);
   const selectedProvider = providerForRuntime(agentRuntime);
 
@@ -428,7 +451,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       />
       {workflowRuntimeBlocked && (
         <p className="text-xs text-text-tertiary">
-          Codex PTY is quick-session-only. Pick a Claude runtime before starting a workflow run.
+          Codex PTY is quick-session-only. Pick Codex SDK or a Claude runtime before starting a workflow run.
         </p>
       )}
 
@@ -511,22 +534,14 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
 
       <div className="mt-2 flex flex-col gap-2 border-t border-border-primary pt-3">
         <p className="text-xs text-text-secondary">Or start without a workflow:</p>
+        {quickRuntimeBlocked && (
+          <p className="text-xs text-text-tertiary">
+            Codex SDK is workflow-only. Pick Codex PTY or a Claude runtime for Quick Session.
+          </p>
+        )}
         <button
-          onClick={() =>
-            void startQuickSession(
-              permissionMode,
-              selectedSubstrate,
-              undefined,
-              model,
-              undefined,
-              undefined,
-              undefined,
-              undefined,
-              selectedProvider,
-              agentRuntime,
-            )
-          }
-          disabled={isQuickStarting || isStarting}
+          onClick={handleQuickSession}
+          disabled={isQuickStarting || isStarting || quickRuntimeBlocked}
           className="rounded-button border border-interactive bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="quick-session-button"
         >

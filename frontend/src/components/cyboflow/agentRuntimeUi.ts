@@ -21,6 +21,10 @@ export function workflowRuntimeForLaunch(runtime: LaunchAgentRuntime): WorkflowA
   return runtime === 'codex-pty' ? null : runtime;
 }
 
+export function quickSessionRuntimeForLaunch(runtime: LaunchAgentRuntime): SessionAgentRuntime | null {
+  return runtime === 'codex-sdk' ? null : runtime;
+}
+
 export function isCodexRuntime(runtime: LaunchAgentRuntime): boolean {
   return providerForRuntime(runtime) === 'codex';
 }

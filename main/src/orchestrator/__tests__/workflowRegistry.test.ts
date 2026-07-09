@@ -829,6 +829,44 @@ describe('WorkflowRegistry', () => {
       });
     });
 
+    it("stamps codex-sdk workflow requests as provider/runtime while keeping substrate 'sdk'", async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'codex-sdk-workflow.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'codex',
+          requestedAgentRuntime: 'codex-sdk',
+        });
+
+        expect(result.substrate).toBe('sdk');
+        const run = registry.getRunById(result.runId);
+        expect(run).not.toBeNull();
+        expect(run!.substrate).toBe('sdk');
+        expect(run!.agent_provider).toBe('codex');
+        expect(run!.agent_runtime).toBe('codex-sdk');
+      });
+    });
+
+    it('rejects codex-sdk workflow requests that also request the interactive substrate', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'codex-sdk-interactive-conflict.md', '---\n---\n');
+        registry.seed(1, [{ name: 'sprint', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+        expect(() =>
+          registry.createRun(workflowId, 'interactive', TEST_SESSION_ID, undefined, {
+            requestedAgentProvider: 'codex',
+            requestedAgentRuntime: 'codex-sdk',
+          }),
+        ).toThrow(/substrate interactive conflicts with agentRuntime codex-sdk/);
+      });
+    });
+
     // ───── execution_model stamping (migration 032) ─────
 
     it("stamps the default execution model 'orchestrated' when no override is set (zero-behavior-change)", async () => {

@@ -5,15 +5,15 @@
  * pin can produce (null / 'interactive' / 'sdk').
  *
  * Behaviors verified:
- *   1. No pin (null) → normal <select> with enabled Claude options and disabled
- *      Codex roadmap options; value NOT force-synced.
+ *   1. No pin (null) → normal <select> with scope-aware Codex availability;
+ *      value NOT force-synced.
  *   2. interactivePtyOnly lock ('interactive') → read-only locked UI + caveats,
  *      and the controlled value is synced to 'interactive' via onChange.
  *   3. Demo pin ('sdk') → normal <select> (NOT the "interactive locked" UI) and
  *      the value is left alone, so demo never falsely claims interactive.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 
 const { mockUseForcedSubstrate } = vi.hoisted(() => ({
   mockUseForcedSubstrate: vi.fn<() => 'sdk' | 'interactive' | null>(() => null),
@@ -31,23 +31,36 @@ beforeEach(() => {
 });
 
 describe('SubstrateSelector — no forced pin', () => {
-  it('renders the select with disabled Codex workflow runtimes and does not force-sync the value', () => {
+  it('renders workflow runtimes with Codex SDK enabled and Codex PTY disabled', () => {
     const onChange = vi.fn();
     render(<SubstrateSelector value="claude-sdk" onChange={onChange} />);
 
     expect(screen.getByRole('combobox', { name: /select agent runtime/i })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /Claude SDK/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /Claude interactive/i })).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
-    expect(screen.queryByRole('option', { name: /Codex PTY/i })).toBeNull();
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex PTY/i })).toBeDisabled();
+    expect(screen.getByText(/Codex SDK can run workflows/i)).toBeInTheDocument();
     expect(screen.queryByTestId('substrate-locked')).not.toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it('shows Codex PTY only for session-capable runtime scopes, enabled', () => {
+  it('renders quick-session runtimes with Codex SDK disabled and Codex PTY enabled', () => {
     render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="session" />);
 
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
+    expect(screen.getByText(/Codex PTY can start quick sessions/i)).toBeInTheDocument();
+  });
+
+  it('ignores programmatic changes to a runtime disabled for the current scope', () => {
+    const onChange = vi.fn();
+    render(<SubstrateSelector value="claude-sdk" onChange={onChange} runtimeScope="session" />);
+
+    fireEvent.change(screen.getByRole('combobox', { name: /select agent runtime/i }), {
+      target: { value: 'codex-sdk' },
+    });
+    expect(onChange).not.toHaveBeenCalled();
   });
 });
 

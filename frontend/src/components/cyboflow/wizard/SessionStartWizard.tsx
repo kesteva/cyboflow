@@ -92,6 +92,7 @@ import type { LaunchAgentRuntime } from '../agentRuntimeUi';
 import {
   isCodexRuntime,
   providerForRuntime,
+  quickSessionRuntimeForLaunch,
   substrateForRuntime,
   workflowRuntimeForLaunch,
 } from '../agentRuntimeUi';
@@ -234,6 +235,9 @@ export default function SessionStartWizard(): React.JSX.Element {
   const [fastMode, setFastMode] = useState<boolean>(false);
   useEffect(() => {
     if (selection?.kind === 'workflow' && agentRuntime === 'codex-pty') {
+      setAgentRuntime(DEFAULT_SESSION_AGENT_RUNTIME);
+    }
+    if (selection?.kind === 'quick' && quickSessionRuntimeForLaunch(agentRuntime) === null) {
       setAgentRuntime(DEFAULT_SESSION_AGENT_RUNTIME);
     }
   }, [selection?.kind, agentRuntime]);
@@ -682,6 +686,11 @@ export default function SessionStartWizard(): React.JSX.Element {
     if (selection === null || startInFlightRef.current) return;
 
     if (selection.kind === 'quick') {
+      const sessionRuntime = quickSessionRuntimeForLaunch(agentRuntime);
+      if (sessionRuntime === null) {
+        setLaunchError('Codex SDK is available for workflow runs only. Choose Codex PTY or a Claude runtime for a quick session.');
+        return;
+      }
       // Fast mode is Opus-only; never request it for another model even if the
       // toggle was left on before the model was switched.
       //
@@ -692,8 +701,8 @@ export default function SessionStartWizard(): React.JSX.Element {
       // it — `undefined` (unchanged) leaves the column NULL (inherit); an explicit
       // array (incl []) pins the exclusive set for the session.
       const pluginSelection = sameStringSet(enabledPlugins, pluginBaseline) ? undefined : enabledPlugins;
-      const quickSubstrate = substrateForRuntime(agentRuntime);
-      const quickProvider = providerForRuntime(agentRuntime);
+      const quickSubstrate = substrateForRuntime(sessionRuntime);
+      const quickProvider = providerForRuntime(sessionRuntime);
       void startQuickSession(
         permissionMode,
         quickSubstrate,
@@ -706,7 +715,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         // global default); an explicit choice threads into sessions.in_place.
         worktreeModeOverride !== 'inherit' ? worktreeModeOverride : undefined,
         quickProvider,
-        agentRuntime,
+        sessionRuntime,
       );
       return;
     }
@@ -1331,7 +1340,9 @@ export default function SessionStartWizard(): React.JSX.Element {
                     ? 'Claude interactive (PTY)'
                     : effectiveRuntime === 'codex-pty'
                       ? 'Codex PTY'
-                      : 'Claude SDK'
+                      : effectiveRuntime === 'codex-sdk'
+                        ? 'Codex SDK'
+                        : 'Claude SDK'
                 }
               />
               <SummaryRow

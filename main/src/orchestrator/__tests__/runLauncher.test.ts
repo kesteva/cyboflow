@@ -382,6 +382,70 @@ describe('RunLauncher.launch', () => {
     });
   });
 
+  it('threads the per-run agent provider/runtime into WorkflowRegistry.createRun opts', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = sessionHostedDb();
+      const adapter = dbAdapter(db);
+      const logger = makeSpyLogger();
+
+      const seedWorkflowId = randomUUID();
+      db.prepare(
+        "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, 'sprint', '/fake/path.md', 'default')",
+      ).run(seedWorkflowId);
+      interface IdRow { id: string }
+      const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
+
+      seedSession(db, 'sess-1', join(tmpDir, 'wt'));
+
+      const cannedRunId = randomUUID().replace(/-/g, '');
+      const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate, sessionId?: string) => {
+        db.prepare(
+          "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+        ).run(cannedRunId, workflowId, 1, sessionId ?? null);
+        return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
+      });
+      const realRegistry = {
+        getById: (id: string) =>
+          db.prepare('SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?').get(id) ?? null,
+        createRun: createRunSpy,
+      } as unknown as WorkflowRegistry;
+
+      const { worktree: fakeWorktree } = sessionWorktreeStub('cyboflow/sprint/x');
+
+      const launcher = new RunLauncher(adapter, realRegistry, fakeWorktree, logger, fakeMcpConfigWriter, fakeOrchSocketProvider, fakeBridgeScriptResolver, fakeNodeResolver);
+
+      await launcher.launch(
+        workflowId,
+        tmpDir,
+        'sdk',
+        undefined,
+        undefined,
+        'sess-1',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'codex',
+        'codex-sdk',
+      );
+
+      expect(createRunSpy).toHaveBeenCalledWith(
+        workflowId,
+        'sdk',
+        'sess-1',
+        undefined,
+        {
+          requestedAgentProvider: 'codex',
+          requestedAgentRuntime: 'codex-sdk',
+        },
+      );
+    });
+  });
+
   it('threads the per-run agent permission choice into WorkflowRegistry.createRun', async () => {
     await withTempDir('runlauncher-test-', async (tmpDir) => {
       const db = sessionHostedDb();

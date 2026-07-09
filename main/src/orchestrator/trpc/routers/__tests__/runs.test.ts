@@ -336,6 +336,116 @@ describe('cyboflow.runs.start', () => {
     }
   });
 
+  it('accepts codex-sdk workflows and forwards the SDK substrate compatibility stamp plus provider/runtime', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-codex',
+      worktreePath: '/tmp/wt/codex',
+      branchName: 'cyboflow/sprint/codex123',
+    });
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({
+        workflowId: 'wf-sprint',
+        projectId: 1,
+        sessionId: 'sess-1',
+        agentProvider: 'codex',
+        agentRuntime: 'codex-sdk',
+      });
+
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock).toHaveBeenCalledWith(
+        'wf-sprint',
+        '/projects/my-project',
+        'sdk',
+        undefined,
+        undefined,
+        'sess-1',
+        undefined,
+        undefined,
+        undefined,
+        1,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'codex',
+        'codex-sdk',
+      );
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  it('rejects codex-sdk workflows when paired with the interactive substrate', async () => {
+    const launchMock = vi.fn();
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-sprint',
+          projectId: 1,
+          sessionId: 'sess-1',
+          substrate: 'interactive',
+          agentProvider: 'codex',
+          agentRuntime: 'codex-sdk',
+        }),
+      ).rejects.toSatisfy(
+        (err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST',
+      );
+      expect(launchMock).not.toHaveBeenCalled();
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  it('rejects codex-pty on workflow launches at the tRPC boundary', async () => {
+    const launchMock = vi.fn();
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-sprint',
+          projectId: 1,
+          sessionId: 'sess-1',
+          // @ts-expect-error deliberate invalid workflow runtime; zod must reject it.
+          agentRuntime: 'codex-pty',
+        }),
+      ).rejects.toSatisfy(
+        (err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST',
+      );
+      expect(launchMock).not.toHaveBeenCalled();
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
   // -------------------------------------------------------------------------
   // (a2) ideaId supplied (migration 017) → full-form launch with the seed idea.
   // -------------------------------------------------------------------------

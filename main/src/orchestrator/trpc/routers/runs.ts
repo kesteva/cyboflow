@@ -26,6 +26,7 @@ import { withRunFileErrorMapping } from '../runFileErrors';
 import type { RunFileEntry, RunFileContent, RunGitDiff } from '../../../../../shared/types/runFiles';
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
+import type { AgentProvider, WorkflowAgentRuntime } from '../../../../../shared/types/agentRuntime';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
 import type { ExperimentArm } from '../../../../../shared/types/experiments';
 import type { SprintLaneRow, SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
@@ -316,8 +317,11 @@ export interface RunLauncherLike {
    * per-run model choice (Configure surface) — a user-facing alias stamped onto
    * workflow_runs.model and resolved to a concrete snapshot at the spawn seam; when
    * omitted the run pins no model and falls through to the SDK default.
+   * `requestedAgentProvider` / `requestedAgentRuntime` carry the workflow's
+   * run-scoped agent route. Omitted means the registry keeps the Claude default;
+   * `codex-sdk` maps to legacy substrate='sdk' for compatibility.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[] }): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[] }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowAgentRuntime): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
@@ -970,16 +974,24 @@ export const runsRouter = router({
           message: `Project ${input.projectId} not found`,
         });
       }
-      if (input.agentProvider === 'codex' || input.agentRuntime === 'codex-sdk') {
+      if (input.agentProvider === 'codex' && input.agentRuntime !== undefined && input.agentRuntime !== 'codex-sdk') {
         throw new TRPCError({
-          code: 'METHOD_NOT_SUPPORTED',
-          message: 'Codex workflow runtimes are not wired yet. Use Claude for this build.',
+          code: 'BAD_REQUEST',
+          message: `agentProvider codex conflicts with agentRuntime ${input.agentRuntime}`,
         });
       }
+      if (input.agentProvider === 'claude' && input.agentRuntime === 'codex-sdk') {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'agentProvider claude conflicts with agentRuntime codex-sdk',
+        });
+      }
+      const codexSdkRequested =
+        input.agentProvider === 'codex' || input.agentRuntime === 'codex-sdk';
       const substrateFromRuntime =
         input.agentRuntime === 'claude-interactive'
           ? 'interactive'
-          : input.agentRuntime === 'claude-sdk'
+          : input.agentRuntime === 'claude-sdk' || codexSdkRequested
             ? 'sdk'
             : undefined;
       if (input.substrate && substrateFromRuntime && input.substrate !== substrateFromRuntime) {
@@ -1059,6 +1071,8 @@ export const runsRouter = router({
           }
         }
       }
+      const launchWithAgentSelection =
+        input.agentProvider !== undefined || input.agentRuntime !== undefined;
       // Forward the per-run substrate choice (IDEA-013), native-task link
       // (migration 014), planner seed idea (migration 017), session host
       // (Phase 1 / migration 019), per-run agent permission override
@@ -1075,28 +1089,7 @@ export const runsRouter = router({
       // the wizard's per-run Orchestration override (undefined = inherit the
       // resolver ladder); findingIds, requestedModel, then requestedEvalEnabled
       // (migration 044) are the LAST positional args, AFTER requestedExecutionModel.
-      const { runId, worktreePath, branchName } = await startRunDeps.runLauncher.launch(
-        input.workflowId,
-        project.path,
-        launchSubstrate,
-        input.taskId,
-        input.ideaId,
-        input.sessionId,
-        input.permissionMode,
-        undefined,
-        input.taskIds,
-        input.projectId,
-        input.executionModel,
-        input.findingIds,
-        input.model,
-        input.evalEnabled,
-        input.verifyEnabled,
-        // The trailing launchOptions object carries the A/B variant/baseline pin
-        // (migration 048) PLUS the planner multi-idea seed (IDEA-009 / migration
-        // 060). An explicit variant pin wins over a baseline pin (VariantSelector
-        // only ever sends one or the other); rotation (neither supplied) and
-        // experiment stamps are resolved/supplied elsewhere. ideaIds is orthogonal
-        // and threaded whenever supplied (planner-only; the launcher enforces that).
+      const launchOptions =
         input.variantId !== undefined || input.baseline || input.ideaIds !== undefined
           ? {
               ...(input.variantId !== undefined
@@ -1106,8 +1099,46 @@ export const runsRouter = router({
                   : {}),
               ...(input.ideaIds !== undefined ? { ideaIds: input.ideaIds } : {}),
             }
-          : undefined,
-      );
+          : undefined;
+      const { runId, worktreePath, branchName } = launchWithAgentSelection
+        ? await startRunDeps.runLauncher.launch(
+            input.workflowId,
+            project.path,
+            launchSubstrate,
+            input.taskId,
+            input.ideaId,
+            input.sessionId,
+            input.permissionMode,
+            undefined,
+            input.taskIds,
+            input.projectId,
+            input.executionModel,
+            input.findingIds,
+            input.model,
+            input.evalEnabled,
+            input.verifyEnabled,
+            launchOptions,
+            input.agentProvider,
+            input.agentRuntime,
+          )
+        : await startRunDeps.runLauncher.launch(
+            input.workflowId,
+            project.path,
+            launchSubstrate,
+            input.taskId,
+            input.ideaId,
+            input.sessionId,
+            input.permissionMode,
+            undefined,
+            input.taskIds,
+            input.projectId,
+            input.executionModel,
+            input.findingIds,
+            input.model,
+            input.evalEnabled,
+            input.verifyEnabled,
+           launchOptions,
+         );
       return { runId, worktreePath, branchName };
     }),
 

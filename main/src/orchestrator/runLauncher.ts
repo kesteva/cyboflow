@@ -23,6 +23,7 @@ import type { WorktreeManager } from '../services/worktreeManager';
 import type { DatabaseLike, LoggerLike } from './types';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
+import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import { resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { StreamEnvelope } from '../../../shared/types/claudeStream';
@@ -328,6 +329,12 @@ export class RunLauncher {
       // stays valid for planner AND ship, unchanged, and leaves seed_idea_ids NULL.
       ideaIds?: string[];
     },
+    // The user's explicit per-run AGENT PROVIDER/RUNTIME choice. Omitted means
+    // createRun keeps the Claude defaults; codex-sdk is stored as provider/runtime
+    // while retaining substrate='sdk' for compatibility with legacy substrate-only
+    // seams until the provider-neutral dispatch manager lands.
+    requestedAgentProvider?: AgentProvider,
+    requestedAgentRuntime?: WorkflowAgentRuntime,
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
 
@@ -480,7 +487,9 @@ export class RunLauncher {
       rv !== null ||
       rotationExperimentId !== null ||
       experiment !== undefined ||
-      projectVerifyConfig !== null
+      projectVerifyConfig !== null ||
+      requestedAgentProvider !== undefined ||
+      requestedAgentRuntime !== undefined
         ? {
             ...(projectId !== undefined ? { projectId } : {}),
             ...(requestedExecutionModel !== undefined ? { requestedExecutionModel } : {}),
@@ -501,6 +510,8 @@ export class RunLauncher {
               ? { experimentId: experiment.experimentId, experimentArm: experiment.arm }
               : {}),
             ...(projectVerifyConfig !== null ? { projectVerifyConfig } : {}),
+            ...(requestedAgentProvider !== undefined ? { requestedAgentProvider } : {}),
+            ...(requestedAgentRuntime !== undefined ? { requestedAgentRuntime } : {}),
           }
         : undefined;
     const { runId, permissionMode, substrate: resolvedSubstrate } = this.workflowRegistry.createRun(
