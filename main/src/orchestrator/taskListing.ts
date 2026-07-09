@@ -128,6 +128,8 @@ interface TaskDbRow {
   approved_at: string | null;
   /** A/B experiment sandbox tag (049); non-null rows are hidden by default in selectProjectBacklog. */
   experiment_id: string | null;
+  /** User-controlled manual rank (057); NULL = unranked (legacy created_at/ref order). */
+  sort_order: number | null;
   version: number;
   created_at: string;
   updated_at: string;
@@ -141,7 +143,7 @@ interface TaskDbRow {
  * column ORDER is fixed and shared by every branch (SQLite unions positionally).
  */
 const UNION_COLUMNS =
-  'id, project_id, type, ref, title, summary, body, priority, repo, parent_epic_id, originating_idea_id, scope, board_id, stage_id, archived_at, decomposed_at, approved_at, experiment_id, version, created_at, updated_at';
+  'id, project_id, type, ref, title, summary, body, priority, repo, parent_epic_id, originating_idea_id, scope, board_id, stage_id, archived_at, decomposed_at, approved_at, experiment_id, sort_order, version, created_at, updated_at';
 
 /**
  * UNION_COLUMNS prefixed with a subquery alias for joined outer SELECTs — the
@@ -167,17 +169,17 @@ function entityUnionSql(filter: EntityUnionFilter): string {
   return `
     SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, repo,
            NULL AS parent_epic_id, NULL AS originating_idea_id, scope,
-           board_id, stage_id, archived_at, decomposed_at, NULL AS approved_at, experiment_id, version, created_at, updated_at
+           board_id, stage_id, archived_at, decomposed_at, NULL AS approved_at, experiment_id, sort_order, version, created_at, updated_at
       FROM ideas${where}
     UNION ALL
     SELECT id, project_id, 'epic' AS type, ref, title, summary, body, priority, repo,
            NULL AS parent_epic_id, originating_idea_id, NULL AS scope,
-           board_id, stage_id, archived_at, NULL AS decomposed_at, approved_at, experiment_id, version, created_at, updated_at
+           board_id, stage_id, archived_at, NULL AS decomposed_at, approved_at, experiment_id, sort_order, version, created_at, updated_at
       FROM epics${where}
     UNION ALL
     SELECT id, project_id, 'task' AS type, ref, title, summary, body, priority, repo,
            parent_epic_id, originating_idea_id, NULL AS scope,
-           board_id, stage_id, archived_at, NULL AS decomposed_at, approved_at, experiment_id, version, created_at, updated_at
+           board_id, stage_id, archived_at, NULL AS decomposed_at, approved_at, experiment_id, sort_order, version, created_at, updated_at
       FROM tasks${where}`;
 }
 
@@ -492,6 +494,9 @@ function projectTaskItem(db: DatabaseLike, row: TaskDbRow): BacklogTaskItem {
     decomposed_at: row.decomposed_at,
     approved_at: row.approved_at,
     experiment_id: row.experiment_id ?? null,
+    // Manual rank (057). Same silent-drop rationale as the stamps above: the
+    // frontend orders by it, so every emit/read constructor must populate it.
+    sort_order: row.sort_order ?? null,
     version: row.version,
     stage_position: row.stage_position,
     inFlow,
@@ -532,7 +537,7 @@ export function selectTaskById(db: DatabaseLike, taskId: string): BacklogTaskIte
       .prepare(
         `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.repo,
                 t.parent_epic_id, t.originating_idea_id, NULL AS scope,
-                t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.experiment_id, t.version, t.created_at, t.updated_at,
+                t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.experiment_id, t.sort_order, t.version, t.created_at, t.updated_at,
                 COALESCE(bs.position, 0) AS stage_position
            FROM tasks t
            LEFT JOIN board_stages bs ON bs.id = t.stage_id
@@ -585,7 +590,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
          FROM (
            SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, repo,
                   NULL AS parent_epic_id, NULL AS originating_idea_id, scope,
-                  board_id, stage_id, archived_at, decomposed_at, NULL AS approved_at, experiment_id, version, created_at, updated_at
+                  board_id, stage_id, archived_at, decomposed_at, NULL AS approved_at, experiment_id, sort_order, version, created_at, updated_at
              FROM ideas WHERE id = ?
          ) e
          LEFT JOIN board_stages bs ON bs.id = e.stage_id`,
@@ -600,7 +605,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
     .prepare(
       `SELECT e.id, e.project_id, 'epic' AS type, e.ref, e.title, e.summary, e.body, e.priority, e.repo,
               NULL AS parent_epic_id, e.originating_idea_id, NULL AS scope,
-              e.board_id, e.stage_id, e.archived_at, NULL AS decomposed_at, e.approved_at, e.experiment_id, e.version, e.created_at, e.updated_at,
+              e.board_id, e.stage_id, e.archived_at, NULL AS decomposed_at, e.approved_at, e.experiment_id, e.sort_order, e.version, e.created_at, e.updated_at,
               COALESCE(bs.position, 0) AS stage_position
          FROM epics e
          LEFT JOIN board_stages bs ON bs.id = e.stage_id
@@ -618,7 +623,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
       .prepare(
         `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.repo,
                 t.parent_epic_id, t.originating_idea_id, NULL AS scope,
-                t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.experiment_id, t.version, t.created_at, t.updated_at,
+                t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.experiment_id, t.sort_order, t.version, t.created_at, t.updated_at,
                 COALESCE(bs.position, 0) AS stage_position
            FROM tasks t
            LEFT JOIN board_stages bs ON bs.id = t.stage_id
@@ -649,7 +654,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
     .prepare(
       `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.repo,
               t.parent_epic_id, t.originating_idea_id, NULL AS scope,
-              t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.experiment_id, t.version, t.created_at, t.updated_at,
+              t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.experiment_id, t.sort_order, t.version, t.created_at, t.updated_at,
               COALESCE(bs.position, 0) AS stage_position
          FROM tasks t
          LEFT JOIN board_stages bs ON bs.id = t.stage_id
@@ -731,7 +736,7 @@ export function selectProjectBacklog(
     `SELECT ${aliasedUnionColumns('e')}, COALESCE(bs.position, 0) AS stage_position
        FROM (${entityUnionSql(scoped ? 'WHERE project_id = ?' : '')}) e
        LEFT JOIN board_stages bs ON bs.id = e.stage_id
-      ORDER BY e.created_at ASC, e.ref ASC`,
+      ORDER BY (e.sort_order IS NULL) ASC, e.sort_order ASC, e.created_at ASC, e.ref ASC`,
   );
   const allRows = (scoped ? stmt.all(projectId, projectId, projectId) : stmt.all()) as TaskDbRow[];
   // Drop experiment-tagged rows unless explicitly included. Filtered post-query

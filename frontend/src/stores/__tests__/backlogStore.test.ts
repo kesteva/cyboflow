@@ -62,6 +62,7 @@ function makeTask(overrides: Partial<BacklogTaskItem> & { id: string }): Backlog
     archived_at: overrides.archived_at ?? null,
     decomposed_at: overrides.decomposed_at ?? null,
     approved_at: overrides.approved_at !== undefined ? overrides.approved_at : '2026-01-01T00:00:00.000Z',
+    sort_order: overrides.sort_order !== undefined ? overrides.sort_order : null,
     version: overrides.version ?? 1,
     stage_position: overrides.stage_position ?? 1,
     inFlow: overrides.inFlow ?? [],

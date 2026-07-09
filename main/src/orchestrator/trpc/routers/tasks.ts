@@ -273,6 +273,8 @@ export const tasksRouter = router({
         /** Image attachments — whole-array replace; only meaningful on type='idea'. */
         attachments: z.array(attachmentSchema).nullable().optional(),
         parentEpicId: z.string().nullable().optional(),
+        /** Manual rank (migration 057); null clears the rank. Valid on all three entity types. */
+        sortOrder: z.number().finite().nullable().optional(),
         expectedVersion: z.number().int().optional(),
       }),
     )
@@ -289,6 +291,7 @@ export const tasksRouter = router({
             ...(input.repo !== undefined ? { repo: input.repo } : {}),
             ...(input.scope !== undefined ? { scope: input.scope } : {}),
             ...(input.attachments !== undefined ? { attachments: input.attachments } : {}),
+            ...(input.sortOrder !== undefined ? { sortOrder: input.sortOrder } : {}),
           },
           ...(input.parentEpicId !== undefined ? { parentEpicId: input.parentEpicId } : {}),
           ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),

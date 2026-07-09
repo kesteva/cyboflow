@@ -75,6 +75,8 @@ function buildDb(): Database.Database {
     db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
     db.exec(`ALTER TABLE ${t} ADD COLUMN caused_by_run_id TEXT;`);
   }
+  // Migration 057: the read-side UNION projects sort_order unconditionally.
+  db.exec(readFileSync(join(migDir, '057_entity_sort_order.sql'), 'utf-8'));
   return db;
 }
 
@@ -120,6 +122,7 @@ function fakeItem(taskId: string, projectId: number): BacklogTaskItem {
     archived_at: null,
     decomposed_at: null,
     approved_at: null,
+    sort_order: null,
     version: 1,
     stage_position: 1,
     inFlow: [],

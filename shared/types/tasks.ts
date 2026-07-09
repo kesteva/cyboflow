@@ -158,6 +158,14 @@ export interface BacklogTaskItem {
    * view. Slice C's client `isExperimentSandboxed` selector reads `?? null`.
    */
   experiment_id?: string | null;
+  /**
+   * User-controlled manual rank (migration 057): a REAL used to order items
+   * within the board/list ahead of the created_at/ref fallback; null = unranked
+   * (sorts after every ranked item). REQUIRED — same silent-drop rationale as
+   * `decomposed_at`/`approved_at`: the frontend orders by it, so an emit path
+   * that omits it would silently reset dragged order on every live upsert.
+   */
+  sort_order: number | null;
   version: number;
   // derived overlays (computed on read):
   /** The position of the item's current stage on its board (cross-project bucketing key). */

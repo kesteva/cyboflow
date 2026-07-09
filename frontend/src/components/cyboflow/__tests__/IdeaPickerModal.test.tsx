@@ -39,6 +39,7 @@ function makeItem(overrides: Partial<BacklogTaskItem>): BacklogTaskItem {
     archived_at: null,
     decomposed_at: null,
     approved_at: '2026-01-01T00:00:00.000Z',
+    sort_order: null,
     stage_position: 1,
     version: 1,
     inFlow: [],

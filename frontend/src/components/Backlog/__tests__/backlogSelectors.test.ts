@@ -83,6 +83,7 @@ function item(over: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     // overrides approved_at to null).
     decomposed_at: null,
     approved_at: '2026-01-01T00:00:00.000Z',
+    sort_order: null,
     version: 1,
     stage_position: 6,
     inFlow: [],

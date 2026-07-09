@@ -60,6 +60,8 @@ function buildDb(): Database.Database {
   db.exec('ALTER TABLE ideas ADD COLUMN experiment_id TEXT');
   db.exec('ALTER TABLE epics ADD COLUMN experiment_id TEXT');
   db.exec('ALTER TABLE tasks ADD COLUMN experiment_id TEXT');
+  // Migration 057 adds the manual rank; the UNION projects sort_order unconditionally.
+  db.exec(readFileSync(join(migDir, '057_entity_sort_order.sql'), 'utf-8'));
   return db;
 }
 
@@ -509,6 +511,87 @@ describe('taskListing — dependency overlay', () => {
     expect(shown.some((t) => t.id === ideaId)).toBe(true);
     const shownIdea = shown.find((t) => t.id === ideaId)!;
     expect(shownIdea.experiment_id).toBe('exp-1');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sort_order (manual rank, migration 057)
+// ---------------------------------------------------------------------------
+
+describe('taskListing — sort_order manual rank (migration 057)', () => {
+  it('ranked items sort BEFORE unranked, in rank order (unranked keep the legacy order)', () => {
+    const db = buildDb();
+    // Three top-level tasks, created_at ASC: a < b < c.
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, created_at)
+       VALUES ('tsk_a', 1, 'TASK-001', 'A', 'b', 'board-1-default', ?, '2026-01-01T00:00:00.000Z')`,
+    ).run(stageId(6));
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, created_at)
+       VALUES ('tsk_b', 1, 'TASK-002', 'B', 'b', 'board-1-default', ?, '2026-01-01T00:00:01.000Z')`,
+    ).run(stageId(6));
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, created_at)
+       VALUES ('tsk_c', 1, 'TASK-003', 'C', 'b', 'board-1-default', ?, '2026-01-01T00:00:02.000Z')`,
+    ).run(stageId(6));
+    // Rank the NEWEST first and the oldest second; middle stays unranked.
+    db.prepare('UPDATE tasks SET sort_order = 1.0 WHERE id = ?').run('tsk_c');
+    db.prepare('UPDATE tasks SET sort_order = 2.0 WHERE id = ?').run('tsk_a');
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.map((t) => t.id)).toEqual(['tsk_c', 'tsk_a', 'tsk_b']);
+    // The rank round-trips onto the projected item.
+    expect(backlog[0].sort_order).toBe(1.0);
+    expect(backlog[1].sort_order).toBe(2.0);
+    expect(backlog[2].sort_order).toBeNull();
+  });
+
+  it('with every sort_order NULL the board order is identical to today (created_at, ref)', () => {
+    const db = buildDb();
+    seedFixture(db); // idea (t0) + epic (t1); the task nests under the epic
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.map((t) => t.ref)).toEqual(['IDEA-001', 'EPIC-001']);
+    expect(backlog.every((t) => t.sort_order === null)).toBe(true);
+    // Nested child projects sort_order too (explicit null, never undefined).
+    const epic = backlog.find((t) => t.ref === 'EPIC-001')!;
+    expect(epic.children![0].sort_order).toBeNull();
+  });
+
+  it('mixed-type interleave: idea/epic/task in one list order by rank across tables', () => {
+    const db = buildDb();
+    const { ideaId, epicId } = seedFixture(db); // idea + epic + nested task
+    // An orphan task so a task-type row is present at the TOP level.
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, created_at)
+       VALUES ('tsk_orphan', 1, 'TASK-050', 'Orphan', 'b', 'board-1-default', ?, '2026-01-01T00:00:06.000Z')`,
+    ).run(stageId(6));
+    // Rank across the three tables: task first, epic second, idea third.
+    db.prepare('UPDATE tasks SET sort_order = 0.5 WHERE id = ?').run('tsk_orphan');
+    db.prepare('UPDATE epics SET sort_order = 1.5 WHERE id = ?').run(epicId);
+    db.prepare('UPDATE ideas SET sort_order = 3.0 WHERE id = ?').run(ideaId);
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    expect(backlog.map((t) => t.id)).toEqual(['tsk_orphan', epicId, ideaId]);
+  });
+
+  it('the MCP-visible flatten (top-level + epic children inline) follows sort_order', () => {
+    const db = buildDb();
+    const { ideaId, epicId, taskId } = seedFixture(db);
+    // Rank the epic ahead of the idea; the nested task rides with its epic in
+    // the flatten regardless of its own rank (mirrors handleListTasks).
+    db.prepare('UPDATE epics SET sort_order = 1.0 WHERE id = ?').run(epicId);
+    db.prepare('UPDATE ideas SET sort_order = 2.0 WHERE id = ?').run(ideaId);
+
+    const tree = selectProjectBacklog(dbAdapter(db), 1);
+    const flat: string[] = [];
+    for (const item of tree) {
+      flat.push(item.id);
+      if (item.type === 'epic' && item.children) {
+        flat.push(...item.children.map((c) => c.id));
+      }
+    }
+    expect(flat).toEqual([epicId, taskId, ideaId]);
   });
 });
 

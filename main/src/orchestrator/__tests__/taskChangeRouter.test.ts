@@ -87,6 +87,8 @@ function buildDb(): Database.Database {
   db.exec('ALTER TABLE epics ADD COLUMN approved_at TEXT;');
   db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
+  // Migration 057: manual rank column the sortOrder field-delta writes.
+  db.exec(readFileSync(join(migDir, '057_entity_sort_order.sql'), 'utf-8'));
   return db;
 }
 
@@ -303,6 +305,118 @@ describe('TaskChangeRouter (3-table entity model)', () => {
     await router.applyChange(1, { actor: 'user', taskId, expectedVersion: 1, fields: { title: 'X' } });
     const task = db.prepare('SELECT title FROM tasks WHERE id = ?').get(taskId) as { title: string };
     expect(task.title).toBe('X');
+  });
+
+  // -------------------------------------------------------------------------
+  // sortOrder (manual rank, migration 057)
+  // -------------------------------------------------------------------------
+
+  describe('sortOrder (manual rank, migration 057)', () => {
+    it.each([['idea', 'ideas'], ['epic', 'epics'], ['task', 'tasks']] as const)(
+      'sortOrder on a %s writes the column + exactly one sort_order delta event',
+      async (entityType, table) => {
+        const db = buildDb();
+        const router = TaskChangeRouter.initialize(dbAdapter(db));
+        const { taskId } = await router.applyChange(1, { actor: 'user', entityType, title: 'T' });
+        const eventsBefore = eventCount(db, entityType, taskId);
+
+        await router.applyChange(1, { actor: 'user', taskId, fields: { sortOrder: 1.5 } });
+
+        const row = db
+          .prepare(`SELECT sort_order, version FROM ${table} WHERE id = ?`)
+          .get(taskId) as { sort_order: number | null; version: number };
+        expect(row.sort_order).toBe(1.5);
+        expect(row.version).toBe(2);
+
+        // Exactly ONE new entity_events row, carrying the sort_order delta.
+        expect(eventCount(db, entityType, taskId)).toBe(eventsBefore + 1);
+        const lastEvent = db
+          .prepare(
+            'SELECT changes_json FROM entity_events WHERE entity_type = ? AND entity_id = ? ORDER BY seq DESC LIMIT 1',
+          )
+          .get(entityType, taskId) as { changes_json: string };
+        const deltas = JSON.parse(lastEvent.changes_json) as Array<{
+          field: string;
+          from: unknown;
+          to: unknown;
+        }>;
+        expect(deltas).toEqual([{ field: 'sort_order', from: null, to: 1.5 }]);
+      },
+    );
+
+    it('unchanged sortOrder is a no-op: no event, no version bump', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      await router.applyChange(1, { actor: 'user', taskId, fields: { sortOrder: 2 } });
+
+      const before = db
+        .prepare('SELECT version FROM tasks WHERE id = ?')
+        .get(taskId) as { version: number };
+      const eventsBefore = eventCount(db, 'task', taskId);
+
+      await router.applyChange(1, { actor: 'user', taskId, fields: { sortOrder: 2 } });
+
+      const after = db
+        .prepare('SELECT version FROM tasks WHERE id = ?')
+        .get(taskId) as { version: number };
+      expect(after.version).toBe(before.version);
+      expect(eventCount(db, 'task', taskId)).toBe(eventsBefore);
+    });
+
+    it('sortOrder: null clears a set rank (delta from rank to null)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      await router.applyChange(1, { actor: 'user', taskId, fields: { sortOrder: 3 } });
+
+      await router.applyChange(1, { actor: 'user', taskId, fields: { sortOrder: null } });
+
+      const row = db
+        .prepare('SELECT sort_order FROM tasks WHERE id = ?')
+        .get(taskId) as { sort_order: number | null };
+      expect(row.sort_order).toBeNull();
+
+      const lastEvent = db
+        .prepare(
+          "SELECT changes_json FROM entity_events WHERE entity_type = 'task' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
+        )
+        .get(taskId) as { changes_json: string };
+      expect(JSON.parse(lastEvent.changes_json)).toEqual([
+        { field: 'sort_order', from: 3, to: null },
+      ]);
+    });
+
+    it('stale expectedVersion on a sortOrder write is rejected with the concurrency code', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+
+      await expect(
+        router.applyChange(1, { actor: 'user', taskId, expectedVersion: 99, fields: { sortOrder: 1 } }),
+      ).rejects.toMatchObject({ code: 'concurrency' });
+
+      // The rank stays unset and no delta event was written.
+      const row = db
+        .prepare('SELECT sort_order, version FROM tasks WHERE id = ?')
+        .get(taskId) as { sort_order: number | null; version: number };
+      expect(row.sort_order).toBeNull();
+      expect(row.version).toBe(1);
+      expect(eventCount(db, 'task', taskId)).toBe(1); // only 'created'
+    });
+
+    it('the emitted event snapshot carries sort_order (live-upsert emit path)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+
+      const events: TaskChangedEvent[] = [];
+      taskChangeEvents.on(taskProjectChannel(1), (e: TaskChangedEvent) => events.push(e));
+      await router.applyChange(1, { actor: 'user', taskId, fields: { sortOrder: 7.25 } });
+
+      expect(events).toHaveLength(1);
+      expect(events[0].task?.sort_order).toBe(7.25);
+    });
   });
 
   // -------------------------------------------------------------------------

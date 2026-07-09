@@ -176,6 +176,11 @@ export interface TaskFieldChanges {
    * asserted field that only the orchestrator path writes.
    */
   entryStageId?: string | null;
+  /**
+   * User-controlled manual rank (migration 057). Valid on all three entity
+   * types; null clears the rank back to the created_at/ref fallback order.
+   */
+  sortOrder?: number | null;
 }
 
 export type TaskActor = 'user' | 'orchestrator' | `agent:${string}` | 'linear';
@@ -331,6 +336,8 @@ interface EntityDbRow {
   experiment_arm: ExperimentArm | null;
   /** Post-merge bug attribution (migration 049); the run that introduced this entity, else NULL. */
   caused_by_run_id: string | null;
+  /** User-controlled manual rank (migration 057); NULL = unranked + on pre-057 DBs. */
+  sort_order: number | null;
   version: number;
   created_at: string;
   updated_at: string;
@@ -1603,6 +1610,11 @@ export class TaskChangeRouter {
           params.push(f.priority);
           deltas.push({ field: 'priority', from: current.priority, to: f.priority });
         }
+        if (f.sortOrder !== undefined && f.sortOrder !== current.sort_order) {
+          sets.push('sort_order = ?');
+          params.push(f.sortOrder);
+          deltas.push({ field: 'sort_order', from: current.sort_order, to: f.sortOrder });
+        }
         if (f.repo !== undefined && f.repo !== current.repo) {
           sets.push('repo = ?');
           params.push(f.repo);
@@ -2084,10 +2096,14 @@ export class TaskChangeRouter {
     const causedByRunId = this.columnExists(desc.table, 'caused_by_run_id')
       ? 'caused_by_run_id'
       : 'NULL AS caused_by_run_id';
+    // Manual rank (migration 057), fail-soft on pre-057 / partial test DBs.
+    const sortOrder = this.columnExists(desc.table, 'sort_order')
+      ? 'sort_order'
+      : 'NULL AS sort_order';
     const row = this.db
       .prepare(
         `SELECT id, project_id, ref, title, summary, body, priority, repo, board_id, stage_id, archived_at,
-                ${decomposedAt}, ${approvedAt}, ${experimentId}, ${experimentArm}, ${causedByRunId}, version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
+                ${decomposedAt}, ${approvedAt}, ${experimentId}, ${experimentArm}, ${causedByRunId}, ${sortOrder}, version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
            FROM ${desc.table} WHERE id = ? AND project_id = ?`,
       )
       .get(id, projectId) as EntityDbRow | undefined;
@@ -2499,6 +2515,10 @@ export class TaskChangeRouter {
       // visibility stamps: the client `isExperimentSandboxed` selector compares
       // `!== null`, so it MUST be projected on the emit path.
       experiment_id: row.experiment_id ?? null,
+      // Manual rank (migration 057). Same silent-drop rationale: the frontend
+      // orders by it, so omitting it on the live-event emit path would silently
+      // reset dragged order on every live upsert.
+      sort_order: row.sort_order ?? null,
       version: row.version,
       stage_position: stage?.position ?? 0,
       inFlow,

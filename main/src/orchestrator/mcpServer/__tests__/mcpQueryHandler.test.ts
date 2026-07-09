@@ -658,6 +658,8 @@ describe('McpQueryHandler', () => {
       taskDb.exec(readFileSync(join(migDir, '024_archive_in_place.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '028_idea_attachments.sql'), 'utf-8'));
       taskDb.exec(readFileSync(join(migDir, '042_collapse_board.sql'), 'utf-8'));
+      // Migration 057: the read-side UNION projects sort_order unconditionally.
+      taskDb.exec(readFileSync(join(migDir, '057_entity_sort_order.sql'), 'utf-8'));
       return taskDb;
     }
 
@@ -1437,6 +1439,8 @@ describe('McpQueryHandler', () => {
       db.exec('ALTER TABLE ideas ADD COLUMN experiment_arm TEXT');
       db.exec('ALTER TABLE epics ADD COLUMN experiment_arm TEXT');
       db.exec('ALTER TABLE tasks ADD COLUMN experiment_arm TEXT');
+      // Migration 057: the read-side UNION projects sort_order unconditionally.
+      db.exec(readFileSync(join(migDir, '057_entity_sort_order.sql'), 'utf-8'));
       return db;
     }
 

@@ -159,6 +159,7 @@ function task(overrides: Partial<BacklogTaskItem> & { id: string; stage_id: stri
     // explicit null, never undefined.
     decomposed_at: overrides.decomposed_at ?? null,
     approved_at: overrides.approved_at !== undefined ? overrides.approved_at : '2026-01-01T00:00:00.000Z',
+    sort_order: overrides.sort_order !== undefined ? overrides.sort_order : null,
     version: 1,
     stage_position: overrides.stage_position ?? POSITION_BY_STAGE_ID[overrides.stage_id] ?? 0,
     inFlow: overrides.inFlow ?? [],
