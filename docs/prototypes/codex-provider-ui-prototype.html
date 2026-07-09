@@ -565,14 +565,14 @@
               </button>
               <button id="providerCodex" class="provider-card selected" type="button">
                 <strong>Codex</strong>
-                <span>OpenAI Codex SDK with local worktree sandboxing.</span>
+                <span>Codex SDK for workflows; terminal PTY for quick sessions.</span>
               </button>
             </div>
           </div>
 
           <div class="field">
             <span class="label">Session permission</span>
-            <div id="claudePermission" class="permission-list hidden">
+            <div class="permission-list">
               <button class="option-row selected" type="button">
                 <strong>Ask before edits</strong>
                 <span>Prompt for each edit</span>
@@ -583,34 +583,19 @@
               </button>
               <button class="option-row" type="button">
                 <strong>Auto</strong>
-                <span>Native Claude classifier</span>
+                <span>Provider classifier where available</span>
               </button>
               <button class="option-row" type="button">
                 <strong>Don't ask</strong>
                 <span>No prompts - skip permissions</span>
               </button>
             </div>
-
-            <div id="codexPermission" class="permission-list">
-              <button class="option-row selected" type="button">
-                <strong>Ask when needed</strong>
-                <span>Codex pauses at sandbox or policy boundaries</span>
-              </button>
-              <button class="option-row" type="button">
-                <strong>Auto-review eligible prompts</strong>
-                <span>Reviewer agent handles low-risk approvals</span>
-              </button>
-              <button class="option-row" type="button">
-                <strong>Never ask</strong>
-                <span>Use only in isolated worktrees</span>
-              </button>
-            </div>
           </div>
 
           <div id="claudeControls" class="hidden">
             <div class="field">
-              <label class="label" for="claudeRuntime">CLI substrate</label>
-              <select id="claudeRuntime" class="select" aria-label="Select CLI substrate">
+              <label class="label" for="claudeRuntime">Runtime</label>
+              <select id="claudeRuntime" class="select" aria-label="Select Claude runtime">
                 <option>SDK (default)</option>
                 <option>Interactive (PTY)</option>
               </select>
@@ -632,15 +617,11 @@
 
           <div id="codexControls">
             <div class="field">
-              <div class="two-col runtime-grid">
-              <div class="field">
-                <label class="label" for="codexRuntime">Runtime</label>
-                <select id="codexRuntime" class="select" aria-label="Select Codex runtime">
-                  <option>Codex SDK - workflows</option>
-                  <option disabled>Codex PTY - quick sessions only</option>
-                </select>
-              </div>
-            </div>
+              <label class="label" for="codexRuntime">Runtime</label>
+              <select id="codexRuntime" class="select" aria-label="Select Codex runtime">
+                <option>Codex SDK - workflows</option>
+                <option disabled>Codex PTY - quick sessions only</option>
+              </select>
               <p class="hint">Runtime comes first. Workflows use Codex SDK for structured events; PTY is limited to quick sessions.</p>
             </div>
 
@@ -686,7 +667,7 @@
                 <div class="advanced-row">
                   <div>
                     <strong>Network access</strong>
-                    <span>Allow model-run commands to use outbound network inside the sandbox</span>
+                    <span>Allow model-run commands to use outbound network when policy permits</span>
                   </div>
                   <label class="toggle" aria-label="Network access">
                     <input type="checkbox">
@@ -746,15 +727,15 @@
             </div>
             <div class="summary-row">
               <span class="key eyebrow">Permission</span>
-              <span id="summaryPermission" class="value">Ask when needed</span>
+              <span id="summaryPermission" class="value">Ask before edits</span>
             </div>
             <div class="summary-row">
               <span class="key eyebrow">Model</span>
               <span id="summaryModel" class="value">GPT-5.5</span>
             </div>
             <div class="summary-row">
-              <span class="key eyebrow">Safety</span>
-              <span id="summarySafety" class="value">Ask when needed / workspace-write</span>
+              <span class="key eyebrow">Scope</span>
+              <span id="summaryScope" class="value">Returns to session agent</span>
             </div>
           </div>
 
@@ -769,14 +750,12 @@
     const providerCodex = document.getElementById('providerCodex');
     const claudeControls = document.getElementById('claudeControls');
     const codexControls = document.getElementById('codexControls');
-    const claudePermission = document.getElementById('claudePermission');
-    const codexPermission = document.getElementById('codexPermission');
     const codexAdvancedRows = document.getElementById('codexAdvancedRows');
     const summaryAgent = document.getElementById('summaryAgent');
     const summaryRuntime = document.getElementById('summaryRuntime');
     const summaryPermission = document.getElementById('summaryPermission');
     const summaryModel = document.getElementById('summaryModel');
-    const summarySafety = document.getElementById('summarySafety');
+    const summaryScope = document.getElementById('summaryScope');
     const cta = document.getElementById('cta');
     const advancedToggle = document.getElementById('advancedToggle');
     const advancedBody = document.getElementById('advancedBody');
@@ -788,15 +767,13 @@
       providerClaude.classList.toggle('selected', !codex);
       codexControls.classList.toggle('hidden', !codex);
       claudeControls.classList.toggle('hidden', codex);
-      codexPermission.classList.toggle('hidden', !codex);
-      claudePermission.classList.toggle('hidden', codex);
       codexAdvancedRows.classList.toggle('hidden', !codex);
 
       summaryAgent.textContent = codex ? 'Codex' : 'Claude';
-      summaryRuntime.textContent = codex ? 'Codex SDK' : 'SDK';
-      summaryPermission.textContent = codex ? 'Ask when needed' : 'Ask before edits';
+      summaryRuntime.textContent = codex ? 'Codex SDK' : 'Claude SDK';
+      summaryPermission.textContent = 'Ask before edits';
       summaryModel.textContent = codex ? 'GPT-5.5' : 'Opus';
-      summarySafety.textContent = codex ? 'Ask when needed / workspace-write' : 'Cyboflow approval hook';
+      summaryScope.textContent = 'Returns to session agent';
       cta.textContent = codex ? 'Run /planner with Codex' : 'Run /planner with Claude';
     }
 

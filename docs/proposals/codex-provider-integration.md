@@ -47,10 +47,18 @@ agent_runtime = substrate === 'interactive' ? 'claude-interactive' : 'claude-sdk
 
 Keep `sessions.substrate` and `workflow_runs.substrate` during the migration window as Claude compatibility projections, then stop exposing them as the primary UI concept.
 
+Current v1 implementation decisions:
+
+- Workflow launches use `codex-sdk` for Codex. This gives Cyboflow structured events, resumable threads, usage accounting, and MCP workflow progress.
+- Quick sessions may use `codex-pty` for an interactive terminal-style Codex experience.
+- Workflow PTY is intentionally unsupported. It does not provide the event, MCP, usage, and review-queue hooks workflows need.
+- `codex-exec` remains internal-only for diagnostics and fixture capture.
+- Codex auth starts with ChatGPT login. API-key auth is a later product/billing decision.
+
 ## Goals
 
 - Let users choose Claude or Codex as the session's default chat agent.
-- Let workflows run with their own provider/runtime/model plan, including mixed Claude and Codex steps inside one workflow.
+- Let workflows run with their own provider/runtime/model plan, and keep the architecture capable of mixed Claude/Codex steps as a fast-follow after the v1 parity gates pass.
 - Preserve Cyboflow's product invariant: all human attention routes through the shared review queue.
 - Reuse the existing worktree, run lifecycle, MCP, raw event, message projection, review item, and usage infrastructure.
 - Keep Claude as the default and avoid behavior changes for existing users.
@@ -159,6 +167,8 @@ WHERE agent_provider = 'claude';
 ```
 
 `sessions.agent_runtime` should use `SessionAgentRuntime`, not the narrower workflow runtime set. `codex-pty` is valid here because it is a quick-session runtime. `codex-exec` is not valid here because it remains an internal diagnostic runner.
+
+Do not ship workflow-run columns without parallel session columns. The session owns the default runtime agent that powers normal chat before and after workflows, so storage must cover `SessionAgentConfig` explicitly rather than projecting it through the legacy `sessions.substrate` field.
 
 Add workflow run columns:
 
@@ -381,6 +391,8 @@ Then implement adapters:
 
 The raw provider event should still be stored in `raw_events.payload_json` for replay/debugging. The normalized event should drive message projection, review queue, usage, and workflow progress.
 
+This boundary should land with the Codex SDK manager work, not after Codex is rendering through a temporary `Codex -> ClaudeStreamEvent` shim. Rendering Codex messages and usage in the existing run view should mean rendering provider-neutral `AgentStreamEvent` projections.
+
 ### Codex Event Mapping
 
 Initial mapping:
@@ -411,17 +423,10 @@ Cyboflow's MCP server should be available to Codex the same way it is available 
 - artifact tools
 - shell approval hook path if needed
 
-Do not ask the user to globally edit `~/.codex/config.toml` as the main path. Generate per-run config through SDK `config` overrides and environment injection where possible:
+Do not ask the user to globally edit `~/.codex/config.toml` as the main path. Generate per-run config through SDK `config` overrides where possible, and avoid replacing the SDK process environment unless isolation requires it:
 
 ```ts
 new Codex({
-  env: {
-    PATH,
-    HOME,
-    CYBOFLOW_RUN_ID: runId,
-    CYBOFLOW_ORCH_SOCKET: socketPath,
-    CODEX_HOME: perRunCodexHome,
-  },
   config: {
     mcp_servers: {
       cyboflow: {
@@ -432,7 +437,7 @@ new Codex({
           CYBOFLOW_ORCH_SOCKET: socketPath,
         },
         required: true,
-        default_tools_approval_mode: 'auto',
+        default_tools_approval_mode: 'approve',
       },
     },
   },
@@ -465,6 +470,7 @@ Beta limitation if hook parity is not ready:
 
 - Codex can run in `workspace-write` with Codex-native approvals, but Cyboflow should mark review queue parity as incomplete.
 - Do not present Codex as equivalent to Claude until approvals are bridged.
+- The local `@openai/codex-sdk` type surface currently exposes approval policy flags, not a Claude-style synchronous `canUseTool` callback. Treat that as a Phase 0 gate for product honesty, not a detail to discover during workflow rollout.
 
 ## UI Approach
 
@@ -490,7 +496,7 @@ Claude:
 
 Codex:
 
-- Runtime for quick sessions: SDK, Interactive PTY.
+- Runtime for quick sessions: Interactive PTY.
 - Runtime for workflows: SDK only.
 - Model: Auto, GPT-5.5, GPT-5.4 mini, Custom.
 - Permission mode: maps to Codex sandbox and approval policy internally.
@@ -591,6 +597,8 @@ Do not add provider tabs by default. Filtering by provider can be a later advanc
 - Verify whether the SDK exposes a synchronous approve/deny hook that can back Cyboflow's review queue approval bridge.
 - Verify whether per-run nested `mcp_servers` config works through SDK config overrides. If not, prove the per-run `CODEX_HOME/config.toml` fallback.
 - Verify how Codex usage/cost fields are exposed and what normalization is required for `run_usage`.
+
+Approval bridging and MCP config injection are Phase 0 feasibility gates. They determine whether Codex can be presented as a workflow peer or must launch with explicit beta limitations.
 
 Findings from the initial docs and local CLI spike:
 
@@ -717,10 +725,8 @@ Add integration coverage:
 
 Use `pnpm test:unit` as the code-change gate when implementation starts.
 
-## Open Questions
+## Remaining Product Questions
 
-- Phase 0 must answer whether the TypeScript SDK exposes enough config override support for complete per-run MCP config, or whether Cyboflow should always use a per-run `CODEX_HOME`.
-- Phase 0 must answer which Codex hook event is best for a blocking Cyboflow approval bridge, and what exact response shape resumes/denies the action.
 - Should model defaults be global per provider or per workflow?
 
 ## Recommendation
@@ -728,8 +734,8 @@ Use `pnpm test:unit` as the code-change gate when implementation starts.
 Build Codex support as a provider/runtime expansion:
 
 1. Provider/runtime schema and UI.
-2. Codex SDK manager for workflows and Codex PTY manager for quick sessions.
-3. Provider-neutral event adapter.
+2. Provider-neutral event adapter.
+3. Codex SDK manager for workflows and Codex PTY manager for quick sessions.
 4. MCP parity.
 5. Review queue approval parity.
 
