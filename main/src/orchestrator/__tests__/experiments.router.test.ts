@@ -40,6 +40,14 @@ function buildDb(): Database.Database {
   db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT;');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_id TEXT;');
+  // Migration 022's soft batch link + sprint_batch_tasks (lanes), so decide's
+  // clone->original lane remap (remapWinnerSeedLane) has real rows to rewrite.
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN batch_id TEXT;');
+  db.exec(`CREATE TABLE sprint_batch_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, task_id TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'queued', current_step_id TEXT, run_id TEXT, error_message TEXT,
+    integrated_at DATETIME, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (batch_id, task_id));`);
   for (const t of ['ideas', 'epics', 'tasks']) {
     db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
     db.exec(`ALTER TABLE ${t} ADD COLUMN caused_by_run_id TEXT;`);
@@ -1259,6 +1267,145 @@ describe('experiments router orchestration (slice B)', () => {
       expect(withAbandoned.map((e) => e.experimentId)).toEqual(
         expect.arrayContaining([decided.experimentId, abandoned.experimentId]),
       );
+    });
+  });
+
+  // --- Fold hardening: sprint-lane remap (defect a) + evidence-based lost-clone
+  //     recovery (defect b) on decide -------------------------------------------
+  describe('decide fold: lane remap + lost-clone recovery', () => {
+    /** Start a settled sprint experiment over one eligible task; return the arm-A clone id. */
+    async function settledSprint(
+      h: Harness,
+      body = 'orig-1',
+    ): Promise<{ t1: string; res: Awaited<ReturnType<typeof startExperiment>>; cloneA: string }> {
+      const t1 = await seedEligibleTask(h, 'T1', body);
+      const res = await startExperiment(h.deps, {
+        projectId: 1, workflowId: 'wf-sprint', variantAId: 'vA-sprint', variantBId: 'vB-sprint', seedTaskIds: [t1],
+      });
+      const cloneA = listExperimentSeedTasks(dbAdapter(h.db), res.experimentId).find((r) => r.arm === 'A')!.clone_task_id;
+      setRunStatus(h.db, res.armA.runId, 'awaiting_review');
+      setRunStatus(h.db, res.armB.runId, 'awaiting_review');
+      return { t1, res, cloneA };
+    }
+
+    function doneStageId(h: Harness): string {
+      return (h.db.prepare('SELECT id FROM board_stages WHERE position = 9 LIMIT 1').get() as { id: string }).id;
+    }
+    function laneTaskIds(h: Harness, batchId: string): string[] {
+      return (
+        h.db.prepare('SELECT task_id AS taskId FROM sprint_batch_tasks WHERE batch_id = ?').all(batchId) as Array<{
+          taskId: string;
+        }>
+      ).map((r) => r.taskId);
+    }
+    function foldEventCount(h: Harness, taskId: string): number {
+      return (
+        h.db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM entity_events
+              WHERE entity_type = 'task' AND entity_id = ? AND kind = 'experiment-promote-fold'`,
+          )
+          .get(taskId) as { n: number }
+      ).n;
+    }
+
+    it('T1: remaps the winner run lanes from clones to originals; fold still copies body + stage', async () => {
+      const h = makeHarness();
+      const { t1, res, cloneA } = await settledSprint(h);
+      const batchA = 'batchA';
+      h.db.prepare('UPDATE workflow_runs SET batch_id = ? WHERE id = ?').run(batchA, res.armA.runId);
+      h.db.prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES (?, ?, 'integrated')`).run(batchA, cloneA);
+
+      // Winner clone evolves: new body + moved to Done — so the fold is observable too.
+      const done = doneStageId(h);
+      h.db.prepare('UPDATE tasks SET body = ? WHERE id = ?').run('WINNER-BODY', cloneA);
+      await h.deps.taskChangeRouter.applyChange(1, { actor: 'orchestrator', entityType: 'task', taskId: cloneA, stageId: done });
+
+      const dec = await decideExperiment(h.deps, res.experimentId, res.armA.runId);
+      expect(dec.status).toBe('decided');
+      // Lane now references the ORIGINAL (not the swept clone).
+      expect(laneTaskIds(h, batchA)).toEqual([t1]);
+      // Fold copied body + stage onto the original; clone swept.
+      expect(field(h.db, 'tasks', t1, 'body')).toBe('WINNER-BODY');
+      expect(field(h.db, 'tasks', t1, 'stage_id')).toBe(done);
+      expect(exists(h.db, 'tasks', cloneA)).toBe(false);
+    });
+
+    it('T2: crash-retry preserved — absent clone WITH an in-scope fold event is skipped (stage + body unchanged)', async () => {
+      const h = makeHarness();
+      const { t1, res, cloneA } = await settledSprint(h);
+      // Simulate a crashed prior decide: durable fold onto the original (body only, no
+      // stage move) + clone swept, then died before stamping 'decided'.
+      await h.deps.taskChangeRouter.applyChange(1, {
+        actor: 'orchestrator', entityType: 'task', taskId: t1, fields: { body: 'DURABLE-FOLD' }, kind: 'experiment-promote-fold',
+      });
+      const stageBefore = field(h.db, 'tasks', t1, 'stage_id');
+      h.db.prepare('DELETE FROM tasks WHERE id = ?').run(cloneA);
+
+      const dec = await decideExperiment(h.deps, res.experimentId, res.armA.runId);
+      expect(dec.status).toBe('decided');
+      // Fold SKIPPED: body kept, stage NOT advanced to Done.
+      expect(field(h.db, 'tasks', t1, 'body')).toBe('DURABLE-FOLD');
+      expect(field(h.db, 'tasks', t1, 'stage_id')).toBe(stageBefore);
+      expect(field(h.db, 'tasks', t1, 'stage_id')).not.toBe(doneStageId(h));
+    });
+
+    it('T3: lost clone recovered — absent clone WITHOUT a fold event advances the original to Done (body untouched, fold event minted)', async () => {
+      const h = makeHarness();
+      const { t1, res, cloneA } = await settledSprint(h);
+      const done = doneStageId(h);
+      const foldsBefore = foldEventCount(h, t1);
+      // Clone lost OUTSIDE decide (no body fold, no fold event) — just gone.
+      h.db.prepare('DELETE FROM tasks WHERE id = ?').run(cloneA);
+
+      const dec = await decideExperiment(h.deps, res.experimentId, res.armA.runId);
+      expect(dec.status).toBe('decided');
+      // Advanced to Done; body untouched; a fold event now exists (retry idempotency).
+      expect(field(h.db, 'tasks', t1, 'stage_id')).toBe(done);
+      expect(field(h.db, 'tasks', t1, 'body')).toBe('orig-1');
+      expect(foldEventCount(h, t1)).toBe(foldsBefore + 1);
+    });
+
+    it('T4: re-seed scoping — a STALE (pre-experiment) fold event does NOT mask the lost clone; still recovers', async () => {
+      const h = makeHarness();
+      const { t1, res, cloneA } = await settledSprint(h);
+      const done = doneStageId(h);
+      // A STALE fold event from a PRIOR experiment (created_at well before this one).
+      const maxSeq = (
+        h.db
+          .prepare(`SELECT COALESCE(MAX(seq), 0) AS s FROM entity_events WHERE entity_type = 'task' AND entity_id = ?`)
+          .get(t1) as { s: number }
+      ).s;
+      h.db
+        .prepare(
+          `INSERT INTO entity_events (entity_type, entity_id, seq, kind, actor, run_id, changes_json, created_at)
+           VALUES ('task', ?, ?, 'experiment-promote-fold', 'orchestrator', NULL, '[]', '2020-01-01T00:00:00.000Z')`,
+        )
+        .run(t1, maxSeq + 1);
+      // Clone lost outside decide (no in-scope fold event).
+      h.db.prepare('DELETE FROM tasks WHERE id = ?').run(cloneA);
+
+      const dec = await decideExperiment(h.deps, res.experimentId, res.armA.runId);
+      expect(dec.status).toBe('decided');
+      // The stale (out-of-scope) event did NOT mask the loss — recovery advanced to Done.
+      expect(field(h.db, 'tasks', t1, 'stage_id')).toBe(done);
+      expect(field(h.db, 'tasks', t1, 'body')).toBe('orig-1');
+    });
+
+    it('T5: lane remap UNIQUE-conflict guard — an existing original lane makes the clone lane get DELETED, decide still succeeds', async () => {
+      const h = makeHarness();
+      const { t1, res, cloneA } = await settledSprint(h);
+      const batchA = 'batchA';
+      h.db.prepare('UPDATE workflow_runs SET batch_id = ? WHERE id = ?').run(batchA, res.armA.runId);
+      // The batch already contains BOTH a lane for the original AND one for the clone.
+      h.db.prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES (?, ?, 'integrated')`).run(batchA, t1);
+      h.db.prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES (?, ?, 'integrated')`).run(batchA, cloneA);
+
+      const dec = await decideExperiment(h.deps, res.experimentId, res.armA.runId);
+      expect(dec.status).toBe('decided');
+      // The clone lane was DELETED (not remapped onto the conflicting original); no error.
+      expect(laneTaskIds(h, batchA)).toEqual([t1]);
+      expect(laneTaskIds(h, batchA)).not.toContain(cloneA);
     });
   });
 });

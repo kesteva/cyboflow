@@ -152,7 +152,17 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
               .get(lane.taskId) as
               | { id: string; project_id: number; board_id: string; stage_id: string }
               | undefined;
-            if (!task) continue;
+            if (!task) {
+              // After experiments.decide's lane remap (experiments.ts remapWinnerSeedLane),
+              // an A/B winner's lanes point at ORIGINAL task ids, never swept clones — so a
+              // missing task here should never fire for an experiment run. If it does, a lane
+              // still references a deleted clone: a real signal (defect a), not noise.
+              console.warn(
+                `[IPC:git] sprint close-out: lane task ${lane.taskId} (batch ${run.batch_id}) has no tasks row ` +
+                  '— skipping (unexpected for an experiment run after decide lane remap)'
+              );
+              continue;
+            }
             // DONE_POSITION = 9 — same stage resolution as TaskChangeRouter.
             // recomputeTaskExecutionStage's outcome='merged' arm.
             const doneStage = db

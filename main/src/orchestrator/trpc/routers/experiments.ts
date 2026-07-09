@@ -775,6 +775,173 @@ async function revealWinnerEntities(
   }
 }
 
+// ---------------------------------------------------------------------------
+// decide fold: lost-clone recovery + sprint-lane remap helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalize a stored timestamp to the ISO-8601 form entity_events.created_at uses
+ * (`YYYY-MM-DDTHH:MM:SS.sssZ` — TaskChangeRouter writes it via Date.toISOString), so
+ * a string `>=` floor comparison against an event stamp is well-defined. The
+ * experiments row stores created_at as SQLite CURRENT_TIMESTAMP
+ * (`YYYY-MM-DD HH:MM:SS` — a SPACE separator, no fractional/zone); a raw compare
+ * against the ISO event stamp is skewed by 'T' (0x54) > ' ' (0x20) at the separator,
+ * which would wrongly admit a stale SAME-DAY fold event from an EARLIER experiment
+ * and defeat the re-seed scoping in priorFoldEventExists. CURRENT_TIMESTAMP is UTC,
+ * so a space-form value is re-expressed as UTC ISO; an already-ISO (or unrecognized)
+ * value is returned unchanged.
+ */
+function normalizeToEventIso(ts: string): string {
+  const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/.exec(ts);
+  return m ? `${m[1]}T${m[2]}.000Z` : ts;
+}
+
+/**
+ * True when a DURABLE experiment-promote-fold entity_events row already exists on
+ * (`entityType`, `entityId`) stamped at/after `experimentCreatedAt` — i.e. within
+ * THIS experiment's lifetime. This is how decide's fold distinguishes its two
+ * absent-clone causes: a prior decide that folded + swept + crashed leaves such an
+ * event (skip — re-folding would wipe the original), whereas a clone lost OUTSIDE
+ * decide's control leaves NONE (recover). The created_at floor is ESSENTIAL: an
+ * original decided in an EARLIER experiment gets RE-SEEDED into a later one, so an
+ * unscoped lookup would let experiment N-1's fold event mask experiment N's lost
+ * clone. Columns per taskChangeRouter's entity_events INSERT (entity_type /
+ * entity_id / kind / created_at). Fail-soft: a thrown query (e.g. a pre-015 DB with
+ * no entity_events) reports "no prior fold" — biasing toward the recovery path,
+ * which never wipes a body.
+ */
+function priorFoldEventExists(
+  db: DatabaseLike,
+  entityType: 'idea' | 'task',
+  entityId: string,
+  experimentCreatedAt: string,
+): boolean {
+  try {
+    const row = db
+      .prepare(
+        `SELECT 1 FROM entity_events
+          WHERE entity_type = ? AND entity_id = ? AND kind = 'experiment-promote-fold' AND created_at >= ?
+          LIMIT 1`,
+      )
+      .get(entityType, entityId, normalizeToEventIso(experimentCreatedAt));
+    return row !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Recover an ORIGINAL sprint task whose winner clone was lost OUTSIDE decide's
+ * control (the clone row is gone AND no durable fold event exists). decide = the
+ * user accepted this arm's outcome, so a lost clone must not strand the original at
+ * its pre-sprint stage — advance it to Done (board position 9, the SAME stage the
+ * sprint merge close-out uses), mirroring the accepted-outcome semantics and the
+ * manual remedy applied in the real incident. The body is deliberately UNTOUCHED
+ * (the clone's body is unrecoverable, and never wiping the user's original is the
+ * whole point of the guard). Routed through the chokepoint with kind
+ * 'experiment-promote-fold', which also writes the fold event that makes a retried
+ * decide idempotent (the retry then takes the skip branch — unless the original was
+ * already at Done, in which case the stage-only change is a durable no-op, still
+ * harmless because body is never touched). Skips gracefully with a loud log when the
+ * original task row or its Done stage is missing.
+ */
+async function recoverStrandedOriginalTask(
+  deps: ExperimentsDeps,
+  projectId: number,
+  originalTaskId: string,
+): Promise<void> {
+  const { db } = deps;
+  const orig = db
+    .prepare('SELECT board_id AS boardId, stage_id AS stageId FROM tasks WHERE id = ?')
+    .get(originalTaskId) as { boardId?: unknown; stageId?: unknown } | undefined;
+  if (!orig || typeof orig.boardId !== 'string') {
+    console.warn(
+      `[experiments] decide: lost winner clone for original task ${originalTaskId}, but the original row is ` +
+        'missing — cannot advance to Done (skipping)',
+    );
+    return;
+  }
+  const doneStage = db
+    .prepare('SELECT id FROM board_stages WHERE board_id = ? AND position = 9')
+    .get(orig.boardId) as { id?: unknown } | undefined;
+  if (!doneStage || typeof doneStage.id !== 'string') {
+    console.warn(
+      `[experiments] decide: lost winner clone for original task ${originalTaskId}, but its board ` +
+        `${orig.boardId} has no Done stage — cannot advance (skipping)`,
+    );
+    return;
+  }
+  console.warn(
+    `[experiments] decide: winner clone for original task ${originalTaskId} was lost outside decide's ` +
+      'control (no durable fold event) — advancing the original to Done to mirror the accepted outcome; ' +
+      'body left untouched (clone body unrecoverable)',
+  );
+  await deps.taskChangeRouter.applyChange(projectId, {
+    actor: 'orchestrator',
+    entityType: 'task',
+    taskId: originalTaskId,
+    stageId: doneStage.id,
+    kind: 'experiment-promote-fold',
+  });
+}
+
+/**
+ * Point the winner run's sprint lane from a (to-be-swept) clone id to its ORIGINAL
+ * task id, so the decide-THEN-merge path closes out like a regular sprint: after
+ * decide sweeps the clone, the winner session's still-'integrated' lane points at
+ * the ORIGINAL, and finalizeSprintLanesOnSessionMerge (main/src/ipc/git.ts) advances
+ * the original to Done on merge (defect a). Without this, decide hard-deletes the
+ * clone in step 3 and finalize's `if (!task) continue` skips the dangling lane,
+ * stranding the original short of Done. Runs for EVERY winner seed row, clone
+ * present or not (a crash-retry re-run is an idempotent no-op — the lane already
+ * points at the original, so the UPDATE matches nothing).
+ *
+ * sprint_batch_tasks is owned by SprintLaneStore
+ * (main/src/orchestrator/sprintLaneStore.ts), NOT the entity chokepoint — but that
+ * store is a boot-wired singleton absent from ExperimentsDeps, and injecting it for
+ * one UPDATE is heavier than a well-scoped direct write, so this is a deliberate
+ * direct parameterized write against the column the store owns. UNIQUE(batch_id,
+ * task_id): if a lane for the original already exists in the batch (should never
+ * happen — originals are never seeded into an arm batch), the clone lane is DELETED
+ * instead of updated, avoiding a constraint error. FAIL-SOFT (mirrors finalize's
+ * posture): any failure is logged and swallowed — a remap miss only re-opens defect
+ * (a) for this task and must never abort decide.
+ */
+function remapWinnerSeedLane(
+  deps: ExperimentsDeps,
+  winnerRunId: string,
+  cloneTaskId: string,
+  originalTaskId: string,
+): void {
+  const { db } = deps;
+  try {
+    const runRow = db.prepare('SELECT batch_id AS batchId FROM workflow_runs WHERE id = ?').get(winnerRunId) as
+      | { batchId?: unknown }
+      | undefined;
+    const batchId = typeof runRow?.batchId === 'string' && runRow.batchId.length > 0 ? runRow.batchId : null;
+    if (!batchId) return; // idea-seeded / non-sprint arm — no batch, nothing to remap.
+
+    const conflict = db
+      .prepare('SELECT 1 FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?')
+      .get(batchId, originalTaskId);
+    if (conflict !== undefined) {
+      db.prepare('DELETE FROM sprint_batch_tasks WHERE batch_id = ? AND task_id = ?').run(batchId, cloneTaskId);
+      return;
+    }
+    db.prepare('UPDATE sprint_batch_tasks SET task_id = ? WHERE batch_id = ? AND task_id = ?').run(
+      originalTaskId,
+      batchId,
+      cloneTaskId,
+    );
+  } catch (err) {
+    console.error(
+      `[experiments] decide: sprint lane remap failed for clone ${cloneTaskId} -> original ${originalTaskId} ` +
+        '(continuing; defect (a) re-opens for this task):',
+      err,
+    );
+  }
+}
+
 /** @internal exported for unit tests. */
 export async function decideExperiment(
   deps: ExperimentsDeps,
@@ -869,12 +1036,8 @@ export async function decideExperiment(
       const cloneRow = db.prepare('SELECT body FROM ideas WHERE id = ?').get(winnerCloneId) as
         | { body?: unknown }
         | undefined;
-      // A MISSING clone row means a prior decide attempt already folded this body and
-      // swept the clone (step 3 runs only AFTER the fold succeeds), then crashed before
-      // stamping 'decided'. Re-folding a now-absent clone's (null) body would WIPE the
-      // user's original idea, so skip — the fold is already durable. Only an existing
-      // clone row is folded (its body may legitimately be null/empty).
       if (cloneRow !== undefined) {
+        // The clone row is present — fold its (possibly null/empty) body onto the original.
         const cloneBody = typeof cloneRow.body === 'string' ? cloneRow.body : null;
         await deps.taskChangeRouter.applyChange(exp.project_id, {
           actor: 'orchestrator',
@@ -883,6 +1046,21 @@ export async function decideExperiment(
           fields: { body: cloneBody },
           kind: 'experiment-promote-fold',
         });
+      } else if (priorFoldEventExists(db, 'idea', exp.seed_idea_id, exp.created_at)) {
+        // Crash-retry: a prior decide already folded this body + swept the clone (step 3
+        // runs only AFTER the fold), then crashed before stamping 'decided'. A durable
+        // fold event within this experiment proves it — re-folding a now-absent clone's
+        // (null) body would WIPE the user's original idea, so skip; the fold is durable.
+      } else {
+        // Lost clone (NOT crash-retry): the clone is gone with no durable fold event in
+        // this experiment's lifetime — its body was deleted outside decide's control. An
+        // idea has no stage to advance and its body is unrecoverable, so LOG LOUDLY and
+        // continue WITHOUT touching the original idea's body (never wipe the user's idea).
+        console.warn(
+          `[experiments] decide: winner idea clone ${winnerCloneId} for experiment ${experimentId} is gone ` +
+            `with no durable fold event on original idea ${exp.seed_idea_id} — body unrecoverable, leaving the ` +
+            "original idea's body untouched (clone evidence lost outside decide)",
+        );
       }
     }
 
@@ -893,14 +1071,31 @@ export async function decideExperiment(
     //     original is untagged so the orchestrator-actor write is sandbox-exempt.
     //     approved_at is NOT touched — the original stays as the user approved it.
     for (const row of winnerSeedTaskRows) {
+      // Remap the winner run's sprint lane clone->original FIRST (every row, clone
+      // present or not) so the decide-THEN-merge path closes out like a regular
+      // sprint: after decide sweeps the clone, the winner session's still-'integrated'
+      // lane points at the ORIGINAL, and finalizeSprintLanesOnSessionMerge advances the
+      // original to Done on merge (defect a). Fail-soft — never aborts decide.
+      remapWinnerSeedLane(deps, winnerRunId, row.clone_task_id, row.original_task_id);
+
       const cloneRow = db.prepare('SELECT body AS body, stage_id AS stageId FROM tasks WHERE id = ?').get(
         row.clone_task_id,
       ) as { body?: unknown; stageId?: unknown } | undefined;
-      // A MISSING clone row means a prior decide attempt already folded + swept it
-      // (step 3 runs only after the fold succeeds) then crashed before stamping
-      // 'decided'; re-folding a now-null body would WIPE the user's original task.
-      // Skip — the fold is already durable.
-      if (cloneRow === undefined) continue;
+      if (cloneRow === undefined) {
+        // The clone row is ABSENT — two DISTINGUISHABLE causes (an experiment-promote-fold
+        // entity_events row on the original, scoped to THIS experiment's lifetime, tells
+        // them apart):
+        //   crash-retry — a prior decide folded + swept the clone (step 3 runs only after
+        //     the fold) then crashed before stamping 'decided'. The durable fold event
+        //     proves it; re-folding a now-null body would WIPE the user's original, so SKIP.
+        //   lost clone — the clone was deleted OUTSIDE decide's control (real incident:
+        //     winner clones merged + swept, zero fold events, originals stranded at 'Ready'
+        //     + re-seeded into a later experiment). No fold event → the original never got
+        //     the accepted outcome, so RECOVER it (advance to Done; body untouched).
+        if (priorFoldEventExists(db, 'task', row.original_task_id, exp.created_at)) continue;
+        await recoverStrandedOriginalTask(deps, exp.project_id, row.original_task_id);
+        continue;
+      }
       const cloneBody = typeof cloneRow.body === 'string' ? cloneRow.body : null;
       const cloneStageId = typeof cloneRow.stageId === 'string' ? cloneRow.stageId : undefined;
       await deps.taskChangeRouter.applyChange(exp.project_id, {
