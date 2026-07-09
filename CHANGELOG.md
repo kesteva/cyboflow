@@ -6,6 +6,44 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.20] — 2026-07-09
+
+### Added
+
+- **Visual verification.** A new subsystem that captures a run's UI deliverable,
+  judges it, and can gate the merge on the result — opt-in via a global
+  **Settings → Visual Verification** toggle and a **per-run toggle** in the launch
+  config step, configured per project through a `.cyboflow/verify.json` file.
+  [migrations 055–056]
+  - **Backends, in rungs.** Rung 0 captures the page and judges with a VLM; rung 1
+    (**Playwright**) drives interactive web across multiple viewports with a
+    deterministic-first accessibility gate, spinning up the project's dev server
+    (`DevServerManager`) and lazy-installing Chromium; rung 2 (**Peekaboo**)
+    verifies native desktop via a `verify:screen` lease and degrades to SKIPPED
+    when macOS TCC grants are missing. Playwright is now a runtime dependency so
+    the backend ships in packaged builds.
+  - **Judging + baselines.** A zero-dependency pixel/**SSIM** pre-diff gates the
+    (paid) VLM call, bounded by a **per-project judge-call budget** with telemetry;
+    verdicts carry their source and SSIM score. A filesystem **baseline store**
+    (`.cyboflow/artifacts/baselines`) plus an **Accept-as-baseline** button in the
+    verdict banner let you promote a passing capture as the reference for future
+    diffs.
+  - **Scheduler.** A singleton `VerificationScheduler` with a resource-lease pool
+    and drain loop runs requests wedge-proof, starvation-free, and cancel-safe,
+    with request timeouts, abort, `cancelForRun`, crash recovery, and a
+    per-batch worktree-sync mutex for batched sprint runs.
+  - **Merge-gate integration.** A visual-verify lane step with loopback delivers
+    the verdict (artifact enrichment plus a FAIL / low-confidence finding); the
+    programmatic controller parks and actuates the gate, and skipped/timeout
+    verdicts park the lane (with a non-blocking finding for
+    advance-with-visibility) instead of wedging the sprint. Exposed to agents via
+    the `cyboflow_request_verification` MCP tool.
+  - **Review surfaces.** A **Verify Queue** panel (center pane + sidebar toggle)
+    backed by a `verificationRequests.list` route, and a verdict banner on the
+    run's Screenshots tab.
+- **Run pending-input strip.** A footer on the run view that surfaces pending
+  review items and live questions at a glance (TASK-004 / TASK-005).
+
 ## [0.1.19] — 2026-07-08
 
 ### Added
