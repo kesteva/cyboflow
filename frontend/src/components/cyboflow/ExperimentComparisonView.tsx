@@ -24,12 +24,13 @@
  * (rerun / switchToRotation).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { X, Trophy, Ban, RotateCcw, Shuffle } from 'lucide-react';
+import { X, Trophy, Ban, RotateCcw, Shuffle, FlaskConical, ArrowRight } from 'lucide-react';
 import { trpc } from '../../trpc/client';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { cn } from '../../utils/cn';
 import { bootstrapArmSessionPanels } from '../../utils/bootstrapArmSessionPanels';
+import { experimentDisplayName, armDisplayLabel } from '../../utils/experimentDisplay';
 import { ScoreSummary, type FindingRow } from './WorkflowSummaryPanel';
 import { DiffBody } from './FileTabRenderer';
 import { IdeaPickerModal } from './IdeaPickerModal';
@@ -48,9 +49,11 @@ import type {
   ExperimentComparisonDiffs,
   ExperimentArmView,
   ExperimentArm,
+  ExperimentStatus,
+  ComparisonStatus,
   PairwiseSample,
 } from '../../../../shared/types/experiments';
-import type { QualityFinding } from '../../../../shared/types/insights';
+import type { QualityFinding, RunUsageRollup } from '../../../../shared/types/insights';
 
 /** How often to re-poll while the comparison is not yet resolved. */
 const COMPARISON_POLL_MS = 10_000;
@@ -89,6 +92,43 @@ function armVariantId(exp: ExperimentRow, arm: ExperimentArm): string {
   return arm === 'A' ? exp.variant_a_id : exp.variant_b_id;
 }
 
+/**
+ * Lifecycle status pill text for the experiment home header. `grading` splits on
+ * the comparison: 'verdict ready' once the pairwise judge has produced a complete
+ * comparison but the human has not yet decided, else 'grading…' while it runs.
+ */
+function experimentStatusPill(status: ExperimentStatus, comparisonStatus: ComparisonStatus | 'absent'): string {
+  switch (status) {
+    case 'running':
+      return 'running';
+    case 'grading':
+      return comparisonStatus === 'complete' ? 'verdict ready' : 'grading…';
+    case 'decided':
+      return 'decided';
+    case 'abandoned':
+      return 'abandoned';
+    default:
+      return status;
+  }
+}
+
+/** Accent classes for the header status pill, keyed off {@link experimentStatusPill}'s label. */
+function statusPillClasses(label: string): string {
+  switch (label) {
+    case 'running':
+      return 'border-interactive/40 bg-interactive/10 text-interactive';
+    case 'grading…':
+      return 'border-status-warning/40 bg-status-warning/10 text-status-warning';
+    case 'verdict ready':
+    case 'decided':
+      return 'border-status-success/40 bg-status-success/10 text-status-success';
+    case 'abandoned':
+      return 'border-border-primary text-text-tertiary';
+    default:
+      return 'border-border-primary text-text-secondary';
+  }
+}
+
 /** Human summary of the recorded CHANGES decision (experiments.decide) once an experiment is settled. */
 function changesDecisionSummary(exp: ExperimentRow): string {
   if (exp.status === 'abandoned') return 'Experiment abandoned';
@@ -118,7 +158,28 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
   const [seedIdeaLabel, setSeedIdeaLabel] = useState<string | null>(null);
   const [ideaPickerOpen, setIdeaPickerOpen] = useState(false);
   const [rotationConfirmOpen, setRotationConfirmOpen] = useState(false);
+  const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
   const [promoteConfirm, setPromoteConfirm] = useState<ExperimentArm | null>(null);
+
+  // Workflow display name for the identity header — resolved cheaply from the
+  // experiment's workflow_id (the same `workflows.get` the editor uses). Absent
+  // until it lands; `experimentDisplayName` tolerates '' so the header still
+  // renders the challenger name in the meantime.
+  const [workflowName, setWorkflowName] = useState<string>('');
+  const workflowId = exp?.workflow_id ?? null;
+  useEffect(() => {
+    if (workflowId === null) return;
+    let alive = true;
+    void trpc.cyboflow.workflows.get
+      .query({ workflowId })
+      .then((row) => {
+        if (alive) setWorkflowName(row.name);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [workflowId]);
 
   // -- Data loading + polling ------------------------------------------------
 
@@ -204,6 +265,10 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
   const armBSettled = payload !== null && isExperimentArmSettled(payload.armB.status);
   const bothSettled = armASettled && armBSettled;
   const expSettled = exp !== null && isExperimentSettled(exp.status);
+  // The mid-run "live arms" view stands in for the verdict layout while there is
+  // no pairwise verdict yet AND at least one arm is still executing. Once both
+  // arms settle (grading) or a verdict lands, the full verdict layout renders.
+  const showRunningState = payload !== null && payload.verdict === null && (!armASettled || !armBSettled);
   const canDecide = exp !== null && payload !== null && !expSettled && bothSettled;
   const canRerunComparison = exp !== null && (exp.status === 'running' || exp.status === 'grading');
   // "Switch to randomized" turns the head-to-head into an ongoing A/B rotation between
@@ -308,6 +373,20 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
     }
   };
 
+  const handleOpenArmSession = async (arm: ExperimentArm): Promise<void> => {
+    if (exp === null || payload === null) return;
+    const sessionId = arm === 'A' ? exp.session_a_id : exp.session_b_id;
+    const runId = arm === 'A' ? payload.armA.runId : payload.armB.runId;
+    if (sessionId === null) return;
+    // Arm B is created headless, so bootstrap its panels BEFORE navigating —
+    // mirrors ABTestLaunchModal's post-start sequence exactly (bootstrap →
+    // setActiveRun → setActiveProjectId → goToSession).
+    await bootstrapArmSessionPanels(sessionId);
+    useCyboflowStore.getState().setActiveRun(runId, sessionId);
+    useNavigationStore.getState().setActiveProjectId(exp.project_id);
+    useNavigationStore.getState().goToSession();
+  };
+
   const handlePromoteVariant = async (arm: ExperimentArm): Promise<void> => {
     if (exp === null || actionBusy !== null) return;
     setActionBusy('promoteVariant');
@@ -364,26 +443,77 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
     );
   }
 
+  const displayName = experimentDisplayName(
+    workflowName,
+    { variantId: exp.variant_a_id, label: payload.armA.variantLabel },
+    { variantId: exp.variant_b_id, label: payload.armB.variantLabel },
+  );
+  const pillLabel = experimentStatusPill(exp.status, payload.comparisonStatus);
+
   return (
     <div className="flex h-full w-full flex-col overflow-hidden bg-bg-primary" data-testid="experiment-comparison-view">
-      <div className="flex flex-shrink-0 items-center justify-between border-b border-border-primary bg-bg-secondary px-7 py-4">
-        <div>
-          <div className="eyebrow text-text-tertiary">A/B experiment · pairwise comparison</div>
-          <h2 className="mt-1 text-[20px] font-bold tracking-[-0.01em] text-text-primary">Experiment comparison</h2>
+      <div className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-border-primary bg-bg-secondary px-7 py-4">
+        <div className="flex min-w-0 items-center gap-3">
+          <FlaskConical size={22} className="flex-shrink-0 text-interactive" aria-hidden />
+          <div className="min-w-0">
+            <div className="eyebrow text-text-tertiary">A/B experiment</div>
+            <div className="mt-0.5 flex items-center gap-2">
+              <h2
+                data-testid="experiment-display-name"
+                title={displayName}
+                className="truncate text-[18px] font-bold tracking-[-0.01em] text-text-primary"
+              >
+                {displayName}
+              </h2>
+              <span
+                data-testid="experiment-status-pill"
+                className={cn(
+                  'flex-shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold',
+                  statusPillClasses(pillLabel),
+                )}
+              >
+                {pillLabel}
+              </span>
+            </div>
+          </div>
         </div>
-        <button
-          type="button"
-          data-testid="experiment-comparison-close"
-          onClick={() => useNavigationStore.getState().closeExperimentComparison()}
-          className="rounded-button p-1.5 text-text-tertiary hover:bg-bg-hover hover:text-text-primary"
-          aria-label="Close comparison"
-        >
-          <X size={18} />
-        </button>
+        <div className="flex flex-shrink-0 items-center gap-2">
+          {!expSettled && (
+            <button
+              type="button"
+              data-testid="experiment-cancel"
+              disabled={actionBusy !== null}
+              onClick={() => setCancelConfirmOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-button border border-status-error/40 px-3 py-1.5 text-sm font-medium text-status-error hover:bg-status-error/10 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Ban size={14} /> Cancel experiment
+            </button>
+          )}
+          <button
+            type="button"
+            data-testid="experiment-comparison-close"
+            onClick={() => useNavigationStore.getState().closeExperimentComparison()}
+            className="rounded-button p-1.5 text-text-tertiary hover:bg-bg-hover hover:text-text-primary"
+            aria-label="Close comparison"
+          >
+            <X size={18} />
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto px-7 py-5">
         <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-6">
+          {showRunningState ? (
+            <>
+              <RunningStateView exp={exp} payload={payload} onOpenSession={handleOpenArmSession} />
+              {actionError !== null && (
+                <p className="text-sm text-status-error" role="alert">
+                  {actionError}
+                </p>
+              )}
+            </>
+          ) : (
+            <>
           <VerdictCard payload={payload} onRerunComparison={handleRerunComparison} canRerunComparison={canRerunComparison} busy={actionBusy === 'rerunComparison'} />
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
@@ -442,19 +572,9 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
                   </button>
                   {!bothSettled && (
                     <span className="text-xs text-text-muted" data-testid="experiment-decide-hint">
-                      Waiting for both arms to finish before a decision can be recorded.
+                      Waiting for both arms to finish before a decision can be recorded — use
+                      &ldquo;Cancel experiment&rdquo; above to tear it down.
                     </span>
-                  )}
-                  {!bothSettled && (
-                    <button
-                      type="button"
-                      data-testid="experiment-abandon"
-                      disabled={actionBusy !== null}
-                      onClick={() => void handleAbandon()}
-                      className="text-xs font-medium text-text-tertiary underline hover:text-status-error disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      Abandon experiment
-                    </button>
                   )}
                 </div>
               ) : (
@@ -581,12 +701,24 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
               </div>
             </div>
           </div>
+            </>
+          )}
         </div>
       </div>
 
       {ideaPickerOpen && exp !== null && (
         <IdeaPickerModal isOpen projectId={exp.project_id} onClose={() => setIdeaPickerOpen(false)} onPicked={handleIdeaPicked} />
       )}
+
+      <ConfirmDialog
+        isOpen={cancelConfirmOpen}
+        onClose={() => setCancelConfirmOpen(false)}
+        onConfirm={() => void handleAbandon()}
+        title="Cancel this experiment?"
+        message="Both arms are torn down and the experiment is abandoned. Any work in the arm sessions is discarded — this cannot be undone."
+        confirmText="Yes, cancel it"
+        cancelText="Keep running"
+      />
 
       <ConfirmDialog
         isOpen={rotationConfirmOpen}
@@ -773,6 +905,114 @@ function ArmColumn({ arm }: { arm: ExperimentArmView }): React.JSX.Element {
           onToggleBreakdown={() => {}}
         />
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Running state — live arm cards while the experiment has no verdict yet
+// ---------------------------------------------------------------------------
+
+/**
+ * The mid-run stand-in for the verdict layout: two live arm cards plus a quiet
+ * placeholder strip, rendered while there is no pairwise verdict and at least
+ * one arm is still executing (see `showRunningState`). Each card links straight
+ * into that arm's session so the user can watch / steer the run live; the 10s
+ * comparison poll keeps the statuses + usage fresh (no second poll here).
+ */
+function RunningStateView({
+  exp,
+  payload,
+  onOpenSession,
+}: {
+  exp: ExperimentRow;
+  payload: ExperimentComparisonPayload;
+  onOpenSession: (arm: ExperimentArm) => void;
+}): React.JSX.Element {
+  return (
+    <div className="flex flex-col gap-4" data-testid="experiment-running-state">
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+        <RunningArmCard
+          arm="A"
+          label={armDisplayLabel({ variantId: exp.variant_a_id, label: payload.armA.variantLabel })}
+          status={payload.armA.status}
+          usage={payload.armA.usage}
+          canOpen={exp.session_a_id !== null}
+          onOpen={() => onOpenSession('A')}
+        />
+        <RunningArmCard
+          arm="B"
+          label={armDisplayLabel({ variantId: exp.variant_b_id, label: payload.armB.variantLabel })}
+          status={payload.armB.status}
+          usage={payload.armB.usage}
+          canOpen={exp.session_b_id !== null}
+          onOpen={() => onOpenSession('B')}
+        />
+      </div>
+      <p className="text-xs text-text-muted" data-testid="experiment-running-placeholder">
+        Pairwise verdict runs automatically when both arms settle.
+      </p>
+    </div>
+  );
+}
+
+/** One live arm card in the running state: badge · label · status · usage · open-session link. */
+function RunningArmCard({
+  arm,
+  label,
+  status,
+  usage,
+  canOpen,
+  onOpen,
+}: {
+  arm: ExperimentArm;
+  label: string;
+  status: string;
+  usage: RunUsageRollup | null;
+  canOpen: boolean;
+  onOpen: () => void;
+}): React.JSX.Element {
+  return (
+    <div
+      className="flex flex-col gap-3 rounded-card border border-border-primary bg-surface-primary p-4"
+      data-testid={`experiment-running-arm-${arm.toLowerCase()}`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full border border-border-primary bg-surface-secondary text-[11px] font-bold text-text-secondary">
+            {arm}
+          </span>
+          <span className="truncate text-sm font-semibold text-text-primary" title={label}>
+            {label}
+          </span>
+        </div>
+        <span
+          data-testid={`experiment-running-arm-${arm.toLowerCase()}-status`}
+          className="flex-shrink-0 rounded-full border border-border-primary bg-surface-secondary px-2 py-0.5 text-[11px] font-medium uppercase tracking-wide text-text-secondary"
+        >
+          {status}
+        </span>
+      </div>
+
+      <div className="text-xs text-text-secondary" data-testid={`experiment-running-arm-${arm.toLowerCase()}-usage`}>
+        {usage !== null ? (
+          <>
+            {compactTokens(usage.totalTokens)} tokens · {formatCost(usage.costUsd)}
+          </>
+        ) : (
+          <>— tokens · —</>
+        )}
+      </div>
+
+      <button
+        type="button"
+        data-testid={`experiment-open-session-${arm.toLowerCase()}`}
+        disabled={!canOpen}
+        onClick={onOpen}
+        className="inline-flex w-fit items-center gap-1.5 rounded-button border border-border-primary px-3 py-1.5 text-xs font-medium text-text-secondary hover:border-border-emphasized hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        Open session <ArrowRight size={13} />
+      </button>
     </div>
   );
 }

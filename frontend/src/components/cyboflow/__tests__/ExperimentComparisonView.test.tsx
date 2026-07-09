@@ -24,6 +24,7 @@ import type {
 const getQuery = vi.fn();
 const getComparisonQuery = vi.fn();
 const getComparisonDiffsQuery = vi.fn();
+const getWorkflowQuery = vi.fn();
 const decideMutate = vi.fn();
 const abandonMutate = vi.fn();
 const rerunComparisonMutate = vi.fn();
@@ -34,6 +35,7 @@ const closeExperimentComparison = vi.fn();
 const setActiveProjectId = vi.fn();
 const goToSession = vi.fn();
 const setActiveRun = vi.fn();
+const bootstrapArmSessionPanels = vi.fn().mockResolvedValue(undefined);
 
 vi.mock('../../../trpc/client', () => ({
   trpc: {
@@ -49,6 +51,7 @@ vi.mock('../../../trpc/client', () => ({
         switchToRotation: { mutate: (...a: unknown[]) => switchToRotationMutate(...a) },
         promoteVariant: { mutate: (...a: unknown[]) => promoteVariantMutate(...a) },
       },
+      workflows: { get: { query: (...a: unknown[]) => getWorkflowQuery(...a) } },
       tasks: { get: { query: vi.fn().mockResolvedValue(null) } },
     },
   },
@@ -65,7 +68,7 @@ vi.mock('../../../stores/cyboflowStore', () => ({
 }));
 
 vi.mock('../../../utils/bootstrapArmSessionPanels', () => ({
-  bootstrapArmSessionPanels: vi.fn().mockResolvedValue(undefined),
+  bootstrapArmSessionPanels: (...a: unknown[]) => bootstrapArmSessionPanels(...a),
 }));
 
 vi.mock('../IdeaPickerModal', () => ({
@@ -181,6 +184,10 @@ function makeDiffs(over: Partial<ExperimentComparisonDiffs> = {}): ExperimentCom
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The identity header resolves the workflow display name from workflow_id via
+  // `workflows.get`; default it so every mount can render 'sprint A/B · …'.
+  getWorkflowQuery.mockResolvedValue({ id: 'wf-1', name: 'sprint' });
+  bootstrapArmSessionPanels.mockResolvedValue(undefined);
 });
 
 describe('ExperimentComparisonView', () => {
@@ -432,20 +439,29 @@ describe('ExperimentComparisonView', () => {
     expect(setActiveRun).toHaveBeenCalledWith('run-a2', 'sess-a2');
   });
 
-  it('"Abandon experiment" is offered while an arm is still running and tears the experiment down', async () => {
+  it('offers the header "Cancel experiment" while an arm is still running and tears the experiment down after confirm', async () => {
     // Preserves the old "Discard both & run again" abandon-reachability contract:
     // a still-running experiment (an arm not yet settled) can be torn down without
-    // waiting for a changes decision, now via a dedicated Abandon control.
+    // waiting for a changes decision — now via the always-available header Cancel
+    // control (the old !bothSettled footer abandon-link was removed).
     getQuery.mockResolvedValue(makeExp({ status: 'running' }));
     getComparisonQuery.mockResolvedValue(
-      makePayload({ armB: makeArm({ runId: 'run-b', arm: 'B', status: 'running' }) }),
+      makePayload({
+        comparisonStatus: 'absent',
+        verdict: null,
+        armA: makeArm({ runId: 'run-a', arm: 'A', status: 'running' }),
+        armB: makeArm({ runId: 'run-b', arm: 'B', status: 'running' }),
+      }),
     );
     getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
     abandonMutate.mockResolvedValue({ experimentId: 'exp_1', status: 'abandoned', winnerRunId: null });
 
     render(<ExperimentComparisonView experimentId="exp_1" />);
-    const btn = await screen.findByTestId('experiment-abandon');
+    const btn = await screen.findByTestId('experiment-cancel');
     fireEvent.click(btn);
+    // Confirmation gates the mutation — not called until confirmed.
+    expect(abandonMutate).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByText('Yes, cancel it'));
 
     await waitFor(() => expect(abandonMutate).toHaveBeenCalledWith({ experimentId: 'exp_1' }));
     expect(decideMutate).not.toHaveBeenCalled();
@@ -483,5 +499,91 @@ describe('ExperimentComparisonView', () => {
     // synchronously right after the file-tab appears (avoids a real render race).
     expect(await screen.findByText(/new line A/)).toBeInTheDocument();
     expect(await screen.findByText(/new line B/)).toBeInTheDocument();
+  });
+
+  // -------------------------------------------------------------------------
+  // Lifecycle-aware home: running state + always-available cancel (slice S4)
+  // -------------------------------------------------------------------------
+
+  /** A mid-run comparison: no verdict yet, both arms still executing. */
+  function makeRunningPayload(): ExperimentComparisonPayload {
+    return makePayload({
+      comparisonStatus: 'absent',
+      verdict: null,
+      armA: makeArm({ runId: 'run-a', arm: 'A', variantLabel: 'variant-a', status: 'running' }),
+      armB: makeArm({ runId: 'run-b', arm: 'B', variantLabel: 'variant-b', status: 'running' }),
+    });
+  }
+
+  it('AC1: a running experiment renders the identity header, two live arm cards, and a Cancel button', async () => {
+    getQuery.mockResolvedValue(makeExp({ status: 'running' }));
+    getComparisonQuery.mockResolvedValue(makeRunningPayload());
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+
+    // Header: 'running' pill + the resolved '<workflow> A/B · <challenger>' name.
+    expect(await screen.findByTestId('experiment-status-pill')).toHaveTextContent('running');
+    await waitFor(() =>
+      expect(screen.getByTestId('experiment-display-name')).toHaveTextContent(
+        'sprint A/B · variant-a vs variant-b',
+      ),
+    );
+    // Two live arm cards with labels + statuses, in place of the verdict layout.
+    expect(screen.getByTestId('experiment-running-state')).toBeInTheDocument();
+    expect(screen.getByTestId('experiment-running-arm-a')).toHaveTextContent('variant-a');
+    expect(screen.getByTestId('experiment-running-arm-a-status')).toHaveTextContent('running');
+    expect(screen.getByTestId('experiment-running-arm-b')).toHaveTextContent('variant-b');
+    expect(screen.getByTestId('experiment-running-placeholder')).toHaveTextContent(
+      'Pairwise verdict runs automatically when both arms settle.',
+    );
+    // Cancel is visible; the verdict card is NOT rendered yet.
+    expect(screen.getByTestId('experiment-cancel')).toBeInTheDocument();
+    expect(screen.queryByTestId('experiment-verdict-card')).not.toBeInTheDocument();
+  });
+
+  it('AC2: a grading experiment with a complete comparison shows the decide CTAs AND the Cancel button', async () => {
+    getQuery.mockResolvedValue(makeExp({ status: 'grading' }));
+    getComparisonQuery.mockResolvedValue(makePayload()); // complete comparison + verdict
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    // Full verdict layout with decide CTAs.
+    expect(await screen.findByTestId('experiment-accept-a')).toBeInTheDocument();
+    // grading is NOT settled → Cancel remains available; the running state is gone.
+    expect(screen.getByTestId('experiment-cancel')).toBeInTheDocument();
+    expect(screen.queryByTestId('experiment-running-state')).not.toBeInTheDocument();
+    expect(screen.getByTestId('experiment-status-pill')).toHaveTextContent('verdict ready');
+  });
+
+  it('AC3: a decided experiment renders NO Cancel button', async () => {
+    getQuery.mockResolvedValue(makeExp({ status: 'decided', winner_arm: 'A', winner_run_id: 'run-a' }));
+    getComparisonQuery.mockResolvedValue(makePayload());
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    await screen.findByTestId('experiment-verdict-card');
+    expect(screen.queryByTestId('experiment-cancel')).not.toBeInTheDocument();
+    expect(screen.getByTestId('experiment-status-pill')).toHaveTextContent('decided');
+  });
+
+  it('AC4: "Open session" bootstraps the arm panels then navigates to the chosen arm session', async () => {
+    getQuery.mockResolvedValue(makeExp({ status: 'running' }));
+    getComparisonQuery.mockResolvedValue(makeRunningPayload());
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+
+    // Arm B is created headless — the panel bootstrap must run before navigation.
+    fireEvent.click(await screen.findByTestId('experiment-open-session-b'));
+    await waitFor(() => expect(bootstrapArmSessionPanels).toHaveBeenCalledWith('sess-b'));
+    await waitFor(() => expect(setActiveRun).toHaveBeenCalledWith('run-b', 'sess-b'));
+    await waitFor(() => expect(goToSession).toHaveBeenCalled());
+    expect(setActiveProjectId).toHaveBeenCalledWith(5);
+
+    // Arm A routes to its own session/run.
+    fireEvent.click(screen.getByTestId('experiment-open-session-a'));
+    await waitFor(() => expect(bootstrapArmSessionPanels).toHaveBeenCalledWith('sess-a'));
+    await waitFor(() => expect(setActiveRun).toHaveBeenCalledWith('run-a', 'sess-a'));
   });
 });
