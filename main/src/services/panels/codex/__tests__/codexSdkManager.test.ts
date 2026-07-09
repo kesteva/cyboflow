@@ -245,12 +245,22 @@ describe('CodexSdkManager', () => {
       const result = JSON.parse(rows[3].payloadJson) as {
         type: string;
         subtype: string;
-        usage: { input_tokens: number; output_tokens: number };
+        usage: {
+          input_tokens: number;
+          output_tokens: number;
+          cache_read_input_tokens: number;
+          reasoning_output_tokens: number;
+        };
       };
       expect(result).toMatchObject({
         type: 'result',
         subtype: 'success',
-        usage: { input_tokens: 13, output_tokens: 9 },
+        usage: {
+          input_tokens: 10,
+          output_tokens: 9,
+          cache_read_input_tokens: 3,
+          reasoning_output_tokens: 2,
+        },
       });
     } finally {
       db.close();

@@ -10,6 +10,7 @@ export interface AgentUsage {
   output_tokens?: number;
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
+  reasoning_output_tokens?: number;
 }
 
 export interface AgentTextBlock {
@@ -98,7 +99,7 @@ export interface AgentResultEvent {
   num_turns: number;
   result?: string;
   cost_usd?: number;
-  usage?: Pick<AgentUsage, 'input_tokens' | 'output_tokens'>;
+  usage?: AgentUsage;
   external_session_id?: string;
 }
 

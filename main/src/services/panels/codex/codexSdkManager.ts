@@ -93,7 +93,7 @@ function stringifyUnknown(value: unknown): string {
 
 function usageInputTokens(usage: Usage | null): number {
   if (!usage) return 0;
-  return usage.input_tokens + usage.cached_input_tokens;
+  return usage.input_tokens;
 }
 
 function usageOutputTokens(usage: Usage | null): number {
@@ -670,6 +670,8 @@ export class CodexSdkManager extends AbstractCliManager {
       usage: {
         input_tokens: usageInputTokens(input.usage),
         output_tokens: usageOutputTokens(input.usage),
+        cache_read_input_tokens: input.usage?.cached_input_tokens ?? 0,
+        reasoning_output_tokens: input.usage?.reasoning_output_tokens ?? 0,
       },
       external_session_id: input.threadId ?? undefined,
     };

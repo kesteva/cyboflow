@@ -356,13 +356,23 @@ function fetchMaterializedRollups(
  *     object is present.
  *   - result → total_cost_usd (SUMmed; null when never present) and num_turns
  *     (SUMmed; null when never present).
- * `result.usage` tokens are intentionally NOT added (they restate turn totals).
+ *   - result.usage → token fallback used only when the run has no assistant usage
+ *     blocks. Codex reports turn usage on its terminal result, while Claude
+ *     normally reports it on assistant messages; the fallback avoids both zeroed
+ *     Codex totals and double-counting Claude totals.
  */
 function scanRawEventRollups(
   db: DatabaseLike,
   runIds: readonly string[],
 ): Map<string, RunUsageRollup> {
   const acc = new Map<string, RunUsageRollup>();
+  const resultUsageFallback = new Map<string, {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    messageCount: number;
+  }>();
   for (const id of runIds) acc.set(id, zeroRollup(id));
   if (runIds.length === 0) return acc;
 
@@ -409,11 +419,35 @@ function scanRawEventRollups(
         if (typeof payload.num_turns === 'number' && Number.isFinite(payload.num_turns)) {
           target.numTurns = (target.numTurns ?? 0) + payload.num_turns;
         }
+        const usage = payload.usage;
+        if (isRecord(usage)) {
+          const fallback = resultUsageFallback.get(row.runId) ?? {
+            inputTokens: 0,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            messageCount: 0,
+          };
+          fallback.inputTokens += asNumber(usage.input_tokens);
+          fallback.outputTokens += asNumber(usage.output_tokens);
+          fallback.cacheReadTokens += asNumber(usage.cache_read_input_tokens);
+          fallback.cacheCreationTokens += asNumber(usage.cache_creation_input_tokens);
+          fallback.messageCount += 1;
+          resultUsageFallback.set(row.runId, fallback);
+        }
       }
     }
   }
 
   for (const rollup of acc.values()) {
+    const fallback = resultUsageFallback.get(rollup.runId);
+    if (rollup.assistantMessageCount === 0 && fallback !== undefined) {
+      rollup.inputTokens = fallback.inputTokens;
+      rollup.outputTokens = fallback.outputTokens;
+      rollup.cacheReadTokens = fallback.cacheReadTokens;
+      rollup.cacheCreationTokens = fallback.cacheCreationTokens;
+      rollup.assistantMessageCount = fallback.messageCount;
+    }
     rollup.totalTokens = rollup.inputTokens + rollup.outputTokens;
   }
   return acc;
