@@ -558,20 +558,10 @@ export class RunLauncher {
       this.db
         .prepare('UPDATE workflow_runs SET base_sha = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
         .run(baseSha, runId);
-      // Dual-write the legacy back-link AND keep the legacy session substrate in
-      // lockstep with the run it hosts. Without the substrate stamp a session
-      // created on the SDK default (ensureSessionForLaunch) that hosts an
-      // INTERACTIVE run would, on cancel/end, return to its resting view as
-      // SDK — the session never reflected the PTY substrate the run actually
-      // used. The frontend resting view (ClaudePanel) reads sessions.substrate,
-      // and the live REPL re-spawn (sessions:input) re-registers the PTY channel
-      // under sessions.run_id, so this keeps the resting view a PTY surface.
-      // The new sessions.agent_* columns are the default chat agent config; a
-      // workflow run owns its own provider/runtime stamp and must not overwrite
-      // the session defaults while it temporarily takes over.
-      this.db
-        .prepare('UPDATE sessions SET run_id = ?, substrate = ? WHERE id = ?')
-        .run(runId, resolvedSubstrate, sessionId);
+      // Dual-write only the legacy back-link. The session's substrate and
+      // agent_* columns own its default chat runtime; the workflow run owns the
+      // temporary takeover runtime and must not overwrite those defaults.
+      this.db.prepare('UPDATE sessions SET run_id = ? WHERE id = ?').run(runId, sessionId);
 
       // Planner pre-launch seed idea(s) (migrations 017 + 060). A direct
       // workflow_runs write — NOT a tasks write, and NOT routed through the stage
