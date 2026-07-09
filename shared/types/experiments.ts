@@ -112,8 +112,12 @@ void _settledStatusesAreValid;
 // stats types below these without touching them.
 // ===========================================================================
 
-/** The only experiment kind in v1 — a two-arm side-by-side head-to-head. */
-export type ExperimentKind = 'side_by_side';
+/**
+ * Experiment kind. `side_by_side` is a two-arm head-to-head; `rotation`
+ * (migration 058) is an ongoing randomized rotation over a workflow's live
+ * baseline + its active variants, tracked as a first-class experiment record.
+ */
+export type ExperimentKind = 'side_by_side' | 'rotation';
 
 /**
  * Sentinel variant id for the "Current workflow (baseline)" arm of a side-by-side
@@ -144,32 +148,45 @@ export function isBaselineArm(variantId: string): boolean {
  * - `decided`   — a winner was promoted (or both discarded) via experiments.decide.
  * - `abandoned` — torn down before a decision (rollback / explicit abandon /
  *                 half-created crash recovery).
+ * - `superseded` — (rotation only, migration 058) a rotation experiment closed
+ *                 because its ARM-SET MEMBERSHIP changed (a variant activated/
+ *                 retired, or the baseline opted in/out); a successor row replaces
+ *                 it. Terminal. A pure weight change does NOT supersede.
  */
-export type ExperimentStatus = 'running' | 'grading' | 'decided' | 'abandoned';
+export type ExperimentStatus = 'running' | 'grading' | 'decided' | 'abandoned' | 'superseded';
 
-/** The four `ExperimentStatus` values, for zod/enum construction + iteration. */
+/** The five `ExperimentStatus` values, for zod/enum construction + iteration. */
 export const EXPERIMENT_STATUSES: readonly ExperimentStatus[] = [
   'running',
   'grading',
   'decided',
   'abandoned',
+  'superseded',
 ] as const;
 
-/** A settled experiment can no longer be re-run/re-decided; rerun/switchToRotation require it. */
+/**
+ * A settled experiment can no longer be re-run/re-decided; rerun/switchToRotation
+ * require it. `superseded` (a rotation replaced by a successor) is terminal too.
+ */
 export function isExperimentSettled(status: string): boolean {
-  return status === 'decided' || status === 'abandoned';
+  return status === 'decided' || status === 'abandoned' || status === 'superseded';
 }
 
-/** `experiments` DB row (migration 049). */
+/** `experiments` DB row (migration 049; nullable relaxations in 057). */
 export interface ExperimentRow {
   id: string;
-  project_id: number;
+  /** Nullable since 057: a global-workflow rotation has no project. Always set for side-by-side. */
+  project_id: number | null;
   workflow_id: string;
   kind: ExperimentKind;
-  base_branch: string;
-  base_sha: string;
-  variant_a_id: string;
-  variant_b_id: string;
+  /** Nullable since 057: a rotation pins no base branch. Always set for side-by-side. */
+  base_branch: string | null;
+  /** Nullable since 057: a rotation pins no SHA. Always set for side-by-side. */
+  base_sha: string | null;
+  /** Nullable since 057: a rotation's arms live in experiment_rotation_arms. Always set for side-by-side. */
+  variant_a_id: string | null;
+  /** Nullable since 057: see variant_a_id. */
+  variant_b_id: string | null;
   run_a_id: string | null;
   run_b_id: string | null;
   session_a_id: string | null;
@@ -205,6 +222,22 @@ export interface ExperimentSeedTaskRow {
   arm: ExperimentArm;
   original_task_id: string;
   clone_task_id: string;
+  created_at: string;
+}
+
+/**
+ * `experiment_rotation_arms` DB row (migration 058) — one arm-set snapshot row per
+ * arm of a ROTATION experiment, captured at open. `variant_id` is a real variant
+ * id or the `BASELINE_VARIANT_SENTINEL` ('__baseline__') for the live-baseline arm.
+ * `label` + `weight_at_open` are denormalized so the snapshot survives a later
+ * variant delete / re-weight. An arm-set MEMBERSHIP change closes the experiment
+ * (status='superseded') and opens a successor with a fresh set of these rows.
+ */
+export interface ExperimentRotationArmRow {
+  experiment_id: string;
+  variant_id: string;
+  label: string;
+  weight_at_open: number;
   created_at: string;
 }
 

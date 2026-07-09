@@ -221,6 +221,7 @@ const STATUS_LABEL: Record<ExperimentSummary['status'], string> = {
   grading: 'Grading',
   decided: 'Decided',
   abandoned: 'Abandoned',
+  superseded: 'Superseded',
 };
 
 function ExperimentRow({ item }: { item: ExperimentSummary }): React.JSX.Element {

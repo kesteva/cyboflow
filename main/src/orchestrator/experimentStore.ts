@@ -255,6 +255,12 @@ export type ReconcileOutcome =
 /**
  * Reconcile a single experiment's status against its arm runs.
  *
+ * - **Side-by-side only.** A rotation experiment (migration 058) has no
+ *   run_a_id/run_b_id (its arms live in experiment_rotation_arms) and its own
+ *   membership-driven lifecycle — this two-arm reconcile does not apply, so a
+ *   non-`side_by_side` kind is left untouched. Without this guard a live
+ *   rotation row would be misread as "half-created" (both run ids NULL) and
+ *   forcibly abandoned on every boot recovery.
  * - Only a `running` experiment is reconciled (grading/decided/abandoned are
  *   settled or human-owned).
  * - **Half-created** (either run_a_id or run_b_id NULL on a `running` experiment
@@ -266,6 +272,7 @@ export type ReconcileOutcome =
 export function reconcileExperimentStatus(db: DatabaseLike, experimentId: string): ReconcileOutcome {
   const exp = getExperiment(db, experimentId);
   if (!exp) return { changed: false, status: 'abandoned' };
+  if (exp.kind !== 'side_by_side') return { changed: false, status: exp.status };
   if (exp.status !== 'running') return { changed: false, status: exp.status };
 
   // Half-created: an arm never launched. Both run ids are stamped together at the
@@ -356,6 +363,15 @@ export async function dismissAndSweepHalfCreatedExperiment(
   exp: ExperimentRow,
   deps: HalfCreatedExperimentRecoveryDeps,
 ): Promise<void> {
+  // A side-by-side experiment always has a project (project_id is nullable only
+  // for a rotation experiment, migration 058). This recovery path is side-by-side
+  // only — the arm sessions + seed clones it sweeps are exclusive to that kind.
+  if (exp.project_id === null) {
+    throw new Error(
+      `experimentStore.dismissAndSweepHalfCreatedExperiment: experiment ${exp.id} has a null project_id`,
+    );
+  }
+  const projectId = exp.project_id;
   for (const sessionId of [exp.session_a_id, exp.session_b_id]) {
     if (!sessionId) continue;
     try {
@@ -369,7 +385,7 @@ export async function dismissAndSweepHalfCreatedExperiment(
     }
   }
   await deps
-    .deleteExperimentArmEntities(exp.project_id, {
+    .deleteExperimentArmEntities(projectId, {
       experimentId: exp.id,
       runId: exp.run_a_id ?? '',
       seedCloneId: exp.seed_idea_clone_a_id,
@@ -377,7 +393,7 @@ export async function dismissAndSweepHalfCreatedExperiment(
     })
     .catch(() => {});
   await deps
-    .deleteExperimentArmEntities(exp.project_id, {
+    .deleteExperimentArmEntities(projectId, {
       experimentId: exp.id,
       runId: exp.run_b_id ?? '',
       seedCloneId: exp.seed_idea_clone_b_id,

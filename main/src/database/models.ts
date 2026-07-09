@@ -557,6 +557,16 @@ export type { WorkflowVariantRow } from '../../../shared/types/experiments';
 export type { ExperimentRow } from '../../../shared/types/experiments';
 
 /**
+ * `experiment_rotation_arms` row (migration 058) — one arm-set snapshot row per arm
+ * of a ROTATION experiment (the live baseline + active variants), captured at open.
+ * `label`/`weight_at_open` are denormalized so the snapshot survives a later variant
+ * delete/re-weight. The canonical shape lives in `shared/types/experiments.ts`
+ * (cross-slice contract); re-exported here so DB-row consumers can import it
+ * alongside the other `*Row` interfaces.
+ */
+export type { ExperimentRotationArmRow } from '../../../shared/types/experiments';
+
+/**
  * `experiment_comparisons` row (migration 050) — one self-contained pairwise
  * A/B verdict per side-by-side experiment (v1: 2 arms => 1 comparison). Freezes
  * both arms' diffs + seed context on the row so the pairwise judge survives

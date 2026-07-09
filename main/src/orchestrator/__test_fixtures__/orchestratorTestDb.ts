@@ -172,6 +172,10 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     // Migration 049 (A/B slice B): getRunById also projects merge_sha (the merge
     // commit the run's code landed on, stamped at close-out). Additive nullable TEXT.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN merge_sha TEXT');
+    // Migration 057 (rotation experiments): resolver-assigned rotation attribution,
+    // SEPARATE from experiment_id (the side-by-side sandbox tag) per the migration's
+    // CRITICAL INVARIANT. Additive nullable TEXT — never widens GATE_SCHEMA.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN rotation_experiment_id TEXT');
     variantColumnsAdded = true;
   };
   if (options?.includeStuckDetectedAt) {

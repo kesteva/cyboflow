@@ -172,6 +172,38 @@ function requireDeps(): ExperimentsDeps {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * The five `experiments` columns that were NOT NULL through migration 052 but were
+ * relaxed to nullable in 057 (a rotation experiment carries none of them: no fixed
+ * arm pair, no pinned base, and — for a global workflow — no project). Every code
+ * path in THIS router operates on side-by-side experiments, where all five are
+ * always populated; this narrows them once with a guard that names the missing
+ * field rather than sprinkling non-null assertions.
+ */
+interface SideBySideFields {
+  projectId: number;
+  baseBranch: string;
+  baseSha: string;
+  variantAId: string;
+  variantBId: string;
+}
+
+/** Narrow a side-by-side experiment's post-057-nullable fields; throws naming the first missing one. */
+function requireSideBySideFields(exp: ExperimentRow): SideBySideFields {
+  const { project_id, base_branch, base_sha, variant_a_id, variant_b_id } = exp;
+  const miss = (field: string): TRPCError =>
+    new TRPCError({
+      code: 'INTERNAL_SERVER_ERROR',
+      message: `experiment ${exp.id} is missing side-by-side field '${field}' (rotation experiments carry none)`,
+    });
+  if (project_id === null) throw miss('project_id');
+  if (base_branch === null) throw miss('base_branch');
+  if (base_sha === null) throw miss('base_sha');
+  if (variant_a_id === null) throw miss('variant_a_id');
+  if (variant_b_id === null) throw miss('variant_b_id');
+  return { projectId: project_id, baseBranch: base_branch, baseSha: base_sha, variantAId: variant_a_id, variantBId: variant_b_id };
+}
+
 interface SeedIdeaFields {
   title: string;
   summary: string | null;
@@ -963,6 +995,7 @@ export async function decideExperiment(
       message: 'both arms must be settled (awaiting_review|completed|failed|canceled) before deciding',
     });
   }
+  const { projectId } = requireSideBySideFields(exp);
 
   const now = new Date().toISOString();
 
@@ -970,7 +1003,7 @@ export async function decideExperiment(
   // dismiss both sessions, drop the seed-task mapping rows.
   if (winnerRunId === null) {
     if (exp.run_a_id) {
-      await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
+      await deps.taskChangeRouter.deleteExperimentArmEntities(projectId, {
         experimentId,
         runId: exp.run_a_id,
         seedCloneId: exp.seed_idea_clone_a_id,
@@ -978,7 +1011,7 @@ export async function decideExperiment(
       });
     }
     if (exp.run_b_id) {
-      await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
+      await deps.taskChangeRouter.deleteExperimentArmEntities(projectId, {
         experimentId,
         runId: exp.run_b_id,
         seedCloneId: exp.seed_idea_clone_b_id,
@@ -1039,7 +1072,7 @@ export async function decideExperiment(
       if (cloneRow !== undefined) {
         // The clone row is present — fold its (possibly null/empty) body onto the original.
         const cloneBody = typeof cloneRow.body === 'string' ? cloneRow.body : null;
-        await deps.taskChangeRouter.applyChange(exp.project_id, {
+        await deps.taskChangeRouter.applyChange(projectId, {
           actor: 'orchestrator',
           entityType: 'idea',
           taskId: exp.seed_idea_id,
@@ -1098,7 +1131,7 @@ export async function decideExperiment(
       }
       const cloneBody = typeof cloneRow.body === 'string' ? cloneRow.body : null;
       const cloneStageId = typeof cloneRow.stageId === 'string' ? cloneRow.stageId : undefined;
-      await deps.taskChangeRouter.applyChange(exp.project_id, {
+      await deps.taskChangeRouter.applyChange(projectId, {
         actor: 'orchestrator',
         entityType: 'task',
         taskId: row.original_task_id,
@@ -1111,7 +1144,7 @@ export async function decideExperiment(
     // 2. Reveal winner entities (reparent to original when idea-seeded) + clear their
     //    tag. Task-seeded arms create no board entities (they execute the clones), so
     //    this is a no-op there; the fold above carried the outcome.
-    await revealWinnerEntities(deps, exp.project_id, winnerRunId, seeded ? exp.seed_idea_id : null);
+    await revealWinnerEntities(deps, projectId, winnerRunId, seeded ? exp.seed_idea_id : null);
   } catch (err) {
     throw new TRPCError({
       code: 'INTERNAL_SERVER_ERROR',
@@ -1154,7 +1187,7 @@ export async function decideExperiment(
   //    their tag cleared in step 2, so deleteExperimentArmEntities spares them and
   //    sweeps ONLY the still-tagged clones — the seed IDEA clone AND the seed TASK
   //    clones (whose outcome was already folded onto the originals in step 1b).
-  await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
+  await deps.taskChangeRouter.deleteExperimentArmEntities(projectId, {
     experimentId,
     runId: winnerRunId,
     seedCloneId: winnerCloneId,
@@ -1163,7 +1196,7 @@ export async function decideExperiment(
 
   // 4. Discard the whole loser arm (incl. its seed TASK clones).
   if (loserRunId) {
-    await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
+    await deps.taskChangeRouter.deleteExperimentArmEntities(projectId, {
       experimentId,
       runId: loserRunId,
       seedCloneId: loserCloneId,
@@ -1205,6 +1238,7 @@ export async function abandonExperiment(deps: ExperimentsDeps, experimentId: str
   if (isExperimentSettled(exp.status)) {
     throw new TRPCError({ code: 'CONFLICT', message: `experiment ${experimentId} is already ${exp.status}` });
   }
+  const { projectId } = requireSideBySideFields(exp);
 
   // Stamp 'abandoned' FIRST — immediately after the settled guard, BEFORE cancelling
   // the arms. A canceled arm counts as settled (isExperimentArmSettled includes
@@ -1242,7 +1276,7 @@ export async function abandonExperiment(deps: ExperimentsDeps, experimentId: str
   // still-tagged orphans.)
   try {
     if (exp.run_a_id) {
-      await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
+      await deps.taskChangeRouter.deleteExperimentArmEntities(projectId, {
         experimentId,
         runId: exp.run_a_id,
         seedCloneId: exp.seed_idea_clone_a_id,
@@ -1250,7 +1284,7 @@ export async function abandonExperiment(deps: ExperimentsDeps, experimentId: str
       });
     }
     if (exp.run_b_id) {
-      await deps.taskChangeRouter.deleteExperimentArmEntities(exp.project_id, {
+      await deps.taskChangeRouter.deleteExperimentArmEntities(projectId, {
         experimentId,
         runId: exp.run_b_id,
         seedCloneId: exp.seed_idea_clone_b_id,
@@ -1314,7 +1348,8 @@ export function promoteVariant(
       message: `experiment ${experimentId} already promoted variant ${exp.promoted_variant_id}`,
     });
   }
-  const variantId = arm === 'A' ? exp.variant_a_id : exp.variant_b_id;
+  const { variantAId, variantBId } = requireSideBySideFields(exp);
+  const variantId = arm === 'A' ? variantAId : variantBId;
   const now = new Date().toISOString();
 
   // Baseline arm won: keep the current workflow definition unchanged, record verdict only.
@@ -1398,8 +1433,9 @@ export function switchToRotationExperiment(
     deps.setVariantStatus(variantId, 'active');
     if (weight !== undefined) deps.setVariantWeight(variantId, weight);
   };
-  activateArm(exp.variant_a_id, weights?.a);
-  activateArm(exp.variant_b_id, weights?.b);
+  const { variantAId, variantBId } = requireSideBySideFields(exp);
+  activateArm(variantAId, weights?.a);
+  activateArm(variantBId, weights?.b);
   return { experimentId: exp.id, status: exp.status, winnerRunId: exp.winner_run_id };
 }
 
@@ -1525,7 +1561,11 @@ export interface ListDashboardInput {
  * experiments unless includeAbandoned is set.
  */
 export function listDashboardExperiments(deps: ExperimentsDeps, input: ListDashboardInput): ExperimentSummary[] {
-  const conds: string[] = [];
+  // Side-by-side only: this dashboard renders the two-arm head-to-head shape
+  // (base_branch/variant_a_id/variant_b_id, non-null per ExperimentSummary).
+  // A rotation experiment (kind='rotation') leaves those columns NULL, so it
+  // must never surface here or it would inject nulls into a non-null wire type.
+  const conds: string[] = ["e.kind = 'side_by_side'"];
   const params: unknown[] = [];
   if (input.projectId !== null && input.projectId !== undefined) {
     conds.push('e.project_id = ?');
@@ -1677,11 +1717,12 @@ export const experimentsRouter = router({
           message: `experiment ${input.experimentId} must be decided/abandoned before rerun`,
         });
       }
+      const sb = requireSideBySideFields(src);
       return startExperiment(deps, {
-        projectId: src.project_id,
+        projectId: sb.projectId,
         workflowId: src.workflow_id,
-        variantAId: src.variant_a_id,
-        variantBId: src.variant_b_id,
+        variantAId: sb.variantAId,
+        variantBId: sb.variantBId,
         seedIdeaId: input.seedIdeaId,
         seedTaskIds: input.seedTaskIds,
         rerunOfExperimentId: src.id,
@@ -1753,14 +1794,15 @@ export const experimentsRouter = router({
       if (!exp) return null;
       const comparison = readComparisonRow(deps.db, input.experimentId);
       const comparisonStatusValue: ComparisonStatus | 'absent' = comparison?.eval_status ?? 'absent';
+      const { variantAId, variantBId } = requireSideBySideFields(exp);
       return {
         experimentId: exp.id,
         comparisonStatus: comparisonStatusValue,
         baseSha: comparison?.base_sha ?? exp.base_sha,
         snapshotAt: comparison?.snapshot_at ?? null,
         verdict: buildVerdict(comparison),
-        armA: buildArmView(deps, exp.run_a_id, 'A', exp.variant_a_id),
-        armB: buildArmView(deps, exp.run_b_id, 'B', exp.variant_b_id),
+        armA: buildArmView(deps, exp.run_a_id, 'A', variantAId),
+        armB: buildArmView(deps, exp.run_b_id, 'B', variantBId),
       };
     }),
 
@@ -1776,16 +1818,17 @@ export const experimentsRouter = router({
       if (!exp) return null;
       const comparison = readComparisonRow(deps.db, input.experimentId);
       if (!comparison) return null;
+      const { variantAId, variantBId } = requireSideBySideFields(exp);
       return {
         baseSha: comparison.base_sha,
         armA: {
           runId: comparison.run_id_a,
-          label: variantLabel(deps, exp.variant_a_id),
+          label: variantLabel(deps, variantAId),
           diff: comparison.diff_a_text ?? '',
         },
         armB: {
           runId: comparison.run_id_b,
-          label: variantLabel(deps, exp.variant_b_id),
+          label: variantLabel(deps, variantBId),
           diff: comparison.diff_b_text ?? '',
         },
       };

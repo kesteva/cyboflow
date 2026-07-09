@@ -89,7 +89,10 @@ function stalledArm(payload: ExperimentComparisonPayload): ExperimentArm | null 
 
 /** The raw variant id (or the baseline sentinel) backing one arm of an experiment. */
 function armVariantId(exp: ExperimentRow, arm: ExperimentArm): string {
-  return arm === 'A' ? exp.variant_a_id : exp.variant_b_id;
+  // variant_a_id/variant_b_id are nullable since migration 058 (rotation experiments
+  // carry none); this compare view only renders side-by-side experiments, so the
+  // value is always present — coalesce to '' (never the baseline sentinel) for types.
+  return (arm === 'A' ? exp.variant_a_id : exp.variant_b_id) ?? '';
 }
 
 /**
@@ -706,7 +709,7 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
         </div>
       </div>
 
-      {ideaPickerOpen && exp !== null && (
+      {ideaPickerOpen && exp !== null && exp.project_id !== null && (
         <IdeaPickerModal isOpen projectId={exp.project_id} onClose={() => setIdeaPickerOpen(false)} onPicked={handleIdeaPicked} />
       )}
 
