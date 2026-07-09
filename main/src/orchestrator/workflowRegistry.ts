@@ -35,6 +35,7 @@ import { resolveExecutionModel } from './executionModelResolver';
 import { resolveVisualVerification, SHIPPED_VERIFY_BACKENDS } from './visualVerificationResolver';
 import { resolvePermissionMode } from './permissionModeResolver';
 import { computeSpecHash } from './specHash';
+import { reconcileRotationExperiment } from './experimentStore';
 
 // ---------------------------------------------------------------------------
 // Descriptor types
@@ -536,26 +537,41 @@ export class WorkflowRegistry {
       params.push(trimmed);
     }
     sets.push("updated_at = datetime('now')");
+    const existing = this.getVariantById(variantId);
+    if (!existing) {
+      throw new Error(`WorkflowRegistry.updateVariant: variant ${variantId} not found`);
+    }
     const stmt = this.db.prepare(`UPDATE workflow_variants SET ${sets.join(', ')} WHERE id = ?`);
+    // Rotation-lifecycle chokepoint (migration 057): the write PLUS a pool
+    // reconcile run atomically — a weight 0<->positive edit is a membership change,
+    // so this can open/supersede/replace/close the workflow's rotation experiment.
     const tx = this.db.transaction(() => {
       const result = stmt.run(...params, variantId);
       if (result.changes === 0) {
         throw new Error(`WorkflowRegistry.updateVariant: variant ${variantId} not found`);
       }
+      reconcileRotationExperiment(this.db, existing.workflow_id);
     });
     tx();
   }
 
   /** Transition a variant's rotation status. Throws 'not found' when absent. */
   setVariantStatus(variantId: string, status: WorkflowVariantStatus): void {
+    const existing = this.getVariantById(variantId);
+    if (!existing) {
+      throw new Error(`WorkflowRegistry.setVariantStatus: variant ${variantId} not found`);
+    }
     const stmt = this.db.prepare(
       "UPDATE workflow_variants SET status = ?, updated_at = datetime('now') WHERE id = ?",
     );
+    // Rotation-lifecycle chokepoint (migration 057): activating/pausing an arm is a
+    // membership change; reconcile atomically with the status write.
     const tx = this.db.transaction(() => {
       const result = stmt.run(status, variantId);
       if (result.changes === 0) {
         throw new Error(`WorkflowRegistry.setVariantStatus: variant ${variantId} not found`);
       }
+      reconcileRotationExperiment(this.db, existing.workflow_id);
     });
     tx();
   }
@@ -579,8 +595,12 @@ export class WorkflowRegistry {
         `WorkflowRegistry.deleteVariant: variant ${variantId} has run history (${count} run(s)); retire it instead of deleting`,
       );
     }
+    const workflowId = variant.workflow_id;
+    // Rotation-lifecycle chokepoint (migration 057): deleting an arm is a membership
+    // change; reconcile atomically after the row is gone.
     const tx = this.db.transaction(() => {
       this.db.prepare('DELETE FROM workflow_variants WHERE id = ?').run(variantId);
+      reconcileRotationExperiment(this.db, workflowId);
     });
     tx();
   }
@@ -622,11 +642,14 @@ export class WorkflowRegistry {
     }
     if (sets.length === 0) return;
     const stmt = this.db.prepare(`UPDATE workflows SET ${sets.join(', ')} WHERE id = ?`);
+    // Rotation-lifecycle chokepoint (migration 057): toggling the baseline into/out of
+    // rotation (or its weight across 0) is a membership change; reconcile atomically.
     const tx = this.db.transaction(() => {
       const result = stmt.run(...params, workflowId);
       if (result.changes === 0) {
         throw new Error(`WorkflowRegistry.setBaselineRotation: workflow ${workflowId} not found`);
       }
+      reconcileRotationExperiment(this.db, workflowId);
     });
     tx();
   }
@@ -907,6 +930,13 @@ export class WorkflowRegistry {
       experimentId?: string;
       experimentArm?: ExperimentArm;
       /**
+       * Rotation-experiment attribution (migration 057) supplied by the
+       * VariantResolver via RunLauncher.launch on a GENUINE weighted rotation pick.
+       * SEPARATE from experimentId (the side-by-side sandbox tag) per the migration's
+       * CRITICAL INVARIANT — rotation runs are normal runs. Stamped immutably.
+       */
+      rotationExperimentId?: string;
+      /**
        * Per-run launch override for visual-verification ENABLEMENT (the highest
        * rung of the enablement ladder). The caller (RunLauncher.launch) threads
        * the launch-UI choice here. undefined => unset, falls through to the
@@ -1098,8 +1128,8 @@ export class WorkflowRegistry {
     const specHash = computeSpecHash(effectiveSpecJson);
 
     const insert = this.db.prepare(`
-      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, session_id, spec_hash, experiment_id, experiment_arm, variant_id, variant_label)
-      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, substrate, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, session_id, spec_hash, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id)
+      VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     const createTx = this.db.transaction(() => {
@@ -1121,6 +1151,7 @@ export class WorkflowRegistry {
         opts?.experimentArm ?? null,
         opts?.variantId ?? null,
         opts?.variantLabel ?? null,
+        opts?.rotationExperimentId ?? null,
       );
       // Ensure the frozen hash is always resolvable to its spec: snapshot a
       // revision for the EFFECTIVE spec we just stamped. INSERT OR IGNORE keyed on
@@ -1143,7 +1174,7 @@ export class WorkflowRegistry {
    */
   getRunById(runId: string): WorkflowRunRow | null {
     const stmt = this.db.prepare(
-      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, outcome, base_branch, base_sha, steps_snapshot_json, substrate, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, experiment_id, experiment_arm, variant_id, variant_label, merge_sha, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
+      'SELECT id, workflow_id, project_id, status, permission_mode_snapshot, worktree_path, branch_name, policy_json, stuck_at, stuck_reason, error_message, current_step_id, task_id, seed_idea_id, claude_session_id, session_id, batch_id, seed_finding_ids, outcome, base_branch, base_sha, steps_snapshot_json, substrate, execution_model, model, eval_enabled, verify_enabled, verify_type, verify_chain, experiment_id, experiment_arm, variant_id, variant_label, rotation_experiment_id, merge_sha, started_at, ended_at, created_at, updated_at FROM workflow_runs WHERE id = ?',
     );
     const row = stmt.get(runId) as WorkflowRunRow | undefined;
     return row ?? null;

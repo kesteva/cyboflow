@@ -173,6 +173,14 @@ export interface WorkflowRunRow {
    */
   merge_sha?: string | null;
   /**
+   * Rotation-experiment attribution (migration 057) — the resolver stamps this at
+   * pick time when a genuine weighted rotation assigns the run. SEPARATE from
+   * experiment_id (the side-by-side sandbox tag) per the migration's CRITICAL
+   * INVARIANT: rotation runs are normal runs. NULL for pins, baseline pins,
+   * restarts, and non-rotation launches.
+   */
+  rotation_experiment_id?: string | null;
+  /**
    * Layered visual-verification posture stamped at launch (migration 055) — the
    * third immutable run-stamp sibling to substrate / execution_model. Resolved
    * ONCE by visualVerificationResolver and never updated (a run can't change

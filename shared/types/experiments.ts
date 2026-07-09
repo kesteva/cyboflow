@@ -241,6 +241,19 @@ export interface ExperimentRotationArmRow {
   created_at: string;
 }
 
+/**
+ * Read-model summary of the OPEN rotation experiment for a workflow (phase 2,
+ * migration 057). Assembled by the router's getRunningRotationSummary from the
+ * experiments row + its arm snapshot + a live count of attributed runs.
+ */
+export interface RotationExperimentSummary {
+  experimentId: string;
+  workflowId: string;
+  startedAt: string;
+  arms: Array<{ variantId: string; label: string; weightAtOpen: number }>;
+  runCount: number;
+}
+
 /** Result of `experiments.startSideBySide`. */
 export interface StartSideBySideResult {
   experimentId: string;

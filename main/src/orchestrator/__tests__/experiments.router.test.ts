@@ -19,9 +19,18 @@ import {
   promoteVariant,
   switchToRotationExperiment,
   listDashboardExperiments,
+  decideRotationExperiment,
+  abandonRotationExperiment,
+  getRunningRotationSummary,
   type ExperimentsDeps,
 } from '../trpc/routers/experiments';
-import { getExperiment, listExperimentSeedTasks } from '../experimentStore';
+import {
+  getExperiment,
+  listExperimentSeedTasks,
+  insertRotationExperiment,
+  getRunningRotationExperiment,
+  reconcileRotationExperiment,
+} from '../experimentStore';
 import type { WorkflowVariantRow } from '../../../../shared/types/experiments';
 
 function buildDb(): Database.Database {
@@ -39,6 +48,8 @@ function buildDb(): Database.Database {
   db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN experiment_id TEXT;');
+  // Migration 058: rotation-attribution column (SEPARATE from experiment_id).
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN rotation_experiment_id TEXT;');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_id TEXT;');
   // Migration 022's soft batch link + sprint_batch_tasks (lanes), so decide's
   // clone->original lane remap (remapWinnerSeedLane) has real rows to rewrite.
@@ -52,15 +63,25 @@ function buildDb(): Database.Database {
     db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
     db.exec(`ALTER TABLE ${t} ADD COLUMN caused_by_run_id TEXT;`);
   }
+  // Migration 058 shape: kind CHECK widened to include 'rotation'; status CHECK gains
+  // 'superseded'; project_id / base_branch / base_sha / variant_a_id / variant_b_id
+  // lose NOT NULL (a rotation has no fixed two-arm pair, base SHA, or project).
   db.exec(`CREATE TABLE experiments (
-    id TEXT PRIMARY KEY, project_id INTEGER NOT NULL, workflow_id TEXT NOT NULL,
-    kind TEXT NOT NULL DEFAULT 'side_by_side', base_branch TEXT NOT NULL, base_sha TEXT NOT NULL,
-    variant_a_id TEXT NOT NULL, variant_b_id TEXT NOT NULL, run_a_id TEXT, run_b_id TEXT,
+    id TEXT PRIMARY KEY, project_id INTEGER, workflow_id TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'side_by_side' CHECK (kind IN ('side_by_side','rotation')),
+    base_branch TEXT, base_sha TEXT,
+    variant_a_id TEXT, variant_b_id TEXT, run_a_id TEXT, run_b_id TEXT,
     session_a_id TEXT, session_b_id TEXT, seed_idea_id TEXT, seed_idea_clone_a_id TEXT, seed_idea_clone_b_id TEXT,
-    status TEXT NOT NULL DEFAULT 'running', winner_run_id TEXT, winner_arm TEXT, merge_sha TEXT,
+    status TEXT NOT NULL DEFAULT 'running'
+      CHECK (status IN ('running','grading','decided','abandoned','superseded')),
+    winner_run_id TEXT, winner_arm TEXT, merge_sha TEXT,
     decided_at TEXT, rerun_of_experiment_id TEXT,
     promoted_variant_id TEXT, promoted_arm TEXT CHECK (promoted_arm IN ('A','B')), promoted_at TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);`);
+  db.exec(`CREATE TABLE experiment_rotation_arms (
+    experiment_id TEXT NOT NULL, variant_id TEXT NOT NULL, label TEXT NOT NULL,
+    weight_at_open INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (experiment_id, variant_id));`);
   db.exec(`CREATE TABLE experiment_seed_tasks (
     experiment_id TEXT NOT NULL, arm TEXT NOT NULL CHECK (arm IN ('A','B')),
     original_task_id TEXT NOT NULL, clone_task_id TEXT NOT NULL,
@@ -89,6 +110,11 @@ function buildDb(): Database.Database {
     FOREIGN KEY (experiment_id) REFERENCES experiments(id) ON DELETE CASCADE,
     FOREIGN KEY (run_id_a) REFERENCES workflow_runs(id) ON DELETE CASCADE,
     FOREIGN KEY (run_id_b) REFERENCES workflow_runs(id) ON DELETE CASCADE);`);
+  // Migration 054 baseline columns so the rotation reconcile (computeRotationArmSet)
+  // can run in the rotation tests below. Baseline defaults OUT of rotation here to
+  // keep the no-variant pool empty (→ no reopen).
+  db.exec('ALTER TABLE workflows ADD COLUMN baseline_in_rotation INTEGER NOT NULL DEFAULT 0;');
+  db.exec('ALTER TABLE workflows ADD COLUMN baseline_rotation_weight INTEGER NOT NULL DEFAULT 1;');
   db.prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf', 1, 'planner', '{}')`).run();
   // A sprint workflow so the task-seeded experiment path (migration 051) can resolve
   // workflow.name === 'sprint'.
@@ -911,6 +937,155 @@ describe('experiments router orchestration (slice B)', () => {
       switchToRotationExperiment(deps, res.experimentId, { a: 3, b: 7 });
       expect(h.baselineRotations).toEqual([{ workflowId: 'wf', patch: { inRotation: true, weight: 3 } }]);
       expect(weightsSet).toEqual([{ id: 'vB', weight: 7 }]);
+    });
+
+    it("sets a variant arm's weight BEFORE activating it so the rotation snapshot opens at the requested weight", async () => {
+      // Activation is what makes the pool go live and auto-opens the rotation whose
+      // weight_at_open snapshot freezes at open. If status were flipped before the
+      // weight, the rotation would open on the stale/default weight. Assert the deps
+      // call order per real variant: setVariantWeight precedes setVariantStatus.
+      const h = makeHarness();
+      const res = await settledExperiment(h, { variantAId: 'vA', variantBId: 'vB' });
+      const calls: Array<{ op: 'weight' | 'status'; id: string }> = [];
+      const deps: ExperimentsDeps = {
+        ...h.deps,
+        setVariantWeight: (id) => calls.push({ op: 'weight', id }),
+        setVariantStatus: (id) => calls.push({ op: 'status', id }),
+      };
+      switchToRotationExperiment(deps, res.experimentId, { a: 3, b: 7 });
+      for (const id of ['vA', 'vB']) {
+        const weightIdx = calls.findIndex((c) => c.op === 'weight' && c.id === id);
+        const statusIdx = calls.findIndex((c) => c.op === 'status' && c.id === id);
+        expect(weightIdx).toBeGreaterThanOrEqual(0);
+        expect(statusIdx).toBeGreaterThanOrEqual(0);
+        expect(weightIdx).toBeLessThan(statusIdx);
+      }
+    });
+
+    it('chains the auto-opened rotation experiment to the head-to-head that birthed it', async () => {
+      // The real chokepoint auto-OPENS the rotation when the pool reaches 2 arms; the
+      // harness's fake setVariantStatus does not, so seed the open rotation directly to
+      // exercise switchToRotation's lineage-chaining branch (setRotationLineage).
+      const h = makeHarness();
+      const res = await settledExperiment(h, { variantAId: 'vA', variantBId: 'vB' });
+      const rotation = insertRotationExperiment(dbAdapter(h.db), {
+        workflowId: 'wf',
+        arms: [
+          { variantId: 'vA', label: 'vA', weightAtOpen: 1 },
+          { variantId: 'vB', label: 'vB', weightAtOpen: 1 },
+        ],
+      });
+      switchToRotationExperiment(h.deps, res.experimentId);
+      expect(getExperiment(dbAdapter(h.db), rotation.id)?.rerun_of_experiment_id).toBe(res.experimentId);
+    });
+  });
+
+  describe('rotation decide / abandon cores (migration 058)', () => {
+    /** Seed an OPEN rotation for 'wf' with the given arm variant ids. */
+    function openRotation(h: Harness, variantIds: string[]): string {
+      return insertRotationExperiment(dbAdapter(h.db), {
+        workflowId: 'wf',
+        arms: variantIds.map((id) => ({ variantId: id, label: id, weightAtOpen: 1 })),
+      }).id;
+    }
+    /** deps whose getVariant returns a promotable variant for the named real variants; records setVariantStatus. */
+    function rotationDeps(
+      h: Harness,
+      realVariantIds: string[],
+      statusCalls: Array<{ id: string; status: string }>,
+    ): ExperimentsDeps {
+      return {
+        ...h.deps,
+        getVariant: (id) => (realVariantIds.includes(id) ? validVariant(id) : null),
+        setVariantStatus: (id, status) => {
+          statusCalls.push({ id, status });
+        },
+      };
+    }
+
+    it('real-variant winner: adopts its spec, retires the (spec-only) winner, pauses the other, stamps decided', () => {
+      const h = makeHarness();
+      const expId = openRotation(h, ['vA', 'vB', '__baseline__']);
+      const statusCalls: Array<{ id: string; status: string }> = [];
+      const deps = rotationDeps(h, ['vA', 'vB'], statusCalls);
+
+      const out = decideRotationExperiment(deps, expId, 'vA');
+      expect(out).toEqual({ experimentId: expId, status: 'decided', promotedVariantId: 'vA' });
+      // Winner spec adopted into the base workflow.
+      expect(h.adoptedSpecs).toHaveLength(1);
+      expect(h.adoptedSpecs[0].workflowId).toBe('wf');
+      // Spec-only winner retired (and thus skipped by the pause); the other real arm paused;
+      // the baseline sentinel is never touched.
+      expect(statusCalls).toEqual(
+        expect.arrayContaining([
+          { id: 'vA', status: 'retired' },
+          { id: 'vB', status: 'paused' },
+        ]),
+      );
+      expect(statusCalls.find((c) => c.id === '__baseline__')).toBeUndefined();
+      const exp = getExperiment(dbAdapter(h.db), expId)!;
+      expect(exp.status).toBe('decided');
+      expect(exp.promoted_variant_id).toBe('vA');
+      expect(exp.promoted_arm).toBeNull();
+      // No running rotation remains.
+      expect(getRunningRotationExperiment(dbAdapter(h.db), 'wf')).toBeNull();
+    });
+
+    it('baseline winner: no spec adoption, pauses real arms, stamps the __baseline__ sentinel', () => {
+      const h = makeHarness();
+      const expId = openRotation(h, ['vA', '__baseline__']);
+      const statusCalls: Array<{ id: string; status: string }> = [];
+      const deps = rotationDeps(h, ['vA'], statusCalls);
+
+      const out = decideRotationExperiment(deps, expId, '__baseline__');
+      expect(out.promotedVariantId).toBe('__baseline__');
+      expect(h.adoptedSpecs).toHaveLength(0);
+      expect(statusCalls).toEqual([{ id: 'vA', status: 'paused' }]);
+      const exp = getExperiment(dbAdapter(h.db), expId)!;
+      expect(exp.status).toBe('decided');
+      expect(exp.promoted_variant_id).toBe('__baseline__');
+    });
+
+    it('decideRotation guards: NOT_FOUND, not-a-rotation, and winner-not-an-arm', async () => {
+      const h = makeHarness();
+      expect(() => decideRotationExperiment(h.deps, 'nope', 'vA')).toThrow(/not found/);
+      // A side-by-side experiment is not a rotation.
+      const sbs = await startExperiment(h.deps, { projectId: 1, workflowId: 'wf', variantAId: 'vA', variantBId: 'vB' });
+      expect(() => decideRotationExperiment(h.deps, sbs.experimentId, 'vA')).toThrow(/not a rotation/);
+      // Winner not in the arm snapshot.
+      const expId = openRotation(h, ['vA', 'vB']);
+      expect(() => decideRotationExperiment(h.deps, expId, 'vZ')).toThrow(/not an arm/);
+    });
+
+    it('abandonRotation: stamps abandoned, pauses real arms, and a follow-up reconcile does NOT reopen', () => {
+      const h = makeHarness();
+      const expId = openRotation(h, ['vA', 'vB', '__baseline__']);
+      const statusCalls: Array<{ id: string; status: string }> = [];
+      const deps = rotationDeps(h, ['vA', 'vB'], statusCalls);
+
+      const out = abandonRotationExperiment(deps, expId);
+      expect(out).toEqual({ experimentId: expId, status: 'abandoned' });
+      expect(getExperiment(dbAdapter(h.db), expId)!.status).toBe('abandoned');
+      expect(statusCalls).toEqual(
+        expect.arrayContaining([
+          { id: 'vA', status: 'paused' },
+          { id: 'vB', status: 'paused' },
+        ]),
+      );
+      // No active variants exist in workflow_variants → pool empty → reconcile stays 'none'.
+      const rec = reconcileRotationExperiment(dbAdapter(h.db), 'wf');
+      expect(rec.action).toBe('none');
+      expect(getRunningRotationExperiment(dbAdapter(h.db), 'wf')).toBeNull();
+    });
+
+    it('getRunningRotationSummary reflects the open rotation with its arm snapshot + run count', () => {
+      const h = makeHarness();
+      const expId = openRotation(h, ['vA', '__baseline__']);
+      const summary = getRunningRotationSummary(h.deps, 'wf');
+      expect(summary?.experimentId).toBe(expId);
+      expect(summary?.arms.map((a) => a.variantId).sort()).toEqual(['__baseline__', 'vA']);
+      expect(summary?.runCount).toBe(0);
+      expect(getRunningRotationSummary(h.deps, 'wf-sprint')).toBeNull();
     });
   });
 

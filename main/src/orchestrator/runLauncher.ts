@@ -412,10 +412,17 @@ export class RunLauncher {
     // pure stamper. An explicit pin (requestedVariantId) loads regardless of status;
     // otherwise the resolver does weighted random over active variants (or null →
     // baseline live-spec run). A foreign-workflow pin throws inside the resolver.
-    const rv =
+    const assignment =
       this.variantResolver?.resolveForLaunch(workflowId, launchOptions?.requestedVariantId, {
         baseline: launchOptions?.baseline,
       }) ?? null;
+    // Provenance split (phase 2): the resolved variant is folded as before, and a
+    // GENUINE weighted rotation pick (source==='rotation') additionally stamps the
+    // run's rotation_experiment_id when a rotation experiment is open. A pin /
+    // baseline-pin / empty pool never attributes to a rotation.
+    const rv = assignment?.variant ?? null;
+    const rotationExperimentId =
+      assignment?.source === 'rotation' ? assignment.rotationExperimentId : null;
     const experiment = launchOptions?.experiment;
 
     // Load the per-project `.cyboflow/verify.json` ONCE here (createRun is sync;
@@ -437,6 +444,7 @@ export class RunLauncher {
       requestedEvalEnabled !== undefined ||
       requestedVerifyEnabled !== undefined ||
       rv !== null ||
+      rotationExperimentId !== null ||
       experiment !== undefined ||
       projectVerifyConfig !== null
         ? {
@@ -454,6 +462,7 @@ export class RunLauncher {
                   ...(rv.executionModel !== null ? { variantExecutionModel: rv.executionModel } : {}),
                 }
               : {}),
+            ...(rotationExperimentId !== null ? { rotationExperimentId } : {}),
             ...(experiment !== undefined
               ? { experimentId: experiment.experimentId, experimentArm: experiment.arm }
               : {}),

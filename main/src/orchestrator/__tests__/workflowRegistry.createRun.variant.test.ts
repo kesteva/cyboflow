@@ -121,4 +121,30 @@ describe('WorkflowRegistry.createRun — variant/experiment stamping', () => {
     });
     expect(executionModel).toBe('orchestrated');
   });
+
+  it('stamps rotation_experiment_id from opts (migration 057) without disturbing the other columns', () => {
+    const { runId } = registry.createRun(WF, undefined, SESSION, undefined, {
+      variantId: 'wfv_rot',
+      variantLabel: 'rot-arm',
+      variantSpecJson: VARIANT_SPEC,
+      rotationExperimentId: 'exp-rot-1',
+    });
+    const row = registry.getRunById(runId);
+    expect(row?.rotation_experiment_id).toBe('exp-rot-1');
+    // The 18 sibling INSERT values are undisturbed (guards the column/param ORDER).
+    expect(row?.variant_id).toBe('wfv_rot');
+    expect(row?.variant_label).toBe('rot-arm');
+    // rotation attribution is SEPARATE from experiment_id (the side-by-side tag).
+    expect(row?.experiment_id ?? null).toBeNull();
+    expect(row?.experiment_arm ?? null).toBeNull();
+    const specRow = db.prepare('SELECT spec_hash FROM workflow_runs WHERE id = ?').get(runId) as {
+      spec_hash: string;
+    };
+    expect(specRow.spec_hash).toBe(computeSpecHash(VARIANT_SPEC));
+  });
+
+  it('leaves rotation_experiment_id NULL when opts.rotationExperimentId is absent', () => {
+    const { runId } = registry.createRun(WF, undefined, SESSION);
+    expect(registry.getRunById(runId)?.rotation_experiment_id ?? null).toBeNull();
+  });
 });

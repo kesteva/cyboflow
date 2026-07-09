@@ -12,6 +12,7 @@ import { WorkflowRegistry } from '../workflowRegistry';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { createTestDb } from '../__test_fixtures__/orchestratorTestDb';
+import { getRunningRotationExperiment, getExperiment } from '../experimentStore';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 
 const WF_PLANNER = 'wf-global-planner';
@@ -37,6 +38,33 @@ function setupDb(): Database.Database {
   // baseline is the champion — in rotation by DEFAULT 1).
   db.exec('ALTER TABLE workflows ADD COLUMN baseline_in_rotation INTEGER NOT NULL DEFAULT 1');
   db.exec('ALTER TABLE workflows ADD COLUMN baseline_rotation_weight INTEGER NOT NULL DEFAULT 1');
+  // Migration 057 (rotation experiments): the registry's variant-config chokepoint
+  // now reconciles the rotation experiment inside the same transaction, so these
+  // tables must exist or every setVariantStatus/updateVariant/deleteVariant/
+  // setBaselineRotation write would throw. 057 shape (widened CHECKs, relaxed NULLs).
+  db.exec(`
+    CREATE TABLE experiments (
+      id TEXT PRIMARY KEY, project_id INTEGER, workflow_id TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'side_by_side' CHECK (kind IN ('side_by_side','rotation')),
+      base_branch TEXT, base_sha TEXT, variant_a_id TEXT, variant_b_id TEXT,
+      run_a_id TEXT, run_b_id TEXT, session_a_id TEXT, session_b_id TEXT,
+      seed_idea_id TEXT, seed_idea_clone_a_id TEXT, seed_idea_clone_b_id TEXT,
+      status TEXT NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running','grading','decided','abandoned','superseded')),
+      winner_run_id TEXT, winner_arm TEXT CHECK (winner_arm IN ('A','B')),
+      merge_sha TEXT, decided_at TEXT, rerun_of_experiment_id TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      promoted_variant_id TEXT, promoted_arm TEXT CHECK (promoted_arm IN ('A','B')), promoted_at TEXT
+    );
+    CREATE TABLE experiment_rotation_arms (
+      experiment_id TEXT NOT NULL, variant_id TEXT NOT NULL, label TEXT NOT NULL,
+      weight_at_open INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (experiment_id, variant_id)
+    );
+  `);
+  // (workflow_runs.rotation_experiment_id is already added by createTestDb's
+  // includeWorkflowRunTaskColumns → addVariantColumnsOnce path.)
   // A built-in planner workflow with the empty live spec (resolves to the static graph).
   db.prepare("INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, NULL, 'planner', '{}')").run(WF_PLANNER);
   return db;
@@ -163,5 +191,79 @@ describe('WorkflowRegistry variants', () => {
 
   it('setBaselineRotation throws "not found" for a missing workflow', () => {
     expect(() => registry.setBaselineRotation('nope', { inRotation: true })).toThrow(/not found/);
+  });
+
+  // -- Rotation-experiment reconcile chokepoint (migration 057) ---------------
+  describe('rotation reconcile via the variant-config chokepoint', () => {
+    const rot = (): ReturnType<typeof getRunningRotationExperiment> =>
+      getRunningRotationExperiment(dbAdapter(db), WF_PLANNER);
+    const activate = (label: string, weight = 1): string => {
+      const v = registry.createVariantFromCurrent(WF_PLANNER, label);
+      registry.setVariantStatus(v.id, 'active');
+      if (weight !== 1) registry.updateVariant(v.id, { weight });
+      return v.id;
+    };
+    const attributeRun = (experimentId: string): void => {
+      db.prepare(
+        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, rotation_experiment_id) VALUES (?, ?, 1, 'completed', ?)",
+      ).run(`run-${Math.random().toString(36).slice(2)}`, WF_PLANNER, experimentId);
+    };
+
+    it('activating a variant with the baseline in rotation opens a rotation experiment (2 arms)', () => {
+      expect(rot()).toBeNull();
+      const id = activate('challenger'); // pool: challenger + baseline = 2 arms
+      const exp = rot();
+      expect(exp?.kind).toBe('rotation');
+      expect(exp?.status).toBe('running');
+      // Baseline is opted in by default (migration 054), so a single active variant suffices.
+      expect(id).toBeTruthy();
+    });
+
+    it('updateVariant weight->0 is a membership change that replaces the rotation at zero runs', () => {
+      registry.setBaselineRotation(WF_PLANNER, { inRotation: false });
+      const v1 = activate('a');
+      activate('b');
+      activate('c');
+      const before = rot();
+      expect(before).not.toBeNull(); // pool a,b,c = 3 arms
+      registry.updateVariant(v1, { weight: 0 }); // pool b,c = 2 arms, membership changed
+      const after = rot();
+      expect(after).not.toBeNull();
+      expect(after?.id).not.toBe(before?.id); // replaced (old deleted, fresh opened)
+      expect(getExperiment(dbAdapter(db), before?.id as string)).toBeNull();
+    });
+
+    it('updateVariant weight->0 SUPERSEDES (not replaces) once the rotation has attributed runs', () => {
+      registry.setBaselineRotation(WF_PLANNER, { inRotation: false });
+      const v1 = activate('a');
+      activate('b');
+      activate('c');
+      const before = rot();
+      attributeRun(before?.id as string);
+      registry.updateVariant(v1, { weight: 0 });
+      const after = rot();
+      expect(after?.id).not.toBe(before?.id);
+      expect(getExperiment(dbAdapter(db), before?.id as string)?.status).toBe('superseded');
+      expect(after?.rerun_of_experiment_id).toBe(before?.id);
+    });
+
+    it('setBaselineRotation inRotation:false closes a baseline+variant rotation', () => {
+      activate('challenger'); // pool: challenger + baseline = 2 → opens
+      expect(rot()).not.toBeNull();
+      registry.setBaselineRotation(WF_PLANNER, { inRotation: false }); // pool: challenger = 1 → off
+      expect(rot()).toBeNull();
+    });
+
+    it('deleteVariant reconciles (membership change) the rotation', () => {
+      registry.setBaselineRotation(WF_PLANNER, { inRotation: false });
+      const v1 = activate('a');
+      activate('b');
+      activate('c');
+      const before = rot();
+      registry.deleteVariant(v1); // 0 runs → hard delete → pool b,c = 2 → replace
+      const after = rot();
+      expect(after).not.toBeNull();
+      expect(after?.id).not.toBe(before?.id);
+    });
   });
 });

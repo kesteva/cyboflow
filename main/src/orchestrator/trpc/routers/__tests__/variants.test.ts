@@ -22,6 +22,11 @@ function createVariantsTestDb(): Database.Database {
   db.pragma('foreign_keys = ON');
   db.exec(REGISTRY_SCHEMA);
   db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_id TEXT');
+  // Migration 057: run-attribution column read by the rotation reconcile's run count.
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN rotation_experiment_id TEXT');
+  // Migration 054 baseline columns (baseline is the champion — in rotation by default).
+  db.exec('ALTER TABLE workflows ADD COLUMN baseline_in_rotation INTEGER NOT NULL DEFAULT 1');
+  db.exec('ALTER TABLE workflows ADD COLUMN baseline_rotation_weight INTEGER NOT NULL DEFAULT 1');
   db.exec(`
     CREATE TABLE workflow_variants (
       id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
@@ -30,6 +35,27 @@ function createVariantsTestDb(): Database.Database {
       created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE UNIQUE INDEX idx_workflow_variants_wf_label ON workflow_variants(workflow_id, label);
+    -- Migration 057: the variant-config chokepoint reconciles the rotation experiment
+    -- inside the same transaction, so these tables must exist (057 shape).
+    CREATE TABLE experiments (
+      id TEXT PRIMARY KEY, project_id INTEGER, workflow_id TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'side_by_side' CHECK (kind IN ('side_by_side','rotation')),
+      base_branch TEXT, base_sha TEXT, variant_a_id TEXT, variant_b_id TEXT,
+      run_a_id TEXT, run_b_id TEXT, session_a_id TEXT, session_b_id TEXT,
+      seed_idea_id TEXT, seed_idea_clone_a_id TEXT, seed_idea_clone_b_id TEXT,
+      status TEXT NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running','grading','decided','abandoned','superseded')),
+      winner_run_id TEXT, winner_arm TEXT CHECK (winner_arm IN ('A','B')),
+      merge_sha TEXT, decided_at TEXT, rerun_of_experiment_id TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      promoted_variant_id TEXT, promoted_arm TEXT CHECK (promoted_arm IN ('A','B')), promoted_at TEXT
+    );
+    CREATE TABLE experiment_rotation_arms (
+      experiment_id TEXT NOT NULL, variant_id TEXT NOT NULL, label TEXT NOT NULL,
+      weight_at_open INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (experiment_id, variant_id)
+    );
   `);
   db.prepare("INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, NULL, 'planner', '{}')").run(WF);
   return db;

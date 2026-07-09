@@ -40,6 +40,7 @@ import type {
   PairwiseVerdict,
   PairwiseSample,
   PairwisePreference,
+  RotationExperimentSummary,
 } from '../../../../../shared/types/experiments';
 import {
   isExperimentArmSettled,
@@ -58,6 +59,10 @@ import {
   listExperimentSeedTasks,
   seedTaskCloneIdsForArm,
   deleteExperimentSeedTasks,
+  getRunningRotationExperiment,
+  listRotationArms,
+  countRotationExperimentRuns,
+  setRotationLineage,
 } from '../../experimentStore';
 import { SPRINT_BATCH_MAX_TASKS } from '../../../../../shared/types/sprintBatch';
 import type { Priority } from '../../../../../shared/types/tasks';
@@ -1430,13 +1435,200 @@ export function switchToRotationExperiment(
       });
       return;
     }
-    deps.setVariantStatus(variantId, 'active');
+    // Set the weight BEFORE flipping status to 'active'. Activation is what pushes
+    // the arm into the resolver pool, and reaching >= 2 pool members auto-OPENS the
+    // rotation whose arm-set snapshot captures each arm's weight_at_open. reconcile
+    // freezes that snapshot (a later same-membership re-weight is a no-op, by
+    // design — experimentStore.rotation.test.ts:122), so activating first would open
+    // the rotation on the variant's stale/default weight and the requested weight
+    // would never reach the snapshot.
     if (weight !== undefined) deps.setVariantWeight(variantId, weight);
+    deps.setVariantStatus(variantId, 'active');
   };
   const { variantAId, variantBId } = requireSideBySideFields(exp);
   activateArm(variantAId, weights?.a);
   activateArm(variantBId, weights?.b);
+
+  // Activating the arms flows through the registry chokepoint, which auto-OPENS a
+  // rotation experiment once the weighted pool reaches >= 2 arms. Chain that fresh
+  // rotation to THIS head-to-head that birthed it (setRotationLineage only fills a
+  // NULL lineage, so it is a no-op if a chain already exists). Skip silently if the
+  // pool did not reach 2 arms (no rotation opened).
+  const rotation = getRunningRotationExperiment(deps.db, exp.workflow_id);
+  if (rotation) setRotationLineage(deps.db, rotation.id, exp.id);
+
   return { experimentId: exp.id, status: exp.status, winnerRunId: exp.winner_run_id };
+}
+
+// ---------------------------------------------------------------------------
+// Rotation experiment cores (migration 057, phase 2) — the read summary + the
+// two explicit terminal decisions (decide / abandon) over an OPEN rotation. The
+// LIFECYCLE (open/supersede/replace/close) is driven implicitly by the registry
+// chokepoint's reconcile; these are the human-initiated conclusions.
+// ---------------------------------------------------------------------------
+
+/** @internal exported for unit tests. The OPEN rotation summary for a workflow, or null. */
+export function getRunningRotationSummary(
+  deps: ExperimentsDeps,
+  workflowId: string,
+): RotationExperimentSummary | null {
+  const { db } = deps;
+  const exp = getRunningRotationExperiment(db, workflowId);
+  if (!exp) return null;
+  const arms = listRotationArms(db, exp.id).map((a) => ({
+    variantId: a.variant_id,
+    label: a.label,
+    weightAtOpen: a.weight_at_open,
+  }));
+  return {
+    experimentId: exp.id,
+    workflowId: exp.workflow_id,
+    startedAt: exp.created_at,
+    arms,
+    runCount: countRotationExperimentRuns(db, exp.id),
+  };
+}
+
+/**
+ * Guard + load a running rotation experiment for an explicit terminal decision.
+ * NOT_FOUND when absent; PRECONDITION_FAILED when it is not a running rotation.
+ */
+function requireRunningRotation(deps: ExperimentsDeps, experimentId: string): ExperimentRow {
+  const exp = getExperiment(deps.db, experimentId);
+  if (!exp) {
+    throw new TRPCError({ code: 'NOT_FOUND', message: `experiment ${experimentId} not found` });
+  }
+  if (exp.kind !== 'rotation') {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: `experiment ${experimentId} is not a rotation (kind=${exp.kind})`,
+    });
+  }
+  if (exp.status !== 'running') {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: `rotation ${experimentId} is not running (status=${exp.status})`,
+    });
+  }
+  return exp;
+}
+
+/**
+ * Pause every real-variant arm in a rotation's snapshot so the pool drops below 2
+ * and the workflow stops rotating. Skips the baseline sentinel (the workflow's
+ * baseline_in_rotation flag stays as-is) and any arm whose variant was deleted.
+ * `skipVariantId` exempts one arm from pausing — passed ONLY for a winner that was
+ * already retired by spec adoption; a promoted-but-NOT-retired winner is deliberately
+ * not skipped, so it gets paused too (leaving it active would re-open a fresh
+ * rotation immediately — its spec now IS the baseline).
+ */
+function pauseRotationArms(deps: ExperimentsDeps, experimentId: string, skipVariantId?: string): void {
+  for (const arm of listRotationArms(deps.db, experimentId)) {
+    if (isBaselineArm(arm.variant_id)) continue;
+    if (skipVariantId !== undefined && arm.variant_id === skipVariantId) continue;
+    if (deps.getVariant(arm.variant_id) === null) continue;
+    deps.setVariantStatus(arm.variant_id, 'paused');
+  }
+}
+
+/**
+ * Conclude a rotation with an explicit winner. Adopts a real-variant winner's spec
+ * into the base workflow (mirroring promoteVariant) and turns rotation OFF.
+ *
+ * Order is LOAD-BEARING (all in ONE transaction): (1) stamp decided + promotion
+ * FIRST — so the per-write registry reconciles triggered by the setVariantStatus
+ * pauses below see NO running rotation and cannot supersede the one being decided;
+ * (2) real-variant winner → adopt spec + retire IFF spec-only; (3) pause EVERY
+ * real-variant arm — including the winner when it was NOT retired, because its spec
+ * is now the baseline and an active variant would re-open a fresh rotation at once.
+ * The baseline sentinel is left alone (champion-default; a baseline-only pool < 2
+ * arms simply stops rotating). Intermediate reconciles inside the transaction may
+ * open+delete transient zero-run rotations — acceptable churn, all rolled into the
+ * one atomic decide.
+ */
+export function decideRotationExperiment(
+  deps: ExperimentsDeps,
+  experimentId: string,
+  winnerVariantId: string,
+): { experimentId: string; status: 'decided'; promotedVariantId: string } {
+  const { db } = deps;
+  const exp = requireRunningRotation(deps, experimentId);
+
+  const armIds = new Set(listRotationArms(db, experimentId).map((a) => a.variant_id));
+  if (!armIds.has(winnerVariantId)) {
+    throw new TRPCError({
+      code: 'BAD_REQUEST',
+      message: `variant ${winnerVariantId} is not an arm of rotation ${experimentId}`,
+    });
+  }
+
+  const now = new Date().toISOString();
+  const baselineWinner = isBaselineArm(winnerVariantId);
+
+  // Real-variant winner: parse its spec BEFORE the transaction (promoteVariant's
+  // exact parse/error contract) and decide retire-eligibility.
+  let definition: WorkflowDefinition | null = null;
+  let retireWinner = false;
+  if (!baselineWinner) {
+    const variant = deps.getVariant(winnerVariantId);
+    if (!variant) {
+      throw new TRPCError({ code: 'NOT_FOUND', message: `variant ${winnerVariantId} not found` });
+    }
+    try {
+      definition = workflowDefinitionSchema.parse(JSON.parse(variant.spec_json));
+    } catch {
+      throw new TRPCError({
+        code: 'INTERNAL_SERVER_ERROR',
+        message: `variant ${winnerVariantId} has an invalid spec and cannot be adopted`,
+      });
+    }
+    retireWinner =
+      variant.agent_overrides_json === null && variant.model === null && variant.execution_model === null;
+  }
+
+  const applyDecision = db.transaction(() => {
+    // (1) Stamp FIRST so reconciles from the pauses below see no running rotation.
+    updateExperimentStatus(db, experimentId, 'decided', { decidedAt: now });
+    setExperimentPromotion(db, experimentId, {
+      promotedVariantId: baselineWinner ? BASELINE_VARIANT_SENTINEL : winnerVariantId,
+      promotedArm: null,
+      promotedAt: now,
+    });
+    // (2) Real-variant winner: adopt its spec; retire IFF spec-only.
+    if (!baselineWinner && definition !== null) {
+      deps.adoptWorkflowSpec(exp.workflow_id, definition);
+      if (retireWinner) deps.setVariantStatus(winnerVariantId, 'retired');
+    }
+    // (3) Turn rotation off: pause every real-variant arm. Skip the winner ONLY when
+    // it was retired above (retire already removed it from the pool); a non-retired
+    // winner MUST be paused too, else its (now-baseline) spec re-opens a rotation.
+    pauseRotationArms(deps, experimentId, retireWinner ? winnerVariantId : undefined);
+  });
+  applyDecision();
+
+  return {
+    experimentId,
+    status: 'decided',
+    promotedVariantId: baselineWinner ? BASELINE_VARIANT_SENTINEL : winnerVariantId,
+  };
+}
+
+/**
+ * Abandon a rotation: stamp 'abandoned' and turn rotation off. Same stamp-FIRST
+ * ordering + reopen-hazard rule as decide, but no spec adoption.
+ */
+export function abandonRotationExperiment(
+  deps: ExperimentsDeps,
+  experimentId: string,
+): { experimentId: string; status: 'abandoned' } {
+  const { db } = deps;
+  requireRunningRotation(deps, experimentId);
+  const applyAbandon = db.transaction(() => {
+    updateExperimentStatus(db, experimentId, 'abandoned');
+    pauseRotationArms(deps, experimentId);
+  });
+  applyAbandon();
+  return { experimentId, status: 'abandoned' };
 }
 
 // ---------------------------------------------------------------------------
@@ -1762,6 +1954,32 @@ export const experimentsRouter = router({
         return promoteVariant(deps, input.experimentId, input.arm);
       },
     ),
+
+  /** The OPEN rotation experiment summary for a workflow (null when none). */
+  getRunningRotation: protectedProcedure
+    .input(z.object({ workflowId: z.string().min(1) }))
+    .query(async ({ input }): Promise<RotationExperimentSummary | null> => {
+      return getRunningRotationSummary(requireDeps(), input.workflowId);
+    }),
+
+  /**
+   * Conclude a rotation with an explicit winner: stamp decided + promotion, adopt a
+   * real-variant winner's spec into the baseline, and turn rotation off.
+   */
+  decideRotation: protectedProcedure
+    .input(z.object({ experimentId: z.string().min(1), winnerVariantId: z.string().min(1) }))
+    .mutation(
+      ({ input }): { experimentId: string; status: 'decided'; promotedVariantId: string } => {
+        return decideRotationExperiment(requireDeps(), input.experimentId, input.winnerVariantId);
+      },
+    ),
+
+  /** Abandon a rotation: stamp abandoned and turn rotation off (no spec adoption). */
+  abandonRotation: protectedProcedure
+    .input(z.object({ experimentId: z.string().min(1) }))
+    .mutation(({ input }): { experimentId: string; status: 'abandoned' } => {
+      return abandonRotationExperiment(requireDeps(), input.experimentId);
+    }),
 
   get: protectedProcedure
     .input(z.object({ experimentId: z.string().min(1) }))

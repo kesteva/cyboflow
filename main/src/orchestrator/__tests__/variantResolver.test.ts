@@ -1,12 +1,15 @@
 /**
- * Unit tests for VariantResolver (A/B testing, migration 048).
+ * Unit tests for VariantResolver (A/B testing, migration 048; provenance 057).
  *
  * Covers the rotation seam: weighted pick determinism with an injected Rng,
- * zero/all-paused → null, weight=0 active excluded, explicit pin loads regardless
- * of status, foreign-workflow pin throws, __quick__ → null.
+ * zero/all-paused → none, weight=0 active excluded, explicit pin loads regardless
+ * of status, foreign-workflow pin throws, __quick__ → none. Phase 2 adds the
+ * VariantAssignment provenance: every outcome carries a `source`, and only a
+ * genuine weighted rotation pick populates `rotationExperimentId` (from the open
+ * rotation experiment).
  *
- * Uses an in-memory better-sqlite3 with the workflows + workflow_variants tables
- * applied inline (no file I/O).
+ * Uses an in-memory better-sqlite3 with the workflows + workflow_variants +
+ * experiments (057 shape) tables applied inline (no file I/O).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -42,11 +45,28 @@ function makeDb(): Database.Database {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+    -- Minimal 057-shape experiments table so the resolver's rotation-attribution
+    -- lookup (getRunningRotationExperiment) resolves. No arms table needed — the
+    -- resolver only reads the running experiment id.
+    CREATE TABLE experiments (
+      id TEXT PRIMARY KEY, project_id INTEGER, workflow_id TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'side_by_side' CHECK (kind IN ('side_by_side','rotation')),
+      status TEXT NOT NULL DEFAULT 'running'
+        CHECK (status IN ('running','grading','decided','abandoned','superseded')),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
   `);
   db.prepare("INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, 'planner', '{}')").run(WF);
   db.prepare("INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, 'sprint', '{}')").run(OTHER_WF);
   db.prepare("INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-q', 1, '__quick__', '{}')").run();
   return db;
+}
+
+function seedRunningRotation(db: Database.Database, id: string, workflowId = WF): void {
+  db.prepare(
+    "INSERT INTO experiments (id, project_id, workflow_id, kind, status) VALUES (?, 1, ?, 'rotation', 'running')",
+  ).run(id, workflowId);
 }
 
 function seedVariant(
@@ -86,30 +106,38 @@ describe('VariantResolver', () => {
     db = makeDb();
   });
 
-  it('returns null when the workflow has zero variants (baseline run)', () => {
+  it('source=none with null variant when the workflow has zero variants (baseline run)', () => {
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    expect(resolver.resolveForLaunch(WF)).toBeNull();
+    const a = resolver.resolveForLaunch(WF);
+    expect(a.variant).toBeNull();
+    expect(a.source).toBe('none');
+    expect(a.rotationExperimentId).toBeNull();
   });
 
-  it('returns null when all variants are paused (baseline run)', () => {
+  it('source=none when all variants are paused (baseline run)', () => {
     seedVariant(db, 'v1', { status: 'paused' });
     seedVariant(db, 'v2', { status: 'paused' });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    expect(resolver.resolveForLaunch(WF)).toBeNull();
+    const a = resolver.resolveForLaunch(WF);
+    expect(a.variant).toBeNull();
+    expect(a.source).toBe('none');
   });
 
-  it('excludes weight=0 active variants from rotation', () => {
+  it('excludes weight=0 active variants from rotation (source=none)', () => {
     seedVariant(db, 'v0', { weight: 0, status: 'active' });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    expect(resolver.resolveForLaunch(WF)).toBeNull();
+    const a = resolver.resolveForLaunch(WF);
+    expect(a.variant).toBeNull();
+    expect(a.source).toBe('none');
   });
 
-  it('rng=()=>0 deterministically picks the first active candidate', () => {
+  it('rng=()=>0 deterministically picks the first active candidate (source=rotation)', () => {
     seedVariant(db, 'v1', { weight: 1 });
     seedVariant(db, 'v2', { weight: 1 });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const picked = resolver.resolveForLaunch(WF);
-    expect(picked?.variantId).toBe('v1');
+    const a = resolver.resolveForLaunch(WF);
+    expect(a.variant?.variantId).toBe('v1');
+    expect(a.source).toBe('rotation');
   });
 
   it('weighted pick honors boundary values (r just past the first weight picks the second)', () => {
@@ -117,24 +145,28 @@ describe('VariantResolver', () => {
     seedVariant(db, 'v2', { weight: 3 });
     // total = 4. rng()=0.25 → r=1.0; cumulative after v1 is 1 (not > 1.0) → v2.
     const resolver = new VariantResolver(dbAdapter(db), () => 0.25);
-    expect(resolver.resolveForLaunch(WF)?.variantId).toBe('v2');
+    expect(resolver.resolveForLaunch(WF).variant?.variantId).toBe('v2');
     // rng()=0.2 → r=0.8; cumulative after v1 is 1 (> 0.8) → v1.
     const resolver2 = new VariantResolver(dbAdapter(db), () => 0.2);
-    expect(resolver2.resolveForLaunch(WF)?.variantId).toBe('v1');
+    expect(resolver2.resolveForLaunch(WF).variant?.variantId).toBe('v1');
   });
 
-  it('explicit pin loads a PAUSED variant regardless of status', () => {
+  it('explicit pin loads a PAUSED variant regardless of status (source=pin)', () => {
     seedVariant(db, 'vp', { status: 'paused', label: 'paused-one' });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const picked = resolver.resolveForLaunch(WF, 'vp');
-    expect(picked?.variantId).toBe('vp');
-    expect(picked?.variantLabel).toBe('paused-one');
+    const a = resolver.resolveForLaunch(WF, 'vp');
+    expect(a.variant?.variantId).toBe('vp');
+    expect(a.variant?.variantLabel).toBe('paused-one');
+    expect(a.source).toBe('pin');
+    expect(a.rotationExperimentId).toBeNull();
   });
 
   it('explicit pin loads a RETIRED variant regardless of status', () => {
     seedVariant(db, 'vr', { status: 'retired' });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    expect(resolver.resolveForLaunch(WF, 'vr')?.variantId).toBe('vr');
+    const a = resolver.resolveForLaunch(WF, 'vr');
+    expect(a.variant?.variantId).toBe('vr');
+    expect(a.source).toBe('pin');
   });
 
   it('throws when an explicit pin belongs to a different workflow', () => {
@@ -148,28 +180,65 @@ describe('VariantResolver', () => {
     expect(() => resolver.resolveForLaunch(WF, 'nope')).toThrow(/not found/);
   });
 
-  it('baseline pin returns null WITHOUT rotating even when active variants exist', () => {
+  it('baseline pin returns source=baseline-pin (null variant) WITHOUT rotating even when active variants exist', () => {
     // Restart of a baseline (variant_id NULL) run: the workflow has since gained
     // active weight>0 variants, but `baseline: true` must reproduce the baseline —
     // never roll a variant ("restart inherits, no re-roll").
     seedVariant(db, 'v1', { weight: 1, status: 'active' });
     seedVariant(db, 'v2', { weight: 5, status: 'active' });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    expect(resolver.resolveForLaunch(WF, undefined, { baseline: true })).toBeNull();
+    const baselinePin = resolver.resolveForLaunch(WF, undefined, { baseline: true });
+    expect(baselinePin.variant).toBeNull();
+    expect(baselinePin.source).toBe('baseline-pin');
+    expect(baselinePin.rotationExperimentId).toBeNull();
     // Sanity: without the baseline pin the same resolver WOULD pick a variant.
-    expect(resolver.resolveForLaunch(WF)?.variantId).toBe('v1');
+    expect(resolver.resolveForLaunch(WF).variant?.variantId).toBe('v1');
   });
 
   it('explicit pin wins over the baseline flag', () => {
     seedVariant(db, 'vp', { status: 'paused', label: 'pinned' });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const picked = resolver.resolveForLaunch(WF, 'vp', { baseline: true });
-    expect(picked?.variantId).toBe('vp');
+    const a = resolver.resolveForLaunch(WF, 'vp', { baseline: true });
+    expect(a.variant?.variantId).toBe('vp');
+    expect(a.source).toBe('pin');
   });
 
-  it('returns null for the __quick__ sentinel workflow', () => {
+  it('source=none for the __quick__ sentinel workflow', () => {
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    expect(resolver.resolveForLaunch('wf-q')).toBeNull();
+    const a = resolver.resolveForLaunch('wf-q');
+    expect(a.variant).toBeNull();
+    expect(a.source).toBe('none');
+  });
+
+  // -- Rotation attribution provenance (migration 057) -----------------------
+  describe('rotation attribution', () => {
+    it('populates rotationExperimentId from the open rotation experiment on a weighted pick', () => {
+      seedVariant(db, 'v1', { weight: 1 });
+      seedVariant(db, 'v2', { weight: 1 });
+      seedRunningRotation(db, 'exp-rot-1');
+      const resolver = new VariantResolver(dbAdapter(db), () => 0);
+      const a = resolver.resolveForLaunch(WF);
+      expect(a.source).toBe('rotation');
+      expect(a.rotationExperimentId).toBe('exp-rot-1');
+    });
+
+    it('leaves rotationExperimentId null on a rotation pick when no rotation experiment is open', () => {
+      seedVariant(db, 'v1', { weight: 1 });
+      seedVariant(db, 'v2', { weight: 1 });
+      const resolver = new VariantResolver(dbAdapter(db), () => 0);
+      const a = resolver.resolveForLaunch(WF);
+      expect(a.source).toBe('rotation');
+      expect(a.rotationExperimentId).toBeNull();
+    });
+
+    it('never populates rotationExperimentId for an explicit pin even with an open rotation', () => {
+      seedVariant(db, 'v1', { weight: 1, status: 'active' });
+      seedRunningRotation(db, 'exp-rot-2');
+      const resolver = new VariantResolver(dbAdapter(db), () => 0);
+      const a = resolver.resolveForLaunch(WF, 'v1');
+      expect(a.source).toBe('pin');
+      expect(a.rotationExperimentId).toBeNull();
+    });
   });
 
   // -- Baseline as a rotation participant (migration 054) --------------------
@@ -181,35 +250,36 @@ describe('VariantResolver', () => {
     }
 
     it('excludes the baseline from the pool when it is out of rotation (100% variant)', () => {
-      // The test fixture pins baseline_in_rotation=0 (see makeDb) to isolate variant
-      // rotation; PRODUCTION defaults the baseline IN (migration 054), covered by the
-      // migration054 + workflowRegistry.variants tests.
       seedVariant(db, 'v1', { weight: 1, status: 'active' });
       // rng()=0.99 would land in the baseline slice IF the baseline were in the pool.
       const resolver = new VariantResolver(dbAdapter(db), () => 0.99);
-      expect(resolver.resolveForLaunch(WF)?.variantId).toBe('v1');
+      expect(resolver.resolveForLaunch(WF).variant?.variantId).toBe('v1');
     });
 
-    it('adds the baseline to the weighted pool when opted in — a baseline win → null', () => {
+    it('adds the baseline to the weighted pool when opted in — a baseline win → null variant, source=rotation', () => {
       seedVariant(db, 'v1', { weight: 1, status: 'active' });
       optBaselineIn(3); // pool: v1(1) + baseline(3), total 4
       // rng()=0 → r=0 → first candidate (v1).
-      expect(new VariantResolver(dbAdapter(db), () => 0).resolveForLaunch(WF)?.variantId).toBe('v1');
-      // rng()=0.5 → r=2; cumulative after v1 is 1 (not > 2) → baseline slice → null.
-      expect(new VariantResolver(dbAdapter(db), () => 0.5).resolveForLaunch(WF)).toBeNull();
+      expect(new VariantResolver(dbAdapter(db), () => 0).resolveForLaunch(WF).variant?.variantId).toBe('v1');
+      // rng()=0.5 → r=2; cumulative after v1 is 1 (not > 2) → baseline slice → null variant.
+      const baselineWin = new VariantResolver(dbAdapter(db), () => 0.5).resolveForLaunch(WF);
+      expect(baselineWin.variant).toBeNull();
+      expect(baselineWin.source).toBe('rotation');
     });
 
     it('excludes the baseline when opted in but weight=0', () => {
       seedVariant(db, 'v1', { weight: 1, status: 'active' });
       optBaselineIn(0);
       const resolver = new VariantResolver(dbAdapter(db), () => 0.99);
-      expect(resolver.resolveForLaunch(WF)?.variantId).toBe('v1');
+      expect(resolver.resolveForLaunch(WF).variant?.variantId).toBe('v1');
     });
 
-    it('baseline-only rotation (no active variants) resolves to the baseline run (null)', () => {
+    it('baseline-only rotation (no active variants) resolves to the baseline run (null variant, source=rotation)', () => {
       optBaselineIn(5);
       const resolver = new VariantResolver(dbAdapter(db), () => 0);
-      expect(resolver.resolveForLaunch(WF)).toBeNull();
+      const a = resolver.resolveForLaunch(WF);
+      expect(a.variant).toBeNull();
+      expect(a.source).toBe('rotation');
     });
   });
 
@@ -221,8 +291,8 @@ describe('VariantResolver', () => {
       agentOverridesJson: '{"planner":{"model":"sonnet"}}',
     });
     const resolver = new VariantResolver(dbAdapter(db), () => 0);
-    const picked = resolver.resolveForLaunch(WF);
-    expect(picked).toEqual({
+    const a = resolver.resolveForLaunch(WF);
+    expect(a.variant).toEqual({
       variantId: 'v1',
       variantLabel: 'v1',
       specJson: '{"g":1}',

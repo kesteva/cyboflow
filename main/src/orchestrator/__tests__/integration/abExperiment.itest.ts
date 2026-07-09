@@ -389,7 +389,9 @@ describe('Tier-3 A/B testing: variants, rotation, side-by-side experiments, pair
 
     // rng()=0 ⇒ weightedPick returns the first (only) active candidate deterministically.
     const resolver = new VariantResolver(t.db, () => 0);
-    const resolved = resolver.resolveForLaunch(WF_ID);
+    const assignment = resolver.resolveForLaunch(WF_ID);
+    expect(assignment.source).toBe('rotation');
+    const resolved = assignment.variant;
     expect(resolved?.variantId).toBe(variant.id);
 
     const { runId } = registry.createRun(WF_ID, undefined, sessionId, undefined, {

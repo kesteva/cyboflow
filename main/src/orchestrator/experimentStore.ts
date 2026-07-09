@@ -20,10 +20,11 @@ import type { DatabaseLike, LoggerLike } from './types';
 import type {
   ExperimentArm,
   ExperimentRow,
+  ExperimentRotationArmRow,
   ExperimentSeedTaskRow,
   ExperimentStatus,
 } from '../../../shared/types/experiments';
-import { isExperimentArmSettled } from '../../../shared/types/experiments';
+import { isExperimentArmSettled, BASELINE_VARIANT_SENTINEL } from '../../../shared/types/experiments';
 
 /** Fields required to seed a new experiments row (status defaults to 'running'). */
 export interface InsertExperimentInput {
@@ -223,11 +224,16 @@ export function updateExperimentStatus(
   db.prepare(`UPDATE experiments SET ${sets.join(', ')} WHERE id = ?`).run(...params, experimentId);
 }
 
-/** Stamp the variant-outcome verdict (experiments.promoteVariant). One-way; the router guards against re-promotion. */
+/**
+ * Stamp the variant-outcome verdict (experiments.promoteVariant / rotation decide).
+ * One-way; the router guards against re-promotion. `promotedArm` is nullable: a
+ * side-by-side promotion stamps the winning A/B arm, while a rotation decide has no
+ * A/B arm identity (its winner is a variant id) and passes null.
+ */
 export function setExperimentPromotion(
   db: DatabaseLike,
   experimentId: string,
-  opts: { promotedVariantId: string; promotedArm: ExperimentArm; promotedAt: string },
+  opts: { promotedVariantId: string; promotedArm: ExperimentArm | null; promotedAt: string },
 ): void {
   db.prepare(
     `UPDATE experiments SET promoted_variant_id = ?, promoted_arm = ?, promoted_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
@@ -401,4 +407,255 @@ export async function dismissAndSweepHalfCreatedExperiment(
     })
     .catch(() => {});
   deleteExperimentSeedTasks(db, exp.id);
+}
+
+// ===========================================================================
+// Rotation experiments (migration 057, phase 2) — the ongoing randomized
+// rotation over a workflow's live baseline + its active variants, tracked as a
+// first-class experiment record. The lifecycle is MEMBERSHIP-driven (opened when
+// the weighted pool reaches >= 2 arms; superseded/replaced when the arm SET
+// changes; closed when the pool drops below 2). A pure WEIGHT change never closes.
+// ===========================================================================
+
+/** One arm of a rotation's arm-set snapshot (the resolver-pool member at open). */
+export interface RotationArmInput {
+  variantId: string;
+  label: string;
+  weightAtOpen: number;
+}
+
+/**
+ * Insert a `rotation` experiment (status='running', side-by-side columns all NULL)
+ * plus one experiment_rotation_arms row per arm, as ONE transaction. Rejects an
+ * arm set smaller than 2 — a rotation is only meaningful with >= 2 live arms.
+ */
+export function insertRotationExperiment(
+  db: DatabaseLike,
+  input: { workflowId: string; arms: RotationArmInput[]; rerunOfExperimentId?: string | null },
+): ExperimentRow {
+  if (input.arms.length < 2) {
+    throw new Error(
+      `experimentStore.insertRotationExperiment: a rotation needs >= 2 arms (got ${input.arms.length})`,
+    );
+  }
+  const id = `exp_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
+  const tx = db.transaction(() => {
+    db.prepare(
+      `INSERT INTO experiments (id, project_id, workflow_id, kind, base_branch, base_sha,
+         variant_a_id, variant_b_id, status, rerun_of_experiment_id)
+       VALUES (?, NULL, ?, 'rotation', NULL, NULL, NULL, NULL, 'running', ?)`,
+    ).run(id, input.workflowId, input.rerunOfExperimentId ?? null);
+    const armStmt = db.prepare(
+      `INSERT INTO experiment_rotation_arms (experiment_id, variant_id, label, weight_at_open)
+       VALUES (?, ?, ?, ?)`,
+    );
+    for (const arm of input.arms) {
+      armStmt.run(id, arm.variantId, arm.label, arm.weightAtOpen);
+    }
+  });
+  tx();
+  const row = getExperiment(db, id);
+  if (!row) {
+    throw new Error(`experimentStore.insertRotationExperiment: inserted rotation ${id} could not be read back`);
+  }
+  return row;
+}
+
+/** The OPEN rotation experiment for a workflow (kind='rotation' AND status='running'), newest first; null when none. */
+export function getRunningRotationExperiment(db: DatabaseLike, workflowId: string): ExperimentRow | null {
+  const row = db
+    .prepare(
+      `SELECT * FROM experiments
+        WHERE workflow_id = ? AND kind = 'rotation' AND status = 'running'
+        ORDER BY created_at DESC, id DESC LIMIT 1`,
+    )
+    .get(workflowId) as ExperimentRow | undefined;
+  return row ?? null;
+}
+
+/** The arm-set snapshot rows for a rotation experiment, ordered by variant id. */
+export function listRotationArms(db: DatabaseLike, experimentId: string): ExperimentRotationArmRow[] {
+  return db
+    .prepare('SELECT * FROM experiment_rotation_arms WHERE experiment_id = ? ORDER BY variant_id')
+    .all(experimentId) as ExperimentRotationArmRow[];
+}
+
+/** Count the runs attributed to a rotation experiment (workflow_runs.rotation_experiment_id). */
+export function countRotationExperimentRuns(db: DatabaseLike, experimentId: string): number {
+  const row = db
+    .prepare('SELECT COUNT(*) AS n FROM workflow_runs WHERE rotation_experiment_id = ?')
+    .get(experimentId) as { n: number };
+  return row.n;
+}
+
+/** Hard-delete a rotation experiment + its arm rows (zero-run REPLACE / silent close only). */
+export function deleteRotationExperiment(db: DatabaseLike, experimentId: string): void {
+  const tx = db.transaction(() => {
+    db.prepare('DELETE FROM experiment_rotation_arms WHERE experiment_id = ?').run(experimentId);
+    db.prepare('DELETE FROM experiments WHERE id = ?').run(experimentId);
+  });
+  tx();
+}
+
+/** Fill a rotation's `rerun_of_experiment_id` — only when currently NULL (never overwrites an existing lineage). */
+export function setRotationLineage(db: DatabaseLike, experimentId: string, rerunOfExperimentId: string): void {
+  db.prepare(
+    `UPDATE experiments SET rerun_of_experiment_id = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ? AND rerun_of_experiment_id IS NULL`,
+  ).run(rerunOfExperimentId, experimentId);
+}
+
+/**
+ * Compute a workflow's current weighted rotation POOL as an arm set.
+ *
+ * ⚠️ LOCKSTEP with VariantResolver.resolveForLaunch's pool predicate — the two
+ * MUST admit exactly the same members or a run could be attributed to a rotation
+ * whose snapshot does not contain the picked arm (or vice versa). The predicate:
+ * `workflow_variants` where `status='active' AND weight>0` (ORDER BY id), plus the
+ * live BASELINE when `workflows.baseline_in_rotation=1 AND baseline_rotation_weight>0`
+ * (migration 054). The `__quick__` sentinel never rotates → []. If you change this
+ * predicate, change resolveForLaunch's in the same edit.
+ */
+export function computeRotationArmSet(db: DatabaseLike, workflowId: string): RotationArmInput[] {
+  const workflow = db
+    .prepare(
+      'SELECT name AS name, baseline_in_rotation AS baselineInRotation, baseline_rotation_weight AS baselineWeight FROM workflows WHERE id = ?',
+    )
+    .get(workflowId) as
+    | { name?: unknown; baselineInRotation?: unknown; baselineWeight?: unknown }
+    | undefined;
+  if (!workflow) return [];
+  if (workflow.name === '__quick__') return [];
+
+  const variants = db
+    .prepare(
+      `SELECT id AS id, label AS label, weight AS weight FROM workflow_variants
+        WHERE workflow_id = ? AND status = 'active' AND weight > 0
+        ORDER BY id`,
+    )
+    .all(workflowId) as Array<{ id: string; label: string; weight: number }>;
+
+  const arms: RotationArmInput[] = variants.map((v) => ({
+    variantId: v.id,
+    label: v.label,
+    weightAtOpen: v.weight,
+  }));
+
+  const baselineInRotation = Number(workflow.baselineInRotation ?? 0) === 1;
+  const baselineWeight = Math.max(0, Math.trunc(Number(workflow.baselineWeight ?? 0)) || 0);
+  if (baselineInRotation && baselineWeight > 0) {
+    arms.push({ variantId: BASELINE_VARIANT_SENTINEL, label: 'Baseline', weightAtOpen: baselineWeight });
+  }
+  return arms;
+}
+
+/** The action a reconcile pass took (for logging / tests). */
+export type RotationReconcileAction = 'none' | 'opened' | 'superseded' | 'replaced' | 'closed';
+
+/** Order-insensitive comparison of two arm sets by the SET of their variant ids. */
+function sameMembership(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const setA = new Set(a);
+  for (const id of b) if (!setA.has(id)) return false;
+  return true;
+}
+
+/**
+ * Reconcile a workflow's rotation experiment against its live weighted pool.
+ * Idempotent; the whole decision + writes run in ONE transaction. The lifecycle
+ * matrix (membership = the SET of arm variant ids, weight differences ignored):
+ *
+ *  - pool >= 2, no running exp                     → OPEN a fresh rotation ('opened')
+ *  - pool >= 2, running exp, same membership       → no-op ('none') (weight-only change)
+ *  - pool >= 2, running exp, membership changed:
+ *      · has attributed runs  → SUPERSEDE (old→superseded) + open successor
+ *                               (successor.rerun_of_experiment_id = old.id) ('superseded')
+ *      · zero attributed runs → REPLACE: delete old + open fresh, INHERITING the
+ *                               deleted row's rerun_of_experiment_id ('replaced')
+ *  - pool < 2 (rotation off), running exp:
+ *      · has attributed runs  → close as 'abandoned' ('closed')
+ *      · zero attributed runs → delete silently ('closed')
+ *  - pool < 2, no running exp                       → no-op ('none')
+ *
+ * Zero-run REPLACE means fiddling with the arm set before any run ever rotated
+ * never mints a phantom `superseded` row — only membership changes AFTER real runs
+ * chain a superseded→successor lineage.
+ */
+export function reconcileRotationExperiment(
+  db: DatabaseLike,
+  workflowId: string,
+): { action: RotationReconcileAction; experimentId: string | null } {
+  const tx = db.transaction(() => {
+    const desired = computeRotationArmSet(db, workflowId);
+    const running = getRunningRotationExperiment(db, workflowId);
+    const live = desired.length >= 2;
+
+    if (!live) {
+      if (!running) return { action: 'none' as RotationReconcileAction, experimentId: null };
+      if (countRotationExperimentRuns(db, running.id) > 0) {
+        updateExperimentStatus(db, running.id, 'abandoned');
+      } else {
+        deleteRotationExperiment(db, running.id);
+      }
+      return { action: 'closed' as RotationReconcileAction, experimentId: running.id };
+    }
+
+    if (!running) {
+      const opened = insertRotationExperiment(db, { workflowId, arms: desired });
+      return { action: 'opened' as RotationReconcileAction, experimentId: opened.id };
+    }
+
+    const currentIds = listRotationArms(db, running.id).map((a) => a.variant_id);
+    const desiredIds = desired.map((a) => a.variantId);
+    if (sameMembership(currentIds, desiredIds)) {
+      return { action: 'none' as RotationReconcileAction, experimentId: running.id };
+    }
+
+    if (countRotationExperimentRuns(db, running.id) > 0) {
+      updateExperimentStatus(db, running.id, 'superseded');
+      const successor = insertRotationExperiment(db, {
+        workflowId,
+        arms: desired,
+        rerunOfExperimentId: running.id,
+      });
+      return { action: 'superseded' as RotationReconcileAction, experimentId: successor.id };
+    }
+
+    const inheritedLineage = running.rerun_of_experiment_id;
+    deleteRotationExperiment(db, running.id);
+    const fresh = insertRotationExperiment(db, {
+      workflowId,
+      arms: desired,
+      rerunOfExperimentId: inheritedLineage,
+    });
+    return { action: 'replaced' as RotationReconcileAction, experimentId: fresh.id };
+  });
+  return tx() as { action: RotationReconcileAction; experimentId: string | null };
+}
+
+/**
+ * Boot-recovery sweep: reconcile EVERY workflow's rotation experiment against its
+ * live pool (config could have drifted while a pre-057 build ran, or a crash
+ * interrupted a mid-reconcile). Per-workflow try/catch — one bad workflow never
+ * aborts the rest — and NEVER throws. Skips the `__quick__` sentinel.
+ */
+export function reconcileAllRotationExperiments(db: DatabaseLike, logger?: Pick<LoggerLike, 'error'>): void {
+  let workflows: Array<{ id: string; name: string }>;
+  try {
+    workflows = db.prepare('SELECT id, name FROM workflows').all() as Array<{ id: string; name: string }>;
+  } catch {
+    // Pre-migration DB (no workflows table) — nothing to reconcile.
+    return;
+  }
+  for (const wf of workflows) {
+    if (wf.name === '__quick__') continue;
+    try {
+      reconcileRotationExperiment(db, wf.id);
+    } catch (err) {
+      logger?.error('[experiments] rotation reconcile failed', {
+        workflowId: wf.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
 }

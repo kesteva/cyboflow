@@ -20,6 +20,7 @@
 import type { DatabaseLike } from './types';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { WorkflowVariantRow } from '../../../shared/types/experiments';
+import { getRunningRotationExperiment } from './experimentStore';
 
 /** A random number generator in `[0, 1)`. Defaults to `Math.random`. */
 export type Rng = () => number;
@@ -32,6 +33,23 @@ export interface ResolvedVariant {
   model: string | null;
   executionModel: ExecutionModel | null;
   agentOverridesJson: string | null;
+}
+
+/**
+ * The launch's resolved variant assignment WITH provenance (phase 2). `source`
+ * disambiguates the four outcomes a bare `ResolvedVariant | null` could not:
+ *   - `pin`          — explicit variant pin (restart inherit / experiment arm / UI).
+ *   - `baseline-pin` — a baseline (live-spec) run pinned via opts.baseline (restart).
+ *   - `rotation`     — a genuine weighted rotation pick; `variant` may be null when
+ *                      the BASELINE arm won. ONLY this source attributes the run to a
+ *                      rotation experiment (rotationExperimentId set when one is open).
+ *   - `none`         — no rotation applied (__quick__, empty pool).
+ * `rotationExperimentId` is populated ONLY for `source==='rotation'`; null otherwise.
+ */
+export interface VariantAssignment {
+  variant: ResolvedVariant | null;
+  source: 'pin' | 'baseline-pin' | 'rotation' | 'none';
+  rotationExperimentId: string | null;
 }
 
 export class VariantResolver {
@@ -53,13 +71,14 @@ export class VariantResolver {
    *   has gained active weight>0 variants — honouring the "restart inherits, no
    *   re-roll" contract for the baseline case. Ignored when `requestedVariantId`
    *   is supplied (an explicit pin always wins).
-   * @returns The resolved variant, or `null` for a baseline (live-spec) run.
+   * @returns A {@link VariantAssignment} carrying the resolved variant (or null for
+   *   a baseline / no-rotation run) plus its provenance + any rotation attribution.
    */
   resolveForLaunch(
     workflowId: string,
     requestedVariantId?: string,
     opts?: { baseline?: boolean },
-  ): ResolvedVariant | null {
+  ): VariantAssignment {
     // Defense-in-depth: the __quick__ sentinel never rotates. (It is created via a
     // direct createRun in ipc/session.ts and never reaches RunLauncher.launch, so
     // this is belt-and-suspenders.)
@@ -70,7 +89,9 @@ export class VariantResolver {
       .get(workflowId) as
       | { name?: unknown; baselineInRotation?: unknown; baselineWeight?: unknown }
       | undefined;
-    if (workflow && workflow.name === '__quick__') return null;
+    if (workflow && workflow.name === '__quick__') {
+      return { variant: null, source: 'none', rotationExperimentId: null };
+    }
 
     if (requestedVariantId !== undefined) {
       const variant = this.loadVariant(requestedVariantId);
@@ -82,13 +103,18 @@ export class VariantResolver {
           `VariantResolver: variant ${requestedVariantId} belongs to a different workflow`,
         );
       }
-      return this.toResolved(variant);
+      return { variant: this.toResolved(variant), source: 'pin', rotationExperimentId: null };
     }
 
     // Baseline pin (restart of a variant_id-NULL run): reproduce the baseline
     // deterministically — never fall through to rotation.
-    if (opts?.baseline) return null;
+    if (opts?.baseline) return { variant: null, source: 'baseline-pin', rotationExperimentId: null };
 
+    // ⚠️ LOCKSTEP with experimentStore.computeRotationArmSet's pool predicate — the
+    // two MUST admit exactly the same members (active + weight>0 variants, plus the
+    // opted-in baseline). If you change this predicate, change computeRotationArmSet's
+    // in the same edit, or a run could be attributed to a rotation whose arm snapshot
+    // omits the picked arm.
     const variants = this.db
       .prepare(
         `SELECT * FROM workflow_variants
@@ -110,10 +136,19 @@ export class VariantResolver {
       pool.push({ weight: baselineWeight, variant: null });
     }
 
-    if (pool.length === 0) return null;
+    if (pool.length === 0) return { variant: null, source: 'none', rotationExperimentId: null };
 
+    // A genuine weighted rotation pick — attribute it to the open rotation experiment
+    // (phase 2). The baseline arm winning yields a null variant, but it is STILL a
+    // rotation pick (source='rotation'): a baseline-vs-variant rotation's baseline
+    // draws must be attributed too, so the experiment's arm stats are complete.
     const picked = this.weightedPick(pool);
-    return picked && picked.variant ? this.toResolved(picked.variant) : null;
+    const rotationExperimentId = getRunningRotationExperiment(this.db, workflowId)?.id ?? null;
+    return {
+      variant: picked && picked.variant ? this.toResolved(picked.variant) : null,
+      source: 'rotation',
+      rotationExperimentId,
+    };
   }
 
   /** Load a single variant row by id (any status). */

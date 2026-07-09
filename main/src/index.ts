@@ -147,7 +147,7 @@ import { readWorkflowPromptForRow } from './orchestrator/workflowPromptReaderAda
 import { makeLoggerLike, makeDatabaseLike } from './orchestrator/loggerAdapter';
 import { recoverActiveStateOrphans, recoverArchivedSessionRunOrphans, backfillTerminalOutcomes, stampSessionRunsOutcome } from './orchestrator/runRecovery';
 import { setExperimentsDeps } from './orchestrator/trpc/routers/experiments';
-import { recoverExperiments, reconcileExperimentStatus, dismissAndSweepHalfCreatedExperiment } from './orchestrator/experimentStore';
+import { recoverExperiments, reconcileExperimentStatus, dismissAndSweepHalfCreatedExperiment, reconcileAllRotationExperiments } from './orchestrator/experimentStore';
 import { createQuickSessionCore } from './services/createQuickSessionCore';
 import * as fs from 'fs';
 import { getDevDebugLogPath, appendDevDebugLog, formatConsoleArgs } from './utils/devDebugLog';
@@ -2856,6 +2856,19 @@ app.whenReady().then(async () => {
       });
     } catch (err) {
       loggerLike.error('[Main] experiment boot recovery failed', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // Boot recovery: reconcile EVERY workflow's rotation experiment against its live
+    // weighted pool (migration 057). Config could have drifted while a pre-057 build
+    // ran (no reconcile hooks), or a crash interrupted a mid-reconcile — this heals
+    // the drift (opens/supersedes/closes as the pool dictates). Per-workflow
+    // try/catch inside; never throws.
+    try {
+      reconcileAllRotationExperiments(db, loggerLike);
+    } catch (err) {
+      loggerLike.error('[Main] rotation experiment boot reconcile failed', {
         error: err instanceof Error ? err.message : String(err),
       });
     }
