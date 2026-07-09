@@ -2,7 +2,13 @@ import Database from 'better-sqlite3';
 import { describe, expect, it, vi } from 'vitest';
 import type { CodexOptions, ThreadEvent, ThreadOptions } from '@openai/codex-sdk';
 import type { SessionManager } from '../../../sessionManager';
-import { CodexSdkManager, type CodexClientFactory, type CodexClientLike, type CodexThreadLike } from '../codexSdkManager';
+import {
+  buildCodexOptionsForRun,
+  CodexSdkManager,
+  type CodexClientFactory,
+  type CodexClientLike,
+  type CodexThreadLike,
+} from '../codexSdkManager';
 
 async function* streamEvents(events: ThreadEvent[]): AsyncGenerator<ThreadEvent> {
   for (const event of events) {
@@ -62,6 +68,7 @@ function makeManager(db: Database.Database, client: CodexClientLike): CodexSdkMa
   manager.setCyboflowMcpRuntimeConfig({
     orchSocketPath: '/tmp/cyboflow-orch.sock',
     bridgeScriptPath: '/app/cyboflowMcpServer.js',
+    codexHookScriptPath: '/app/codexPreToolUseHook.js',
     nodeExecutablePath: '/usr/local/bin/node',
   });
   return manager;
@@ -78,12 +85,58 @@ function makeManagerWithFactory(db: Database.Database, factory: CodexClientFacto
   manager.setCyboflowMcpRuntimeConfig({
     orchSocketPath: '/tmp/cyboflow-orch.sock',
     bridgeScriptPath: '/app/cyboflowMcpServer.js',
+    codexHookScriptPath: '/app/codexPreToolUseHook.js',
     nodeExecutablePath: '/usr/local/bin/node',
   });
   return manager;
 }
 
 describe('CodexSdkManager', () => {
+  it('builds per-run Codex options with Cyboflow MCP and approval hook config', () => {
+    const options = buildCodexOptionsForRun('run-1', {
+      orchSocketPath: '/tmp/cyboflow-orch.sock',
+      bridgeScriptPath: '/app/cyboflowMcpServer.js',
+      codexHookScriptPath: '/app/codexPreToolUseHook.js',
+      nodeExecutablePath: '/usr/local/bin/node',
+    });
+
+    expect(options).toEqual(expect.objectContaining({
+      config: expect.objectContaining({
+        mcp_servers: {
+          cyboflow: expect.objectContaining({
+            command: '/usr/local/bin/node',
+            args: ['/app/cyboflowMcpServer.js'],
+            env: expect.objectContaining({
+              CYBOFLOW_RUN_ID: 'run-1',
+              CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
+            }),
+            required: true,
+            default_tools_approval_mode: 'approve',
+          }),
+        },
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: '*',
+              hooks: [
+                {
+                  type: 'command',
+                  command: "'/usr/local/bin/node' '/app/codexPreToolUseHook.js'",
+                  timeout: 86400,
+                  statusMessage: 'Checking Cyboflow permission',
+                },
+              ],
+            },
+          ],
+        },
+      }),
+      env: expect.objectContaining({
+        CYBOFLOW_RUN_ID: 'run-1',
+        CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
+      }),
+    }));
+  });
+
   it('starts a Codex thread with workflow options and projects assistant/result events', async () => {
     const db = createDb();
     try {
@@ -123,22 +176,41 @@ describe('CodexSdkManager', () => {
         model: 'gpt-5.5',
       });
 
-      expect(createClient).toHaveBeenCalledWith({
-        config: {
+      expect(createClient).toHaveBeenCalledWith(expect.objectContaining({
+        config: expect.objectContaining({
           mcp_servers: {
-            cyboflow: {
+            cyboflow: expect.objectContaining({
               command: '/usr/local/bin/node',
               args: ['/app/cyboflowMcpServer.js'],
-              env: {
+              env: expect.objectContaining({
                 CYBOFLOW_RUN_ID: 'run-1',
                 CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
-              },
+              }),
               required: true,
               default_tools_approval_mode: 'approve',
-            },
+            }),
           },
-        },
-      });
+          hooks: {
+            PreToolUse: [
+              {
+                matcher: '*',
+                hooks: [
+                  {
+                    type: 'command',
+                    command: "'/usr/local/bin/node' '/app/codexPreToolUseHook.js'",
+                    timeout: 86400,
+                    statusMessage: 'Checking Cyboflow permission',
+                  },
+                ],
+              },
+            ],
+          },
+        }),
+        env: expect.objectContaining({
+          CYBOFLOW_RUN_ID: 'run-1',
+          CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
+        }),
+      }));
       expect(client.startThread).toHaveBeenCalledWith({
         workingDirectory: '/tmp/worktree',
         sandboxMode: 'workspace-write',

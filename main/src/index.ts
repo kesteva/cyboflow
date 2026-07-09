@@ -106,6 +106,7 @@ import { handoverRunHandler, type HandoverRunDeps } from './orchestrator/handove
 import { OrchestratorHealth } from './orchestrator/health';
 import { McpServerLifecycle } from './orchestrator/mcpServer/mcpServerLifecycle';
 import { resolveMcpServerScriptPath } from './orchestrator/mcpServer/scriptPath';
+import { resolveShellHookScriptPathForFilename } from './services/panels/claude/interactiveSettingsWriter';
 import { OrchSocketServer } from './orchestrator/mcpServer/orchSocketServer';
 import { approvalEvents, experimentEvents, questionEvents, runStatusEvents, stepTransitionEvents } from './orchestrator/trpc/routers/events';
 import { EvalWorker } from './orchestrator/eval/evalWorker';
@@ -2077,6 +2078,7 @@ async function initializeServices() {
   createdCodexSdkManager.setCyboflowMcpRuntimeConfig({
     orchSocketPath: socketPath,
     bridgeScriptPath: bridgeScriptResolver.getScriptPath(),
+    codexHookScriptPath: resolveShellHookScriptPathForFilename('codexPreToolUseHook.js'),
     nodeExecutablePath: await nodeResolver.getNodePath(),
   });
 

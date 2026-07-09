@@ -55,49 +55,53 @@ const HOOK_FILENAME = 'preToolUseShellHook.js';
 const STOP_HOOK_FILENAME = 'stopShellHook.js';
 
 /**
+ * Relative path from process.resourcesPath to the unpacked hook script. Mirrors
+ * the `build.asarUnpack` glob in package.json
+ * (main/dist/main/src/orchestrator/shellHooks/**\/*.js).
+ */
+const ASAR_UNPACKED_HOOKS_DIR_REL =
+  'app.asar.unpacked/main/dist/main/src/orchestrator/shellHooks';
+
+/**
  * In dev, a compiled hook script lives next to the compiled mcpServer scripts
  * under main/dist/.../orchestrator/shellHooks/. This service module compiles to
  * main/dist/.../services/panels/claude/, so the dev path is computed relative to
  * __dirname rather than co-located. Pass `dirOverride` (an absolute shellHooks
  * dir) in tests to pin the dev branch deterministically.
  */
-function devRelFromDirname(filename: string): string {
-  return path.join('..', '..', '..', 'orchestrator', 'shellHooks', filename);
-}
-
-/**
- * Relative path from process.resourcesPath to a given unpacked hook script.
- * Mirrors the `build.asarUnpack` glob in package.json
- * (main/dist/main/src/orchestrator/shellHooks/**\/*.js — a directory glob, so
- * it covers every compiled script in the dir without a per-file entry).
- */
-function asarUnpackedRel(filename: string): string {
-  return `app.asar.unpacked/main/dist/main/src/orchestrator/shellHooks/${filename}`;
-}
+const DEV_HOOKS_DIR_REL_FROM_DIRNAME = path.join(
+  '..',
+  '..',
+  '..',
+  'orchestrator',
+  'shellHooks',
+);
 
 /**
  * Resolve the absolute path to a compiled shellHooks script.
  *
+ * @param filename The compiled script's filename.
  * @param dirOverride Optional absolute directory holding the compiled hook
  *   script. When supplied, the dev branch uses it directly (test-only). When
  *   omitted, the dev branch resolves relative to __dirname.
- * @param filename The compiled script's filename. Defaults to
- *   `preToolUseShellHook.js` — existing single-arg callers keep resolving the
- *   PreToolUse gate unchanged.
  */
-export function resolveShellHookScriptPath(dirOverride?: string, filename: string = HOOK_FILENAME): string {
+export function resolveShellHookScriptPathForFilename(filename: string, dirOverride?: string): string {
   if (app.isPackaged) {
-    return path.join(process.resourcesPath, asarUnpackedRel(filename));
+    return path.join(process.resourcesPath, ASAR_UNPACKED_HOOKS_DIR_REL, filename);
   }
   if (dirOverride !== undefined) {
     return path.join(dirOverride, filename);
   }
-  return path.resolve(__dirname, devRelFromDirname(filename));
+  return path.resolve(__dirname, DEV_HOOKS_DIR_REL_FROM_DIRNAME, filename);
+}
+
+export function resolveShellHookScriptPath(dirOverride?: string): string {
+  return resolveShellHookScriptPathForFilename(HOOK_FILENAME, dirOverride);
 }
 
 /** Resolve the absolute path to the compiled Stop turn-end-hook script. */
 export function resolveStopHookScriptPath(dirOverride?: string): string {
-  return resolveShellHookScriptPath(dirOverride, STOP_HOOK_FILENAME);
+  return resolveShellHookScriptPathForFilename(STOP_HOOK_FILENAME, dirOverride);
 }
 
 // ---------------------------------------------------------------------------

@@ -52,6 +52,7 @@ export type CodexClientFactory = (options?: CodexOptions) => CodexClientLike | P
 export interface CodexMcpRuntimeConfig {
   orchSocketPath: string;
   bridgeScriptPath: string;
+  codexHookScriptPath: string;
   nodeExecutablePath: string;
 }
 
@@ -123,6 +124,7 @@ function buildCyboflowMcpCodexConfig(
   runId: string,
   runtimeConfig: CodexMcpRuntimeConfig,
 ): NonNullable<CodexOptions['config']> {
+  const hookCommand = `${quoteShellArg(runtimeConfig.nodeExecutablePath)} ${quoteShellArg(runtimeConfig.codexHookScriptPath)}`;
   return {
     mcp_servers: {
       cyboflow: {
@@ -136,6 +138,42 @@ function buildCyboflowMcpCodexConfig(
         default_tools_approval_mode: 'approve',
       },
     },
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: '*',
+          hooks: [
+            {
+              type: 'command',
+              command: hookCommand,
+              timeout: 86400,
+              statusMessage: 'Checking Cyboflow permission',
+            },
+          ],
+        },
+      ],
+    },
+  };
+}
+
+function buildCodexEnvironment(runId: string, runtimeConfig: CodexMcpRuntimeConfig): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined) env[key] = value;
+  }
+  env.CYBOFLOW_RUN_ID = runId;
+  env.CYBOFLOW_ORCH_SOCKET = runtimeConfig.orchSocketPath;
+  return env;
+}
+
+function quoteShellArg(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+export function buildCodexOptionsForRun(runId: string, runtimeConfig: CodexMcpRuntimeConfig): CodexOptions {
+  return {
+    config: buildCyboflowMcpCodexConfig(runId, runtimeConfig),
+    env: buildCodexEnvironment(runId, runtimeConfig),
   };
 }
 
@@ -547,9 +585,7 @@ export class CodexSdkManager extends AbstractCliManager {
       throw new Error('Codex SDK manager missing Cyboflow MCP runtime config');
     }
 
-    return {
-      config: buildCyboflowMcpCodexConfig(runId, this.cyboflowMcpRuntimeConfig),
-    };
+    return buildCodexOptionsForRun(runId, this.cyboflowMcpRuntimeConfig);
   }
 
   private buildAssistantTextEvent(
