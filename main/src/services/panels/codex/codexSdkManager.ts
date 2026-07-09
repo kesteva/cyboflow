@@ -13,15 +13,15 @@ import type { ConfigManager } from '../../configManager';
 import type { SessionManager } from '../../sessionManager';
 import type { ConversationMessage } from '../../../database/models';
 import type { ClaudeSpawnerOptions } from '../../../orchestrator/runExecutor';
-import { EventRouter, RawEventsSink } from '../../streamParser';
+import { agentStreamEventToClaudeStreamEvent, EventRouter, RawEventsSink } from '../../streamParser';
 import type {
-  AssistantEvent,
-  ClaudeStreamEvent,
-  ResultEvent,
-  SessionInfoEvent,
-  SystemInitEvent,
-  UserEvent,
-} from '../../../../../shared/types/claudeStream';
+  AgentAssistantMessageEvent,
+  AgentInitEvent,
+  AgentResultEvent,
+  AgentSessionInfoEvent,
+  AgentStreamEvent,
+  AgentUserMessageEvent,
+} from '../../../../../shared/types/agentStream';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { codexPermissionFlagsForMode } from './codexPtyManager';
 
@@ -391,7 +391,7 @@ export class CodexSdkManager extends AbstractCliManager {
       systemInitEmitted: boolean;
       durationMs: number;
     },
-  ): ClaudeStreamEvent[] {
+  ): AgentStreamEvent[] {
     switch (event.type) {
       case 'thread.started':
         return context.systemInitEmitted
@@ -438,7 +438,7 @@ export class CodexSdkManager extends AbstractCliManager {
         ];
       default: {
         const _exhaustive: never = event;
-        return [{ kind: '__unknown__', raw: stringifyUnknown(_exhaustive) ? { raw: stringifyUnknown(_exhaustive) } : {} }];
+        return [{ type: 'agent_unknown', raw: stringifyUnknown(_exhaustive) ? { raw: stringifyUnknown(_exhaustive) } : {} }];
       }
     }
   }
@@ -447,7 +447,7 @@ export class CodexSdkManager extends AbstractCliManager {
     item: ThreadItem,
     options: ClaudeSpawnerOptions,
     threadId: string | null,
-  ): ClaudeStreamEvent[] {
+  ): AgentStreamEvent[] {
     switch (item.type) {
       case 'agent_message':
         if (item.text.trim().length === 0) return [];
@@ -502,16 +502,18 @@ export class CodexSdkManager extends AbstractCliManager {
         ];
       default: {
         const _exhaustive: never = item;
-        return [{ kind: '__unknown__', raw: { raw: stringifyUnknown(_exhaustive) } }];
+        return [{ type: 'agent_unknown', raw: { raw: stringifyUnknown(_exhaustive) } }];
       }
     }
   }
 
-  private buildSessionInfo(options: ClaudeSpawnerOptions): SessionInfoEvent {
+  private buildSessionInfo(options: ClaudeSpawnerOptions): AgentSessionInfoEvent {
     return {
-      type: 'session_info',
+      type: 'agent_session_info',
+      provider: 'codex',
+      runtime: 'codex-sdk',
       initial_prompt: options.prompt,
-      claude_command: 'codex-sdk-in-process',
+      command: 'codex-sdk-in-process',
       worktree_path: options.worktreePath,
       model: this.displayModel(options.model),
       permission_mode: options.agentPermissionMode ?? 'default',
@@ -523,17 +525,18 @@ export class CodexSdkManager extends AbstractCliManager {
     options: ClaudeSpawnerOptions,
     threadId: string,
     threadOptions: ThreadOptions,
-  ): SystemInitEvent {
+  ): AgentInitEvent {
     return {
-      type: 'system',
-      subtype: 'init',
-      session_id: threadId,
+      type: 'agent_init',
+      provider: 'codex',
+      runtime: 'codex-sdk',
+      external_session_id: threadId,
       cwd: options.worktreePath,
       model: this.displayModel(threadOptions.model),
       tools: [],
       mcp_servers: [{ name: 'cyboflow', status: 'connected' }],
-      permissionMode: options.agentPermissionMode ?? 'default',
-      claude_code_version: '@openai/codex-sdk',
+      permission_mode: options.agentPermissionMode ?? 'default',
+      sdk_version: '@openai/codex-sdk',
     };
   }
 
@@ -552,16 +555,14 @@ export class CodexSdkManager extends AbstractCliManager {
     text: string,
     options: ClaudeSpawnerOptions,
     threadId: string | null,
-  ): AssistantEvent {
+  ): AgentAssistantMessageEvent {
     return {
-      type: 'assistant',
-      message: {
-        id,
-        model: this.displayModel(options.model),
-        role: 'assistant',
-        content: [{ type: 'text', text }],
-      },
-      session_id: threadId ?? undefined,
+      type: 'agent_message',
+      role: 'assistant',
+      id,
+      model: this.displayModel(options.model),
+      content: [{ type: 'text', text }],
+      external_session_id: threadId ?? undefined,
     };
   }
 
@@ -570,16 +571,14 @@ export class CodexSdkManager extends AbstractCliManager {
     text: string,
     options: ClaudeSpawnerOptions,
     threadId: string | null,
-  ): AssistantEvent {
+  ): AgentAssistantMessageEvent {
     return {
-      type: 'assistant',
-      message: {
-        id,
-        model: this.displayModel(options.model),
-        role: 'assistant',
-        content: [{ type: 'thinking', thinking: text }],
-      },
-      session_id: threadId ?? undefined,
+      type: 'agent_message',
+      role: 'assistant',
+      id,
+      model: this.displayModel(options.model),
+      content: [{ type: 'thinking', text }],
+      external_session_id: threadId ?? undefined,
     };
   }
 
@@ -591,44 +590,40 @@ export class CodexSdkManager extends AbstractCliManager {
     isError: boolean;
     options: ClaudeSpawnerOptions;
     threadId: string | null;
-  }): [AssistantEvent, UserEvent] {
+  }): [AgentAssistantMessageEvent, AgentUserMessageEvent] {
     return [
       {
-        type: 'assistant',
-        message: {
-          id: `${input.id}:call`,
-          model: this.displayModel(input.options.model),
-          role: 'assistant',
-          content: [{ type: 'tool_use', id: input.id, name: input.name, input: input.input }],
-        },
-        session_id: input.threadId ?? undefined,
+        type: 'agent_message',
+        role: 'assistant',
+        id: `${input.id}:call`,
+        model: this.displayModel(input.options.model),
+        content: [{ type: 'tool_call', id: input.id, name: input.name, input: input.input }],
+        external_session_id: input.threadId ?? undefined,
       },
       {
-        type: 'user',
-        message: {
-          role: 'user',
-          content: [{
-            type: 'tool_result',
-            tool_use_id: input.id,
-            content: input.result,
-            is_error: input.isError,
-          }],
-        },
-        session_id: input.threadId ?? undefined,
+        type: 'agent_message',
+        role: 'user',
+        content: [{
+          type: 'tool_result',
+          tool_call_id: input.id,
+          content: input.result,
+          is_error: input.isError,
+        }],
+        external_session_id: input.threadId ?? undefined,
       },
     ];
   }
 
   private buildResultEvent(input: {
-    subtype: ResultEvent['subtype'];
+    subtype: AgentResultEvent['subtype'];
     isError: boolean;
     result?: string;
     usage: Usage | null;
     durationMs: number;
     threadId: string | null;
-  }): ResultEvent {
+  }): AgentResultEvent {
     return {
-      type: 'result',
+      type: 'agent_result',
       subtype: input.subtype,
       is_error: input.isError,
       duration_ms: input.durationMs,
@@ -638,7 +633,7 @@ export class CodexSdkManager extends AbstractCliManager {
         input_tokens: usageInputTokens(input.usage),
         output_tokens: usageOutputTokens(input.usage),
       },
-      session_id: input.threadId ?? undefined,
+      external_session_id: input.threadId ?? undefined,
     };
   }
 
@@ -647,14 +642,15 @@ export class CodexSdkManager extends AbstractCliManager {
     runId: string,
     panelId: string,
     sessionId: string,
-    data: ClaudeStreamEvent,
+    data: AgentStreamEvent,
   ): void {
-    router.emitForRun(runId, data);
+    const legacyEvent = agentStreamEventToClaudeStreamEvent(data);
+    router.emitForRun(runId, legacyEvent);
     this.emit('output', {
       panelId,
       sessionId,
       type: 'json',
-      data,
+      data: legacyEvent,
       timestamp: new Date(),
     });
   }
@@ -675,9 +671,8 @@ export class CodexSdkManager extends AbstractCliManager {
     }
   }
 
-  private resultTerminalError(event: ClaudeStreamEvent): string | null {
-    if ('kind' in event) return null;
-    if (event.type !== 'result' || !event.is_error) return null;
+  private resultTerminalError(event: AgentStreamEvent): string | null {
+    if (event.type !== 'agent_result' || !event.is_error) return null;
     return event.result ?? 'Codex turn failed';
   }
 

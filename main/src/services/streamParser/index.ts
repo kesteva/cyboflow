@@ -13,4 +13,9 @@ export { EventRouter } from './eventRouter';
 export { RawEventsSink } from './rawEventsSink';
 export { MessageProjection } from './messageProjection';
 export { deriveEventType } from './derivers';
+export {
+  agentStreamEventToClaudeStreamEvent,
+  claudeStreamEventToAgentStreamEvent,
+} from './agentStreamAdapter';
 export type { ILogger } from './types';
+export type { AgentStreamContext } from './agentStreamAdapter';
