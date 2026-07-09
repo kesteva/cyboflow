@@ -99,13 +99,20 @@ export function applyReviewItemChangeToList(
  * Filter a flat item list down to the PENDING review items for a single run,
  * sorted blocking-first. Stable within each blocking group (preserves input
  * relative order). Returns a NEW array; the input is never mutated.
+ *
+ * Findings are emitted silently — they go to the triage queue, not the run's
+ * "Needs your input" strip — so `kind === 'finding'` is dropped here. Only the
+ * attention kinds (permission approvals, decisions, human tasks, notification
+ * FYIs) surface in the strip.
  */
 export function pendingReviewItemsForRun(
   items: ReviewItem[],
   runId: string,
 ): ReviewItem[] {
   return items
-    .filter((it) => it.run_id === runId && it.status === 'pending')
+    .filter(
+      (it) => it.run_id === runId && it.status === 'pending' && it.kind !== 'finding',
+    )
     .map((it, index) => ({ it, index }))
     .sort((a, b) => {
       if (a.it.blocking !== b.it.blocking) {

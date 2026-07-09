@@ -53,7 +53,7 @@ function makeItem(id: string, overrides: Partial<ReviewItem> = {}): ReviewItem {
     run_id: null,
     entity_type: null,
     entity_id: null,
-    kind: 'finding',
+    kind: 'decision',
     status: 'pending',
     blocking: false,
     title: id,
@@ -171,6 +171,19 @@ describe('pendingReviewItemsForRun', () => {
     ];
     const result = pendingReviewItemsForRun(items, 'run-1');
     expect(result).toEqual([]);
+  });
+
+  it('drops findings (silent) but keeps the attention kinds', () => {
+    const items = [
+      makeItem('a', { run_id: 'run-1', kind: 'finding' }),
+      makeItem('b', { run_id: 'run-1', kind: 'permission' }),
+      makeItem('c', { run_id: 'run-1', kind: 'decision' }),
+      makeItem('d', { run_id: 'run-1', kind: 'human_task' }),
+      makeItem('e', { run_id: 'run-1', kind: 'notification' }),
+      makeItem('f', { run_id: 'run-1', kind: 'finding' }),
+    ];
+    const result = pendingReviewItemsForRun(items, 'run-1');
+    expect(result.map((i) => i.id)).toEqual(['b', 'c', 'd', 'e']);
   });
 });
 
