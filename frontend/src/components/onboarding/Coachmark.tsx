@@ -25,7 +25,13 @@ interface CoachmarkProps {
   onAnchorActioned: () => void;
 }
 
-type ArrowSide = 'left' | 'up';
+/**
+ * Which popover edge carries the arrow — 'left' puts the popover to the RIGHT
+ * of the anchor, 'right' puts it to the LEFT, 'up' puts it below. Horizontal
+ * sides are a preference: they auto-flip when the preferred side has no room,
+ * so the viewport clamp never drags the popover back over its own anchor.
+ */
+type ArrowSide = 'left' | 'up' | 'right';
 
 interface CoachSpec {
   anchorId: string;
@@ -38,8 +44,9 @@ const HOLE_PAD = 6;
 
 const COACH: Record<number, CoachSpec> = {
   4: {
+    // The card sits near the wizard's right edge — popover goes to its LEFT.
     anchorId: ONBOARDING_ANCHORS.quickSessionCard,
-    arrow: 'left',
+    arrow: 'right',
     body: (
       <>
         Spin up a <b className="text-[var(--paper)]">quick session</b> — an ad-hoc Claude Code chat in its own worktree.
@@ -203,10 +210,26 @@ export function Coachmark({
   const clampLeft = (l: number): number => Math.min(Math.max(l, 8), Math.max(8, vw - POPOVER_WIDTH - 8));
   const clampTop = (t: number): number => Math.min(Math.max(t, 8), Math.max(8, vh - 190));
 
+  const fitsRightSide = rect.left + rect.width + 14 + POPOVER_WIDTH <= vw - 8;
+  const fitsLeftSide = rect.left - 14 - POPOVER_WIDTH >= 8;
+  const side: ArrowSide =
+    spec.arrow === 'up'
+      ? 'up'
+      : spec.arrow === 'right'
+        ? fitsLeftSide || !fitsRightSide
+          ? 'right'
+          : 'left'
+        : fitsRightSide || !fitsLeftSide
+          ? 'left'
+          : 'right';
+
+  const sideTop = clampTop(rect.top + rect.height / 2 - 24);
   const pop =
-    spec.arrow === 'left'
-      ? { left: clampLeft(rect.left + rect.width + 14), top: clampTop(rect.top + rect.height / 2 - 24) }
-      : { left: clampLeft(rect.left + rect.width / 2 - 30), top: clampTop(rect.top + rect.height + 14) };
+    side === 'up'
+      ? { left: clampLeft(rect.left + rect.width / 2 - 30), top: clampTop(rect.top + rect.height + 14) }
+      : side === 'right'
+        ? { left: clampLeft(rect.left - POPOVER_WIDTH - 14), top: sideTop }
+        : { left: clampLeft(rect.left + rect.width + 14), top: sideTop };
 
   // Transparent hole (padded) that lets clicks reach the real target.
   const hole = {
@@ -247,7 +270,7 @@ export function Coachmark({
         className="pointer-events-auto absolute bg-[var(--ink)] text-[var(--paper)] shadow-[0_24px_60px_rgba(0,0,0,.5)]"
         style={{ left: pop.left, top: pop.top, width: POPOVER_WIDTH }}
       >
-        {spec.arrow === 'left' ? (
+        {side === 'left' && (
           <span
             className="absolute"
             style={{
@@ -260,7 +283,22 @@ export function Coachmark({
               borderRight: '8px solid var(--ink)',
             }}
           />
-        ) : (
+        )}
+        {side === 'right' && (
+          <span
+            className="absolute"
+            style={{
+              right: -8,
+              top: 24,
+              width: 0,
+              height: 0,
+              borderTop: '8px solid transparent',
+              borderBottom: '8px solid transparent',
+              borderLeft: '8px solid var(--ink)',
+            }}
+          />
+        )}
+        {side === 'up' && (
           <span
             className="absolute"
             style={{
