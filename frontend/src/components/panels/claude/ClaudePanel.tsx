@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { AIPanelProps } from '../ai/AbstractAIPanel';
 import { useClaudePanel } from '../../../hooks/useClaudePanel';
 import { useConfigStore } from '../../../stores/configStore';
@@ -15,6 +15,9 @@ import { UnifiedChatView } from '../../cyboflow/unified/UnifiedChatView';
 import { useUnifiedPanelMessages } from '../../cyboflow/unified/useUnifiedPanelMessages';
 import { SessionActionToast } from '../../cyboflow/SessionActionToast';
 import { usePendingSendStore } from '../../../stores/pendingSendStore';
+import { usePanelLiveEventsStore } from '../../../stores/panelLiveEventsStore';
+import { LiveTail } from '../../chat/LiveTail';
+import { reduceLiveTail } from '../../../utils/liveTailReducer';
 
 // Sessions whose open-time resume prompt the user explicitly declined ("Start
 // fresh") this app run. Module-level so the decision survives ClaudePanel
@@ -206,6 +209,22 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
     reconcilePending(panel.id, messages);
   }, [messages, panel.id, reconcilePending]);
 
+  // Progressive-render live tail (Option A — see render-map.md): quick panels
+  // have no cyboflowStore.streamEvents equivalent, so their `stream_event`/
+  // `result` envelopes are captured separately by panelLiveEventsStore (fed
+  // from useIPCEvents.ts's onSessionOutput). Skipped on the interactive
+  // substrate, whose live xterm owns the conversation surface and never
+  // renders ChatTranscript.
+  const panelLiveEvents = usePanelLiveEventsStore((s) => s.byPanel[panel.id]);
+  const liveTailState = useMemo(
+    () => (isInteractive ? { activeBlocks: [], isGenerating: false } : reduceLiveTail(panelLiveEvents ?? [])),
+    [isInteractive, panelLiveEvents],
+  );
+  const liveTail =
+    liveTailState.activeBlocks.length > 0 ? (
+      <LiveTail blocks={liveTailState.activeBlocks} agentName="Claude" />
+    ) : undefined;
+
   if (!activeSession || !paneSession) {
     return (
       <div className="flex-1 flex items-center justify-center text-text-secondary">
@@ -328,6 +347,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
         messages={messages}
         loadError={loadError}
         isWaitingForResponse={isWaitingForResponse}
+        liveTail={liveTail}
         folderLabel={folderLabel}
         folderTitle={worktreePath}
         branchName={branchName}

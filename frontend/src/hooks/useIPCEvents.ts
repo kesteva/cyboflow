@@ -2,9 +2,12 @@ import { useEffect, useRef } from 'react';
 import { useSessionStore } from '../stores/sessionStore';
 import { useErrorStore } from '../stores/errorStore';
 import { usePanelStore } from '../stores/panelStore';
+import { usePanelLiveEventsStore } from '../stores/panelLiveEventsStore';
 import { API } from '../utils/api';
 import type { Session, SessionOutput, GitStatus } from '../types/session';
 import type { ToolPanel } from '../../../shared/types/panels';
+import type { StreamEvent as LiveTailEnvelope } from '../utils/cyboflowApi';
+import type { StreamEvent as RawStreamEvent, ResultEvent as RawResultEvent } from '../../../shared/types/claudeStream';
 
 interface SessionEventData {
   sessionId: string;
@@ -35,7 +38,34 @@ function validateEventSession(eventData: ValidatedEventData, activeSessionId?: s
 }
 
 
-// Throttle utility function  
+/**
+ * Narrow a raw `session-output` JSON payload down to the two envelope kinds
+ * the LiveTail progressive-render buffer needs (`stream_event`, `result`) —
+ * see panelLiveEventsStore.ts. The wire shape here is the RAW SDK/CLI event
+ * (claudeCodeManager.ts forwards `data: event`, the pre-narrowed message —
+ * NOT the renderer's wrapped StreamEnvelope), so a `type: 'stream_event'` /
+ * `type: 'result'` payload is already shaped like the corresponding
+ * StreamEnvelopePayload arm's `payload` field. One audited cast at this
+ * boundary, mirroring the precedent documented on StreamEnvelope itself
+ * (shared/types/claudeStream.ts, runEventBridge.ts:237). Returns null for
+ * every other payload (stdout/stderr text, other json message types) —
+ * those are still handled entirely by the existing debounced-refetch path.
+ */
+function toLiveTailEnvelope(raw: unknown, timestamp: string): LiveTailEnvelope | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const obj = raw as Record<string, unknown>;
+  if (obj.type === 'stream_event' && typeof obj.event === 'object' && obj.event !== null) {
+    const envelope: LiveTailEnvelope = { type: 'stream_event', payload: obj as unknown as RawStreamEvent, timestamp };
+    return envelope;
+  }
+  if (obj.type === 'result') {
+    const envelope: LiveTailEnvelope = { type: 'result', payload: obj as unknown as RawResultEvent, timestamp };
+    return envelope;
+  }
+  return null;
+}
+
+// Throttle utility function
 function throttle<T extends (...args: never[]) => void>(
   func: T,
   delay: number
@@ -239,6 +269,22 @@ export function useIPCEvents() {
       }
 
       console.log(`[useIPCEvents] Received session output for ${output.sessionId}, type: ${output.type}`);
+
+      // Feed the LiveTail progressive-render buffer (panelLiveEventsStore) for
+      // quick-session panels — see toLiveTailEnvelope's doc comment. No-ops
+      // for non-panel output or any payload that isn't a stream_event/result.
+      if (output.panelId && output.type === 'json') {
+        // output.timestamp is declared `string` here, but the IPC bridge
+        // structured-clones the main process's `new Date()` verbatim — guard
+        // both shapes rather than trust the (pre-existing, out-of-scope) type.
+        const rawTimestamp: unknown = output.timestamp;
+        const timestamp =
+          rawTimestamp instanceof Date ? rawTimestamp.toISOString() : String(rawTimestamp);
+        const envelope = toLiveTailEnvelope(output.data, timestamp);
+        if (envelope !== null) {
+          usePanelLiveEventsStore.getState().appendEvent(output.panelId, envelope);
+        }
+      }
 
       // Just emit custom event to notify that new output is available
       // Include panelId (if present) so panel-based views can react precisely
