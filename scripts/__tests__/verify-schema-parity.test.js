@@ -7,11 +7,12 @@
  * Run: node scripts/__tests__/verify-schema-parity.test.js
  * Exit 0 on all pass, non-zero if any test fails.
  *
- * Four cases:
+ * Five cases:
  *   1. Happy path — real schema.sql + migrations, expect exit 0.
  *   2. Extra column in schema.sql only — drift detected, expect exit non-0 + stderr names column.
- *   3. Extra table only in a migration — drift detected, expect exit non-0.
+ *   3. Column missing from schema.sql but present in a migration — drift detected.
  *   4. Migration-008-style "no such column" error — tolerated, exit 0 (no real drift).
+ *   5. A sessions agent column present only in schema.sql — drift detected.
  */
 'use strict';
 
@@ -183,7 +184,7 @@ test('drift: schema.sql missing a column present in migration causes exit non-0'
 // Test 4: "no such column" in a migration is tolerated — exit 0 when no real
 // drift exists (mirrors migration-008's UPDATE sessions SET permission_mode).
 //
-// Fixture: schema.sql declares only sessions(id TEXT PRIMARY KEY).
+// Fixture: schema.sql declares the inherited sessions baseline.
 // A single migration 099_test_column_tolerance.sql runs:
 //   UPDATE sessions SET missing_col = 'x' WHERE missing_col IS NULL;
 // Both path-1 and path-2 get the same SqliteError (no such column: missing_col)
@@ -192,7 +193,22 @@ test('drift: schema.sql missing a column present in migration causes exit non-0'
 // ---------------------------------------------------------------------------
 test('tolerance: "no such column" in migration is tolerated, exit 0 when no real drift', () => {
   const { tmpDir, schemaPath, migrationsDir } = setupFixtureDirs({
-    schemaContent: 'CREATE TABLE sessions (id TEXT PRIMARY KEY);',
+    schemaContent: `
+      CREATE TABLE sessions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        initial_prompt TEXT NOT NULL,
+        worktree_name TEXT NOT NULL,
+        worktree_path TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        last_output TEXT,
+        exit_code INTEGER,
+        pid INTEGER,
+        claude_session_id TEXT
+      );
+    `,
     migrations: {
       '099_test_column_tolerance.sql':
         "UPDATE sessions SET missing_col = 'x' WHERE missing_col IS NULL;\n",
@@ -209,6 +225,38 @@ test('tolerance: "no such column" in migration is tolerated, exit 0 when no real
       result.status,
       0,
       `Expected exit 0 (no real drift despite "no such column" error) but got ${result.status}.\nstderr: ${result.stderr}\nstdout: ${result.stdout}`
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Test 5: sessions is no longer excluded as a legacy-only table. A stale agent
+// column added directly to schema.sql must differ from the independent inherited
+// sessions baseline used by the migrations path.
+// ---------------------------------------------------------------------------
+test('drift: sessions agent columns participate in parity', () => {
+  const realSchema = fs.readFileSync(REAL_SCHEMA, 'utf-8');
+  const driftedSchema = realSchema.replace(
+    '  claude_session_id TEXT\n);',
+    "  claude_session_id TEXT,\n  agent_runtime TEXT NOT NULL DEFAULT 'codex-pty'\n);"
+  );
+  assert.ok(driftedSchema.includes("agent_runtime TEXT NOT NULL DEFAULT 'codex-pty'"));
+
+  const { tmpDir, schemaPath, migrationsDir } = setupFixtureDirs({
+    schemaContent: driftedSchema,
+  });
+
+  try {
+    const result = runScript({
+      SCHEMA_PATH: schemaPath,
+      MIGRATIONS_DIR: migrationsDir,
+    });
+    assert.notStrictEqual(result.status, 0, `Expected sessions drift to fail.\nstdout: ${result.stdout}`);
+    assert.ok(
+      result.stderr.includes('sessions') && result.stderr.includes('agent_runtime'),
+      `Expected stderr to identify sessions.agent_runtime.\nstderr: ${result.stderr}`
     );
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
