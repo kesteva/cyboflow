@@ -77,7 +77,7 @@ describe('resolveRunFanOutInner', () => {
     db = makeDb();
   });
 
-  it("returns the FIRST fanOut-bearing step's inner chain, walking phases in order", () => {
+  it("returns a single fanOut-bearing step's inner chain, walking phases in order", () => {
     db.prepare("INSERT INTO workflows (id, name, spec_json) VALUES ('wf-1', 'custom-flow', ?)").run(FANOUT_SPEC);
     db.prepare("INSERT INTO workflow_runs (id, workflow_id) VALUES ('run-1', 'wf-1')").run();
 
@@ -86,6 +86,90 @@ describe('resolveRunFanOutInner', () => {
       { id: 'design', agent: 'design', name: 'Design' },
       { id: 'build', agent: 'build', name: 'Build', loopback: 'design' },
     ]);
+  });
+
+  it('unions the inner chains of ALL fanOut steps in walk order, deduped by id (first occurrence wins)', () => {
+    // buildFanOutAppend emits one prompt section per fanOut step, so the lane
+    // vocabulary must accept the SECOND chain's ids too — a first-chain-only
+    // resolution rejected them as out-of-vocabulary (Codex adversarial review).
+    const twoFanOuts = JSON.stringify({
+      id: 'wf-two-fanouts',
+      phases: [
+        {
+          id: 'execute',
+          label: 'Execute',
+          color: '#3b6dd6',
+          steps: [
+            {
+              id: 'execute-tasks',
+              name: 'Execute tasks',
+              agent: 'implement',
+              mcps: [],
+              retries: 0,
+              fanOut: {
+                over: 'tasks',
+                inner: [
+                  { id: 'build', agent: 'build', name: 'Build' },
+                  { id: 'task-verify', agent: 'task-verify', name: 'Verify', loopback: 'build' },
+                ],
+              },
+            },
+            {
+              id: 'polish-tasks',
+              name: 'Polish tasks',
+              agent: 'implement',
+              mcps: [],
+              retries: 0,
+              fanOut: {
+                over: 'tasks',
+                inner: [
+                  // 'task-verify' repeats across chains (different loopback) — the
+                  // FIRST occurrence's step object must win the dedupe.
+                  { id: 'polish', agent: 'polish', name: 'Polish' },
+                  { id: 'task-verify', agent: 'task-verify', name: 'Verify', loopback: 'polish' },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    db.prepare("INSERT INTO workflows (id, name, spec_json) VALUES ('wf-1', 'custom-flow', ?)").run(twoFanOuts);
+    db.prepare("INSERT INTO workflow_runs (id, workflow_id) VALUES ('run-1', 'wf-1')").run();
+
+    const inner = resolveRunFanOutInner(dbAdapter(db), 'run-1');
+    expect(inner?.map((s) => s.id)).toEqual(['build', 'task-verify', 'polish']);
+    expect(inner?.find((s) => s.id === 'task-verify')?.loopback).toBe('build');
+  });
+
+  it('returns null (canonical fallback) when the only fanOut step has an empty inner chain', () => {
+    // An empty chain used to surface as an empty-but-truthy array, narrowing the
+    // MCP seam's allowedStepIds to just the park step; null lets every consumer
+    // fall back to the canonical vocabulary instead.
+    const emptyInner = JSON.stringify({
+      id: 'wf-empty-inner',
+      phases: [
+        {
+          id: 'execute',
+          label: 'Execute',
+          color: '#3b6dd6',
+          steps: [
+            {
+              id: 'execute-tasks',
+              name: 'Execute tasks',
+              agent: 'implement',
+              mcps: [],
+              retries: 0,
+              fanOut: { over: 'tasks', inner: [] },
+            },
+          ],
+        },
+      ],
+    });
+    db.prepare("INSERT INTO workflows (id, name, spec_json) VALUES ('wf-1', 'custom-flow', ?)").run(emptyInner);
+    db.prepare("INSERT INTO workflow_runs (id, workflow_id) VALUES ('run-1', 'wf-1')").run();
+
+    expect(resolveRunFanOutInner(dbAdapter(db), 'run-1')).toBeNull();
   });
 
   it('returns null when the resolved definition has no fanOut step', () => {
