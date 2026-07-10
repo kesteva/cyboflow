@@ -30,6 +30,8 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mutex as globalMutex, type Mutex } from '../../utils/mutex';
+import { emitSeamError } from '../telemetrySink';
+import { classifyErrorPattern } from '../programmatic/systemicError';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type {
   CaptureContext,
@@ -1932,6 +1934,18 @@ export class VerificationScheduler {
         attemptedStatus: status,
       });
       return;
+    }
+    // Report a verification that ended in a FAILURE-ish terminal state (failed /
+    // timed out / skipped-because-unable) — a passed / low_confidence verdict is
+    // not an error. Only after the guarded write won (changes === 1) so a
+    // cancel-race never double-reports. errorClass buckets the cause.
+    if (status === 'failed' || status === 'timeout' || status === 'skipped') {
+      emitSeamError('verify-request-failed', new Error((extra.error ?? status).slice(0, 500)), {
+        requestStatus: status,
+        verifyType: row.verify_type,
+        ...(extra.backend ? { backend: extra.backend } : {}),
+        errorClass: classifyErrorPattern(extra.error),
+      });
     }
     await this.deliver(row, status, verdict, fileNames, input);
   }

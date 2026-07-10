@@ -29,6 +29,8 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { LoggerLike } from '../types';
 import { resolveClaudeExecutablePath } from '../../services/panels/claude/claudeExecutablePath';
+import { emitSeamError } from '../telemetrySink';
+import { classifyErrorPattern } from './systemicError';
 
 /**
  * Default deadline for a single monitor query (triage OR answer). A hung claude
@@ -170,6 +172,12 @@ export function makeSdkStructuredQuery(
           ? err.message
           : String(err);
       logger?.warn('[monitorQuery] structured query failed', { error: message });
+      emitSeamError('monitor-query-failed', new Error(message), {
+        substrate: 'sdk',
+        queryKind: 'triage',
+        timedOut: String(didTimeOut()),
+        errorClass: classifyErrorPattern(message),
+      });
       throw new Error(message);
     } finally {
       cleanup();
@@ -225,6 +233,12 @@ export function makeSdkTextQuery(
           ? err.message
           : String(err);
       logger?.warn('[monitorQuery] text query failed', { error: message });
+      emitSeamError('monitor-query-failed', new Error(message), {
+        substrate: 'sdk',
+        queryKind: 'answer',
+        timedOut: String(didTimeOut()),
+        errorClass: classifyErrorPattern(message),
+      });
       // Graceful degradation: if the monitor produced a partial answer before the
       // error (a turn-cap hit mid-investigation, a timeout after it spoke), surface
       // THAT rather than throwing → the user sees a useful (if incomplete) reply

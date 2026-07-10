@@ -52,6 +52,7 @@ import {
   buildAskUserQuestionRecoveryGate,
 } from './reviewItemListing';
 import { emitReviewItemChangedById } from './reviewItemRouter';
+import { emitSeamError } from './telemetrySink';
 import { runStatusEvents } from './trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
 import { TaskChangeRouter } from './taskChangeRouter';
@@ -348,11 +349,17 @@ export class QuestionRouter extends EventEmitter {
     // Review-item ids that actually transitioned pending→resolved during the
     // self-heal (in-memory folds + orphan sweep), for the post-commit emits.
     let resolvedSupersededReviewItemIds: string[] = [];
+    // True when the self-heal branch fired — a prior gate was wedged at
+    // awaiting_input (the recurring 600s PreToolUse hook-timeout). Reported to
+    // Sentry post-commit (the orphan-sweep case leaves supersededEntries empty,
+    // so this dedicated flag is the reliable signal).
+    let gateSelfHealed = false;
 
     await this.getQuestionQueue(runId).add(async () => {
       // Reset per-attempt (the closure captures the outer refs).
       supersededEntries = [];
       resolvedSupersededReviewItemIds = [];
+      gateSelfHealed = false;
 
       // Atomic: UPDATE workflow_runs + INSERT questions in one transaction. On a
       // running→awaiting_input guard miss the transaction either throws (the run
@@ -375,6 +382,7 @@ export class QuestionRouter extends EventEmitter {
           if (status !== 'awaiting_input') {
             throw new RunNotRunningError(runId);
           }
+          gateSelfHealed = true;
 
           // SELF-HEAL: supersede every prior gate for this run, then open the new
           // one below. Collect the in-memory entries first (deletion + promise
@@ -450,6 +458,18 @@ export class QuestionRouter extends EventEmitter {
       // Execute the transaction — throws RunNotRunningError on a non-healable
       // guard miss (the run moved on).
       (txn as () => void)();
+
+      // Report the self-heal to Sentry — this path only runs when a prior gate was
+      // found wedged at awaiting_input, the signature of the recurring 600s
+      // PreToolUse hook-timeout that leaves a run silently stuck. Post-commit +
+      // fire-and-forget (emitSeamError never throws).
+      if (gateSelfHealed) {
+        emitSeamError(
+          'gate-hook-timeout',
+          new Error('AskUserQuestion gate self-heal: a prior gate was wedged at awaiting_input (likely a 600s PreToolUse hook timeout)'),
+          { gateKind: 'question', errorClass: 'gate-hook-timeout' },
+        );
+      }
 
       // Post-commit: settle the superseded gates FIRST (resolve their awaiting
       // callers with a synthetic empty answer, never the old socketReply — mirror

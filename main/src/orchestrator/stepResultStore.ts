@@ -9,6 +9,8 @@
  * main/src/services/*. Uses the narrow DatabaseLike injected at construction.
  */
 import type { DatabaseLike } from './types';
+import { emitSeamError } from './telemetrySink';
+import { classifyErrorPattern } from './programmatic/systemicError';
 
 /** A persisted per-step result row. */
 export interface StepResultRow {
@@ -34,6 +36,30 @@ export interface StepResultRecord {
 
 /** Outcomes that count as "this step does not need to re-run on resume". */
 const COMPLETED_OUTCOMES = new Set<StepResultRow['outcome']>(['done', 'skipped']);
+
+/**
+ * Report a step that settled with a problem to Sentry — the "a workflow step
+ * was skipped / unable due to an issue" surface. Reports a hard `failed` step
+ * always, and a `skipped` step ONLY when it carries an error (an optional step
+ * that exhausted its retries — a plain skip of a not-needed step has no error and
+ * is not reported). Intentional `canceled` (user cancel) and human `rejected`
+ * outcomes are never reported. The step id + error ride in the (bounded,
+ * scrub-redacted) message; tags stay low-cardinality. No-op until the seam sink
+ * is registered at boot.
+ */
+function reportStepIssue(r: StepResultRecord): void {
+  const isFailure = r.outcome === 'failed';
+  const isSkippedWithError = r.outcome === 'skipped' && !!r.error;
+  if (!isFailure && !isSkippedWithError) return;
+  emitSeamError(
+    'programmatic-step-failed',
+    new Error(`programmatic step '${r.stepId}' ${r.outcome}: ${(r.error ?? '').slice(0, 500)}`),
+    {
+      stepOutcome: r.outcome,
+      errorClass: classifyErrorPattern(r.error ?? undefined),
+    },
+  );
+}
 
 function hasStepResultsTable(db: DatabaseLike): boolean {
   const row = db
@@ -75,6 +101,7 @@ export class StepResultStore {
          VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
       )
       .run(r.runId, r.stepId, r.phaseId ?? null, r.outcome, r.attempts, r.summary ?? null, r.error ?? null);
+    reportStepIssue(r);
   }
 
   /** All persisted results for a run, in stable step order. */

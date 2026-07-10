@@ -1,9 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { StepResultStore } from '../stepResultStore';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
+import { setSeamErrorSink } from '../telemetrySink';
 
 function buildDb(withTable = true): Database.Database {
   const db = new Database(':memory:');
@@ -57,5 +58,47 @@ describe('StepResultStore', () => {
     expect(() => store.record({ runId: 'r', stepId: 'a', outcome: 'done', attempts: 1 })).not.toThrow();
     expect(store.listForRun('r')).toEqual([]);
     expect(store.completedStepIds('r')).toEqual([]);
+  });
+});
+
+describe('StepResultStore seam-error telemetry (seam G)', () => {
+  afterEach(() => setSeamErrorSink(undefined as never));
+
+  function withSink(): Array<{ seam: string; tags?: Record<string, string> }> {
+    const calls: Array<{ seam: string; tags?: Record<string, string> }> = [];
+    setSeamErrorSink((seam, _error, tags) => calls.push({ seam, tags }));
+    return calls;
+  }
+
+  it('reports a failed step with stepOutcome + classified errorClass', () => {
+    const calls = withSink();
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    store.record({ runId: 'r', stepId: 'implement', outcome: 'failed', attempts: 3, error: 'API Error: 429 Too Many Requests' });
+
+    const reports = calls.filter((c) => c.seam === 'programmatic-step-failed');
+    expect(reports).toHaveLength(1);
+    expect(reports[0].tags).toEqual({ stepOutcome: 'failed', errorClass: 'http-429' });
+  });
+
+  it('reports a skipped step ONLY when it carries an error', () => {
+    const calls = withSink();
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    // Optional step that exhausted retries → skipped WITH error → reported.
+    store.record({ runId: 'r', stepId: 'ui-prototype', outcome: 'skipped', attempts: 2, error: 'Stream closed' });
+    // Plain skip of a not-needed step (no error) → NOT reported.
+    store.record({ runId: 'r', stepId: 'architecture', outcome: 'skipped', attempts: 0 });
+
+    const reports = calls.filter((c) => c.seam === 'programmatic-step-failed');
+    expect(reports).toHaveLength(1);
+    expect(reports[0].tags).toMatchObject({ stepOutcome: 'skipped', errorClass: 'stream-closed' });
+  });
+
+  it('does NOT report done or canceled (intentional) outcomes', () => {
+    const calls = withSink();
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    store.record({ runId: 'r', stepId: 'a', outcome: 'done', attempts: 1 });
+    store.record({ runId: 'r', stepId: 'b', outcome: 'canceled', attempts: 1, error: 'user canceled' });
+
+    expect(calls.filter((c) => c.seam === 'programmatic-step-failed')).toHaveLength(0);
   });
 });
