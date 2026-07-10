@@ -422,3 +422,74 @@ describe('SprintSwimlaneCanvas — generalized fanOut lane strip', () => {
     ).toBe('pending');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Worker cap denominator — derived from the active fanOut step's
+// effectiveMaxConcurrency (Phase E: editor UI + swimlane cap display).
+// ---------------------------------------------------------------------------
+
+describe('SprintSwimlaneCanvas — worker cap denominator', () => {
+  it('falls back to SPRINT_BATCH_CAP when the active fanOut step declares no maxConcurrency', async () => {
+    // PHASE_STATE's execute-tasks step carries no fanOut at all.
+    await renderCanvas();
+
+    expect(screen.getByTestId('swimlane-summary')).toHaveTextContent('workers 2/5');
+  });
+
+  it("uses the active fanOut step's explicit maxConcurrency as the denominator", async () => {
+    const cappedPhaseState: UseWorkflowPhaseStateResult = {
+      definition: {
+        id: 'custom-fan',
+        phases: [
+          {
+            id: 'plan',
+            label: 'Plan',
+            color: '#3b6dd6',
+            steps: [{ id: 'scope', name: 'Scope', agent: 'planner', mcps: [], retries: 0 }],
+          },
+          {
+            id: 'execute',
+            label: 'Execute',
+            color: '#c96442',
+            steps: [
+              {
+                id: 'fan-step',
+                name: 'Fan step',
+                agent: 'executor',
+                mcps: [],
+                retries: 0,
+                fanOut: {
+                  over: 'tasks',
+                  maxConcurrency: 3,
+                  inner: [{ id: 'build', agent: 'builder', name: 'Build' }],
+                },
+              },
+            ],
+          },
+          {
+            id: 'verify',
+            label: 'Verify',
+            color: '#2d8a5b',
+            steps: [{ id: 'final-review', name: 'Final review', agent: 'reviewer', mcps: [], retries: 0 }],
+          },
+        ],
+      },
+      currentStepId: 'fan-step',
+      stepStates: [],
+      isLoading: false,
+      error: null,
+    };
+
+    const customLanes: SprintLaneRow[] = [
+      { ...baseLane, taskId: 'tc1', status: 'running', currentStepId: 'build', ref: 'TASK-C1', title: 'Custom 1', attempts: 0, blockedByRefs: [] },
+      { ...baseLane, taskId: 'tc2', status: 'running', currentStepId: 'build', ref: 'TASK-C2', title: 'Custom 2', attempts: 0, blockedByRefs: [] },
+    ];
+    lanesQuerySpy.mockResolvedValue(customLanes);
+
+    render(<SprintSwimlaneCanvas runId="run-3" phaseState={cappedPhaseState} sprintStatus="running" />);
+    await screen.findByTestId('swimlane-lane-tc1');
+
+    // Denominator is the step's own cap (3), not the global SPRINT_BATCH_CAP (5).
+    expect(screen.getByTestId('swimlane-summary')).toHaveTextContent('workers 2/3');
+  });
+});

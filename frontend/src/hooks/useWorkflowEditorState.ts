@@ -81,8 +81,12 @@ export type WorkflowEditorAction =
   | { type: 'TOGGLE_HUMAN'; phaseId: string; stepId: string }
   | { type: 'TOGGLE_MCP'; phaseId: string; stepId: string; mcp: string }
   | { type: 'SET_LOOPBACK'; phaseId: string; stepId: string; loopback: string | null }
-  // Fan-out (parallel per-item) editing.
+  // Fan-out (parallel per-item) editing. SET_STEP_FANOUT toggles the fan-out
+  // template between parallel (enabled:true) and serial (enabled:false) —
+  // REMOVE_STEP_FANOUT is the only action that deletes the template.
   | { type: 'SET_STEP_FANOUT'; phaseId: string; stepId: string; enabled: boolean }
+  | { type: 'SET_FANOUT_MAX_CONCURRENCY'; phaseId: string; stepId: string; value: number }
+  | { type: 'REMOVE_STEP_FANOUT'; phaseId: string; stepId: string }
   | { type: 'SET_FANOUT_OVER'; phaseId: string; stepId: string }
   | { type: 'ADD_FANOUT_INNER'; phaseId: string; stepId: string }
   | { type: 'REMOVE_FANOUT_INNER'; phaseId: string; stepId: string; innerIndex: number }
@@ -339,22 +343,58 @@ export function workflowEditorReducer(
       const definition = mapPhase(state.definition, action.phaseId, (phase) =>
         mapStep(phase, action.stepId, (step) => {
           if (action.enabled) {
-            if (step.fanOut !== undefined) return step;
-            // Seed a minimal one-inner-step chain over 'tasks' using the step's
-            // own agent. Server zod (fanOutSchema) is authoritative on save.
-            const fanOut: NonNullable<WorkflowStep['fanOut']> = {
-              over: FANOUT_OVER_TASKS,
-              inner: [{ id: 'item', agent: step.agent, name: 'Item' }],
-            };
+            if (step.fanOut === undefined) {
+              // No template yet — seed a minimal one-inner-step chain over
+              // 'tasks' using the step's own agent, with no explicit
+              // maxConcurrency (absent = the SPRINT_BATCH_CAP default). Server
+              // zod (fanOutSchema) is authoritative on save.
+              const fanOut: NonNullable<WorkflowStep['fanOut']> = {
+                over: FANOUT_OVER_TASKS,
+                inner: [{ id: 'item', agent: step.agent, name: 'Item' }],
+              };
+              return { ...step, fanOut };
+            }
+            // Already a template (currently serial) — go back to the default
+            // cap. Never touches `inner`.
+            if (step.fanOut.maxConcurrency === undefined) return step;
+            const fanOut = { ...step.fanOut };
+            delete fanOut.maxConcurrency;
             return { ...step, fanOut };
           }
-          // Disable — drop the key entirely.
+          // Disable — go serial (maxConcurrency: 1). The template (and its
+          // inner chain) is NEVER deleted here; REMOVE_STEP_FANOUT is the only
+          // action that removes it.
+          if (step.fanOut === undefined) return step;
+          return { ...step, fanOut: { ...step.fanOut, maxConcurrency: 1 } };
+        }),
+      );
+      return { ...state, definition, selectedStepId: action.stepId, selectedFanOutInner: null };
+    }
+
+    case 'SET_FANOUT_MAX_CONCURRENCY': {
+      const definition = mapPhase(state.definition, action.phaseId, (phase) =>
+        mapStep(phase, action.stepId, (step) => {
+          if (step.fanOut === undefined) return step;
+          // Clamp to a positive integer (write-path schema requires int >= 1).
+          const v = Number.isFinite(action.value) ? Math.max(1, Math.floor(action.value)) : 1;
+          return { ...step, fanOut: { ...step.fanOut, maxConcurrency: v } };
+        }),
+      );
+      return { ...state, definition };
+    }
+
+    case 'REMOVE_STEP_FANOUT': {
+      const definition = mapPhase(state.definition, action.phaseId, (phase) =>
+        mapStep(phase, action.stepId, (step) => {
+          if (step.fanOut === undefined) return step;
           const rest = { ...step };
           delete rest.fanOut;
           return rest;
         }),
       );
-      return { ...state, definition, selectedStepId: action.stepId, selectedFanOutInner: null };
+      const selectedFanOutInner =
+        state.selectedFanOutInner?.stepId === action.stepId ? null : state.selectedFanOutInner;
+      return { ...state, definition, selectedFanOutInner };
     }
 
     case 'SET_FANOUT_OVER': {

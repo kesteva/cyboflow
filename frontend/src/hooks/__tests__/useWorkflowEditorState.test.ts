@@ -287,7 +287,7 @@ describe('workflowEditorReducer — SET_LOOPBACK', () => {
 // ---------------------------------------------------------------------------
 
 describe('workflowEditorReducer — fan-out editing', () => {
-  it('SET_STEP_FANOUT seeds tasks plus one inner row and disabling deletes fanOut', () => {
+  it('SET_STEP_FANOUT seeds tasks plus one inner row (no explicit maxConcurrency = default cap)', () => {
     const enabled = workflowEditorReducer(makeState(), {
       type: 'SET_STEP_FANOUT',
       phaseId: 'execute',
@@ -298,14 +298,53 @@ describe('workflowEditorReducer — fan-out editing', () => {
       over: 'tasks',
       inner: [{ id: 'item', agent: 'executor', name: 'Item' }],
     });
+  });
 
+  it('disabling sets maxConcurrency to 1 (serial) and NEVER deletes fanOut or touches inner', () => {
+    const enabled = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
     const disabled = workflowEditorReducer(enabled, {
       type: 'SET_STEP_FANOUT',
       phaseId: 'execute',
       stepId: 'implement',
       enabled: false,
     });
-    expect(findStep(disabled.definition, 'implement')?.fanOut).toBeUndefined();
+    expect(findStep(disabled.definition, 'implement')?.fanOut).toEqual({
+      over: 'tasks',
+      inner: [{ id: 'item', agent: 'executor', name: 'Item' }],
+      maxConcurrency: 1,
+    });
+  });
+
+  it('re-enabling a serial fan-out clears maxConcurrency back to the default cap without touching inner', () => {
+    let state = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+    state = workflowEditorReducer(state, {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: false,
+    });
+    expect(findStep(state.definition, 'implement')?.fanOut?.maxConcurrency).toBe(1);
+
+    const reEnabled = workflowEditorReducer(state, {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+    expect(findStep(reEnabled.definition, 'implement')?.fanOut).toEqual({
+      over: 'tasks',
+      inner: [{ id: 'item', agent: 'executor', name: 'Item' }],
+    });
   });
 
   it('SET_STEP_FANOUT selects the target outer step so canvas chips and inspector stay in sync', () => {
@@ -553,6 +592,135 @@ describe('workflowEditorReducer — fan-out editing', () => {
     });
     expect(disabled.selectedStepId).toBe('implement');
     expect(disabled.selectedFanOutInner).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// SET_FANOUT_MAX_CONCURRENCY
+// ---------------------------------------------------------------------------
+
+describe('workflowEditorReducer — SET_FANOUT_MAX_CONCURRENCY', () => {
+  it('clamps to a positive integer (>= 1)', () => {
+    const state = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+
+    const zero = workflowEditorReducer(state, {
+      type: 'SET_FANOUT_MAX_CONCURRENCY',
+      phaseId: 'execute',
+      stepId: 'implement',
+      value: 0,
+    });
+    expect(findStep(zero.definition, 'implement')?.fanOut?.maxConcurrency).toBe(1);
+
+    const negative = workflowEditorReducer(state, {
+      type: 'SET_FANOUT_MAX_CONCURRENCY',
+      phaseId: 'execute',
+      stepId: 'implement',
+      value: -5,
+    });
+    expect(findStep(negative.definition, 'implement')?.fanOut?.maxConcurrency).toBe(1);
+
+    const fractional = workflowEditorReducer(state, {
+      type: 'SET_FANOUT_MAX_CONCURRENCY',
+      phaseId: 'execute',
+      stepId: 'implement',
+      value: 2.9,
+    });
+    expect(findStep(fractional.definition, 'implement')?.fanOut?.maxConcurrency).toBe(2);
+  });
+
+  it('value 1 is legal and renders as the serial (toggle-off) state', () => {
+    const state = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+    const next = workflowEditorReducer(state, {
+      type: 'SET_FANOUT_MAX_CONCURRENCY',
+      phaseId: 'execute',
+      stepId: 'implement',
+      value: 1,
+    });
+    expect(findStep(next.definition, 'implement')?.fanOut?.maxConcurrency).toBe(1);
+  });
+
+  it('is a no-op on a step without a fanOut template', () => {
+    const next = workflowEditorReducer(makeState(), {
+      type: 'SET_FANOUT_MAX_CONCURRENCY',
+      phaseId: 'execute',
+      stepId: 'implement',
+      value: 3,
+    });
+    expect(findStep(next.definition, 'implement')?.fanOut).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// REMOVE_STEP_FANOUT
+// ---------------------------------------------------------------------------
+
+describe('workflowEditorReducer — REMOVE_STEP_FANOUT', () => {
+  it('deletes the fanOut structure entirely — the only action that does', () => {
+    const enabled = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+    const removed = workflowEditorReducer(enabled, {
+      type: 'REMOVE_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+    });
+    expect(findStep(removed.definition, 'implement')?.fanOut).toBeUndefined();
+  });
+
+  it('clears selectedFanOutInner when it pointed at the removed step', () => {
+    let state = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+    state = workflowEditorReducer(state, {
+      type: 'SELECT_FANOUT_INNER',
+      stepId: 'implement',
+      innerIndex: 0,
+    });
+    const removed = workflowEditorReducer(state, {
+      type: 'REMOVE_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+    });
+    expect(removed.selectedFanOutInner).toBeNull();
+  });
+
+  it('leaves selectedFanOutInner untouched when it points at a different step', () => {
+    let state = workflowEditorReducer(makeState(), { type: 'ADD_STEP', phaseId: 'execute' });
+    const otherStepId = state.selectedStepId as string;
+    state = workflowEditorReducer(state, {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: otherStepId,
+      enabled: true,
+    });
+    state = workflowEditorReducer(state, {
+      type: 'SELECT_FANOUT_INNER',
+      stepId: otherStepId,
+      innerIndex: 0,
+    });
+
+    const removed = workflowEditorReducer(state, {
+      type: 'REMOVE_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+    });
+    expect(removed.selectedFanOutInner).toEqual({ stepId: otherStepId, innerIndex: 0 });
   });
 });
 

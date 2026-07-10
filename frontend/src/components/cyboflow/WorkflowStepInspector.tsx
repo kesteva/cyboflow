@@ -14,6 +14,7 @@
  */
 import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
+import { effectiveMaxConcurrency } from '../../../../shared/types/workflows';
 import type {
   FanOutInnerStep,
   WorkflowAgentConfig,
@@ -200,7 +201,7 @@ export function WorkflowStepInspector({
         {found === null ? (
           <p style={{ color: 'var(--color-text-secondary)' }}>Select a step to edit it.</p>
         ) : tab === 'step' ? (
-          <StepTab phase={found.phase} step={found.step} dispatch={dispatch} />
+          <StepTab phase={found.phase} step={found.step} dispatch={dispatch} customAgentKeys={customAgentKeys} />
         ) : tab === 'agent' ? (
           <AgentTab
             phase={found.phase}
@@ -430,7 +431,7 @@ function InnerFanOutInspector({
   );
 }
 
-function StepTab({ phase, step, dispatch }: TabProps) {
+function StepTab({ phase, step, dispatch, customAgentKeys }: TabProps & { customAgentKeys: readonly string[] }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <div style={{ fontSize: 10, color: 'var(--color-text-secondary)' }}>
@@ -502,7 +503,7 @@ function StepTab({ phase, step, dispatch }: TabProps) {
         />
       </div>
 
-      <FanOutSection phase={phase} step={step} dispatch={dispatch} />
+      <FanOutSection phase={phase} step={step} dispatch={dispatch} customAgentKeys={customAgentKeys} />
     </div>
   );
 }
@@ -512,16 +513,27 @@ function StepTab({ phase, step, dispatch }: TabProps) {
 // ---------------------------------------------------------------------------
 
 /**
- * Toggle + editor for `step.fanOut`. Enabling seeds a minimal one-inner-step
- * chain over 'tasks'; disabling clears the key. When enabled, exposes the `over`
- * key and an add/remove inner-chain list (id + agent + optional per row). The
- * server zod schema (fanOutSchema) is authoritative on save — this stays plain
- * TS and never validates.
+ * Toggle + editor for `step.fanOut`. The master toggle flips the template
+ * between parallel (default cap, maxConcurrency absent) and serial
+ * (maxConcurrency: 1) — it never deletes `fanOut`; a fresh template is only
+ * seeded the first time a step with no `fanOut` is toggled on. The "remove
+ * fan-out" affordance (REMOVE_STEP_FANOUT) is the only way to drop the
+ * template entirely. Whenever a template is present (serial or parallel) the
+ * editor stays open — items still walk the inner chain one at a time when
+ * serial. The server zod schema (fanOutSchema) is authoritative on save —
+ * this stays plain TS and never validates.
  */
-function FanOutSection({ phase, step, dispatch }: TabProps): ReactElement {
+function FanOutSection({
+  phase,
+  step,
+  dispatch,
+  customAgentKeys,
+}: TabProps & { customAgentKeys: readonly string[] }): ReactElement {
   const fanOut = step.fanOut;
-  const enabled = fanOut !== undefined;
-  const unsupportedOver = enabled && fanOut !== undefined && fanOut.over !== 'tasks';
+  const hasFanOut = fanOut !== undefined;
+  const maxConcurrency = fanOut !== undefined ? effectiveMaxConcurrency(fanOut) : null;
+  const isParallel = maxConcurrency !== null && maxConcurrency > 1;
+  const unsupportedOver = fanOut !== undefined && fanOut.over !== 'tasks';
 
   return (
     <div
@@ -536,23 +548,32 @@ function FanOutSection({ phase, step, dispatch }: TabProps): ReactElement {
     >
       <ToggleRow
         label="fan-out (parallel per-item)"
-        checked={enabled}
+        checked={isParallel}
         onToggle={() =>
-          dispatch({ type: 'SET_STEP_FANOUT', phaseId: phase.id, stepId: step.id, enabled: !enabled })
+          dispatch({ type: 'SET_STEP_FANOUT', phaseId: phase.id, stepId: step.id, enabled: !isParallel })
         }
         testId="inspector-toggle-fanout"
       />
 
-      {!enabled && (
+      {!hasFanOut && (
         <p
           style={{ margin: 0, fontSize: 9.5, color: 'var(--color-text-tertiary)', lineHeight: 1.45 }}
           data-testid="inspector-fanout-off-note"
         >
-          This step runs once unless fan-out is enabled.
+          This step runs once until a fan-out template is added.
         </p>
       )}
 
-      {enabled && fanOut !== undefined && (
+      {hasFanOut && !isParallel && (
+        <p
+          style={{ margin: 0, fontSize: 9.5, color: 'var(--color-text-tertiary)', lineHeight: 1.45 }}
+          data-testid="inspector-fanout-serial-note"
+        >
+          Serial: items run one at a time through the chain. Enable to run up to the concurrency cap in parallel.
+        </p>
+      )}
+
+      {hasFanOut && fanOut !== undefined && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }} data-testid="inspector-fanout-editor">
           <div>
             <label style={labelStyle} htmlFor="insp-fanout-over">over (item source)</label>
@@ -572,30 +593,41 @@ function FanOutSection({ phase, step, dispatch }: TabProps): ReactElement {
             </select>
             <p style={{ marginTop: 6, fontSize: 9.5, color: 'var(--color-text-tertiary)' }}>
               {unsupportedOver
-                ? 'Unsupported item sources run once until changed to tasks.'
-                : 'Programmatic batch runs only — orchestrated runs execute this step once.'}
+                ? 'Unsupported item source — switch to tasks to run fan-out.'
+                : 'Drives both execution planes — orchestrated runs receive these instructions in their prompt; programmatic runs are host-driven.'}
             </p>
           </div>
 
-          <div
-            style={{
-              border: '1px solid var(--color-border-primary)',
-              background: 'var(--color-bg-primary)',
-              padding: '7px 8px',
-              fontSize: 10,
-              color: 'var(--color-text-secondary)',
-            }}
-            data-testid="inspector-fanout-system-cap"
-          >
-            <span style={{ color: 'var(--color-text-tertiary)' }}>system cap </span>
-            <b style={{ color: 'var(--color-text-primary)' }}>{SPRINT_BATCH_CAP}</b>
-            <span style={{ color: 'var(--color-text-tertiary)' }}> · no per-step concurrency yet</span>
+          <div>
+            <label style={labelStyle} htmlFor="insp-fanout-max-concurrency">max concurrency</label>
+            <input
+              id="insp-fanout-max-concurrency"
+              type="number"
+              min={1}
+              step={1}
+              value={effectiveMaxConcurrency(fanOut)}
+              onChange={(e) =>
+                dispatch({
+                  type: 'SET_FANOUT_MAX_CONCURRENCY',
+                  phaseId: phase.id,
+                  stepId: step.id,
+                  value: Number.parseInt(e.target.value, 10) || 1,
+                })
+              }
+              style={inputStyle}
+              data-testid="inspector-fanout-max-concurrency"
+            />
+            <p style={{ marginTop: 6, fontSize: 9.5, color: 'var(--color-text-tertiary)' }}>
+              Items dispatched at once. Default when unset: {SPRINT_BATCH_CAP}. 1 = serial.
+            </p>
           </div>
 
           <div>
             <label style={labelStyle}>inner chain (per item)</label>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {fanOut.inner.map((inner, idx) => (
+              {fanOut.inner.map((inner, idx) => {
+                const { agentOptions, customKeySet, agentInList } = agentOptionsFor(inner.agent, customAgentKeys);
+                return (
                 <div
                   key={idx}
                   style={{
@@ -641,8 +673,7 @@ function FanOutSection({ phase, step, dispatch }: TabProps): ReactElement {
                     style={inputStyle}
                     testId={`inspector-fanout-inner-id-${idx}`}
                   />
-                  <input
-                    type="text"
+                  <select
                     value={inner.agent}
                     onChange={(e) =>
                       dispatch({
@@ -654,10 +685,18 @@ function FanOutSection({ phase, step, dispatch }: TabProps): ReactElement {
                         value: e.target.value,
                       })
                     }
-                    placeholder="agent"
                     style={inputStyle}
                     data-testid={`inspector-fanout-inner-agent-${idx}`}
-                  />
+                  >
+                    {!agentInList && inner.agent.length > 0 && (
+                      <option value={inner.agent}>{inner.agent} (custom)</option>
+                    )}
+                    {agentOptions.map((a) => (
+                      <option key={a} value={a}>
+                        {customKeySet.has(a) ? `${a} (custom)` : a}
+                      </option>
+                    ))}
+                  </select>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8 }}>
                     <ToggleRow
                       label="optional"
@@ -702,7 +741,8 @@ function FanOutSection({ phase, step, dispatch }: TabProps): ReactElement {
                     </button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
             <button
               type="button"
@@ -725,6 +765,28 @@ function FanOutSection({ phase, step, dispatch }: TabProps): ReactElement {
               + add inner step
             </button>
           </div>
+
+          <button
+            type="button"
+            onClick={() => dispatch({ type: 'REMOVE_STEP_FANOUT', phaseId: phase.id, stepId: step.id })}
+            style={{
+              alignSelf: 'flex-start',
+              marginTop: 2,
+              fontFamily: 'inherit',
+              fontSize: 9,
+              letterSpacing: '0.12em',
+              textTransform: 'uppercase',
+              background: 'transparent',
+              border: 0,
+              color: 'var(--color-text-tertiary)',
+              padding: 0,
+              cursor: 'pointer',
+              textDecoration: 'underline',
+            }}
+            data-testid="inspector-fanout-remove"
+          >
+            remove fan-out
+          </button>
         </div>
       )}
     </div>

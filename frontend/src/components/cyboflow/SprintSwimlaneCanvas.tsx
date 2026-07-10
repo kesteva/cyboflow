@@ -27,6 +27,7 @@
 import { useSprintLanes } from '../../hooks/useSprintLanes';
 import type { SprintLane } from '../../hooks/useSprintLanes';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
+import { effectiveMaxConcurrency } from '../../../../shared/types/workflows';
 import type { WorkflowDefinition } from '../../../../shared/types/workflows';
 import { WorkflowStepCard } from './WorkflowStepCard';
 import type { StepStatus } from './WorkflowStepCard';
@@ -105,6 +106,21 @@ function laneStepIdsFor(definition: WorkflowDefinition | null): LaneStepColumn[]
     label: LANE_STEP_SHORT_LABEL[id],
     optional: id === 'visual-verify',
   }));
+}
+
+/**
+ * Resolves the effective per-step concurrency cap from the same fanOut step
+ * `laneStepIdsFor` derives the lane columns from (the first step in the
+ * definition that declares `fanOut`), falling back to SPRINT_BATCH_CAP when no
+ * fanOut step resolves (legacy/orchestrated-only defs, or a null definition).
+ */
+function activeFanOutCap(definition: WorkflowDefinition | null): number {
+  const fanOutStep = definition?.phases
+    .flatMap((p) => p.steps)
+    .find((s) => s.fanOut !== undefined);
+  return fanOutStep?.fanOut !== undefined
+    ? effectiveMaxConcurrency(fanOutStep.fanOut)
+    : SPRINT_BATCH_CAP;
 }
 
 /**
@@ -332,6 +348,9 @@ export function SprintSwimlaneCanvas({
   // Lane step strip — derived from the active fanOut step's inner ids (falls back
   // to SPRINT_LANE_STEP_IDS for sprint / non-fanOut defs, so sprint is identical).
   const laneSteps = laneStepIdsFor(definition);
+  // Worker cap — the same active fanOut step's effective per-step concurrency,
+  // falling back to SPRINT_BATCH_CAP when no fanOut step resolves.
+  const workerCap = activeFanOutCap(definition);
 
   // ── Workflow-step state derivation (same ordering rule as WorkflowCanvas) ──
   const stepIds = definition?.phases.flatMap((p) => p.steps.map((s) => s.id)) ?? [];
@@ -400,7 +419,7 @@ export function SprintSwimlaneCanvas({
         <span>
           workers{' '}
           <b style={{ color: 'var(--color-text-primary)', fontWeight: 700 }}>
-            {runningCount}/{SPRINT_BATCH_CAP}
+            {runningCount}/{workerCap}
           </b>
         </span>
         <span>·</span>

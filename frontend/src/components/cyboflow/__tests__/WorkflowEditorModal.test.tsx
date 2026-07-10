@@ -563,17 +563,20 @@ describe('WorkflowEditorModal — fan-out editing', () => {
     const inspectorToggle = screen.getByTestId('inspector-toggle-fanout');
     expect(inspectorToggle).toHaveAttribute('aria-pressed', 'false');
     expect(screen.getByTestId('inspector-fanout-off-note')).toHaveTextContent(
-      'This step runs once unless fan-out is enabled',
+      'This step runs once until a fan-out template is added',
     );
 
     fireEvent.click(screen.getByTestId('editor-step-make-parallel-context'));
     await waitFor(() => expect(inspectorToggle).toHaveAttribute('aria-pressed', 'true'));
-    expect(screen.getByTestId('editor-step-parallel-chip-context')).toBeInTheDocument();
+    expect(screen.getByTestId('editor-step-parallel-chip-context')).toHaveTextContent('Parallel');
     expect(screen.getByTestId('editor-step-fanout-frame-context')).toBeInTheDocument();
 
+    // Toggling the chip off goes SERIAL — the template + frame persist, only
+    // the cap collapses to 1 (maxConcurrency: 1).
     fireEvent.click(screen.getByTestId('editor-step-parallel-chip-context'));
     await waitFor(() => expect(inspectorToggle).toHaveAttribute('aria-pressed', 'false'));
-    expect(screen.queryByTestId('editor-step-fanout-frame-context')).toBeNull();
+    expect(screen.getByTestId('editor-step-parallel-chip-context')).toHaveTextContent('Serial');
+    expect(screen.getByTestId('editor-step-fanout-frame-context')).toBeInTheDocument();
   });
 
   it('Make parallel on a non-selected card selects that card and syncs the inspector switch', async () => {
@@ -587,7 +590,7 @@ describe('WorkflowEditorModal — fan-out editing', () => {
     expect(screen.getByTestId('editor-step-fanout-frame-approve-idea')).toBeInTheDocument();
   });
 
-  it('the fan-out meta and inspector disclose tasks, system cap, and programmatic-only runtime scope', async () => {
+  it('the fan-out meta and inspector disclose tasks, the effective cap, and dual-plane execution', async () => {
     await renderEditMode();
 
     fireEvent.click(screen.getByTestId('inspector-toggle-fanout'));
@@ -595,12 +598,37 @@ describe('WorkflowEditorModal — fan-out editing', () => {
 
     const meta = screen.getByTestId('editor-step-fanout-meta-context');
     expect(meta).toHaveTextContent('over tasks');
-    expect(meta).toHaveTextContent(`system cap ${SPRINT_BATCH_CAP}`);
+    expect(meta).toHaveTextContent(`cap ${SPRINT_BATCH_CAP}`);
     expect(meta).toHaveTextContent('1 inner');
-    expect(meta).toHaveTextContent('programmatic batch only');
+    expect(meta).toHaveTextContent('both planes');
 
-    expect(screen.getByTestId('inspector-fanout-system-cap')).toHaveTextContent(`system cap ${SPRINT_BATCH_CAP}`);
-    expect(screen.getByText(/Programmatic batch runs only/)).toBeInTheDocument();
+    // No explicit maxConcurrency yet — the number input shows the resolved default.
+    expect(screen.getByTestId('inspector-fanout-max-concurrency')).toHaveValue(SPRINT_BATCH_CAP);
+    expect(screen.getByText(/Drives both execution planes/)).toBeInTheDocument();
+  });
+
+  it('editing the max-concurrency input persists an explicit maxConcurrency', async () => {
+    await renderEditMode();
+
+    fireEvent.click(screen.getByTestId('inspector-toggle-fanout'));
+    const capInput = await screen.findByTestId('inspector-fanout-max-concurrency');
+    fireEvent.change(capInput, { target: { value: '3' } });
+    await waitFor(() =>
+      expect(screen.getByTestId('editor-step-fanout-meta-context')).toHaveTextContent('cap 3'),
+    );
+    expect(screen.getByTestId('editor-step-parallel-chip-context')).toHaveTextContent('Parallel ×3');
+
+    const saveBtn = screen.getByTestId('editor-save-button');
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('save-scope-confirm'));
+    });
+
+    const savedStep = mockUpdateSpec.mock.calls[0][0].definition.phases[0].steps.find((s) => s.id === 'context');
+    expect(savedStep?.fanOut?.maxConcurrency).toBe(3);
   });
 
   it('the fan-out item source picker is constrained to tasks', async () => {
@@ -624,17 +652,17 @@ describe('WorkflowEditorModal — fan-out editing', () => {
     const over = screen.getByTestId('inspector-fanout-over-input') as HTMLSelectElement;
     expect(over).toHaveValue('ideas');
     expect(Array.from(over.options).map((option) => option.value)).toEqual(['ideas', 'tasks']);
-    expect(screen.getByText(/Unsupported item sources run once/)).toBeInTheDocument();
-    // The canvas meta bar must not claim batch behavior for an unsupported
+    expect(screen.getByText(/Unsupported item source/)).toBeInTheDocument();
+    // The canvas meta bar must not claim dual-plane behavior for an unsupported
     // source — resolveItems returns [] for over !== 'tasks' on every plane.
     expect(screen.getByTestId('editor-step-fanout-meta-context')).toHaveTextContent(
-      'unsupported source · runs once',
+      'unsupported source',
     );
 
     fireEvent.change(over, { target: { value: 'tasks' } });
     await waitFor(() => expect(over).toHaveValue('tasks'));
     expect(screen.getByTestId('editor-step-fanout-meta-context')).toHaveTextContent(
-      'programmatic batch only',
+      'both planes',
     );
 
     const saveBtn = screen.getByTestId('editor-save-button');
@@ -687,7 +715,7 @@ describe('WorkflowEditorModal — fan-out editing', () => {
     expect(onSaved).toHaveBeenCalledWith(EDIT_WORKFLOW_ID);
   });
 
-  it('disabling the fan-out toggle clears step.fanOut entirely', async () => {
+  it('disabling the fan-out toggle sets maxConcurrency to 1 and preserves the chain (never deletes fanOut)', async () => {
     const seeded = structuredClone(SEED_DEFINITION);
     seeded.phases[0].steps[0].fanOut = {
       over: 'tasks',
@@ -701,7 +729,43 @@ describe('WorkflowEditorModal — fan-out editing', () => {
 
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'false'));
+    // The editor stays open (serial) — the chain is still editable, not gone.
+    expect(screen.getByTestId('inspector-fanout-editor')).toBeInTheDocument();
+    expect(screen.getByTestId('inspector-fanout-serial-note')).toBeInTheDocument();
+    expect(screen.getByTestId('inspector-fanout-inner-0')).toBeInTheDocument();
+
+    const saveBtn = screen.getByTestId('editor-save-button');
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('save-scope-confirm'));
+    });
+
+    const savedStep = mockUpdateSpec.mock.calls[0][0].definition.phases[0].steps.find((s) => s.id === 'context');
+    expect(savedStep?.fanOut).toEqual({
+      over: 'tasks',
+      inner: [{ id: 'item', agent: 'idea-extractor', name: 'Item' }],
+      maxConcurrency: 1,
+    });
+  });
+
+  it('the "remove fan-out" affordance deletes the template entirely', async () => {
+    const seeded = structuredClone(SEED_DEFINITION);
+    seeded.phases[0].steps[0].fanOut = {
+      over: 'tasks',
+      inner: [{ id: 'item', agent: 'idea-extractor', name: 'Item' }],
+    };
+    mockGetDefinition.mockResolvedValueOnce(seeded);
+    await renderEditMode();
+
+    expect(screen.getByTestId('inspector-fanout-editor')).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId('inspector-fanout-remove'));
+
     expect(screen.queryByTestId('inspector-fanout-editor')).toBeNull();
+    expect(screen.getByTestId('inspector-fanout-off-note')).toBeInTheDocument();
+    expect(screen.queryByTestId('editor-step-fanout-frame-context')).toBeNull();
 
     const saveBtn = screen.getByTestId('editor-save-button');
     await waitFor(() => expect(saveBtn).not.toBeDisabled());

@@ -22,8 +22,8 @@
  *
  * FEATURE: user-editable workflow blueprint editor.
  */
+import { effectiveMaxConcurrency } from '../../../../shared/types/workflows';
 import type { WorkflowAgentConfig, WorkflowDefinition, WorkflowPhase, WorkflowStep } from '../../../../shared/types/workflows';
-import { SPRINT_BATCH_CAP } from '../../../../shared/types/sprintBatch';
 import { resolveStepAgentKey, HUMAN_GATE_AGENT } from '../../../../shared/types/agentIdentity';
 import { AGENT_MODEL_LABELS, type AgentModelAlias } from '../../../../shared/types/agents';
 import type { WorkflowEditorAction, WorkflowEditorState } from '../../hooks/useWorkflowEditorState';
@@ -317,6 +317,8 @@ function StepNode({
   const agentKey = resolveStepAgentKey(step.id, step.agent) ?? step.agent;
   const isHumanGate = step.agent === HUMAN_GATE_AGENT;
   const stepAgentConfig = definition.agentConfigs?.[agentKey];
+  const fanOutCap = fanOut !== undefined ? effectiveMaxConcurrency(fanOut) : null;
+  const isParallel = fanOutCap !== null && fanOutCap > 1;
 
   // Head bar: black (Direction A) by default; hatched amber for human steps.
   const headBackground = isHuman
@@ -373,7 +375,7 @@ function StepNode({
             type="button"
             onClick={(e) => {
               e.stopPropagation();
-              dispatch({ type: 'SET_STEP_FANOUT', phaseId: phase.id, stepId: step.id, enabled: false });
+              dispatch({ type: 'SET_STEP_FANOUT', phaseId: phase.id, stepId: step.id, enabled: !isParallel });
             }}
             style={{
               fontFamily: 'inherit',
@@ -383,13 +385,13 @@ function StepNode({
               fontWeight: 700,
               padding: '3px 7px',
               border: '1px solid var(--color-status-error)',
-              background: 'var(--color-status-error)',
-              color: 'var(--color-bg-primary)',
+              background: isParallel ? 'var(--color-status-error)' : 'transparent',
+              color: isParallel ? 'var(--color-bg-primary)' : 'var(--color-status-error)',
               cursor: 'pointer',
             }}
             data-testid={`editor-step-parallel-chip-${step.id}`}
           >
-            ⇄ Parallel
+            {isParallel ? `⇄ Parallel ×${fanOutCap}` : '→ Serial'}
           </button>
         </div>
       )}
@@ -569,10 +571,10 @@ function StepNode({
             data-testid={`editor-step-fanout-meta-${step.id}`}
           >
             <span><span style={{ color: 'var(--color-text-tertiary)' }}>over </span><b style={{ color: 'var(--color-text-primary)' }}>{fanOut.over}</b></span>
-            <span><span style={{ color: 'var(--color-text-tertiary)' }}>system cap </span><b style={{ color: 'var(--color-text-primary)' }}>{SPRINT_BATCH_CAP}</b></span>
+            <span><span style={{ color: 'var(--color-text-tertiary)' }}>cap </span><b style={{ color: 'var(--color-text-primary)' }}>{effectiveMaxConcurrency(fanOut)}</b></span>
             <span><b style={{ color: 'var(--color-status-error)' }}>{fanOut.inner.length} inner</b></span>
             <span style={{ color: 'var(--color-text-tertiary)' }}>
-              {fanOut.over === 'tasks' ? 'programmatic batch only' : 'unsupported source · runs once'}
+              {fanOut.over === 'tasks' ? 'both planes' : 'unsupported source'}
             </span>
           </div>
 
