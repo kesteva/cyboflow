@@ -1935,11 +1935,16 @@ export class VerificationScheduler {
       });
       return;
     }
-    // Report a verification that ended in a FAILURE-ish terminal state (failed /
-    // timed out / skipped-because-unable) — a passed / low_confidence verdict is
-    // not an error. Only after the guarded write won (changes === 1) so a
-    // cancel-race never double-reports. errorClass buckets the cause.
-    if (status === 'failed' || status === 'timeout' || status === 'skipped') {
+    // Report a verification that genuinely FAILED or TIMED OUT. Deliberately NOT
+    // 'skipped': a skip is this scheduler's by-design non-failure for a missing
+    // precondition (no usable/healthy backend, missing TCC grant, uninstalled
+    // chromium, static-only chain, unparseable input) — and on a host without a
+    // provisioned visual-verify backend (the documented common case) EVERY request
+    // skips, which would flood Sentry with non-errors under a seam named
+    // 'verify-request-failed' and bury real signal. Passed / low_confidence are
+    // valid verdicts, also not errors. Only after the guarded write won
+    // (changes === 1) so a cancel-race never double-reports.
+    if (status === 'failed' || status === 'timeout') {
       emitSeamError('verify-request-failed', new Error((extra.error ?? status).slice(0, 500)), {
         requestStatus: status,
         verifyType: row.verify_type,

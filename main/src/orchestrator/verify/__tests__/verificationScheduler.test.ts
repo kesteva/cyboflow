@@ -34,6 +34,7 @@ import {
   type VerificationTerminalEvent,
 } from '../verificationScheduler';
 import { Mutex } from '../../../utils/mutex';
+import { setSeamErrorSink } from '../../telemetrySink';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import {
   PlaywrightBackend,
@@ -2226,5 +2227,77 @@ describe('VerificationScheduler — full hydration of interactions/viewports/bas
     expect(input?.interactions).toEqual([{ action: 'click', target: '#agent' }]);
     expect(input?.viewports).toEqual([{ width: 375, height: 667, label: 'agent' }]);
     expect(input?.baselineKey).toBe('agent-key');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Seam-error telemetry (seam J): report ONLY genuine failures — a skip (missing
+// precondition: no usable/healthy backend, the documented common case on a host
+// without a provisioned verify backend) is a by-design non-failure and must NOT
+// be reported as an error, or it would flood Sentry and bury real signal.
+// ---------------------------------------------------------------------------
+
+describe('VerificationScheduler — verify-request-failed seam gating (seam J)', () => {
+  const seamCalls: Array<{ seam: string; tags?: Record<string, string> }> = [];
+
+  beforeEach(() => {
+    seamCalls.length = 0;
+    setSeamErrorSink((seam, _error, tags) => seamCalls.push({ seam, tags }));
+  });
+  afterEach(() => setSeamErrorSink(undefined as never));
+
+  const verifyReports = () => seamCalls.filter((c) => c.seam === 'verify-request-failed');
+
+  it('reports a genuine capture FAILURE (throwOnCapture → failed)', async () => {
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null, throwOnCapture: true, sink: {} }) },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+    const id = enqueueRow(db, { chain: ['capturePage'] });
+    await sched.drain();
+
+    expect(rowStatus(db, id).status).toBe('failed');
+    expect(verifyReports()).toHaveLength(1);
+    expect(verifyReports()[0].tags).toMatchObject({ requestStatus: 'failed', verifyType: 'static-render-snapshot' });
+  });
+
+  it('does NOT report a by-design SKIP (unhealthy backend → skipped, the common no-backend case)', async () => {
+    const unhealthy: VisualBackend = {
+      id: 'peekaboo',
+      rung: 2,
+      requiredLease: () => 'verify:screen',
+      healthCheck: async () => false, // declined TCC / missing binary — a SKIP, not a fail
+      capture: async (): Promise<CaptureResult> => ({ ok: true, fileNames: ['x.png'] }),
+    };
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { peekaboo: unhealthy },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+    const id = enqueueRowRaw(db, { chain: ['peekaboo'], input: { url: 'http://placeholder' }, type: 'native-desktop' });
+    await sched.drain();
+
+    expect(rowStatus(db, id).status).toBe('skipped');
+    expect(verifyReports()).toHaveLength(0); // the whole point: no error event on a benign skip
+  });
+
+  it('does NOT report a PASS', async () => {
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink: {} }) },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+    });
+    const id = enqueueRow(db, { chain: ['capturePage'] });
+    await sched.drain();
+
+    expect(rowStatus(db, id).status).toBe('passed');
+    expect(verifyReports()).toHaveLength(0);
   });
 });

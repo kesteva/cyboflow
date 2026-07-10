@@ -742,16 +742,15 @@ export abstract class AbstractCliManager extends EventEmitter {
         this.logger?.error(`${this.getCliToolName()} process failed for session ${sessionId}. Exit code: ${exitCode}, Signal: ${signal}`);
 
         // Report the interactive REPL's non-zero exit — the interactive-substrate
-        // run-failure chokepoint. lastOutput (the PTY tail) is the actual reason
-        // (e.g. "Invalid MCP configuration") — bounded to its last 500 chars and
-        // home-path redacted by the scrub. `phase` distinguishes a never-started
-        // process from a runtime crash.
+        // run-failure chokepoint. The raw PTY tail (lastOutput) is DELIBERATELY
+        // kept out of the message: it is unstructured terminal output that can
+        // contain user source, prompt text, or secrets, and the Sentry scrub only
+        // redacts home paths (not arbitrary content). Instead classifyErrorPattern
+        // distills lastOutput into a bounded, non-PII `errorClass` bucket, and
+        // exitCode + phase (never-started vs runtime crash) carry the rest.
         captureSeamError(
           'interactive-process-exit-failed',
-          new Error(
-            `${this.getCliToolName()} process exited (code ${exitCode})` +
-              (lastOutput ? `: ${lastOutput.slice(-500)}` : ''),
-          ),
+          new Error(`${this.getCliToolName()} process exited (code ${exitCode})`),
           {
             substrate: 'interactive',
             cliTool: this.getCliToolName(),
