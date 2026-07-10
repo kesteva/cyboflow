@@ -699,7 +699,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       // Fast mode is Opus-only; never request it for another model even if the
       // toggle was left on before the model was switched.
       //
-      // MCP deny + plugin selection are enforced on BOTH substrates (SDK:
+      // MCP deny + plugin selection are enforced on both CLAUDE substrates (SDK:
       // composeMcpServers delete + disallowedTools; interactive: --disallowed-tools
       // + disabledMcpjsonServers + enabledPlugins via --settings). Plugins reflect
       // the current enabled set, so send the selection ONLY when the user changed
@@ -1003,6 +1003,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                 value={permissionMode}
                 onChange={setPermissionMode}
                 agentProvider={effectiveProvider}
+                agentRuntime={effectiveRuntime}
               />
             </div>
 
@@ -1058,7 +1059,7 @@ export default function SessionStartWizard(): React.JSX.Element {
                 id="wizard-variant"
               />
             )}
-            {/* Advanced (QUICK + ULTRACODE, both substrates): MCP / plugin
+            {/* Advanced (QUICK + ULTRACODE): workspace plus Claude-only MCP/plugin
                 selection. These are a session-START decision — the deny-list is
                 enforced at the first spawn, so toggling mid-conversation was
                 confusing and could leak a disabled server back via the CLI's
@@ -1066,7 +1067,9 @@ export default function SessionStartWizard(): React.JSX.Element {
                 SDK (composeMcpServers delete + strictMcpConfig + disallowedTools)
                 and interactive PTY (--disallowed-tools mcp__<srv> +
                 disabledMcpjsonServers + enabledPlugins via --settings) — ultracode
-                is an interactive quick session, so it gets the same controls.
+                is an interactive Claude quick session, so it gets the same controls.
+                Codex quick runtimes do not consume these launch selections, so the
+                MCP/plugin rows are omitted instead of implying enforcement.
                 Collapsed by default; the pills are controlled (no sessionId yet →
                 wizard owns the state and threads it into createQuick). */}
             {(selection.kind === 'quick' || selection.kind === 'ultracode') && (
@@ -1091,24 +1094,28 @@ export default function SessionStartWizard(): React.JSX.Element {
                     className="flex flex-col gap-3 border-t border-border-secondary px-3 py-3"
                     data-testid="wizard-advanced-body"
                   >
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex flex-col">
-                        <span className="text-sm font-medium text-text-primary">MCP servers</span>
-                        <span className="text-xs text-text-tertiary">
-                          Disable servers this session should not load
-                        </span>
-                      </div>
-                      <McpTogglePill disabled={disabledMcpServers} onChange={setDisabledMcpServers} />
-                    </div>
-                    <div className="flex items-center justify-between gap-3">
-                      <div className="flex flex-col">
-                        <span className="text-sm font-medium text-text-primary">Plugins</span>
-                        <span className="text-xs text-text-tertiary">
-                          Reflects your enabled plugins — turn any off for this session
-                        </span>
-                      </div>
-                      <PluginTogglePill selected={enabledPlugins} onChange={setEnabledPlugins} />
-                    </div>
+                    {effectiveProvider === 'claude' && (
+                      <>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex flex-col">
+                            <span className="text-sm font-medium text-text-primary">MCP servers</span>
+                            <span className="text-xs text-text-tertiary">
+                              Disable servers this session should not load
+                            </span>
+                          </div>
+                          <McpTogglePill disabled={disabledMcpServers} onChange={setDisabledMcpServers} />
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="flex flex-col">
+                            <span className="text-sm font-medium text-text-primary">Plugins</span>
+                            <span className="text-xs text-text-tertiary">
+                              Reflects your enabled plugins — turn any off for this session
+                            </span>
+                          </div>
+                          <PluginTogglePill selected={enabledPlugins} onChange={setEnabledPlugins} />
+                        </div>
+                      </>
+                    )}
 
                     {/* Workspace — where this quick session's working tree lives.
                         'Use global setting' omits worktreeMode (createQuick floors to

@@ -363,6 +363,35 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     });
     expect(screen.getByTestId('wizard-advanced-toggle')).toBeInTheDocument();
   });
+
+  it('distinguishes Codex SDK auto-review from PTY Auto and omits unsupported MCP/plugin controls', async () => {
+    await renderLockedWizard();
+    await selectQuickAndConfigure();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'codex-sdk' },
+      });
+    });
+    expect(screen.getByText('Workspace writes · Codex auto-reviews')).toBeInTheDocument();
+    expect(screen.getByText(/other requested approvals use the Cyboflow review queue/i)).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), {
+        target: { value: 'codex-pty' },
+      });
+    });
+
+    expect(screen.getByText('Currently same as Allow edits')).toBeInTheDocument();
+    expect(screen.getByText(/prompts appear in its terminal/i)).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-advanced-toggle'));
+    });
+    expect(screen.queryByText('MCP servers')).toBeNull();
+    expect(screen.queryByText('Plugins')).toBeNull();
+    expect(screen.getByText('Workspace')).toBeInTheDocument();
+  });
 });
 
 // ---------------------------------------------------------------------------

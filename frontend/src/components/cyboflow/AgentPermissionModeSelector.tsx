@@ -7,7 +7,7 @@
  * options + button markup are single-sourced (no drift in labels/hints/styling).
  */
 import type { PermissionMode } from '../../../../shared/types/workflows';
-import type { AgentProvider } from '../../../../shared/types/agentRuntime';
+import type { AgentProvider, SessionAgentRuntime } from '../../../../shared/types/agentRuntime';
 
 /**
  * The session agent-permission options. Selecting one writes the host session's
@@ -26,14 +26,28 @@ export const PERMISSION_MODE_OPTIONS: ReadonlyArray<PermissionModeOption> = [
   { id: 'dontAsk', label: "Don't ask", hint: 'No prompts · skip permissions' },
 ];
 
-const CODEX_PERMISSION_MODE_OPTIONS: ReadonlyArray<PermissionModeOption> = PERMISSION_MODE_OPTIONS.map((option) =>
-  option.id === 'auto'
-    ? { ...option, hint: 'Codex decides when to ask' }
-    : option,
-);
+const CODEX_SDK_PERMISSION_MODE_OPTIONS: ReadonlyArray<PermissionModeOption> = [
+  { id: 'default', label: 'Ask before edits', hint: 'Read-only · asks to write' },
+  { id: 'acceptEdits', label: 'Allow edits', hint: 'Workspace writes · asks when needed' },
+  { id: 'auto', label: 'Auto', hint: 'Workspace writes · Codex auto-reviews' },
+  { id: 'dontAsk', label: "Don't ask", hint: 'Full access · approvals off' },
+];
 
-function permissionModeOptionsForProvider(agentProvider: AgentProvider): ReadonlyArray<PermissionModeOption> {
-  return agentProvider === 'codex' ? CODEX_PERMISSION_MODE_OPTIONS : PERMISSION_MODE_OPTIONS;
+const CODEX_PTY_PERMISSION_MODE_OPTIONS: ReadonlyArray<PermissionModeOption> = [
+  { id: 'default', label: 'Ask before edits', hint: 'Read-only · asks to write' },
+  { id: 'acceptEdits', label: 'Allow edits', hint: 'Workspace writes · asks when needed' },
+  { id: 'auto', label: 'Auto', hint: 'Currently same as Allow edits' },
+  { id: 'dontAsk', label: "Don't ask", hint: 'Full access · approvals off' },
+];
+
+function permissionModeOptionsForProvider(
+  agentProvider: AgentProvider,
+  agentRuntime?: SessionAgentRuntime,
+): ReadonlyArray<PermissionModeOption> {
+  if (agentProvider !== 'codex') return PERMISSION_MODE_OPTIONS;
+  return agentRuntime === 'codex-pty'
+    ? CODEX_PTY_PERMISSION_MODE_OPTIONS
+    : CODEX_SDK_PERMISSION_MODE_OPTIONS;
 }
 
 interface AgentPermissionModeSelectorProps {
@@ -41,6 +55,8 @@ interface AgentPermissionModeSelectorProps {
   onChange: (mode: PermissionMode) => void;
   /** Provider whose runtime will execute the next launch/message. */
   agentProvider?: AgentProvider;
+  /** Distinguishes structured Codex auto-review from Codex PTY CLI flags. */
+  agentRuntime?: SessionAgentRuntime;
   /** Heading text above the buttons; pass null to omit the heading. */
   label?: string | null;
   /** Extra classes on the wrapper. */
@@ -51,10 +67,11 @@ export function AgentPermissionModeSelector({
   value,
   onChange,
   agentProvider = 'claude',
+  agentRuntime,
   label = 'Session permission',
   className,
 }: AgentPermissionModeSelectorProps): React.JSX.Element {
-  const options = permissionModeOptionsForProvider(agentProvider);
+  const options = permissionModeOptionsForProvider(agentProvider, agentRuntime);
 
   return (
     <div className={`flex flex-col gap-1.5${className ? ` ${className}` : ''}`}>
@@ -78,7 +95,9 @@ export function AgentPermissionModeSelector({
       ))}
       {agentProvider === 'codex' && (
         <p className="text-xs text-text-tertiary">
-          Codex uses Codex-native sandbox prompts; Cyboflow review-queue permission prompts are Claude-only for now.
+          {agentRuntime === 'codex-pty'
+            ? 'Codex prompts appear in its terminal; they do not enter the Cyboflow review queue.'
+            : 'Auto lets Codex review approval requests; other requested approvals use the Cyboflow review queue.'}
         </p>
       )}
     </div>
