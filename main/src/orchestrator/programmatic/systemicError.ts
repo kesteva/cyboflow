@@ -157,6 +157,77 @@ export function isSystemicStepError(error: string | undefined): boolean {
   return SYSTEMIC_PATTERNS.some(({ pattern }) => pattern.test(error));
 }
 
+/**
+ * NON-systemic failure buckets — recoverable/local conditions that are NOT
+ * environment-level (so they never trigger a systemic park) but are still worth
+ * naming for telemetry grouping. Ordered most-specific first. Only consulted by
+ * {@link classifyErrorPattern} AFTER the systemic patterns, so a systemic match
+ * always wins (e.g. "connection timed out" classifies as net-connection-failure,
+ * not the generic 'timed-out' bucket here).
+ */
+const NONSYSTEMIC_PATTERNS: SystemicPattern[] = [
+  {
+    // The intermittent SDK control-channel drop (see the Stream-closed gate
+    // false-complete bug). Distinct from net 'connection closed'.
+    name: 'stream-closed',
+    pattern: /stream closed/i,
+  },
+  {
+    // The report-only SDK first-event watchdog message ("SDK produced no events
+    // ..."), and the interactive transcript-discovery timeout.
+    name: 'first-event-timeout',
+    pattern: /no events|first[\s-]?event|transcript discovery/i,
+  },
+  {
+    // The recoverable turn cap and the controller's own execution-bound backstop.
+    name: 'max-turns-or-execution-bound',
+    pattern: /max[\s_-]?turns|maximum (?:number of )?turns|execution bound/i,
+  },
+  {
+    // Missing/unresolvable CLI binary — claude not on PATH, spawn ENOENT, the
+    // interactive "... CLI not available" guard. Deliberately NOT a bare "not
+    // available" (that would swallow model-availability 404s) — anchors on the
+    // executable/CLI/PATH context.
+    name: 'binary-missing',
+    pattern: /\benoent\b|executable not found|not found in (?:\$?path)|cli not available|no such file/i,
+  },
+  {
+    // Spawn/process failures that are not ENOENT (covered above).
+    name: 'spawn-failed',
+    pattern: /failed to spawn|spawn \w+ e[a-z]+|is not recognized/i,
+  },
+  {
+    // A child process exited non-zero (interactive REPL / tool subprocess).
+    name: 'nonzero-exit',
+    pattern: /exited with code|non-?zero exit|exit code \d/i,
+  },
+  {
+    // Generic timeout LAST — a catch-all for any remaining "timed out" text not
+    // already claimed by a systemic net pattern or first-event-timeout above.
+    name: 'timed-out',
+    pattern: /timed?[\s-]?out|timeout/i,
+  },
+];
+
+/**
+ * Classify an error string into ONE low-cardinality, non-PII label for use as a
+ * Sentry `errorClass` tag. Tries the systemic patterns first (usage/rate limit,
+ * auth, billing, network — the environment-level causes), then the non-systemic
+ * buckets above, then falls back to a fixed sentinel. The return value is always
+ * one of a small fixed set of names (never free text), so it is safe as a tag.
+ *
+ * Pure — no I/O, no clock — so it stays importable from anywhere under the
+ * standalone-typecheck invariant, including the impure boot seam and services.
+ */
+export function classifyErrorPattern(error: string | undefined): string {
+  if (!error) return 'unknown';
+  const systemic = SYSTEMIC_PATTERNS.find(({ pattern }) => pattern.test(error));
+  if (systemic) return systemic.name;
+  const nonSystemic = NONSYSTEMIC_PATTERNS.find(({ pattern }) => pattern.test(error));
+  if (nonSystemic) return nonSystemic.name;
+  return 'other';
+}
+
 /** Garbage guard: never trust a computed reset delay beyond this horizon. */
 const MAX_RESET_DELAY_MS = 7 * 24 * 60 * 60 * 1000;
 

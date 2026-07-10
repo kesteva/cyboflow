@@ -14,8 +14,8 @@ import { Logger } from './utils/logger';
 import { ArchiveProgressManager } from './services/archiveProgressManager';
 import { initializeCommitManager } from './services/commitManager';
 import { setCyboflowDirectory, getCyboflowSubdirectory } from './utils/cyboflowDirectory';
-import { initTelemetry, trackUsage } from './services/telemetry';
-import { setTelemetrySink } from './orchestrator/telemetrySink';
+import { initTelemetry, trackUsage, captureSeamError } from './services/telemetry';
+import { setTelemetrySink, setSeamErrorSink } from './orchestrator/telemetrySink';
 import { getCurrentWorktreeName } from './utils/worktreeUtils';
 import { registerIpcHandlers } from './ipc';
 import { registerArtifactImageHandlers } from './ipc/artifactImages';
@@ -614,8 +614,11 @@ async function initializeServices() {
   // ahead of app.whenReady() below), because the Aptabase SDK disables itself if
   // initialized post-ready. Here we only register the usage sink so orchestrator
   // code (which can't import services/*) can emit events via emitUsage() — see
-  // orchestrator/telemetrySink.ts.
+  // orchestrator/telemetrySink.ts. The parallel seam-error sink lets that same
+  // invariant-bound orchestrator code report HANDLED failures (run/session/step
+  // failures, timeouts, skips, systemic parks) to Sentry via emitSeamError().
   setTelemetrySink(trackUsage);
+  setSeamErrorSink(captureSeamError);
 
   // Initialize logger early so it can capture all logs
   logger = new Logger(configManager);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isSystemicStepError, parseLimitResetDelayMs } from '../systemicError';
+import { isSystemicStepError, parseLimitResetDelayMs, classifyErrorPattern } from '../systemicError';
 
 describe('isSystemicStepError', () => {
   const positives: Array<[string, string]> = [
@@ -67,6 +67,60 @@ describe('isSystemicStepError', () => {
 
   it.each(negatives)('does not match: %s', (_label, error) => {
     expect(isSystemicStepError(error)).toBe(false);
+  });
+});
+
+describe('classifyErrorPattern', () => {
+  const cases: Array<[string, string | undefined, string]> = [
+    // Systemic patterns win first — the label is the SystemicPattern.name.
+    ['usage limit', 'Claude AI usage limit reached|1751234567', 'usage-limit-reached'],
+    ['rate limit', 'rate_limit_error: too many requests', 'rate-limit'],
+    ['http 429', 'Request failed with status code 429', 'http-429'],
+    ['overloaded', 'overloaded_error: the server is overloaded', 'overloaded'],
+    ['low credit', 'Your credit balance is too low to access the Claude API', 'billing-credit-balance'],
+    ['auth 401', '401 Unauthorized', 'auth-401'],
+    ['connection closed (systemic net)', 'API Error: Connection closed mid-response.', 'net-connection-closed'],
+    ['ECONNRESET', 'ECONNRESET', 'net-econn-codes'],
+    // Systemic net beats the generic non-systemic 'timed-out' bucket.
+    ['connection timed out is net, not generic timeout', 'connection timed out', 'net-connection-failure'],
+    // Non-systemic buckets.
+    ['stream closed', 'Error: Stream closed unexpectedly', 'stream-closed'],
+    ['first-event watchdog', 'SDK produced no events within 30000ms', 'first-event-timeout'],
+    ['transcript discovery timeout', 'interactive transcript discovery timed out', 'first-event-timeout'],
+    ['execution bound', 'Step exceeded the execution bound of 30 minutes', 'max-turns-or-execution-bound'],
+    ['max turns', 'error_max_turns: the step hit its max turn allowance', 'max-turns-or-execution-bound'],
+    ['spawn ENOENT', 'spawn claude ENOENT', 'binary-missing'],
+    ['cli not available', 'Claude Code (Interactive) not available: claude executable not found in PATH', 'binary-missing'],
+    ['failed to spawn', 'Failed to spawn claude: node-pty error', 'spawn-failed'],
+    ['nonzero exit', 'Interactive Claude exited with code 1', 'nonzero-exit'],
+    ['generic timeout last', 'request timed out', 'timed-out'],
+    // model-availability 404 must NOT be mislabeled as binary-missing.
+    ['model 404 is other, not binary-missing', 'Request failed with status code 404: model not available', 'other'],
+    ['generic build failure', 'Command failed: eslint . --max-warnings=0', 'other'],
+    ['undefined', undefined, 'unknown'],
+    ['empty', '', 'unknown'],
+  ];
+
+  it.each(cases)('classifies %s', (_label, error, expected) => {
+    expect(classifyErrorPattern(error)).toBe(expected);
+  });
+
+  it('only ever returns a low-cardinality label from the fixed set', () => {
+    const known = new Set([
+      // systemic names
+      'usage-limit-reached', 'window-limit-reached-or-hit', 'rate-limit', 'http-429',
+      'overloaded', 'http-529', 'billing-credit-balance', 'billing-quota-exceeded',
+      'auth-failed', 'auth-invalid-api-key', 'auth-401', 'auth-oauth-expired',
+      'auth-authentication-error-type', 'auth-invalid-x-api-key', 'net-connection-closed',
+      'net-connection-failure', 'net-econn-codes', 'net-fetch-failed',
+      // non-systemic buckets + fallbacks
+      'stream-closed', 'first-event-timeout', 'max-turns-or-execution-bound',
+      'binary-missing', 'spawn-failed', 'nonzero-exit', 'timed-out', 'other', 'unknown',
+    ]);
+    const samples = [undefined, '', 'anything at all', 'ECONNREFUSED', 'Stream closed', 'weird 500'];
+    for (const s of samples) {
+      expect(known.has(classifyErrorPattern(s))).toBe(true);
+    }
   });
 });
 
