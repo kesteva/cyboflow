@@ -164,4 +164,48 @@ describe('WorkflowEditorCanvas — model meta row (fan-out inner cards)', () => 
     expect(screen.getByTestId('editor-fanout-inner-agent-custom-inner-code-review')).toBeInTheDocument();
     expect(screen.queryByTestId('editor-fanout-inner-agent-custom-inner-implement')).toBeNull();
   });
+
+  it('(g) renders the CANONICAL agent key on inner cards for a legacy label', () => {
+    // A legacy 'executor' binding resolves to canonical 'implement' — the card must
+    // display the same key the config/model lookups (and the inspector) use, not the
+    // raw label, or the UI would contradict where the config actually applies.
+    const def: WorkflowDefinition = {
+      id: 'legacy',
+      agentConfigs: { implement: { model: 'opus' } },
+      phases: [
+        {
+          id: 'exec',
+          label: 'Execute',
+          color: '#c96442',
+          steps: [
+            {
+              id: 'batch',
+              name: 'Batch',
+              agent: 'batch-host',
+              mcps: [],
+              retries: 0,
+              fanOut: { over: 'tasks', inner: [{ id: 'inner-legacy', agent: 'executor', name: 'Implement' }] },
+            },
+          ],
+        },
+      ],
+    };
+    render(
+      <WorkflowEditorCanvas
+        definition={def}
+        selectedStepId={null}
+        selectedFanOutInner={null}
+        dispatch={vi.fn()}
+        agentModelPins={{}}
+      />,
+    );
+
+    // Canonical key shown; raw legacy label absent.
+    expect(screen.getByText('implement')).toBeInTheDocument();
+    expect(screen.queryByText('executor')).toBeNull();
+    // And the config keyed by the canonical key drives the inner model row.
+    expect(screen.getByTestId('editor-fanout-inner-model-inner-legacy')).toHaveTextContent(
+      AGENT_MODEL_LABELS.opus,
+    );
+  });
 });

@@ -671,7 +671,7 @@ function StepNode({
                             <span>
                               <span style={{ color: 'var(--color-text-tertiary)', display: 'inline-block', width: 38 }}>agent</span>
                               <b style={{ color: 'var(--color-text-primary)' }}>
-                                {inner.agent}
+                                {innerAgentKey}
                                 {innerAgentConfig?.custom !== undefined && (
                                   <span
                                     title="Customized for this flow"
