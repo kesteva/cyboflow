@@ -4,6 +4,34 @@ import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { QuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import type { VisualVerifyConfig } from '../../../shared/types/visualVerification';
 
+/**
+ * Auto-surface idle PTY quick sessions into the human review queue. Stored
+ * partial (members floor on read) so config.json stays byte-identical for users
+ * who never opt in. See ConfigManager.getIdleSessionReviewConfig().
+ */
+export interface IdleSessionReviewConfig {
+  /** Master switch. Absent → floors to IDLE_SESSION_REVIEW_DEFAULTS.enabled (true). */
+  enabled?: boolean;
+  /**
+   * Minutes an interactive quick session may sit finished-and-unviewed before a
+   * blocking human_task is minted. Absent/non-positive → floors to
+   * IDLE_SESSION_REVIEW_DEFAULTS.thresholdMinutes (5).
+   */
+  thresholdMinutes?: number;
+}
+
+/** Fully-resolved idle-session-review config (every member present). */
+export interface ResolvedIdleSessionReviewConfig {
+  enabled: boolean;
+  thresholdMinutes: number;
+}
+
+/** Floor values applied on read for any omitted IdleSessionReviewConfig member. */
+export const IDLE_SESSION_REVIEW_DEFAULTS: ResolvedIdleSessionReviewConfig = {
+  enabled: true,
+  thresholdMinutes: 5,
+};
+
 export interface AppConfig {
   verbose?: boolean;
   // Legacy fields for backward compatibility
@@ -62,6 +90,15 @@ export interface AppConfig {
   // other globals, intentionally NOT seeded into constructor defaults so existing
   // config.json files stay byte-identical; the ConfigManager getter applies floors.
   visualVerify?: VisualVerifyConfig;
+  // Auto-surface idle PTY quick sessions into the human review queue (see
+  // IdleSessionReviewConfig). A blocking human_task is minted for an interactive
+  // quick session that finished a turn and has sat unviewed longer than
+  // thresholdMinutes, so a session waiting on the user surfaces even if the agent
+  // never filed a finding. Absent members floor to IDLE_SESSION_REVIEW_DEFAULTS
+  // (enabled: true, thresholdMinutes: 5) via getIdleSessionReviewConfig(). NOT
+  // seeded into constructor defaults, so existing config.json files stay
+  // byte-identical.
+  idleSessionReview?: IdleSessionReviewConfig;
   // Theme preference
   theme?: 'paper' | 'light' | 'dark';
   // Notification settings
@@ -142,6 +179,8 @@ export interface UpdateConfigRequest {
   artifactCommitDir?: string;
   // Layered visual verification settings (see AppConfig.visualVerify).
   visualVerify?: VisualVerifyConfig;
+  // Idle PTY quick-session auto-review settings (see AppConfig.idleSessionReview).
+  idleSessionReview?: IdleSessionReviewConfig;
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;

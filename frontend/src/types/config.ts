@@ -45,6 +45,14 @@ export interface AppConfig {
   // Layered visual verification settings (see shared/types/visualVerification.ts).
   // Master switch defaults OFF; the ConfigManager getter applies floors.
   visualVerify?: VisualVerifyConfig;
+  // Auto-surface idle PTY quick sessions into the human review queue. A blocking
+  // human_task is minted for an interactive quick session that finished a turn
+  // and has sat unviewed longer than thresholdMinutes. Absent members floor to
+  // { enabled: true, thresholdMinutes: 5 } on the main side.
+  idleSessionReview?: {
+    enabled?: boolean;
+    thresholdMinutes?: number;
+  };
   theme?: 'paper' | 'light' | 'dark';
   notifications?: {
     enabled: boolean;

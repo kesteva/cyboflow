@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events';
 import { app } from 'electron';
-import type { AppConfig } from '../types/config';
+import type { AppConfig, ResolvedIdleSessionReviewConfig } from '../types/config';
+import { IDLE_SESSION_REVIEW_DEFAULTS } from '../types/config';
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
@@ -416,6 +417,26 @@ export class ConfigManager extends EventEmitter {
       simulatorDevices: vv?.simulatorDevices
         ? [...vv.simulatorDevices]
         : [...VISUAL_VERIFY_DEFAULTS.simulatorDevices],
+    };
+  }
+
+  /**
+   * The fully-resolved idle-session-review block — every field present, with
+   * IDLE_SESSION_REVIEW_DEFAULTS applied for any omitted member. Mirrors
+   * getVisualVerifyConfig's floor-on-read contract: the stored shape stays
+   * partial (config.json is never rewritten with defaults) while the detector
+   * gets a complete, typed config. thresholdMinutes floors to the default when
+   * absent OR non-positive (a 0/negative would surface every quick session).
+   */
+  getIdleSessionReviewConfig(): ResolvedIdleSessionReviewConfig {
+    const isr = this.config.idleSessionReview;
+    const threshold = isr?.thresholdMinutes;
+    return {
+      enabled: isr?.enabled ?? IDLE_SESSION_REVIEW_DEFAULTS.enabled,
+      thresholdMinutes:
+        typeof threshold === 'number' && threshold > 0
+          ? threshold
+          : IDLE_SESSION_REVIEW_DEFAULTS.thresholdMinutes,
     };
   }
 
