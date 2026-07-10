@@ -100,18 +100,31 @@ export interface ProgrammaticRunHostArgs {
    */
   recordStepResult?: (runId: string, report: StepReport) => void;
   /**
-   * Optional fan-out lane driver (sprint-lane backed). Exposed verbatim on the
-   * host's `fanOut` getter so the WorkflowController can resolve a step's item set
-   * + drive a lane per item. Present ONLY for a seeded sprint-style run (a
-   * non-empty `batch_id`); absent ⇒ `host.fanOut` is undefined ⇒ the controller
-   * never fans out (a `fanOut` step runs as a normal single agent step).
+   * Fan-out lane driver PROVIDER (sprint-lane backed). Consulted by the host's
+   * `fanOut` getter EVERY time the controller reads it — NOT captured once at
+   * construction — because `ship` stamps `workflow_runs.batch_id` MID-RUN (the
+   * materialize-batch step's `cyboflow_create_sprint_batch` MCP tool), strictly
+   * AFTER this host is built and BEFORE the run's execute-tasks fanOut step is
+   * reached. A one-shot field would forever see "no batch" for that walk and the
+   * fanOut step would silently degrade to a single agent step. The provider is
+   * expected to memoize its own successful resolution (batch_id only ever
+   * transitions null → non-null, never un-stamped) — DefaultProgrammaticRunner's
+   * does — so a settled driver is a cheap in-memory return on later consults, not
+   * a repeat DB read. Absent ⇒ `host.fanOut` is always undefined ⇒ the controller
+   * never fans out (a `fanOut` step runs as a normal single agent step — the
+   * behavior of every host built without one, e.g. most existing tests).
    */
-  fanOutDriver?: FanOutDriver;
+  fanOutDriverProvider?: () => FanOutDriver | undefined;
   /**
    * Optional visual merge-gate (programmatic actuation). Exposed verbatim on the
    * host's `visualGate` getter so the controller can park + await the async verdict
-   * after a lane's visual-verify step. Present ONLY for a sprint-style run; absent ⇒
-   * `host.visualGate` is undefined ⇒ the controller never parks (byte-identical).
+   * after a lane's visual-verify step. Attached whenever the caller wires one —
+   * NOT gated on a fan-out driver existing (which, under lazy resolution above,
+   * this host cannot know at construction time). It is otherwise inert: the
+   * controller only ever consults `visualGate` from inside `runFanOut`, which
+   * itself only runs once `host.fanOut` has resolved non-undefined, so wiring it
+   * unconditionally strands nothing. Absent ⇒ `host.visualGate` is undefined ⇒
+   * the controller never parks (byte-identical).
    */
   visualGate?: VisualVerifyGate;
   logger?: LoggerLike;
@@ -279,13 +292,15 @@ export class ProgrammaticRunHost implements ControllerHost {
   }
 
   /**
-   * Fan-out lane driver (sprint-lane backed). Wired only for seeded sprint-style
-   * runs; `ControllerHost.fanOut` is optional so an absent driver (undefined) is a
-   * valid "never fans out" host — the controller treats a `fanOut` step as a normal
-   * single agent step.
+   * Fan-out lane driver (sprint-lane backed) — resolved LIVE on every read via the
+   * injected provider (see `ProgrammaticRunHostArgs.fanOutDriverProvider`), not
+   * captured once. `ControllerHost.fanOut` is optional so a provider-less host (or
+   * one whose provider still returns undefined, e.g. batch_id not yet stamped) is
+   * a valid "never fans out (yet)" host — the controller treats a `fanOut` step as
+   * a normal single agent step until a driver becomes available.
    */
   get fanOut(): FanOutDriver | undefined {
-    return this.args.fanOutDriver;
+    return this.args.fanOutDriverProvider?.();
   }
 
   /**

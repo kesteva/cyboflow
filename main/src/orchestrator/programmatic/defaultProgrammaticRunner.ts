@@ -87,14 +87,35 @@ export interface DefaultProgrammaticRunnerDeps {
    */
   stepResultRecorder?: (runId: string, report: StepReport) => void;
   /**
-   * Fan-out lane substrate (optional). Called once per run to build a per-run
-   * `FanOutDriver` bound to the run's `batch_id` (sprint-lane backed in
-   * production). The runner only invokes it when `ctx.run.batch_id` is a non-empty
-   * string (the run is a seeded sprint); otherwise the host receives no driver and
-   * the controller never fans out (byte-identical to today). A factory that itself
-   * returns undefined (e.g. no batch) likewise yields no host-driven fan-out.
+   * Fan-out lane substrate (optional). Builds a per-run `FanOutDriver` bound to a
+   * batch_id (sprint-lane backed in production). Invoked LAZILY — by the host's
+   * `fanOut` provider, at the moment the controller first consults `host.fanOut`
+   * with a non-empty batchId in hand — NOT once at run start (see
+   * `readRunBatchId` below for why a one-shot call is unsafe for `ship`). Never
+   * invoked at all when the run never resolves a batchId (byte-identical to
+   * today for a plain orchestrated/non-sprint run). A factory that itself returns
+   * undefined (e.g. no batch) likewise yields no host-driven fan-out.
    */
   fanOutDriverFactory?: (ctx: { runId: string; batchId: string | null }) => FanOutDriver | undefined;
+  /**
+   * LIVE `workflow_runs.batch_id` reader (generalize-parallel-fan-out follow-up —
+   * fixes a confirmed silent no-op). `ctx.run.batch_id` is a SNAPSHOT taken once
+   * when RunExecutor read the run row at the top of `execute()`. `ship`'s
+   * materialize-batch step stamps `batch_id` MID-RUN (via the
+   * `cyboflow_create_sprint_batch` MCP tool's `UPDATE workflow_runs SET batch_id=...
+   * WHERE id=? AND batch_id IS NULL`, main/src/orchestrator/mcpServer/
+   * mcpQueryHandler.ts), strictly AFTER this run() snapshots `ctx.run.batch_id` and
+   * BEFORE the SAME walk reaches execute-tasks — so the snapshot never observes
+   * the stamp and the fanOut step silently degrades to a single agent step. The
+   * fan-out driver provider built below calls this fresh on every consult until a
+   * driver is successfully resolved (then memoizes — batch_id only ever
+   * transitions null → non-null, never un-stamped, so no more reads are needed).
+   * Absent ⇒ the provider falls back to the one-shot `ctx.run.batch_id` snapshot
+   * (today's behavior — byte-identical for `sprint`, which stamps batch_id at
+   * LAUNCH before this run() is ever called, and for any test host that does not
+   * care about a mid-run stamp).
+   */
+  readRunBatchId?: (runId: string) => string | null;
   /**
    * Visual merge-gate resolver (programmatic actuation). A single stateless
    * instance (it resolves run/lane state per call) threaded onto the host so the
@@ -184,13 +205,20 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       MonitorRegistry.getInstance().register(ctx.runId, monitor);
     }
 
-    // Host-driven fan-out (programmatic plane): build a per-run lane driver ONLY
-    // when the run is a seeded sprint (a non-empty `batch_id`, resolved above).
-    // Absent driver ⇒ host.fanOut is undefined ⇒ the controller never fans out —
-    // byte-identical to today for every non-sprint run.
-    const fanOutDriver = batchId
-      ? this.deps.fanOutDriverFactory?.({ runId: ctx.runId, batchId })
-      : undefined;
+    // Host-driven fan-out (programmatic plane): resolve the per-run lane driver
+    // LAZILY via a provider, not once here — see `readRunBatchId`'s docblock for
+    // why a one-shot resolution silently drops `ship`'s mid-run batch_id stamp.
+    // `resolvedFanOutDriver` memoizes the first successful build so a settled
+    // driver is a cheap in-memory return on every later consult instead of a
+    // repeat DB read + factory call.
+    let resolvedFanOutDriver: FanOutDriver | undefined;
+    const fanOutDriverProvider = (): FanOutDriver | undefined => {
+      if (resolvedFanOutDriver) return resolvedFanOutDriver;
+      const liveBatchId = this.deps.readRunBatchId ? this.deps.readRunBatchId(ctx.runId) : batchId;
+      if (!liveBatchId) return undefined;
+      resolvedFanOutDriver = this.deps.fanOutDriverFactory?.({ runId: ctx.runId, batchId: liveBatchId });
+      return resolvedFanOutDriver;
+    };
 
     const host = new ProgrammaticRunHost({
       runId: ctx.runId,
@@ -202,11 +230,13 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       ...(monitor ? { monitor } : {}),
       injectEvent: ctx.injectEvent,
       ...(this.deps.stepResultRecorder ? { recordStepResult: this.deps.stepResultRecorder } : {}),
-      ...(fanOutDriver ? { fanOutDriver } : {}),
-      // The visual merge-gate is wired only alongside a fan-out driver (a sprint
-      // run) — without lanes there is nothing to park. It is otherwise inert (the
-      // controller consults it only on a visual-verify inner step when active).
-      ...(fanOutDriver && this.deps.visualGate ? { visualGate: this.deps.visualGate } : {}),
+      fanOutDriverProvider,
+      // The visual merge-gate is inert until a fan-out step actually runs (which
+      // itself requires the provider above to have resolved a driver), so it is
+      // wired unconditionally rather than gated on a driver existing AT
+      // CONSTRUCTION TIME — under lazy resolution that may not happen until well
+      // into the walk (see ProgrammaticRunHostArgs.visualGate's docblock).
+      ...(this.deps.visualGate ? { visualGate: this.deps.visualGate } : {}),
       logger: this.deps.logger,
     });
 

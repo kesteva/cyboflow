@@ -735,13 +735,15 @@ describe('WorkflowController', () => {
       return host;
     }
 
-    const fanStep = (id: string, innerIds: string[]): WorkflowStep =>
+    /** `maxConcurrency` is optional (mirrors FanOutSpec) — absent ⇒ the default cap. */
+    const fanStep = (id: string, innerIds: string[], maxConcurrency?: number): WorkflowStep =>
       step({
         id,
         agent: 'orchestrate',
         fanOut: {
           over: 'tasks',
           inner: innerIds.map((iid) => ({ id: iid, agent: iid })),
+          ...(maxConcurrency !== undefined ? { maxConcurrency } : {}),
         },
       });
 
@@ -843,10 +845,10 @@ describe('WorkflowController', () => {
       expect(driver.lanes.some((l) => l.status === 'integrated')).toBe(false);
     });
 
-    it('respects the SPRINT_BATCH_CAP concurrency cap (items run in waves)', async () => {
+    it('respects the SPRINT_BATCH_CAP DEFAULT concurrency cap when the step declares no maxConcurrency (items run in waves)', async () => {
       // More items than the cap → at most SPRINT_BATCH_CAP run concurrently.
       const items = Array.from({ length: SPRINT_BATCH_CAP + 3 }, (_, k) => `t${k}`);
-      const d = def([phase('p1', [fanStep('execute', ['implement'])])]);
+      const d = def([phase('p1', [fanStep('execute', ['implement'])])]); // no maxConcurrency ⇒ default
       const driver = makeFanOutDriver(items);
 
       let inFlight = 0;
@@ -869,6 +871,69 @@ describe('WorkflowController', () => {
       // Every item integrated.
       const integrated = driver.lanes.filter((l) => l.status === 'integrated').map((l) => l.itemId);
       expect(new Set(integrated)).toEqual(new Set(items));
+    });
+
+    it('respects a per-step fanOut.maxConcurrency override (e.g. 2) instead of the SPRINT_BATCH_CAP default', async () => {
+      // More items than the declared cap → at most 2 run concurrently, even though
+      // SPRINT_BATCH_CAP (5) would otherwise allow more.
+      const items = Array.from({ length: 5 }, (_, k) => `t${k}`);
+      const d = def([phase('p1', [fanStep('execute', ['implement'], 2)])]);
+      const driver = makeFanOutDriver(items);
+
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const runner: StepRunner = {
+        async runStep() {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((res) => setTimeout(res, 1));
+          inFlight -= 1;
+          return { status: 'ok' };
+        },
+      };
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(maxInFlight).toBeLessThanOrEqual(2);
+      // Sanity: it actually raced at least 2 concurrently (not accidentally serial).
+      expect(maxInFlight).toBeGreaterThan(1);
+      const integrated = driver.lanes.filter((l) => l.status === 'integrated').map((l) => l.itemId);
+      expect(new Set(integrated)).toEqual(new Set(items));
+    });
+
+    it("drives lanes fully serially when fanOut.maxConcurrency is 1 — one item's WHOLE inner chain completes before the next item starts", async () => {
+      const d = def([phase('p1', [fanStep('execute', ['implement', 'verify'], 1)])]);
+      const items = ['t0', 't1', 't2'];
+      const driver = makeFanOutDriver(items);
+
+      let inFlight = 0;
+      let maxInFlight = 0;
+      const seen: Array<{ itemId?: string; stepId: string }> = [];
+      const runner: StepRunner = {
+        async runStep(s, ctx) {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          seen.push({ itemId: ctx.item?.id, stepId: s.id });
+          // Yield so a bugged concurrent dispatch would have a chance to overlap —
+          // a passing maxInFlight === 1 here is a real serialization guarantee,
+          // not an artifact of everything resolving synchronously.
+          await new Promise((res) => setTimeout(res, 1));
+          inFlight -= 1;
+          return { status: 'ok' };
+        },
+      };
+
+      const result = await new WorkflowController(runner, makeFanHost(driver)).run('r', d);
+
+      expect(result.outcome).toBe('completed');
+      expect(maxInFlight).toBe(1);
+      // The recorded (item, step) order is grouped by item — t0's full 2-step
+      // inner chain finishes before t1's FIRST step starts, and likewise for t2.
+      expect(seen.map((s) => s.itemId)).toEqual(['t0', 't0', 't1', 't1', 't2', 't2']);
+      expect(seen.map((s) => s.stepId)).toEqual([
+        'implement', 'verify', 'implement', 'verify', 'implement', 'verify',
+      ]);
     });
 
     it('marks a lane failed on a required inner-step failure while siblings integrate', async () => {

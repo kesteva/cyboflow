@@ -86,6 +86,36 @@ function fanOutDef(): WorkflowDefinition {
     ],
   };
 }
+/**
+ * A def shaped like `ship`: a plain step BEFORE a fanOut step. Used to simulate
+ * the materialize-batch step's mid-run `batch_id` stamp — the plain step's agent
+ * turn flips a fake `readRunBatchId`'s return value, mirroring
+ * `cyboflow_create_sprint_batch`'s `UPDATE workflow_runs SET batch_id=...` — and
+ * the LATER fanOut step ('execute-tasks') must observe the live stamp.
+ */
+function shipShapedDef(): WorkflowDefinition {
+  return {
+    id: 'd',
+    phases: [
+      {
+        id: 'p',
+        label: 'P',
+        color: '#3b6dd6',
+        steps: [
+          { id: 'materialize-batch', name: 'Materialize', agent: 'executor', mcps: [], retries: 0 },
+          {
+            id: 'execute-tasks',
+            name: 'Execute',
+            agent: 'executor',
+            mcps: [],
+            retries: 0,
+            fanOut: { over: 'tasks', inner: [{ id: 'impl', agent: 'executor', name: 'Impl' }] },
+          },
+        ],
+      },
+    ],
+  };
+}
 
 describe('DefaultProgrammaticRunner', () => {
   afterEach(() => {
@@ -204,6 +234,13 @@ describe('DefaultProgrammaticRunner', () => {
   });
 
   // ── Fan-out driver wiring (generalize-parallel-fan-out, commit #5) ──────────
+  // Live-resolution follow-up (fixes a confirmed `ship` silent no-op): the driver
+  // is now built LAZILY — by a provider the host consults on every `host.fanOut`
+  // read — instead of once at construction from a `ctx.run.batch_id` snapshot, so
+  // a `batch_id` stamped MID-WALK (ship's materialize-batch step) is honored by
+  // the SAME walk. `readRunBatchId` absent ⇒ the provider falls back to the
+  // one-shot `ctx.run.batch_id` snapshot (today's pre-fix behavior), which is why
+  // most of these cases below still work without wiring it explicitly.
   it('builds a fan-out driver from the factory for a run WITH a batch_id and threads it into the host', async () => {
     // A spy driver: resolveItems returns one item so the controller actually fans
     // out, proving the built driver reached the host (host.fanOut !== undefined).
@@ -224,8 +261,9 @@ describe('DefaultProgrammaticRunner', () => {
 
     await expect(runner.run(ctxFor(fanOutDef(), { batchId: 'batch-9' }))).resolves.toBeUndefined();
 
-    // The factory was invoked once with the run's batchId (built ONLY because the
-    // run carries a non-empty batch_id).
+    // The factory was invoked once with the run's batchId — memoized after the
+    // FIRST successful resolution, so the second `host.fanOut` read inside
+    // runFanOut (the driver assignment) does not re-invoke it.
     expect(fanOutDriverFactory).toHaveBeenCalledTimes(1);
     expect(fanOutDriverFactory).toHaveBeenCalledWith({ runId: 'run-1', batchId: 'batch-9' });
     // And the built driver was threaded into the host: the controller resolved the
@@ -246,7 +284,8 @@ describe('DefaultProgrammaticRunner', () => {
       fanOutDriverFactory,
     });
 
-    // The run has no batch_id ⇒ the factory is never invoked ⇒ host.fanOut is
+    // The run has no batch_id AND it is never stamped mid-walk (single-step def,
+    // no readRunBatchId wired) ⇒ the factory is never invoked ⇒ host.fanOut stays
     // undefined ⇒ the fanOut step runs as a normal single agent step.
     await expect(runner.run(ctxFor(fanOutDef(), { batchId: null }))).resolves.toBeUndefined();
     expect(fanOutDriverFactory).not.toHaveBeenCalled();
@@ -265,6 +304,97 @@ describe('DefaultProgrammaticRunner', () => {
 
     await expect(runner.run(ctxFor(oneStepDef()))).resolves.toBeUndefined();
     expect(fanOutDriverFactory).not.toHaveBeenCalled();
+  });
+
+  it('does NOT call the factory when readRunBatchId is live-wired but the run never stamps a batch_id', async () => {
+    // readRunBatchId is consulted (it is wired) but keeps returning null for the
+    // whole walk — never called ⇒ the provider never has a batchId to build from.
+    const readRunBatchId = vi.fn((): string | null => null);
+    const fanOutDriverFactory = vi.fn<(ctx: { runId: string; batchId: string | null }) => FanOutDriver | undefined>(
+      () => ({ resolveItems: vi.fn(() => ['x']), driveLane: vi.fn() }),
+    );
+
+    const runner = new DefaultProgrammaticRunner({
+      spawner: makeSpawner(),
+      reporter,
+      gate: gateOf('approve'),
+      fanOutDriverFactory,
+      readRunBatchId,
+    });
+
+    await expect(runner.run(ctxFor(fanOutDef(), { batchId: null }))).resolves.toBeUndefined();
+
+    expect(readRunBatchId).toHaveBeenCalled();
+    expect(fanOutDriverFactory).not.toHaveBeenCalled();
+  });
+
+  it('memoizes the resolved fan-out driver — readRunBatchId is not re-read once a driver exists', async () => {
+    const readRunBatchId = vi.fn((): string | null => 'batch-9');
+    const driver: FanOutDriver = { resolveItems: vi.fn(() => ['task-1']), driveLane: vi.fn() };
+    const fanOutDriverFactory = vi.fn<(ctx: { runId: string; batchId: string | null }) => FanOutDriver | undefined>(
+      () => driver,
+    );
+
+    const runner = new DefaultProgrammaticRunner({
+      spawner: makeSpawner(),
+      reporter,
+      gate: gateOf('approve'),
+      fanOutDriverFactory,
+      readRunBatchId,
+    });
+
+    await expect(runner.run(ctxFor(fanOutDef(), { batchId: null }))).resolves.toBeUndefined();
+
+    // The controller reads `host.fanOut` TWICE for one fanOut-step visit (the
+    // presence check at the loop head, then the driver read inside runFanOut).
+    // Memoization means only the FIRST of those two triggers a live DB read +
+    // factory build; the second is a cheap in-memory return.
+    expect(readRunBatchId).toHaveBeenCalledTimes(1);
+    expect(fanOutDriverFactory).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves a LIVE fan-out driver mid-walk when batch_id is stamped after run start (the ship regression)', async () => {
+    // Simulates `ship`: batch_id starts null (no seeded sprint at run start) and
+    // is stamped by an EARLIER step's agent turn (materialize-batch, standing in
+    // for the cyboflow_create_sprint_batch MCP tool's mid-run UPDATE) BEFORE the
+    // LATER fanOut step (execute-tasks) is reached — all within the SAME walk.
+    let liveBatchId: string | null = null;
+    const readRunBatchId = vi.fn((runId: string): string | null => {
+      expect(runId).toBe('run-1');
+      return liveBatchId;
+    });
+    const driver: FanOutDriver = {
+      resolveItems: vi.fn(() => ['task-1']),
+      driveLane: vi.fn(),
+    };
+    const fanOutDriverFactory = vi.fn<(ctx: { runId: string; batchId: string | null }) => FanOutDriver | undefined>(
+      () => driver,
+    );
+    // The 'materialize-batch' step's agent turn stamps batch_id, mirroring the
+    // MCP tool's mid-run UPDATE; every OTHER step (including the fanOut step's own
+    // inner spawn) is a no-op.
+    const spawner = makeSpawner(async () => {
+      liveBatchId = 'batch-ship';
+    });
+
+    const runner = new DefaultProgrammaticRunner({
+      spawner,
+      reporter,
+      gate: gateOf('approve'),
+      fanOutDriverFactory,
+      readRunBatchId,
+    });
+
+    // ctx.run.batch_id is null — the run-start snapshot RunExecutor took BEFORE
+    // materialize-batch ran — proving the driver came from the LIVE re-read, not
+    // a stale snapshot (a one-shot resolution would see null forever and the
+    // fanOut step would silently degrade to a single agent step).
+    await expect(runner.run(ctxFor(shipShapedDef(), { batchId: null }))).resolves.toBeUndefined();
+
+    expect(fanOutDriverFactory).toHaveBeenCalledTimes(1);
+    expect(fanOutDriverFactory).toHaveBeenCalledWith({ runId: 'run-1', batchId: 'batch-ship' });
+    expect(driver.resolveItems).toHaveBeenCalledWith('run-1', 'tasks');
+    expect(driver.driveLane).toHaveBeenCalled();
   });
 
   // ── Systemic-pause gate wiring (the 2026-07-06 planner-incident fix) ────────

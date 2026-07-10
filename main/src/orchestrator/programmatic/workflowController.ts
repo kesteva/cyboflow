@@ -24,9 +24,9 @@
  * Standalone-typecheck invariant: shared types + sibling protocol types only.
  */
 import type { WorkflowDefinition, WorkflowStep } from '../../../../shared/types/workflows';
+import { effectiveMaxConcurrency } from '../../../../shared/types/workflows';
 import { HUMAN_GATE_AGENT } from '../../../../shared/types/agentIdentity';
 import {
-  SPRINT_BATCH_CAP,
   AWAITING_VERIFY_STEP,
   SPRINT_IMPLEMENT_STEP,
   SPRINT_VISUAL_VERIFY_STEP,
@@ -549,8 +549,11 @@ export class WorkflowController {
    * step's inner chain, with bounded parallelism. Each item's lane goes
    * `running` (at the first inner step) → one `currentStepId` update per inner
    * step → `integrated` (all inner steps succeeded) or `failed` (a required inner
-   * step failed). Items run in WAVES of at most `SPRINT_BATCH_CAP` via
-   * `Promise.all`; the abort signal is checked between waves AND per inner step,
+   * step failed). Items run in WAVES of at most `effectiveMaxConcurrency(fanOut)`
+   * (the step's declared `maxConcurrency`, else SPRINT_BATCH_CAP — see
+   * shared/types/workflows.ts) via `Promise.all`; a cap of 1 naturally serializes,
+   * since the wave loop re-evaluates readiness after each wave settles. The abort
+   * signal is checked between waves AND per inner step,
    * so a canceled run returns a terminal 'canceled' promptly. Lane writes go
    * through the injected fail-soft `host.fanOut.driveLane` (never throws); the
    * controller itself performs NO DB/IPC.
@@ -854,8 +857,13 @@ export class WorkflowController {
       }
 
       // Dispatch ONE cap-sized wave of ready tasks concurrently, then re-evaluate
-      // (tasks unblocked by this wave's integrations join the next wave).
-      const wave = ready.slice(0, SPRINT_BATCH_CAP);
+      // (tasks unblocked by this wave's integrations join the next wave). The cap
+      // is PER-STEP (effectiveMaxConcurrency honors `fanOut.maxConcurrency` when
+      // the step declares one, else the SPRINT_BATCH_CAP default) — a cap of 1
+      // naturally serializes items one at a time since readiness is re-evaluated
+      // after each wave settles, so no structural change is needed for the
+      // serial case.
+      const wave = ready.slice(0, effectiveMaxConcurrency(fanOut));
       const outcomes = await Promise.all(wave.map((itemId) => driveItem(itemId)));
       if (outcomes.includes('aborted') || signal?.aborted) return { terminal: true, incompleteCount };
       // Settle each lane. A 'systemic' lane is NEITHER integrated NOR failed: it

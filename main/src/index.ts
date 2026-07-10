@@ -1671,6 +1671,15 @@ async function initializeServices() {
         },
       };
     },
+    // Live batch_id reader (generalize-parallel-fan-out follow-up): backs the
+    // fan-out driver provider's mid-walk re-read so `ship`'s materialize-batch
+    // step (which UPDATEs workflow_runs.batch_id strictly AFTER this run's
+    // ProgrammaticRunContext is built) is honored on the SAME walk instead of a
+    // permanently-null one-shot snapshot silently degrading execute-tasks to a
+    // single agent step. Reuses the SAME WorkflowRegistry row reader RunExecutor
+    // itself uses to snapshot ctx.run at the top of execute() — just re-invoked
+    // live rather than once.
+    readRunBatchId: (runId) => workflowRegistry.getRunById(runId)?.batch_id ?? null,
     // Sprint task-scope provider (grounding fix, 2026-06-22): resolve the
     // `# Sprint tasks` block body for a sprint run's batch so the programmatic step
     // prompts carry the real task set (reuses the SAME buildSeedTasksBlock helper +

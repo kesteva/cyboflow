@@ -201,22 +201,37 @@ describe('ProgrammaticRunHost', () => {
     expect(() => none.recordStepResult({ stepId: 'a', phaseId: 'p', outcome: 'done', attempts: 1 })).not.toThrow();
   });
 
-  // ── Fan-out lane driver (generalize-parallel-fan-out) ───────────────────────
-  it('exposes the injected fan-out driver on host.fanOut', () => {
+  // ── Fan-out lane driver (generalize-parallel-fan-out; LIVE resolution) ──────
+  it('exposes the provider-resolved fan-out driver on host.fanOut, consulting the provider on EVERY read', () => {
     const fanOutDriver: FanOutDriver = {
       resolveItems: vi.fn(() => ['t1', 't2']),
       driveLane: vi.fn(),
     };
-    const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), fanOutDriver });
+    const fanOutDriverProvider = vi.fn(() => fanOutDriver);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), fanOutDriverProvider,
+    });
 
     expect(host.fanOut).toBe(fanOutDriver);
     // And it is callable through the host (the controller resolves items via it).
     expect(host.fanOut?.resolveItems('r', 'tasks')).toEqual(['t1', 't2']);
+    // The getter is a live pass-through — NOT cached by the host itself (any
+    // memoization is the provider's own responsibility, per its docblock).
+    expect(fanOutDriverProvider).toHaveBeenCalledTimes(2);
   });
 
-  it('host.fanOut is undefined when no driver is injected (the controller never fans out)', () => {
+  it('host.fanOut is undefined when no provider is injected (the controller never fans out)', () => {
     const host = new ProgrammaticRunHost({ runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve') });
     expect(host.fanOut).toBeUndefined();
+  });
+
+  it('host.fanOut is undefined when the provider itself has not yet resolved a driver (e.g. batch_id not stamped)', () => {
+    const fanOutDriverProvider = vi.fn(() => undefined);
+    const host = new ProgrammaticRunHost({
+      runId: 'r', projectId: 1, reporter: makeReporter(), gate: makeGate('approve'), fanOutDriverProvider,
+    });
+    expect(host.fanOut).toBeUndefined();
+    expect(fanOutDriverProvider).toHaveBeenCalledTimes(1);
   });
 
   // ── Systemic-pause seam (the 2026-07-06 planner-incident fix) ────────────────
