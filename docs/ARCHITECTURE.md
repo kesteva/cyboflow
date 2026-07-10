@@ -642,15 +642,23 @@ actually merges — see `recomputeTaskExecutionStage` / `recomputeEpicStage` in 
 
 A multi-task **sprint** is ONE session-hosted `sprint` run seeded with N task ids: the
 launcher creates a `sprint_batches` row plus one **lane** per task in `sprint_batch_tasks`
-and stamps `workflow_runs.batch_id`. The orchestrator agent fans out per-task subagents in
-the shared session worktree (max 5 concurrent) and reports per-task progress
-(status + `current_step_id`) through the `cyboflow_update_sprint_task` MCP tool. These are
-NOT entity-model tables — they have their own single write chokepoint, **`SprintLaneStore`**
-(`main/src/orchestrator/sprintLaneStore.ts`), and never route through `TaskChangeRouter`
-(board-stage derivation of the underlying tasks still does). Lane status `'integrated'`
-means "task complete + committed in the session worktree"; the session Merge close-out moves
-integrated lanes' tasks to Done and marks the batch terminal. See
-`docs/parallel-sprint-design.md` for the full architecture.
+and stamps `workflow_runs.batch_id`. Stage parallelism is now **spec-derived** on BOTH
+planes: `WORKFLOW_DEFINITIONS.sprint`'s (and `.ship`'s) `execute-tasks` step declares a
+`step.fanOut` (`over: 'tasks'`, a 5-step `inner` chain, optional `maxConcurrency` — absent ⇒
+`SPRINT_BATCH_CAP` = 5, `1` ⇒ serial; see `shared/types/workflows.ts` `FanOutSpec`). The
+orchestrated plane (today's default) receives a runtime-generated instruction block derived
+from that spec (`main/src/orchestrator/prompts/fan-out-instructions.ts`) telling the
+orchestrator agent how to fan out per-task subagents and drive lanes itself in the shared
+session worktree, reporting per-task progress (status + `current_step_id`) through the
+`cyboflow_update_sprint_task` MCP tool; the programmatic plane's `FanOutDriver` walks the
+same spec mechanically. Neither plane hardcodes the concurrency cap or the chain shape in
+prose anymore — the workflow editor's fan-out toggle + concurrency control is the single
+place that changes it. These lane tables are NOT entity-model tables — they have their own
+single write chokepoint, **`SprintLaneStore`** (`main/src/orchestrator/sprintLaneStore.ts`),
+and never route through `TaskChangeRouter` (board-stage derivation of the underlying tasks
+still does). Lane status `'integrated'` means "task complete + committed in the session
+worktree"; the session Merge close-out moves integrated lanes' tasks to Done and marks the
+batch terminal. See `docs/parallel-sprint-design.md` for the full architecture.
 
 #### Workflow A/B testing — variants, experiments, pairwise grading (migrations 048–050)
 

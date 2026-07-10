@@ -1,5 +1,15 @@
 # Parallel Step UI Treatment Proposal
 
+> **SUPERSEDED.** This proposal's two core assumptions — "orchestrated runs
+> ignore `step.fanOut`" and "concurrency is shown as the fixed system cap, not
+> an editable value" — were overturned by the fanOut consolidation: `fanOut`
+> (plus the new `maxConcurrency` field) is now the single source of truth for
+> stage parallelism on BOTH the programmatic and orchestrated planes. See
+> `shared/types/workflows.ts` (`FanOutSpec`, `effectiveMaxConcurrency`) for the
+> current contract. Left below for historical context; do not treat the
+> "programmatic/batch-only" framing or the read-only-concurrency framing as
+> current.
+
 > Draft for review. This revision incorporates Claude review feedback: the UI
 > must reflect the real `WorkflowStep.fanOut` contract, not the prototype's
 > fictional stage-level/full-step model.

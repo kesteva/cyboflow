@@ -9,7 +9,8 @@
  *  - createCustom → is_custom=1, base_agent_key NULL, name 'cyboflow-<key>'.
  *  - createCustom with a builtin key → reserved_key.
  *  - duplicate createCustom → duplicate_key.
- *  - deleteCustom of a workflow-referenced key → conflict listing workflow names.
+ *  - deleteCustom of a workflow-referenced key → conflict listing workflow names
+ *    (direct step.agent binding AND fan-out inner-chain-only binding).
  *  - reset of a custom / deleteCustom of a builtin → error.
  *  - BLOCKER guard: an upsert writes ZERO entity_events rows (the CHECK forbids an
  *    'agent_override' entity_type and would abort the txn).
@@ -103,6 +104,44 @@ function seedWorkflowReferencing(db: Database.Database, name: string, agentKey: 
         label: 'Phase 1',
         color: '#3b6dd6',
         steps: [{ id: 's1', name: 'Step 1', agent: agentKey, mcps: [], retries: 0 }],
+      },
+    ],
+  };
+  db.prepare(
+    `INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, ?)`,
+  ).run(`wf-${name}`, name, JSON.stringify(spec));
+}
+
+/**
+ * Seed a workflow whose ONLY reference to `agentKey` is a fan-out inner step —
+ * the outer step's own `agent` is a different key, mirroring sprint/ship's
+ * execute-tasks step (agent: 'implement', inner chain fans out to several
+ * other agents). Exercises the referential guard's fanOut.inner walk.
+ */
+function seedWorkflowReferencingViaFanOut(db: Database.Database, name: string, agentKey: string): void {
+  const spec = {
+    id: name,
+    phases: [
+      {
+        id: 'p1',
+        label: 'Phase 1',
+        color: '#3b6dd6',
+        steps: [
+          {
+            id: 'execute-tasks',
+            name: 'Execute tasks',
+            agent: 'implement',
+            mcps: [],
+            retries: 0,
+            fanOut: {
+              over: 'tasks',
+              inner: [
+                { id: 'implement', agent: 'implement' },
+                { id: 'review', agent: agentKey },
+              ],
+            },
+          },
+        ],
       },
     ],
   };
@@ -520,6 +559,35 @@ describe('AgentOverrideRouter (agent_overrides chokepoint)', () => {
     }
     expect(caught).toBeInstanceOf(AgentOverrideError);
     expect(caught?.message).toContain('My Flow');
+    // not deleted
+    expect(router.getByKey(1, 'doc-writer')).not.toBeNull();
+  });
+
+  it('deleteCustom of a key referenced ONLY via a fan-out inner chain throws with the workflow name', async () => {
+    const db = buildDb();
+    const router = AgentOverrideRouter.initialize(dbAdapter(db));
+
+    await router.applyChange(1, {
+      op: 'createCustom',
+      name: 'Doc Writer',
+      role: null,
+      description: 'x',
+      systemPrompt: 'y',
+      tools: TOOLS,
+      enabledMcps: [],
+    });
+    // 'doc-writer' is bound only to the fanOut.inner 'review' entry — no
+    // outer step.agent in this workflow equals 'doc-writer'.
+    seedWorkflowReferencingViaFanOut(db, 'Fan Flow', 'doc-writer');
+
+    let caught: AgentOverrideError | null = null;
+    try {
+      await router.applyChange(1, { op: 'deleteCustom', agentKey: 'doc-writer' });
+    } catch (e) {
+      caught = e as AgentOverrideError;
+    }
+    expect(caught).toBeInstanceOf(AgentOverrideError);
+    expect(caught?.message).toContain('Fan Flow');
     // not deleted
     expect(router.getByKey(1, 'doc-writer')).not.toBeNull();
   });

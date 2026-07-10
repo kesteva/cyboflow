@@ -10,12 +10,14 @@
  * Locks:
  *  - list returns the 15 builtins, each source 'builtin', isOverridden:false,
  *    stats.costUsd null.
- *  - the step-BOUND set (workflowCount >= 1) is exactly
- *    context/research/ui-prototype/architecture/epics/tasks/dependency-analyzer/
- *    implement/sprint-verify/sprint-review/compounder.
- *  - the step-UNBOUND set (workflowCount 0) is exactly
- *    code-review/write-tests/task-verify/visual-verify, each with a non-empty
- *    dispatchedBy (sprint).
+ *  - EVERY canonical key is step-BOUND (workflowCount >= 1) — both planes now
+ *    honor `step.fanOut` as the single source of truth for stage parallelism
+ *    (shared/types/workflows.ts FanOutSpec), so `computeAgentUsage` counts a
+ *    fan-out inner-chain reference the same as an outer step.agent binding;
+ *    no canonical key is step-unbound anymore.
+ *  - the 5 fan-out inner-chain keys (implement/write-tests/code-review/
+ *    task-verify/visual-verify) are ALSO `dispatchedBy` both 'sprint' and
+ *    'ship' (both built-ins carry the identical execute-tasks fanOut block).
  *  - upsertOverride / resetOverride round-trip; createCustom / deleteCustom;
  *    duplicate seeds from the source.
  *  - every procedure throws PRECONDITION_FAILED when deps are unwired.
@@ -113,7 +115,7 @@ function makeWiredCaller(rawDb: Database.Database): ReturnType<typeof appRouter.
   );
 }
 
-const BOUND_KEYS = [
+const ALL_CANONICAL_KEYS = [
   'context',
   'research',
   'ui-prototype',
@@ -122,12 +124,17 @@ const BOUND_KEYS = [
   'tasks',
   'dependency-analyzer',
   'implement',
+  'code-review',
+  'write-tests',
+  'task-verify',
   'sprint-verify',
+  'visual-verify',
   'sprint-review',
   'compounder',
 ].sort();
 
-const UNBOUND_KEYS = ['code-review', 'write-tests', 'task-verify', 'visual-verify'].sort();
+/** The sprint/ship execute-tasks fanOut.inner ids — dispatched by BOTH built-ins. */
+const FAN_OUT_INNER_KEYS = ['implement', 'write-tests', 'code-review', 'task-verify', 'visual-verify'].sort();
 
 describe('cyboflow.agents.list', () => {
   beforeEach(() => AgentOverrideRouter._resetForTesting());
@@ -147,28 +154,27 @@ describe('cyboflow.agents.list', () => {
     }
   });
 
-  it('partitions usage: the bound set has workflowCount >= 1, the unbound set has 0 + non-empty dispatchedBy', async () => {
+  it('every canonical key is step-bound (workflowCount >= 1); the fan-out inner keys are also dispatchedBy sprint + ship', async () => {
     const caller = makeWiredCaller(createAgentsTestDb());
     const entries = await caller.cyboflow.agents.list({ projectId: PROJECT_ID });
     const byKey = new Map(entries.map((e) => [e.agentKey, e]));
 
+    // Both planes now honor step.fanOut as the single source of truth for
+    // stage parallelism, so computeAgentUsage's usedBy walk covers a fan-out
+    // inner-chain reference the same as an outer step.agent binding — no
+    // canonical key is step-unbound anymore.
     const bound = entries
       .filter((e) => e.usage.workflowCount >= 1)
       .map((e) => e.agentKey)
       .sort();
-    expect(bound).toEqual(BOUND_KEYS);
+    expect(bound).toEqual(ALL_CANONICAL_KEYS);
 
-    const unbound = entries
-      .filter((e) => e.usage.workflowCount === 0)
-      .map((e) => e.agentKey)
-      .sort();
-    expect(unbound).toEqual(UNBOUND_KEYS);
-
-    for (const key of UNBOUND_KEYS) {
+    // The 5 fan-out inner ids are dispatched by BOTH sprint and ship (each
+    // built-in's execute-tasks step carries the identical fanOut block).
+    for (const key of FAN_OUT_INNER_KEYS) {
       const entry = byKey.get(key);
       expect(entry, key).toBeDefined();
-      expect(entry?.usage.dispatchedBy.length, key).toBeGreaterThan(0);
-      expect(entry?.usage.dispatchedBy, key).toContain('sprint');
+      expect(entry?.usage.dispatchedBy, key).toEqual(expect.arrayContaining(['sprint', 'ship']));
     }
   });
 });

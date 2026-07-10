@@ -30,9 +30,14 @@ lane. Nothing about the flow, the data model, or the UI changes.
 Selection caps: the picker allows up to `SPRINT_BATCH_MAX_TASKS[substrate]`
 tasks (15 `sdk` / 10 `interactive` — a context/host-resource cap), enforced
 client-side in the picker AND server-side in `runs.start`. Subagent
-**concurrency** is `SPRINT_BATCH_CAP = 5`, substrate-independent, enforced by
-prose in `sprint.md` (the orchestrator agent dispatches at most 5 task chains
-at once). Both constants live in `shared/types/sprintBatch.ts`.
+**concurrency** is spec-derived and substrate-independent: the `execute-tasks`
+step's `fanOut.maxConcurrency` (`shared/types/workflows.ts` `FanOutSpec` /
+`effectiveMaxConcurrency` — absent ⇒ `SPRINT_BATCH_CAP` = 5, `1` ⇒ serial),
+honored on BOTH planes — the orchestrated agent receives a runtime-generated
+instruction block derived from the spec (`main/src/orchestrator/prompts/
+fan-out-instructions.ts`), the programmatic host walks the same spec
+mechanically. `SPRINT_BATCH_CAP` / `SPRINT_BATCH_MAX_TASKS` live in
+`shared/types/sprintBatch.ts`.
 
 ---
 
@@ -67,20 +72,27 @@ Key properties:
 
 ## 3. The `sprint` workflow definition
 
-`shared/types/workflows.ts` — 3 phases, 5 steps, **no loopback fields**
-(re-delegation to a fresh subagent is prose-driven in `sprint.md`, not
-runner-driven):
+`shared/types/workflows.ts` — 3 phases, 5 top-level steps. The `execute-tasks`
+step carries a `fanOut` block (`over: 'tasks'`) whose 5-step `inner` chain
+holds `loopback: 'implement'` on 4 of its 5 entries, encoding "on failure,
+re-delegate to implement" as DATA — consumed by the orchestrated prompt
+generator (`main/src/orchestrator/prompts/fan-out-instructions.ts`); the
+programmatic controller does not yet re-drive on it in v1:
 
 | Phase | Step | Agent | Notes |
 |---|---|---|---|
 | `plan` (Plan, `#5a4ad6`) | `analyze-dependencies` | dependency-analyzer | retries 1 |
-| `execute` (Execute, `#c96442`) | `execute-tasks` | executor | retries 3 — ONE step covering the whole fan-out; per-task progress lives in the lanes, not in step reports |
+| `execute` (Execute, `#c96442`) | `execute-tasks` | executor | retries 3 — ONE top-level step; `fanOut.inner` drives the 5-step per-task chain, per-task progress lives in the lanes, not in step reports |
 | `verify` (Sprint review, `#a87a2c`) | `sprint-verify` → `sprint-review` → `human-review` | verifier / code-reviewer / human | the single human gate (`human: true`) |
 
-The old per-task steps (`implement`, `write-tests`, `code-review`,
-`task-verify`, `visual-verify`) are no longer workflow steps — they survive as
-the **lane step vocabulary** (`SPRINT_LANE_STEP_IDS`, §5) that each lane's
-`current_step_id` walks through.
+The per-task steps (`implement`, `write-tests`, `code-review`, `task-verify`,
+`visual-verify`) are not TOP-LEVEL workflow steps, but they are no longer
+prose-only either: they ARE the `execute-tasks` step's `fanOut.inner` chain
+(`shared/types/workflows.ts` `FanOutSpec`) — by design, the same ids in the
+same order as the **lane step vocabulary** (`SPRINT_LANE_STEP_IDS`, §5) that
+each lane's `current_step_id` walks through. `ship`'s `execute-tasks` step
+carries an identical `fanOut` block (Ship's Execute phase IS the sprint
+execute phase, concatenated after planning + materialize).
 
 ## 4. The orchestrator agent (`main/src/orchestrator/workflows/sprint.md`)
 
@@ -98,17 +110,22 @@ skipped so the DAG stays acyclic).
 
 **Phase 2 — Execute.** Run the sprint as **DAG waves** over the recorded edges:
 
-- A task is READY when all its blocking prerequisites are complete; dispatch at
-  most **5** concurrently (parallel Agent tool calls in one message).
+- A task is READY when all its blocking prerequisites are complete; dispatch up
+  to the resolved fan-out concurrency cap (`effectiveMaxConcurrency` on the
+  `execute-tasks` step's `fanOut` — absent `maxConcurrency` ⇒ `SPRINT_BATCH_CAP`
+  = 5, `1` ⇒ serial) concurrently (parallel Agent tool calls in one message).
 - **File-overlap serialization:** before each wave, tasks whose expected files
   overlap are serialized into later waves — two subagents never touch the same
   file concurrently.
 - All work happens in the **shared session worktree** — no per-task branches or
   worktrees.
 - Each task runs the per-task subagent chain `implement → write-tests →
-  code-review → task-verify → visual-verify(optional)`, with prose-driven
-  loopbacks (failing tests / blocking review defects / verify FAIL re-delegate
-  to `cyboflow-implement`, up to 3 verify retries). On every implement
+  code-review → task-verify → visual-verify(optional)`, with spec-derived
+  loopbacks (`fanOut.inner[].loopback: 'implement'`, surfaced to the agent via
+  the runtime-generated fan-out instruction block —
+  `main/src/orchestrator/prompts/fan-out-instructions.ts`): failing tests /
+  blocking review defects / verify FAIL re-delegate to `cyboflow-implement`, up
+  to 3 verify retries. On every implement
   re-delegation the orchestrator includes `attempt: <n>` (2 on the first
   re-delegate, 3 on the second) in the **same** `cyboflow_update_sprint_task`
   call that moves the lane's `current_step` back to `implement` — this feeds

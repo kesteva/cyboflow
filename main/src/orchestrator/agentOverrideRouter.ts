@@ -552,7 +552,9 @@ export class AgentOverrideRouter {
 
   /**
    * Names of the project's workflows whose spec_json binds `agentKey` to any
-   * step (step.agent === agentKey). Malformed spec_json is skipped.
+   * step — either directly (`step.agent === agentKey`) or via a fan-out inner
+   * chain (`step.fanOut.inner[].agent === agentKey`; both-planes contract,
+   * shared/types/workflows.ts FanOutSpec). Malformed spec_json is skipped.
    *
    * Migration-030 note: this checks only PROJECT-SCOPED workflows
    * (`project_id = ?`); a GLOBAL custom flow (project_id NULL) binding `agentKey`
@@ -567,6 +569,10 @@ export class AgentOverrideRouter {
       .prepare('SELECT name, spec_json FROM workflows WHERE project_id = ?')
       .all(projectId) as WorkflowSpecRow[];
 
+    const stepReferencesAgent = (step: WorkflowStep): boolean =>
+      step.agent === agentKey ||
+      (step.fanOut !== undefined && step.fanOut.inner.some((inner) => inner.agent === agentKey));
+
     const names: string[] = [];
     for (const row of rows) {
       if (!row.spec_json) continue;
@@ -578,9 +584,7 @@ export class AgentOverrideRouter {
       }
       const phases = Array.isArray(spec.phases) ? spec.phases : [];
       const referenced = phases.some(
-        (phase) =>
-          Array.isArray(phase.steps) &&
-          phase.steps.some((step: WorkflowStep) => step.agent === agentKey),
+        (phase) => Array.isArray(phase.steps) && phase.steps.some(stepReferencesAgent),
       );
       if (referenced) names.push(row.name);
     }
