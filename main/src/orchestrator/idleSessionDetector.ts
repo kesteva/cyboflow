@@ -20,6 +20,7 @@
  */
 import type { DatabaseLike, LoggerLike, PreparedStatement } from './types';
 import type { ReviewItemCreate, ReviewItemTriage } from './reviewItemRouter';
+import { IDLE_REVIEW_SOURCE_PREFIX } from '../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -28,8 +29,8 @@ import type { ReviewItemCreate, ReviewItemTriage } from './reviewItemRouter';
 /** How often the detector scans for idle sessions. Matches StuckDetector. */
 const SCAN_INTERVAL_MS = 60_000; // 60 seconds
 
-/** Source-tag prefix — one pending review item per session, keyed by this. */
-const SOURCE_PREFIX = 'idle-session:';
+/** Source-tag prefix — one review item per session, keyed by this (shared with the frontend). */
+const SOURCE_PREFIX = IDLE_REVIEW_SOURCE_PREFIX;
 
 // ---------------------------------------------------------------------------
 // Dependency bag

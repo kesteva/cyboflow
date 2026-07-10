@@ -60,6 +60,15 @@ export type ReviewItemEntityType = 'idea' | 'epic' | 'task';
  */
 export type ReviewItemSource = string;
 
+/**
+ * Source-tag prefix for idle-quick-session review items (minted by
+ * IdleSessionDetector, one per session as `idle-session:<sessionId>`). Shared so
+ * the main-side detector and the frontend "Idle sessions" queue section agree on
+ * the tag. A review item whose `source` starts with this prefix is an idle-session
+ * item.
+ */
+export const IDLE_REVIEW_SOURCE_PREFIX = 'idle-session:';
+
 // ---------------------------------------------------------------------------
 // Per-kind payload union
 // ---------------------------------------------------------------------------

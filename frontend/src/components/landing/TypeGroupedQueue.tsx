@@ -9,9 +9,12 @@
  *   2. DECISION      (rust swatch)    — approve-idea / approve-plan gates from the
  *      review_items inbox (kind === 'decision'), rendered via ReviewItemCard.
  *   3. HUMAN TASK    (blue swatch)    — free-form action items (kind === 'human_task'),
- *      rendered via ReviewItemCard.
- *   4. READY TO REVIEW (green swatch) — runs drained to awaiting_review.
- *   5. NOTIFICATION  (neutral swatch) — informational FYIs (kind === 'notification');
+ *      EXCLUDING idle-session items, rendered via ReviewItemCard.
+ *   4. IDLE SESSIONS (rust swatch)    — idle-quick-session items (kind === 'human_task'
+ *      with source `idle-session:*`), split out of Human task and sorted oldest-idle
+ *      first so the longest-quiet sessions sit at the top.
+ *   5. READY TO REVIEW (green swatch) — runs drained to awaiting_review.
+ *   6. NOTIFICATION  (neutral swatch) — informational FYIs (kind === 'notification');
  *      nothing is blocked, so this group renders LAST.
  *
  * Findings are intentionally DROPPED here — the landing aggregation
@@ -28,7 +31,7 @@ import { useReviewQueueSlice } from '../../stores/reviewQueueSlice';
 import { PendingApprovalCard } from '../ReviewQueue/PendingApprovalCard';
 import { ReviewItemCard } from '../ReviewQueue/ReviewItemCard';
 import type { QueueItem } from '../../utils/reviewQueueSelectors';
-import type { ReviewItem } from '../../../../shared/types/reviews';
+import { IDLE_REVIEW_SOURCE_PREFIX, type ReviewItem } from '../../../../shared/types/reviews';
 import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
 import {
@@ -231,8 +234,20 @@ export function TypeGroupedQueue(): React.JSX.Element {
     () => reviewItems.filter((it) => it.kind === 'decision'),
     [reviewItems],
   );
+  // Idle-quick-session items (source `idle-session:<id>`) get their own section,
+  // sorted oldest-idle first (earliest created_at at the top) so the longest-quiet
+  // sessions surface at the top of the group. They are split OUT of the generic
+  // human-task bucket so a burst of idle sessions doesn't drown the real tasks.
+  const isIdleItem = (it: ReviewItem) => it.source?.startsWith(IDLE_REVIEW_SOURCE_PREFIX) ?? false;
+  const idleItems = React.useMemo(
+    () =>
+      reviewItems
+        .filter((it) => it.kind === 'human_task' && isIdleItem(it))
+        .sort((a, b) => a.created_at.localeCompare(b.created_at)),
+    [reviewItems],
+  );
   const humanTaskItems = React.useMemo(
-    () => reviewItems.filter((it) => it.kind === 'human_task'),
+    () => reviewItems.filter((it) => it.kind === 'human_task' && !isIdleItem(it)),
     [reviewItems],
   );
   const notificationItems = React.useMemo(
@@ -253,6 +268,7 @@ export function TypeGroupedQueue(): React.JSX.Element {
     permissionItems.length > 0 ||
     decisionItems.length > 0 ||
     humanTaskItems.length > 0 ||
+    idleItems.length > 0 ||
     readyToReviewRuns.length > 0 ||
     notificationItems.length > 0;
 
@@ -310,6 +326,20 @@ export function TypeGroupedQueue(): React.JSX.Element {
             descriptor="Work assigned to you"
           />
           {humanTaskItems.map((it) => (
+            <ReviewItemRow key={it.id} item={it} />
+          ))}
+        </section>
+      )}
+
+      {idleItems.length > 0 && (
+        <section data-testid="queue-group-idle">
+          <GroupHeader
+            swatchClass="bg-interactive"
+            name="Idle sessions"
+            count={idleItems.length}
+            descriptor="Quick sessions gone quiet — reopen or wrap up (oldest first)"
+          />
+          {idleItems.map((it) => (
             <ReviewItemRow key={it.id} item={it} />
           ))}
         </section>
