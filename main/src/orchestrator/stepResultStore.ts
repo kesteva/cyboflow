@@ -51,14 +51,15 @@ function reportStepIssue(r: StepResultRecord): void {
   const isFailure = r.outcome === 'failed';
   const isSkippedWithError = r.outcome === 'skipped' && !!r.error;
   if (!isFailure && !isSkippedWithError) return;
-  emitSeamError(
-    'programmatic-step-failed',
-    new Error(`programmatic step '${r.stepId}' ${r.outcome}: ${(r.error ?? '').slice(0, 500)}`),
-    {
-      stepOutcome: r.outcome,
-      errorClass: classifyErrorPattern(r.error ?? undefined),
-    },
-  );
+  // The step error text and stepId are kept OUT of the Sentry message: a step
+  // error is often tool/CLI output (source, paths) and a custom-flow stepId can be
+  // user-named — neither is sanitized by the home-path-only scrub. The bounded
+  // errorClass (derived from r.error) and stepOutcome tags carry the signal.
+  const errorClass = classifyErrorPattern(r.error ?? undefined);
+  emitSeamError('programmatic-step-failed', new Error(`programmatic step ${r.outcome} (${errorClass})`), {
+    stepOutcome: r.outcome,
+    errorClass,
+  });
 }
 
 function hasStepResultsTable(db: DatabaseLike): boolean {

@@ -1945,11 +1945,15 @@ export class VerificationScheduler {
     // valid verdicts, also not errors. Only after the guarded write won
     // (changes === 1) so a cancel-race never double-reports.
     if (status === 'failed' || status === 'timeout') {
-      emitSeamError('verify-request-failed', new Error((extra.error ?? status).slice(0, 500)), {
+      // extra.error (a capture/judge error) may include a URL or path, so it is
+      // NOT put in the exception message — only the bounded errorClass, derived
+      // from it, plus the bounded requestStatus/verifyType/backend tags.
+      const verifyErrorClass = classifyErrorPattern(extra.error);
+      emitSeamError('verify-request-failed', new Error(`verify ${status} (${verifyErrorClass})`), {
         requestStatus: status,
         verifyType: row.verify_type,
         ...(extra.backend ? { backend: extra.backend } : {}),
-        errorClass: classifyErrorPattern(extra.error),
+        errorClass: verifyErrorClass,
       });
     }
     await this.deliver(row, status, verdict, fileNames, input);

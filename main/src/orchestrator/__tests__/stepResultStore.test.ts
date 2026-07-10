@@ -64,9 +64,11 @@ describe('StepResultStore', () => {
 describe('StepResultStore seam-error telemetry (seam G)', () => {
   afterEach(() => setSeamErrorSink(undefined as never));
 
-  function withSink(): Array<{ seam: string; tags?: Record<string, string> }> {
-    const calls: Array<{ seam: string; tags?: Record<string, string> }> = [];
-    setSeamErrorSink((seam, _error, tags) => calls.push({ seam, tags }));
+  function withSink(): Array<{ seam: string; message: string; tags?: Record<string, string> }> {
+    const calls: Array<{ seam: string; message: string; tags?: Record<string, string> }> = [];
+    setSeamErrorSink((seam, error, tags) =>
+      calls.push({ seam, message: error instanceof Error ? error.message : String(error), tags }),
+    );
     return calls;
   }
 
@@ -100,5 +102,23 @@ describe('StepResultStore seam-error telemetry (seam G)', () => {
     store.record({ runId: 'r', stepId: 'b', outcome: 'canceled', attempts: 1, error: 'user canceled' });
 
     expect(calls.filter((c) => c.seam === 'programmatic-step-failed')).toHaveLength(0);
+  });
+
+  it('keeps the raw step error and stepId OUT of the Sentry message (privacy — Codex [high])', () => {
+    const calls = withSink();
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    store.record({
+      runId: 'r',
+      stepId: 'my-secret-custom-step',
+      outcome: 'failed',
+      attempts: 1,
+      error: 'Command failed: eslint /Users/me/proj/src/Secret.tsx\n<source code snippet here>',
+    });
+    const rep = calls.find((c) => c.seam === 'programmatic-step-failed');
+    expect(rep).toBeDefined();
+    expect(rep!.message).not.toContain('my-secret-custom-step');
+    expect(rep!.message).not.toContain('Secret.tsx');
+    expect(rep!.message).not.toContain('source code');
+    expect(rep!.message).toBe('programmatic step failed (other)');
   });
 });

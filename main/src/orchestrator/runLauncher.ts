@@ -656,8 +656,14 @@ export class RunLauncher {
       const errMsg = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err);
       // LAUNCH-time failure — worktree/MCP-config/spawn-setup threw before the run
       // began executing. This raw UPDATE bypasses transitionToFailed, so this is
-      // the only place the launch failure reaches error telemetry.
-      emitSeamError('run-launch-failed', err, { errorClass: classifyErrorPattern(errMsg) });
+      // the only place the launch failure reaches error telemetry. The raw err is
+      // NOT the reported exception (errMsg may embed worktree paths/output the
+      // scrub does not sanitize); the bounded errorClass carries the cause and
+      // errMsg stays in the local logger.error below.
+      const launchErrorClass = classifyErrorPattern(errMsg);
+      emitSeamError('run-launch-failed', new Error(`run launch failed (${launchErrorClass})`), {
+        errorClass: launchErrorClass,
+      });
       try {
         this.db
           .prepare(
@@ -666,9 +672,11 @@ export class RunLauncher {
           .run(errMsg, runId);
       } catch (dbErr) {
         // Double fault: the mark-as-failed write itself threw, so the run is
-        // orphaned in a non-terminal state. Report the DB error distinctly.
-        emitSeamError('run-launch-mark-failed-failed', dbErr, {
-          errorClass: classifyErrorPattern(dbErr instanceof Error ? dbErr.message : String(dbErr)),
+        // orphaned in a non-terminal state. Report the DB error distinctly — fixed
+        // message + bounded errorClass only (dbErr text stays in the local log).
+        const dbErrClass = classifyErrorPattern(dbErr instanceof Error ? dbErr.message : String(dbErr));
+        emitSeamError('run-launch-mark-failed-failed', new Error(`run launch mark-failed write failed (${dbErrClass})`), {
+          errorClass: dbErrClass,
         });
         this.logger.error('RunLauncher: failed to mark run as failed after launch error', {
           runId,

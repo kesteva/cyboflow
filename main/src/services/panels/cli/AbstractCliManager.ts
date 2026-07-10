@@ -672,10 +672,13 @@ export abstract class AbstractCliManager extends EventEmitter {
     // node-pty spawn of the interactive REPL failed after the normal + Node
     // shebang-fallback attempts (ENOENT / 'env: node:' / not recognized). This
     // PTY path is interactive-substrate only (the SDK uses query(), not a PTY).
-    captureSeamError('pty-spawn-failed', lastError, {
+    // Fixed message + bounded errorClass — errorMsg (which may include a spawn
+    // command line / paths) stays in the local logger.error above.
+    const spawnErrorClass = classifyErrorPattern(errorMsg);
+    captureSeamError('pty-spawn-failed', new Error(`pty spawn failed (${spawnErrorClass})`), {
       substrate: 'interactive',
       cliTool: this.getCliToolName(),
-      errorClass: classifyErrorPattern(errorMsg),
+      errorClass: spawnErrorClass,
     });
     throw new Error(`Failed to spawn ${this.getCliToolName()}: ${errorMsg}`);
   }

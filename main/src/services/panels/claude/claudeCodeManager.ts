@@ -1090,10 +1090,13 @@ export class ClaudeCodeManager extends AbstractCliManager {
               // Report the fatal is_error RESULT (usage limit / auth / execution
               // error surfaced by the CLI without throwing — the "false Workflow
               // complete" case). Its own seam so it groups separately from thrown
-              // SDK errors above.
-              captureSeamError('sdk-session-terminal-result', new Error(resultErr.slice(0, 1000)), {
+              // SDK errors above. resultErr is NOT put in the exception message (an
+              // execution-error result can contain tool output); the bounded
+              // errorClass carries the cause.
+              const resultErrorClass = classifyErrorPattern(resultErr);
+              captureSeamError('sdk-session-terminal-result', new Error(`sdk terminal result (${resultErrorClass})`), {
                 substrate: 'sdk',
-                errorClass: classifyErrorPattern(resultErr),
+                errorClass: resultErrorClass,
               });
             }
 
@@ -1124,13 +1127,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
         this.emit('error', { panelId: displayPanelId, sessionId, error: errMsg });
         // Report the thrown SDK error to Sentry — the ROOT cause of a failed SDK
         // session (auth / network / 'Stream closed' control-channel drop / spawn
-        // failure). errorClass groups by cause; the message is home-path redacted
-        // by the scrub. Distinct from the is_error RESULT seam below (a fatal turn
-        // the CLI reports without throwing).
-        captureSeamError('sdk-session-error', err, {
+        // failure). The raw err is NOT passed as the exception (its message could
+        // embed user/worktree content the scrub does not sanitize); errorClass —
+        // derived from errMsg but a bounded label — carries the cause. errMsg stays
+        // in the local logger.error above. Distinct from the is_error RESULT seam
+        // below (a fatal turn the CLI reports without throwing).
+        const sdkErrorClass = classifyErrorPattern(errMsg);
+        captureSeamError('sdk-session-error', new Error(`sdk session error (${sdkErrorClass})`), {
           substrate: 'sdk',
           packaged: String(Boolean(app.isPackaged)),
-          errorClass: classifyErrorPattern(errMsg),
+          errorClass: sdkErrorClass,
         });
         // A thrown SDK error (auth / network / spawn failure) is terminal too.
         terminalError = errMsg;

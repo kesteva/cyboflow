@@ -77,8 +77,15 @@ function reportRunFinalizeFailure(
       name !== undefined && (CYBOFLOW_WORKFLOW_NAMES as readonly string[]).includes(name)
         ? (name as TelemetryFlow)
         : 'custom';
-    captureSeamError('run-finalize-failed', new Error(errorMessage.slice(0, 1000)), {
-      errorClass: classifyErrorPattern(errorMessage),
+    // NEVER put the raw errorMessage in the Sentry exception message — for a
+    // programmatic run it can carry arbitrary tool/CLI output, prompts, source
+    // snippets, or repo names, and the scrub only redacts home paths. The raw text
+    // is used ONLY to derive the bounded errorClass label (and is already in local
+    // logs); the exception message is a fixed vocabulary so nothing user-derived
+    // leaves the machine.
+    const errorClass = classifyErrorPattern(errorMessage);
+    captureSeamError('run-finalize-failed', new Error(`run failed (${errorClass})`), {
+      errorClass,
       fromStatus,
       flow,
       substrate: row?.substrate ?? 'sdk',

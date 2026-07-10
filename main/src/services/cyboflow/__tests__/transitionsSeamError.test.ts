@@ -92,15 +92,21 @@ describe('transitionToFailed → captureSeamError (seam A)', () => {
     expect(JSON.stringify(tags)).not.toContain('Secret');
   });
 
-  it('bounds the reported message to 1000 chars', () => {
+  it('never puts raw error text in the Sentry message (privacy — Codex [high])', () => {
     seedWorkflow(db, 'sprint');
     seedRun(db, 'running');
-    const huge = 'x'.repeat(5000);
+    // A programmatic step failure could carry tool output, source, and paths.
+    const rawSecret = 'SENSITIVE_TOOL_OUTPUT ' + 'x'.repeat(2000) + ' /Users/me/secret-repo/src/App.tsx';
 
-    transitionToFailed(db, { runId: RUN_ID, fromStatus: 'running', errorMessage: huge });
+    transitionToFailed(db, { runId: RUN_ID, fromStatus: 'running', errorMessage: rawSecret });
 
     const [, error] = captureSeamError.mock.calls[0];
-    expect((error as Error).message.length).toBe(1000);
+    const msg = (error as Error).message;
+    expect(msg).not.toContain('SENSITIVE_TOOL_OUTPUT');
+    expect(msg).not.toContain('secret-repo');
+    expect(msg).not.toContain('App.tsx');
+    // Message is a fixed vocabulary + the bounded errorClass label only.
+    expect(msg).toBe('run failed (other)');
   });
 
   it('reports NOTHING when the transition is rejected (wrong fromStatus)', () => {

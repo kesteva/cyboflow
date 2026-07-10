@@ -172,11 +172,12 @@ export function makeSdkStructuredQuery(
           ? err.message
           : String(err);
       logger?.warn('[monitorQuery] structured query failed', { error: message });
-      emitSeamError('monitor-query-failed', new Error(message), {
+      const triageErrorClass = classifyErrorPattern(message);
+      emitSeamError('monitor-query-failed', new Error(`monitor triage query failed (${triageErrorClass})`), {
         substrate: 'sdk',
         queryKind: 'triage',
         timedOut: String(didTimeOut()),
-        errorClass: classifyErrorPattern(message),
+        errorClass: triageErrorClass,
       });
       throw new Error(message);
     } finally {
@@ -233,11 +234,12 @@ export function makeSdkTextQuery(
           ? err.message
           : String(err);
       logger?.warn('[monitorQuery] text query failed', { error: message });
-      emitSeamError('monitor-query-failed', new Error(message), {
+      const answerErrorClass = classifyErrorPattern(message);
+      emitSeamError('monitor-query-failed', new Error(`monitor answer query failed (${answerErrorClass})`), {
         substrate: 'sdk',
         queryKind: 'answer',
         timedOut: String(didTimeOut()),
-        errorClass: classifyErrorPattern(message),
+        errorClass: answerErrorClass,
       });
       // Graceful degradation: if the monitor produced a partial answer before the
       // error (a turn-cap hit mid-investigation, a timeout after it spoke), surface
