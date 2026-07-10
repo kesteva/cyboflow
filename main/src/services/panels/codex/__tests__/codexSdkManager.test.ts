@@ -137,6 +137,17 @@ describe('CodexSdkManager', () => {
     }));
   });
 
+  it.each(['auto', 'dontAsk'] as const)('does not install the review hook for %s mode', (mode) => {
+    const options = buildCodexOptionsForRun('run-1', {
+      orchSocketPath: '/tmp/cyboflow-orch.sock',
+      bridgeScriptPath: '/app/cyboflowMcpServer.js',
+      codexHookScriptPath: '/app/codexPreToolUseHook.js',
+      nodeExecutablePath: '/usr/local/bin/node',
+    }, mode);
+
+    expect(options.config).not.toHaveProperty('hooks');
+  });
+
   it('starts a Codex thread with workflow options and projects assistant/result events', async () => {
     const db = createDb();
     try {

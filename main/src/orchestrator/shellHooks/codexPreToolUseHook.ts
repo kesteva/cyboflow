@@ -7,7 +7,8 @@
  * This wrapper reuses the long-lived Cyboflow approval socket flow and emits
  * Codex-shaped hook decisions:
  *
- *   allow -> { "decision": "allow" }
+ *   allow -> { "hookSpecificOutput": { "hookEventName": "PreToolUse",
+ *              "permissionDecision": "allow" } }
  *   deny  -> { "decision": "block", "reason": "..." }
  *
  * Standalone-typecheck invariant: only import node built-ins and the sibling
@@ -20,10 +21,14 @@ import {
   type ShellHookResult,
 } from './preToolUseShellHook';
 
-export interface CodexHookOutput {
-  decision: 'allow' | 'block';
-  reason?: string;
-}
+export type CodexHookOutput =
+  | {
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse';
+        permissionDecision: 'allow';
+      };
+    }
+  | { decision: 'block'; reason?: string };
 
 export interface CodexHookResult {
   output: CodexHookOutput;
@@ -36,7 +41,15 @@ const DEFAULT_BLOCK_REASON = 'Denied by Cyboflow review queue';
 export function codexHookResultFromShellResult(result: ShellHookResult): CodexHookResult {
   const hookOutput = result.output.hookSpecificOutput;
   if (hookOutput.permissionDecision === 'allow') {
-    return { output: { decision: 'allow' }, exitCode: 0 };
+    return {
+      output: {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+        },
+      },
+      exitCode: 0,
+    };
   }
 
   return {

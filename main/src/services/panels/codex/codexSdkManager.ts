@@ -25,6 +25,7 @@ import type {
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { codexPermissionFlagsForMode } from './codexPtyManager';
 import { resolveAgentModelAlias } from '../agentModelContext';
+import type { PermissionMode } from '../../../../../shared/types/workflows';
 
 interface StubCliProcess {
   process: never;
@@ -123,6 +124,7 @@ function codexThreadOptions(
 function buildCyboflowMcpCodexConfig(
   runId: string,
   runtimeConfig: CodexMcpRuntimeConfig,
+  permissionMode: PermissionMode,
 ): NonNullable<CodexOptions['config']> {
   const hookCommand = `${quoteShellArg(runtimeConfig.nodeExecutablePath)} ${quoteShellArg(runtimeConfig.codexHookScriptPath)}`;
   return {
@@ -138,21 +140,25 @@ function buildCyboflowMcpCodexConfig(
         default_tools_approval_mode: 'approve',
       },
     },
-    hooks: {
-      PreToolUse: [
-        {
-          matcher: '*',
-          hooks: [
-            {
-              type: 'command',
-              command: hookCommand,
-              timeout: 86400,
-              statusMessage: 'Checking Cyboflow permission',
-            },
-          ],
-        },
-      ],
-    },
+    ...(permissionMode === 'auto' || permissionMode === 'dontAsk'
+      ? {}
+      : {
+          hooks: {
+            PreToolUse: [
+              {
+                matcher: '*',
+                hooks: [
+                  {
+                    type: 'command',
+                    command: hookCommand,
+                    timeout: 86400,
+                    statusMessage: 'Checking Cyboflow permission',
+                  },
+                ],
+              },
+            ],
+          },
+        }),
   };
 }
 
@@ -170,9 +176,13 @@ function quoteShellArg(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-export function buildCodexOptionsForRun(runId: string, runtimeConfig: CodexMcpRuntimeConfig): CodexOptions {
+export function buildCodexOptionsForRun(
+  runId: string,
+  runtimeConfig: CodexMcpRuntimeConfig,
+  permissionMode: PermissionMode = 'default',
+): CodexOptions {
   return {
-    config: buildCyboflowMcpCodexConfig(runId, runtimeConfig),
+    config: buildCyboflowMcpCodexConfig(runId, runtimeConfig, permissionMode),
     env: buildCodexEnvironment(runId, runtimeConfig),
   };
 }
@@ -317,7 +327,9 @@ export class CodexSdkManager extends AbstractCliManager {
       this.emitProjected(router, runId, displayPanelId, options.sessionId, this.buildSessionInfo(options));
       this.emit('spawned', { panelId: displayPanelId, sessionId: options.sessionId });
 
-      const client = await this.createCodexClient(this.buildCodexOptions(runId));
+      const client = await this.createCodexClient(
+        this.buildCodexOptions(runId, options.agentPermissionMode ?? 'default'),
+      );
       const thread = options.resumeSessionId
         ? client.resumeThread(options.resumeSessionId, threadOptions)
         : client.startThread(threadOptions);
@@ -580,12 +592,12 @@ export class CodexSdkManager extends AbstractCliManager {
     };
   }
 
-  private buildCodexOptions(runId: string): CodexOptions {
+  private buildCodexOptions(runId: string, permissionMode: PermissionMode): CodexOptions {
     if (!this.cyboflowMcpRuntimeConfig) {
       throw new Error('Codex SDK manager missing Cyboflow MCP runtime config');
     }
 
-    return buildCodexOptionsForRun(runId, this.cyboflowMcpRuntimeConfig);
+    return buildCodexOptionsForRun(runId, this.cyboflowMcpRuntimeConfig, permissionMode);
   }
 
   private buildAssistantTextEvent(

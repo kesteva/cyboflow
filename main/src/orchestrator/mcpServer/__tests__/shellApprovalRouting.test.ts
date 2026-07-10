@@ -858,7 +858,7 @@ describe('preToolUseShellHook runShellHook', () => {
     expect(result.output.hookSpecificOutput.permissionDecisionReason).toBe('blocked by human');
   });
 
-  it('Codex hook wrapper maps allow to top-level decision:"allow"', async () => {
+  it('Codex hook wrapper maps allow to the supported PreToolUse allow response', async () => {
     const shellResult: ShellHookResult = {
       exitCode: 0,
       output: {
@@ -871,7 +871,12 @@ describe('preToolUseShellHook runShellHook', () => {
 
     expect(codexHookResultFromShellResult(shellResult)).toEqual({
       exitCode: 0,
-      output: { decision: 'allow' },
+      output: {
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+        },
+      },
     });
   });
 
