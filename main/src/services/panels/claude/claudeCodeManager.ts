@@ -268,6 +268,12 @@ const SDK_FIRST_EVENT_TIMEOUT_MS = 30_000;
 const SDK_WARM_SESSION_TTL_MS = 15 * 60_000;
 
 /**
+ * Hard cap on warmCloseReasonBySpawn — best-effort diagnostics whose entries can
+ * be orphaned when a closed spawnKey never respawns; oldest evicted past this.
+ */
+const WARM_CLOSE_REASON_CAP = 64;
+
+/**
  * v1 rollback lever: when `CYBOFLOW_DISABLE_WARM_SDK=1`, every SDK turn closes its
  * subprocess at the result event (today's single-shot behavior) instead of parking
  * the session warm. Read per turn so it can be flipped without a restart.
@@ -561,8 +567,23 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * in the same breath (idle-TTL expiry or a terminal-error kill). Read + cleared
    * by the next cold spawn so its [Timing] log records `reason=ttl-expired` /
    * `reason=post-error` instead of a bare `no-warm`. Best-effort diagnostics only.
+   * An entry whose spawnKey is never spawned again (session dismissed, run never
+   * retried) is unreachable by the read — hard-cap the map via
+   * {@link recordWarmCloseReason} (evict oldest) so it cannot grow unboundedly
+   * over a long-lived app session.
    */
   private readonly warmCloseReasonBySpawn = new Map<string, 'ttl-expired' | 'post-error'>();
+
+  /** Record a warm-close reason, evicting the oldest entry past the cap. */
+  private recordWarmCloseReason(spawnKey: string, reason: 'ttl-expired' | 'post-error'): void {
+    // Re-set moves the key to the tail so eviction stays oldest-first.
+    this.warmCloseReasonBySpawn.delete(spawnKey);
+    this.warmCloseReasonBySpawn.set(spawnKey, reason);
+    if (this.warmCloseReasonBySpawn.size > WARM_CLOSE_REASON_CAP) {
+      const oldest = this.warmCloseReasonBySpawn.keys().next().value;
+      if (oldest !== undefined) this.warmCloseReasonBySpawn.delete(oldest);
+    }
+  }
 
   /**
    * Latest per-panel fast-mode report, keyed by displayPanelId. The CLI stamps
@@ -1455,7 +1476,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
               // next re-drive respawns fresh with --resume. Record it so that cold
               // spawn's timing log reads `reason=post-error`.
               if (run.warm !== null && terminalError !== null) {
-                this.warmCloseReasonBySpawn.set(spawnKey, 'post-error');
+                this.recordWarmCloseReason(spawnKey, 'post-error');
               }
               this.finishTurn(run, spawnKey, displayPanelId, sessionId, runId, terminalError, aborted);
               // One recovery gate per turn — arm a fresh detector for the next turn.
@@ -1687,7 +1708,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // awaits the same iteratorDone.
     run.closing = true;
     if (reason === 'ttl-expired' || reason === 'post-error') {
-      this.warmCloseReasonBySpawn.set(spawnKey, reason);
+      this.recordWarmCloseReason(spawnKey, reason);
     }
     this.clearWarmTimers(run);
     run.warm.input.close();
