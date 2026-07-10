@@ -27,15 +27,22 @@ const notFound: ClaudeBinaryDetection = { found: false, path: null, version: nul
  */
 export async function detectClaudeBinary(configuredPath?: string): Promise<ClaudeBinaryDetection> {
   try {
-    // Ensure the enhanced shell PATH is loaded before probing (packaged apps
-    // start with a restricted PATH; findExecutableInPath depends on this).
-    getShellPath();
+    // Load the enhanced shell PATH before probing (packaged apps start with a
+    // restricted PATH; findExecutableInPath depends on this).
+    const shellPath = getShellPath();
 
     const resolvedPath = configuredPath?.trim() || findExecutableInPath('claude');
     if (!resolvedPath) return { ...notFound };
 
     try {
-      const { stdout } = await execFileAsync(resolvedPath, ['--version'], { timeout: VERSION_TIMEOUT_MS });
+      // The version probe must run under the same enhanced PATH used for
+      // resolution — a node-shebang `claude` that findExecutableInPath can see
+      // still fails to EXEC under the packaged app's restricted PATH, which
+      // would misreport an installed CLI as missing.
+      const { stdout } = await execFileAsync(resolvedPath, ['--version'], {
+        timeout: VERSION_TIMEOUT_MS,
+        env: { ...process.env, PATH: shellPath },
+      });
       return { found: true, path: resolvedPath, version: stdout.trim() || null };
     } catch {
       // Found on disk but `--version` failed (not executable, wrong binary,
