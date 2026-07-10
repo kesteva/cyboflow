@@ -10,6 +10,9 @@ import type {
   AppServerTurnInterruptResponse,
   AppServerTurnStartParams,
   AppServerUserInput,
+  ThreadTokenUsage,
+  ThreadTokenUsageUpdatedNotification,
+  TokenUsageBreakdown,
 } from './protocol';
 
 export interface TurnSessionClient {
@@ -62,6 +65,10 @@ interface TurnSessionTurnEventBase {
 export type TurnSessionEvent =
   | { type: 'thread.started'; threadId: string }
   | (TurnSessionTurnEventBase & { type: 'turn.started' })
+  | (TurnSessionTurnEventBase & {
+      type: 'thread.tokenUsage.updated';
+      tokenUsage: ThreadTokenUsage;
+    })
   | (TurnSessionTurnEventBase & {
       type: 'item.started';
       item: TurnSessionItem;
@@ -274,6 +281,55 @@ function parseTurnEnvelope(params: unknown): { threadId: string; turnId: string 
   return { threadId: params.threadId as string, turnId: params.turn.id as string };
 }
 
+function parseTokenUsageBreakdown(value: unknown): TokenUsageBreakdown | null {
+  if (
+    !isRecord(value)
+    || !isFiniteNumber(value.totalTokens)
+    || !isFiniteNumber(value.inputTokens)
+    || !isFiniteNumber(value.cachedInputTokens)
+    || !isFiniteNumber(value.outputTokens)
+    || !isFiniteNumber(value.reasoningOutputTokens)
+  ) {
+    return null;
+  }
+  return {
+    totalTokens: value.totalTokens,
+    inputTokens: value.inputTokens,
+    cachedInputTokens: value.cachedInputTokens,
+    outputTokens: value.outputTokens,
+    reasoningOutputTokens: value.reasoningOutputTokens,
+  };
+}
+
+function parseThreadTokenUsageUpdated(
+  params: unknown,
+): ThreadTokenUsageUpdatedNotification | null {
+  if (
+    !isRecord(params)
+    || !hasString(params, 'threadId')
+    || !hasString(params, 'turnId')
+    || !isRecord(params.tokenUsage)
+    || (
+      params.tokenUsage.modelContextWindow !== null
+      && !isFiniteNumber(params.tokenUsage.modelContextWindow)
+    )
+  ) {
+    return null;
+  }
+  const total = parseTokenUsageBreakdown(params.tokenUsage.total);
+  const last = parseTokenUsageBreakdown(params.tokenUsage.last);
+  if (!total || !last) return null;
+  return {
+    threadId: params.threadId as string,
+    turnId: params.turnId as string,
+    tokenUsage: {
+      total,
+      last,
+      modelContextWindow: params.tokenUsage.modelContextWindow,
+    },
+  };
+}
+
 function parseItemEnvelope(
   params: unknown,
   timestampKey: 'startedAtMs' | 'completedAtMs',
@@ -481,6 +537,18 @@ export class CodexAppServerTurnSession {
           return { type: 'raw', notification };
         }
         return { type: 'turn.started', ...envelope };
+      }
+      case 'thread/tokenUsage/updated': {
+        const params = parseThreadTokenUsageUpdated(notification.params);
+        if (!params || !this.acceptsTurn(params.threadId, params.turnId)) {
+          return { type: 'raw', notification };
+        }
+        return {
+          type: 'thread.tokenUsage.updated',
+          threadId: params.threadId,
+          turnId: params.turnId,
+          tokenUsage: params.tokenUsage,
+        };
       }
       case 'item/started': {
         const envelope = parseItemEnvelope(notification.params, 'startedAtMs');

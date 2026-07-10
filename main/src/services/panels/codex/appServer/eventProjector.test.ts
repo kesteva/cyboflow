@@ -35,6 +35,28 @@ describe('projectTurnSessionEvent', () => {
       turnId: 'turn-1',
     })).toEqual([]);
     expect(project({
+      type: 'thread.tokenUsage.updated',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      tokenUsage: {
+        total: {
+          totalTokens: 15,
+          inputTokens: 10,
+          cachedInputTokens: 3,
+          outputTokens: 5,
+          reasoningOutputTokens: 2,
+        },
+        last: {
+          totalTokens: 15,
+          inputTokens: 10,
+          cachedInputTokens: 3,
+          outputTokens: 5,
+          reasoningOutputTokens: 2,
+        },
+        modelContextWindow: 258_400,
+      },
+    })).toEqual([]);
+    expect(project({
       type: 'item.started',
       threadId: 'thread-1',
       turnId: 'turn-1',

@@ -126,6 +126,26 @@ export interface AppServerTurnInterruptParams {
 
 export type AppServerTurnInterruptResponse = Record<string, never>;
 
+export interface TokenUsageBreakdown {
+  totalTokens: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+}
+
+export interface ThreadTokenUsage {
+  total: TokenUsageBreakdown;
+  last: TokenUsageBreakdown;
+  modelContextWindow: number | null;
+}
+
+export interface ThreadTokenUsageUpdatedNotification {
+  threadId: string;
+  turnId: string;
+  tokenUsage: ThreadTokenUsage;
+}
+
 export type CommandAction =
   | { type: 'read'; command: string; name: string; path: string }
   | { type: 'listFiles'; command: string; path: string | null }

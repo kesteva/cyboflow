@@ -245,6 +245,7 @@ export function projectTurnSessionEvent(
   switch (event.type) {
     case 'thread.started':
     case 'turn.started':
+    case 'thread.tokenUsage.updated':
     case 'item.started':
       return [];
     case 'item.completed':

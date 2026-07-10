@@ -5,6 +5,7 @@ import type {
   AppServerInitializeParams,
   AppServerInitializeResponse,
   AppServerJsonValue,
+  ThreadTokenUsageUpdatedNotification,
 } from './protocol';
 import {
   CodexAppServerTurnSession,
@@ -30,6 +31,28 @@ const INITIALIZE_RESPONSE: AppServerInitializeResponse = {
   platformFamily: 'unix',
   platformOs: 'macos',
 };
+
+const TOKEN_USAGE_UPDATED_PARAMS = {
+  threadId: 'thread-1',
+  turnId: 'turn-1',
+  tokenUsage: {
+    total: {
+      totalTokens: 1_200,
+      inputTokens: 1_000,
+      cachedInputTokens: 400,
+      outputTokens: 200,
+      reasoningOutputTokens: 50,
+    },
+    last: {
+      totalTokens: 150,
+      inputTokens: 120,
+      cachedInputTokens: 20,
+      outputTokens: 30,
+      reasoningOutputTokens: 10,
+    },
+    modelContextWindow: 258_400,
+  },
+} satisfies ThreadTokenUsageUpdatedNotification;
 
 interface RequestCall {
   method: string;
@@ -204,6 +227,94 @@ describe('CodexAppServerTurnSession', () => {
       params: { threadId: 'thread-1', turnId: 'turn-1' },
     });
     expect(session.activeTurnId).toBe('turn-1');
+  });
+
+  it('maps exact 0.143.0 token usage notifications for the active turn', async () => {
+    const client = new FakeTurnSessionClient();
+    const events: TurnSessionEvent[] = [];
+    const session = await activeSession(client, events);
+
+    session.handleNotification({
+      method: 'thread/tokenUsage/updated',
+      params: TOKEN_USAGE_UPDATED_PARAMS,
+    });
+    session.handleNotification({
+      method: 'thread/tokenUsage/updated',
+      params: {
+        ...TOKEN_USAGE_UPDATED_PARAMS,
+        tokenUsage: {
+          ...TOKEN_USAGE_UPDATED_PARAMS.tokenUsage,
+          modelContextWindow: null,
+        },
+      },
+    });
+
+    expect(events).toEqual([
+      {
+        type: 'thread.tokenUsage.updated',
+        ...TOKEN_USAGE_UPDATED_PARAMS,
+      },
+      {
+        type: 'thread.tokenUsage.updated',
+        ...TOKEN_USAGE_UPDATED_PARAMS,
+        tokenUsage: {
+          ...TOKEN_USAGE_UPDATED_PARAMS.tokenUsage,
+          modelContextWindow: null,
+        },
+      },
+    ]);
+  });
+
+  it('preserves malformed and stale token usage notifications as raw', async () => {
+    const client = new FakeTurnSessionClient();
+    const events: TurnSessionEvent[] = [];
+    const session = await activeSession(client, events);
+    const malformedBreakdown: AppServerNotification = {
+      method: 'thread/tokenUsage/updated',
+      params: {
+        ...TOKEN_USAGE_UPDATED_PARAMS,
+        tokenUsage: {
+          ...TOKEN_USAGE_UPDATED_PARAMS.tokenUsage,
+          last: {
+            totalTokens: 150,
+            inputTokens: 120,
+            cachedInputTokens: 20,
+            outputTokens: 30,
+          },
+        },
+      },
+    };
+    const malformedContextWindow: AppServerNotification = {
+      method: 'thread/tokenUsage/updated',
+      params: {
+        ...TOKEN_USAGE_UPDATED_PARAMS,
+        tokenUsage: {
+          ...TOKEN_USAGE_UPDATED_PARAMS.tokenUsage,
+          modelContextWindow: '258400',
+        },
+      },
+    };
+    const staleThread: AppServerNotification = {
+      method: 'thread/tokenUsage/updated',
+      params: { ...TOKEN_USAGE_UPDATED_PARAMS, threadId: 'thread-stale' },
+    };
+    const staleTurn: AppServerNotification = {
+      method: 'thread/tokenUsage/updated',
+      params: { ...TOKEN_USAGE_UPDATED_PARAMS, turnId: 'turn-stale' },
+    };
+    const notifications = [
+      malformedBreakdown,
+      malformedContextWindow,
+      staleThread,
+      staleTurn,
+    ];
+
+    for (const notification of notifications) session.handleNotification(notification);
+
+    expect(events).toEqual(notifications.map((notification) => ({
+      type: 'raw',
+      notification,
+    })));
   });
 
   it('maps the bounded item set used by a later manager adapter', async () => {
