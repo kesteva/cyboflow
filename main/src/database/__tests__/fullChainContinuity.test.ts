@@ -75,8 +75,8 @@ describe('Full-chain migration continuity', () => {
     // on workflow_runs — a representative sampling from the tail of the chain.
     const wrCols = columnNames(raw, 'workflow_runs');
     expect(wrCols).toContain('eval_enabled'); // 044
-    expect(wrCols).toContain('agent_provider'); // 051
-    expect(wrCols).toContain('agent_runtime'); // 052
+    expect(wrCols).toContain('agent_provider'); // 060
+    expect(wrCols).toContain('agent_runtime'); // 061
     expect(wrCols).toContain('execution_model'); // 032
     expect(wrCols).toContain('substrate'); // 013
 
@@ -93,9 +93,24 @@ describe('Full-chain migration continuity', () => {
     const sessCols = columnNames(raw, 'sessions');
     expect(sessCols).toContain('disabled_mcp_servers_json'); // 039
     expect(sessCols).toContain('enabled_plugins_json'); // 039
-    expect(sessCols).toContain('agent_provider'); // 048
-    expect(sessCols).toContain('agent_runtime'); // 049
-    expect(sessCols).toContain('agent_model'); // 050
+    expect(sessCols).toContain('agent_provider'); // 057
+    expect(sessCols).toContain('agent_runtime'); // 058
+    expect(sessCols).toContain('agent_model'); // 059
+
+    // 063 creates provider-neutral, append-only invocation persistence.
+    expect(columnNames(raw, 'agent_invocations')).toEqual(
+      expect.arrayContaining([
+        'id',
+        'agent_invocation_id',
+        'run_id',
+        'step_id',
+        'agent_provider',
+        'agent_runtime',
+        'model',
+        'external_session_id',
+        'created_at',
+      ]),
+    );
 
     raw.close();
   });
