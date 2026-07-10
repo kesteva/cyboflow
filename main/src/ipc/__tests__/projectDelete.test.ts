@@ -305,7 +305,7 @@ describe('projects:delete — hosted-run cancellation', () => {
     expect(Math.max(...cancelOrders)).toBeLessThan(Math.max(...removeOrders));
   });
 
-  it('skips main-repo, worktree-less, and in-place sessions (mirrors the existing worktree-cleanup skip)', async () => {
+  it('cancels hosted runs for EVERY session — including main-repo / worktree-less / in-place, which have no worktree to remove but can still host a live (warm SDK) chat process', async () => {
     const made = makeServices({
       project: { id: 1, name: 'Proj', path: '/proj', worktree_folder: null },
       sessions: [
@@ -318,8 +318,14 @@ describe('projects:delete — hosted-run cancellation', () => {
 
     await invoke(handlers, 'projects:delete', '1');
 
-    expect(made.cancelHostedRuns).toHaveBeenCalledTimes(1);
+    // Cancel is UNCONDITIONAL per session (mirrors sessions:delete)…
+    expect(made.cancelHostedRuns).toHaveBeenCalledTimes(3);
+    expect(made.cancelHostedRuns).toHaveBeenCalledWith('main');
+    expect(made.cancelHostedRuns).toHaveBeenCalledWith('no-wt');
     expect(made.cancelHostedRuns).toHaveBeenCalledWith('s3');
+    // …while the worktree-cleanup skip still only removes the real worktree.
+    expect(made.removeWorktree).toHaveBeenCalledTimes(1);
+    expect(made.removeWorktree.mock.calls[0][1]).toBe('wt-3');
   });
 
   it('is fail-soft: a cancelHostedRuns failure does not abort the sweep or block the project deletion', async () => {

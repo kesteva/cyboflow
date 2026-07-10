@@ -332,24 +332,26 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
       // Clean up all worktrees for this project (including archived sessions)
       let worktreeCleanupCount = 0;
       for (const session of allProjectSessions) {
+        // Deleting a project must not strand any session's hosted workflow runs
+        // (mirrors sessions:delete, which cancels UNCONDITIONALLY before its own
+        // worktree gate): cancel every non-terminal run FIRST — same seam
+        // (cyboflow.cancelHostedRuns), git-neutral (stops the live agent and
+        // settles pending approvals/questions; a sprint run's lane batch is
+        // closed too). Deliberately ABOVE the worktree skip below: main-repo /
+        // in-place / worktree-less sessions have no worktree to remove but can
+        // still host a live (warm SDK) chat process that must be stopped.
+        // Fail-soft: a cancel failure must never block the deletion.
+        try {
+          await cyboflow.cancelHostedRuns(session.id);
+        } catch (error) {
+          console.error(`[Main] Failed to cancel hosted runs for session ${session.id}:`, error);
+        }
+
         // Skip sessions that are main repo, don't have worktrees, or work in-place
         // (migration 047 — worktree_path IS the user's real checkout, so there is no
         // dedicated worktree to remove; tearing it down would delete the project).
         if (session.is_main_repo || !session.worktree_name || session.in_place) {
           continue;
-        }
-
-        // Deleting a project must not strand its sessions' hosted workflow runs
-        // (mirrors the sessions:delete pattern in session.ts): cancel every
-        // non-terminal run FIRST, before worktree removal tears the cwd out from
-        // under a still-live agent — same seam sessions:delete uses
-        // (cyboflow.cancelHostedRuns), git-neutral (stops the live agent and
-        // settles pending approvals/questions; a sprint run's lane batch is
-        // closed too). Fail-soft: a cancel failure must never block the deletion.
-        try {
-          await cyboflow.cancelHostedRuns(session.id);
-        } catch (error) {
-          console.error(`[Main] Failed to cancel hosted runs for session ${session.id}:`, error);
         }
 
         // PTY quick-session close-out (mirrors the sessions:delete pattern in
