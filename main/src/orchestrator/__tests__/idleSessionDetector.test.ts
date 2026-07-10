@@ -61,12 +61,23 @@ function makeDb(): Database.Database {
       updated_at TEXT,
       chat_run_id TEXT
     );
+    -- Minimal workflow_runs so the candidate query's LEFT JOIN (dangling-FK
+    -- guard on chat_run_id) resolves. Deliberately shares columns (substrate/
+    -- status/updated_at) with sessions to prove the s.-qualified predicate
+    -- is unambiguous under the join.
+    CREATE TABLE workflow_runs (
+      id TEXT PRIMARY KEY,
+      substrate TEXT,
+      status TEXT,
+      updated_at TEXT
+    );
     CREATE TABLE review_items (
       id TEXT PRIMARY KEY,
       project_id INTEGER,
       kind TEXT,
       status TEXT,
-      source TEXT
+      source TEXT,
+      created_at TEXT
     );
   `);
   return db;
@@ -84,6 +95,8 @@ interface SeedSessionOverrides {
   last_viewed_at?: string | null;
   updated_at?: string;
   chat_run_id?: string | null;
+  /** When false, the chat_run_id's workflow_runs row is NOT seeded (dangling FK). */
+  seedRun?: boolean;
 }
 
 /** Defaults describe an in-scope, idle (rested 10 min ago), unviewed session. */
@@ -101,6 +114,11 @@ function seedSession(db: Database.Database, o: SeedSessionOverrides = {}): strin
     updated_at: o.updated_at ?? iso(10),
     chat_run_id: o.chat_run_id === undefined ? 'run-s1' : o.chat_run_id,
   };
+  // Seed the FK target so chat_run_id resolves through the LEFT JOIN, unless the
+  // test is exercising a dangling chat_run_id (seedRun: false).
+  if (s.chat_run_id && o.seedRun !== false) {
+    db.prepare(`INSERT OR IGNORE INTO workflow_runs (id) VALUES (?)`).run(s.chat_run_id);
+  }
   db.prepare(
     `INSERT INTO sessions
        (id, name, project_id, substrate, is_quick, is_main_repo, archived, status,
@@ -124,10 +142,12 @@ function makeApply(db: Database.Database) {
     seq += 1;
     if (change.op === 'create') {
       const id = `rvw_${seq}`;
+      // created_at = NOW (mint happens well after the session's past updated_at),
+      // which is what the detector's per-episode NOT EXISTS guard keys on.
       db.prepare(
-        `INSERT INTO review_items (id, project_id, kind, status, source)
-         VALUES (?, ?, ?, 'pending', ?)`,
-      ).run(id, projectId, change.kind, change.source ?? null);
+        `INSERT INTO review_items (id, project_id, kind, status, source, created_at)
+         VALUES (?, ?, ?, 'pending', ?, ?)`,
+      ).run(id, projectId, change.kind, change.source ?? null, new Date(NOW_MS).toISOString());
       return { reviewItemId: id, event: { id: seq, seq } };
     }
     db.prepare(`UPDATE review_items SET status = 'resolved' WHERE id = ?`).run(change.reviewItemId);
@@ -196,6 +216,18 @@ describe('IdleSessionDetector — minting', () => {
     expect(change.runId).toBeUndefined();
   });
 
+  it('omits runId (but still surfaces) when chat_run_id dangles with no workflow_runs row', async () => {
+    // Dangling-FK guard: passing a pruned run id would throw on the real FK and
+    // silently drop the session. The LEFT JOIN nulls the runId instead.
+    seedSession(db, { chat_run_id: 'ghost-run', seedRun: false });
+    const { apply, calls } = makeApply(db);
+    await makeDetector(db, apply).scan();
+
+    const c = creates(calls);
+    expect(c).toHaveLength(1); // session still surfaced
+    expect((c[0].change as ReviewItemCreate).runId).toBeUndefined();
+  });
+
   it('does not double-mint across repeated scans (idempotent per session)', async () => {
     seedSession(db);
     const { apply, calls } = makeApply(db);
@@ -203,6 +235,37 @@ describe('IdleSessionDetector — minting', () => {
     await d.scan();
     await d.scan();
     await d.scan();
+    expect(creates(calls)).toHaveLength(1);
+  });
+
+  it('does NOT re-mint after the item is resolved/dismissed without opening the session', async () => {
+    // Finding: keying idempotency on status='pending' re-minted every tick once
+    // the user cleared it. The per-episode guard keys on created_at >= updated_at,
+    // so a triaged item still suppresses re-mint for the SAME idle episode.
+    seedSession(db);
+    const { apply, calls } = makeApply(db);
+    const d = makeDetector(db, apply);
+    await d.scan(); // mint
+    expect(creates(calls)).toHaveLength(1);
+
+    // User clears it from the queue but never opens the session.
+    db.prepare(`UPDATE review_items SET status = 'resolved' WHERE source = 'idle-session:s1'`).run();
+    await d.scan();
+    await d.scan();
+    expect(creates(calls)).toHaveLength(1); // no respawn
+  });
+
+  it('re-mints for a genuinely new idle episode (updated_at advances past the old item)', async () => {
+    // An old, already-resolved idle item from a prior episode (created 20m ago).
+    seedSession(db, { updated_at: iso(10) });
+    db.prepare(
+      `INSERT INTO review_items (id, project_id, kind, status, source, created_at)
+       VALUES ('rvw_old', 7, 'human_task', 'resolved', 'idle-session:s1', ?)`,
+    ).run(iso(20));
+    const { apply, calls } = makeApply(db);
+    await makeDetector(db, apply).scan();
+    // updated_at (10m ago) is newer than the old item's created_at (20m ago) →
+    // this is a fresh episode → surfaces again.
     expect(creates(calls)).toHaveLength(1);
   });
 });
@@ -354,16 +417,45 @@ describe('IdleSessionDetector — disabled', () => {
     expect(creates(calls)).toHaveLength(0);
   });
 
-  it('still drains an outstanding item when flipped off', async () => {
+  it('drains a still-idle outstanding item when flipped off (no view needed)', async () => {
     seedSession(db);
     const { apply, calls } = makeApply(db);
-    // Mint while enabled...
+    // Mint while enabled — session is and stays idle+unviewed.
     await makeDetector(db, apply, enabledConfig).scan();
     expect(creates(calls)).toHaveLength(1);
-    // ...user views it, then the feature is turned off: the item should still clear.
-    db.prepare(`UPDATE sessions SET last_viewed_at = ? WHERE id = 's1'`).run(iso(0));
+    // Turn the feature off: the blocking item must clear even though the session
+    // is still idle (turning it off = stop AND clear its nags).
     await makeDetector(db, apply, disabled).scan();
     expect(resolves(calls)).toHaveLength(1);
+    const row = db.prepare(`SELECT status FROM review_items WHERE source = 'idle-session:s1'`).get() as { status: string };
+    expect(row.status).toBe('resolved');
+  });
+});
+
+describe('IdleSessionDetector — re-entrancy', () => {
+  let db: Database.Database;
+  beforeEach(() => { db = makeDb(); });
+  afterEach(() => { db.close(); });
+
+  it('a scan entered while another is in flight returns early (no overlap)', async () => {
+    seedSession(db);
+    // A gated apply: the first create hangs until we release it, so we can drive
+    // a second scan() concurrently and prove the re-entrancy guard blocks it.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    let creates = 0;
+    const apply = async (_pid: number, change: ReviewItemCreate | ReviewItemTriage) => {
+      if (change.op === 'create') { creates += 1; await gate; }
+      return { reviewItemId: 'rvw_x', event: { id: 1, seq: 1 } };
+    };
+    const d = makeDetector(db, apply);
+
+    const first = d.scan();            // enters, hangs inside the create
+    await Promise.resolve();
+    await d.scan();                    // guarded — returns immediately
+    release();
+    await first;
+    expect(creates).toBe(1);
   });
 });
 

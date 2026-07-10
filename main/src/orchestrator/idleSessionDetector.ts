@@ -88,6 +88,13 @@ interface PendingIdleItemRow {
  * list-visible quick session (not the hidden main-repo singleton, not archived)
  * that rested to 'completed' and has NOT been viewed since (last_viewed_at is
  * NULL or older than the resting updated_at → renders as completed_unviewed).
+ * Columns are qualified `s.` so this composes with the workflow_runs LEFT JOIN
+ * in the candidate query (workflow_runs also has substrate/status/updated_at,
+ * which would otherwise be ambiguous).
+ *
+ * NOTE: the `last_viewed_at < updated_at` unviewed rule is the SQL twin of
+ * sessionManager.mapDbStatusToSessionStatus's completed_unviewed logic — keep
+ * the two definitions in sync (they intentionally mirror the same badge).
  *
  * Timestamps are wrapped in SQLite datetime() so the comparison is correct
  * regardless of the stored string format: sessions.updated_at / last_viewed_at
@@ -96,13 +103,13 @@ interface PendingIdleItemRow {
  * (' ' < 'T' at index 10). datetime() normalizes both sides to one canonical form.
  */
 const IN_SCOPE_PREDICATE = `
-  substrate = 'interactive'
-  AND is_quick = 1
-  AND (is_main_repo IS NULL OR is_main_repo = 0)
-  AND (archived IS NULL OR archived = 0)
-  AND status = 'completed'
-  AND (last_viewed_at IS NULL OR datetime(last_viewed_at) < datetime(updated_at))
-  AND project_id IS NOT NULL
+  s.substrate = 'interactive'
+  AND s.is_quick = 1
+  AND (s.is_main_repo IS NULL OR s.is_main_repo = 0)
+  AND (s.archived IS NULL OR s.archived = 0)
+  AND s.status = 'completed'
+  AND (s.last_viewed_at IS NULL OR datetime(s.last_viewed_at) < datetime(s.updated_at))
+  AND s.project_id IS NOT NULL
 `;
 
 // ---------------------------------------------------------------------------
@@ -118,9 +125,13 @@ export class IdleSessionDetector {
 
   private intervalHandle: ReturnType<typeof setInterval> | null = null;
 
+  /** Re-entrancy guard: setInterval does not await scan(); a scan slower than
+   *  SCAN_INTERVAL_MS must not overlap the next tick (that would let two scans
+   *  both pass the per-episode mint guard before either INSERT commits). */
+  private scanning = false;
+
   // Hoisted prepared statements — SQL is static.
   private readonly stmtIdleCandidates: PreparedStatement;
-  private readonly stmtHasPendingForSource: PreparedStatement;
   private readonly stmtPendingIdleItems: PreparedStatement;
   private readonly stmtStillInScope: PreparedStatement;
 
@@ -131,17 +142,28 @@ export class IdleSessionDetector {
     this.logger = deps.logger;
     this.now = deps.now ?? Date.now;
 
+    // Candidate = an in-scope, idle session for which THIS idle episode has not
+    // already been surfaced. "Episode" is keyed by the resting updated_at: the
+    // NOT EXISTS matches ANY prior idle item (pending OR already-triaged) minted
+    // at/after the current updated_at, so a manually resolved/dismissed item is
+    // NOT re-minted for the same episode (finding: dismissed items respawning).
+    // A genuinely new turn bumps updated_at past the old item's created_at, so
+    // the new episode surfaces afresh. The LEFT JOIN nulls out a dangling
+    // chat_run_id (sessions.chat_run_id has no FK; review_items.run_id does, so
+    // passing a pruned run id would throw and silently drop the session).
     this.stmtIdleCandidates = this.db.prepare(
-      `SELECT id, project_id, name, chat_run_id,
-              strftime('%Y-%m-%dT%H:%M:%SZ', updated_at) AS updated_at_iso
-         FROM sessions
+      `SELECT s.id, s.project_id, s.name,
+              CASE WHEN wr.id IS NOT NULL THEN s.chat_run_id ELSE NULL END AS chat_run_id,
+              strftime('%Y-%m-%dT%H:%M:%SZ', s.updated_at) AS updated_at_iso
+         FROM sessions s
+         LEFT JOIN workflow_runs wr ON wr.id = s.chat_run_id
         WHERE ${IN_SCOPE_PREDICATE}
-          AND datetime(updated_at) < datetime(?)`,
-    );
-    this.stmtHasPendingForSource = this.db.prepare(
-      `SELECT 1 FROM review_items
-        WHERE source = ? AND status = 'pending'
-        LIMIT 1`,
+          AND datetime(s.updated_at) < datetime(?)
+          AND NOT EXISTS (
+                SELECT 1 FROM review_items ri
+                 WHERE ri.source = '${SOURCE_PREFIX}' || s.id
+                   AND datetime(ri.created_at) >= datetime(s.updated_at)
+              )`,
     );
     this.stmtPendingIdleItems = this.db.prepare(
       `SELECT id, project_id, source FROM review_items
@@ -149,8 +171,8 @@ export class IdleSessionDetector {
           AND source LIKE '${SOURCE_PREFIX}%'`,
     );
     this.stmtStillInScope = this.db.prepare(
-      `SELECT 1 FROM sessions
-        WHERE id = ? AND ${IN_SCOPE_PREDICATE}
+      `SELECT 1 FROM sessions s
+        WHERE s.id = ? AND ${IN_SCOPE_PREDICATE}
         LIMIT 1`,
     );
 
@@ -180,26 +202,32 @@ export class IdleSessionDetector {
   // --------------------------------------------------------------------------
 
   /**
-   * One scan pass. Auto-resolve stale items FIRST (a session attended to since
-   * the last tick), then mint for newly-idle sessions. The whole body is wrapped
-   * so a single bad scan never stops the interval; each per-item write is further
-   * guarded so one project's failure does not abort the rest.
+   * One scan pass.
+   *
+   * Disabled → drain EVERY pending idle item (turning the feature off clears its
+   * nags, still-idle or not) and return. Enabled → resolve items whose session
+   * left scope (viewed / new turn / archived), then mint for idle episodes not
+   * yet surfaced. The whole body is wrapped so a single bad scan never stops the
+   * interval; each per-item write is further guarded so one project's failure
+   * does not abort the rest. Re-entrancy-guarded so overlapping ticks can't
+   * double-mint (the mint guard is a SELECT before an async commit).
    */
   async scan(): Promise<void> {
+    if (this.scanning) return;
+    this.scanning = true;
     try {
       const { enabled, thresholdMinutes } = this.getConfig();
-      // Even when disabled we still auto-resolve outstanding items so flipping the
-      // toggle off drains the queue instead of stranding blocking rows.
-      await this.resolveAttendedItems();
-      if (!enabled) return;
+      if (!enabled) {
+        await this.resolvePendingIdleItems(true /* drainAll */);
+        return;
+      }
+      await this.resolvePendingIdleItems(false /* only sessions that left scope */);
 
       const cutoffIso = new Date(this.now() - thresholdMinutes * 60_000).toISOString();
       const rows = this.stmtIdleCandidates.all(cutoffIso) as IdleSessionRow[];
 
       for (const s of rows) {
         const source = `${SOURCE_PREFIX}${s.id}`;
-        if (this.stmtHasPendingForSource.get(source)) continue; // idempotent
-
         const idleMin = Math.max(
           thresholdMinutes,
           Math.round((this.now() - new Date(s.updated_at_iso).getTime()) / 60_000),
@@ -235,19 +263,24 @@ export class IdleSessionDetector {
       this.logger.warn('[IdleSessionDetector] scan failed', {
         error: err instanceof Error ? (err.stack ?? err.message) : String(err),
       });
+    } finally {
+      this.scanning = false;
     }
   }
 
   /**
-   * Resolve every pending idle-session review item whose session has left scope
-   * (reopened/viewed, a new turn is running, or the session was archived/deleted).
-   * This is the queue's self-cleaning pass — no view/resume event wiring needed.
+   * Resolve pending idle-session review items. When `drainAll` is false (feature
+   * enabled) only items whose session LEFT scope are resolved (reopened/viewed,
+   * new turn running, or archived/deleted) — the queue's self-cleaning pass, no
+   * view/resume event wiring needed. When `drainAll` is true (feature disabled)
+   * every pending idle item is resolved, so turning the toggle off clears its
+   * nags rather than stranding still-idle blocking rows.
    */
-  private async resolveAttendedItems(): Promise<void> {
+  private async resolvePendingIdleItems(drainAll: boolean): Promise<void> {
     const items = this.stmtPendingIdleItems.all() as PendingIdleItemRow[];
     for (const item of items) {
       const sessionId = item.source.slice(SOURCE_PREFIX.length);
-      if (this.stmtStillInScope.get(sessionId)) continue; // still idle+unviewed → keep
+      if (!drainAll && this.stmtStillInScope.get(sessionId)) continue; // still idle+unviewed → keep
       try {
         await this.applyReviewItem(item.project_id, {
           op: 'resolve',

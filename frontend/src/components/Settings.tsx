@@ -87,7 +87,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // A blocking human_task is minted for an interactive quick session that finished
   // a turn and has sat unviewed longer than idleReviewThresholdMinutes.
   const [idleReviewEnabled, setIdleReviewEnabled] = useState(true);
-  const [idleReviewThresholdMinutes, setIdleReviewThresholdMinutes] = useState(5);
+  // number | '' so clearing the field shows empty (never value={NaN}); the save
+  // path floors a non-finite/empty value back to 5.
+  const [idleReviewThresholdMinutes, setIdleReviewThresholdMinutes] = useState<number | ''>(5);
   const [notificationSettings, setNotificationSettings] = useState({
     enabled: true,
     playSound: true,
@@ -199,7 +201,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         idleSessionReview: {
           enabled: idleReviewEnabled,
           thresholdMinutes:
-            Number.isFinite(idleReviewThresholdMinutes) && idleReviewThresholdMinutes > 0
+            typeof idleReviewThresholdMinutes === 'number' &&
+            Number.isFinite(idleReviewThresholdMinutes) &&
+            idleReviewThresholdMinutes > 0
               ? idleReviewThresholdMinutes
               : 5,
         },
@@ -638,7 +642,9 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                   step={1}
                   disabled={!idleReviewEnabled}
                   value={idleReviewThresholdMinutes}
-                  onChange={(e) => setIdleReviewThresholdMinutes(e.target.valueAsNumber)}
+                  onChange={(e) =>
+                    setIdleReviewThresholdMinutes(e.target.value === '' ? '' : e.target.valueAsNumber)
+                  }
                   className="w-28 px-3 py-2 border border-border-primary rounded-md focus:outline-none focus:ring-2 focus:ring-interactive text-text-primary bg-surface-secondary disabled:opacity-50"
                 />
                 <p className="text-xs text-text-tertiary mt-2">
