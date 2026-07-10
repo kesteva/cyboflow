@@ -6,6 +6,7 @@ import type {
   CodexAppServerClientOptions,
 } from '../appServer/client';
 import type { AppServerInitializeParams } from '../appServer/protocol';
+import { CODEX_RAW_NOTIFICATION_EVENT_TYPE } from '../appServer/rawNotificationSink';
 import {
   CodexSdkManager,
   type CodexAppServerClientFactory,
@@ -16,7 +17,7 @@ type RequestHandler = (method: string, params: unknown, client: FakeAppServerCli
 
 class FakeAppServerClient implements CodexAppServerClientLike {
   readonly start = vi.fn(() => undefined);
-  readonly stop = vi.fn((_signal?: NodeJS.Signals) => undefined);
+  readonly stop = vi.fn(async (_signal?: NodeJS.Signals) => undefined);
   readonly initialize = vi.fn(async (_params: AppServerInitializeParams) => ({
     userAgent: 'codex-cli/0.143.0',
     codexHome: '/home/user/.codex',
@@ -100,6 +101,10 @@ function makeManager(
   });
   manager.setApprovalRouterProvider(() => ({
     requestApproval: vi.fn(async () => ({ behavior: 'allow' as const })),
+    clearPendingForSource: vi.fn(),
+  }));
+  manager.setQuestionRouterProvider(() => ({
+    requestQuestion: vi.fn(async () => ({ answers: {} })),
     clearPendingForRun: vi.fn(),
   }));
   return {
@@ -190,7 +195,8 @@ describe('CodexSdkManager app-server runtime', () => {
         systemPromptAppend: 'Report through Cyboflow.',
         agentPermissionMode: 'acceptEdits',
         model: 'gpt-5.5',
-      });
+        agentInvocationStepId: 'verify-step',
+      } as Parameters<CodexSdkManager['spawnCliProcess']>[0] & { agentInvocationStepId: string });
 
       const client = getClient();
       expect(client.start).toHaveBeenCalledOnce();
@@ -237,7 +243,8 @@ describe('CodexSdkManager app-server runtime', () => {
           `SELECT agent_provider AS provider,
                   agent_runtime AS runtime,
                   model,
-                  external_session_id AS externalSessionId
+                  external_session_id AS externalSessionId,
+                  step_id AS stepId
              FROM agent_invocations
             WHERE run_id = ?`,
         )
@@ -246,17 +253,22 @@ describe('CodexSdkManager app-server runtime', () => {
           runtime: string;
           model: string | null;
           externalSessionId: string | null;
+          stepId: string | null;
         };
       expect(invocationRow).toEqual({
         provider: 'codex',
         runtime: 'codex-sdk',
         model: 'gpt-5.5',
         externalSessionId: 'codex-thread-1',
+        stepId: 'verify-step',
       });
 
       const rows = db
-        .prepare('SELECT event_type AS eventType, payload_json AS payloadJson FROM raw_events ORDER BY id')
-        .all() as Array<{ eventType: string; payloadJson: string }>;
+        .prepare(`SELECT event_type AS eventType, payload_json AS payloadJson
+                    FROM raw_events
+                   WHERE event_type != ?
+                   ORDER BY id`)
+        .all(CODEX_RAW_NOTIFICATION_EVENT_TYPE) as Array<{ eventType: string; payloadJson: string }>;
       expect(rows.map((row) => row.eventType)).toEqual(['session_info', 'system', 'assistant', 'result']);
       expect(JSON.parse(rows[1].payloadJson)).toMatchObject({
         type: 'agent_init',
@@ -288,6 +300,17 @@ describe('CodexSdkManager app-server runtime', () => {
           && output.data !== null
           && (output.data as { type?: unknown }).type === 'assistant';
       })).toBe(true);
+      const rawNotifications = db
+        .prepare(`SELECT payload_json AS payloadJson
+                    FROM raw_events
+                   WHERE event_type = ?
+                   ORDER BY id`)
+        .all(CODEX_RAW_NOTIFICATION_EVENT_TYPE) as Array<{ payloadJson: string }>;
+      expect(rawNotifications.map((row) => JSON.parse(row.payloadJson).method)).toEqual([
+        'item/completed',
+        'thread/tokenUsage/updated',
+        'turn/completed',
+      ]);
     } finally {
       db.close();
     }
@@ -442,6 +465,40 @@ describe('CodexSdkManager app-server runtime', () => {
         method: 'account/read',
         params: { refreshToken: false },
       }]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('does not shadow a resumable thread when startup auth fails transiently', async () => {
+    const db = createDb();
+    try {
+      db.prepare(
+        `INSERT INTO agent_invocations
+           (agent_invocation_id, run_id, step_id, agent_provider, agent_runtime, model, external_session_id)
+         VALUES ('prior', 'run-1', NULL, 'codex', 'codex-sdk', NULL, 'codex-thread-prior')`,
+      ).run();
+      const { manager } = makeManager(db, (method) => {
+        if (method === 'account/read') {
+          throw new Error('temporary auth service failure');
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      });
+      manager.on('error', () => undefined);
+
+      await expect(manager.spawnCliProcess({
+        panelId: 'run-1',
+        sessionId: 'run-1',
+        runId: 'run-1',
+        worktreePath: '/tmp/worktree',
+        prompt: 'continue',
+        resumeSessionId: 'codex-thread-prior',
+      })).rejects.toThrow('temporary auth service failure');
+
+      const rows = db.prepare(
+        'SELECT agent_invocation_id AS id, external_session_id AS externalSessionId FROM agent_invocations',
+      ).all() as Array<{ id: string; externalSessionId: string | null }>;
+      expect(rows).toEqual([{ id: 'prior', externalSessionId: 'codex-thread-prior' }]);
     } finally {
       db.close();
     }

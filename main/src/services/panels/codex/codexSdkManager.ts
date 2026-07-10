@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
 import type { SessionManager } from '../../sessionManager';
@@ -22,9 +23,15 @@ import {
   type ResolvedCodexExecutable,
 } from './codexExecutablePath';
 import {
+  CODEX_APP_SERVER_APPROVAL_SOURCE,
   CodexAppServerApprovalBridge,
   type ApprovalRouterPort,
 } from './appServer/approvalBridge';
+import {
+  CodexAppServerQuestionBridge,
+  type QuestionRouterPort,
+} from './appServer/questionBridge';
+import { CodexRawNotificationSink } from './appServer/rawNotificationSink';
 import { requireCodexChatGptAccount } from './appServer/account';
 import {
   CodexAppServerClient,
@@ -60,7 +67,7 @@ interface StubCliProcess {
 
 export interface CodexAppServerClientLike extends TurnSessionClient {
   start(): void;
-  stop(signal?: NodeJS.Signals): void;
+  stop(signal?: NodeJS.Signals): Promise<void>;
 }
 
 export type CodexAppServerClientFactory = (
@@ -154,6 +161,7 @@ export class CodexSdkManager extends AbstractCliManager {
   private readonly spawnKeysByPanelId = new Map<string, Set<string>>();
   private cyboflowMcpRuntimeConfig: CodexMcpRuntimeConfig | null = null;
   private approvalRouterProvider: (() => ApprovalRouterPort) | null = null;
+  private questionRouterProvider: (() => QuestionRouterPort) | null = null;
   private resolvedExecutable: ResolvedCodexExecutable | null = null;
 
   constructor(
@@ -180,6 +188,10 @@ export class CodexSdkManager extends AbstractCliManager {
 
   setApprovalRouterProvider(provider: () => ApprovalRouterPort): void {
     this.approvalRouterProvider = provider;
+  }
+
+  setQuestionRouterProvider(provider: () => QuestionRouterPort): void {
+    this.questionRouterProvider = provider;
   }
 
   protected async testCliAvailability(): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {
@@ -286,18 +298,15 @@ export class CodexSdkManager extends AbstractCliManager {
 
     const runtimeConfig = this.requireMcpRuntimeConfig();
     const approvalRouter = this.requireApprovalRouter();
+    const questionRouter = this.requireQuestionRouter();
     const executable = this.getResolvedExecutable();
-    const agentInvocationId = new AgentInvocationStore(this.db).createInvocation({
-      runId,
-      provider: 'codex',
-      runtime: 'codex-sdk',
-      model: resolveAgentModelAlias('codex', options.model),
-    });
+    const agentInvocationId = randomUUID();
     const command = executable.executablePath;
     const abortController = new AbortController();
     const terminal = createDeferred<void>();
     const router = new EventRouter<AgentStreamEvent>();
     const sink = new RawEventsSink<AgentStreamEvent>(this.db, this.logger);
+    const rawNotificationSink = new CodexRawNotificationSink(this.db, this.logger);
     sink.attachToRouter(router, runId);
 
     let exitCode = 0;
@@ -311,6 +320,12 @@ export class CodexSdkManager extends AbstractCliManager {
     const approvalBridge = new CodexAppServerApprovalBridge({
       runId,
       approvalRouter,
+      source: `${CODEX_APP_SERVER_APPROVAL_SOURCE}:${agentInvocationId}`,
+      onError: (error) => this.logger?.error(`[CodexSdkManager] ${error.message}`),
+    });
+    const questionBridge = new CodexAppServerQuestionBridge({
+      runId,
+      questionRouter,
       onError: (error) => this.logger?.error(`[CodexSdkManager] ${error.message}`),
     });
 
@@ -318,6 +333,9 @@ export class CodexSdkManager extends AbstractCliManager {
       if (event.type === 'thread.started') threadId = event.threadId;
       if (event.type === 'thread.tokenUsage.updated') {
         usageAccumulator.addLastUsage(event.tokenUsage.last);
+      }
+      if (event.type === 'item.started' || event.type === 'item.completed') {
+        approvalBridge.observeItem(event.item);
       }
       if (
         abortController.signal.aborted
@@ -356,8 +374,13 @@ export class CodexSdkManager extends AbstractCliManager {
         buildCodexAppServerEnvironment(runId, runtimeConfig),
         executable.pathDir,
       ),
-      onServerRequest: (request) => approvalBridge.handleServerRequest(request),
-      onNotification: (notification) => turnSessionRef.current?.handleNotification(notification),
+      onServerRequest: (request) => request.method === 'item/tool/requestUserInput'
+        ? questionBridge.handleServerRequest(request)
+        : approvalBridge.handleServerRequest(request),
+      onNotification: (notification) => {
+        rawNotificationSink.persist(runId, notification);
+        turnSessionRef.current?.handleNotification(notification);
+      },
       onStderr: (chunk) => this.logger?.warn(`[Codex app-server stderr] ${chunk.trimEnd()}`),
       onError: (error) => {
         if (!abortController.signal.aborted) terminal.reject(error);
@@ -390,8 +413,9 @@ export class CodexSdkManager extends AbstractCliManager {
             );
           }
         }
+        questionBridge.teardown();
         approvalBridge.teardown();
-        client.stop();
+        await client.stop();
       })();
       return teardownPromise;
     };
@@ -447,6 +471,18 @@ export class CodexSdkManager extends AbstractCliManager {
         'Codex ChatGPT account check',
       );
       requireCodexChatGptAccount(accountResponse);
+      new AgentInvocationStore(this.db).createInvocation({
+        agentInvocationId,
+        runId,
+        stepId: (options as ClaudeSpawnerOptions & { agentInvocationStepId?: string })
+          .agentInvocationStepId,
+        provider: 'codex',
+        runtime: 'codex-sdk',
+        model: resolveAgentModelAlias('codex', options.model),
+      });
+      if (options.resumeSessionId) {
+        this.captureInvocationCodexThreadId(runId, agentInvocationId, options.resumeSessionId);
+      }
       const thread = options.resumeSessionId
         ? await withTimeout(
             turnSession.resumeThread(buildCodexAppServerThreadResumeParams(
@@ -545,6 +581,13 @@ export class CodexSdkManager extends AbstractCliManager {
       throw new Error('Codex app-server manager missing approval router provider');
     }
     return this.approvalRouterProvider();
+  }
+
+  private requireQuestionRouter(): QuestionRouterPort {
+    if (!this.questionRouterProvider) {
+      throw new Error('Codex app-server manager missing question router provider');
+    }
+    return this.questionRouterProvider();
   }
 
   private buildSessionInfo(

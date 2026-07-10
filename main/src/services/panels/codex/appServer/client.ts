@@ -15,12 +15,18 @@ import type {
   FileChangeRequestApprovalResponse,
   McpServerElicitationRequestParams,
   McpServerElicitationRequestResponse,
+  PermissionsRequestApprovalParams,
+  PermissionsRequestApprovalResponse,
+  ToolRequestUserInputParams,
+  ToolRequestUserInputResponse,
 } from './protocol';
 
 export const CODEX_APP_SERVER_ARGS = ['app-server', '--listen', 'stdio://'] as const;
 
 const DEFAULT_MAX_FRAME_BYTES = 4 * 1024 * 1024;
 const METHOD_NOT_FOUND = -32601;
+const DEFAULT_STOP_TIMEOUT_MS = 2_000;
+const DEFAULT_FORCE_KILL_TIMEOUT_MS = 1_000;
 
 export interface AppServerProcess extends EventEmitter {
   readonly stdin: Writable;
@@ -62,6 +68,16 @@ export type AppServerServerRequestDispatch =
       respond(response: FileChangeRequestApprovalResponse): void;
     })
   | (ServerRequestDispatchBase & {
+      method: 'item/tool/requestUserInput';
+      params: ToolRequestUserInputParams;
+      respond(response: ToolRequestUserInputResponse): void;
+    })
+  | (ServerRequestDispatchBase & {
+      method: 'item/permissions/requestApproval';
+      params: PermissionsRequestApprovalParams;
+      respond(response: PermissionsRequestApprovalResponse): void;
+    })
+  | (ServerRequestDispatchBase & {
       method: 'mcpServer/elicitation/request';
       params: McpServerElicitationRequestParams;
       respond(response: McpServerElicitationRequestResponse): void;
@@ -76,6 +92,8 @@ export interface CodexAppServerClientOptions extends AppServerSpawnOptions {
   command?: string;
   spawn?: SpawnAppServerProcess;
   maxFrameBytes?: number;
+  stopTimeoutMs?: number;
+  forceKillTimeoutMs?: number;
   onServerRequest?: (
     request: AppServerServerRequestDispatch,
   ) => void | Promise<void>;
@@ -347,6 +365,42 @@ function isFileChangeApprovalParams(value: unknown): value is FileChangeRequestA
     && hasOptionalStringOrNull(value, 'grantRoot');
 }
 
+function isToolRequestUserInputParams(value: unknown): value is ToolRequestUserInputParams {
+  if (!isRecord(value) || !Array.isArray(value.questions)) return false;
+  return typeof value.threadId === 'string'
+    && typeof value.turnId === 'string'
+    && typeof value.itemId === 'string'
+    && (value.autoResolutionMs === null || isFiniteNumber(value.autoResolutionMs))
+    && value.questions.every((question) => {
+      if (!isRecord(question)) return false;
+      return typeof question.id === 'string'
+        && typeof question.header === 'string'
+        && typeof question.question === 'string'
+        && typeof question.isOther === 'boolean'
+        && typeof question.isSecret === 'boolean'
+        && (question.options === null || (
+          Array.isArray(question.options)
+          && question.options.every((option) => isRecord(option)
+            && typeof option.label === 'string'
+            && typeof option.description === 'string')
+        ));
+    });
+}
+
+function isPermissionsRequestApprovalParams(
+  value: unknown,
+): value is PermissionsRequestApprovalParams {
+  if (!isRecord(value)) return false;
+  return typeof value.threadId === 'string'
+    && typeof value.turnId === 'string'
+    && typeof value.itemId === 'string'
+    && isStringOrNull(value.environmentId)
+    && isFiniteNumber(value.startedAtMs)
+    && typeof value.cwd === 'string'
+    && isStringOrNull(value.reason)
+    && isAdditionalPermissionProfile(value.permissions);
+}
+
 function isMcpElicitationParams(value: unknown): value is McpServerElicitationRequestParams {
   if (!isRecord(value)) return false;
   if (
@@ -465,6 +519,8 @@ export class CodexAppServerClient {
   private readonly command: string;
   private readonly spawnProcess: SpawnAppServerProcess;
   private readonly maxFrameBytes: number;
+  private readonly stopTimeoutMs: number;
+  private readonly forceKillTimeoutMs: number;
   private readonly stdoutDecoder = new StringDecoder('utf8');
   private readonly stderrDecoder = new StringDecoder('utf8');
   private readonly pendingClientRequests = new Map<string, PendingClientRequest>();
@@ -476,13 +532,23 @@ export class CodexAppServerClient {
   private currentState: AppServerClientState = 'idle';
   private initializing = false;
   private initialized = false;
+  private readonly exitWaiters = new Set<() => void>();
+  private stopPromise: Promise<void> | null = null;
 
   constructor(private readonly options: CodexAppServerClientOptions = {}) {
     this.command = options.command ?? 'codex';
     this.spawnProcess = options.spawn ?? defaultSpawn;
     this.maxFrameBytes = options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
+    this.stopTimeoutMs = options.stopTimeoutMs ?? DEFAULT_STOP_TIMEOUT_MS;
+    this.forceKillTimeoutMs = options.forceKillTimeoutMs ?? DEFAULT_FORCE_KILL_TIMEOUT_MS;
     if (!Number.isSafeInteger(this.maxFrameBytes) || this.maxFrameBytes <= 0) {
       throw new AppServerTransportError('maxFrameBytes must be a positive safe integer');
+    }
+    if (!Number.isSafeInteger(this.stopTimeoutMs) || this.stopTimeoutMs < 0) {
+      throw new AppServerTransportError('stopTimeoutMs must be a non-negative safe integer');
+    }
+    if (!Number.isSafeInteger(this.forceKillTimeoutMs) || this.forceKillTimeoutMs < 0) {
+      throw new AppServerTransportError('forceKillTimeoutMs must be a non-negative safe integer');
     }
   }
 
@@ -572,16 +638,33 @@ export class CodexAppServerClient {
     this.writeFrame(frame);
   }
 
-  stop(signal: NodeJS.Signals = 'SIGTERM'): void {
+  stop(signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    this.stopPromise = this.stopProcess(signal);
+    return this.stopPromise;
+  }
+
+  private async stopProcess(signal: NodeJS.Signals): Promise<void> {
     if (this.currentState === 'idle') {
       this.currentState = 'exited';
       return;
     }
-    if (
-      this.currentState === 'stopping'
-      || this.currentState === 'failed'
-      || this.currentState === 'exited'
-    ) {
+    if (this.currentState === 'exited') return;
+    if (this.currentState === 'stopping') {
+      await this.waitForExit(this.stopTimeoutMs);
+      return;
+    }
+    if (this.currentState === 'failed') {
+      try {
+        this.child?.kill('SIGKILL');
+      } catch (cause) {
+        this.reportError(new AppServerTransportError(
+          `Failed to force-kill failed Codex app-server: ${toError(cause).message}`,
+          { cause },
+        ));
+        return;
+      }
+      await this.waitForExit(this.forceKillTimeoutMs);
       return;
     }
 
@@ -598,7 +681,38 @@ export class CodexAppServerClient {
         `Failed to stop Codex app-server: ${toError(cause).message}`,
         { cause },
       ));
+      return;
     }
+
+    if (await this.waitForExit(this.stopTimeoutMs)) return;
+    try {
+      this.child?.kill('SIGKILL');
+    } catch (cause) {
+      this.currentState = 'failed';
+      this.reportError(new AppServerTransportError(
+        `Failed to force-kill Codex app-server: ${toError(cause).message}`,
+        { cause },
+      ));
+      return;
+    }
+    await this.waitForExit(this.forceKillTimeoutMs);
+  }
+
+  private waitForExit(timeoutMs: number): Promise<boolean> {
+    if (this.currentState === 'exited') return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      let timeout: NodeJS.Timeout | undefined;
+      const onExit = (): void => {
+        if (timeout) clearTimeout(timeout);
+        this.exitWaiters.delete(onExit);
+        resolve(true);
+      };
+      this.exitWaiters.add(onExit);
+      timeout = setTimeout(() => {
+        this.exitWaiters.delete(onExit);
+        resolve(false);
+      }, timeoutMs);
+    });
   }
 
   private bindProcess(child: AppServerProcess): void {
@@ -790,6 +904,18 @@ export class CodexAppServerClient {
         return;
       }
       request = { method, id, params };
+    } else if (method === 'item/tool/requestUserInput') {
+      if (!isToolRequestUserInputParams(params)) {
+        this.fail(new AppServerProtocolError(`Codex app-server emitted malformed params for ${method}`));
+        return;
+      }
+      request = { method, id, params };
+    } else if (method === 'item/permissions/requestApproval') {
+      if (!isPermissionsRequestApprovalParams(params)) {
+        this.fail(new AppServerProtocolError(`Codex app-server emitted malformed params for ${method}`));
+        return;
+      }
+      request = { method, id, params };
     } else if (method === 'mcpServer/elicitation/request') {
       if (!isMcpElicitationParams(params)) {
         this.fail(new AppServerProtocolError(`Codex app-server emitted malformed params for ${method}`));
@@ -860,6 +986,22 @@ export class CodexAppServerClient {
           },
           reject,
         };
+      case 'item/tool/requestUserInput':
+        return {
+          ...request,
+          respond: (response: ToolRequestUserInputResponse) => {
+            this.finishServerRequest(request.id, { id: request.id, result: response });
+          },
+          reject,
+        };
+      case 'item/permissions/requestApproval':
+        return {
+          ...request,
+          respond: (response: PermissionsRequestApprovalResponse) => {
+            this.finishServerRequest(request.id, { id: request.id, result: response });
+          },
+          reject,
+        };
       case 'mcpServer/elicitation/request':
         return {
           ...request,
@@ -885,6 +1027,12 @@ export class CodexAppServerClient {
       case 'item/fileChange/requestApproval':
         dispatch.respond({ decision: 'cancel' });
         break;
+      case 'item/tool/requestUserInput':
+        dispatch.respond({ answers: {} });
+        break;
+      case 'item/permissions/requestApproval':
+        dispatch.respond({ permissions: {}, scope: 'turn', strictAutoReview: true });
+        break;
       case 'mcpServer/elicitation/request':
         dispatch.respond({ action: 'cancel', content: null, _meta: null });
         break;
@@ -896,7 +1044,11 @@ export class CodexAppServerClient {
     if (pending) {
       const result = pending.method === 'mcpServer/elicitation/request'
         ? { action: 'cancel', content: null, _meta: null }
-        : { decision: 'cancel' };
+        : pending.method === 'item/tool/requestUserInput'
+          ? { answers: {} }
+          : pending.method === 'item/permissions/requestApproval'
+            ? { permissions: {}, scope: 'turn', strictAutoReview: true }
+            : { decision: 'cancel' };
       try {
         this.finishServerRequest(id, { id, result });
       } catch (error) {
@@ -959,6 +1111,7 @@ export class CodexAppServerClient {
     } catch (callbackError) {
       this.reportError(toError(callbackError));
     }
+    for (const resolve of [...this.exitWaiters]) resolve();
   }
 
   private fail(error: Error): void {

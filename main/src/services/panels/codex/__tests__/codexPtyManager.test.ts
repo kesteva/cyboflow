@@ -12,6 +12,16 @@ class TestableCodexPtyManager extends CodexPtyManager {
       ...options,
     });
   }
+
+  captureConcurrentContext(
+    context: { panelId: string; sessionId: string; runId: string },
+    delayMs: number,
+  ): Promise<{ panelId: string; sessionId: string; runId: string } | undefined> {
+    return this.runWithPtySpawnContext(context, async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+      return this.getActivePtySpawnContext();
+    });
+  }
 }
 
 function makeSessionManager(mode?: string): SessionManager {
@@ -79,5 +89,21 @@ describe('CodexPtyManager.buildCommandArgs', () => {
       '--ask-for-approval',
       'never',
     ]);
+  });
+});
+
+describe('CodexPtyManager concurrent spawn context', () => {
+  it('keeps interleaved PTY spawn provenance isolated', async () => {
+    const manager = new TestableCodexPtyManager(makeSessionManager());
+    const first = { panelId: 'panel-1', sessionId: 'session-1', runId: 'run-1' };
+    const second = { panelId: 'panel-2', sessionId: 'session-2', runId: 'run-2' };
+
+    const [capturedFirst, capturedSecond] = await Promise.all([
+      manager.captureConcurrentContext(first, 10),
+      manager.captureConcurrentContext(second, 0),
+    ]);
+
+    expect(capturedFirst).toEqual(first);
+    expect(capturedSecond).toEqual(second);
   });
 });

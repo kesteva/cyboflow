@@ -1,4 +1,5 @@
 import { execSync } from 'child_process';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
@@ -28,6 +29,12 @@ interface CodexPermissionFlags {
   approval: CodexApprovalPolicy;
 }
 
+interface CodexPtySpawnContext {
+  panelId: string;
+  sessionId: string;
+  runId: string;
+}
+
 const PTY_BACKLOG_CAP_BYTES = 200_000;
 
 export function codexPermissionFlagsForMode(mode: PermissionMode): CodexPermissionFlags {
@@ -51,7 +58,7 @@ export class CodexPtyManager extends AbstractCliManager {
   private resolvedExecutablePath: string | null = null;
   private readonly panelRunIds = new Map<string, string>();
   private readonly ptyBacklog = new Map<string, string>();
-  private pendingPtyContext: { panelId: string; sessionId: string; runId: string } | null = null;
+  private readonly ptySpawnContext = new AsyncLocalStorage<CodexPtySpawnContext>();
 
   protected getCliToolName(): string {
     return 'Codex';
@@ -143,21 +150,21 @@ export class CodexPtyManager extends AbstractCliManager {
   override async spawnCliProcess(options: CodexPtySpawnOptions): Promise<void> {
     const runId = options.runId ?? options.panelId;
     this.panelRunIds.set(options.panelId, runId);
-    this.pendingPtyContext = { panelId: options.panelId, sessionId: options.sessionId, runId };
     try {
-      await super.spawnCliProcess({ ...options, runId });
+      await this.runWithPtySpawnContext(
+        { panelId: options.panelId, sessionId: options.sessionId, runId },
+        () => super.spawnCliProcess({ ...options, runId }),
+      );
     } catch (err) {
       this.panelRunIds.delete(options.panelId);
       this.ptyBacklog.delete(runId);
       throw err;
-    } finally {
-      this.pendingPtyContext = null;
     }
   }
 
   protected override async spawnPtyProcess(command: string, args: string[], cwd: string, env: { [key: string]: string }): Promise<pty.IPty> {
     const ptyProcess = await super.spawnPtyProcess(command, args, cwd, env);
-    const context = this.pendingPtyContext;
+    const context = this.ptySpawnContext.getStore();
     if (context) {
       ptyProcess.onData((data: string) => {
         this.recordPtyBacklog(context.runId, data);
@@ -273,5 +280,16 @@ export class CodexPtyManager extends AbstractCliManager {
       runId,
       next.length > PTY_BACKLOG_CAP_BYTES ? next.slice(-PTY_BACKLOG_CAP_BYTES) : next,
     );
+  }
+
+  protected runWithPtySpawnContext<T>(
+    context: CodexPtySpawnContext,
+    operation: () => T,
+  ): T {
+    return this.ptySpawnContext.run(context, operation);
+  }
+
+  protected getActivePtySpawnContext(): CodexPtySpawnContext | undefined {
+    return this.ptySpawnContext.getStore();
   }
 }

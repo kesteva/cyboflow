@@ -119,6 +119,25 @@ describe('projectTurnSessionEvent', () => {
     }))).toEqual([]);
   });
 
+  it('projects app-server userMessage items for prompt and nudge reconstruction', () => {
+    expect(project(completedItem({
+      type: 'userMessage',
+      id: 'user-1',
+      clientId: 'nudge-1',
+      content: [
+        { type: 'text', text: 'Continue the workflow.', text_elements: [] },
+        { type: 'localImage', path: '/tmp/context.png', detail: 'high' },
+      ],
+    }))).toEqual([{
+      type: 'agent_message',
+      provider: 'codex',
+      runtime: 'codex-sdk',
+      role: 'user',
+      content: [{ type: 'text', text: 'Continue the workflow.\n[local image: /tmp/context.png]' }],
+      external_session_id: 'thread-1',
+    }]);
+  });
+
   it('correlates command, MCP, and web-search calls with their results', () => {
     expect(project(completedItem({
       type: 'commandExecution',

@@ -97,8 +97,11 @@ export type AppServerThreadResumeResponse = AppServerThreadResponse;
 export type AppServerImageDetail = 'auto' | 'low' | 'high' | 'original';
 
 export type AppServerUserInput =
-  | { type: 'text'; text: string; text_elements: [] }
-  | { type: 'localImage'; path: string; detail?: AppServerImageDetail };
+  | { type: 'text'; text: string; text_elements: AppServerJsonValue[] }
+  | { type: 'image'; url: string; detail?: AppServerImageDetail }
+  | { type: 'localImage'; path: string; detail?: AppServerImageDetail }
+  | { type: 'skill'; name: string; path: string }
+  | { type: 'mention'; name: string; path: string };
 
 export interface AppServerTurnStartParams {
   threadId: string;
@@ -245,6 +248,54 @@ export interface FileChangeRequestApprovalResponse {
   decision: FileChangeApprovalDecision;
 }
 
+export interface ToolRequestUserInputOption {
+  label: string;
+  description: string;
+}
+
+export interface ToolRequestUserInputQuestion {
+  id: string;
+  header: string;
+  question: string;
+  isOther: boolean;
+  isSecret: boolean;
+  options: ToolRequestUserInputOption[] | null;
+}
+
+export interface ToolRequestUserInputParams {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  questions: ToolRequestUserInputQuestion[];
+  autoResolutionMs: number | null;
+}
+
+export interface ToolRequestUserInputResponse {
+  answers: Record<string, { answers: string[] }>;
+}
+
+export interface PermissionsRequestApprovalParams {
+  threadId: string;
+  turnId: string;
+  itemId: string;
+  environmentId: string | null;
+  startedAtMs: number;
+  cwd: string;
+  reason: string | null;
+  permissions: AdditionalPermissionProfile;
+}
+
+export interface GrantedPermissionProfile {
+  network?: { enabled: boolean | null };
+  fileSystem?: AdditionalFileSystemPermissions;
+}
+
+export interface PermissionsRequestApprovalResponse {
+  permissions: GrantedPermissionProfile;
+  scope: 'turn' | 'session';
+  strictAutoReview?: boolean;
+}
+
 interface McpElicitationSchemaBase {
   title?: string;
   description?: string;
@@ -336,6 +387,16 @@ export type AppServerServerRequest =
       params: FileChangeRequestApprovalParams;
     }
   | {
+      method: 'item/tool/requestUserInput';
+      id: AppServerRequestId;
+      params: ToolRequestUserInputParams;
+    }
+  | {
+      method: 'item/permissions/requestApproval';
+      id: AppServerRequestId;
+      params: PermissionsRequestApprovalParams;
+    }
+  | {
       method: 'mcpServer/elicitation/request';
       id: AppServerRequestId;
       params: McpServerElicitationRequestParams;
@@ -348,4 +409,8 @@ export type AppServerServerResponseFor<M extends AppServerServerRequestMethod> =
     ? CommandExecutionRequestApprovalResponse
     : M extends 'item/fileChange/requestApproval'
       ? FileChangeRequestApprovalResponse
-      : McpServerElicitationRequestResponse;
+      : M extends 'item/tool/requestUserInput'
+        ? ToolRequestUserInputResponse
+        : M extends 'item/permissions/requestApproval'
+          ? PermissionsRequestApprovalResponse
+          : McpServerElicitationRequestResponse;

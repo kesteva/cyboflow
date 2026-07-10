@@ -323,6 +323,12 @@ describe('CodexAppServerTurnSession', () => {
     const session = await activeSession(client, events);
     const items: Array<{ type: string; [key: string]: AppServerJsonValue }> = [
       { type: 'agentMessage', id: 'agent', text: 'done' },
+      {
+        type: 'userMessage',
+        id: 'user-message',
+        clientId: 'nudge-1',
+        content: [{ type: 'text', text: 'Please continue.', text_elements: [] }],
+      },
       { type: 'reasoning', id: 'reason', summary: ['summary'], content: ['detail'] },
       {
         type: 'commandExecution',
@@ -380,6 +386,7 @@ describe('CodexAppServerTurnSession', () => {
     });
     expect(events.slice(1).map((event) => event.type)).toEqual([
       'item.started',
+      'item.completed',
       'item.completed',
       'item.completed',
       'item.completed',

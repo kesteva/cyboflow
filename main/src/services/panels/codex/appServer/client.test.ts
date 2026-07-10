@@ -175,7 +175,7 @@ describe('CodexAppServerClient', () => {
     expect(child.killCalls).toEqual([]);
   });
 
-  it('dispatches command, file, and MCP approval requests with typed responders', () => {
+  it('dispatches pinned approval and user-input requests with typed responders', () => {
     const handled: string[] = [];
     const { child } = makeHarness({
       onServerRequest: (request) => {
@@ -188,6 +188,14 @@ describe('CodexAppServerClient', () => {
           case 'item/fileChange/requestApproval':
             expect(request.params.grantRoot).toBe('/tmp/worktree');
             request.respond({ decision: 'decline' });
+            break;
+          case 'item/tool/requestUserInput':
+            expect(request.params.questions[0].id).toBe('question-1');
+            request.respond({ answers: { 'question-1': { answers: ['Proceed'] } } });
+            break;
+          case 'item/permissions/requestApproval':
+            expect(request.params.permissions.network).toEqual({ enabled: true });
+            request.respond({ permissions: { network: { enabled: true } }, scope: 'turn' });
             break;
           case 'mcpServer/elicitation/request':
             expect(request.params.serverName).toBe('cyboflow');
@@ -224,6 +232,38 @@ describe('CodexAppServerClient', () => {
         },
       })}\n`
       + `${JSON.stringify({
+        id: 'question-request-1',
+        method: 'item/tool/requestUserInput',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          itemId: 'tool-1',
+          questions: [{
+            id: 'question-1',
+            header: 'Action',
+            question: 'What next?',
+            isOther: true,
+            isSecret: false,
+            options: [{ label: 'Proceed', description: 'Continue.' }],
+          }],
+          autoResolutionMs: null,
+        },
+      })}\n`
+      + `${JSON.stringify({
+        id: 'permissions-1',
+        method: 'item/permissions/requestApproval',
+        params: {
+          threadId: 'thread-1',
+          turnId: 'turn-1',
+          itemId: 'permissions-item-1',
+          environmentId: null,
+          startedAtMs: 102,
+          cwd: '/tmp/worktree',
+          reason: 'network access',
+          permissions: { network: { enabled: true }, fileSystem: null },
+        },
+      })}\n`
+      + `${JSON.stringify({
         id: 'mcp-1',
         method: 'mcpServer/elicitation/request',
         params: {
@@ -241,11 +281,15 @@ describe('CodexAppServerClient', () => {
     expect(handled).toEqual([
       'item/commandExecution/requestApproval',
       'item/fileChange/requestApproval',
+      'item/tool/requestUserInput',
+      'item/permissions/requestApproval',
       'mcpServer/elicitation/request',
     ]);
     expect(child.outboundFrames()).toEqual([
       { id: 'command-1', result: { decision: 'accept' } },
       { id: 'file-1', result: { decision: 'decline' } },
+      { id: 'question-request-1', result: { answers: { 'question-1': { answers: ['Proceed'] } } } },
+      { id: 'permissions-1', result: { permissions: { network: { enabled: true } }, scope: 'turn' } },
       { id: 'mcp-1', result: { action: 'cancel', content: null, _meta: null } },
     ]);
   });
@@ -291,7 +335,7 @@ describe('CodexAppServerClient', () => {
 
     child.writeFrame({
       id: 'permissions-1',
-      method: 'item/permissions/requestApproval',
+      method: 'item/tool/call',
       params: { permissions: ['network'] },
     });
 
@@ -299,12 +343,12 @@ describe('CodexAppServerClient', () => {
       id: 'permissions-1',
       error: {
         code: -32601,
-        message: 'Unsupported Codex app-server request: item/permissions/requestApproval',
+        message: 'Unsupported Codex app-server request: item/tool/call',
       },
     }]);
     expect(unhandled).toHaveBeenCalledWith({
       id: 'permissions-1',
-      method: 'item/permissions/requestApproval',
+      method: 'item/tool/call',
       params: { permissions: ['network'] },
     });
     expect(client.state).toBe('running');
@@ -378,8 +422,8 @@ describe('CodexAppServerClient', () => {
     const pending = client.sendRequest<unknown, object>('turn/start', {});
     const caught = pending.catch((error: unknown) => error);
 
-    client.stop('SIGINT');
-    client.stop('SIGTERM');
+    const firstStop = client.stop('SIGINT');
+    const secondStop = client.stop('SIGTERM');
 
     expect(await caught).toMatchObject({
       name: 'AppServerTransportError',
@@ -389,10 +433,28 @@ describe('CodexAppServerClient', () => {
     expect(child.killCalls).toEqual(['SIGINT']);
 
     child.emit('exit', null, 'SIGINT');
+    await Promise.all([firstStop, secondStop]);
 
     expect(client.state).toBe('exited');
     expect(exits).toEqual([{ code: null, signal: 'SIGINT' }]);
     expect(errors).toEqual([]);
+  });
+
+  it('force-kills and waits again when graceful stop does not exit', async () => {
+    vi.useFakeTimers();
+    try {
+      const { child, client } = makeHarness({ stopTimeoutMs: 25, forceKillTimeoutMs: 25 });
+      const stopping = client.stop();
+
+      expect(child.killCalls).toEqual(['SIGTERM']);
+      await vi.advanceTimersByTimeAsync(25);
+      expect(child.killCalls).toEqual(['SIGTERM', 'SIGKILL']);
+      child.emit('exit', null, 'SIGKILL');
+      await stopping;
+      expect(client.state).toBe('exited');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('treats child-process errors as fatal transport failures', async () => {

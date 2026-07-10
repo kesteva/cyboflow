@@ -1,4 +1,5 @@
 import type { AppServerServerRequestDispatch } from './client';
+import type { TurnSessionItem } from './turnSession';
 
 export const CODEX_APP_SERVER_APPROVAL_SOURCE = 'approval:codex-app-server';
 
@@ -17,7 +18,7 @@ export interface ApprovalRouterPort {
     socketReply: (decision: ApprovalBridgeDecision) => void,
     source?: string,
   ): Promise<ApprovalBridgeDecision>;
-  clearPendingForRun(runId: string): void;
+  clearPendingForSource?(runId: string, source: string): void;
 }
 
 export interface CodexAppServerApprovalBridgeOptions {
@@ -28,8 +29,13 @@ export interface CodexAppServerApprovalBridgeOptions {
 }
 
 interface PendingApproval {
-  request: AppServerServerRequestDispatch;
+  request: ApprovalDispatch;
 }
+
+type ApprovalDispatch = Exclude<
+  AppServerServerRequestDispatch,
+  { method: 'item/tool/requestUserInput' }
+>;
 
 export class CodexAppServerApprovalBridgeError extends Error {
   override readonly name: string = 'CodexAppServerApprovalBridgeError';
@@ -71,6 +77,10 @@ export class CodexAppServerApprovalBridge {
   private readonly source: string;
   private readonly onError?: (error: Error) => void;
   private readonly pending = new Map<string, PendingApproval>();
+  private readonly fileChangesByItemId = new Map<
+    string,
+    Extract<TurnSessionItem, { type: 'fileChange' }>['changes']
+  >();
   private readonly handledRequests = new WeakSet<object>();
   private disposed = false;
 
@@ -85,7 +95,13 @@ export class CodexAppServerApprovalBridge {
     return this.pending.size;
   }
 
-  async handleServerRequest(request: AppServerServerRequestDispatch): Promise<void> {
+  observeItem(item: TurnSessionItem): void {
+    if (item.type === 'fileChange') {
+      this.fileChangesByItemId.set(item.id, item.changes.map((change) => ({ ...change })));
+    }
+  }
+
+  async handleServerRequest(request: ApprovalDispatch): Promise<void> {
     if (this.handledRequests.has(request)) return;
     this.handledRequests.add(request);
 
@@ -140,7 +156,7 @@ export class CodexAppServerApprovalBridge {
     for (const key of pendingKeys) this.cancelPending(key);
 
     try {
-      this.approvalRouter.clearPendingForRun(this.runId);
+      this.approvalRouter.clearPendingForSource?.(this.runId, this.source);
     } catch (cause) {
       this.reportError(new CodexAppServerApprovalBridgeError(
         `Failed to clear pending Codex approvals for run ${this.runId}`,
@@ -149,18 +165,20 @@ export class CodexAppServerApprovalBridge {
     }
   }
 
-  private toolName(request: AppServerServerRequestDispatch): string {
+  private toolName(request: ApprovalDispatch): string {
     switch (request.method) {
       case 'item/commandExecution/requestApproval':
         return 'Bash';
       case 'item/fileChange/requestApproval':
         return 'Edit';
+      case 'item/permissions/requestApproval':
+        return 'Permissions';
       case 'mcpServer/elicitation/request':
         return mcpToolName(request);
     }
   }
 
-  private approvalInput(request: AppServerServerRequestDispatch): Record<string, unknown> {
+  private approvalInput(request: ApprovalDispatch): Record<string, unknown> {
     const itemId = request.method === 'mcpServer/elicitation/request'
       ? null
       : request.params.itemId;
@@ -173,6 +191,9 @@ export class CodexAppServerApprovalBridge {
       itemId,
     };
 
+    const proposedChanges = request.method === 'item/fileChange/requestApproval'
+      ? this.fileChangesByItemId.get(request.params.itemId)
+      : undefined;
     return {
       ...request.params,
       runId: this.runId,
@@ -182,6 +203,7 @@ export class CodexAppServerApprovalBridge {
       turnId: request.params.turnId,
       itemId,
       correlation,
+      ...(proposedChanges ? { proposedChanges } : {}),
     };
   }
 
@@ -196,6 +218,21 @@ export class CodexAppServerApprovalBridge {
           pending.request.respond({
             decision: decision.behavior === 'allow' ? 'accept' : 'decline',
           });
+          break;
+        case 'item/permissions/requestApproval':
+          pending.request.respond(decision.behavior === 'allow'
+            ? {
+                permissions: {
+                  ...(pending.request.params.permissions.network
+                    ? { network: pending.request.params.permissions.network }
+                    : {}),
+                  ...(pending.request.params.permissions.fileSystem
+                    ? { fileSystem: pending.request.params.permissions.fileSystem }
+                    : {}),
+                },
+                scope: 'turn',
+              }
+            : { permissions: {}, scope: 'turn', strictAutoReview: true });
           break;
         case 'mcpServer/elicitation/request':
           pending.request.respond({
@@ -231,6 +268,9 @@ export class CodexAppServerApprovalBridge {
         case 'item/fileChange/requestApproval':
           request.respond({ decision: 'cancel' });
           break;
+        case 'item/permissions/requestApproval':
+          request.respond({ permissions: {}, scope: 'turn', strictAutoReview: true });
+          break;
         case 'mcpServer/elicitation/request':
           request.respond({ action: 'cancel', content: null, _meta: null });
           break;
@@ -251,4 +291,3 @@ export class CodexAppServerApprovalBridge {
     }
   }
 }
-

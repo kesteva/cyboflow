@@ -112,6 +112,23 @@ function reasoningText(item: Extract<TurnSessionItem, { type: 'reasoning' }>): s
   return [...item.summary, ...item.content].join('\n');
 }
 
+function userMessageText(item: Extract<TurnSessionItem, { type: 'userMessage' }>): string {
+  return item.content.map((content) => {
+    switch (content.type) {
+      case 'text':
+        return content.text;
+      case 'image':
+        return `[image: ${content.url}]`;
+      case 'localImage':
+        return `[local image: ${content.path}]`;
+      case 'skill':
+        return `[skill: ${content.name} (${content.path})]`;
+      case 'mention':
+        return `[mention: ${content.name} (${content.path})]`;
+    }
+  }).join('\n');
+}
+
 function rawTurnError(
   event: Extract<TurnSessionEvent, { type: 'turn.error' }>,
 ): Record<string, unknown> {
@@ -144,6 +161,18 @@ function projectCompletedItem(
 ): AgentStreamEvent[] {
   const { item, threadId } = event;
   switch (item.type) {
+    case 'userMessage': {
+      const text = userMessageText(item);
+      return text.trim().length === 0
+        ? []
+        : [{
+            type: 'agent_message',
+            ...CODEX_EVENT_SOURCE,
+            role: 'user',
+            content: [{ type: 'text', text }],
+            external_session_id: threadId,
+          }];
+    }
     case 'agentMessage':
       return item.text.trim().length === 0
         ? []

@@ -61,7 +61,7 @@ export function buildCodexAppServerThreadConfiguration(
     cwd: options.worktreePath,
     sandbox: permissionFlags.sandbox,
     approvalPolicy: permissionFlags.approval,
-    approvalsReviewer: 'user',
+    approvalsReviewer: permissionMode === 'auto' ? 'auto_review' : 'user',
     config: buildMcpConfig(runId, runtimeConfig),
     ...(model ? { model } : {}),
     ...(options.systemPromptAppend

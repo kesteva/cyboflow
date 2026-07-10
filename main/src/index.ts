@@ -2080,6 +2080,7 @@ async function initializeServices() {
     nodeExecutablePath: await nodeResolver.getNodePath(),
   });
   createdCodexSdkManager.setApprovalRouterProvider(() => ApprovalRouter.getInstance());
+  createdCodexSdkManager.setQuestionRouterProvider(() => QuestionRouter.getInstance());
 
   // OrchestratorHealth — constructed with the real McpServerLifecycle so both the
   // raw-IPC cyboflow:mcp-health channel and the tRPC cyboflow.health.mcpServer

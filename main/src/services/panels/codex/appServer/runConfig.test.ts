@@ -68,6 +68,25 @@ describe('Codex app-server run configuration', () => {
     expect(params).not.toHaveProperty('model');
   });
 
+  it('maps only auto mode to the pinned auto-review reviewer', () => {
+    const base = {
+      panelId: 'run-1',
+      sessionId: 'run-1',
+      worktreePath: '/tmp/worktree',
+      prompt: 'ship it',
+    };
+    expect(buildCodexAppServerThreadStartParams('run-1', {
+      ...base,
+      agentPermissionMode: 'auto',
+    }, runtimeConfig).approvalsReviewer).toBe('auto_review');
+    for (const agentPermissionMode of ['default', 'acceptEdits', 'dontAsk'] as const) {
+      expect(buildCodexAppServerThreadStartParams('run-1', {
+        ...base,
+        agentPermissionMode,
+      }, runtimeConfig).approvalsReviewer).toBe('user');
+    }
+  });
+
   it('resumes the requested external thread without dropping per-run configuration', () => {
     const params = buildCodexAppServerThreadResumeParams('run-1', 'thread-1', {
       panelId: 'run-1',

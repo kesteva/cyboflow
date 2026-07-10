@@ -3,6 +3,7 @@ import { AppServerProtocolError } from './client';
 import type {
   AppServerInitializeParams,
   AppServerInitializeResponse,
+  AppServerImageDetail,
   AppServerJsonValue,
   AppServerThreadResumeParams,
   AppServerThreadStartParams,
@@ -22,6 +23,12 @@ export interface TurnSessionClient {
 }
 
 export type TurnSessionItem =
+  | {
+      type: 'userMessage';
+      id: string;
+      clientId: string | null;
+      content: AppServerUserInput[];
+    }
   | { type: 'agentMessage'; id: string; text: string }
   | { type: 'reasoning'; id: string; summary: string[]; content: string[] }
   | {
@@ -238,6 +245,44 @@ function parseCommandActions(value: unknown): CommandAction[] | null {
   return actions;
 }
 
+function parseUserInput(value: unknown): AppServerUserInput | null {
+  if (!isRecord(value) || typeof value.type !== 'string') return null;
+  switch (value.type) {
+    case 'text':
+      return typeof value.text === 'string'
+        && Array.isArray(value.text_elements)
+        && value.text_elements.every(isJsonValue)
+        ? { type: 'text', text: value.text, text_elements: value.text_elements }
+        : null;
+    case 'image':
+      return typeof value.url === 'string'
+        ? { type: 'image', url: value.url, ...(typeof value.detail === 'string' ? { detail: value.detail as AppServerImageDetail } : {}) }
+        : null;
+    case 'localImage':
+      return typeof value.path === 'string'
+        ? { type: 'localImage', path: value.path, ...(typeof value.detail === 'string' ? { detail: value.detail as AppServerImageDetail } : {}) }
+        : null;
+    case 'skill':
+    case 'mention':
+      return typeof value.name === 'string' && typeof value.path === 'string'
+        ? { type: value.type, name: value.name, path: value.path }
+        : null;
+    default:
+      return null;
+  }
+}
+
+function parseUserInputs(value: unknown): AppServerUserInput[] | null {
+  if (!Array.isArray(value)) return null;
+  const inputs: AppServerUserInput[] = [];
+  for (const entry of value) {
+    const input = parseUserInput(entry);
+    if (!input) return null;
+    inputs.push(input);
+  }
+  return inputs;
+}
+
 function parseItem(value: unknown): TurnSessionItem | null {
   if (!isJsonValue(value)) return null;
   if (!isRecord(value) || typeof value.type !== 'string' || typeof value.id !== 'string') {
@@ -245,6 +290,12 @@ function parseItem(value: unknown): TurnSessionItem | null {
   }
 
   switch (value.type) {
+    case 'userMessage': {
+      const content = parseUserInputs(value.content);
+      return content && (value.clientId === null || typeof value.clientId === 'string')
+        ? { type: 'userMessage', id: value.id, clientId: value.clientId, content }
+        : rawItem(value);
+    }
     case 'agentMessage':
       return typeof value.text === 'string'
         ? { type: 'agentMessage', id: value.id, text: value.text }

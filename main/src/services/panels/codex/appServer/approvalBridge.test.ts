@@ -15,6 +15,10 @@ type FileDispatch = Extract<
   AppServerServerRequestDispatch,
   { method: 'item/fileChange/requestApproval' }
 >;
+type PermissionsDispatch = Extract<
+  AppServerServerRequestDispatch,
+  { method: 'item/permissions/requestApproval' }
+>;
 type McpDispatch = Extract<
   AppServerServerRequestDispatch,
   { method: 'mcpServer/elicitation/request' }
@@ -47,7 +51,7 @@ function deferredDecision(): DeferredDecision {
 
 class FakeApprovalRouter implements ApprovalRouterPort {
   readonly calls: ApprovalCall[] = [];
-  readonly clearCalls: string[] = [];
+  readonly clearCalls: Array<{ runId: string; source: string }> = [];
 
   requestApproval(
     runId: string,
@@ -61,8 +65,8 @@ class FakeApprovalRouter implements ApprovalRouterPort {
     return deferred.promise;
   }
 
-  clearPendingForRun(runId: string): void {
-    this.clearCalls.push(runId);
+  clearPendingForSource(runId: string, source: string): void {
+    this.clearCalls.push({ runId, source });
   }
 }
 
@@ -109,6 +113,35 @@ function fileDispatch(id: string | number = 'file-1'): {
         startedAtMs: 101,
         reason: 'write generated file',
         grantRoot: '/tmp/worktree',
+      },
+      respond,
+      reject: vi.fn(),
+    },
+  };
+}
+
+function permissionsDispatch(): {
+  request: PermissionsDispatch;
+  respond: ReturnType<typeof vi.fn>;
+} {
+  const respond = vi.fn();
+  return {
+    respond,
+    request: {
+      id: 'permissions-1',
+      method: 'item/permissions/requestApproval',
+      params: {
+        threadId: 'thread-1',
+        turnId: 'turn-1',
+        itemId: 'item-permissions',
+        environmentId: null,
+        startedAtMs: 102,
+        cwd: '/tmp/worktree',
+        reason: 'network and generated output',
+        permissions: {
+          network: { enabled: true },
+          fileSystem: { read: null, write: ['/tmp/generated'] },
+        },
       },
       respond,
       reject: vi.fn(),
@@ -270,6 +303,51 @@ describe('CodexAppServerApprovalBridge', () => {
     expect(respond).toHaveBeenCalledWith({ action: 'accept', content: null, _meta: null });
   });
 
+  it('correlates proposed file changes captured from the item lifecycle', async () => {
+    const { bridge, router } = makeBridge();
+    bridge.observeItem({
+      type: 'fileChange',
+      id: 'item-file',
+      status: 'inProgress',
+      changes: [{ path: 'src/new.ts', kind: { type: 'add' }, diff: '+export {};' }],
+    });
+    const { request } = fileDispatch();
+
+    const handling = bridge.handleServerRequest(request);
+    expect(router.calls[0].input).toMatchObject({
+      proposedChanges: [{ path: 'src/new.ts', kind: { type: 'add' }, diff: '+export {};' }],
+    });
+    router.calls[0].deferred.resolve({ behavior: 'allow' });
+    await handling;
+  });
+
+  it('routes permissions through ApprovalRouter and grants only on allow', async () => {
+    const { bridge, router } = makeBridge();
+    const allowed = permissionsDispatch();
+    const allowedHandling = bridge.handleServerRequest(allowed.request);
+    expect(router.calls[0]).toMatchObject({ toolName: 'Permissions' });
+    router.calls[0].deferred.resolve({ behavior: 'allow' });
+    await allowedHandling;
+    expect(allowed.respond).toHaveBeenCalledWith({
+      permissions: {
+        network: { enabled: true },
+        fileSystem: { read: null, write: ['/tmp/generated'] },
+      },
+      scope: 'turn',
+    });
+
+    const denied = permissionsDispatch();
+    denied.request.id = 'permissions-2';
+    const deniedHandling = bridge.handleServerRequest(denied.request);
+    router.calls[1].deferred.resolve({ behavior: 'deny' });
+    await deniedHandling;
+    expect(denied.respond).toHaveBeenCalledWith({
+      permissions: {},
+      scope: 'turn',
+      strictAutoReview: true,
+    });
+  });
+
   it('cancels generic MCP form and URL elicitations without opening review items', async () => {
     const { bridge, router } = makeBridge();
     const form = mcpDispatch({ id: 'form-1' });
@@ -313,7 +391,10 @@ describe('CodexAppServerApprovalBridge', () => {
     expect(file.respond).toHaveBeenCalledWith({ decision: 'cancel' });
     expect(command.respond).toHaveBeenCalledTimes(1);
     expect(file.respond).toHaveBeenCalledTimes(1);
-    expect(router.clearCalls).toEqual(['run-1']);
+    expect(router.clearCalls).toEqual([{
+      runId: 'run-1',
+      source: CODEX_APP_SERVER_APPROVAL_SOURCE,
+    }]);
     expect(bridge.pendingCount).toBe(0);
 
     router.calls[0].deferred.resolve({ behavior: 'allow' });
@@ -351,4 +432,3 @@ describe('CodexAppServerApprovalBridge', () => {
     });
   });
 });
-
