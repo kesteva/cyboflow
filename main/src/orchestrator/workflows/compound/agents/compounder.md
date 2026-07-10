@@ -25,10 +25,19 @@ learning qualifies only if it clears one of:
   bug (silently wrong, hard to detect later), or a structural gap that will
   predictably bite again.
 
-Everything below the bar gets dropped — or, when several sub-bar observations
-share a theme, folded into ONE combined entry. Return at most **7** learnings,
-ordered by impact; a short list the human can actually weigh beats an exhaustive
-one.
+Everything below the bar is **discarded** — but you do not drop it silently.
+Return each discarded candidate in a short `## Discarded` list (a one-line reason
+per entry) so the orchestrator can show the human, in ONE review, both "here is
+what you should act on" and "here is what I considered and set aside." When
+several sub-bar observations share a theme, fold them into ONE discarded entry
+rather than listing each facet. Return at most **7** act-on learnings, ordered by
+impact; a short list the human can actually weigh beats an exhaustive one.
+
+A discarded candidate is **context for the recommendations doc's Discarded
+section — never an action.** It is not a finding, not a decision, not a task; it
+is a thing you looked at and chose not to compound, with your reason. Do not dress
+a drop up as a `decision` (a decision is a proposed doc edit, below) — that is how
+compound used to spam the review queue with one blocking gate per rejection.
 
 Each learning must state the **general rule, not the instance** — "IPC response
 types must be declared explicitly at the boundary", not "fix the type in file X".
@@ -71,11 +80,23 @@ decisions.
 
 ## Result
 
-Return a `## Learnings` list, ordered by impact, at most 7 entries. Each entry: a
-short title, its tag (quick / task / decision), the general rule it establishes,
-its evidence (recurrence count + run ids, instances, directly-attributed token /
-cost figures only), the file(s) / location(s) it concerns, and the proposed
-write-back (the in-place fix for a `quick`, the task body for a `task`, or the doc
-edit with target file/section and verbatim wording for a `decision`). Or the
-single line `No durable learnings.` when nothing clears the bar — an empty result
-is a valid, common outcome.
+Return TWO sections so the orchestrator can compose one review the human reads at
+a single gate:
+
+1. A `## Learnings` list — the act-on set, ordered by impact, at most 7 entries.
+   Each entry: a short title, its tag (quick / task / decision), the general rule
+   it establishes, its evidence (recurrence count + run ids, instances,
+   directly-attributed token / cost figures only), the file(s) / location(s) it
+   concerns, and the proposed write-back (the in-place fix for a `quick`, the task
+   body for a `task`, or the doc edit with target file/section and verbatim
+   wording for a `decision`). Write `No durable learnings.` when nothing clears the
+   bar — an empty act-on set is a valid, common outcome.
+2. A `## Discarded` list — the candidates you considered and set aside, one line
+   each: the candidate + your one-line reason (below the bar, single-instance nit,
+   intentional behaviour, already covered, etc.). This is what the human sees under
+   "here's what I discarded." Omit the section only when you genuinely considered
+   nothing beyond the act-on set.
+
+Both lists are **returned text, not cyboflow state** — you never file them. The
+orchestrator folds both into the `compound-recommendations` doc and gates the
+act-on set once; the discarded list never becomes a review-queue item.

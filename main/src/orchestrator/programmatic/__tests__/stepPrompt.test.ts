@@ -159,7 +159,7 @@ describe('composeStepPrompt', () => {
     expect(out).not.toContain('report_artifact');
   });
 
-  it('instructs a compound extract step to compose the doc and call cyboflow_report_artifact', () => {
+  it('instructs a compound extract step to compose the Act on / Discarded doc and call cyboflow_report_artifact', () => {
     const out = composeStepPrompt({
       step: step({
         id: 'extract',
@@ -175,8 +175,35 @@ describe('composeStepPrompt', () => {
     expect(out).toContain("atype: 'compound-recommendations'");
     expect(out).toContain('"Recommendations"');
     expect(out).toContain('{"markdown": "<the doc>"}');
-    // And it must forbid re-emitting the learnings as findings.
+    // The doc is the single review: an Act on section AND a Discarded section.
+    expect(out).toContain('## Act on');
+    expect(out).toContain('## Discarded');
+    // And it must forbid re-emitting the learnings as findings AND filing a drop
+    // as a decision (the sequential-gate spam this rework kills).
     expect(out).toContain("kind:'finding'");
+    expect(out).toContain('DISCARDED candidate');
+  });
+
+  it('adds the compound review-queue discipline guard to EVERY compound step (incl. one with no outputArtifact)', () => {
+    // load-sprint has no outputArtifact, so the artifact addendum never reaches
+    // it — yet it is where the per-drop `decision` spam was observed. The guard
+    // must attach on workflow name alone.
+    const loadSprint = composeStepPrompt({
+      step: step({ id: 'load-sprint', name: 'Load merged work', agent: 'compounder' }),
+      workflowName: 'compound',
+      attempt: 1,
+    });
+    expect(loadSprint).toContain('## Compound review-queue discipline');
+    expect(loadSprint).toContain('NEVER file a discarded candidate');
+    expect(loadSprint).not.toContain('## Artifact to report'); // no outputArtifact
+
+    // A non-compound step never gets the guard.
+    const plannerStep = composeStepPrompt({
+      step: step({ id: 'context', name: 'Context', agent: 'context' }),
+      workflowName: 'planner',
+      attempt: 1,
+    });
+    expect(plannerStep).not.toContain('## Compound review-queue discipline');
   });
 
   it('adds no artifact addendum for an outputArtifact atype that mints without a follow-up (idea-spec)', () => {

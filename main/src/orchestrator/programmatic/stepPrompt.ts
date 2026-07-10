@@ -102,7 +102,7 @@ function artifactFollowUp(outputArtifact: NonNullable<WorkflowStep['outputArtifa
     case 'arch-design':
       return `\n\n## Artifact to report\n\nWhen your \`cyboflow-architecture\` subagent returns its \`## Architecture design\` section, fold it into the IDEA's body yourself via \`cyboflow_update_task\`: if the body already has an \`## Architecture design\` section, REPLACE that section (never stack a second copy); otherwise append it. The arch-design deliverable tab derives from the body automatically, so you do not report an artifact for this step.`;
     case 'compound-recommendations':
-      return `\n\n## Artifact to report\n\nAfter your \`cyboflow-compounder\` subagent returns its \`## Learnings\` list, compose ONE summary-of-recommendations markdown doc — grouped by bucket as \`## Quick fixes\` / \`## Doc edits\` / \`## Tasks\`, one entry per learning with its general rule, evidence (recurrence + run ids, files), and computed impact — and call \`cyboflow_report_artifact\` yourself with \`atype: 'compound-recommendations'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the doc>"}\`. That call is the ONLY thing that mints this run's recommendations tab, and it is exactly what the human reads at the approve-learnings gate — skipping it leaves the gate with nothing to review. Do NOT emit these learnings as \`cyboflow_report_finding\` \`kind:'finding'\` items; a finding is Compound's input, not its output.`;
+      return `\n\n## Artifact to report\n\nAfter your \`cyboflow-compounder\` subagent returns its \`## Learnings\` and \`## Discarded\` lists, compose ONE summary-of-recommendations markdown doc — the single thing the human reads at the approve-learnings gate — with TWO top-level sections:\n\n- \`## Act on\` — the learnings that cleared the bar, grouped as \`### Quick fixes\` / \`### Doc edits\` / \`### Tasks\`, one entry per learning with its general rule, evidence (recurrence + run ids, files), computed impact, and the proposed change.\n- \`## Discarded\` — the candidates the compounder considered and set aside, one line each with its reason. This is the "here's what I discarded" half of the review. Omit the section only if the compounder returned no discarded list.\n\nThen call \`cyboflow_report_artifact\` yourself with \`atype: 'compound-recommendations'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the doc>"}\`. That call is the ONLY thing that mints this run's recommendations tab; skipping it leaves the gate with nothing to review.\n\nHard limits on what becomes a review-queue item: do NOT emit \`cyboflow_report_finding\` with \`kind:'finding'\` (a finding is Compound's input, not its output), and do NOT emit a \`cyboflow_report_finding\` \`decision\` — or any review item — for a DISCARDED candidate. Discarded candidates live in the \`## Discarded\` section of THIS doc and nowhere else; filing one per drop is exactly the sequential-gate spam this flow must not produce. \`decision\` items are reserved for human-APPROVED doc edits at the write-back step, not for anything here.`;
     default:
       return '';
   }
@@ -123,6 +123,18 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
       ? `\n\n# Sprint tasks\n\n${args.taskScope.trim()}\n\nThese are the EXACT tasks in scope for this sprint — the cyboflow database is their source of truth. When this step needs the task set (e.g. dependency analysis or per-task work), use THIS list and pass it to your subagent; do NOT hunt for task files in the worktree to discover scope (cyboflow keeps no task files on disk, so you will find none and wrongly conclude there is nothing to do).`
       : '';
   const artifactNote = step.outputArtifact !== undefined ? artifactFollowUp(step.outputArtifact) : '';
+  // Compound review-queue discipline — applies to EVERY compound step, not just
+  // the one that reports the artifact. The compounder surfaces below-bar
+  // candidates in a `## Discarded` list; a step agent that faithfully "records
+  // every item the subagent returns" used to file one blocking `decision` per
+  // drop, spamming the review queue with sequential approve/resume gates
+  // (observed on load-sprint, which has no outputArtifact so the addendum above
+  // never reaches it). This guard reaches all steps and pins the single-review
+  // contract: drops go in the doc, decisions are only human-approved doc edits.
+  const compoundGuard =
+    workflowName === 'compound'
+      ? `\n\n## Compound review-queue discipline\n\nThe \`cyboflow-compounder\` subagent may return a \`## Discarded\` list of candidates it considered and set aside. These are CONTEXT, not actions: NEVER file a discarded candidate as a \`cyboflow_report_finding\` (\`decision\` or \`finding\`) or any other review-queue item. Discarded candidates belong ONLY in the \`## Discarded\` section of the \`compound-recommendations\` doc (composed at the \`extract\` step) — one blocking gate per drop is exactly the sequential-gate spam this flow must never produce. A \`decision\` review item is reserved for a human-APPROVED doc edit at the \`write-back\` step; do not emit one anywhere else.`
+      : '';
   const userGuidance =
     args.userGuidance !== undefined && args.userGuidance.trim().length > 0
       ? `\n\n## Operator guidance\n\nThe operator added mid-run guidance for this step — follow it:\n\n${args.userGuidance.trim()}`
@@ -138,5 +150,5 @@ Do ONLY this step:
 2. **Commit atomically.** Make ONE git commit for this step (\`<type>: <what changed>\`), staging only the files this step touched.
 3. **Stop.** Do NOT start any other step — the host orchestrator sequences the workflow and will invoke the next step itself. Report a one-line summary of what this step produced, then end your turn.
 
-The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${artifactNote}${userGuidance}${retryNote}`;
+The cyboflow database is the single source of truth: never read on-disk or worktree state files (e.g. a plugin state directory) to decide the task set or a task's status — any such file is NOT cyboflow's source of truth and may be stale or absent.${compoundGuard}${artifactNote}${userGuidance}${retryNote}`;
 }

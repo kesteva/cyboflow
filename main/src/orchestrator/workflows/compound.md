@@ -122,8 +122,11 @@ from plugin state files:
    data and returns a `## Merged work` summary — what shipped, where, and any
    verifier reports or stuck-task notes worth mining.
 2. **extract** → re-delegate to `cyboflow-compounder` with the `## Merged work`
-   summary. It returns a `## Learnings` list — each a draft learning with a
-   **computed impact**: token deltas read from the digest's per-run usage,
+   summary. It returns TWO lists: a `## Learnings` list (the act-on set) and a
+   `## Discarded` list (candidates it considered and set aside, one line + reason
+   each). The discarded list is context for the recommendations doc's Discarded
+   section — you NEVER file it as review-queue items. Each act-on learning carries
+   a **computed impact**: token deltas read from the digest's per-run usage,
    recurrence counts (how often the same issue showed up across runs), and the
    files / patterns it touches. Each learning is tagged as exactly one of the
    three actionable buckets — **never a finding**:
@@ -135,12 +138,15 @@ from plugin state files:
      test, a refactor). A regression traced to already-merged work is a `quick`
      fix when trivial, otherwise a `task` — it is an improvement to *make*, not a
      finding to re-file.
-3. **draft the recommendations doc** → compose the summary-of-recommendations
-   markdown from the drafted learnings (grouped by bucket: Quick fixes / Doc edits
-   / Tasks; each entry with its rule, evidence, and computed impact) and call
+3. **draft the recommendations doc** → compose ONE summary-of-recommendations
+   markdown with two top-level sections: **`## Act on`** (the drafted learnings,
+   grouped `### Quick fixes` / `### Doc edits` / `### Tasks`; each entry with its
+   rule, evidence, computed impact, and proposed change) and **`## Discarded`**
+   (the compounder's discarded list, one line each with its reason). Call
    `cyboflow_report_artifact` with `atype: 'compound-recommendations'`, a short
-   `label`, and `payload_json` `{"markdown": "<the doc>"}`. This is the surface the
-   human reviews at the gate (see "Recommendations doc" below).
+   `label`, and `payload_json` `{"markdown": "<the doc>"}`. This single doc is the
+   whole review — "here's what to act on, here's what I discarded" — the human
+   reads at the gate (see "Recommendations doc" below).
 4. **approve-learnings** → **human gate, inline.** STOP here. Present the gate
    with **AskUserQuestion** (header `Approve`, options Approve all / Pick subset /
    Reject) and point the user at the **`compound-recommendations` artifact tab**
@@ -170,11 +176,15 @@ summary of what Compound proposes. Compose it as markdown and report it via
 `{"markdown": "<doc>"}`). One artifact per run: a repeat call with the same atype
 ENRICHES it, so you can refine the doc as you go.
 
-- Structure it by bucket — **Quick fixes**, **Doc edits**, **Tasks** — in that
-  order, each as an H2 section with one entry per learning.
-- Each entry states the **general rule** (not the one instance), its **evidence /
-  computed impact** (recurrence across runs with ids, files touched, token/cost
-  deltas only when the digest attributes them), and the concrete action.
+- Structure it in TWO top-level sections: **`## Act on`** — grouped `### Quick
+  fixes` / `### Doc edits` / `### Tasks`, in that order, one entry per learning —
+  and **`## Discarded`** — the candidates the compounder considered and set aside,
+  one line each with its reason. The Discarded section is the "here's what I
+  discarded" half of the single review; it lives in this doc ONLY and never
+  becomes review-queue items.
+- Each **Act on** entry states the **general rule** (not the one instance), its
+  **evidence / computed impact** (recurrence across runs with ids, files touched,
+  token/cost deltas only when the digest attributes them), and the concrete action.
 - On the **unseeded** path, publish it at the `draft the recommendations doc`
   step BEFORE the `approve-learnings` gate — it is what the human reads to decide.
 - On the **seeded** path, publish it at `load-sprint` before write-back as a
@@ -199,6 +209,12 @@ ENRICHES it, so you can refine the doc as you go.
   `kind: 'finding'` — a finding is Compound's input, not its output. (`decision`
   items ARE `cyboflow_report_finding` calls with `kind: 'decision'`; that is the
   gated-doc-edit path, not a finding.)
+- **One review point — discarded candidates NEVER become gates.** A candidate the
+  compounder considered and set aside belongs in the `## Discarded` section of the
+  `compound-recommendations` doc, and NOWHERE else. NEVER file a `decision` (or any
+  review item) per drop — that is the sequential-gate spam this flow exists to
+  avoid. A `decision` is only ever a human-APPROVED doc edit; the human reviews the
+  whole Act on / Discarded doc at the single `approve-learnings` gate.
 - **You are the single writer.** Only this session calls the `cyboflow_*` write
   tools (`cyboflow_create_task`, `cyboflow_report_artifact`, `cyboflow_report_finding`
   with `kind: 'decision'`, and — on a seeded run — `cyboflow_resolve_finding`); the

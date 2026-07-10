@@ -816,7 +816,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem'],
             retries: 0,
             outputArtifact: { atype: 'compound-recommendations', label: 'Recommendations' },
-            desc: 'Draft durable learnings tagged quick / doc / task (NEVER findings), then publish the summary-of-recommendations doc for the gate.',
+            desc: 'Draft durable learnings (quick / doc / task, NEVER findings) plus a discarded list, then publish ONE compound-recommendations doc with an Act on section and a Discarded section — the single surface the gate reviews. Discarded candidates go in the doc, never the review queue.',
           },
           {
             id: 'approve-learnings',
@@ -833,7 +833,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'compounder',
             mcps: ['filesystem'],
             retries: 0,
-            desc: "Apply approved items only: quick fixes in-place, tasks via cyboflow_create_task, doc edits as blocking cyboflow_report_finding decisions. NEVER emit kind:'finding'.",
+            desc: "Apply approved items only: quick fixes in-place, tasks via cyboflow_create_task, approved doc edits as blocking cyboflow_report_finding decisions. NEVER emit kind:'finding', and NEVER a decision for a discarded candidate.",
           },
         ],
       },

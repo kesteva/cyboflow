@@ -115,6 +115,13 @@ describe('buildBuiltInWorkflows', () => {
     expect(body, "compound must never emit kind:'finding' (a finding is its input)").toMatch(
       /finding is Compound's input/i,
     );
+
+    // Single review point: discarded candidates are surfaced in the doc's
+    // Discarded section, NEVER as per-drop review-queue gates.
+    expect(body, 'compound publishes a Discarded section in the doc').toMatch(/## Discarded/);
+    expect(body, 'compound forbids filing a decision per discarded candidate').toMatch(
+      /discarded candidate.*belongs in the `## Discarded`|NEVER file a `decision` \(or any review item\) per drop/is,
+    );
   });
 
   it('compound DEFINITION drives the programmatic path: extract outputs the recommendations doc, write-back emits no findings', () => {
@@ -132,6 +139,9 @@ describe('buildBuiltInWorkflows', () => {
     expect(extract!.outputArtifact?.atype, 'extract declares the recommendations artifact').toBe(
       'compound-recommendations',
     );
+    // The doc the programmatic extract step drives is the single review — it names
+    // both the Act on set and the Discarded set that replaces the per-drop gates.
+    expect(extract!.desc ?? '', 'extract desc names the Discarded section').toMatch(/discarded/i);
 
     // Neither driving desc may instruct emitting findings; write-back is quick/
     // doc/task only.
