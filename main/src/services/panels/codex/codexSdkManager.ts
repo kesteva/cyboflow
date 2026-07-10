@@ -1,13 +1,4 @@
 import type Database from 'better-sqlite3';
-import type {
-  ApprovalMode,
-  CodexOptions,
-  SandboxMode,
-  ThreadEvent,
-  ThreadItem,
-  ThreadOptions,
-  Usage,
-} from '@openai/codex-sdk';
 import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
 import type { SessionManager } from '../../sessionManager';
@@ -15,18 +6,40 @@ import type { ConversationMessage } from '../../../database/models';
 import type { ClaudeSpawnerOptions } from '../../../orchestrator/runExecutor';
 import { agentStreamEventToClaudeStreamEvent, EventRouter, RawEventsSink } from '../../streamParser';
 import type {
-  AgentAssistantMessageEvent,
   AgentInitEvent,
   AgentResultEvent,
   AgentSessionInfoEvent,
   AgentStreamEvent,
-  AgentUserMessageEvent,
 } from '../../../../../shared/types/agentStream';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
-import { codexPermissionFlagsForMode } from './codexPtyManager';
 import { resolveAgentModelAlias } from '../agentModelContext';
-import type { PermissionMode } from '../../../../../shared/types/workflows';
-import type { ApprovalRouterPort } from './appServer/approvalBridge';
+import {
+  CodexAppServerApprovalBridge,
+  type ApprovalRouterPort,
+} from './appServer/approvalBridge';
+import {
+  CodexAppServerClient,
+  type CodexAppServerClientOptions,
+} from './appServer/client';
+import { projectTurnSessionEvent } from './appServer/eventProjector';
+import {
+  buildCodexAppServerEnvironment,
+  buildCodexAppServerThreadResumeParams,
+  buildCodexAppServerThreadStartParams,
+  type CodexAppServerMcpRuntimeConfig,
+} from './appServer/runConfig';
+import type {
+  AppServerInitializeParams,
+  AppServerInitializeResponse,
+} from './appServer/protocol';
+import {
+  CodexAppServerTurnSession,
+  type TurnSessionClient,
+  type TurnSessionEvent,
+} from './appServer/turnSession';
+
+const APP_SERVER_REQUEST_TIMEOUT_MS = 15_000;
+const APP_SERVER_INTERRUPT_TIMEOUT_MS = 2_000;
 
 interface StubCliProcess {
   process: never;
@@ -35,156 +48,95 @@ interface StubCliProcess {
   worktreePath: string;
 }
 
-interface CodexStreamedTurnLike {
-  events: AsyncGenerator<ThreadEvent>;
+export interface CodexAppServerClientLike extends TurnSessionClient {
+  start(): void;
+  stop(signal?: NodeJS.Signals): void;
 }
 
-export interface CodexThreadLike {
-  readonly id: string | null;
-  runStreamed(input: string, turnOptions?: { signal?: AbortSignal }): Promise<CodexStreamedTurnLike>;
-}
+export type CodexAppServerClientFactory = (
+  options: CodexAppServerClientOptions,
+) => CodexAppServerClientLike;
 
-export interface CodexClientLike {
-  startThread(options?: ThreadOptions): CodexThreadLike;
-  resumeThread(id: string, options?: ThreadOptions): CodexThreadLike;
-}
-
-export type CodexClientFactory = (options?: CodexOptions) => CodexClientLike | Promise<CodexClientLike>;
-
-export interface CodexMcpRuntimeConfig {
-  orchSocketPath: string;
-  bridgeScriptPath: string;
-  codexHookScriptPath: string;
-  nodeExecutablePath: string;
+export interface CodexMcpRuntimeConfig extends CodexAppServerMcpRuntimeConfig {
+  /** Retained while older startup composition still resolves the removed hook asset. */
+  codexHookScriptPath?: string;
 }
 
 interface ActiveCodexRun {
   abortController: AbortController;
+  cancel(): Promise<void>;
   panelId: string;
   sessionId: string;
   worktreePath: string;
 }
 
-type CodexSdkModule = typeof import('@openai/codex-sdk');
-
-const importCodexSdk = new Function('specifier', 'return import(specifier)') as (
-  specifier: string,
-) => Promise<CodexSdkModule>;
-
-async function defaultCodexClientFactory(options?: CodexOptions): Promise<CodexClientLike> {
-  // @openai/codex-sdk is ESM-only while Electron main is compiled as CommonJS.
-  // Use native dynamic import through Function so TypeScript does not lower it
-  // into require(), which would fail at runtime with ERR_REQUIRE_ESM.
-  const { Codex } = await importCodexSdk('@openai/codex-sdk');
-  return new Codex(options);
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: Error): void;
+  readonly settled: boolean;
 }
 
-function isCodexThreadEvent(value: unknown): value is ThreadEvent {
-  return typeof value === 'object' && value !== null && typeof (value as { type?: unknown }).type === 'string';
-}
-
-function stringifyUnknown(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (value === undefined) return '';
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
-function usageInputTokens(usage: Usage | null): number {
-  if (!usage) return 0;
-  return usage.input_tokens;
-}
-
-function usageOutputTokens(usage: Usage | null): number {
-  if (!usage) return 0;
-  return usage.output_tokens + usage.reasoning_output_tokens;
-}
-
-function codexThreadOptions(
-  options: ClaudeSpawnerOptions,
-): ThreadOptions {
-  const permissionMode = options.agentPermissionMode ?? 'default';
-  const permissionFlags = codexPermissionFlagsForMode(permissionMode);
-  const threadOptions: ThreadOptions = {
-    workingDirectory: options.worktreePath,
-    sandboxMode: permissionFlags.sandbox as SandboxMode,
-    approvalPolicy: permissionFlags.approval as ApprovalMode,
-  };
-
-  const resolvedModel = resolveAgentModelAlias('codex', options.model);
-  if (resolvedModel) {
-    threadOptions.model = resolvedModel;
-  }
-
-  return threadOptions;
-}
-
-function buildCyboflowMcpCodexConfig(
-  runId: string,
-  runtimeConfig: CodexMcpRuntimeConfig,
-  permissionMode: PermissionMode,
-): NonNullable<CodexOptions['config']> {
-  const hookCommand = `${quoteShellArg(runtimeConfig.nodeExecutablePath)} ${quoteShellArg(runtimeConfig.codexHookScriptPath)}`;
+function createDeferred<T>(): Deferred<T> {
+  let settled = false;
+  let resolvePromise!: (value: T) => void;
+  let rejectPromise!: (error: Error) => void;
+  const promise = new Promise<T>((resolve, reject) => {
+    resolvePromise = resolve;
+    rejectPromise = reject;
+  });
   return {
-    mcp_servers: {
-      cyboflow: {
-        command: runtimeConfig.nodeExecutablePath,
-        args: [runtimeConfig.bridgeScriptPath],
-        env: {
-          CYBOFLOW_RUN_ID: runId,
-          CYBOFLOW_ORCH_SOCKET: runtimeConfig.orchSocketPath,
-        },
-        required: true,
-        default_tools_approval_mode: 'approve',
-      },
+    promise,
+    resolve: (value) => {
+      if (settled) return;
+      settled = true;
+      resolvePromise(value);
     },
-    ...(permissionMode === 'auto' || permissionMode === 'dontAsk'
-      ? {}
-      : {
-          hooks: {
-            PreToolUse: [
-              {
-                matcher: '*',
-                hooks: [
-                  {
-                    type: 'command',
-                    command: hookCommand,
-                    timeout: 86400,
-                    statusMessage: 'Checking Cyboflow permission',
-                  },
-                ],
-              },
-            ],
-          },
-        }),
+    reject: (error) => {
+      if (settled) return;
+      settled = true;
+      rejectPromise(error);
+    },
+    get settled() {
+      return settled;
+    },
   };
 }
 
-function buildCodexEnvironment(runId: string, runtimeConfig: CodexMcpRuntimeConfig): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined) env[key] = value;
+async function withTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  description: string,
+): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error(`${description} timed out after ${timeoutMs}ms`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([operation, timeoutPromise]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
-  env.CYBOFLOW_RUN_ID = runId;
-  env.CYBOFLOW_ORCH_SOCKET = runtimeConfig.orchSocketPath;
-  return env;
 }
 
-function quoteShellArg(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+function defaultCodexAppServerClientFactory(
+  options: CodexAppServerClientOptions,
+): CodexAppServerClientLike {
+  return new CodexAppServerClient(options);
 }
 
-export function buildCodexOptionsForRun(
-  runId: string,
-  runtimeConfig: CodexMcpRuntimeConfig,
-  permissionMode: PermissionMode = 'default',
-): CodexOptions {
+function initializeParams(): AppServerInitializeParams {
   return {
-    config: buildCyboflowMcpCodexConfig(runId, runtimeConfig, permissionMode),
-    env: buildCodexEnvironment(runId, runtimeConfig),
+    clientInfo: {
+      name: 'cyboflow',
+      title: 'Cyboflow',
+      version: '0.1.20',
+    },
+    capabilities: {
+      experimentalApi: true,
+      requestAttestation: false,
+      mcpServerOpenaiFormElicitation: true,
+    },
   };
 }
 
@@ -199,7 +151,7 @@ export class CodexSdkManager extends AbstractCliManager {
     logger: Logger | undefined,
     configManager: ConfigManager | undefined,
     private readonly db: Database.Database,
-    private readonly createCodexClient: CodexClientFactory = defaultCodexClientFactory,
+    private readonly createAppServerClient: CodexAppServerClientFactory = defaultCodexAppServerClientFactory,
   ) {
     super(sessionManager, logger, configManager);
     if (db == null) {
@@ -208,7 +160,7 @@ export class CodexSdkManager extends AbstractCliManager {
   }
 
   protected getCliToolName(): string {
-    return 'Codex SDK';
+    return 'Codex app-server';
   }
 
   setCyboflowMcpRuntimeConfig(config: CodexMcpRuntimeConfig): void {
@@ -220,7 +172,7 @@ export class CodexSdkManager extends AbstractCliManager {
   }
 
   protected async testCliAvailability(): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {
-    return { available: true, version: '@openai/codex-sdk', path: '@openai/codex-sdk' };
+    return { available: true, version: 'unverified', path: 'codex' };
   }
 
   protected buildCommandArgs(_options: ClaudeSpawnerOptions): string[] {
@@ -228,7 +180,7 @@ export class CodexSdkManager extends AbstractCliManager {
   }
 
   protected async getCliExecutablePath(): Promise<string> {
-    return 'codex-sdk-in-process';
+    return 'codex';
   }
 
   protected parseCliOutput(
@@ -275,7 +227,7 @@ export class CodexSdkManager extends AbstractCliManager {
     _prompt: string,
     _conversationHistory: ConversationMessage[],
   ): Promise<void> {
-    throw new Error('Codex SDK panel continuation is workflow-only in this build');
+    throw new Error('Codex app-server panel continuation is workflow-only in this build');
   }
 
   async stopPanel(panelId: string): Promise<void> {
@@ -289,7 +241,7 @@ export class CodexSdkManager extends AbstractCliManager {
     _initialPrompt: string,
     _conversationHistory: ConversationMessage[],
   ): Promise<void> {
-    throw new Error('Codex SDK panel restart is workflow-only in this build');
+    throw new Error('Codex app-server panel restart is workflow-only in this build');
   }
 
   override async spawnCliProcess(options: ClaudeSpawnerOptions): Promise<void> {
@@ -298,10 +250,117 @@ export class CodexSdkManager extends AbstractCliManager {
     const runId = options.runId ?? options.panelId;
 
     if (this.processes.has(spawnKey)) {
-      throw new Error(`Codex SDK process already running for spawn ${spawnKey}`);
+      throw new Error(`Codex app-server process already running for spawn ${spawnKey}`);
     }
 
+    const runtimeConfig = this.requireMcpRuntimeConfig();
+    const approvalRouter = this.requireApprovalRouter();
+    const command = await this.getCliExecutablePath();
     const abortController = new AbortController();
+    const terminal = createDeferred<void>();
+    const router = new EventRouter<AgentStreamEvent>();
+    const sink = new RawEventsSink<AgentStreamEvent>(this.db, this.logger);
+    sink.attachToRouter(router, runId);
+
+    let exitCode = 0;
+    let terminalResultEmitted = false;
+    let threadId = options.resumeSessionId ?? null;
+    let initializeResponse: AppServerInitializeResponse | null = null;
+    const startedAt = Date.now();
+    const turnSessionRef: { current: CodexAppServerTurnSession | null } = { current: null };
+
+    const approvalBridge = new CodexAppServerApprovalBridge({
+      runId,
+      approvalRouter,
+      onError: (error) => this.logger?.error(`[CodexSdkManager] ${error.message}`),
+    });
+
+    const handleTurnEvent = (event: TurnSessionEvent): void => {
+      if (event.type === 'thread.started') threadId = event.threadId;
+      if (
+        abortController.signal.aborted
+        && event.type === 'turn.completed'
+        && event.status === 'interrupted'
+      ) {
+        terminal.resolve();
+        return;
+      }
+
+      const projectedEvents = projectTurnSessionEvent(event, {
+        model: this.displayModel(options.model),
+        durationMs: Date.now() - startedAt,
+      });
+      for (const projected of projectedEvents) {
+        if (projected.type === 'agent_result') {
+          if (terminalResultEmitted) continue;
+          terminalResultEmitted = true;
+        }
+        this.emitProjected(router, runId, displayPanelId, options.sessionId, projected);
+        if (projected.type === 'agent_result') {
+          if (projected.is_error) {
+            terminal.reject(new Error(projected.result ?? 'Codex turn failed'));
+          } else {
+            terminal.resolve();
+          }
+        }
+      }
+    };
+
+    const client = this.createAppServerClient({
+      command,
+      cwd: options.worktreePath,
+      env: buildCodexAppServerEnvironment(runId, runtimeConfig),
+      onServerRequest: (request) => approvalBridge.handleServerRequest(request),
+      onNotification: (notification) => turnSessionRef.current?.handleNotification(notification),
+      onStderr: (chunk) => this.logger?.warn(`[Codex app-server stderr] ${chunk.trimEnd()}`),
+      onError: (error) => {
+        if (!abortController.signal.aborted) terminal.reject(error);
+      },
+      onExit: ({ code, signal }) => {
+        if (!abortController.signal.aborted && !terminal.settled) {
+          terminal.reject(new Error(
+            `Codex app-server exited before the turn completed (code=${String(code)}, signal=${String(signal)})`,
+          ));
+        }
+      },
+    });
+    const turnSession = new CodexAppServerTurnSession(client, { onEvent: handleTurnEvent });
+    turnSessionRef.current = turnSession;
+
+    let teardownPromise: Promise<void> | null = null;
+    const teardown = (interrupt: boolean): Promise<void> => {
+      if (teardownPromise) return teardownPromise;
+      teardownPromise = (async () => {
+        if (interrupt && turnSession.isInitialized && turnSession.activeTurnId) {
+          try {
+            await withTimeout(
+              turnSession.interruptTurn(),
+              APP_SERVER_INTERRUPT_TIMEOUT_MS,
+              'Codex app-server turn interruption',
+            );
+          } catch (error) {
+            this.logger?.warn(
+              `[CodexSdkManager] failed to interrupt run ${runId}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+        approvalBridge.teardown();
+        client.stop();
+      })();
+      return teardownPromise;
+    };
+
+    const activeRun: ActiveCodexRun = {
+      abortController,
+      cancel: async () => {
+        abortController.abort();
+        terminal.resolve();
+        await teardown(true);
+      },
+      panelId: displayPanelId,
+      sessionId: options.sessionId,
+      worktreePath: options.worktreePath,
+    };
     const stub: StubCliProcess = {
       process: undefined as never,
       panelId: displayPanelId,
@@ -309,117 +368,81 @@ export class CodexSdkManager extends AbstractCliManager {
       worktreePath: options.worktreePath,
     };
     (this.processes as Map<string, StubCliProcess>).set(spawnKey, stub);
-    this.activeRuns.set(spawnKey, {
-      abortController,
-      panelId: displayPanelId,
-      sessionId: options.sessionId,
-      worktreePath: options.worktreePath,
-    });
+    this.activeRuns.set(spawnKey, activeRun);
     this.recordSpawnKey(displayPanelId, spawnKey);
 
-    const router = new EventRouter<AgentStreamEvent>();
-    const sink = new RawEventsSink<AgentStreamEvent>(this.db, this.logger);
-    sink.attachToRouter(router, runId);
-
-    let exitCode = 0;
-    let terminalError: string | null = null;
-    let terminalResultEmitted = false;
-    let threadId = options.resumeSessionId ?? null;
-    let systemInitEmitted = false;
-    const startedAt = Date.now();
-    const threadOptions = codexThreadOptions(options);
-
     try {
-      this.emitProjected(router, runId, displayPanelId, options.sessionId, this.buildSessionInfo(options));
+      this.emitProjected(
+        router,
+        runId,
+        displayPanelId,
+        options.sessionId,
+        this.buildSessionInfo(options, command),
+      );
       this.emit('spawned', { panelId: displayPanelId, sessionId: options.sessionId });
 
-      const client = await this.createCodexClient(
-        this.buildCodexOptions(runId, options.agentPermissionMode ?? 'default'),
+      client.start();
+      initializeResponse = await withTimeout(
+        turnSession.initialize(initializeParams()),
+        APP_SERVER_REQUEST_TIMEOUT_MS,
+        'Codex app-server initialization',
       );
       const thread = options.resumeSessionId
-        ? client.resumeThread(options.resumeSessionId, threadOptions)
-        : client.startThread(threadOptions);
+        ? await withTimeout(
+            turnSession.resumeThread(buildCodexAppServerThreadResumeParams(
+              runId,
+              options.resumeSessionId,
+              options,
+              runtimeConfig,
+            )),
+            APP_SERVER_REQUEST_TIMEOUT_MS,
+            'Codex app-server thread resume',
+          )
+        : await withTimeout(
+            turnSession.startThread(buildCodexAppServerThreadStartParams(runId, options, runtimeConfig)),
+            APP_SERVER_REQUEST_TIMEOUT_MS,
+            'Codex app-server thread start',
+          );
+      threadId = thread.threadId;
+      this.captureRunCodexThreadId(runId, thread.threadId);
+      this.emitProjected(
+        router,
+        runId,
+        displayPanelId,
+        options.sessionId,
+        this.buildSystemInitEvent(options, thread.threadId, initializeResponse),
+      );
 
-      if (options.resumeSessionId) {
-        systemInitEmitted = true;
-        this.emitProjected(
-          router,
-          runId,
-          displayPanelId,
-          options.sessionId,
-          this.buildSystemInitEvent(options, options.resumeSessionId, threadOptions),
-        );
-      }
-
-      const streamed = await thread.runStreamed(options.prompt, { signal: abortController.signal });
-      for await (const rawEvent of streamed.events) {
-        if (abortController.signal.aborted) break;
-        if (!isCodexThreadEvent(rawEvent)) continue;
-
-        const projectedEvents = this.projectThreadEvent(rawEvent, {
-          options,
-          threadOptions,
-          threadId,
-          systemInitEmitted,
-          durationMs: Date.now() - startedAt,
-        });
-
-        if (rawEvent.type === 'thread.started') {
-          threadId = rawEvent.thread_id;
-          systemInitEmitted = true;
-          this.captureRunCodexThreadId(runId, rawEvent.thread_id);
-        }
-
-        for (const projected of projectedEvents) {
-          this.emitProjected(router, runId, displayPanelId, options.sessionId, projected);
-          const resultError = this.resultTerminalError(projected);
-          if (resultError) {
-            terminalError = resultError;
-            terminalResultEmitted = true;
-          }
-        }
-
-        if (rawEvent.type === 'turn.failed') {
-          terminalError = rawEvent.error.message;
-          break;
-        }
-        if (rawEvent.type === 'error') {
-          terminalError = rawEvent.message;
-          break;
-        }
-      }
-
-      if (terminalError !== null) {
-        exitCode = 1;
-        throw new Error(terminalError);
-      }
-    } catch (err) {
+      await withTimeout(
+        turnSession.startTurn(options.prompt, {
+          model: resolveAgentModelAlias('codex', options.model),
+        }),
+        APP_SERVER_REQUEST_TIMEOUT_MS,
+        'Codex app-server turn start',
+      );
+      await terminal.promise;
+    } catch (error) {
       if (abortController.signal.aborted) {
-        this.logger?.info(`[CodexSdkManager] Codex SDK run aborted for panel ${displayPanelId}`);
+        this.logger?.info(`[CodexSdkManager] Codex app-server run aborted for panel ${displayPanelId}`);
       } else {
         exitCode = 1;
-        terminalError = err instanceof Error ? err.message : String(err);
-        this.logger?.error(`[CodexSdkManager] Codex SDK run error for panel ${displayPanelId}: ${terminalError}`);
-        this.emit('error', { panelId: displayPanelId, sessionId: options.sessionId, error: terminalError });
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger?.error(`[CodexSdkManager] Codex app-server run error for panel ${displayPanelId}: ${message}`);
+        this.emit('error', { panelId: displayPanelId, sessionId: options.sessionId, error: message });
         if (!terminalResultEmitted) {
+          terminalResultEmitted = true;
           this.emitProjected(
             router,
             runId,
             displayPanelId,
             options.sessionId,
-            this.buildResultEvent({
-              subtype: 'error_during_execution',
-              isError: true,
-              result: terminalError,
-              usage: null,
-              durationMs: Date.now() - startedAt,
-              threadId,
-            }),
+            this.buildFailureResult(message, Date.now() - startedAt, threadId),
           );
         }
-        throw err;
+        throw error;
       }
     } finally {
+      await teardown(false);
       sink.dispose(runId);
       this.processes.delete(spawnKey);
       this.activeRuns.delete(spawnKey);
@@ -435,143 +458,35 @@ export class CodexSdkManager extends AbstractCliManager {
 
   override async killProcess(panelId: string): Promise<void> {
     const keys = this.spawnKeysByPanelId.get(panelId) ?? new Set([panelId]);
-    for (const spawnKey of keys) {
-      this.activeRuns.get(spawnKey)?.abortController.abort();
-    }
+    await Promise.all([...keys].map(async (spawnKey) => {
+      await this.activeRuns.get(spawnKey)?.cancel();
+    }));
   }
 
-  private projectThreadEvent(
-    event: ThreadEvent,
-    context: {
-      options: ClaudeSpawnerOptions;
-      threadOptions: ThreadOptions;
-      threadId: string | null;
-      systemInitEmitted: boolean;
-      durationMs: number;
-    },
-  ): AgentStreamEvent[] {
-    switch (event.type) {
-      case 'thread.started':
-        return context.systemInitEmitted
-          ? []
-          : [this.buildSystemInitEvent(context.options, event.thread_id, context.threadOptions)];
-      case 'turn.started':
-        return [];
-      case 'item.started':
-      case 'item.updated':
-        return [];
-      case 'item.completed':
-        return this.projectCompletedItem(event.item, context.options, context.threadId);
-      case 'turn.completed':
-        return [
-          this.buildResultEvent({
-            subtype: 'success',
-            isError: false,
-            usage: event.usage,
-            durationMs: context.durationMs,
-            threadId: context.threadId,
-          }),
-        ];
-      case 'turn.failed':
-        return [
-          this.buildResultEvent({
-            subtype: 'error_during_execution',
-            isError: true,
-            result: event.error.message,
-            usage: null,
-            durationMs: context.durationMs,
-            threadId: context.threadId,
-          }),
-        ];
-      case 'error':
-        return [
-          this.buildResultEvent({
-            subtype: 'error_during_execution',
-            isError: true,
-            result: event.message,
-            usage: null,
-            durationMs: context.durationMs,
-            threadId: context.threadId,
-          }),
-        ];
-      default: {
-        const _exhaustive: never = event;
-        return [{ type: 'agent_unknown', raw: stringifyUnknown(_exhaustive) ? { raw: stringifyUnknown(_exhaustive) } : {} }];
-      }
+  private requireMcpRuntimeConfig(): CodexMcpRuntimeConfig {
+    if (!this.cyboflowMcpRuntimeConfig) {
+      throw new Error('Codex app-server manager missing Cyboflow MCP runtime config');
     }
+    return this.cyboflowMcpRuntimeConfig;
   }
 
-  private projectCompletedItem(
-    item: ThreadItem,
+  private requireApprovalRouter(): ApprovalRouterPort {
+    if (!this.approvalRouterProvider) {
+      throw new Error('Codex app-server manager missing approval router provider');
+    }
+    return this.approvalRouterProvider();
+  }
+
+  private buildSessionInfo(
     options: ClaudeSpawnerOptions,
-    threadId: string | null,
-  ): AgentStreamEvent[] {
-    switch (item.type) {
-      case 'agent_message':
-        if (item.text.trim().length === 0) return [];
-        return [this.buildAssistantTextEvent(item.id, item.text, options, threadId)];
-      case 'reasoning':
-        if (item.text.trim().length === 0) return [];
-        return [this.buildAssistantThinkingEvent(item.id, item.text, options, threadId)];
-      case 'command_execution':
-        return this.buildToolProjection({
-          id: item.id,
-          name: 'Bash',
-          input: { command: item.command },
-          result: item.aggregated_output,
-          isError: item.status === 'failed' || (item.exit_code !== undefined && item.exit_code !== 0),
-          options,
-          threadId,
-        });
-      case 'mcp_tool_call':
-        return this.buildToolProjection({
-          id: item.id,
-          name: item.tool,
-          input: { server: item.server, arguments: item.arguments },
-          result: item.error?.message ?? stringifyUnknown(item.result?.structured_content ?? item.result?.content ?? ''),
-          isError: item.status === 'failed',
-          options,
-          threadId,
-        });
-      case 'file_change':
-        return [this.buildAssistantTextEvent(item.id, this.describeFileChange(item), options, threadId)];
-      case 'web_search':
-        return this.buildToolProjection({
-          id: item.id,
-          name: 'WebSearch',
-          input: { query: item.query },
-          result: `Searched for ${item.query}`,
-          isError: false,
-          options,
-          threadId,
-        });
-      case 'todo_list':
-        return [this.buildAssistantThinkingEvent(item.id, this.describeTodoList(item), options, threadId)];
-      case 'error':
-        return [
-          this.buildResultEvent({
-            subtype: 'error_during_execution',
-            isError: true,
-            result: item.message,
-            usage: null,
-            durationMs: 0,
-            threadId,
-          }),
-        ];
-      default: {
-        const _exhaustive: never = item;
-        return [{ type: 'agent_unknown', raw: { raw: stringifyUnknown(_exhaustive) } }];
-      }
-    }
-  }
-
-  private buildSessionInfo(options: ClaudeSpawnerOptions): AgentSessionInfoEvent {
+    command: string,
+  ): AgentSessionInfoEvent {
     return {
       type: 'agent_session_info',
       provider: 'codex',
       runtime: 'codex-sdk',
       initial_prompt: options.prompt,
-      command: 'codex-sdk-in-process',
+      command,
       worktree_path: options.worktreePath,
       model: this.displayModel(options.model),
       permission_mode: options.agentPermissionMode ?? 'default',
@@ -582,7 +497,7 @@ export class CodexSdkManager extends AbstractCliManager {
   private buildSystemInitEvent(
     options: ClaudeSpawnerOptions,
     threadId: string,
-    threadOptions: ThreadOptions,
+    initializeResponse: AppServerInitializeResponse,
   ): AgentInitEvent {
     return {
       type: 'agent_init',
@@ -590,118 +505,29 @@ export class CodexSdkManager extends AbstractCliManager {
       runtime: 'codex-sdk',
       external_session_id: threadId,
       cwd: options.worktreePath,
-      model: this.displayModel(threadOptions.model),
+      model: this.displayModel(options.model),
       tools: [],
-      mcp_servers: [{ name: 'cyboflow', status: 'connected' }],
+      mcp_servers: [{ name: 'cyboflow', status: 'configured' }],
       permission_mode: options.agentPermissionMode ?? 'default',
-      sdk_version: '@openai/codex-sdk',
+      sdk_version: initializeResponse.userAgent,
     };
   }
 
-  private buildCodexOptions(runId: string, permissionMode: PermissionMode): CodexOptions {
-    if (!this.cyboflowMcpRuntimeConfig) {
-      throw new Error('Codex SDK manager missing Cyboflow MCP runtime config');
-    }
-
-    return buildCodexOptionsForRun(runId, this.cyboflowMcpRuntimeConfig, permissionMode);
-  }
-
-  private buildAssistantTextEvent(
-    id: string,
-    text: string,
-    options: ClaudeSpawnerOptions,
+  private buildFailureResult(
+    message: string,
+    durationMs: number,
     threadId: string | null,
-  ): AgentAssistantMessageEvent {
-    return {
-      type: 'agent_message',
-      provider: 'codex',
-      runtime: 'codex-sdk',
-      role: 'assistant',
-      id,
-      model: this.displayModel(options.model),
-      content: [{ type: 'text', text }],
-      external_session_id: threadId ?? undefined,
-    };
-  }
-
-  private buildAssistantThinkingEvent(
-    id: string,
-    text: string,
-    options: ClaudeSpawnerOptions,
-    threadId: string | null,
-  ): AgentAssistantMessageEvent {
-    return {
-      type: 'agent_message',
-      provider: 'codex',
-      runtime: 'codex-sdk',
-      role: 'assistant',
-      id,
-      model: this.displayModel(options.model),
-      content: [{ type: 'thinking', text }],
-      external_session_id: threadId ?? undefined,
-    };
-  }
-
-  private buildToolProjection(input: {
-    id: string;
-    name: string;
-    input: Record<string, unknown>;
-    result: string;
-    isError: boolean;
-    options: ClaudeSpawnerOptions;
-    threadId: string | null;
-  }): [AgentAssistantMessageEvent, AgentUserMessageEvent] {
-    return [
-      {
-        type: 'agent_message',
-        provider: 'codex',
-        runtime: 'codex-sdk',
-        role: 'assistant',
-        id: `${input.id}:call`,
-        model: this.displayModel(input.options.model),
-        content: [{ type: 'tool_call', id: input.id, name: input.name, input: input.input }],
-        external_session_id: input.threadId ?? undefined,
-      },
-      {
-        type: 'agent_message',
-        provider: 'codex',
-        runtime: 'codex-sdk',
-        role: 'user',
-        content: [{
-          type: 'tool_result',
-          tool_call_id: input.id,
-          content: input.result,
-          is_error: input.isError,
-        }],
-        external_session_id: input.threadId ?? undefined,
-      },
-    ];
-  }
-
-  private buildResultEvent(input: {
-    subtype: AgentResultEvent['subtype'];
-    isError: boolean;
-    result?: string;
-    usage: Usage | null;
-    durationMs: number;
-    threadId: string | null;
-  }): AgentResultEvent {
+  ): AgentResultEvent {
     return {
       type: 'agent_result',
       provider: 'codex',
       runtime: 'codex-sdk',
-      subtype: input.subtype,
-      is_error: input.isError,
-      duration_ms: input.durationMs,
+      subtype: 'error_during_execution',
+      is_error: true,
+      duration_ms: durationMs,
       num_turns: 1,
-      ...(input.result ? { result: input.result } : {}),
-      usage: {
-        input_tokens: usageInputTokens(input.usage),
-        output_tokens: usageOutputTokens(input.usage),
-        cache_read_input_tokens: input.usage?.cached_input_tokens ?? 0,
-        reasoning_output_tokens: input.usage?.reasoning_output_tokens ?? 0,
-      },
-      external_session_id: input.threadId ?? undefined,
+      result: message,
+      external_session_id: threadId ?? undefined,
     };
   }
 
@@ -713,12 +539,11 @@ export class CodexSdkManager extends AbstractCliManager {
     data: AgentStreamEvent,
   ): void {
     router.emitForRun(runId, data);
-    const legacyEvent = agentStreamEventToClaudeStreamEvent(data);
     this.emit('output', {
       panelId,
       sessionId,
       type: 'json',
-      data: legacyEvent,
+      data: agentStreamEventToClaudeStreamEvent(data),
       timestamp: new Date(),
     });
   }
@@ -732,37 +557,15 @@ export class CodexSdkManager extends AbstractCliManager {
             WHERE id = ? AND claude_session_id IS NULL`,
         )
         .run(threadId, runId);
-    } catch (err) {
+    } catch (error) {
       this.logger?.warn(
-        `[CodexSdkManager] failed to capture Codex thread id for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+        `[CodexSdkManager] failed to capture Codex thread id for run ${runId}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
 
-  private resultTerminalError(event: AgentStreamEvent): string | null {
-    if (event.type !== 'agent_result' || !event.is_error) return null;
-    return event.result ?? 'Codex turn failed';
-  }
-
   private displayModel(model: string | null | undefined): string {
     return resolveAgentModelAlias('codex', model) ?? 'codex-default';
-  }
-
-  private describeFileChange(
-    item: Extract<ThreadItem, { type: 'file_change' }>,
-  ): string {
-    const files = item.changes.map((change) => `${change.kind} ${change.path}`).join('\n');
-    return item.status === 'failed'
-      ? `Failed to apply file changes:\n${files}`
-      : `Applied file changes:\n${files}`;
-  }
-
-  private describeTodoList(
-    item: Extract<ThreadItem, { type: 'todo_list' }>,
-  ): string {
-    return item.items
-      .map((todo) => `${todo.completed ? '[x]' : '[ ]'} ${todo.text}`)
-      .join('\n');
   }
 
   private recordSpawnKey(panelId: string, spawnKey: string): void {
@@ -775,8 +578,6 @@ export class CodexSdkManager extends AbstractCliManager {
     const keys = this.spawnKeysByPanelId.get(panelId);
     if (!keys) return;
     keys.delete(spawnKey);
-    if (keys.size === 0) {
-      this.spawnKeysByPanelId.delete(panelId);
-    }
+    if (keys.size === 0) this.spawnKeysByPanelId.delete(panelId);
   }
 }

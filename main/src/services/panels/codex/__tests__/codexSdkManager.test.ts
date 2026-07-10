@@ -1,39 +1,42 @@
 import Database from 'better-sqlite3';
 import { describe, expect, it, vi } from 'vitest';
-import type { CodexOptions, ThreadEvent, ThreadOptions } from '@openai/codex-sdk';
 import type { SessionManager } from '../../../sessionManager';
+import type {
+  AppServerNotification,
+  CodexAppServerClientOptions,
+} from '../appServer/client';
+import type { AppServerInitializeParams } from '../appServer/protocol';
 import {
-  buildCodexOptionsForRun,
   CodexSdkManager,
-  type CodexClientFactory,
-  type CodexClientLike,
-  type CodexThreadLike,
+  type CodexAppServerClientFactory,
+  type CodexAppServerClientLike,
 } from '../codexSdkManager';
 
-async function* streamEvents(events: ThreadEvent[]): AsyncGenerator<ThreadEvent> {
-  for (const event of events) {
-    yield event;
+type RequestHandler = (method: string, params: unknown, client: FakeAppServerClient) => unknown;
+
+class FakeAppServerClient implements CodexAppServerClientLike {
+  readonly start = vi.fn(() => undefined);
+  readonly stop = vi.fn((_signal?: NodeJS.Signals) => undefined);
+  readonly initialize = vi.fn(async (_params: AppServerInitializeParams) => ({
+    userAgent: 'codex-cli/0.143.0',
+    codexHome: '/home/user/.codex',
+    platformFamily: 'unix',
+    platformOs: 'macos',
+  }));
+  readonly requests: Array<{ method: string; params: unknown }> = [];
+
+  constructor(
+    readonly options: CodexAppServerClientOptions,
+    private readonly requestHandler: RequestHandler,
+  ) {}
+
+  async sendRequest<TResult, TParams>(method: string, params: TParams): Promise<TResult> {
+    this.requests.push({ method, params });
+    return this.requestHandler(method, params, this) as TResult;
   }
-}
 
-class FakeThread implements CodexThreadLike {
-  readonly id: string | null = null;
-  readonly runStreamed = vi.fn<
-    (input: string, turnOptions?: { signal?: AbortSignal }) => Promise<{ events: AsyncGenerator<ThreadEvent> }>
-  >();
-
-  constructor(events: ThreadEvent[]) {
-    this.runStreamed.mockResolvedValue({ events: streamEvents(events) });
-  }
-}
-
-class FakeCodexClient implements CodexClientLike {
-  readonly startThread = vi.fn<(options?: ThreadOptions) => CodexThreadLike>();
-  readonly resumeThread = vi.fn<(id: string, options?: ThreadOptions) => CodexThreadLike>();
-
-  constructor(private readonly thread: CodexThreadLike) {
-    this.startThread.mockReturnValue(thread);
-    this.resumeThread.mockReturnValue(thread);
+  notify(notification: AppServerNotification): void {
+    this.options.onNotification?.(notification);
   }
 }
 
@@ -57,24 +60,15 @@ function createDb(): Database.Database {
   return db;
 }
 
-function makeManager(db: Database.Database, client: CodexClientLike): CodexSdkManager {
-  const manager = new CodexSdkManager(
-    {} as SessionManager,
-    undefined,
-    undefined,
-    db,
-    () => client,
-  );
-  manager.setCyboflowMcpRuntimeConfig({
-    orchSocketPath: '/tmp/cyboflow-orch.sock',
-    bridgeScriptPath: '/app/cyboflowMcpServer.js',
-    codexHookScriptPath: '/app/codexPreToolUseHook.js',
-    nodeExecutablePath: '/usr/local/bin/node',
-  });
-  return manager;
-}
-
-function makeManagerWithFactory(db: Database.Database, factory: CodexClientFactory): CodexSdkManager {
+function makeManager(
+  db: Database.Database,
+  handler: RequestHandler,
+): { manager: CodexSdkManager; getClient(): FakeAppServerClient } {
+  let client: FakeAppServerClient | null = null;
+  const factory: CodexAppServerClientFactory = (options) => {
+    client = new FakeAppServerClient(options, handler);
+    return client;
+  };
   const manager = new CodexSdkManager(
     {} as SessionManager,
     undefined,
@@ -85,91 +79,54 @@ function makeManagerWithFactory(db: Database.Database, factory: CodexClientFacto
   manager.setCyboflowMcpRuntimeConfig({
     orchSocketPath: '/tmp/cyboflow-orch.sock',
     bridgeScriptPath: '/app/cyboflowMcpServer.js',
-    codexHookScriptPath: '/app/codexPreToolUseHook.js',
     nodeExecutablePath: '/usr/local/bin/node',
   });
-  return manager;
+  manager.setApprovalRouterProvider(() => ({
+    requestApproval: vi.fn(async () => ({ behavior: 'allow' as const })),
+    clearPendingForRun: vi.fn(),
+  }));
+  return {
+    manager,
+    getClient: () => {
+      if (!client) throw new Error('client not created');
+      return client;
+    },
+  };
 }
 
-describe('CodexSdkManager', () => {
-  it('builds per-run Codex options with Cyboflow MCP and approval hook config', () => {
-    const options = buildCodexOptionsForRun('run-1', {
-      orchSocketPath: '/tmp/cyboflow-orch.sock',
-      bridgeScriptPath: '/app/cyboflowMcpServer.js',
-      codexHookScriptPath: '/app/codexPreToolUseHook.js',
-      nodeExecutablePath: '/usr/local/bin/node',
-    });
-
-    expect(options).toEqual(expect.objectContaining({
-      config: expect.objectContaining({
-        mcp_servers: {
-          cyboflow: expect.objectContaining({
-            command: '/usr/local/bin/node',
-            args: ['/app/cyboflowMcpServer.js'],
-            env: expect.objectContaining({
-              CYBOFLOW_RUN_ID: 'run-1',
-              CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
-            }),
-            required: true,
-            default_tools_approval_mode: 'approve',
-          }),
+function successfulHandler(method: string, _params: unknown, client: FakeAppServerClient): unknown {
+  if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
+  if (method === 'thread/resume') return { thread: { id: 'codex-thread-1' } };
+  if (method === 'turn/interrupt') return {};
+  if (method === 'turn/start') {
+    setTimeout(() => {
+      client.notify({
+        method: 'item/completed',
+        params: {
+          threadId: 'codex-thread-1',
+          turnId: 'turn-1',
+          completedAtMs: 20,
+          item: { type: 'agentMessage', id: 'message-1', text: 'Done from Codex.' },
         },
-        hooks: {
-          PreToolUse: [
-            {
-              matcher: '*',
-              hooks: [
-                {
-                  type: 'command',
-                  command: "'/usr/local/bin/node' '/app/codexPreToolUseHook.js'",
-                  timeout: 86400,
-                  statusMessage: 'Checking Cyboflow permission',
-                },
-              ],
-            },
-          ],
+      });
+      client.notify({
+        method: 'turn/completed',
+        params: {
+          threadId: 'codex-thread-1',
+          turn: { id: 'turn-1', status: 'completed' },
         },
-      }),
-      env: expect.objectContaining({
-        CYBOFLOW_RUN_ID: 'run-1',
-        CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
-      }),
-    }));
-  });
+      });
+    }, 0);
+    return { turn: { id: 'turn-1' } };
+  }
+  throw new Error(`Unexpected request: ${method}`);
+}
 
-  it.each(['auto', 'dontAsk'] as const)('does not install the review hook for %s mode', (mode) => {
-    const options = buildCodexOptionsForRun('run-1', {
-      orchSocketPath: '/tmp/cyboflow-orch.sock',
-      bridgeScriptPath: '/app/cyboflowMcpServer.js',
-      codexHookScriptPath: '/app/codexPreToolUseHook.js',
-      nodeExecutablePath: '/usr/local/bin/node',
-    }, mode);
-
-    expect(options.config).not.toHaveProperty('hooks');
-  });
-
-  it('starts a Codex thread with workflow options and projects assistant/result events', async () => {
+describe('CodexSdkManager app-server runtime', () => {
+  it('starts a configured thread and persists provider-neutral events', async () => {
     const db = createDb();
     try {
-      const thread = new FakeThread([
-        { type: 'thread.started', thread_id: 'codex-thread-1' },
-        {
-          type: 'item.completed',
-          item: { id: 'msg-1', type: 'agent_message', text: 'Done from Codex.' },
-        },
-        {
-          type: 'turn.completed',
-          usage: {
-            input_tokens: 10,
-            cached_input_tokens: 3,
-            output_tokens: 7,
-            reasoning_output_tokens: 2,
-          },
-        },
-      ]);
-      const client = new FakeCodexClient(thread);
-      const createClient = vi.fn<(options?: CodexOptions) => CodexClientLike>(() => client);
-      const manager = makeManagerWithFactory(db, createClient);
+      const { manager, getClient } = makeManager(db, successfulHandler);
       const outputs: Array<{ data: unknown }> = [];
       manager.on('output', (payload: unknown) => {
         if (typeof payload === 'object' && payload !== null && 'data' in payload) {
@@ -183,53 +140,40 @@ describe('CodexSdkManager', () => {
         runId: 'run-1',
         worktreePath: '/tmp/worktree',
         prompt: 'ship it',
+        systemPromptAppend: 'Report through Cyboflow.',
         agentPermissionMode: 'acceptEdits',
         model: 'gpt-5.5',
       });
 
-      expect(createClient).toHaveBeenCalledWith(expect.objectContaining({
-        config: expect.objectContaining({
-          mcp_servers: {
-            cyboflow: expect.objectContaining({
-              command: '/usr/local/bin/node',
-              args: ['/app/cyboflowMcpServer.js'],
-              env: expect.objectContaining({
-                CYBOFLOW_RUN_ID: 'run-1',
-                CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
-              }),
-              required: true,
-              default_tools_approval_mode: 'approve',
-            }),
-          },
-          hooks: {
-            PreToolUse: [
-              {
-                matcher: '*',
-                hooks: [
-                  {
-                    type: 'command',
-                    command: "'/usr/local/bin/node' '/app/codexPreToolUseHook.js'",
-                    timeout: 86400,
-                    statusMessage: 'Checking Cyboflow permission',
-                  },
-                ],
-              },
-            ],
-          },
-        }),
-        env: expect.objectContaining({
+      const client = getClient();
+      expect(client.start).toHaveBeenCalledOnce();
+      expect(client.stop).toHaveBeenCalledOnce();
+      expect(client.options).toMatchObject({
+        command: 'codex',
+        cwd: '/tmp/worktree',
+        env: {
           CYBOFLOW_RUN_ID: 'run-1',
           CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
-        }),
-      }));
-      expect(client.startThread).toHaveBeenCalledWith({
-        workingDirectory: '/tmp/worktree',
-        sandboxMode: 'workspace-write',
-        approvalPolicy: 'on-request',
-        model: 'gpt-5.5',
+        },
       });
-      expect(thread.runStreamed).toHaveBeenCalledWith('ship it', {
-        signal: expect.any(AbortSignal) as AbortSignal,
+      expect(client.requests[0]).toMatchObject({
+        method: 'thread/start',
+        params: {
+          cwd: '/tmp/worktree',
+          sandbox: 'workspace-write',
+          approvalPolicy: 'on-request',
+          approvalsReviewer: 'user',
+          model: 'gpt-5.5',
+          developerInstructions: 'Report through Cyboflow.',
+        },
+      });
+      expect(client.requests[1]).toEqual({
+        method: 'turn/start',
+        params: {
+          threadId: 'codex-thread-1',
+          input: [{ type: 'text', text: 'ship it', text_elements: [] }],
+          model: 'gpt-5.5',
+        },
       });
 
       const threadRow = db
@@ -241,118 +185,79 @@ describe('CodexSdkManager', () => {
         .prepare('SELECT event_type AS eventType, payload_json AS payloadJson FROM raw_events ORDER BY id')
         .all() as Array<{ eventType: string; payloadJson: string }>;
       expect(rows.map((row) => row.eventType)).toEqual(['session_info', 'system', 'assistant', 'result']);
-
-      const systemInit = JSON.parse(rows[1].payloadJson) as {
-        type: string;
-        provider: string;
-        runtime: string;
-        mcp_servers: Array<{ name: string; status: string }>;
-      };
-      expect(systemInit).toMatchObject({
+      expect(JSON.parse(rows[1].payloadJson)).toMatchObject({
         type: 'agent_init',
         provider: 'codex',
         runtime: 'codex-sdk',
+        external_session_id: 'codex-thread-1',
+        sdk_version: 'codex-cli/0.143.0',
+        mcp_servers: [{ name: 'cyboflow', status: 'configured' }],
       });
-      expect(systemInit.mcp_servers).toEqual([{ name: 'cyboflow', status: 'connected' }]);
-
-      const persistedAssistant = JSON.parse(rows[2].payloadJson) as {
-        type: string;
-        provider: string;
-        runtime: string;
-        content: Array<{ type: string; text?: string }>;
-      };
-      expect(persistedAssistant).toMatchObject({
+      expect(JSON.parse(rows[2].payloadJson)).toMatchObject({
         type: 'agent_message',
         provider: 'codex',
         runtime: 'codex-sdk',
         content: [{ type: 'text', text: 'Done from Codex.' }],
       });
-
-      const assistant = outputs.map((output) => output.data).find((data) => {
-        return typeof data === 'object' && data !== null && (data as { type?: unknown }).type === 'assistant';
-      }) as { message: { content: Array<{ type: string; text?: string }> } };
-      expect(assistant.message.content[0]).toEqual({ type: 'text', text: 'Done from Codex.' });
-
-      const result = JSON.parse(rows[3].payloadJson) as {
-        type: string;
-        provider: string;
-        runtime: string;
-        subtype: string;
-        usage: {
-          input_tokens: number;
-          output_tokens: number;
-          cache_read_input_tokens: number;
-          reasoning_output_tokens: number;
-        };
-      };
-      expect(result).toMatchObject({
+      expect(JSON.parse(rows[3].payloadJson)).toMatchObject({
         type: 'agent_result',
-        provider: 'codex',
-        runtime: 'codex-sdk',
         subtype: 'success',
-        usage: {
-          input_tokens: 10,
-          output_tokens: 9,
-          cache_read_input_tokens: 3,
-          reasoning_output_tokens: 2,
-        },
+        is_error: false,
       });
+      expect(outputs.some((output) => {
+        return typeof output.data === 'object'
+          && output.data !== null
+          && (output.data as { type?: unknown }).type === 'assistant';
+      })).toBe(true);
     } finally {
       db.close();
     }
   });
 
-  it('omits the model when a stale Claude model value reaches Codex SDK', async () => {
+  it('resumes an external Codex thread', async () => {
     const db = createDb();
     try {
-      const thread = new FakeThread([]);
-      const client = new FakeCodexClient(thread);
-      const manager = makeManager(db, client);
-
+      const { manager, getClient } = makeManager(db, successfulHandler);
       await manager.spawnCliProcess({
         panelId: 'run-1',
         sessionId: 'run-1',
         runId: 'run-1',
         worktreePath: '/tmp/worktree',
-        prompt: 'ship it',
-        agentPermissionMode: 'acceptEdits',
-        model: 'sonnet',
+        prompt: 'continue',
+        resumeSessionId: 'codex-thread-1',
       });
 
-      expect(client.startThread).toHaveBeenCalledWith({
-        workingDirectory: '/tmp/worktree',
-        sandboxMode: 'workspace-write',
-        approvalPolicy: 'on-request',
+      expect(getClient().requests[0]).toMatchObject({
+        method: 'thread/resume',
+        params: { threadId: 'codex-thread-1', excludeTurns: false },
       });
-      expect(thread.runStreamed).toHaveBeenCalledWith('ship it', {
-        signal: expect.any(AbortSignal) as AbortSignal,
-      });
-
-      const sessionInfoRow = db
-        .prepare("SELECT payload_json AS payloadJson FROM raw_events WHERE event_type = 'session_info'")
-        .get() as { payloadJson: string };
-      expect(JSON.parse(sessionInfoRow.payloadJson)).toMatchObject({ model: 'codex-default' });
     } finally {
       db.close();
     }
   });
 
-  it('projects one failure result and rejects the spawn when a turn fails', async () => {
+  it('emits one failure result and rejects when the turn fails', async () => {
     const db = createDb();
     try {
-      const thread = new FakeThread([
-        { type: 'thread.started', thread_id: 'codex-thread-err' },
-        { type: 'turn.failed', error: { message: 'Codex failed' } },
-      ]);
-      const client = new FakeCodexClient(thread);
-      const manager = makeManager(db, client);
-      const outputs: Array<{ data: unknown }> = [];
-      manager.on('error', () => undefined);
-      manager.on('output', (payload: unknown) => {
-        if (typeof payload === 'object' && payload !== null && 'data' in payload) {
-          outputs.push(payload as { data: unknown });
+      const { manager } = makeManager(db, (method, _params, client) => {
+        if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
+        if (method === 'turn/start') {
+          setTimeout(() => client.notify({
+            method: 'turn/completed',
+            params: {
+              threadId: 'codex-thread-1',
+              turn: {
+                id: 'turn-1',
+                status: 'failed',
+                error: { message: 'Codex failed', codexErrorInfo: null, additionalDetails: null },
+              },
+            },
+          }), 0);
+          return { turn: { id: 'turn-1' } };
         }
+        throw new Error(`Unexpected request: ${method}`);
       });
+      manager.on('error', () => undefined);
 
       await expect(manager.spawnCliProcess({
         panelId: 'run-1',
@@ -367,18 +272,49 @@ describe('CodexSdkManager', () => {
         .all() as Array<{ payloadJson: string }>;
       expect(resultRows).toHaveLength(1);
       expect(JSON.parse(resultRows[0].payloadJson)).toMatchObject({
-        type: 'agent_result',
-        provider: 'codex',
-        runtime: 'codex-sdk',
         subtype: 'error_during_execution',
         is_error: true,
         result: 'Codex failed',
       });
+    } finally {
+      db.close();
+    }
+  });
 
-      const outputResults = outputs.filter((output) => {
-        return typeof output.data === 'object' && output.data !== null && (output.data as { type?: unknown }).type === 'result';
+  it('interrupts an active turn before stopping app-server', async () => {
+    const db = createDb();
+    try {
+      let markTurnStarted!: () => void;
+      const turnStarted = new Promise<void>((resolve) => {
+        markTurnStarted = resolve;
       });
-      expect(outputResults).toHaveLength(1);
+      const { manager, getClient } = makeManager(db, (method) => {
+        if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
+        if (method === 'turn/start') {
+          setTimeout(markTurnStarted, 0);
+          return { turn: { id: 'turn-1' } };
+        }
+        if (method === 'turn/interrupt') return {};
+        throw new Error(`Unexpected request: ${method}`);
+      });
+
+      const spawn = manager.spawnCliProcess({
+        panelId: 'run-1',
+        sessionId: 'run-1',
+        runId: 'run-1',
+        worktreePath: '/tmp/worktree',
+        prompt: 'wait',
+      });
+      await turnStarted;
+      await manager.killProcess('run-1');
+      await spawn;
+
+      const client = getClient();
+      expect(client.requests).toContainEqual({
+        method: 'turn/interrupt',
+        params: { threadId: 'codex-thread-1', turnId: 'turn-1' },
+      });
+      expect(client.stop).toHaveBeenCalledOnce();
     } finally {
       db.close();
     }
