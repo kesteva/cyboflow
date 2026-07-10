@@ -79,9 +79,16 @@ export function usePanelSurface(
         if (response.success && response.data) {
           setMainRepoSessionId(response.data.id);
           setMainRepoSession(response.data);
-          // Activate this session in the session store so session-scoped panels
-          // (ClaudePanel → useClaudePanel reads from useSessionStore) see it as active.
-          await useSessionStore.getState().setActiveSession(response.data.id);
+          // Activate the main-repo session for session-scoped panels ONLY when no
+          // quick session is selected — otherwise Effect B (below) owns activation.
+          // Activating main-repo here while a quick session is selected clobbers
+          // activeSessionId, defeating setActiveSession's wasAlreadyActive guard and
+          // spuriously re-firing markSessionAsViewed on the quick session every time
+          // the surface remounts (e.g. returning from the Human review pane). That
+          // false "view" both clears the unviewed badge and resets the idle clock.
+          if (!selectedSessionId) {
+            await useSessionStore.getState().setActiveSession(response.data.id);
+          }
         }
       } catch (err) {
         console.error('[usePanelSurface] Failed to resolve main-repo session:', err);
@@ -90,7 +97,7 @@ export function usePanelSurface(
     return () => {
       cancelled = true;
     };
-  }, [projectId]);
+  }, [projectId, selectedSessionId]);
 
   // Resolve the quick session when one becomes active.
   useEffect(() => {
