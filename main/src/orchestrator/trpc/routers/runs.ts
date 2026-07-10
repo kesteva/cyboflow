@@ -770,12 +770,12 @@ async function stampOutcomeAndDeriveTask(
 }
 
 /**
- * Terminate a LIVE interactive run's persistent REPL as part of close-out
+ * Terminate a LIVE run's persistent process as part of close-out
  * (IDEA-030 / TASK-818). Routes through the RelayDeps `endSession` seam (backed
- * by SubstrateDispatchFacade.endSession), which writes EOF/`/exit` into the live
- * PTY so the run's spawn promise resolves and teardown fires. Strict NO-OP for
- * the SDK substrate (the facade resolves the substrate per-run). Called BEFORE
- * worktree removal in merge / createPr / dismiss.
+ * by SubstrateDispatchFacade.endSession): interactive gets EOF/`/exit` into the
+ * live PTY so the run's spawn promise resolves and teardown fires; SDK routes to
+ * killProcess (no PTY to write EOF into; a WARM persistent query() must not
+ * outlive close-out). Called BEFORE worktree removal in merge / createPr / dismiss.
  *
  * Fail-soft + opt-in: when `relayDeps` is not wired (legacy close-out / tests
  * that don't inject the relay bag) this is a complete no-op — close-out still
@@ -801,8 +801,9 @@ async function endLiveInteractiveSession(runId: string): Promise<void> {
  * by SubstrateDispatchFacade.killSession → manager.killProcess), which kills the
  * process tree + tears the run down — NOT the graceful EOF/`/exit` of
  * `endSession`, which a RUNNING (busy) claude never reads, leaving the process
- * orphaned. Dismiss discards the run, so a hard kill is correct. Strict NO-OP for
- * the SDK substrate. Same fail-soft + opt-in contract as endLiveInteractiveSession:
+ * orphaned. Dismiss discards the run, so a hard kill is correct. SDK substrate:
+ * routes to killProcess (same primitive as endSession there). Same fail-soft +
+ * opt-in contract as endLiveInteractiveSession:
  * a missing relay bag or a throwing kill is swallowed so close-out still proceeds
  * (the guarded UPDATE marks the run terminal regardless).
  */
