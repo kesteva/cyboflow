@@ -5,6 +5,7 @@ import type { ConfigManager } from '../../configManager';
 import type { SessionManager } from '../../sessionManager';
 import type { ConversationMessage } from '../../../database/models';
 import type { ClaudeSpawnerOptions } from '../../../orchestrator/runExecutor';
+import { AgentInvocationStore } from '../../../orchestrator/agentInvocationStore';
 import { agentStreamEventToClaudeStreamEvent, EventRouter, RawEventsSink } from '../../streamParser';
 import type {
   AgentInitEvent,
@@ -286,6 +287,12 @@ export class CodexSdkManager extends AbstractCliManager {
     const runtimeConfig = this.requireMcpRuntimeConfig();
     const approvalRouter = this.requireApprovalRouter();
     const executable = this.getResolvedExecutable();
+    const agentInvocationId = new AgentInvocationStore(this.db).createInvocation({
+      runId,
+      provider: 'codex',
+      runtime: 'codex-sdk',
+      model: resolveAgentModelAlias('codex', options.model),
+    });
     const command = executable.executablePath;
     const abortController = new AbortController();
     const terminal = createDeferred<void>();
@@ -457,7 +464,7 @@ export class CodexSdkManager extends AbstractCliManager {
             'Codex app-server thread start',
           );
       threadId = thread.threadId;
-      this.captureRunCodexThreadId(runId, thread.threadId);
+      this.captureInvocationCodexThreadId(runId, agentInvocationId, thread.threadId);
       this.emitProjected(
         router,
         runId,
@@ -613,15 +620,13 @@ export class CodexSdkManager extends AbstractCliManager {
     });
   }
 
-  private captureRunCodexThreadId(runId: string, threadId: string): void {
+  private captureInvocationCodexThreadId(
+    runId: string,
+    agentInvocationId: string,
+    threadId: string,
+  ): void {
     try {
-      this.db
-        .prepare(
-          `UPDATE workflow_runs
-              SET claude_session_id = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND claude_session_id IS NULL`,
-        )
-        .run(threadId, runId);
+      new AgentInvocationStore(this.db).captureExternalSessionId(runId, agentInvocationId, threadId);
     } catch (error) {
       this.logger?.warn(
         `[CodexSdkManager] failed to capture Codex thread id for run ${runId}: ${error instanceof Error ? error.message : String(error)}`,

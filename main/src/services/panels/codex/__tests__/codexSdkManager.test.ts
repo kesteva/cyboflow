@@ -48,6 +48,17 @@ function createDb(): Database.Database {
       claude_session_id TEXT,
       updated_at TEXT
     );
+    CREATE TABLE agent_invocations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      agent_invocation_id TEXT NOT NULL UNIQUE,
+      run_id TEXT NOT NULL,
+      step_id TEXT,
+      agent_provider TEXT NOT NULL,
+      agent_runtime TEXT NOT NULL,
+      model TEXT,
+      external_session_id TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE TABLE raw_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       run_id TEXT NOT NULL,
@@ -217,10 +228,31 @@ describe('CodexSdkManager app-server runtime', () => {
         },
       });
 
-      const threadRow = db
-        .prepare('SELECT claude_session_id AS threadId FROM workflow_runs WHERE id = ?')
-        .get('run-1') as { threadId: string | null };
-      expect(threadRow.threadId).toBe('codex-thread-1');
+      const workflowRunRow = db
+        .prepare('SELECT claude_session_id AS claudeSessionId FROM workflow_runs WHERE id = ?')
+        .get('run-1') as { claudeSessionId: string | null };
+      expect(workflowRunRow.claudeSessionId).toBeNull();
+      const invocationRow = db
+        .prepare(
+          `SELECT agent_provider AS provider,
+                  agent_runtime AS runtime,
+                  model,
+                  external_session_id AS externalSessionId
+             FROM agent_invocations
+            WHERE run_id = ?`,
+        )
+        .get('run-1') as {
+          provider: string;
+          runtime: string;
+          model: string | null;
+          externalSessionId: string | null;
+        };
+      expect(invocationRow).toEqual({
+        provider: 'codex',
+        runtime: 'codex-sdk',
+        model: 'gpt-5.5',
+        externalSessionId: 'codex-thread-1',
+      });
 
       const rows = db
         .prepare('SELECT event_type AS eventType, payload_json AS payloadJson FROM raw_events ORDER BY id')
@@ -278,6 +310,14 @@ describe('CodexSdkManager app-server runtime', () => {
         method: 'thread/resume',
         params: { threadId: 'codex-thread-1', excludeTurns: false },
       });
+      const invocationRow = db
+        .prepare(
+          `SELECT external_session_id AS externalSessionId
+             FROM agent_invocations
+            WHERE run_id = ?`,
+        )
+        .get('run-1') as { externalSessionId: string | null };
+      expect(invocationRow.externalSessionId).toBe('codex-thread-1');
     } finally {
       db.close();
     }
