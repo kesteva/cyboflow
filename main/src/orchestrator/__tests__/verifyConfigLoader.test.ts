@@ -11,11 +11,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   loadVerifyConfig,
   matchDeliverable,
   resolveDeliverableContext,
+  resolveStaticHtmlContext,
   VERIFY_CONFIG_RELATIVE_PATH,
 } from '../verifyConfigLoader';
 import type { LoggerLike } from '../types';
@@ -211,6 +212,32 @@ describe('matchDeliverable', () => {
     expect(matchDeliverable(cfg, {}, ROOT)).toBeNull();
   });
 
+  // Rule (e) — Codex finding 6: zero-config static-build hydration.
+  it('rule (e): no target + zero startables + exactly ONE htmlPath deliverable, matches it', () => {
+    const target: DeliverableVerifyConfig = { id: 'docs', htmlPath: 'dist/docs/index.html' };
+    const cfg = config([target]);
+    expect(matchDeliverable(cfg, {}, ROOT)).toBe(target);
+  });
+
+  it('rule (e): no target + zero startables + TWO htmlPath deliverables, returns null (ambiguous)', () => {
+    const cfg = config([
+      { id: 'docs', htmlPath: 'dist/docs/index.html' },
+      { id: 'app', htmlPath: 'dist/app/index.html' },
+    ]);
+    expect(matchDeliverable(cfg, {}, ROOT)).toBeNull();
+  });
+
+  it('rule (e): a startable deliverable being present (even ambiguous startables) keeps startable-only precedence — the htmlPath rule never runs', () => {
+    // Two startables ⇒ rule (d) already refuses as ambiguous; rule (e) must NOT
+    // step in and resolve the single htmlPath-only candidate instead.
+    const cfg = config([
+      { id: 'a', start: 'run', url: 'http://localhost:${PORT}' },
+      { id: 'b', start: 'run', url: 'http://localhost:${PORT}/b' },
+      { id: 'docs', htmlPath: 'dist/docs/index.html' },
+    ]);
+    expect(matchDeliverable(cfg, {}, ROOT)).toBeNull();
+  });
+
   it('REGRESSION: a concrete-url request matching nothing returns null (NO startable[0] binding)', () => {
     // The old closure fell back to startable[0] here, binding + spawning the (only,
     // startable) deliverable and rewriting ctx.input.url to its baseUrl — judging the
@@ -312,5 +339,174 @@ describe('resolveDeliverableContext', () => {
       input: { url: 'http://localhost:8080/docs' },
     });
     expect(resolved).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveStaticHtmlContext — S9's worktree-first static-html resolution (Codex
+// finding 2, the relative-path bug: the pre-S9 code joined every relative
+// htmlPath against a single directory, so a build living solely in the WORKTREE
+// under verification was invisible). These tests use real temp dirs + real
+// files (fs.stat-backed existence checks) for both checkouts.
+// ---------------------------------------------------------------------------
+describe('resolveStaticHtmlContext', () => {
+  let projectRoot: string;
+  let worktreeRoot: string;
+
+  beforeEach(async () => {
+    projectRoot = await mkdtemp(join(tmpdir(), 'cyboflow-static-project-'));
+    worktreeRoot = await mkdtemp(join(tmpdir(), 'cyboflow-static-worktree-'));
+  });
+
+  afterEach(async () => {
+    await rm(projectRoot, { recursive: true, force: true });
+    await rm(worktreeRoot, { recursive: true, force: true });
+  });
+
+  /** Write `<root>/<relPath>` with placeholder content, creating parent dirs. */
+  async function writeAt(root: string, relPath: string): Promise<string> {
+    const abs = join(root, relPath);
+    await mkdir(dirname(abs), { recursive: true });
+    await writeFile(abs, '<html></html>', 'utf-8');
+    return abs;
+  }
+
+  it('an ABSOLUTE htmlPath that exists is used verbatim; staticRoot defaults to dirname', async () => {
+    const abs = await writeAt(projectRoot, 'dist/index.html');
+    const resolved = await resolveStaticHtmlContext({
+      worktreePath: worktreeRoot,
+      projectPath: projectRoot,
+      htmlPath: abs,
+    });
+    expect(resolved).toEqual({ absoluteHtmlPath: abs, staticRoot: join(projectRoot, 'dist') });
+  });
+
+  it('an ABSOLUTE htmlPath that does not exist returns null + warns', async () => {
+    const logger = makeLogger();
+    const missing = join(projectRoot, 'dist/nope.html');
+    const resolved = await resolveStaticHtmlContext(
+      { worktreePath: null, projectPath: projectRoot, htmlPath: missing },
+      logger,
+    );
+    expect(resolved).toBeNull();
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('a RELATIVE htmlPath resolves WORKTREE-FIRST when the file exists there', async () => {
+    const abs = await writeAt(worktreeRoot, 'dist/index.html');
+    // Project root has no such file at all — worktree must win, not fall back.
+    const resolved = await resolveStaticHtmlContext({
+      worktreePath: worktreeRoot,
+      projectPath: projectRoot,
+      htmlPath: 'dist/index.html',
+    });
+    expect(resolved).toEqual({ absoluteHtmlPath: abs, staticRoot: dirname(abs) });
+  });
+
+  it('a RELATIVE htmlPath falls back to the PROJECT root when absent from the worktree', async () => {
+    const abs = await writeAt(projectRoot, 'dist/index.html');
+    // worktreeRoot exists but has no dist/index.html.
+    const resolved = await resolveStaticHtmlContext({
+      worktreePath: worktreeRoot,
+      projectPath: projectRoot,
+      htmlPath: 'dist/index.html',
+    });
+    expect(resolved).toEqual({ absoluteHtmlPath: abs, staticRoot: dirname(abs) });
+  });
+
+  it('a RELATIVE htmlPath found in NEITHER checkout returns null + warns', async () => {
+    const logger = makeLogger();
+    const resolved = await resolveStaticHtmlContext(
+      { worktreePath: worktreeRoot, projectPath: projectRoot, htmlPath: 'dist/index.html' },
+      logger,
+    );
+    expect(resolved).toBeNull();
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the project root when worktreePath is null (quick run / no worktree)', async () => {
+    const abs = await writeAt(projectRoot, 'dist/index.html');
+    const resolved = await resolveStaticHtmlContext({
+      worktreePath: null,
+      projectPath: projectRoot,
+      htmlPath: 'dist/index.html',
+    });
+    expect(resolved).toEqual({ absoluteHtmlPath: abs, staticRoot: dirname(abs) });
+  });
+
+  it('an explicit relative staticRoot resolves against the SAME checkout root the html won from, and is honored when it contains the html', async () => {
+    const abs = await writeAt(worktreeRoot, 'dist/docs/index.html');
+    // staticRoot is the parent of docs/ — still contains the html, just a wider root
+    // (e.g. root-absolute /assets/... referenced from above the html's own dir).
+    await mkdir(join(worktreeRoot, 'dist'), { recursive: true });
+    const resolved = await resolveStaticHtmlContext({
+      worktreePath: worktreeRoot,
+      projectPath: projectRoot,
+      htmlPath: 'dist/docs/index.html',
+      staticRoot: 'dist',
+    });
+    expect(resolved).toEqual({ absoluteHtmlPath: abs, staticRoot: join(worktreeRoot, 'dist') });
+  });
+
+  it('an explicit staticRoot that does NOT contain the html returns null + warns (containment enforced)', async () => {
+    const logger = makeLogger();
+    await writeAt(worktreeRoot, 'dist/docs/index.html');
+    // A sibling directory that exists but never contains dist/docs/index.html.
+    await mkdir(join(worktreeRoot, 'other'), { recursive: true });
+    const resolved = await resolveStaticHtmlContext(
+      {
+        worktreePath: worktreeRoot,
+        projectPath: projectRoot,
+        htmlPath: 'dist/docs/index.html',
+        staticRoot: 'other',
+      },
+      logger,
+    );
+    expect(resolved).toBeNull();
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('an explicit staticRoot that does not exist returns null + warns', async () => {
+    const logger = makeLogger();
+    await writeAt(worktreeRoot, 'dist/docs/index.html');
+    const resolved = await resolveStaticHtmlContext(
+      {
+        worktreePath: worktreeRoot,
+        projectPath: projectRoot,
+        htmlPath: 'dist/docs/index.html',
+        staticRoot: 'does-not-exist',
+      },
+      logger,
+    );
+    expect(resolved).toBeNull();
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+  });
+
+  it('an ABSOLUTE htmlPath with a relative staticRoot resolves the staticRoot worktree-first/project-fallback the SAME way', async () => {
+    // htmlPath is absolute (project-rooted) so there is no "winning root" to
+    // inherit from directly — a relative staticRoot must still resolve via the
+    // worktree-first/project-fallback search, landing on whichever checkout
+    // actually has it (here: only the project does).
+    const abs = await writeAt(projectRoot, 'dist/docs/index.html');
+    await mkdir(join(projectRoot, 'dist'), { recursive: true });
+    const resolved = await resolveStaticHtmlContext({
+      worktreePath: worktreeRoot,
+      projectPath: projectRoot,
+      htmlPath: abs,
+      staticRoot: 'dist',
+    });
+    expect(resolved).toEqual({ absoluteHtmlPath: abs, staticRoot: join(projectRoot, 'dist') });
+  });
+
+  it('an absent staticRoot defaults to dirname(absoluteHtmlPath), not a wider ancestor', async () => {
+    const abs = await writeAt(worktreeRoot, 'dist/sub/index.html');
+    const resolved = await resolveStaticHtmlContext({
+      worktreePath: worktreeRoot,
+      projectPath: projectRoot,
+      htmlPath: 'dist/sub/index.html',
+    });
+    expect(resolved?.absoluteHtmlPath).toBe(abs);
+    expect(resolved?.staticRoot).toBe(join(worktreeRoot, 'dist/sub'));
+    expect(resolved?.staticRoot).not.toBe(join(worktreeRoot, 'dist'));
   });
 });

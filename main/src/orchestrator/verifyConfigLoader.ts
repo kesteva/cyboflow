@@ -22,8 +22,8 @@
  * electron, NO better-sqlite3, NO services/* — fs/promises is explicitly allowed
  * for orchestrator modules (same as runFileExplorer / runLauncher).
  */
-import { readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
+import { dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type {
   DeliverableVerifyConfig,
   VerifyConfigFile,
@@ -154,6 +154,15 @@ function toAbsolute(root: string, p: string): string {
  *   (d) NO url AND NO htmlPath on the request AND EXACTLY ONE startable deliverable
  *       (a `start` command) — the hydration-driven case where the agent passed only
  *       intent/taskRef; two-or-more startables is ambiguous ⇒ null.
+ *   (e) NO url AND NO htmlPath on the request AND ZERO startable deliverables AND
+ *       EXACTLY ONE deliverable with a non-empty `htmlPath` (Codex finding 6) — the
+ *       zero-config STATIC-build hydration case (a built html file, no `start` to
+ *       spawn; S9 then stands its static root up over loopback HTTP). Startables
+ *       retain PRECEDENCE over this rule: any startable deliverable present — one
+ *       (rule (d) matches it) or two-or-more (rule (d) already refuses as
+ *       ambiguous) — means this rule never runs; two-or-more htmlPath-only
+ *       candidates (zero startables) is ambiguous ⇒ null, the same honest-matching
+ *       policy as (d).
  *
  * Pure over shared types + node:path — no fs/electron — so it is unit-testable
  * without a runtime (standalone-typecheck invariant).
@@ -196,6 +205,14 @@ export function matchDeliverable(
   if (!hasTarget) {
     const startable = deliverables.filter((d) => d.start && d.start.trim().length > 0);
     if (startable.length === 1) return startable[0];
+    if (startable.length === 0) {
+      // (e) zero-config static-build hydration (Codex finding 6): no startable
+      // deliverable exists at all, so rule (d) never had an opinion — fall to the
+      // exactly-one-htmlPath rule. Two-or-more here is the same ambiguity refusal
+      // as two-or-more startables above (honest-matching policy preserved).
+      const staticCandidates = deliverables.filter((d) => d.htmlPath && d.htmlPath.trim().length > 0);
+      if (staticCandidates.length === 1) return staticCandidates[0];
+    }
   }
 
   // No honest match — the caller captures the request's own url/htmlPath unchanged.
@@ -249,4 +266,162 @@ export async function resolveDeliverableContext(
   const deliverable = matchDeliverable(config, args.input, cwd);
   if (!deliverable) return null;
   return { cwd, deliverable };
+}
+
+/** fs.stat-based existence probe. Fail-soft: ANY stat error (ENOENT, EACCES, a
+ * directory-in-the-way, ...) reads as "does not exist" — this helper's callers
+ * never need to distinguish WHY a candidate path is unusable, only whether it is. */
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await stat(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * WORKTREE-FIRST static-html context resolution (S9 — locked seam for the
+ * index.ts staticHtmlContextResolver closure, mirrors resolveDeliverableContext
+ * immediately above: the closure supplies the DB-sourced worktree/project paths,
+ * this helper does all the fs work so it stays unit-testable without electron).
+ *
+ * Fixes the relative-path bug (Codex finding 2): the pre-S9 code implicitly
+ * assumed every htmlPath was already rooted somewhere sane and joined it against
+ * a single directory. A RELATIVE htmlPath must resolve the SAME way every other
+ * verify.json-adjacent path does in this file — worktree checkout first (the
+ * branch under verification may have just built the html), project root as the
+ * fallback (quick runs / no worktree / a pre-existing build) — never the Electron
+ * process cwd.
+ *
+ * Resolution:
+ *   - `htmlPath` ABSOLUTE ⇒ used VERBATIM; it must still exist (stat) — a stale or
+ *     typo'd absolute path is exactly as fail-soft as a missing relative one.
+ *   - `htmlPath` RELATIVE ⇒ try `resolve(worktreePath, htmlPath)` first (only when
+ *     `worktreePath` is set) and use it if the file exists; else try
+ *     `resolve(projectPath, htmlPath)`; else null + warn (neither checkout has it).
+ *   - `staticRoot` ABSENT ⇒ `dirname(absoluteHtmlPath)` (correct for the common
+ *     case: the html sits at the build root and every asset it references is a
+ *     sibling/descendant).
+ *   - `staticRoot` PRESENT:
+ *       - ABSOLUTE ⇒ used verbatim.
+ *       - RELATIVE, and the winning html resolution came from a RELATIVE htmlPath
+ *         ⇒ resolved against that SAME checkout root (worktree or project,
+ *         whichever one the html was actually found under) — a recipe author
+ *         declares `staticRoot` relative to wherever their html lives, not to an
+ *         independently-guessed root.
+ *       - RELATIVE, and htmlPath was ABSOLUTE (so there is no "winning root" to
+ *         inherit) ⇒ resolved the SAME worktree-first/project-fallback way as
+ *         htmlPath itself.
+ *     Either way the resolved root must EXIST and must CONTAIN the html path
+ *     (`path.resolve` + an exact match or a `staticRoot + sep` prefix — same
+ *     containment shape StaticServerManager enforces at serve time) — a
+ *     `staticRoot` that doesn't even hold the html it's meant to serve is a
+ *     misconfiguration, never silently served anyway.
+ *
+ * NEVER throws: every failure path is `null` + a `logger?.warn`, so the scheduler
+ * (the sole caller, via the index.ts closure) falls back to the pre-S9 raw-
+ * htmlPath capture rather than failing the request outright.
+ */
+export async function resolveStaticHtmlContext(
+  args: {
+    worktreePath: string | null;
+    projectPath: string;
+    htmlPath: string;
+    staticRoot?: string;
+  },
+  logger?: LoggerLike,
+): Promise<{ absoluteHtmlPath: string; staticRoot: string } | null> {
+  const { worktreePath, projectPath, htmlPath, staticRoot } = args;
+  const hasWorktree = Boolean(worktreePath && worktreePath.trim().length > 0);
+
+  let absoluteHtmlPath: string;
+  // The checkout root the winning (relative) html resolution was rooted in.
+  // Undefined when htmlPath was already absolute — there is no "winning root" in
+  // that case, so a relative staticRoot falls back to its own worktree-first/
+  // project search below.
+  let htmlRoot: string | undefined;
+
+  if (isAbsolute(htmlPath)) {
+    if (!(await pathExists(htmlPath))) {
+      logger?.warn('verifyConfigLoader: static html path (absolute) does not exist', { htmlPath });
+      return null;
+    }
+    absoluteHtmlPath = htmlPath;
+  } else {
+    let resolved: string | null = null;
+    if (hasWorktree) {
+      const candidate = resolve(worktreePath as string, htmlPath);
+      if (await pathExists(candidate)) {
+        resolved = candidate;
+        htmlRoot = worktreePath as string;
+      }
+    }
+    if (!resolved) {
+      const candidate = resolve(projectPath, htmlPath);
+      if (await pathExists(candidate)) {
+        resolved = candidate;
+        htmlRoot = projectPath;
+      }
+    }
+    if (!resolved) {
+      logger?.warn('verifyConfigLoader: static html path not found in worktree or project root', {
+        htmlPath,
+        worktreePath,
+        projectPath,
+      });
+      return null;
+    }
+    absoluteHtmlPath = resolved;
+  }
+
+  if (!staticRoot || staticRoot.trim().length === 0) {
+    return { absoluteHtmlPath, staticRoot: dirname(absoluteHtmlPath) };
+  }
+
+  let resolvedRoot: string;
+  if (isAbsolute(staticRoot)) {
+    resolvedRoot = staticRoot;
+  } else if (htmlRoot) {
+    resolvedRoot = resolve(htmlRoot, staticRoot);
+  } else {
+    // htmlPath was absolute (no winning root to inherit) — resolve the relative
+    // staticRoot the identical worktree-first/project-fallback way.
+    let candidateRoot: string | null = null;
+    if (hasWorktree) {
+      const candidate = resolve(worktreePath as string, staticRoot);
+      if (await pathExists(candidate)) candidateRoot = candidate;
+    }
+    if (!candidateRoot) {
+      const candidate = resolve(projectPath, staticRoot);
+      if (await pathExists(candidate)) candidateRoot = candidate;
+    }
+    if (!candidateRoot) {
+      logger?.warn('verifyConfigLoader: explicit staticRoot not found in worktree or project root', {
+        staticRoot,
+        worktreePath,
+        projectPath,
+      });
+      return null;
+    }
+    resolvedRoot = candidateRoot;
+  }
+
+  if (!(await pathExists(resolvedRoot))) {
+    logger?.warn('verifyConfigLoader: explicit staticRoot does not exist', { staticRoot: resolvedRoot });
+    return null;
+  }
+
+  const normalizedRoot = resolve(resolvedRoot);
+  const containsHtml =
+    absoluteHtmlPath === normalizedRoot || absoluteHtmlPath.startsWith(normalizedRoot + sep);
+  if (!containsHtml) {
+    logger?.warn('verifyConfigLoader: explicit staticRoot does not contain the html path', {
+      staticRoot: normalizedRoot,
+      absoluteHtmlPath,
+    });
+    return null;
+  }
+
+  return { absoluteHtmlPath, staticRoot: normalizedRoot };
 }

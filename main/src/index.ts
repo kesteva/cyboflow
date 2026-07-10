@@ -72,9 +72,10 @@ import { PlaywrightBackend } from './services/visualVerify/playwrightBackend';
 import { PeekabooBackend } from './services/visualVerify/peekabooBackend';
 import { VlmJudgeImpl } from './services/visualVerify/vlmJudge';
 import { DevServerManager } from './services/visualVerify/devServerManager';
+import { StaticServerManager } from './services/visualVerify/staticServerManager';
 import { FsBaselineStore } from './services/visualVerify/baselineStore';
 import { comparePngFiles } from './services/visualVerify/pixelDiff';
-import { resolveDeliverableContext } from './orchestrator/verifyConfigLoader';
+import { resolveDeliverableContext, resolveStaticHtmlContext } from './orchestrator/verifyConfigLoader';
 import { execFileSync } from 'node:child_process';
 import type {
   DeliverableVerifyConfig,
@@ -936,6 +937,61 @@ async function initializeServices() {
       return null;
     }
   };
+  // S9 — the scheduler-owned STATIC file server (the file:// ES-module-block fix).
+  // A request that targets a BUILT html file (no running url, no verify.json `start`)
+  // was previously loaded over `file://` by the rung-0 CapturePageBackend; Chromium
+  // treats `file://` as an opaque origin and CORS-blocks every `<script
+  // type="module">`, so bundler output silently rendered a blank styled shell — no
+  // error, no signal, just an empty page a human had to notice by eye. StaticServerManager
+  // (a service that imports node:http/node:crypto) is the concrete spawner; the
+  // scheduler knows only the narrow StaticServerProvider interface (mirrors the S2
+  // DevServerProvider split immediately above). The token-prefixed URL space IS the
+  // authorization boundary (see StaticServerManager's header) — binding a loopback
+  // port alone grants zero access control, so every request must present the
+  // unguessable per-spawn token as its first path segment. There is deliberately NO
+  // lease (unlike the S2 dev-server pool): the OS assigns an ephemeral port
+  // (127.0.0.1:0), so static captures stay fully parallel — the `verify:port` pool
+  // exists solely to interpolate `${PORT}` into a user's own `start` command, which a
+  // static file server has no need of.
+  //
+  // staticHtmlContextResolver mirrors devServerContextResolver's shape exactly: it
+  // does the DB path lookup (project path + the run's worktree_path, same SELECT)
+  // and delegates ALL fs work to the pure resolveStaticHtmlContext helper (worktree-
+  // first htmlPath resolution + the explicit-staticRoot containment check), so the
+  // scheduler stays fs/electron/service-free (standalone-typecheck invariant). A
+  // thrown error (or a null resolution — html not found in either checkout) fail-
+  // softs to null; the scheduler then captures the request's raw htmlPath unchanged
+  // (pre-S9 behavior, never a fabricated request FAIL).
+  const staticServerManager = new StaticServerManager({ logger: cyboflowLogger });
+  const staticHtmlContextResolver = async (args: {
+    runId: string;
+    projectId: number;
+    htmlPath: string;
+    staticRoot?: string;
+  }): Promise<{ absoluteHtmlPath: string; staticRoot: string } | null> => {
+    try {
+      const project = databaseService.getProject(args.projectId);
+      if (!project?.path) return null;
+      const row = cyboflowDb
+        .prepare('SELECT worktree_path FROM workflow_runs WHERE id = ?')
+        .get(args.runId) as { worktree_path: string | null } | undefined;
+      return await resolveStaticHtmlContext(
+        {
+          worktreePath: row?.worktree_path ?? null,
+          projectPath: project.path,
+          htmlPath: args.htmlPath,
+          staticRoot: args.staticRoot,
+        },
+        cyboflowLogger,
+      );
+    } catch (err) {
+      cyboflowLogger?.warn('[VerificationScheduler] static html context resolve failed', {
+        runId: args.runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  };
   // S3 — Rung-1 PlaywrightBackend (interactive-web + multi-viewport + the
   // deterministic-first a11y/assertion gate). It drives a REAL headless browser via
   // the `playwright` LIBRARY in a fresh BrowserContext per capture (NOT the MCP
@@ -1033,6 +1089,9 @@ async function initializeServices() {
     // S2 — scheduler-owned dev server per verify.json build/start/readyWhen/${PORT}.
     devServerProvider: devServerManager,
     devServerContextResolver,
+    // S9 — scheduler-owned static file server for a built htmlPath (file:// CORS fix).
+    staticServerProvider: staticServerManager,
+    staticHtmlContextResolver,
     // S5 — golden-baseline SSIM pre-diff gates the (paid) VLM. The per-project
     // judge-call budget + judge_calls_used telemetry (migration 056) are enforced
     // inside the scheduler off its injected db; the per-RUN cap stays the
