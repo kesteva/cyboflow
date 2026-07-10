@@ -676,6 +676,31 @@ stats (`selectVariantStats`, excluding experiment arms) power the Insights `04 E
 section; the compare view is `ExperimentComparisonView` (center-pane overlay routed via
 `navigationStore.experimentComparisonId`).
 
+**Rotation experiments (057).** A running randomized rotation is itself a first-class
+`experiments` row (`kind='rotation'`): it auto-OPENS when a workflow's weighted pool
+reaches ≥2 arms (active weight>0 variants + the opted-in baseline), snapshotting the arm
+set into `experiment_rotation_arms` (`'__baseline__'` sentinel row; label/weight
+denormalized at open). **Arm-set membership is the experiment's identity**: a membership
+change closes the running row as `superseded` and opens a lineage-chained successor
+(`rerun_of_experiment_id`) — or silently replaces it when zero runs were attributed; pure
+weight changes never close. The reconcile chokepoint lives INSIDE
+`WorkflowRegistry.setVariantStatus/setBaselineRotation/deleteVariant/updateVariant`
+(transactional with the write; boot reconciles all workflows). Attribution: only genuine
+weighted rotation picks stamp `workflow_runs.rotation_experiment_id`
+(`VariantResolver.resolveForLaunch` returns `VariantAssignment` provenance; pins/restarts
+never stamp) — deliberately SEPARATE from `workflow_runs.experiment_id`, which drives the
+side-by-side entity sandbox and must never see rotation runs. `experiments.decideRotation`
+stamps decided+promotion FIRST (so the pauses below can't supersede it), adopts the
+winning variant's spec (retire iff spec-only), and pauses every real-variant arm —
+including a non-retired winner — so rotation can't instantly reopen; `abandonRotation`
+mirrors it winnerless. Read surface: `selectRotationArmStats` /
+`selectRotationExperimentRuns` / `selectRotationDashboardRows` (fan-out-safe
+`selectVariantStats` shape, arm snapshot as driving set so zero-run arms render).
+UI: rotation rows in Insights 04, a rotation mode of `ExperimentComparisonView`
+(`RotationComparisonBody`: per-arm stats/run drill-down/declare-winner), and a
+confirm-before-supersede modal in `VariantManagerSection` gating membership-changing
+config writes while a rotation runs.
+
 #### Migration file list
 
 Migration files present today under `main/src/database/migrations/`: `003_add_tool_panels.sql`,
@@ -693,7 +718,10 @@ satellites), `015_entity_model_rebuild.sql` (the 3-table entity model + `entity_
 `ideas.decomposed_at` / `epics`+`tasks.approved_at` / `workflow_runs.plan_approved_at` stamps
 via a relocate-then-delete that respects the `ON DELETE RESTRICT` stage FK, mirroring 024),
 `043`–`045`, and the A/B-testing trio `048_workflow_variants.sql` /
-`049_experiments.sql` / `050_experiment_comparisons.sql` (see the section above). 015
+`049_experiments.sql` / `050_experiment_comparisons.sql`, `051_experiment_seed_tasks.sql`,
+`052_experiment_promoted_variant.sql`, `053_experiment_arm_entities.sql`,
+`054_baseline_rotation.sql`, `055_visual_verification.sql`, `056_visual_verify_budget.sql`,
+`057_rotation_experiments.sql` (see the sections above). 015
 and 016 are forward-only with no backfill (no prod data existed); the destructive DROP+recreate
 in 015 is intentional and safe.
 
