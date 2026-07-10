@@ -10,6 +10,7 @@ import { resolveClaudeExecutablePath } from './claudeExecutablePath';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 import { getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
 import { captureSeamError } from '../../telemetry';
+import { classifyErrorPattern } from '../../../orchestrator/programmatic/systemicError';
 import {
   resolveModelAlias,
   sdkModelAndBetas,
@@ -1084,7 +1085,17 @@ export class ClaudeCodeManager extends AbstractCliManager {
             // result never counts. `error_max_turns` is excluded as recoverable. The
             // event is still forwarded as output so the "Session Error" stays visible.
             const resultErr = terminalResultError(event);
-            if (resultErr !== null) terminalError = resultErr;
+            if (resultErr !== null) {
+              terminalError = resultErr;
+              // Report the fatal is_error RESULT (usage limit / auth / execution
+              // error surfaced by the CLI without throwing — the "false Workflow
+              // complete" case). Its own seam so it groups separately from thrown
+              // SDK errors above.
+              captureSeamError('sdk-session-terminal-result', new Error(resultErr.slice(0, 1000)), {
+                substrate: 'sdk',
+                errorClass: classifyErrorPattern(resultErr),
+              });
+            }
 
             // Turn is over: release the input gate so the CLI stops waiting for more
             // input and exits, letting this for-await drain. Placed AFTER the
@@ -1111,6 +1122,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
         const errMsg = err instanceof Error ? err.message : String(err);
         this.logger?.error(`[ClaudeCodeManager] SDK query error for panel ${displayPanelId}: ${errMsg}`);
         this.emit('error', { panelId: displayPanelId, sessionId, error: errMsg });
+        // Report the thrown SDK error to Sentry — the ROOT cause of a failed SDK
+        // session (auth / network / 'Stream closed' control-channel drop / spawn
+        // failure). errorClass groups by cause; the message is home-path redacted
+        // by the scrub. Distinct from the is_error RESULT seam below (a fatal turn
+        // the CLI reports without throwing).
+        captureSeamError('sdk-session-error', err, {
+          substrate: 'sdk',
+          packaged: String(Boolean(app.isPackaged)),
+          errorClass: classifyErrorPattern(errMsg),
+        });
         // A thrown SDK error (auth / network / spawn failure) is terminal too.
         terminalError = errMsg;
         // Reactive availability detection: if the failure names the pinned MODEL

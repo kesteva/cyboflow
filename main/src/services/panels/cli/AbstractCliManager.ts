@@ -8,6 +8,7 @@ import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { captureSeamError } from '../../telemetry';
+import { classifyErrorPattern } from '../../../orchestrator/programmatic/systemicError';
 import { findNodeExecutable } from '../../../utils/nodeFinder';
 
 interface CliProcess {
@@ -668,6 +669,14 @@ export abstract class AbstractCliManager extends EventEmitter {
     // If we failed after all attempts, handle the error
     const errorMsg = lastError instanceof Error ? lastError.message : String(lastError);
     this.logger?.error(`Failed to spawn ${this.getCliToolName()} process after ${spawnAttempt} attempts: ${errorMsg}`);
+    // node-pty spawn of the interactive REPL failed after the normal + Node
+    // shebang-fallback attempts (ENOENT / 'env: node:' / not recognized). This
+    // PTY path is interactive-substrate only (the SDK uses query(), not a PTY).
+    captureSeamError('pty-spawn-failed', lastError, {
+      substrate: 'interactive',
+      cliTool: this.getCliToolName(),
+      errorClass: classifyErrorPattern(errorMsg),
+    });
     throw new Error(`Failed to spawn ${this.getCliToolName()}: ${errorMsg}`);
   }
 
@@ -731,6 +740,26 @@ export abstract class AbstractCliManager extends EventEmitter {
 
       if (exitCode !== 0) {
         this.logger?.error(`${this.getCliToolName()} process failed for session ${sessionId}. Exit code: ${exitCode}, Signal: ${signal}`);
+
+        // Report the interactive REPL's non-zero exit — the interactive-substrate
+        // run-failure chokepoint. lastOutput (the PTY tail) is the actual reason
+        // (e.g. "Invalid MCP configuration") — bounded to its last 500 chars and
+        // home-path redacted by the scrub. `phase` distinguishes a never-started
+        // process from a runtime crash.
+        captureSeamError(
+          'interactive-process-exit-failed',
+          new Error(
+            `${this.getCliToolName()} process exited (code ${exitCode})` +
+              (lastOutput ? `: ${lastOutput.slice(-500)}` : ''),
+          ),
+          {
+            substrate: 'interactive',
+            cliTool: this.getCliToolName(),
+            exitCode: String(exitCode),
+            phase: hasReceivedOutput ? 'runtime' : 'startup',
+            errorClass: classifyErrorPattern(lastOutput),
+          },
+        );
 
         if (!hasReceivedOutput) {
           await this.handleProcessStartupFailure(exitCode, signal, panelId, sessionId, lastOutput);
