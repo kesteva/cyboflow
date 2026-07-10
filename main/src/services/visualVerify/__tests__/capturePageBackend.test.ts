@@ -30,6 +30,13 @@ const fakeWindowControls = vi.hoisted(() => ({
     'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
     'base64',
   ),
+  // S9 companion A: console-message events the fake emits right after a
+  // successful load, so tests can drive the error-level diagnostics collector.
+  consoleMessages: [] as Array<{ level: string; message: string; lineNumber: number; sourceId: string }>,
+  // S9 companion B: the fold-height probe's fake executeJavaScript() result/behavior.
+  foldHeight: 800,
+  foldHeightReject: false,
+  execJsCallCount: 0,
 }));
 
 // The fake classes live INSIDE the mock factory because vi.mock is hoisted above
@@ -49,6 +56,16 @@ vi.mock('electron', () => {
         if (fakeWindowControls.failLoad) {
           this.emit('did-fail-load', {}, -100, 'ERR_CONNECTION_REFUSED', 'http://x');
         } else {
+          // Emit any test-configured console-message events BEFORE did-finish-load
+          // — mirrors real pages that can log during the load itself.
+          for (const msg of fakeWindowControls.consoleMessages) {
+            this.emit('console-message', {
+              level: msg.level,
+              message: msg.message,
+              lineNumber: msg.lineNumber,
+              sourceId: msg.sourceId,
+            });
+          }
           this.emit('did-finish-load');
         }
       });
@@ -63,6 +80,15 @@ vi.mock('electron', () => {
       return {
         toPNG: () => (fakeWindowControls.emptyPng ? Buffer.alloc(0) : fakeWindowControls.onePxPng),
       };
+    }
+    // S9 companion B: fakes the fold-height probe script's result. Counts calls
+    // so tests can assert the probe was (or was not) invoked at all.
+    async executeJavaScript(): Promise<unknown> {
+      fakeWindowControls.execJsCallCount++;
+      if (fakeWindowControls.foldHeightReject) {
+        throw new Error('executeJavaScript failed');
+      }
+      return fakeWindowControls.foldHeight;
     }
   }
   class FakeBrowserWindow {
@@ -84,7 +110,7 @@ vi.mock('electron', () => {
 });
 
 // Imported AFTER the mock so the backend binds to the fake BrowserWindow.
-import { CapturePageBackend } from '../capturePageBackend';
+import { CapturePageBackend, clampFoldHeight } from '../capturePageBackend';
 
 let artifactsDir: string;
 
@@ -95,6 +121,12 @@ beforeEach(async () => {
   fakeWindowControls.neverCapture = false;
   fakeWindowControls.setContentSizeCalls = [];
   fakeWindowControls.destroyed = 0;
+  fakeWindowControls.consoleMessages = [];
+  // Matches DEFAULT_VIEWPORT.height so pre-existing tests that don't care about
+  // the fold probe see setContentSize called with the SAME height as before S9.
+  fakeWindowControls.foldHeight = 800;
+  fakeWindowControls.foldHeightReject = false;
+  fakeWindowControls.execJsCallCount = 0;
   artifactsDir = await mkdtemp(join(tmpdir(), 'cvv-capture-'));
 });
 
@@ -229,5 +261,146 @@ describe('CapturePageBackend', () => {
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/timed out/i);
     expect(fakeWindowControls.destroyed).toBe(1); // wedged window destroyed on timeout
+  });
+
+  describe('S9 companion A: capture diagnostics', () => {
+    it('collects error-level page console output onto CaptureResult.diagnostics', async () => {
+      fakeWindowControls.consoleMessages = [
+        { level: 'error', message: 'boom', lineNumber: 3, sourceId: 'app.js' },
+      ];
+      const res = await new CapturePageBackend().capture(ctx(), new AbortController().signal);
+      expect(res.ok).toBe(true);
+      expect(res.diagnostics).toContain('app.js:3 boom');
+    });
+
+    it('ignores non-error console levels', async () => {
+      fakeWindowControls.consoleMessages = [
+        { level: 'warning', message: 'meh', lineNumber: 1, sourceId: 'app.js' },
+        { level: 'info', message: 'fyi', lineNumber: 2, sourceId: 'app.js' },
+        { level: 'debug', message: 'trace', lineNumber: 4, sourceId: 'app.js' },
+      ];
+      const res = await new CapturePageBackend().capture(ctx(), new AbortController().signal);
+      expect(res.ok).toBe(true);
+      expect(res.diagnostics).toBeUndefined();
+    });
+
+    it('caps collected diagnostics at MAX_DIAGNOSTIC_ENTRIES (10)', async () => {
+      fakeWindowControls.consoleMessages = Array.from({ length: 15 }, (_, i) => ({
+        level: 'error',
+        message: `err${i}`,
+        lineNumber: i,
+        sourceId: 'app.js',
+      }));
+      const res = await new CapturePageBackend().capture(ctx(), new AbortController().signal);
+      expect(res.ok).toBe(true);
+      expect(res.diagnostics).toHaveLength(10);
+    });
+
+    it('caps collected diagnostics at MAX_DIAGNOSTIC_CHARS (2000), truncating the overflowing entry and dropping the rest', async () => {
+      // Three ~1204-char entries: 1st fits whole (1204), 2nd is clipped to fill
+      // the remaining 796-char budget exactly (total 2000), 3rd is dropped.
+      fakeWindowControls.consoleMessages = Array.from({ length: 3 }, () => ({
+        level: 'error',
+        message: 'x'.repeat(1200),
+        lineNumber: 1,
+        sourceId: 's',
+      }));
+      const res = await new CapturePageBackend().capture(ctx(), new AbortController().signal);
+      expect(res.ok).toBe(true);
+      expect(res.diagnostics).toHaveLength(2);
+      const totalChars = (res.diagnostics ?? []).reduce((sum, line) => sum + line.length, 0);
+      expect(totalChars).toBe(2000);
+      expect(res.diagnostics?.[1].length).toBe(796);
+    });
+
+    it('pushes the file:// CORS breadcrumb when loaded from htmlPath', async () => {
+      const html = join(artifactsDir, 'index.html');
+      await writeFile(html, '<!doctype html><h1>hi</h1>');
+      const res = await new CapturePageBackend().capture(
+        ctx({ url: undefined, htmlPath: html }),
+        new AbortController().signal,
+      );
+      expect(res.ok).toBe(true);
+      expect(res.diagnostics?.some((d) => d.includes('loaded over file://'))).toBe(true);
+    });
+
+    it('omits diagnostics entirely when loaded from a url (no breadcrumb, no console errors)', async () => {
+      const res = await new CapturePageBackend().capture(ctx(), new AbortController().signal);
+      expect(res.ok).toBe(true);
+      expect(res.diagnostics).toBeUndefined();
+    });
+
+    it('attaches diagnostics on an ok:false result too', async () => {
+      fakeWindowControls.consoleMessages = [
+        { level: 'error', message: 'boom', lineNumber: 1, sourceId: 'app.js' },
+      ];
+      fakeWindowControls.emptyPng = true;
+      const res = await new CapturePageBackend().capture(ctx(), new AbortController().signal);
+      expect(res.ok).toBe(false);
+      expect(res.diagnostics).toContain('app.js:1 boom');
+    });
+  });
+
+  describe('S9 companion B: default-viewport fold clamp', () => {
+    it('clampFoldHeight: measured height within bounds passes through unchanged', () => {
+      expect(clampFoldHeight(3000, 1280)).toBe(3000);
+    });
+
+    it('clampFoldHeight: never shrinks below the default viewport height', () => {
+      expect(clampFoldHeight(100, 1280)).toBe(800);
+    });
+
+    it('clampFoldHeight: flat MAX_FOLD_HEIGHT ceiling wins on a narrow/default-width viewport', () => {
+      expect(clampFoldHeight(20_000, 1280)).toBe(4_000);
+    });
+
+    it('clampFoldHeight: the pixel-AREA budget clamps tighter than the flat height ceiling on a wide viewport', () => {
+      // floor(12_000_000 / 4000) = 3000, which is < MAX_FOLD_HEIGHT (4000).
+      expect(clampFoldHeight(5_000, 4_000)).toBe(3_000);
+    });
+
+    it('measures + applies the fold height for the default viewport (no clamp needed)', async () => {
+      fakeWindowControls.foldHeight = 3000;
+      const res = await new CapturePageBackend().capture(ctx(), new AbortController().signal);
+      expect(res.ok).toBe(true);
+      expect(fakeWindowControls.setContentSizeCalls).toEqual([[1280, 3000]]);
+      expect(res.diagnostics).toBeUndefined();
+    });
+
+    it('clamps an oversized measured height to MAX_FOLD_HEIGHT and pushes a truncation diagnostic', async () => {
+      fakeWindowControls.foldHeight = 20_000;
+      const res = await new CapturePageBackend().capture(ctx(), new AbortController().signal);
+      expect(res.ok).toBe(true);
+      expect(fakeWindowControls.setContentSizeCalls).toEqual([[1280, 4_000]]);
+      expect(res.diagnostics?.some((d) => /exceeds capture clamp/i.test(d))).toBe(true);
+    });
+
+    it('does NOT measure fold height when viewports are explicitly declared', async () => {
+      const res = await new CapturePageBackend().capture(
+        ctx({ viewports: [{ width: 1024, height: 768, label: 'custom' }] }),
+        new AbortController().signal,
+      );
+      expect(res.ok).toBe(true);
+      expect(fakeWindowControls.execJsCallCount).toBe(0);
+      expect(fakeWindowControls.setContentSizeCalls).toEqual([[1024, 768]]);
+    });
+
+    it('does NOT measure fold height for a non-static-render-snapshot type', async () => {
+      const res = await new CapturePageBackend().capture(
+        { ...ctx(), type: 'responsive-multi-viewport' },
+        new AbortController().signal,
+      );
+      expect(res.ok).toBe(true);
+      expect(fakeWindowControls.execJsCallCount).toBe(0);
+      expect(fakeWindowControls.setContentSizeCalls).toEqual([[1280, 800]]);
+    });
+
+    it('fails soft to the default viewport height when the probe rejects, with a diagnostic', async () => {
+      fakeWindowControls.foldHeightReject = true;
+      const res = await new CapturePageBackend().capture(ctx(), new AbortController().signal);
+      expect(res.ok).toBe(true);
+      expect(fakeWindowControls.setContentSizeCalls).toEqual([[1280, 800]]);
+      expect(res.diagnostics?.some((d) => /measurement failed/i.test(d))).toBe(true);
+    });
   });
 });
