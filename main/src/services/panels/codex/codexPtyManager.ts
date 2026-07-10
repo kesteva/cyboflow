@@ -1,8 +1,6 @@
 import { execSync } from 'child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type * as pty from '@homebridge/node-pty-prebuilt-multiarch';
-import type { Logger } from '../../../utils/logger';
-import type { ConfigManager } from '../../configManager';
 import type { ConversationMessage } from '../../../database/models';
 import { getShellPath, findExecutableInPath } from '../../../utils/shellPath';
 import { AbstractCliManager } from '../cli/AbstractCliManager';

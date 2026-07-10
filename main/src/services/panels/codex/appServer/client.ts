@@ -701,14 +701,13 @@ export class CodexAppServerClient {
   private waitForExit(timeoutMs: number): Promise<boolean> {
     if (this.currentState === 'exited') return Promise.resolve(true);
     return new Promise<boolean>((resolve) => {
-      let timeout: NodeJS.Timeout | undefined;
       const onExit = (): void => {
-        if (timeout) clearTimeout(timeout);
+        clearTimeout(timeout);
         this.exitWaiters.delete(onExit);
         resolve(true);
       };
       this.exitWaiters.add(onExit);
-      timeout = setTimeout(() => {
+      const timeout = setTimeout(() => {
         this.exitWaiters.delete(onExit);
         resolve(false);
       }, timeoutMs);
