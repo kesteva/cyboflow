@@ -85,6 +85,31 @@ describe('parseWorkflowDefinition', () => {
   });
 
   // -------------------------------------------------------------------------
+  // Case 1b: agentConfigs is an unknown-top-level-field pass-through — the
+  // lenient reader does not validate its shape, only that it survives parse.
+  // -------------------------------------------------------------------------
+  it('round-trips agentConfigs (model + custom) through the lenient parser', () => {
+    const def: WorkflowDefinition = {
+      ...makeValidDefinition(),
+      agentConfigs: {
+        'sprint-review': { model: 'opus' },
+        implement: {
+          custom: {
+            description: 'Custom implement agent for this workflow.',
+            systemPrompt: 'You are a focused implementer.',
+            tools: ['Read', 'Edit', 'Bash'],
+            enabledMcps: ['filesystem'],
+          },
+        },
+      },
+    };
+    const parsed = parseWorkflowDefinition(JSON.stringify(def));
+    expect(parsed).toEqual(def);
+    expect(parsed?.agentConfigs?.['sprint-review']).toEqual({ model: 'opus' });
+    expect(parsed?.agentConfigs?.implement?.custom?.tools).toEqual(['Read', 'Edit', 'Bash']);
+  });
+
+  // -------------------------------------------------------------------------
   // Case 2: null / undefined / '' / '{}' all mean "no spec" -> null
   // -------------------------------------------------------------------------
   it('returns null for null, undefined, empty string, and empty object literal', () => {

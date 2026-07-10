@@ -19,10 +19,14 @@
  */
 import { z } from 'zod';
 import type {
+  WorkflowAgentConfig,
+  WorkflowAgentCustomCopy,
   WorkflowDefinition,
   WorkflowPhase,
   WorkflowStep,
 } from '../../../shared/types/workflows';
+import { AGENT_MODEL_ALIASES } from '../../../shared/types/agents';
+import { CLI_TOOLS } from '../../../shared/types/cliTools';
 
 /** Kebab-case identifier, e.g. `'task-verify'` — used for step and phase ids. */
 const kebabCaseId = z
@@ -95,6 +99,38 @@ export const workflowPhaseSchema = z.object({
 }) satisfies z.ZodType<WorkflowPhase>;
 
 /**
+ * A workflow-scoped custom agent — full replacement copy. Mirrors
+ * `WorkflowAgentCustomCopy`. `tools` reuses the same `CliTool` enum precedent
+ * as the Agents-pane tRPC layer's `toolsSchema` (trpc/routers/agents.ts).
+ */
+const workflowAgentCustomCopySchema = z.object({
+  description: z.string(),
+  systemPrompt: z.string().min(1, 'agent systemPrompt is required'),
+  tools: z.array(z.enum(CLI_TOOLS)),
+  enabledMcps: z.array(z.string()),
+}) satisfies z.ZodType<WorkflowAgentCustomCopy>;
+
+/**
+ * Per-workflow-agent config overlay. Mirrors `WorkflowAgentConfig`. An empty
+ * `{}` (neither `model` nor `custom` set) is rejected below — it carries no
+ * signal and the editor must prune it before persisting.
+ */
+const workflowAgentConfigSchema = z
+  .object({
+    model: z.enum(AGENT_MODEL_ALIASES).optional(),
+    custom: workflowAgentCustomCopySchema.optional(),
+  })
+  .superRefine((config, ctx) => {
+    if (config.model === undefined && config.custom === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          'agentConfigs entry must set "model" and/or "custom" — an empty {} config must be pruned before persisting',
+      });
+    }
+  }) satisfies z.ZodType<WorkflowAgentConfig>;
+
+/**
  * Full definition: non-empty id and at least one phase, plus cross-cutting
  * invariants enforced in `superRefine`:
  *   - phase ids unique across the definition
@@ -105,6 +141,10 @@ export const workflowDefinitionSchema = z
   .object({
     id: z.string().min(1, 'definition id is required'),
     phases: z.array(workflowPhaseSchema).min(1, 'a workflow must have at least one phase'),
+    // Per-workflow-agent overlay keyed by agent key (see WorkflowAgentConfig doc).
+    // Non-empty keys only; an empty {} value is rejected by the entry's own
+    // superRefine above.
+    agentConfigs: z.record(z.string().min(1, 'agentConfigs key must not be empty'), workflowAgentConfigSchema).optional(),
   })
   .superRefine((definition, ctx) => {
     const seenPhaseIds = new Set<string>();

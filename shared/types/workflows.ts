@@ -12,6 +12,8 @@ import type { VerificationType } from './visualVerification';
 import type { WorkflowRunStatus } from './cyboflow';
 import type { ArtifactType } from './artifacts';
 import type { ExperimentArm } from './experiments';
+import type { AgentModelAlias } from './agents';
+import type { CliTool } from './cliTools';
 
 /**
  * Workflow-run permission contract consumed by the SDK PreToolUse mapper
@@ -425,6 +427,51 @@ export interface WorkflowPhase {
 }
 
 /**
+ * A workflow-scoped custom agent — a full embedded replacement for the base
+ * agent's editable fields (mirrors `AgentEntry`'s description/systemPrompt/
+ * tools/enabledMcps in `./agents`). Carrying its own copy rather than a
+ * reference means editing the base agent later does NOT retroactively change
+ * what this workflow runs.
+ */
+export interface WorkflowAgentCustomCopy {
+  description: string;
+  /** Non-empty — the full system prompt this workflow's agent runs with. */
+  systemPrompt: string;
+  tools: CliTool[];
+  /** MCP server names this agent may call; mirrors `AgentEntry.enabledMcps`. */
+  enabledMcps: string[];
+}
+
+/**
+ * Per-workflow-agent override, keyed by agent key in
+ * `WorkflowDefinition.agentConfigs` — the SAME vocabulary as `WorkflowStep.agent`
+ * (e.g. `'sprint-review'`).
+ *
+ * Scope is per WORKFLOW-AGENT, not per step: every step (including fan-out
+ * inner steps) binding this agent key shares the one config. Absence of a key
+ * means the agent fully inherits from lower layers.
+ *
+ * Precedence (run side, low -> high): builtin -> project `agent_overrides` ->
+ * this workflow's `agentConfigs` -> an A/B variant's agent delta. So this
+ * layer beats the Agents-pane pin/body, but a variant delta still wins over it.
+ *
+ * An empty `{}` config (neither `model` nor `custom` set) carries no signal
+ * and must NEVER be persisted — the workflow editor prunes it before write.
+ */
+export interface WorkflowAgentConfig {
+  /**
+   * Per-workflow model override for this agent. Beats the agent's own
+   * Agents-pane pin; a variant agent delta still beats this.
+   */
+  model?: AgentModelAlias;
+  /**
+   * Full embedded copy of the base agent — a workflow-scoped custom agent.
+   * When present it REPLACES the base body for runs of this workflow.
+   */
+  custom?: WorkflowAgentCustomCopy;
+}
+
+/**
  * Top-level definition for a cyboflow workflow.
  *
  * `id` is a free-form `string`: for the built-ins it is the
@@ -437,6 +484,12 @@ export interface WorkflowPhase {
 export interface WorkflowDefinition {
   id: string;
   phases: WorkflowPhase[];
+  /**
+   * Optional per-workflow-agent config overlay, keyed by agent key (see
+   * `WorkflowAgentConfig`). Absent -> no overlay, every agent this workflow
+   * binds resolves purely from the builtin/agent_overrides/variant layers.
+   */
+  agentConfigs?: Record<string, WorkflowAgentConfig>;
 }
 
 /**

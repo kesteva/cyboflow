@@ -25,6 +25,7 @@ import {
 } from '../workflowDefinitionSchema';
 import {
   WORKFLOW_DEFINITIONS,
+  type WorkflowAgentConfig,
   type WorkflowDefinition,
 } from '../../../../shared/types/workflows';
 
@@ -292,6 +293,95 @@ describe('workflowDefinitionSchema (fan-out)', () => {
         { id: 'task-verify', agent: 'task-verify', loopback: 'implement' },
       ],
     };
+    expect(() => validateWorkflowDefinition(def)).not.toThrow();
+  });
+});
+
+describe('workflowDefinitionSchema (agentConfigs)', () => {
+  // -------------------------------------------------------------------------
+  // Accept: model-only, custom-only, and both-set configs.
+  // -------------------------------------------------------------------------
+  it('accepts a config with only "model" set', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: { model: 'opus' } };
+    expect(() => validateWorkflowDefinition(def)).not.toThrow();
+  });
+
+  it('accepts a config with only "custom" set', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = {
+      implement: {
+        custom: {
+          description: 'Custom implement agent.',
+          systemPrompt: 'You are a focused implementer.',
+          tools: ['Read', 'Edit', 'Bash'],
+          enabledMcps: ['filesystem'],
+        },
+      },
+    };
+    expect(() => validateWorkflowDefinition(def)).not.toThrow();
+  });
+
+  it('accepts a config with both "model" and "custom" set', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = {
+      implement: {
+        model: 'sonnet',
+        custom: {
+          description: 'Custom implement agent.',
+          systemPrompt: 'You are a focused implementer.',
+          tools: ['Read', 'Edit'],
+          enabledMcps: [],
+        },
+      },
+    };
+    expect(() => validateWorkflowDefinition(def)).not.toThrow();
+  });
+
+  // -------------------------------------------------------------------------
+  // Reject: an empty {} config carries no signal and must be pruned by the
+  // editor before persisting — the schema rejects it defensively.
+  // -------------------------------------------------------------------------
+  it('rejects an empty {} agentConfigs entry', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: {} };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  // -------------------------------------------------------------------------
+  // Reject: a model alias outside AGENT_MODEL_ALIASES.
+  // -------------------------------------------------------------------------
+  it('rejects an unknown model alias', () => {
+    const def = makeValidDefinition();
+    const badConfig = { model: 'not-a-real-model' } as unknown as WorkflowAgentConfig;
+    def.agentConfigs = { implement: badConfig };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  // -------------------------------------------------------------------------
+  // Reject: an empty systemPrompt on a custom copy.
+  // -------------------------------------------------------------------------
+  it('rejects a custom copy with an empty systemPrompt', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = {
+      implement: {
+        custom: {
+          description: 'Custom implement agent.',
+          systemPrompt: '',
+          tools: ['Read'],
+          enabledMcps: [],
+        },
+      },
+    };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  // -------------------------------------------------------------------------
+  // Back-compat: a definition without agentConfigs at all is still valid.
+  // -------------------------------------------------------------------------
+  it('accepts a definition with no agentConfigs field (back-compat)', () => {
+    const def = makeValidDefinition();
+    expect(def.agentConfigs).toBeUndefined();
     expect(() => validateWorkflowDefinition(def)).not.toThrow();
   });
 });
