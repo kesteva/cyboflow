@@ -44,6 +44,88 @@ export interface AppServerInitializeResponse {
   platformOs: string;
 }
 
+export type AppServerApprovalPolicy =
+  | 'untrusted'
+  | 'on-request'
+  | {
+      granular: {
+        sandbox_approval: boolean;
+        rules: boolean;
+        skill_approval: boolean;
+        request_permissions: boolean;
+        mcp_elicitations: boolean;
+      };
+    }
+  | 'never';
+
+export type AppServerApprovalsReviewer = 'user' | 'auto_review' | 'guardian_subagent';
+
+export type AppServerSandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
+
+interface AppServerThreadConfigurationParams {
+  model?: string | null;
+  cwd?: string | null;
+  approvalPolicy?: AppServerApprovalPolicy | null;
+  approvalsReviewer?: AppServerApprovalsReviewer | null;
+  permissions?: string | null;
+  config?: Record<string, AppServerJsonValue> | null;
+  baseInstructions?: string | null;
+  developerInstructions?: string | null;
+}
+
+export interface AppServerThreadStartParams extends AppServerThreadConfigurationParams {
+  sandbox?: AppServerSandboxMode | null;
+  ephemeral?: boolean | null;
+  experimentalRawEvents?: boolean;
+}
+
+export interface AppServerThreadResumeParams extends AppServerThreadConfigurationParams {
+  threadId: string;
+  sandbox?: AppServerSandboxMode | null;
+  excludeTurns?: boolean;
+}
+
+export interface AppServerThreadResponse {
+  thread: {
+    id: string;
+  };
+}
+
+export type AppServerThreadStartResponse = AppServerThreadResponse;
+export type AppServerThreadResumeResponse = AppServerThreadResponse;
+
+export type AppServerImageDetail = 'auto' | 'low' | 'high' | 'original';
+
+export type AppServerUserInput =
+  | { type: 'text'; text: string; text_elements: [] }
+  | { type: 'localImage'; path: string; detail?: AppServerImageDetail };
+
+export interface AppServerTurnStartParams {
+  threadId: string;
+  input: AppServerUserInput[];
+  cwd?: string | null;
+  approvalPolicy?: AppServerApprovalPolicy | null;
+  approvalsReviewer?: AppServerApprovalsReviewer | null;
+  sandboxPolicy?: AppServerJsonValue | null;
+  permissions?: string | null;
+  model?: string | null;
+  effort?: string | null;
+  outputSchema?: AppServerJsonValue | null;
+}
+
+export interface AppServerTurnStartResponse {
+  turn: {
+    id: string;
+  };
+}
+
+export interface AppServerTurnInterruptParams {
+  threadId: string;
+  turnId: string;
+}
+
+export type AppServerTurnInterruptResponse = Record<string, never>;
+
 export type CommandAction =
   | { type: 'read'; command: string; name: string; path: string }
   | { type: 'listFiles'; command: string; path: string | null }
@@ -247,4 +329,3 @@ export type AppServerServerResponseFor<M extends AppServerServerRequestMethod> =
     : M extends 'item/fileChange/requestApproval'
       ? FileChangeRequestApprovalResponse
       : McpServerElicitationRequestResponse;
-
