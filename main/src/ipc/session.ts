@@ -267,6 +267,63 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   const resolveClaudePanelId = (sessionId: string): string | undefined =>
     panelManager.getPanelsForSession(sessionId).find((p) => p.type === 'claude')?.id;
 
+  interface QueuedCodexPanelInput {
+    id: string;
+    text: string;
+  }
+  const codexPanelInputQueues = new Map<string, QueuedCodexPanelInput[]>();
+
+  const startCodexSdkTurn = async (panelId: string, text: string): Promise<void> => {
+    if (!codexSdkManager) throw new Error('Codex SDK manager is not available');
+    const panel = panelManager.getPanel(panelId);
+    if (!panel || panel.type !== 'claude') throw new Error(`Codex panel ${panelId} not found`);
+    const dbSession = databaseService.getSession(panel.sessionId);
+    if (!dbSession || dbSession.agent_runtime !== 'codex-sdk') {
+      throw new Error(`Panel ${panelId} is not owned by a Codex SDK session`);
+    }
+    const session = await sessionManager.getSession(panel.sessionId);
+    if (!session) throw new Error(`Session ${panel.sessionId} not found`);
+    const runId = dbSession.chat_run_id ?? dbSession.run_id;
+    if (!runId) throw new Error('Session is missing its chat run');
+
+    const settings = databaseService.getPanelSettings(panelId);
+    const model = typeof settings?.model === 'string' ? settings.model : undefined;
+    const resumeTarget = new AgentInvocationStore(databaseService.getDb())
+      .getLatestTopLevelResumeTarget(runId);
+    const resumeSessionId =
+      resumeTarget?.provider === 'codex' && resumeTarget.runtime === 'codex-sdk'
+        ? resumeTarget.externalSessionId
+        : undefined;
+    const agentPermissionMode = isPermissionMode(dbSession.agent_permission_mode)
+      ? dbSession.agent_permission_mode
+      : undefined;
+
+    sessionManager.addPanelConversationMessage(panelId, 'user', text);
+    await sessionManager.updateSession(panel.sessionId, { status: 'running' });
+    await codexSdkManager.spawnCliProcess({
+      panelId,
+      sessionId: panel.sessionId,
+      runId,
+      worktreePath: session.worktreePath,
+      prompt: text,
+      systemPromptAppend: QUICK_CODEX_SDK_BRIEFING,
+      ...(agentPermissionMode !== undefined ? { agentPermissionMode } : {}),
+      ...(model !== undefined ? { model } : {}),
+      ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
+    });
+  };
+
+  const flushCodexPanelInputQueueIfIdle = (panelId: string): void => {
+    if (!codexSdkManager || codexSdkManager.isPanelRunning(panelId)) return;
+    const queued = codexPanelInputQueues.get(panelId);
+    if (!queued?.length) return;
+    codexPanelInputQueues.delete(panelId);
+    const combined = queued.map((entry) => entry.text).join('\n\n');
+    void startCodexSdkTurn(panelId, combined).catch((error: unknown) => {
+      console.error(`[IPC] Codex panel-input queue delivery failed for ${panelId}:`, error);
+    });
+  };
+
   codexSdkManager?.on('output', (payload: {
     panelId?: string;
     sessionId?: string;
@@ -298,6 +355,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       sessionManager.updateSession(payload.sessionId, { status: payload.exitCode === 0 ? 'stopped' : 'error' });
     } catch (error) {
       console.error(`[IPC] Failed to update Codex SDK session status for ${payload.sessionId}:`, error);
+    }
+    if (payload.exitCode === 0 && typeof payload.panelId === 'string') {
+      flushCodexPanelInputQueueIfIdle(payload.panelId);
     }
   });
 
@@ -691,6 +751,13 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           claudeConfig: quickAgentProvider === 'claude' ? normalizedClaudeConfig : undefined,
           requestedSubstrate,
           requestedAgentMode,
+          agentProvider: quickAgentProvider,
+          agentRuntime: useCodexSdk
+            ? 'codex-sdk'
+            : useCodexPty
+              ? 'codex-pty'
+              : requestedAgentRuntime,
+          agentModel: requestedModel ?? null,
           // In-place quick session (migration 047): the core forces auto-commit off
           // + commitMode disabled and switches session matching to the NAME fallback.
           inPlace,
@@ -729,7 +796,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // session behaved SDK. NULL remains the legacy/SDK meaning for
       // pre-migration rows only; new quick sessions always carry the resolved
       // value.
-      const resolvedSessionAgentProvider = useCodexSdk || useCodexPty ? 'codex' : 'claude';
       const resolvedSessionAgentRuntime = useCodexSdk
         ? 'codex-sdk'
         : useCodexPty
@@ -739,17 +805,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       db.prepare(
         `UPDATE sessions
             SET substrate = ?,
-                agent_provider = ?,
-                agent_runtime = ?,
-                agent_model = ?
+                agent_runtime = COALESCE(agent_runtime, ?)
           WHERE id = ?`,
-      ).run(
-        resolvedSessionSubstrate,
-        resolvedSessionAgentProvider,
-        resolvedSessionAgentRuntime,
-        requestedModel ?? null,
-        session.id,
-      );
+      ).run(resolvedSessionSubstrate, resolvedSessionAgentRuntime, session.id);
       if (useCodexSdk) {
         db.prepare(
           `UPDATE workflow_runs
@@ -1328,9 +1386,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       }
 
       if (dbSession?.agent_runtime === 'codex-sdk') {
-        if (!codexSdkManager) {
-          return { success: false, error: 'Codex SDK manager is not available' };
-        }
+        if (!codexSdkManager) return { success: false, error: 'Codex SDK manager is not available' };
         if (codexSdkManager.isPanelRunning(claudePanel.id)) {
           return {
             success: false,
@@ -1338,34 +1394,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           };
         }
 
-        const runId = dbSession.chat_run_id ?? dbSession.run_id;
-        if (!runId) {
-          return { success: false, error: 'Session is missing its chat run' };
-        }
-
-        const resumeTarget = new AgentInvocationStore(databaseService.getDb())
-          .getLatestTopLevelResumeTarget(runId);
-        const resumeSessionId =
-          resumeTarget?.provider === 'codex' && resumeTarget.runtime === 'codex-sdk'
-            ? resumeTarget.externalSessionId
-            : undefined;
-        const agentPermissionMode = isPermissionMode(dbSession.agent_permission_mode)
-          ? dbSession.agent_permission_mode
-          : undefined;
-
-        sessionManager.addPanelConversationMessage(claudePanel.id, 'user', finalInput);
-        await sessionManager.updateSession(sessionId, { status: 'running' });
-        await codexSdkManager.spawnCliProcess({
-          panelId: claudePanel.id,
-          sessionId,
-          runId,
-          worktreePath: session.worktreePath,
-          prompt: finalInput,
-          systemPromptAppend: QUICK_CODEX_SDK_BRIEFING,
-          ...(agentPermissionMode !== undefined ? { agentPermissionMode } : {}),
-          ...(panelModel !== undefined ? { model: panelModel } : {}),
-          ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
-        });
+        await startCodexSdkTurn(claudePanel.id, finalInput);
         return { success: true };
       }
 
@@ -2215,11 +2244,20 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         logValidationFailure('panels:queue-input', panelValidation);
         return createValidationError(panelValidation);
       }
-      if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
-        return { success: false, error: 'Queue not supported on this CLI manager' };
-      }
       if (typeof text !== 'string' || text.trim() === '') {
         return { success: false, error: 'Nothing to queue' };
+      }
+      const panel = panelManager.getPanel(panelId);
+      const dbSession = panel ? databaseService.getSession(panel.sessionId) : undefined;
+      if (dbSession?.agent_runtime === 'codex-sdk') {
+        const queue = codexPanelInputQueues.get(panelId) ?? [];
+        queue.push({ id, text: text.trim() });
+        codexPanelInputQueues.set(panelId, queue);
+        flushCodexPanelInputQueueIfIdle(panelId);
+        return { success: true, data: { queued: true } };
+      }
+      if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
+        return { success: false, error: 'Queue not supported on this CLI manager' };
       }
       claudeCodeManager.enqueuePanelInput(panelId, id, text);
       // Race guard: if the turn already ended before this landed, deliver now
@@ -2234,6 +2272,11 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
   ipcMain.handle('panels:list-queued-input', async (_event, panelId: string) => {
     try {
+      const panel = panelManager.getPanel(panelId);
+      const dbSession = panel ? databaseService.getSession(panel.sessionId) : undefined;
+      if (dbSession?.agent_runtime === 'codex-sdk') {
+        return { success: true, data: [...(codexPanelInputQueues.get(panelId) ?? [])] };
+      }
       if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
         return { success: true, data: [] };
       }
@@ -2246,6 +2289,15 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
   ipcMain.handle('panels:dequeue-input', async (_event, panelId: string, id: string) => {
     try {
+      const panel = panelManager.getPanel(panelId);
+      const dbSession = panel ? databaseService.getSession(panel.sessionId) : undefined;
+      if (dbSession?.agent_runtime === 'codex-sdk') {
+        const queue = codexPanelInputQueues.get(panelId) ?? [];
+        const next = queue.filter((entry) => entry.id !== id);
+        if (next.length === 0) codexPanelInputQueues.delete(panelId);
+        else codexPanelInputQueues.set(panelId, next);
+        return { success: true, data: { dequeued: next.length !== queue.length } };
+      }
       if (!(claudeCodeManager instanceof ClaudeCodeManager)) {
         return { success: false, error: 'Queue not supported on this CLI manager' };
       }

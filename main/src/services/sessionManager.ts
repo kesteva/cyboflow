@@ -790,6 +790,14 @@ export class SessionManager extends EventEmitter {
     
     this.db.addPanelOutput(panelId, output.type, dataToStore);
 
+    // Panel-backed transcripts re-read persisted output on this event. Include
+    // both ids because session views key by sessionId while unified quick-panel
+    // views key by panelId.
+    this.emit('session-output-available', {
+      sessionId: panel?.sessionId ?? '',
+      panelId,
+    });
+
     // Capture Claude's session ID from init/system messages for proper --resume handling
     try {
       if (output.type === 'json' && output.data && typeof output.data === 'object') {
