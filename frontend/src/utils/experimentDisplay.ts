@@ -12,8 +12,12 @@ import { BASELINE_VARIANT_SENTINEL } from '../../../shared/types/experiments';
 
 /** One arm's identity for display purposes. */
 export interface ExperimentArmDisplay {
-  /** `experiments.variant_a_id` / `variant_b_id` — may be the baseline sentinel. */
-  variantId: string;
+  /**
+   * `experiments.variant_a_id` / `variant_b_id` — may be the baseline sentinel;
+   * nullable since migration 058 relaxed the columns (rotation experiments carry
+   * no fixed pair). A null is simply "not the baseline arm" here.
+   */
+  variantId: string | null;
   /** Denormalized variant label (survives variant deletion); '' tolerated. */
   label: string;
 }

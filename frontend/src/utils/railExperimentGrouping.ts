@@ -30,8 +30,11 @@ export interface RailExperimentArm {
   session: Session;
   /** armDisplayLabel result: 'baseline' | variant label | the 'A'/'B' fallback. */
   label: string;
-  /** experiments.variant_a_id / variant_b_id for this arm (may be the baseline sentinel). */
-  variantId: string;
+  /**
+   * experiments.variant_a_id / variant_b_id for this arm (may be the baseline
+   * sentinel; nullable since migration 058 relaxed the columns).
+   */
+  variantId: string | null;
   /** experiments.run_a_id / run_b_id — the arm's workflow run, or null pre-launch. */
   runId: string | null;
 }

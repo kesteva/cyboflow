@@ -189,7 +189,7 @@ function requireDeps(): ExperimentsDeps {
 
 /**
  * The five `experiments` columns that were NOT NULL through migration 052 but were
- * relaxed to nullable in 057 (a rotation experiment carries none of them: no fixed
+ * relaxed to nullable in 058 (a rotation experiment carries none of them: no fixed
  * arm pair, no pinned base, and — for a global workflow — no project). Every code
  * path in THIS router operates on side-by-side experiments, where all five are
  * always populated; this narrows them once with a guard that names the missing
@@ -203,7 +203,7 @@ interface SideBySideFields {
   variantBId: string;
 }
 
-/** Narrow a side-by-side experiment's post-057-nullable fields; throws naming the first missing one. */
+/** Narrow a side-by-side experiment's post-058-nullable fields; throws naming the first missing one. */
 function requireSideBySideFields(exp: ExperimentRow): SideBySideFields {
   const { project_id, base_branch, base_sha, variant_a_id, variant_b_id } = exp;
   const miss = (field: string): TRPCError =>
@@ -1141,7 +1141,7 @@ export async function decideExperiment(
         //     + re-seeded into a later experiment). No fold event → the original never got
         //     the accepted outcome, so RECOVER it (advance to Done; body untouched).
         if (priorFoldEventExists(db, 'task', row.original_task_id, exp.created_at)) continue;
-        await recoverStrandedOriginalTask(deps, exp.project_id, row.original_task_id);
+        await recoverStrandedOriginalTask(deps, projectId, row.original_task_id);
         continue;
       }
       const cloneBody = typeof cloneRow.body === 'string' ? cloneRow.body : null;
@@ -1471,7 +1471,7 @@ export function switchToRotationExperiment(
 }
 
 // ---------------------------------------------------------------------------
-// Rotation experiment cores (migration 057, phase 2) — the read summary + the
+// Rotation experiment cores (migration 058, phase 2) — the read summary + the
 // two explicit terminal decisions (decide / abandon) over an OPEN rotation. The
 // LIFECYCLE (open/supersede/replace/close) is driven implicitly by the registry
 // chokepoint's reconcile; these are the human-initiated conclusions.
