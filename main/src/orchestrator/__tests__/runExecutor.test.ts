@@ -1160,6 +1160,57 @@ describe('RunExecutor — getPrompt reads workflow file via injected reader', ()
     expect(opts.systemPromptAppend).toBe('always use TypeScript');
   });
 
+  it('wraps Codex launch prompts at the spawn boundary', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/my/worktree',
+      agent_provider: 'codex',
+      agent_runtime: 'codex-sdk',
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({
+      '/fake/sprint.md': { prompt: 'do the sprint', systemPromptAppend: 'append me' },
+    });
+    const executor = new RunExecutor(spawner, registry, makeSpyLogger(), reader);
+
+    await executor.execute(run.id);
+
+    const opts = spawnedOpts(spawner);
+    expect(opts.prompt).toContain('# Runtime adapter: Codex');
+    expect(opts.prompt.endsWith('do the sprint')).toBe(true);
+    expect(opts.systemPromptAppend).toBe('append me');
+  });
+
+  it('does not wrap Codex nudge prompts because the resumed thread already has the launch envelope', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/my/worktree',
+      claude_session_id: 'codex-thread-1',
+      agent_provider: 'codex',
+      agent_runtime: 'codex-sdk',
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/sprint.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({
+      '/fake/sprint.md': { prompt: 'do the sprint', systemPromptAppend: '' },
+    });
+    const executor = new RunExecutor(spawner, registry, makeSpyLogger(), reader);
+    executor.setPendingNudge(run.id, '  follow up  ');
+
+    await executor.execute(run.id);
+
+    const opts = spawnedOpts(spawner);
+    expect(opts.prompt).toBe('follow up');
+    expect(opts.prompt).not.toContain('# Runtime adapter: Codex');
+  });
+
   // Custom-flow routing (workflow_path === null): getPrompt no longer throws on a
   // null path — it passes the full WorkflowRow to the reader, which renders the
   // custom-flow prompt. Proves the reader receives the row (not a path string) and

@@ -192,6 +192,11 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         runId: ctx.runId,
         worktreePath: ctx.worktreePath,
         workflowName: ctx.workflow.name,
+        promptRenderContext: {
+          provider: ctx.run.agent_provider ?? 'claude',
+          runtime: ctx.run.agent_runtime ?? 'claude-sdk',
+          executionModel: ctx.run.execution_model ?? 'programmatic',
+        },
         // Per-step resolver (permission-mode redesign §3c#2): SpawnStepRunner
         // invokes this each step, reading the run's session-resolved mode off the
         // context rather than the demoted `permission_mode_snapshot` audit column.

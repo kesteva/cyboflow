@@ -43,6 +43,25 @@ describe('SpawnStepRunner', () => {
     expect(passed.prompt).toContain('`epics`'); // the step-scoped prompt
   });
 
+  it('wraps Codex programmatic step prompts with the runtime adapter', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, {
+      ...opts,
+      promptRenderContext: {
+        provider: 'codex',
+        runtime: 'codex-sdk',
+        executionModel: 'programmatic',
+      },
+    });
+
+    const result = await runner.runStep(step({ id: 'epics', agent: 'epics' }), ctx);
+
+    expect(result.status).toBe('ok');
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
+    expect(passed.prompt).toContain('# Runtime adapter: Codex');
+    expect(passed.prompt).toContain('`epics`');
+  });
+
   it('forwards ctx.item into the composed prompt (fan-out item scope)', async () => {
     const spawner = makeSpawner();
     const runner = new SpawnStepRunner(spawner, opts);

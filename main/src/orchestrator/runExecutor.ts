@@ -31,6 +31,11 @@ import type { FindingTagBucket } from '../../../shared/types/reviews';
 import { findingBucket } from '../../../shared/types/reviews';
 import { ReviewItemRouter } from './reviewItemRouter';
 import { createRunDirectives, type RunDirectives } from './programmatic/runDirectives';
+import {
+  renderWorkflowPromptForRuntime,
+  type WorkflowPromptRenderContext,
+  type WorkflowPromptTurnKind,
+} from './workflowPromptRenderer';
 
 // ---------------------------------------------------------------------------
 // Narrow interfaces (no concrete imports)
@@ -701,8 +706,21 @@ export class RunExecutor {
     }
 
     try {
-      const prompt = await this.getPrompt(runId, workflow);
+      let prompt = await this.getPrompt(runId, workflow);
       const overrides = await this.buildOptionsOverrides(runId, run, workflow);
+      const renderedPrompt = this.renderPromptForRun(
+        run,
+        prompt,
+        overrides.systemPromptAppend,
+        this.getWorkflowPromptTurnKind(runId),
+      );
+      prompt = renderedPrompt.prompt;
+      const renderedOverrides: Partial<ClaudeSpawnerOptions> = { ...overrides };
+      if (renderedPrompt.systemPromptAppend.length > 0) {
+        renderedOverrides.systemPromptAppend = renderedPrompt.systemPromptAppend;
+      } else {
+        delete renderedOverrides.systemPromptAppend;
+      }
 
       // Wire event forwarding BEFORE spawning so no SDK-initialization events
       // are lost — bridgeEvents registers listeners, spawnCliProcess starts the
@@ -752,7 +770,7 @@ export class RunExecutor {
           runId,
           worktreePath: run.worktree_path,
           prompt,
-          ...overrides,
+          ...renderedOverrides,
           ...(resumeSessionId ? { resumeSessionId } : {}),
         });
 
@@ -1547,6 +1565,39 @@ export class RunExecutor {
     }
 
     return parts.join('\n\n');
+  }
+
+  private renderPromptForRun(
+    run: WorkflowRunRow,
+    prompt: string,
+    systemPromptAppend: string | undefined,
+    turnKind: WorkflowPromptTurnKind,
+  ): { prompt: string; systemPromptAppend: string } {
+    return renderWorkflowPromptForRuntime(
+      {
+        prompt,
+        systemPromptAppend: systemPromptAppend ?? '',
+      },
+      this.getWorkflowPromptRenderContext(run, turnKind),
+    );
+  }
+
+  private getWorkflowPromptRenderContext(
+    run: WorkflowRunRow,
+    turnKind: WorkflowPromptTurnKind,
+  ): WorkflowPromptRenderContext {
+    return {
+      provider: run.agent_provider ?? 'claude',
+      runtime: run.agent_runtime ?? 'claude-sdk',
+      executionModel: run.execution_model ?? 'orchestrated',
+      turnKind,
+    };
+  }
+
+  private getWorkflowPromptTurnKind(runId: string): WorkflowPromptTurnKind {
+    if (this.pendingNudge.has(runId)) return 'nudge';
+    if (this.pendingResume.has(runId)) return 'resume';
+    return 'launch';
   }
 
   /**

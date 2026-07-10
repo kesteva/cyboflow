@@ -32,6 +32,10 @@ import type { StepRunner, StepRunResult, ControllerStepContext } from './types';
 import { composeStepPrompt } from './stepPrompt';
 import { isSystemicStepError } from './systemicError';
 import type { WorkflowStep } from '../../../../shared/types/workflows';
+import {
+  renderWorkflowPromptForRuntime,
+  type WorkflowPromptRenderContext,
+} from '../workflowPromptRenderer';
 
 /** Per-run spawn parameters bound when the runner is constructed. */
 export interface SpawnStepRunnerOptions {
@@ -72,6 +76,11 @@ export interface SpawnStepRunnerOptions {
    * undefined ⇒ no task block (output unchanged).
    */
   taskScope?: () => string | undefined;
+  /**
+   * Provider/runtime prompt envelope for this run. Claude is identity; Codex gets
+   * the compatibility adapter around each fresh per-step prompt.
+   */
+  promptRenderContext?: WorkflowPromptRenderContext;
 }
 
 export class SpawnStepRunner implements StepRunner {
@@ -93,7 +102,7 @@ export class SpawnStepRunner implements StepRunner {
     // construction) so a lane added mid-run is grounded with its real title/body
     // on its first dispatch, exactly like userGuidance/agentPermissionMode.
     const taskScope = this.opts.taskScope?.();
-    const prompt = composeStepPrompt({
+    const basePrompt = composeStepPrompt({
       step,
       workflowName: this.opts.workflowName,
       attempt: ctx.attempt,
@@ -101,6 +110,17 @@ export class SpawnStepRunner implements StepRunner {
       ...(taskScope ? { taskScope } : {}),
       ...(userGuidance ? { userGuidance } : {}),
     });
+    const { prompt } = renderWorkflowPromptForRuntime(
+      { prompt: basePrompt, systemPromptAppend: '' },
+      {
+        ...(this.opts.promptRenderContext ?? {
+          provider: 'claude' as const,
+          runtime: 'claude-sdk' as const,
+          executionModel: 'programmatic' as const,
+        }),
+        turnKind: 'programmatic-step',
+      },
+    );
     // Re-resolve the agent permission mode PER STEP (permission-mode redesign
     // §3c#2) — never captured at construction — so a mid-run mode change is
     // honored on the next step turn.

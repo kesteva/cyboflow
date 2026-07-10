@@ -21,6 +21,7 @@ describe('renderWorkflowPromptForRuntime', () => {
     const rendered = renderWorkflowPromptForRuntime(BASE_PROMPT, {
       provider: 'codex',
       runtime: 'codex-sdk',
+      turnKind: 'launch',
     });
 
     expect(rendered.prompt).toContain('# Runtime adapter: Codex');
@@ -34,6 +35,7 @@ describe('renderWorkflowPromptForRuntime', () => {
     const rendered = renderWorkflowPromptForRuntime(BASE_PROMPT, {
       provider: 'codex',
       runtime: 'codex-sdk',
+      turnKind: 'programmatic-step',
     });
 
     expect(rendered.prompt).toContain('cyboflow_*');
@@ -41,5 +43,17 @@ describe('renderWorkflowPromptForRuntime', () => {
     expect(rendered.prompt).toContain('Human gates remain host-owned gates');
     expect(rendered.prompt).toContain('Cyboflow database remains the single source of truth');
   });
-});
 
+  it('does not wrap Codex nudge or resume turns because the thread already has the launch prompt', () => {
+    expect(renderWorkflowPromptForRuntime(BASE_PROMPT, {
+      provider: 'codex',
+      runtime: 'codex-sdk',
+      turnKind: 'nudge',
+    })).toBe(BASE_PROMPT);
+    expect(renderWorkflowPromptForRuntime(BASE_PROMPT, {
+      provider: 'codex',
+      runtime: 'codex-sdk',
+      turnKind: 'resume',
+    })).toBe(BASE_PROMPT);
+  });
+});

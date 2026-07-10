@@ -1,14 +1,21 @@
 import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
+import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type { WorkflowPrompt } from './workflowPromptReader';
+
+export type WorkflowPromptTurnKind = 'launch' | 'nudge' | 'resume' | 'programmatic-step';
 
 export interface WorkflowPromptRenderContext {
   provider: AgentProvider;
   runtime: WorkflowAgentRuntime;
+  executionModel?: ExecutionModel;
+  turnKind?: WorkflowPromptTurnKind;
 }
 
 const DEFAULT_RENDER_CONTEXT: WorkflowPromptRenderContext = {
   provider: 'claude',
   runtime: 'claude-sdk',
+  executionModel: 'orchestrated',
+  turnKind: 'launch',
 };
 
 export function defaultWorkflowPromptRenderContext(): WorkflowPromptRenderContext {
@@ -36,10 +43,12 @@ export function renderWorkflowPromptForRuntime(
   if (context.provider !== 'codex') {
     return prompt;
   }
+  if (context.turnKind === 'nudge' || context.turnKind === 'resume') {
+    return prompt;
+  }
 
   return {
     prompt: `${CODEX_WORKFLOW_ENVELOPE}\n\n${prompt.prompt}`,
     systemPromptAppend: prompt.systemPromptAppend,
   };
 }
-
