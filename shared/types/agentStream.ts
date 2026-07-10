@@ -67,6 +67,8 @@ export interface AgentInitEvent {
 
 export interface AgentAssistantMessageEvent {
   type: 'agent_message';
+  provider?: AgentProvider;
+  runtime?: AgentRuntime;
   role: 'assistant';
   id: string;
   model: string;
@@ -78,6 +80,8 @@ export interface AgentAssistantMessageEvent {
 
 export interface AgentUserMessageEvent {
   type: 'agent_message';
+  provider?: AgentProvider;
+  runtime?: AgentRuntime;
   role: 'user';
   content: AgentUserContentBlock[];
   external_session_id?: string;
@@ -93,6 +97,8 @@ export type AgentResultSubtype =
 
 export interface AgentResultEvent {
   type: 'agent_result';
+  provider?: AgentProvider;
+  runtime?: AgentRuntime;
   subtype: AgentResultSubtype;
   is_error: boolean;
   duration_ms: number;
@@ -105,6 +111,8 @@ export interface AgentResultEvent {
 
 export interface AgentUnknownEvent {
   type: 'agent_unknown';
+  provider?: AgentProvider;
+  runtime?: AgentRuntime;
   raw: Record<string, unknown>;
 }
 

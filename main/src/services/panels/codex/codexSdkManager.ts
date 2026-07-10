@@ -311,8 +311,8 @@ export class CodexSdkManager extends AbstractCliManager {
     });
     this.recordSpawnKey(displayPanelId, spawnKey);
 
-    const router = new EventRouter();
-    const sink = new RawEventsSink(this.db, this.logger);
+    const router = new EventRouter<AgentStreamEvent>();
+    const sink = new RawEventsSink<AgentStreamEvent>(this.db, this.logger);
     sink.attachToRouter(router, runId);
 
     let exitCode = 0;
@@ -608,6 +608,8 @@ export class CodexSdkManager extends AbstractCliManager {
   ): AgentAssistantMessageEvent {
     return {
       type: 'agent_message',
+      provider: 'codex',
+      runtime: 'codex-sdk',
       role: 'assistant',
       id,
       model: this.displayModel(options.model),
@@ -624,6 +626,8 @@ export class CodexSdkManager extends AbstractCliManager {
   ): AgentAssistantMessageEvent {
     return {
       type: 'agent_message',
+      provider: 'codex',
+      runtime: 'codex-sdk',
       role: 'assistant',
       id,
       model: this.displayModel(options.model),
@@ -644,6 +648,8 @@ export class CodexSdkManager extends AbstractCliManager {
     return [
       {
         type: 'agent_message',
+        provider: 'codex',
+        runtime: 'codex-sdk',
         role: 'assistant',
         id: `${input.id}:call`,
         model: this.displayModel(input.options.model),
@@ -652,6 +658,8 @@ export class CodexSdkManager extends AbstractCliManager {
       },
       {
         type: 'agent_message',
+        provider: 'codex',
+        runtime: 'codex-sdk',
         role: 'user',
         content: [{
           type: 'tool_result',
@@ -674,6 +682,8 @@ export class CodexSdkManager extends AbstractCliManager {
   }): AgentResultEvent {
     return {
       type: 'agent_result',
+      provider: 'codex',
+      runtime: 'codex-sdk',
       subtype: input.subtype,
       is_error: input.isError,
       duration_ms: input.durationMs,
@@ -690,14 +700,14 @@ export class CodexSdkManager extends AbstractCliManager {
   }
 
   private emitProjected(
-    router: EventRouter,
+    router: EventRouter<AgentStreamEvent>,
     runId: string,
     panelId: string,
     sessionId: string,
     data: AgentStreamEvent,
   ): void {
+    router.emitForRun(runId, data);
     const legacyEvent = agentStreamEventToClaudeStreamEvent(data);
-    router.emitForRun(runId, legacyEvent);
     this.emit('output', {
       panelId,
       sessionId,

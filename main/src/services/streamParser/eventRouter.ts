@@ -1,19 +1,22 @@
 /**
  * EventRouter — Stage 4 of the streamParser pipeline.
  *
- * Provides per-runId fanout for typed ClaudeStreamEvents. Backed by Node's
+ * Provides per-runId fanout for typed provider events. Backed by Node's
  * EventEmitter — runIds are used directly as event names so subscribers
  * only receive events for their own run.
  */
 
 import { EventEmitter } from 'node:events';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
+import type { AgentStreamEvent } from '../../../../shared/types/agentStream';
 
-export class EventRouter extends EventEmitter {
+export type RoutableStreamEvent = ClaudeStreamEvent | AgentStreamEvent;
+
+export class EventRouter<TEvent extends RoutableStreamEvent = ClaudeStreamEvent> extends EventEmitter {
   /**
    * Dispatch an event to all handlers registered for the given runId.
    */
-  emitForRun(runId: string, event: ClaudeStreamEvent): void {
+  emitForRun(runId: string, event: TEvent): void {
     this.emit(runId, event);
   }
 
@@ -23,7 +26,7 @@ export class EventRouter extends EventEmitter {
    * Returns a teardown function that removes the handler when called.
    * Use this for clean per-run lifecycle management.
    */
-  onRun(runId: string, handler: (event: ClaudeStreamEvent) => void): () => void {
+  onRun(runId: string, handler: (event: TEvent) => void): () => void {
     this.on(runId, handler);
     return () => {
       this.off(runId, handler);

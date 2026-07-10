@@ -244,9 +244,29 @@ describe('CodexSdkManager', () => {
 
       const systemInit = JSON.parse(rows[1].payloadJson) as {
         type: string;
+        provider: string;
+        runtime: string;
         mcp_servers: Array<{ name: string; status: string }>;
       };
+      expect(systemInit).toMatchObject({
+        type: 'agent_init',
+        provider: 'codex',
+        runtime: 'codex-sdk',
+      });
       expect(systemInit.mcp_servers).toEqual([{ name: 'cyboflow', status: 'connected' }]);
+
+      const persistedAssistant = JSON.parse(rows[2].payloadJson) as {
+        type: string;
+        provider: string;
+        runtime: string;
+        content: Array<{ type: string; text?: string }>;
+      };
+      expect(persistedAssistant).toMatchObject({
+        type: 'agent_message',
+        provider: 'codex',
+        runtime: 'codex-sdk',
+        content: [{ type: 'text', text: 'Done from Codex.' }],
+      });
 
       const assistant = outputs.map((output) => output.data).find((data) => {
         return typeof data === 'object' && data !== null && (data as { type?: unknown }).type === 'assistant';
@@ -255,6 +275,8 @@ describe('CodexSdkManager', () => {
 
       const result = JSON.parse(rows[3].payloadJson) as {
         type: string;
+        provider: string;
+        runtime: string;
         subtype: string;
         usage: {
           input_tokens: number;
@@ -264,7 +286,9 @@ describe('CodexSdkManager', () => {
         };
       };
       expect(result).toMatchObject({
-        type: 'result',
+        type: 'agent_result',
+        provider: 'codex',
+        runtime: 'codex-sdk',
         subtype: 'success',
         usage: {
           input_tokens: 10,
@@ -343,7 +367,9 @@ describe('CodexSdkManager', () => {
         .all() as Array<{ payloadJson: string }>;
       expect(resultRows).toHaveLength(1);
       expect(JSON.parse(resultRows[0].payloadJson)).toMatchObject({
-        type: 'result',
+        type: 'agent_result',
+        provider: 'codex',
+        runtime: 'codex-sdk',
         subtype: 'error_during_execution',
         is_error: true,
         result: 'Codex failed',

@@ -1,7 +1,7 @@
 /**
  * RawEventsSink — Persistence bridge between EventRouter and the raw_events table.
  *
- * Subscribes to a runId's event stream and inserts every typed ClaudeStreamEvent
+ * Subscribes to a runId's event stream and inserts every typed provider event
  * into the raw_events append-only audit log. Designed as a fail-soft component:
  * an INSERT error is logged at WARN level and the pipeline continues — a transient
  * DB hiccup must NOT kill the orchestrator.
@@ -24,12 +24,13 @@
 
 import type Database from 'better-sqlite3';
 import type { EventRouter } from './eventRouter';
-import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 import type { ILogger } from './types';
+import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 
 import { deriveEventType } from './derivers';
+import type { PersistableStreamEvent } from './derivers';
 
-export class RawEventsSink {
+export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamEvent> {
   private readonly db: Database.Database;
   private readonly logger: Pick<ILogger, 'warn'> | undefined;
   private readonly insertStmt: Database.Statement;
@@ -58,14 +59,14 @@ export class RawEventsSink {
    * Calling attachToRouter for the same runId twice replaces the previous listener
    * (disposes the old one first to avoid duplicate inserts).
    */
-  attachToRouter(router: EventRouter, runId: string): void {
+  attachToRouter(router: EventRouter<TEvent>, runId: string): void {
     // If already attached for this runId, detach first to avoid duplicate rows.
     const existing = this.teardowns.get(runId);
     if (existing !== undefined) {
       existing();
     }
 
-    const handler = (event: ClaudeStreamEvent): void => {
+    const handler = (event: TEvent): void => {
       this.handleEvent(runId, event);
     };
 
@@ -103,7 +104,7 @@ export class RawEventsSink {
    *
    * Fail-soft: catches all errors, logs at WARN, and returns — never re-throws.
    */
-  private handleEvent(runId: string, event: ClaudeStreamEvent): void {
+  private handleEvent(runId: string, event: TEvent): void {
     try {
       const eventType = deriveEventType(event);
       const payloadJson = JSON.stringify(event);

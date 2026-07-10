@@ -17,6 +17,7 @@ import Database from 'better-sqlite3';
 import { EventRouter } from '../eventRouter';
 import { RawEventsSink } from '../rawEventsSink';
 import type { ClaudeStreamEvent } from '../../../../../shared/types/claudeStream';
+import type { AgentStreamEvent } from '../../../../../shared/types/agentStream';
 import { makeRawEventsDb, countRawEvents } from '../../../orchestrator/__test_fixtures__/rawEvents';
 
 // ---------------------------------------------------------------------------
@@ -333,5 +334,27 @@ describe('RawEventsSink', () => {
     const firstContent = parsed.message.content[0] as { type: 'text'; text: string };
     expect(firstContent.text).toBe(largeText);
     expect(firstContent.text).toHaveLength(100_000);
+  });
+
+  it('persists provider-neutral agent events without projecting away identity', () => {
+    const agentRouter = new EventRouter<AgentStreamEvent>();
+    const sink = new RawEventsSink<AgentStreamEvent>(db);
+    sink.attachToRouter(agentRouter, RUN_ID);
+    const event: AgentStreamEvent = {
+      type: 'agent_message',
+      provider: 'codex',
+      runtime: 'codex-sdk',
+      role: 'assistant',
+      id: 'codex-message-1',
+      model: 'gpt-5.5',
+      content: [{ type: 'text', text: 'done' }],
+    };
+
+    agentRouter.emitForRun(RUN_ID, event);
+
+    const rows = selectRows(db, RUN_ID);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].event_type).toBe('assistant');
+    expect(JSON.parse(rows[0].payload_json)).toEqual(event);
   });
 });
