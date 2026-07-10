@@ -45,6 +45,7 @@ import {
   type TurnSessionClient,
   type TurnSessionEvent,
 } from './appServer/turnSession';
+import { CodexTurnUsageAccumulator } from './appServer/usageAccumulator';
 
 const APP_SERVER_REQUEST_TIMEOUT_MS = 15_000;
 const APP_SERVER_INTERRUPT_TIMEOUT_MS = 2_000;
@@ -297,6 +298,7 @@ export class CodexSdkManager extends AbstractCliManager {
     let threadId = options.resumeSessionId ?? null;
     let initializeResponse: AppServerInitializeResponse | null = null;
     const startedAt = Date.now();
+    const usageAccumulator = new CodexTurnUsageAccumulator();
     const turnSessionRef: { current: CodexAppServerTurnSession | null } = { current: null };
 
     const approvalBridge = new CodexAppServerApprovalBridge({
@@ -307,6 +309,9 @@ export class CodexSdkManager extends AbstractCliManager {
 
     const handleTurnEvent = (event: TurnSessionEvent): void => {
       if (event.type === 'thread.started') threadId = event.threadId;
+      if (event.type === 'thread.tokenUsage.updated') {
+        usageAccumulator.addLastUsage(event.tokenUsage.last);
+      }
       if (
         abortController.signal.aborted
         && event.type === 'turn.completed'
@@ -319,6 +324,7 @@ export class CodexSdkManager extends AbstractCliManager {
       const projectedEvents = projectTurnSessionEvent(event, {
         model: this.displayModel(options.model),
         durationMs: Date.now() - startedAt,
+        usage: usageAccumulator.snapshot(),
       });
       for (const projected of projectedEvents) {
         if (projected.type === 'agent_result') {
@@ -483,7 +489,12 @@ export class CodexSdkManager extends AbstractCliManager {
             runId,
             displayPanelId,
             options.sessionId,
-            this.buildFailureResult(message, Date.now() - startedAt, threadId),
+            this.buildFailureResult(
+              message,
+              Date.now() - startedAt,
+              threadId,
+              usageAccumulator.snapshot(),
+            ),
           );
         }
         throw error;
@@ -569,6 +580,7 @@ export class CodexSdkManager extends AbstractCliManager {
     message: string,
     durationMs: number,
     threadId: string | null,
+    usage?: AgentResultEvent['usage'],
   ): AgentResultEvent {
     return {
       type: 'agent_result',
@@ -579,6 +591,7 @@ export class CodexSdkManager extends AbstractCliManager {
       duration_ms: durationMs,
       num_turns: 1,
       result: message,
+      ...(usage !== undefined ? { usage } : {}),
       external_session_id: threadId ?? undefined,
     };
   }

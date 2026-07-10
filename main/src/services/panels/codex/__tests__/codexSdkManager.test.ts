@@ -122,6 +122,30 @@ function successfulHandler(method: string, _params: unknown, client: FakeAppServ
         },
       });
       client.notify({
+        method: 'thread/tokenUsage/updated',
+        params: {
+          threadId: 'codex-thread-1',
+          turnId: 'turn-1',
+          tokenUsage: {
+            total: {
+              totalTokens: 17,
+              inputTokens: 10,
+              cachedInputTokens: 3,
+              outputTokens: 7,
+              reasoningOutputTokens: 2,
+            },
+            last: {
+              totalTokens: 17,
+              inputTokens: 10,
+              cachedInputTokens: 3,
+              outputTokens: 7,
+              reasoningOutputTokens: 2,
+            },
+            modelContextWindow: 258_400,
+          },
+        },
+      });
+      client.notify({
         method: 'turn/completed',
         params: {
           threadId: 'codex-thread-1',
@@ -220,6 +244,12 @@ describe('CodexSdkManager app-server runtime', () => {
         type: 'agent_result',
         subtype: 'success',
         is_error: false,
+        usage: {
+          input_tokens: 7,
+          cache_read_input_tokens: 3,
+          output_tokens: 7,
+          reasoning_output_tokens: 2,
+        },
       });
       expect(outputs.some((output) => {
         return typeof output.data === 'object'

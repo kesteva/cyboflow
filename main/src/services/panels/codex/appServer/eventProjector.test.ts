@@ -410,4 +410,25 @@ describe('projectTurnSessionEvent', () => {
       expect(event).not.toHaveProperty('cost_usd');
     }
   });
+
+  it('attaches accumulated usage only when projecting a terminal result', () => {
+    const usage = {
+      input_tokens: 7,
+      cache_read_input_tokens: 3,
+      output_tokens: 5,
+      reasoning_output_tokens: 2,
+    };
+    expect(projectTurnSessionEvent({
+      type: 'turn.completed',
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      status: 'completed',
+    }, { ...CONTEXT, usage })).toEqual([expect.objectContaining({ usage })]);
+
+    expect(projectTurnSessionEvent(completedItem({
+      type: 'agentMessage',
+      id: 'message-usage',
+      text: 'Done.',
+    }), { ...CONTEXT, usage })[0]).not.toHaveProperty('usage');
+  });
 });

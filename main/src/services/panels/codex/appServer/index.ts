@@ -4,3 +4,4 @@ export * from './client';
 export * from './eventProjector';
 export * from './protocol';
 export * from './turnSession';
+export * from './usageAccumulator';

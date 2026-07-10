@@ -3,6 +3,7 @@ import type {
   AgentResultEvent,
   AgentStreamEvent,
   AgentUnknownEvent,
+  AgentUsage,
   AgentUserMessageEvent,
 } from '../../../../../../shared/types/agentStream';
 import type { AppServerJsonValue } from './protocol';
@@ -15,6 +16,7 @@ import type {
 export interface TurnSessionEventProjectionContext {
   model: string;
   durationMs: number;
+  usage?: AgentUsage;
 }
 
 const CODEX_EVENT_SOURCE = {
@@ -84,6 +86,7 @@ function buildResultEvent(input: {
   durationMs: number;
   isError: boolean;
   result?: string;
+  usage?: AgentUsage;
 }): AgentResultEvent {
   return {
     type: 'agent_result',
@@ -93,6 +96,7 @@ function buildResultEvent(input: {
     duration_ms: input.durationMs,
     num_turns: 1,
     ...(input.result !== undefined ? { result: input.result } : {}),
+    ...(input.usage !== undefined ? { usage: input.usage } : {}),
     external_session_id: input.threadId,
   };
 }
@@ -221,6 +225,7 @@ function projectTurnError(
       durationMs: context.durationMs,
       isError: true,
       result: event.error.message,
+      usage: context.usage,
     }),
   ];
 }
@@ -229,12 +234,14 @@ function projectFailedTurn(
   threadId: string,
   error: TurnSessionError,
   durationMs: number,
+  usage?: AgentUsage,
 ): AgentResultEvent {
   return buildResultEvent({
     threadId,
     durationMs,
     isError: true,
     result: error.message,
+    usage,
   });
 }
 
@@ -258,15 +265,17 @@ export function projectTurnSessionEvent(
             threadId: event.threadId,
             durationMs: context.durationMs,
             isError: false,
+            usage: context.usage,
           })]
         : [buildResultEvent({
             threadId: event.threadId,
             durationMs: context.durationMs,
             isError: true,
             result: 'Codex turn interrupted',
+            usage: context.usage,
           })];
     case 'turn.failed':
-      return [projectFailedTurn(event.threadId, event.error, context.durationMs)];
+      return [projectFailedTurn(event.threadId, event.error, context.durationMs, context.usage)];
     case 'raw':
       return [buildUnknownEvent({ ...event.notification })];
   }
