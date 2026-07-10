@@ -14,6 +14,7 @@ import type { ArtifactType } from './artifacts';
 import type { ExperimentArm } from './experiments';
 import type { AgentModelAlias } from './agents';
 import type { CliTool } from './cliTools';
+import { SPRINT_BATCH_CAP } from './sprintBatch';
 
 /**
  * Workflow-run permission contract consumed by the SDK PreToolUse mapper
@@ -339,15 +340,35 @@ export interface FanOutInnerStep {
  * Declares an OUTER step as a parallel per-item fan-out. The host resolves the
  * runtime item set keyed by `over` (e.g. 'tasks' → the run's batch lane task ids)
  * and walks each item through `inner` with bounded concurrency, driving a lane
- * per item. ONLY honored on the programmatic plane; ignored (the step runs as a
- * normal single agent step) on the orchestrated plane and whenever no item set
- * resolves.
+ * per item. Honored on BOTH planes: the programmatic host walks each resolved
+ * item through `inner` mechanically with bounded concurrency (host-driven), and
+ * the orchestrated plane derives a runtime-generated prompt instruction block
+ * from this spec (see `main/src/orchestrator/prompts/fan-out-instructions.ts`)
+ * that tells the orchestrator AGENT how to fan out and drive lanes itself. On
+ * the programmatic plane an empty resolved item set still falls through to a
+ * normal single step.
  */
 export interface FanOutSpec {
   /** Runtime item-source key. v1 recognizes 'tasks' (→ batch lane task ids). */
   over: string;
   /** Ordered inner chain each item walks; ids form the lane step vocabulary. */
   inner: FanOutInnerStep[];
+  /**
+   * Max items dispatched concurrently for this step. Absent ⇒ DEFAULT
+   * (SPRINT_BATCH_CAP = 5); `1` ⇒ serial per-item (one lane at a time, full
+   * inner chain per item before the next starts). Integer ≥ 1.
+   */
+  maxConcurrency?: number;
+}
+
+/**
+ * Resolve the effective per-step fan-out concurrency cap: the spec's explicit
+ * `maxConcurrency` when set, else the SPRINT_BATCH_CAP default. Single source
+ * of truth for both planes (programmatic wave sizing, orchestrated prompt
+ * instructions) so neither can drift from the other.
+ */
+export function effectiveMaxConcurrency(fanOut: FanOutSpec): number {
+  return fanOut.maxConcurrency ?? SPRINT_BATCH_CAP;
 }
 
 /**
@@ -390,9 +411,11 @@ export interface WorkflowStep {
   /** Short description shown in the phase editor tooltip / right-rail feed. */
   desc?: string;
   /**
-   * Optional parallel fan-out. When present AND the run is programmatic AND an
-   * item set resolves, the host walks each item through `fanOut.inner` driving a
-   * per-item lane. Additive — absent ⇒ a normal step (today's behavior).
+   * Optional parallel fan-out. When present AND an item set resolves, both
+   * planes honor it — the programmatic host walks each item through
+   * `fanOut.inner` driving a per-item lane, and the orchestrated agent receives
+   * a derived prompt instruction block to fan out and drive lanes itself.
+   * Additive — absent ⇒ a normal step (today's behavior), unchanged.
    */
   fanOut?: FanOutSpec;
   /**
@@ -655,8 +678,10 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
   // run. The orchestrator agent analyzes the dependency DAG, fans out per-task
   // subagents with bounded concurrency, and reports per-task lane progress via
   // cyboflow_update_sprint_task. One holistic verify/review/human gate at the
-  // end; N=1 degenerates to a normal single-task sprint. No loopback fields —
-  // re-delegation to a fresh subagent is prose-driven, not runner-driven.
+  // end; N=1 degenerates to a normal single-task sprint. The inner chain's
+  // `loopback: 'implement'` fields encode today's "on failure, re-delegate to
+  // implement" behavior as data, consumed by the orchestrated prompt generator;
+  // the programmatic controller does not yet re-drive on them in v1.
   sprint: {
     id: 'sprint',
     phases: [
@@ -687,19 +712,28 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem'],
             retries: 3,
             desc: 'Parallel per-task fan-out — per-task progress in sprint lanes',
-            // Inert on the orchestrated plane (the agent reads sprint.md and drives lanes
-            // via the cyboflow_update_sprint_task MCP; host.fanOut is undefined). On the
-            // programmatic plane the host walks each task through this inner chain, driving
-            // one sprint lane per task. The 5 inner ids EQUAL SPRINT_LANE_STEP_IDS in order
-            // so the lane vocabulary + swimlane UI render identically.
+            // Honored on BOTH planes (consolidated — was programmatic-only). On the
+            // programmatic plane the host walks each task through this inner chain,
+            // driving one sprint lane per task. On the orchestrated plane the runtime
+            // prompt generator (fan-out-instructions.ts) derives an instruction block
+            // from this spec telling the orchestrator agent how to fan out and drive
+            // lanes itself via cyboflow_update_sprint_task. The 5 inner ids EQUAL
+            // SPRINT_LANE_STEP_IDS in order so the lane vocabulary + swimlane UI
+            // render identically regardless of which plane drove them.
             fanOut: {
               over: 'tasks',
               inner: [
                 { id: 'implement', agent: 'implement', name: 'Implement' },
-                { id: 'write-tests', agent: 'write-tests', name: 'Write tests' },
-                { id: 'code-review', agent: 'code-review', name: 'Code review' },
-                { id: 'task-verify', agent: 'task-verify', name: 'Verify' },
-                { id: 'visual-verify', agent: 'visual-verify', name: 'Visual check', optional: true },
+                { id: 'write-tests', agent: 'write-tests', name: 'Write tests', loopback: 'implement' },
+                { id: 'code-review', agent: 'code-review', name: 'Code review', loopback: 'implement' },
+                { id: 'task-verify', agent: 'task-verify', name: 'Verify', loopback: 'implement' },
+                {
+                  id: 'visual-verify',
+                  agent: 'visual-verify',
+                  name: 'Visual check',
+                  optional: true,
+                  loopback: 'implement',
+                },
               ],
             },
           },
@@ -941,6 +975,26 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: ['filesystem'],
             retries: 3,
             desc: 'Parallel per-task fan-out — per-task progress in sprint lanes',
+            // Mirrors sprint's execute-tasks fanOut block byte-for-byte — ship's
+            // Execute phase IS the sprint execute phase, just concatenated after
+            // planning + materialize. See the sprint definition above for the full
+            // both-planes contract note.
+            fanOut: {
+              over: 'tasks',
+              inner: [
+                { id: 'implement', agent: 'implement', name: 'Implement' },
+                { id: 'write-tests', agent: 'write-tests', name: 'Write tests', loopback: 'implement' },
+                { id: 'code-review', agent: 'code-review', name: 'Code review', loopback: 'implement' },
+                { id: 'task-verify', agent: 'task-verify', name: 'Verify', loopback: 'implement' },
+                {
+                  id: 'visual-verify',
+                  agent: 'visual-verify',
+                  name: 'Visual check',
+                  optional: true,
+                  loopback: 'implement',
+                },
+              ],
+            },
           },
         ],
       },

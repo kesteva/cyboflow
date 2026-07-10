@@ -54,11 +54,18 @@ const fanOutInnerStepSchema = z.object({
 
 /**
  * A fan-out spec: an item-source key (`over`) plus a non-empty ordered inner
- * chain. Mirrors `FanOutSpec`.
+ * chain, and an optional `maxConcurrency` cap (absent ⇒ SPRINT_BATCH_CAP
+ * default via `effectiveMaxConcurrency`; `1` ⇒ serial per-item). Mirrors
+ * `FanOutSpec`.
  */
 const fanOutSchema = z.object({
   over: z.string().min(1, 'fanOut.over is required'),
   inner: z.array(fanOutInnerStepSchema).min(1, 'fanOut.inner needs at least one step'),
+  maxConcurrency: z
+    .number()
+    .int()
+    .min(1, 'fanOut.maxConcurrency must be a positive integer (1 = serial)')
+    .optional(),
 });
 
 /**

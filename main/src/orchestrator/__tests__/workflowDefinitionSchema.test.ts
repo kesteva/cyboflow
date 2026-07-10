@@ -25,9 +25,12 @@ import {
 } from '../workflowDefinitionSchema';
 import {
   WORKFLOW_DEFINITIONS,
+  effectiveMaxConcurrency,
   type WorkflowAgentConfig,
   type WorkflowDefinition,
+  type FanOutSpec,
 } from '../../../../shared/types/workflows';
+import { SPRINT_BATCH_CAP } from '../../../../shared/types/sprintBatch';
 
 /** A fully-valid two-phase definition used as the mutation base for reject cases. */
 function makeValidDefinition(): WorkflowDefinition {
@@ -203,6 +206,76 @@ describe('workflowDefinitionSchema (fan-out)', () => {
     };
     expect(() => validateWorkflowDefinition(def)).not.toThrow();
     expect(validateWorkflowDefinition(def)).toEqual(def);
+  });
+
+  // -------------------------------------------------------------------------
+  // Accept: fanOut.maxConcurrency at the boundary (1 = serial) and mid-range.
+  // -------------------------------------------------------------------------
+  it('accepts a fanOut with an explicit maxConcurrency (serial and parallel)', () => {
+    const serial = makeValidDefinition();
+    serial.phases[1].steps[0].fanOut = {
+      over: 'tasks',
+      inner: [{ id: 'implement', agent: 'implement' }],
+      maxConcurrency: 1,
+    };
+    expect(() => validateWorkflowDefinition(serial)).not.toThrow();
+
+    const parallel = makeValidDefinition();
+    parallel.phases[1].steps[0].fanOut = {
+      over: 'tasks',
+      inner: [{ id: 'implement', agent: 'implement' }],
+      maxConcurrency: 3,
+    };
+    expect(() => validateWorkflowDefinition(parallel)).not.toThrow();
+  });
+
+  it('accepts a fanOut with maxConcurrency absent (defaults resolved elsewhere)', () => {
+    const def = makeValidDefinition();
+    def.phases[1].steps[0].fanOut = {
+      over: 'tasks',
+      inner: [{ id: 'implement', agent: 'implement' }],
+    };
+    expect(() => validateWorkflowDefinition(def)).not.toThrow();
+    expect(validateWorkflowDefinition(def).phases[1].steps[0].fanOut?.maxConcurrency).toBeUndefined();
+  });
+
+  // -------------------------------------------------------------------------
+  // Reject: zero, negative, and non-integer maxConcurrency.
+  // -------------------------------------------------------------------------
+  it('rejects a non-positive-integer fanOut.maxConcurrency', () => {
+    const zero = makeValidDefinition();
+    zero.phases[1].steps[0].fanOut = {
+      over: 'tasks',
+      inner: [{ id: 'implement', agent: 'implement' }],
+      maxConcurrency: 0,
+    };
+    expect(() => validateWorkflowDefinition(zero)).toThrow(ZodError);
+
+    const negative = makeValidDefinition();
+    negative.phases[1].steps[0].fanOut = {
+      over: 'tasks',
+      inner: [{ id: 'implement', agent: 'implement' }],
+      maxConcurrency: -2,
+    };
+    expect(() => validateWorkflowDefinition(negative)).toThrow(ZodError);
+
+    const fractional = makeValidDefinition();
+    fractional.phases[1].steps[0].fanOut = {
+      over: 'tasks',
+      inner: [{ id: 'implement', agent: 'implement' }],
+      maxConcurrency: 2.5,
+    };
+    expect(() => validateWorkflowDefinition(fractional)).toThrow(ZodError);
+  });
+
+  it('round-trips fanOut.maxConcurrency through validation', () => {
+    const def = makeValidDefinition();
+    def.phases[1].steps[0].fanOut = {
+      over: 'tasks',
+      inner: [{ id: 'implement', agent: 'implement' }],
+      maxConcurrency: 2,
+    };
+    expect(validateWorkflowDefinition(def).phases[1].steps[0].fanOut?.maxConcurrency).toBe(2);
   });
 
   it('round-trips only the persisted FanOutInnerStep fields', () => {
@@ -472,6 +545,43 @@ describe('workflowDefinitionSchema (agentConfigs — Agents-pane validation pari
     const def = makeValidDefinition();
     def.agentConfigs = { implement: { model: 'haiku' } };
     expect(() => validateWorkflowDefinition(def)).not.toThrow();
+  });
+});
+
+describe('effectiveMaxConcurrency (shared/types/workflows helper)', () => {
+  it('resolves to SPRINT_BATCH_CAP when maxConcurrency is absent', () => {
+    const fanOut: FanOutSpec = { over: 'tasks', inner: [{ id: 'implement', agent: 'implement' }] };
+    expect(effectiveMaxConcurrency(fanOut)).toBe(SPRINT_BATCH_CAP);
+    expect(effectiveMaxConcurrency(fanOut)).toBe(5);
+  });
+
+  it('resolves to the explicit maxConcurrency when set, including 1 (serial)', () => {
+    const serial: FanOutSpec = {
+      over: 'tasks',
+      inner: [{ id: 'implement', agent: 'implement' }],
+      maxConcurrency: 1,
+    };
+    expect(effectiveMaxConcurrency(serial)).toBe(1);
+
+    const capped: FanOutSpec = {
+      over: 'tasks',
+      inner: [{ id: 'implement', agent: 'implement' }],
+      maxConcurrency: 3,
+    };
+    expect(effectiveMaxConcurrency(capped)).toBe(3);
+  });
+
+  it("sprint and ship's built-in execute-tasks fanOut both resolve to the default cap (no explicit maxConcurrency)", () => {
+    const sprintExecute = WORKFLOW_DEFINITIONS.sprint.phases
+      .flatMap((p) => p.steps)
+      .find((s) => s.id === 'execute-tasks');
+    const shipExecute = WORKFLOW_DEFINITIONS.ship.phases
+      .flatMap((p) => p.steps)
+      .find((s) => s.id === 'execute-tasks');
+    expect(sprintExecute?.fanOut).toBeDefined();
+    expect(shipExecute?.fanOut).toBeDefined();
+    expect(effectiveMaxConcurrency(sprintExecute!.fanOut!)).toBe(SPRINT_BATCH_CAP);
+    expect(effectiveMaxConcurrency(shipExecute!.fanOut!)).toBe(SPRINT_BATCH_CAP);
   });
 });
 
