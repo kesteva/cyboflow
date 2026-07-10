@@ -304,7 +304,11 @@ function StepNode({
       onClick={() => dispatch({ type: 'SELECT_STEP', stepId: step.id })}
       style={{
         position: 'relative',
-        width: isFanOut ? COL_W + 24 : COL_W,
+        // The fan-out frame breaks out wider than a normal card; center it in
+        // the phase band (which is COL_W + padding wide) instead of spilling
+        // the whole breakout out of the right edge.
+        width: isFanOut ? COL_W + 16 : COL_W,
+        alignSelf: isFanOut ? 'center' : undefined,
         border: isFanOut ? '1.5px dashed var(--color-status-error)' : '1.4px solid var(--color-text-primary)',
         background: isFanOut ? 'rgba(201,100,66,0.045)' : 'var(--color-surface-primary)',
         padding: isFanOut ? 10 : 0,
