@@ -94,6 +94,10 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
         console.log('[Main] Directory is not a git repository, initializing...');
       }
 
+      // The detected default branch, persisted at create time. Never trust
+      // projectData.mainBranch — always derive it from the on-disk repo.
+      let mainBranch: string | undefined;
+
       // Initialize git if needed
       if (!isGitRepo) {
         try {
@@ -110,15 +114,14 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
           // Create initial commit
           nodeExecSync(`cd "${projectData.path}" && git commit -m "Initial commit" --allow-empty`, { encoding: 'utf-8' });
           console.log('[Main] Created initial empty commit');
+
+          // git-init path deterministically checks out 'main' above.
+          mainBranch = branchName;
         } catch (error) {
           console.error('[Main] Failed to initialize git repository:', error);
           // Continue anyway - let the user handle git setup manually if needed
         }
-      }
-
-      // Always detect the main branch - never use projectData.mainBranch
-      let mainBranch: string | undefined;
-      if (isGitRepo) {
+      } else {
         try {
           mainBranch = await worktreeManager.getProjectMainBranch(projectData.path);
           console.log('[Main] Detected main branch:', mainBranch);
@@ -138,7 +141,8 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
         projectData.openIdeCommand,
         projectData.commitMode,
         projectData.commitStructuredPromptTemplate,
-        projectData.commitCheckpointPrefix
+        projectData.commitCheckpointPrefix,
+        mainBranch
       );
 
       // If run_script was provided, also create run commands

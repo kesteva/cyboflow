@@ -13,6 +13,8 @@ export interface Project {
   updated_at: string;
   default_permission_mode?: 'approve' | 'ignore';
   open_ide_command?: string | null;
+  /** Detected default branch, persisted at create time (runtime re-detects live). */
+  main_branch?: string | null;
   display_order?: number;
   worktree_folder?: string | null;
   lastUsedModel?: string;

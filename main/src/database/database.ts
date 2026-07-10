@@ -1705,19 +1705,19 @@ export class DatabaseService {
   }
 
   // Project operations
-  createProject(name: string, path: string, systemPrompt?: string, runScript?: string, buildScript?: string, defaultPermissionMode?: 'approve' | 'ignore', openIdeCommand?: string, commitMode?: 'structured' | 'checkpoint' | 'disabled', commitStructuredPromptTemplate?: string, commitCheckpointPrefix?: string): Project {
+  createProject(name: string, path: string, systemPrompt?: string, runScript?: string, buildScript?: string, defaultPermissionMode?: 'approve' | 'ignore', openIdeCommand?: string, commitMode?: 'structured' | 'checkpoint' | 'disabled', commitStructuredPromptTemplate?: string, commitCheckpointPrefix?: string, mainBranch?: string): Project {
     // Get the max display_order for projects
     const maxOrderResult = this.db.prepare(`
-      SELECT MAX(display_order) as max_order 
+      SELECT MAX(display_order) as max_order
       FROM projects
     `).get() as { max_order: number | null };
-    
+
     const displayOrder = (maxOrderResult?.max_order ?? -1) + 1;
-    
+
     const result = this.db.prepare(`
-      INSERT INTO projects (name, path, system_prompt, run_script, build_script, default_permission_mode, open_ide_command, display_order, commit_mode, commit_structured_prompt_template, commit_checkpoint_prefix)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(name, path, systemPrompt || null, runScript || null, buildScript || null, defaultPermissionMode || DEFAULT_PERMISSION_MODE, openIdeCommand || null, displayOrder, commitMode || 'checkpoint', commitStructuredPromptTemplate || null, commitCheckpointPrefix || 'checkpoint: ');
+      INSERT INTO projects (name, path, system_prompt, run_script, build_script, default_permission_mode, open_ide_command, main_branch, display_order, commit_mode, commit_structured_prompt_template, commit_checkpoint_prefix)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(name, path, systemPrompt || null, runScript || null, buildScript || null, defaultPermissionMode || DEFAULT_PERMISSION_MODE, openIdeCommand || null, mainBranch || null, displayOrder, commitMode || 'checkpoint', commitStructuredPromptTemplate || null, commitCheckpointPrefix || 'checkpoint: ');
     
     const project = this.getProject(result.lastInsertRowid as number);
     if (!project) {
