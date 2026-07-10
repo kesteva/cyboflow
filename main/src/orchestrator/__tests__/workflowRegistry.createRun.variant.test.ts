@@ -36,7 +36,44 @@ function setupDb(): Database.Database {
     );
   `);
   db.prepare("INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, 'planner', '{\"live\":1}')").run(WF);
+  // Migration 058 (rotation experiments), minimal shape: createRun RE-VALIDATES
+  // opts.rotationExperimentId against these tables inside its INSERT transaction
+  // (revalidateRotationAttribution), so any test that stamps a rotation id needs
+  // real experiment + arm-snapshot rows.
+  db.exec(`CREATE TABLE experiments (
+    id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'side_by_side' CHECK (kind IN ('side_by_side','rotation')),
+    status TEXT NOT NULL DEFAULT 'running'
+      CHECK (status IN ('running','grading','decided','abandoned','superseded')),
+    rerun_of_experiment_id TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);`);
+  db.exec(`CREATE TABLE experiment_rotation_arms (
+    experiment_id TEXT NOT NULL, variant_id TEXT NOT NULL, label TEXT NOT NULL,
+    weight_at_open INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (experiment_id, variant_id));`);
   return db;
+}
+
+/** Seed a rotation experiment row + its arm-set snapshot. */
+function seedRotation(
+  db: Database.Database,
+  id: string,
+  armVariantIds: string[],
+  status: 'running' | 'superseded' = 'running',
+): void {
+  db.prepare("INSERT INTO experiments (id, workflow_id, kind, status) VALUES (?, ?, 'rotation', ?)").run(
+    id,
+    WF,
+    status,
+  );
+  for (const v of armVariantIds) {
+    db.prepare('INSERT INTO experiment_rotation_arms (experiment_id, variant_id, label) VALUES (?, ?, ?)').run(
+      id,
+      v,
+      v,
+    );
+  }
 }
 
 describe('WorkflowRegistry.createRun — variant/experiment stamping', () => {
@@ -123,6 +160,7 @@ describe('WorkflowRegistry.createRun — variant/experiment stamping', () => {
   });
 
   it('stamps rotation_experiment_id from opts (migration 058) without disturbing the other columns', () => {
+    seedRotation(db, 'exp-rot-1', ['wfv_rot', '__baseline__']);
     const { runId } = registry.createRun(WF, undefined, SESSION, undefined, {
       variantId: 'wfv_rot',
       variantLabel: 'rot-arm',
@@ -146,5 +184,57 @@ describe('WorkflowRegistry.createRun — variant/experiment stamping', () => {
   it('leaves rotation_experiment_id NULL when opts.rotationExperimentId is absent', () => {
     const { runId } = registry.createRun(WF, undefined, SESSION);
     expect(registry.getRunById(runId)?.rotation_experiment_id ?? null).toBeNull();
+  });
+
+  // -- Stale-attribution regression (launch/config race) ----------------------
+  // The rotation id is resolved BEFORE RunLauncher's loadVerifyConfig await; a
+  // membership write during that gap can delete (zero-run replace), supersede, or
+  // rebuild the rotation. createRun must never stamp a dead id.
+
+  it('race: rotation deleted between resolve and createRun → stamps NULL, not the dead id', () => {
+    // No experiments row for 'exp-rot-gone' — the zero-run replace path hard-deleted it.
+    const { runId } = registry.createRun(WF, undefined, SESSION, undefined, {
+      variantId: 'wfv_rot',
+      variantLabel: 'rot-arm',
+      variantSpecJson: VARIANT_SPEC,
+      rotationExperimentId: 'exp-rot-gone',
+    });
+    expect(registry.getRunById(runId)?.rotation_experiment_id ?? null).toBeNull();
+  });
+
+  it('race: rotation superseded, picked arm still in the successor → re-attributes to the successor', () => {
+    seedRotation(db, 'exp-rot-old', ['wfv_rot', '__baseline__'], 'superseded');
+    seedRotation(db, 'exp-rot-new', ['wfv_rot', '__baseline__', 'wfv_added']);
+    const { runId } = registry.createRun(WF, undefined, SESSION, undefined, {
+      variantId: 'wfv_rot',
+      variantLabel: 'rot-arm',
+      variantSpecJson: VARIANT_SPEC,
+      rotationExperimentId: 'exp-rot-old',
+    });
+    expect(registry.getRunById(runId)?.rotation_experiment_id).toBe('exp-rot-new');
+  });
+
+  it('race: rotation superseded and the picked arm is NOT in the successor → stamps NULL', () => {
+    seedRotation(db, 'exp-rot-old', ['wfv_rot', '__baseline__'], 'superseded');
+    seedRotation(db, 'exp-rot-new', ['__baseline__', 'wfv_other']);
+    const { runId } = registry.createRun(WF, undefined, SESSION, undefined, {
+      variantId: 'wfv_rot',
+      variantLabel: 'rot-arm',
+      variantSpecJson: VARIANT_SPEC,
+      rotationExperimentId: 'exp-rot-old',
+    });
+    expect(registry.getRunById(runId)?.rotation_experiment_id ?? null).toBeNull();
+  });
+
+  it('race: a BASELINE rotation pick (no variantId) validates against the baseline sentinel arm', () => {
+    seedRotation(db, 'exp-rot-old', ['wfv_rot', '__baseline__'], 'superseded');
+    seedRotation(db, 'exp-rot-new', ['wfv_rot', '__baseline__', 'wfv_added']);
+    // Baseline won the spin: no variant fold, only the rotation attribution.
+    const { runId } = registry.createRun(WF, undefined, SESSION, undefined, {
+      rotationExperimentId: 'exp-rot-old',
+    });
+    const row = registry.getRunById(runId);
+    expect(row?.rotation_experiment_id).toBe('exp-rot-new');
+    expect(row?.variant_id ?? null).toBeNull();
   });
 });

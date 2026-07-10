@@ -21,6 +21,7 @@ import {
   computeRotationArmSet,
   reconcileRotationExperiment,
   reconcileAllRotationExperiments,
+  revalidateRotationAttribution,
   getExperiment,
 } from '../experimentStore';
 import { BASELINE_VARIANT_SENTINEL } from '../../../../shared/types/experiments';
@@ -245,6 +246,54 @@ describe('countRotationExperimentRuns', () => {
     attributeRun(exp.id);
     attributeRun(exp.id);
     expect(countRotationExperimentRuns(db, exp.id)).toBe(2);
+  });
+});
+
+describe('revalidateRotationAttribution (createRun INSERT seam)', () => {
+  const ARMS = [
+    { variantId: 'v1', label: 'v1', weightAtOpen: 1 },
+    { variantId: BASELINE_VARIANT_SENTINEL, label: 'Baseline', weightAtOpen: 1 },
+  ];
+
+  it('returns the same id while the rotation is still running with the arm in its snapshot', () => {
+    const exp = insertRotationExperiment(db, { workflowId: WF, arms: ARMS });
+    expect(revalidateRotationAttribution(db, WF, exp.id, 'v1')).toBe(exp.id);
+    expect(revalidateRotationAttribution(db, WF, exp.id, BASELINE_VARIANT_SENTINEL)).toBe(exp.id);
+  });
+
+  it('returns null for a deleted id with no running successor (zero-run replace raced the launch)', () => {
+    expect(revalidateRotationAttribution(db, WF, 'exp-gone', 'v1')).toBeNull();
+  });
+
+  it('re-attributes to the running successor when the original was superseded and the arm is still a member', () => {
+    const old = insertRotationExperiment(db, { workflowId: WF, arms: ARMS });
+    raw.prepare("UPDATE experiments SET status = 'superseded' WHERE id = ?").run(old.id);
+    const successor = insertRotationExperiment(db, {
+      workflowId: WF,
+      arms: [...ARMS, { variantId: 'v2', label: 'v2', weightAtOpen: 1 }],
+    });
+    expect(revalidateRotationAttribution(db, WF, old.id, 'v1')).toBe(successor.id);
+  });
+
+  it('returns null when the successor no longer contains the picked arm', () => {
+    const old = insertRotationExperiment(db, { workflowId: WF, arms: ARMS });
+    raw.prepare("UPDATE experiments SET status = 'superseded' WHERE id = ?").run(old.id);
+    insertRotationExperiment(db, {
+      workflowId: WF,
+      arms: [
+        { variantId: 'v2', label: 'v2', weightAtOpen: 1 },
+        { variantId: BASELINE_VARIANT_SENTINEL, label: 'Baseline', weightAtOpen: 1 },
+      ],
+    });
+    expect(revalidateRotationAttribution(db, WF, old.id, 'v1')).toBeNull();
+  });
+
+  it("never cross-attributes to another workflow's running rotation", () => {
+    raw.prepare("INSERT INTO workflows (id, project_id, name) VALUES ('wf-2', 1, 'sprint')").run();
+    const foreign = insertRotationExperiment(db, { workflowId: 'wf-2', arms: ARMS });
+    // The stale id belongs to wf-2; a launch of WF must not adopt it (nor find a
+    // WF successor, since WF has no running rotation).
+    expect(revalidateRotationAttribution(db, WF, foreign.id, 'v1')).toBeNull();
   });
 });
 

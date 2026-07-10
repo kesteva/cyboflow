@@ -420,6 +420,12 @@ export class RunLauncher {
     // GENUINE weighted rotation pick (source==='rotation') additionally stamps the
     // run's rotation_experiment_id when a rotation experiment is open. A pin /
     // baseline-pin / empty pool never attributes to a rotation.
+    //
+    // ⚠️ The id crosses the loadVerifyConfig await below, during which a
+    // variant/baseline membership write can delete/replace/supersede the rotation
+    // experiment. createRun re-validates the attribution inside its INSERT
+    // transaction (revalidateRotationAttribution) — a stale id re-attributes to
+    // the current running rotation or stamps NULL, never a dead id.
     const rv = assignment?.variant ?? null;
     const rotationExperimentId =
       assignment?.source === 'rotation' ? assignment.rotationExperimentId : null;

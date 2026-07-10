@@ -497,6 +497,54 @@ export function deleteRotationExperiment(db: DatabaseLike, experimentId: string)
   tx();
 }
 
+/**
+ * Re-validate a rotation attribution at the `createRun` INSERT seam.
+ *
+ * The id is captured by `resolveForLaunch` BEFORE the launch path's async gap
+ * (`RunLauncher.launch` awaits `loadVerifyConfig` between the pick and the
+ * INSERT). During that gap a variant/baseline membership write can run the
+ * registry's reconcile chokepoint, which may DELETE a zero-run rotation
+ * (replace-in-place) or SUPERSEDE it with a successor. `rotation_experiment_id`
+ * is a soft link, so a stale stamp would not fail fast — the run would silently
+ * vanish from rotation stats or be counted against the wrong arm-set history.
+ *
+ * Returns the id to stamp:
+ *  - the SAME id when the experiment is still this workflow's running rotation
+ *    and the picked arm is still in its snapshot;
+ *  - the CURRENT running rotation's id when the original was replaced/superseded
+ *    but the picked arm is a member of the successor (a replace-in-place or
+ *    add-arm supersede keeps the pick's stats meaningful there);
+ *  - null otherwise (intentionally unattributed — never stamp a dead id).
+ *
+ * `armVariantId` is the picked variant's id, or BASELINE_VARIANT_SENTINEL when
+ * the rotation pick landed on the live baseline.
+ */
+export function revalidateRotationAttribution(
+  db: DatabaseLike,
+  workflowId: string,
+  rotationExperimentId: string,
+  armVariantId: string,
+): string | null {
+  const armInSnapshot = (experimentId: string): boolean =>
+    listRotationArms(db, experimentId).some((a) => a.variant_id === armVariantId);
+
+  const exp = getExperiment(db, rotationExperimentId);
+  if (
+    exp !== null &&
+    exp.kind === 'rotation' &&
+    exp.status === 'running' &&
+    exp.workflow_id === workflowId &&
+    armInSnapshot(exp.id)
+  ) {
+    return exp.id;
+  }
+  const current = getRunningRotationExperiment(db, workflowId);
+  if (current !== null && current.id !== rotationExperimentId && armInSnapshot(current.id)) {
+    return current.id;
+  }
+  return null;
+}
+
 /** Fill a rotation's `rerun_of_experiment_id` — only when currently NULL (never overwrites an existing lineage). */
 export function setRotationLineage(db: DatabaseLike, experimentId: string, rerunOfExperimentId: string): void {
   db.prepare(

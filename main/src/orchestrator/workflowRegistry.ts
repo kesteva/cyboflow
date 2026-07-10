@@ -35,7 +35,8 @@ import { resolveExecutionModel } from './executionModelResolver';
 import { resolveVisualVerification, SHIPPED_VERIFY_BACKENDS } from './visualVerificationResolver';
 import { resolvePermissionMode } from './permissionModeResolver';
 import { computeSpecHash } from './specHash';
-import { reconcileRotationExperiment } from './experimentStore';
+import { reconcileRotationExperiment, revalidateRotationAttribution } from './experimentStore';
+import { BASELINE_VARIANT_SENTINEL } from '../../../shared/types/experiments';
 
 // ---------------------------------------------------------------------------
 // Descriptor types
@@ -934,6 +935,12 @@ export class WorkflowRegistry {
        * VariantResolver via RunLauncher.launch on a GENUINE weighted rotation pick.
        * SEPARATE from experimentId (the side-by-side sandbox tag) per the migration's
        * CRITICAL INVARIANT — rotation runs are normal runs. Stamped immutably.
+       *
+       * RE-VALIDATED at the INSERT (revalidateRotationAttribution): the id crosses
+       * RunLauncher's await gap (loadVerifyConfig), during which a membership write
+       * can delete/replace/supersede the rotation. A stale id re-attributes to the
+       * current running rotation when the picked arm is still a member, else
+       * stamps NULL — never a dead id.
        */
       rotationExperimentId?: string;
       /**
@@ -1133,6 +1140,21 @@ export class WorkflowRegistry {
     `);
 
     const createTx = this.db.transaction(() => {
+      // Rotation attribution re-check (migration 058): the resolver's pick crossed
+      // RunLauncher's await gap (loadVerifyConfig), during which a membership write
+      // may have deleted/replaced/superseded the rotation experiment. Validate
+      // inside the SAME transaction as the INSERT so the stamped id can never
+      // point at a dead or wrong-arm-set experiment (the arm identity is the
+      // picked variant, or the baseline sentinel when the baseline won the spin).
+      const rotationExperimentId =
+        opts?.rotationExperimentId === undefined
+          ? null
+          : revalidateRotationAttribution(
+              this.db,
+              workflowId,
+              opts.rotationExperimentId,
+              opts.variantId ?? BASELINE_VARIANT_SENTINEL,
+            );
       insert.run(
         runId,
         workflowId,
@@ -1151,7 +1173,7 @@ export class WorkflowRegistry {
         opts?.experimentArm ?? null,
         opts?.variantId ?? null,
         opts?.variantLabel ?? null,
-        opts?.rotationExperimentId ?? null,
+        rotationExperimentId,
       );
       // Ensure the frozen hash is always resolvable to its spec: snapshot a
       // revision for the EFFECTIVE spec we just stamped. INSERT OR IGNORE keyed on
