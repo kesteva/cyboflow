@@ -100,6 +100,30 @@ Security, then restart `pnpm dev`. Recurring failure across SPRINT-031..SPRINT-0
 
 cyboflow is desktop-only. `verification.visual_mobile=false`.
 
+## Deliverable `htmlPath` capture (product feature, for cyboflow's users)
+
+The sections above cover verifying **cyboflow's own** renderer while working ON
+this codebase. Separately, cyboflow's *built-in* layered visual verification
+(`cyboflow_request_verification`, see `docs/visual-verification-design.md`) lets a
+lane agent point at a plain built html file via `htmlPath` — e.g. a static site
+export with no dev server. That capture is now served over an ephemeral loopback
+HTTP server rather than `file://`, so `<script type="module">` and other
+same-origin fetches work as expected (a `file://` load gets CORS-blocked by
+Chromium and silently renders a blank shell).
+
+What to know if you're declaring a deliverable in `.cyboflow/verify.json`:
+- The static-serve root defaults to `dirname(htmlPath)` — correct for the common
+  case where the html sits at the build root and its assets are siblings/descendants.
+- A ROOT-ABSOLUTE asset reference in the html (e.g. `<script src="/assets/app.js">`)
+  only resolves correctly when the html itself sits at that same build root. If
+  your html lives BELOW the root the assets are served from (e.g.
+  `dist/docs/index.html` referencing `/assets/...` that live under `dist/`),
+  declare that deliverable's `staticRoot` explicitly in `.cyboflow/verify.json` —
+  otherwise the default `dirname(htmlPath)` root won't contain the asset path and
+  requests for it will 404.
+- Dotfiles (`.git`, `.env*`, `.cyboflow`, ...) and `node_modules` are never served,
+  regardless of `staticRoot` — a request for either is a 404, logged.
+
 ## Manual Playwright E2E (independent of MCP)
 
 `pnpm test:e2e` runs Playwright against `http://localhost:4521`. As noted in
