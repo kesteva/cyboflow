@@ -290,6 +290,15 @@ export interface CaptureResult {
    * `null` is treated the same as `undefined` (no deterministic verdict).
    */
   deterministicVerdict?: VerdictV1 | null;
+  /**
+   * UNTRUSTED, human-facing capture diagnostics (S9 companion): error-level page
+   * console lines and capture-side notes (file:// module-block warning, fold
+   * truncation), capped by the backend. Page code controls this text, so it is
+   * metadata for the HUMAN surfaces (result payload / review item) ONLY — it must
+   * NEVER be threaded into VlmJudge inputs (prompt-injection surface) and never
+   * determines pass/fail.
+   */
+  diagnostics?: string[];
 }
 
 /**
@@ -477,6 +486,14 @@ export interface DeliverableVerifyConfig {
   start?: string;
   url?: string;
   htmlPath?: string;
+  /**
+   * Explicit static-serve root for an `htmlPath` deliverable (S9). The scheduler-
+   * owned static server confines itself to this directory (resolved against the
+   * checkout root). Absent ⇒ dirname(htmlPath) — correct when the html sits at the
+   * build root; declare this for layouts whose root-absolute assets live above the
+   * html's own directory (e.g. `dist/docs/index.html` referencing `/assets/...`).
+   */
+  staticRoot?: string;
   readyWhen?: string;
   viewports?: Array<{ width: number; height: number; label?: string }>;
   interactions?: Array<{

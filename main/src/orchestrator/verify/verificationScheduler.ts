@@ -349,6 +349,80 @@ export type DevServerContextResolver = (args: {
 }) => Promise<{ cwd: string; deliverable: DeliverableVerifyConfig } | null>;
 
 // ---------------------------------------------------------------------------
+// Static-server provider seam (S9 — scheduler-owned static file server)
+//
+// The zero-config `htmlPath` promise: a request that points at a BUILT html file
+// (no dev server, no verify.json `start`) must still render correctly. Loading it
+// over `file://` (the pre-S9 CapturePage path) silently blanks any bundler output —
+// Chromium treats file:// as an opaque origin and CORS-blocks every
+// `<script type="module">`. S9 fixes the class: the scheduler stands the file's
+// static root up on an ephemeral loopback HTTP server and threads the resulting
+// URL into capture, exactly like the S2 dev server (URL threading is the
+// scheduler's job; the backend stays stateless). The OS assigns the port
+// (127.0.0.1:0) so NO `verify:port` lease is needed — that pool exists to
+// interpolate `${PORT}` into user start commands; an OS-assigned port never
+// collides — keeping rung-0 captures fully parallel. The concrete server (a
+// service, node:http) is injected at index.ts; the scheduler imports only these
+// TYPES (standalone-typecheck invariant), mirroring DevServerProvider.
+// ---------------------------------------------------------------------------
+
+/** The args the scheduler passes the provider to stand a static deliverable up. */
+export interface StaticServerSpawnArgs {
+  /** Absolute path of the html entry file (already worktree-resolved + verified). */
+  absoluteHtmlPath: string;
+  /**
+   * Absolute directory the server confines itself to. Defaults upstream to
+   * dirname(absoluteHtmlPath); a verify.json deliverable may widen it via its
+   * explicit `staticRoot` for layouts whose assets live above the html's dir.
+   */
+  staticRoot: string;
+  /** Per-request abort — interrupts an in-flight listen/spawn cleanly. */
+  signal: AbortSignal;
+}
+
+/**
+ * A live static server the scheduler must tear down after capture. `baseUrl` is
+ * the full tokenized URL OF THE HTML ENTRY (not the bare origin) — the scheduler
+ * rewrites it into ctx.input.url verbatim. `release()` closes the listener and
+ * force-destroys open sockets; the scheduler calls it exactly once, in the SAME
+ * finally that releases the S2 dev server.
+ */
+export interface StaticServerHandle {
+  baseUrl: string;
+  release(): Promise<void>;
+}
+
+/**
+ * The narrow static-server spawner interface injected into the scheduler. `spawn`
+ * binds 127.0.0.1:0 and resolves once listening; it rejects (after closing
+ * whatever it opened) on bind failure or abort. The concrete StaticServerManager
+ * (a service) implements it and is wired in at index.ts.
+ */
+export interface StaticServerProvider {
+  spawn(args: StaticServerSpawnArgs): Promise<StaticServerHandle>;
+}
+
+/**
+ * Resolves a request's static-serve context: the ABSOLUTE html path (a relative
+ * request htmlPath resolves against the run's WORKTREE first, project root on
+ * fallback — never the Electron process cwd) + the confining static root
+ * (explicit verify.json `staticRoot` when the matched deliverable declares one,
+ * else dirname(html)). INJECTED as a plain async function (wired at index.ts over
+ * the DB path lookup + fs existence checks) so the scheduler stays fs/electron/
+ * service-free. Returns null when the html file cannot be resolved/found — the
+ * scheduler then skips the static server and the request captures its raw
+ * url/htmlPath unchanged (pre-S9 behavior preserved, fail-soft).
+ */
+export type StaticHtmlContextResolver = (args: {
+  runId: string;
+  projectId: number;
+  /** The request's raw (possibly relative) htmlPath. */
+  htmlPath: string;
+  /** Explicit static root from the matched verify.json deliverable, if any. */
+  staticRoot?: string;
+}) => Promise<{ absoluteHtmlPath: string; staticRoot: string } | null>;
+
+// ---------------------------------------------------------------------------
 // Golden-baseline pre-diff seam (S5 — SSIM gates the VLM)
 //
 // The DETERMINISTIC-FIRST order (decision #3) inserts an SSIM pre-diff between the
@@ -503,6 +577,22 @@ export interface VerificationSchedulerDeps {
    * ever spawned (static capture path preserved).
    */
   devServerContextResolver?: DevServerContextResolver;
+  /**
+   * The scheduler-owned static file server (S9). When present AND a request has an
+   * htmlPath but no url and no dev-server recipe, the scheduler serves the html's
+   * static root on an ephemeral loopback port (no lease — the OS assigns the port),
+   * threads the tokenized entry URL into capture, and tears it down after. Absent ⇒
+   * the raw htmlPath capture path is unchanged (pre-S9 file:// behavior). The
+   * concrete StaticServerManager (a service) is injected at index.ts.
+   */
+  staticServerProvider?: StaticServerProvider;
+  /**
+   * Resolves a request's static-serve context (worktree-resolved absolute html path
+   * + confining static root). Injected as a plain async function so the scheduler
+   * stays fs/electron/service-free — the closure (wired at index.ts) does the DB
+   * path lookup + fs work. Absent ⇒ no static server is ever spawned.
+   */
+  staticHtmlContextResolver?: StaticHtmlContextResolver;
   /**
    * Per-request capture+judge deadline in ms. On expiry the in-flight attempt is
    * `signal.abort()`ed and the row is marked 'timeout' (lease released). Defaults
