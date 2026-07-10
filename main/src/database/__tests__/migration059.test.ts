@@ -1,7 +1,7 @@
 /**
- * Migration 057_compound_recommendations_atype.sql — schema + constraint tests.
+ * Migration 059_compound_recommendations_atype.sql — schema + constraint tests.
  *
- * Applies 006 -> 011 -> 014 -> 015 -> 016 -> 035 -> 045 -> 057 against an
+ * Applies 006 -> 011 -> 014 -> 015 -> 016 -> 035 -> 045 -> 059 against an
  * in-memory SQLite instance. Proves:
  *   1. All SEVEN atypes (incl. the new 'compound-recommendations') are insertable.
  *   2. A bogus atype is still rejected by the widened CHECK.
@@ -47,7 +47,7 @@ const THROUGH_045 = [
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
   seedProject(db);
-  apply(db, [...THROUGH_045, '057_compound_recommendations_atype.sql']);
+  apply(db, [...THROUGH_045, '059_compound_recommendations_atype.sql']);
   return db;
 }
 
@@ -75,7 +75,7 @@ function insertArtifact(
   );
 }
 
-describe('Migration 057: compound-recommendations artifact atype', () => {
+describe('Migration 059: compound-recommendations artifact atype', () => {
   it('accepts all seven atypes (incl. compound-recommendations), rejects a bogus one', () => {
     const db = buildDb();
     seedRun(db, 'run-1');
@@ -106,14 +106,14 @@ describe('Migration 057: compound-recommendations artifact atype', () => {
   it('preserves pre-existing artifacts rows across the copy', () => {
     const db = new Database(':memory:');
     seedProject(db);
-    apply(db, THROUGH_045); // up to but NOT including 057
+    apply(db, THROUGH_045); // up to but NOT including 059
     seedRun(db, 'run-keep');
     db.prepare(
       `INSERT INTO artifacts (id, run_id, atype, label, mode, payload_json, source_ref, committed)
        VALUES ('art_keep', 'run-keep', 'arch-design', 'Keep me', 'template', NULL, 'ide_1', 1)`,
     ).run();
 
-    apply(db, ['057_compound_recommendations_atype.sql']);
+    apply(db, ['059_compound_recommendations_atype.sql']);
 
     const row = db
       .prepare(
