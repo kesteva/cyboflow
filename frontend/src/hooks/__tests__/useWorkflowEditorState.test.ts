@@ -10,6 +10,9 @@
  *   - ADD/REMOVE/MOVE_PHASE (with last-phase / last-step guards)
  *   - SET_PHASE_LABEL / SET_PHASE_COLOR
  *   - generated step/phase ids stay unique + kebab-case
+ *   - workflow-scoped agent config editing (SET_AGENT_MODEL / SET_AGENT_CUSTOM /
+ *     SET_AGENT_CUSTOM_FIELD): pruning of empty configs + empty maps, and
+ *     preservation of `agentConfigs` across unrelated step/phase edits
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -17,7 +20,7 @@ import {
   initWorkflowEditorState,
   type WorkflowEditorState,
 } from '../useWorkflowEditorState';
-import type { WorkflowDefinition } from '../../../../shared/types/workflows';
+import type { WorkflowAgentCustomCopy, WorkflowDefinition } from '../../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -803,5 +806,309 @@ describe('workflowEditorReducer — phase + top-level scalars', () => {
     expect(next.definition).toBe(fresh);
     expect(next.name).toBe('planner');
     expect(next.selectedStepId).toBe('epics');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Workflow-scoped agent config editing (SET_AGENT_MODEL / SET_AGENT_CUSTOM /
+// SET_AGENT_CUSTOM_FIELD)
+// ---------------------------------------------------------------------------
+
+/** A minimal, valid custom-agent copy for seeding SET_AGENT_CUSTOM. */
+function makeCustomCopy(overrides: Partial<WorkflowAgentCustomCopy> = {}): WorkflowAgentCustomCopy {
+  return {
+    description: 'A custom agent',
+    systemPrompt: 'You are a helpful agent.',
+    tools: ['Read', 'Edit'],
+    enabledMcps: ['filesystem'],
+    ...overrides,
+  };
+}
+
+describe('workflowEditorReducer — SET_AGENT_MODEL', () => {
+  it('sets a model for an agent with no prior config', () => {
+    const next = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_MODEL',
+      agentKey: 'executor',
+      model: 'opus',
+    });
+    expect(next.definition.agentConfigs).toEqual({ executor: { model: 'opus' } });
+  });
+
+  it('overwrites an existing model', () => {
+    const first = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_MODEL',
+      agentKey: 'executor',
+      model: 'opus',
+    });
+    const second = workflowEditorReducer(first, {
+      type: 'SET_AGENT_MODEL',
+      agentKey: 'executor',
+      model: 'sonnet',
+    });
+    expect(second.definition.agentConfigs).toEqual({ executor: { model: 'sonnet' } });
+  });
+
+  it('clearing the only field prunes the agent entry and the whole map', () => {
+    const withModel = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_MODEL',
+      agentKey: 'executor',
+      model: 'opus',
+    });
+    const cleared = workflowEditorReducer(withModel, {
+      type: 'SET_AGENT_MODEL',
+      agentKey: 'executor',
+      model: null,
+    });
+    expect(cleared.definition.agentConfigs).toBeUndefined();
+    expect('agentConfigs' in cleared.definition).toBe(false);
+  });
+
+  it('clearing the model leaves a sibling custom copy on the same agent intact', () => {
+    const withCustom = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_CUSTOM',
+      agentKey: 'executor',
+      custom: makeCustomCopy(),
+    });
+    const withBoth = workflowEditorReducer(withCustom, {
+      type: 'SET_AGENT_MODEL',
+      agentKey: 'executor',
+      model: 'opus',
+    });
+    const modelCleared = workflowEditorReducer(withBoth, {
+      type: 'SET_AGENT_MODEL',
+      agentKey: 'executor',
+      model: null,
+    });
+    expect(modelCleared.definition.agentConfigs).toEqual({ executor: { custom: makeCustomCopy() } });
+  });
+
+  it('does not mutate the input state', () => {
+    const state = makeState();
+    const before = JSON.stringify(state.definition);
+    workflowEditorReducer(state, { type: 'SET_AGENT_MODEL', agentKey: 'executor', model: 'opus' });
+    expect(JSON.stringify(state.definition)).toBe(before);
+  });
+});
+
+describe('workflowEditorReducer — SET_AGENT_CUSTOM', () => {
+  it('installs a custom copy for an agent with no prior config', () => {
+    const custom = makeCustomCopy();
+    const next = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_CUSTOM',
+      agentKey: 'verifier',
+      custom,
+    });
+    expect(next.definition.agentConfigs).toEqual({ verifier: { custom } });
+  });
+
+  it('replaces an existing custom copy wholesale', () => {
+    const first = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_CUSTOM',
+      agentKey: 'verifier',
+      custom: makeCustomCopy({ description: 'v1' }),
+    });
+    const replaced = workflowEditorReducer(first, {
+      type: 'SET_AGENT_CUSTOM',
+      agentKey: 'verifier',
+      custom: makeCustomCopy({ description: 'v2' }),
+    });
+    expect(replaced.definition.agentConfigs?.verifier.custom?.description).toBe('v2');
+  });
+
+  it('reverting to predefined (null) removes the custom key and prunes the empty map', () => {
+    const withCustom = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_CUSTOM',
+      agentKey: 'verifier',
+      custom: makeCustomCopy(),
+    });
+    const reverted = workflowEditorReducer(withCustom, {
+      type: 'SET_AGENT_CUSTOM',
+      agentKey: 'verifier',
+      custom: null,
+    });
+    expect(reverted.definition.agentConfigs).toBeUndefined();
+    expect('agentConfigs' in reverted.definition).toBe(false);
+  });
+
+  it('reverting to predefined leaves a sibling model override on the same agent intact', () => {
+    const withModel = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_MODEL',
+      agentKey: 'verifier',
+      model: 'haiku',
+    });
+    const withBoth = workflowEditorReducer(withModel, {
+      type: 'SET_AGENT_CUSTOM',
+      agentKey: 'verifier',
+      custom: makeCustomCopy(),
+    });
+    const customReverted = workflowEditorReducer(withBoth, {
+      type: 'SET_AGENT_CUSTOM',
+      agentKey: 'verifier',
+      custom: null,
+    });
+    expect(customReverted.definition.agentConfigs).toEqual({ verifier: { model: 'haiku' } });
+  });
+});
+
+describe('workflowEditorReducer — SET_AGENT_CUSTOM_FIELD', () => {
+  it('no-ops when the agent has no custom copy at all', () => {
+    const state = makeState();
+    const next = workflowEditorReducer(state, {
+      type: 'SET_AGENT_CUSTOM_FIELD',
+      agentKey: 'executor',
+      field: 'description',
+      value: 'ignored',
+    });
+    // True structural AND referential no-op — the definition is untouched.
+    expect(next.definition).toBe(state.definition);
+    expect(next.definition.agentConfigs).toBeUndefined();
+  });
+
+  it('no-ops when the agent has a model override but no custom copy', () => {
+    const withModel = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_MODEL',
+      agentKey: 'executor',
+      model: 'opus',
+    });
+    const next = workflowEditorReducer(withModel, {
+      type: 'SET_AGENT_CUSTOM_FIELD',
+      agentKey: 'executor',
+      field: 'description',
+      value: 'ignored',
+    });
+    expect(next.definition).toBe(withModel.definition);
+  });
+
+  it('edits description, systemPrompt, tools, and enabledMcps on an existing copy', () => {
+    let state = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_CUSTOM',
+      agentKey: 'executor',
+      custom: makeCustomCopy(),
+    });
+    state = workflowEditorReducer(state, {
+      type: 'SET_AGENT_CUSTOM_FIELD',
+      agentKey: 'executor',
+      field: 'description',
+      value: 'Updated description',
+    });
+    state = workflowEditorReducer(state, {
+      type: 'SET_AGENT_CUSTOM_FIELD',
+      agentKey: 'executor',
+      field: 'systemPrompt',
+      value: 'Updated prompt',
+    });
+    state = workflowEditorReducer(state, {
+      type: 'SET_AGENT_CUSTOM_FIELD',
+      agentKey: 'executor',
+      field: 'tools',
+      value: ['Read', 'Bash'],
+    });
+    state = workflowEditorReducer(state, {
+      type: 'SET_AGENT_CUSTOM_FIELD',
+      agentKey: 'executor',
+      field: 'enabledMcps',
+      value: ['git'],
+    });
+
+    expect(state.definition.agentConfigs?.executor.custom).toEqual({
+      description: 'Updated description',
+      systemPrompt: 'Updated prompt',
+      tools: ['Read', 'Bash'],
+      enabledMcps: ['git'],
+    });
+  });
+});
+
+describe('workflowEditorReducer — agent config pruning + preservation', () => {
+  it('a config left with neither model nor custom is dropped (clearing the last field)', () => {
+    const withCustom = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_CUSTOM',
+      agentKey: 'executor',
+      custom: makeCustomCopy(),
+    });
+    const reverted = workflowEditorReducer(withCustom, {
+      type: 'SET_AGENT_CUSTOM',
+      agentKey: 'executor',
+      custom: null,
+    });
+    expect(reverted.definition.agentConfigs).toBeUndefined();
+  });
+
+  it('an agentConfigs map left empty is removed entirely, not persisted as {}', () => {
+    const withTwo = [
+      { agentKey: 'executor', model: 'opus' as const },
+      { agentKey: 'verifier', model: 'sonnet' as const },
+    ].reduce(
+      (state, { agentKey, model }) =>
+        workflowEditorReducer(state, { type: 'SET_AGENT_MODEL', agentKey, model }),
+      makeState(),
+    );
+    const clearedOne = workflowEditorReducer(withTwo, {
+      type: 'SET_AGENT_MODEL',
+      agentKey: 'executor',
+      model: null,
+    });
+    // One entry remains — map still present.
+    expect(clearedOne.definition.agentConfigs).toEqual({ verifier: { model: 'sonnet' } });
+
+    const clearedBoth = workflowEditorReducer(clearedOne, {
+      type: 'SET_AGENT_MODEL',
+      agentKey: 'verifier',
+      model: null,
+    });
+    // Last entry removed — the map itself is gone, not `{}`.
+    expect(clearedBoth.definition.agentConfigs).toBeUndefined();
+    expect(JSON.stringify(clearedBoth.definition)).not.toContain('agentConfigs');
+  });
+
+  it('unrelated step edits (SET_STEP_FIELD) preserve an existing agentConfigs map', () => {
+    const withConfig = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_MODEL',
+      agentKey: 'executor',
+      model: 'opus',
+    });
+    const edited = workflowEditorReducer(withConfig, {
+      type: 'SET_STEP_FIELD',
+      phaseId: 'plan',
+      stepId: 'context',
+      field: 'name',
+      value: 'Renamed',
+    });
+    expect(edited.definition.agentConfigs).toEqual({ executor: { model: 'opus' } });
+    expect(findStep(edited.definition, 'context')?.name).toBe('Renamed');
+  });
+
+  it('unrelated phase edits (ADD_PHASE, SET_PHASE_LABEL) preserve an existing agentConfigs map', () => {
+    const withConfig = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_CUSTOM',
+      agentKey: 'verifier',
+      custom: makeCustomCopy(),
+    });
+    const added = workflowEditorReducer(withConfig, { type: 'ADD_PHASE' });
+    expect(added.definition.agentConfigs).toEqual({ verifier: { custom: makeCustomCopy() } });
+
+    const labeled = workflowEditorReducer(added, {
+      type: 'SET_PHASE_LABEL',
+      phaseId: 'plan',
+      label: 'Planning v2',
+    });
+    expect(labeled.definition.agentConfigs).toEqual({ verifier: { custom: makeCustomCopy() } });
+  });
+
+  it('does not mutate the input definition when editing a custom-field on an existing copy', () => {
+    const state = workflowEditorReducer(makeState(), {
+      type: 'SET_AGENT_CUSTOM',
+      agentKey: 'executor',
+      custom: makeCustomCopy(),
+    });
+    const before = JSON.stringify(state.definition);
+    workflowEditorReducer(state, {
+      type: 'SET_AGENT_CUSTOM_FIELD',
+      agentKey: 'executor',
+      field: 'description',
+      value: 'mutated?',
+    });
+    expect(JSON.stringify(state.definition)).toBe(before);
   });
 });

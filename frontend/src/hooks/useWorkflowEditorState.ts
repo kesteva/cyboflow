@@ -21,10 +21,13 @@
 import { useReducer } from 'react';
 import type {
   FanOutInnerStep,
+  WorkflowAgentConfig,
+  WorkflowAgentCustomCopy,
   WorkflowDefinition,
   WorkflowPhase,
   WorkflowStep,
 } from '../../../shared/types/workflows';
+import type { AgentModelAlias } from '../../../shared/types/agents';
 import { PHASE_COLORS } from '../components/cyboflow/workflowEditorOptions';
 
 // ---------------------------------------------------------------------------
@@ -54,6 +57,19 @@ export type StepFieldAction =
   | { type: 'SET_STEP_FIELD'; phaseId: string; stepId: string; field: 'agent'; value: string }
   | { type: 'SET_STEP_FIELD'; phaseId: string; stepId: string; field: 'desc'; value: string }
   | { type: 'SET_STEP_FIELD'; phaseId: string; stepId: string; field: 'retries'; value: number };
+
+/**
+ * One (field, value) pair of `WorkflowAgentCustomCopy`, correlated via a
+ * mapped type so the reducer can narrow `action.value`'s type from
+ * `action.field` with no cast — mirrors `StepFieldAction`'s per-field
+ * discriminated-union approach, generated instead of hand-enumerated since
+ * `WorkflowAgentCustomCopy` has a `tools`/`enabledMcps` array-typed field.
+ */
+type AgentCustomFieldEdit = {
+  [K in keyof WorkflowAgentCustomCopy]: { field: K; value: WorkflowAgentCustomCopy[K] };
+}[keyof WorkflowAgentCustomCopy];
+
+export type SetAgentCustomFieldAction = { type: 'SET_AGENT_CUSTOM_FIELD'; agentKey: string } & AgentCustomFieldEdit;
 
 export type WorkflowEditorAction =
   | { type: 'SET_DEFINITION'; definition: WorkflowDefinition; name?: string }
@@ -87,7 +103,12 @@ export type WorkflowEditorAction =
   | { type: 'REMOVE_PHASE'; phaseId: string }
   | { type: 'MOVE_PHASE'; phaseId: string; dir: 'up' | 'down' }
   | { type: 'SET_PHASE_LABEL'; phaseId: string; label: string }
-  | { type: 'SET_PHASE_COLOR'; phaseId: string; color: string };
+  | { type: 'SET_PHASE_COLOR'; phaseId: string; color: string }
+  // Workflow-scoped agent config editing (keyed by agent key, NOT step id —
+  // see `WorkflowAgentConfig` doc comment for the per-workflow-agent scope).
+  | { type: 'SET_AGENT_MODEL'; agentKey: string; model: AgentModelAlias | null }
+  | { type: 'SET_AGENT_CUSTOM'; agentKey: string; custom: WorkflowAgentCustomCopy | null }
+  | SetAgentCustomFieldAction;
 
 // ---------------------------------------------------------------------------
 // Id helpers — kebab-case + uniqueness
@@ -179,6 +200,44 @@ function swap<T>(arr: readonly T[], i: number, j: number): T[] {
   next[i] = next[j];
   next[j] = tmp;
   return next;
+}
+
+/**
+ * Apply `fn` to one agent's config in `def.agentConfigs`, keyed by agent key
+ * (the SAME vocabulary as `WorkflowStep.agent` — scope is per workflow-agent,
+ * shared across every step that binds it, not per step). `fn` receives `{}`
+ * when the agent has no config yet; returning the SAME reference back (a
+ * declined edit — e.g. `SET_AGENT_CUSTOM_FIELD` with no existing custom copy)
+ * makes this a true no-op, short-circuiting before any object is rebuilt.
+ *
+ * Enforces the two prune invariants so the modal's structural (JSON) dirty
+ * check never sees a no-op edit as a diff:
+ *   - a config left with neither `model` nor `custom` is dropped from the map
+ *   - a map left empty is removed entirely (key absent, not `{}`)
+ */
+function mapAgentConfig(
+  def: WorkflowDefinition,
+  agentKey: string,
+  fn: (config: WorkflowAgentConfig) => WorkflowAgentConfig,
+): WorkflowDefinition {
+  const current = def.agentConfigs?.[agentKey] ?? {};
+  const next = fn(current);
+  if (next === current) return def;
+
+  const configs = { ...(def.agentConfigs ?? {}) };
+  if (next.model === undefined && next.custom === undefined) {
+    delete configs[agentKey];
+  } else {
+    configs[agentKey] = next;
+  }
+
+  const result = { ...def };
+  if (Object.keys(configs).length === 0) {
+    delete result.agentConfigs;
+  } else {
+    result.agentConfigs = configs;
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -580,6 +639,52 @@ export function workflowEditorReducer(
         ...phase,
         color: action.color,
       }));
+      return { ...state, definition };
+    }
+
+    case 'SET_AGENT_MODEL': {
+      const definition = mapAgentConfig(state.definition, action.agentKey, (config) => {
+        if (action.model === null) {
+          if (config.model === undefined) return config;
+          const rest = { ...config };
+          delete rest.model;
+          return rest;
+        }
+        return { ...config, model: action.model };
+      });
+      return { ...state, definition };
+    }
+
+    case 'SET_AGENT_CUSTOM': {
+      const definition = mapAgentConfig(state.definition, action.agentKey, (config) => {
+        if (action.custom === null) {
+          if (config.custom === undefined) return config;
+          const rest = { ...config };
+          delete rest.custom;
+          return rest;
+        }
+        return { ...config, custom: action.custom };
+      });
+      return { ...state, definition };
+    }
+
+    case 'SET_AGENT_CUSTOM_FIELD': {
+      const definition = mapAgentConfig(state.definition, action.agentKey, (config) => {
+        // No-op when there's no existing custom copy to edit — a single field
+        // edit never installs one (SET_AGENT_CUSTOM does that explicitly).
+        if (config.custom === undefined) return config;
+        const custom = config.custom;
+        switch (action.field) {
+          case 'description':
+            return { ...config, custom: { ...custom, description: action.value } };
+          case 'systemPrompt':
+            return { ...config, custom: { ...custom, systemPrompt: action.value } };
+          case 'tools':
+            return { ...config, custom: { ...custom, tools: action.value } };
+          case 'enabledMcps':
+            return { ...config, custom: { ...custom, enabledMcps: action.value } };
+        }
+      });
       return { ...state, definition };
     }
 
