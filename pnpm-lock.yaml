@@ -28,6 +28,9 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@3.25.76)
+      '@openai/codex':
+        specifier: 0.143.0
+        version: 0.143.0
       '@sentry/electron':
         specifier: ^7.13.0
         version: 7.13.0
@@ -321,8 +324,8 @@ importers:
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(zod@3.25.76)
-      '@openai/codex-sdk':
-        specifier: ^0.143.0
+      '@openai/codex':
+        specifier: 0.143.0
         version: 0.143.0
       '@sentry/electron':
         specifier: ^7.13.0
@@ -1499,10 +1502,6 @@ packages:
     resolution: {integrity: sha512-mJd2Z5TjYWq/ttPLLGqArdtnC74J6bOzg4rMDnN+p1xTacZ2yPRCk2y0oSWQtygLR9YVQXgOcONrwtnk3JupxQ==}
     engines: {node: ^12.13.0 || ^14.15.0 || >=16.0.0}
     deprecated: This functionality has been moved to @npmcli/fs
-
-  '@openai/codex-sdk@0.143.0':
-    resolution: {integrity: sha512-AQb06ERd2Z6MGgyiL3pcN4sw7m4ESkVSy1nSd2ks+cmchnk06AMOy8lRCH5dkyxI+dtnqWa7dLolqf7aRuOqJA==}
-    engines: {node: '>=18'}
 
   '@openai/codex@0.143.0':
     resolution: {integrity: sha512-6h53sNtESIYncWVwU7zEjdVajwcad/0H94MOrgGqhwBMa9RRUDVG6DU9E9euC7yRdtrsKDAkJkz/m5moZ6MU3A==}
@@ -7330,10 +7329,6 @@ snapshots:
     dependencies:
       mkdirp: 1.0.4
       rimraf: 3.0.2
-
-  '@openai/codex-sdk@0.143.0':
-    dependencies:
-      '@openai/codex': 0.143.0
 
   '@openai/codex@0.143.0':
     optionalDependencies:
