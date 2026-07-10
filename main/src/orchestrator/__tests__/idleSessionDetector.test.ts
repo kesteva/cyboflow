@@ -106,7 +106,7 @@ function seedSession(db: Database.Database, o: SeedSessionOverrides = {}): strin
     name: o.name ?? 'quick-20260710-190000',
     project_id: o.project_id ?? 7,
     substrate: o.substrate ?? 'interactive',
-    is_quick: o.is_quick ?? 1,
+    is_quick: o.is_quick ?? 0, // real sessions are is_quick=0; identity keys on chat_run_id
     is_main_repo: o.is_main_repo ?? 0,
     archived: o.archived ?? 0,
     status: o.status ?? 'completed',
@@ -205,15 +205,6 @@ describe('IdleSessionDetector — minting', () => {
     });
     expect(change.payload).toEqual({ kind: 'human_task' });
     expect(change.title).toContain('quick-20260710-190000');
-  });
-
-  it('omits runId when the session has no chat_run_id', async () => {
-    seedSession(db, { chat_run_id: null });
-    const { apply, calls } = makeApply(db);
-    await makeDetector(db, apply).scan();
-
-    const change = creates(calls)[0].change as ReviewItemCreate;
-    expect(change.runId).toBeUndefined();
   });
 
   it('omits runId (but still surfaces) when chat_run_id dangles with no workflow_runs row', async () => {
@@ -332,7 +323,7 @@ describe('IdleSessionDetector — scope exclusions', () => {
 
   const cases: Array<[string, SeedSessionOverrides]> = [
     ['sdk substrate', { substrate: 'sdk' }],
-    ['not a quick session', { is_quick: 0 }],
+    ['no chat sentinel (chat_run_id null)', { chat_run_id: null }],
     ['hidden main-repo singleton', { is_main_repo: 1 }],
     ['archived', { archived: 1 }],
     ['still running', { status: 'running' }],

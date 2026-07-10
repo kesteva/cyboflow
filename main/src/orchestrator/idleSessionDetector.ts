@@ -85,9 +85,16 @@ interface PendingIdleItemRow {
 
 /**
  * The "in scope" predicate shared by minting and auto-resolve: an interactive,
- * list-visible quick session (not the hidden main-repo singleton, not archived)
- * that rested to 'completed' and has NOT been viewed since (last_viewed_at is
- * NULL or older than the resting updated_at → renders as completed_unviewed).
+ * list-visible chat/quick session (not the hidden main-repo singleton, not
+ * archived) that rested to 'completed' and has NOT been viewed since
+ * (last_viewed_at is NULL or older than the resting updated_at → completed_unviewed).
+ *
+ * Identity is `substrate='interactive' AND chat_run_id IS NOT NULL`, NOT is_quick:
+ * db.createSession never writes is_quick (it's only set by migration 012's one-time
+ * backfill WHERE run_id IS NULL, which modern quick sessions fail), so is_quick=1
+ * matches almost no real session. chat_run_id is the chat-REPL sentinel every
+ * interactive quick session carries once its first turn resolves, and it is exactly
+ * what the turn-end rester (index.ts) keys on to rest a session to 'completed'.
  * Columns are qualified `s.` so this composes with the workflow_runs LEFT JOIN
  * in the candidate query (workflow_runs also has substrate/status/updated_at,
  * which would otherwise be ambiguous).
@@ -104,7 +111,7 @@ interface PendingIdleItemRow {
  */
 const IN_SCOPE_PREDICATE = `
   s.substrate = 'interactive'
-  AND s.is_quick = 1
+  AND s.chat_run_id IS NOT NULL
   AND (s.is_main_repo IS NULL OR s.is_main_repo = 0)
   AND (s.archived IS NULL OR s.archived = 0)
   AND s.status = 'completed'
