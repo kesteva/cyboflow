@@ -256,11 +256,13 @@ export function VariantEditorModal({
           <WorkflowEditorCanvas
             definition={state.definition}
             selectedStepId={state.selectedStepId}
+            selectedFanOutInner={state.selectedFanOutInner}
             dispatch={dispatch}
           />
           <WorkflowStepInspector
             definition={state.definition}
             selectedStepId={state.selectedStepId}
+            selectedFanOutInner={state.selectedFanOutInner}
             dispatch={dispatch}
           />
         </div>

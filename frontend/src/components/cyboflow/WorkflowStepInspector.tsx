@@ -12,10 +12,11 @@
  *
  * FEATURE: user-editable workflow blueprint editor.
  */
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
-import type { WorkflowDefinition, WorkflowPhase, WorkflowStep } from '../../../../shared/types/workflows';
-import type { WorkflowEditorAction } from '../../hooks/useWorkflowEditorState';
+import type { FanOutInnerStep, WorkflowDefinition, WorkflowPhase, WorkflowStep } from '../../../../shared/types/workflows';
+import { SPRINT_BATCH_CAP } from '../../../../shared/types/sprintBatch';
+import type { WorkflowEditorAction, WorkflowEditorState } from '../../hooks/useWorkflowEditorState';
 import { AGENT_OPTIONS, MCP_OPTIONS } from './workflowEditorOptions';
 
 type InspectorTab = 'step' | 'agent' | 'mcp';
@@ -23,6 +24,7 @@ type InspectorTab = 'step' | 'agent' | 'mcp';
 export interface WorkflowStepInspectorProps {
   definition: WorkflowDefinition;
   selectedStepId: string | null;
+  selectedFanOutInner: WorkflowEditorState['selectedFanOutInner'];
   dispatch: React.Dispatch<WorkflowEditorAction>;
   /**
    * The editor project's CUSTOM agent keys (bare, e.g. `my-helper`), merged into
@@ -46,6 +48,17 @@ function findStep(
   return null;
 }
 
+function findFanOutInner(
+  definition: WorkflowDefinition,
+  selection: WorkflowEditorState['selectedFanOutInner'],
+): { phase: WorkflowPhase; step: WorkflowStep; inner: FanOutInnerStep; innerIndex: number } | null {
+  if (selection === null) return null;
+  const found = findStep(definition, selection.stepId);
+  const inner = found?.step.fanOut?.inner[selection.innerIndex];
+  if (found === null || inner === undefined) return null;
+  return { ...found, inner, innerIndex: selection.innerIndex };
+}
+
 const labelStyle: React.CSSProperties = {
   fontSize: 9,
   letterSpacing: '0.18em',
@@ -67,14 +80,45 @@ const inputStyle: React.CSSProperties = {
   boxSizing: 'border-box',
 };
 
+function innerDisplayName(inner: FanOutInnerStep): string {
+  return inner.name != null && inner.name.trim().length > 0 ? inner.name : inner.id;
+}
+
 export function WorkflowStepInspector({
   definition,
   selectedStepId,
+  selectedFanOutInner,
   dispatch,
   customAgentKeys = [],
 }: WorkflowStepInspectorProps) {
   const [tab, setTab] = useState<InspectorTab>('step');
+  const foundInner = findFanOutInner(definition, selectedFanOutInner);
   const found = findStep(definition, selectedStepId);
+
+  if (foundInner !== null) {
+    return (
+      <div
+        style={{
+          width: 300,
+          flexShrink: 0,
+          borderLeft: '1px solid var(--color-border-primary)',
+          background: 'var(--color-bg-secondary)',
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+        data-testid="workflow-step-inspector"
+      >
+        <InnerFanOutInspector
+          phase={foundInner.phase}
+          step={foundInner.step}
+          inner={foundInner.inner}
+          innerIndex={foundInner.innerIndex}
+          dispatch={dispatch}
+          customAgentKeys={customAgentKeys}
+        />
+      </div>
+    );
+  }
 
   return (
     <div
@@ -154,6 +198,192 @@ interface TabProps {
   phase: WorkflowPhase;
   step: WorkflowStep;
   dispatch: React.Dispatch<WorkflowEditorAction>;
+}
+
+function agentOptionsFor(agent: string, customAgentKeys: readonly string[]) {
+  const builtinOptions = AGENT_OPTIONS as readonly string[];
+  const extraCustomKeys = customAgentKeys.filter((k) => !builtinOptions.includes(k));
+  const agentOptions = [...builtinOptions, ...extraCustomKeys];
+  const customKeySet = new Set(extraCustomKeys);
+  const agentInList = agentOptions.includes(agent);
+  return { agentOptions, customKeySet, agentInList };
+}
+
+function InnerFanOutInspector({
+  phase,
+  step,
+  inner,
+  innerIndex,
+  dispatch,
+  customAgentKeys,
+}: {
+  phase: WorkflowPhase;
+  step: WorkflowStep;
+  inner: FanOutInnerStep;
+  innerIndex: number;
+  dispatch: React.Dispatch<WorkflowEditorAction>;
+  customAgentKeys: readonly string[];
+}) {
+  const { agentOptions, customKeySet, agentInList } = agentOptionsFor(inner.agent, customAgentKeys);
+  const siblingTargets = step.fanOut?.inner
+    .map((candidate, idx) => ({ candidate, idx }))
+    .filter(({ idx }) => idx !== innerIndex) ?? [];
+
+  return (
+    <>
+      <div
+        style={{
+          padding: '10px 14px',
+          borderBottom: '1px solid var(--color-border-primary)',
+          background: 'rgba(201,100,66,0.05)',
+        }}
+      >
+        <div
+          style={{
+            fontSize: 9,
+            letterSpacing: '0.16em',
+            textTransform: 'uppercase',
+            color: 'var(--color-status-error)',
+            fontWeight: 700,
+          }}
+        >
+          ⇄ Fan-out inner · {phase.label} · {step.id}
+        </div>
+        <div style={{ marginTop: 5, fontSize: 9.5, color: 'var(--color-text-tertiary)', lineHeight: 1.5 }}>
+          Edits one persisted <b>FanOutInnerStep</b>. Runtime lane loopback is reserved.
+        </div>
+      </div>
+      <div
+        style={{
+          flex: 1,
+          overflow: 'auto',
+          padding: '14px 16px',
+          fontSize: 11,
+          lineHeight: 1.45,
+          color: 'var(--color-text-primary)',
+        }}
+        data-testid="inspector-fanout-inner-editor"
+      >
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div>
+            <label style={labelStyle} htmlFor="insp-inner-name">name</label>
+            <input
+              id="insp-inner-name"
+              type="text"
+              value={inner.name ?? ''}
+              onChange={(e) =>
+                dispatch({
+                  type: 'SET_FANOUT_INNER_FIELD',
+                  phaseId: phase.id,
+                  stepId: step.id,
+                  innerIndex,
+                  field: 'name',
+                  value: e.target.value,
+                })
+              }
+              style={inputStyle}
+              data-testid="inspector-fanout-inner-name-input"
+            />
+          </div>
+
+          <div>
+            <label style={labelStyle} htmlFor="insp-inner-id">id</label>
+            <FanOutInnerIdInput
+              id="insp-inner-id"
+              value={inner.id}
+              onCommit={(value) =>
+                dispatch({
+                  type: 'SET_FANOUT_INNER_FIELD',
+                  phaseId: phase.id,
+                  stepId: step.id,
+                  innerIndex,
+                  field: 'id',
+                  value,
+                })
+              }
+              style={inputStyle}
+              testId="inspector-fanout-inner-id-input"
+            />
+          </div>
+
+          <div>
+            <label style={labelStyle} htmlFor="insp-inner-agent">agent</label>
+            <select
+              id="insp-inner-agent"
+              value={inner.agent}
+              onChange={(e) =>
+                dispatch({
+                  type: 'SET_FANOUT_INNER_FIELD',
+                  phaseId: phase.id,
+                  stepId: step.id,
+                  innerIndex,
+                  field: 'agent',
+                  value: e.target.value,
+                })
+              }
+              style={inputStyle}
+              data-testid="inspector-fanout-inner-agent-select"
+            >
+              {!agentInList && inner.agent.length > 0 && (
+                <option value={inner.agent}>{inner.agent} (custom)</option>
+              )}
+              {agentOptions.map((a) => (
+                <option key={a} value={a}>
+                  {customKeySet.has(a) ? `${a} (custom)` : a}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <ToggleRow
+            label="optional"
+            checked={inner.optional === true}
+            onToggle={() =>
+              dispatch({
+                type: 'TOGGLE_FANOUT_INNER_OPTIONAL',
+                phaseId: phase.id,
+                stepId: step.id,
+                innerIndex,
+              })
+            }
+            testId="inspector-fanout-inner-optional-toggle"
+          />
+
+          <div>
+            <label style={labelStyle} htmlFor="insp-inner-loopback">loopback (reserved)</label>
+            <select
+              id="insp-inner-loopback"
+              value={inner.loopback ?? ''}
+              onChange={(e) =>
+                dispatch({
+                  type: 'SET_FANOUT_INNER_LOOPBACK',
+                  phaseId: phase.id,
+                  stepId: step.id,
+                  innerIndex,
+                  loopback: e.target.value === '' ? null : e.target.value,
+                })
+              }
+              style={inputStyle}
+              data-testid="inspector-fanout-inner-loopback-select"
+            >
+              <option value="">(none)</option>
+              {siblingTargets.map(({ candidate }) => (
+                <option key={candidate.id} value={candidate.id}>
+                  {innerDisplayName(candidate)} · {candidate.id}
+                </option>
+              ))}
+            </select>
+            <p
+              style={{ marginTop: 6, fontSize: 9.5, color: 'var(--color-text-tertiary)' }}
+              data-testid="inspector-fanout-inner-loopback-reserved"
+            >
+              Reserved - not yet executed for lanes.
+            </p>
+          </div>
+        </div>
+      </div>
+    </>
+  );
 }
 
 function StepTab({ phase, step, dispatch }: TabProps) {
@@ -247,6 +477,7 @@ function StepTab({ phase, step, dispatch }: TabProps) {
 function FanOutSection({ phase, step, dispatch }: TabProps): ReactElement {
   const fanOut = step.fanOut;
   const enabled = fanOut !== undefined;
+  const unsupportedOver = enabled && fanOut !== undefined && fanOut.over !== 'tasks';
 
   return (
     <div
@@ -268,23 +499,53 @@ function FanOutSection({ phase, step, dispatch }: TabProps): ReactElement {
         testId="inspector-toggle-fanout"
       />
 
+      {!enabled && (
+        <p
+          style={{ margin: 0, fontSize: 9.5, color: 'var(--color-text-tertiary)', lineHeight: 1.45 }}
+          data-testid="inspector-fanout-off-note"
+        >
+          This step runs once unless fan-out is enabled.
+        </p>
+      )}
+
       {enabled && fanOut !== undefined && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }} data-testid="inspector-fanout-editor">
           <div>
             <label style={labelStyle} htmlFor="insp-fanout-over">over (item source)</label>
-            <input
+            <select
               id="insp-fanout-over"
-              type="text"
               value={fanOut.over}
-              onChange={(e) =>
-                dispatch({ type: 'SET_FANOUT_OVER', phaseId: phase.id, stepId: step.id, over: e.target.value })
+              onChange={() =>
+                dispatch({ type: 'SET_FANOUT_OVER', phaseId: phase.id, stepId: step.id })
               }
               style={inputStyle}
               data-testid="inspector-fanout-over-input"
-            />
+            >
+              {unsupportedOver && (
+                <option value={fanOut.over}>{fanOut.over} (unsupported)</option>
+              )}
+              <option value="tasks">tasks</option>
+            </select>
             <p style={{ marginTop: 6, fontSize: 9.5, color: 'var(--color-text-tertiary)' }}>
-              Runtime item-source key — v1 recognizes <b>tasks</b> (→ batch lane task ids).
+              {unsupportedOver
+                ? 'Unsupported item sources run once until changed to tasks.'
+                : 'Programmatic batch runs only — orchestrated runs execute this step once.'}
             </p>
+          </div>
+
+          <div
+            style={{
+              border: '1px solid var(--color-border-primary)',
+              background: 'var(--color-bg-primary)',
+              padding: '7px 8px',
+              fontSize: 10,
+              color: 'var(--color-text-secondary)',
+            }}
+            data-testid="inspector-fanout-system-cap"
+          >
+            <span style={{ color: 'var(--color-text-tertiary)' }}>system cap </span>
+            <b style={{ color: 'var(--color-text-primary)' }}>{SPRINT_BATCH_CAP}</b>
+            <span style={{ color: 'var(--color-text-tertiary)' }}> · no per-step concurrency yet</span>
           </div>
 
           <div>
@@ -320,22 +581,21 @@ function FanOutSection({ phase, step, dispatch }: TabProps): ReactElement {
                     style={inputStyle}
                     data-testid={`inspector-fanout-inner-name-${idx}`}
                   />
-                  <input
-                    type="text"
+                  <FanOutInnerIdInput
                     value={inner.id}
-                    onChange={(e) =>
+                    onCommit={(value) =>
                       dispatch({
                         type: 'SET_FANOUT_INNER_FIELD',
                         phaseId: phase.id,
                         stepId: step.id,
                         innerIndex: idx,
                         field: 'id',
-                        value: e.target.value,
+                        value,
                       })
                     }
                     placeholder="id"
                     style={inputStyle}
-                    data-testid={`inspector-fanout-inner-id-${idx}`}
+                    testId={`inspector-fanout-inner-id-${idx}`}
                   />
                   <input
                     type="text"
@@ -424,6 +684,53 @@ function FanOutSection({ phase, step, dispatch }: TabProps): ReactElement {
         </div>
       )}
     </div>
+  );
+}
+
+function FanOutInnerIdInput({
+  id,
+  value,
+  onCommit,
+  placeholder,
+  style,
+  testId,
+}: {
+  id?: string;
+  value: string;
+  onCommit: (value: string) => void;
+  placeholder?: string;
+  style: React.CSSProperties;
+  testId: string;
+}) {
+  const [draft, setDraft] = useState(value);
+
+  useEffect(() => {
+    setDraft(value);
+  }, [value]);
+
+  function commit(): void {
+    if (draft !== value) onCommit(draft);
+    // Resync unconditionally: the reducer kebab-normalizes the committed draft,
+    // and when normalization is a fixed point (e.g. 'ITEM' → current id 'item')
+    // the `value` prop never changes, so the [value] effect alone would leave a
+    // stale un-normalized draft on screen.
+    setDraft(value);
+  }
+
+  return (
+    <input
+      id={id}
+      type="text"
+      value={draft}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+      }}
+      placeholder={placeholder}
+      style={style}
+      data-testid={testId}
+    />
   );
 }
 

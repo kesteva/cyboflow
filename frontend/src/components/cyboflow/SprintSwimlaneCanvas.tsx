@@ -83,10 +83,11 @@ interface LaneStepColumn {
  *
  * Generalizes the fixed SPRINT_LANE_STEP_IDS strip to any fanOut step: scans the
  * definition's phases for the FIRST step that declares `fanOut` and maps its
- * `inner` chain to columns (label = inner.name ?? inner.id; optional from the
- * inner step). When no fanOut step is present (e.g. an orchestrated/legacy def or
- * a null definition) it falls back to SPRINT_LANE_STEP_IDS with the canonical
- * short labels — so the sprint flow renders byte-identically.
+ * `inner` chain to columns (label = non-empty inner.name, else inner.id; optional
+ * from the inner step). When no fanOut step is present (e.g. an
+ * orchestrated/legacy def or a null definition) it falls back to
+ * SPRINT_LANE_STEP_IDS with the canonical short labels — so the sprint flow
+ * renders byte-identically.
  */
 function laneStepIdsFor(definition: WorkflowDefinition | null): LaneStepColumn[] {
   const fanOutStep = definition?.phases
@@ -95,7 +96,7 @@ function laneStepIdsFor(definition: WorkflowDefinition | null): LaneStepColumn[]
   if (fanOutStep?.fanOut !== undefined) {
     return fanOutStep.fanOut.inner.map((inner) => ({
       id: inner.id,
-      label: inner.name ?? inner.id,
+      label: inner.name != null && inner.name.trim().length > 0 ? inner.name : inner.id,
       optional: inner.optional === true,
     }));
   }

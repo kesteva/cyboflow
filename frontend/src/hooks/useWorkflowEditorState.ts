@@ -38,7 +38,11 @@ export interface WorkflowEditorState {
   definition: WorkflowDefinition;
   /** Currently-selected step id (drives the inspector), or null. */
   selectedStepId: string | null;
+  /** Currently-selected fan-out inner row, scoped by its owning outer step. */
+  selectedFanOutInner: { stepId: string; innerIndex: number } | null;
 }
+
+const FANOUT_OVER_TASKS = 'tasks';
 
 // ---------------------------------------------------------------------------
 // Actions
@@ -55,6 +59,7 @@ export type WorkflowEditorAction =
   | { type: 'SET_DEFINITION'; definition: WorkflowDefinition; name?: string }
   | { type: 'SET_NAME'; name: string }
   | { type: 'SELECT_STEP'; stepId: string | null }
+  | { type: 'SELECT_FANOUT_INNER'; stepId: string; innerIndex: number }
   | StepFieldAction
   | { type: 'TOGGLE_OPTIONAL'; phaseId: string; stepId: string }
   | { type: 'TOGGLE_HUMAN'; phaseId: string; stepId: string }
@@ -62,7 +67,7 @@ export type WorkflowEditorAction =
   | { type: 'SET_LOOPBACK'; phaseId: string; stepId: string; loopback: string | null }
   // Fan-out (parallel per-item) editing.
   | { type: 'SET_STEP_FANOUT'; phaseId: string; stepId: string; enabled: boolean }
-  | { type: 'SET_FANOUT_OVER'; phaseId: string; stepId: string; over: string }
+  | { type: 'SET_FANOUT_OVER'; phaseId: string; stepId: string }
   | { type: 'ADD_FANOUT_INNER'; phaseId: string; stepId: string }
   | { type: 'REMOVE_FANOUT_INNER'; phaseId: string; stepId: string; innerIndex: number }
   | {
@@ -74,6 +79,7 @@ export type WorkflowEditorAction =
       value: string;
     }
   | { type: 'TOGGLE_FANOUT_INNER_OPTIONAL'; phaseId: string; stepId: string; innerIndex: number }
+  | { type: 'SET_FANOUT_INNER_LOOPBACK'; phaseId: string; stepId: string; innerIndex: number; loopback: string | null }
   | { type: 'ADD_STEP'; phaseId: string }
   | { type: 'REMOVE_STEP'; phaseId: string; stepId: string }
   | { type: 'MOVE_STEP'; phaseId: string; stepId: string; dir: 'up' | 'down' }
@@ -110,6 +116,20 @@ function uniqueId(base: string, taken: Set<string>): string {
   let n = 2;
   while (taken.has(`${base}-${n}`)) n += 1;
   return `${base}-${n}`;
+}
+
+/**
+ * Convert free-text ids into the same kebab-case shape generated ids use.
+ * Empty / punctuation-only values fall back to `item`.
+ */
+function kebabId(value: string, fallback = 'item'): string {
+  const id = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .replace(/-{2,}/g, '-');
+  return id.length > 0 ? id : fallback;
 }
 
 /**
@@ -171,11 +191,13 @@ export function workflowEditorReducer(
 ): WorkflowEditorState {
   switch (action.type) {
     case 'SET_DEFINITION': {
-      const firstStepId = action.definition.phases[0]?.steps[0]?.id ?? null;
+      const definition = action.definition;
+      const firstStepId = definition.phases[0]?.steps[0]?.id ?? null;
       return {
         name: action.name ?? state.name,
-        definition: action.definition,
+        definition,
         selectedStepId: firstStepId,
+        selectedFanOutInner: null,
       };
     }
 
@@ -183,7 +205,14 @@ export function workflowEditorReducer(
       return { ...state, name: action.name };
 
     case 'SELECT_STEP':
-      return { ...state, selectedStepId: action.stepId };
+      return { ...state, selectedStepId: action.stepId, selectedFanOutInner: null };
+
+    case 'SELECT_FANOUT_INNER':
+      return {
+        ...state,
+        selectedStepId: action.stepId,
+        selectedFanOutInner: { stepId: action.stepId, innerIndex: action.innerIndex },
+      };
 
     case 'SET_STEP_FIELD': {
       const definition = mapPhase(state.definition, action.phaseId, (phase) =>
@@ -251,10 +280,11 @@ export function workflowEditorReducer(
       const definition = mapPhase(state.definition, action.phaseId, (phase) =>
         mapStep(phase, action.stepId, (step) => {
           if (action.enabled) {
+            if (step.fanOut !== undefined) return step;
             // Seed a minimal one-inner-step chain over 'tasks' using the step's
             // own agent. Server zod (fanOutSchema) is authoritative on save.
             const fanOut: NonNullable<WorkflowStep['fanOut']> = {
-              over: 'tasks',
+              over: FANOUT_OVER_TASKS,
               inner: [{ id: 'item', agent: step.agent, name: 'Item' }],
             };
             return { ...step, fanOut };
@@ -265,14 +295,14 @@ export function workflowEditorReducer(
           return rest;
         }),
       );
-      return { ...state, definition };
+      return { ...state, definition, selectedStepId: action.stepId, selectedFanOutInner: null };
     }
 
     case 'SET_FANOUT_OVER': {
       const definition = mapPhase(state.definition, action.phaseId, (phase) =>
         mapStep(phase, action.stepId, (step) => {
           if (step.fanOut === undefined) return step;
-          return { ...step, fanOut: { ...step.fanOut, over: action.over } };
+          return { ...step, fanOut: { ...step.fanOut, over: FANOUT_OVER_TASKS } };
         }),
       );
       return { ...state, definition };
@@ -301,25 +331,75 @@ export function workflowEditorReducer(
     }
 
     case 'REMOVE_FANOUT_INNER': {
+      const currentStep = state.definition.phases
+        .find((p) => p.id === action.phaseId)
+        ?.steps.find((s) => s.id === action.stepId);
+      if ((currentStep?.fanOut?.inner.length ?? 0) <= 1) return state;
       const definition = mapPhase(state.definition, action.phaseId, (phase) =>
         mapStep(phase, action.stepId, (step) => {
           if (step.fanOut === undefined) return step;
-          // Keep at least one inner step (fanOutSchema requires inner.min(1)).
-          if (step.fanOut.inner.length <= 1) return step;
-          const inner = step.fanOut.inner.filter((_, i) => i !== action.innerIndex);
+          const removedId = step.fanOut.inner[action.innerIndex]?.id;
+          const inner = step.fanOut.inner
+            .filter((_, i) => i !== action.innerIndex)
+            .map((row) => {
+              if (row.loopback !== removedId) return row;
+              const rest = { ...row };
+              delete rest.loopback;
+              return rest;
+            });
           return { ...step, fanOut: { ...step.fanOut, inner } };
         }),
       );
-      return { ...state, definition };
+      let selectedFanOutInner = state.selectedFanOutInner;
+      if (selectedFanOutInner?.stepId === action.stepId) {
+        if (selectedFanOutInner.innerIndex === action.innerIndex) {
+          selectedFanOutInner = null;
+        } else if (selectedFanOutInner.innerIndex > action.innerIndex) {
+          selectedFanOutInner = {
+            ...selectedFanOutInner,
+            innerIndex: selectedFanOutInner.innerIndex - 1,
+          };
+        }
+      }
+      return { ...state, definition, selectedFanOutInner };
     }
 
     case 'SET_FANOUT_INNER_FIELD': {
       const definition = mapPhase(state.definition, action.phaseId, (phase) =>
         mapStep(phase, action.stepId, (step) => {
           if (step.fanOut === undefined) return step;
-          const inner = step.fanOut.inner.map((row, i) =>
-            i === action.innerIndex ? { ...row, [action.field]: action.value } : row,
+          let previousId: string | null = null;
+          let nextId: string | null = null;
+          const takenIds = new Set(
+            step.fanOut.inner
+              .map((row, i) => (i === action.innerIndex ? null : row.id))
+              .filter((id): id is string => id !== null),
           );
+          const inner = step.fanOut.inner.map((row, i) => {
+            if (i !== action.innerIndex) return row;
+            if (action.field === 'name') {
+              const trimmed = action.value.trim();
+              if (trimmed.length === 0) {
+                const rest = { ...row };
+                delete rest.name;
+                return rest;
+              }
+              return { ...row, name: action.value };
+            }
+            if (action.field !== 'id') return { ...row, [action.field]: action.value };
+            previousId = row.id;
+            nextId = uniqueId(kebabId(action.value), takenIds);
+            return { ...row, id: nextId };
+          }).map((row, i) => {
+            if (action.field !== 'id' || i === action.innerIndex || previousId === null) return row;
+            if (row.loopback !== previousId) return row;
+            if (nextId === null || nextId === row.id) {
+              const rest = { ...row };
+              delete rest.loopback;
+              return rest;
+            }
+            return { ...row, loopback: nextId };
+          });
           return { ...step, fanOut: { ...step.fanOut, inner } };
         }),
       );
@@ -345,6 +425,28 @@ export function workflowEditorReducer(
       return { ...state, definition };
     }
 
+    case 'SET_FANOUT_INNER_LOOPBACK': {
+      const definition = mapPhase(state.definition, action.phaseId, (phase) =>
+        mapStep(phase, action.stepId, (step) => {
+          if (step.fanOut === undefined) return step;
+          const targetIds = step.fanOut.inner
+            .map((row, i) => (i === action.innerIndex ? null : row.id))
+            .filter((id): id is string => id !== null);
+          const inner = step.fanOut.inner.map((row, i) => {
+            if (i !== action.innerIndex) return row;
+            if (action.loopback === null || !targetIds.includes(action.loopback)) {
+              const rest = { ...row };
+              delete rest.loopback;
+              return rest;
+            }
+            return { ...row, loopback: action.loopback };
+          });
+          return { ...step, fanOut: { ...step.fanOut, inner } };
+        }),
+      );
+      return { ...state, definition };
+    }
+
     case 'ADD_STEP': {
       const taken = allStepIds(state.definition);
       const newId = uniqueId('step', taken);
@@ -359,7 +461,7 @@ export function workflowEditorReducer(
         ...phase,
         steps: [...phase.steps, newStep],
       }));
-      return { ...state, definition, selectedStepId: newId };
+      return { ...state, definition, selectedStepId: newId, selectedFanOutInner: null };
     }
 
     case 'REMOVE_STEP': {
@@ -388,7 +490,9 @@ export function workflowEditorReducer(
         const remaining = definition.phases.flatMap((p) => p.steps.map((s) => s.id));
         selectedStepId = remaining[0] ?? null;
       }
-      return { ...state, definition, selectedStepId };
+      const selectedFanOutInner =
+        state.selectedFanOutInner?.stepId === action.stepId ? null : state.selectedFanOutInner;
+      return { ...state, definition, selectedStepId, selectedFanOutInner };
     }
 
     case 'MOVE_STEP': {
@@ -424,7 +528,7 @@ export function workflowEditorReducer(
         ...state.definition,
         phases: [...state.definition.phases, newPhase],
       };
-      return { ...state, definition, selectedStepId: newStepId };
+      return { ...state, definition, selectedStepId: newStepId, selectedFanOutInner: null };
     }
 
     case 'REMOVE_PHASE': {
@@ -442,7 +546,14 @@ export function workflowEditorReducer(
         state.selectedStepId !== null && remaining.includes(state.selectedStepId)
           ? state.selectedStepId
           : (remaining[0] ?? null);
-      return { ...state, definition, selectedStepId };
+      const phaseRemovedSelectedInner = state.selectedFanOutInner !== null
+        && !definition.phases.some((phase) => phase.steps.some((step) => step.id === state.selectedFanOutInner?.stepId));
+      return {
+        ...state,
+        definition,
+        selectedStepId,
+        selectedFanOutInner: phaseRemovedSelectedInner ? null : state.selectedFanOutInner,
+      };
     }
 
     case 'MOVE_PHASE': {
@@ -493,6 +604,7 @@ export function initWorkflowEditorState(
     name,
     definition,
     selectedStepId: definition.phases[0]?.steps[0]?.id ?? null,
+    selectedFanOutInner: null,
   };
 }
 

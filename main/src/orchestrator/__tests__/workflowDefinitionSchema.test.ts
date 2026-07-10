@@ -204,6 +204,31 @@ describe('workflowDefinitionSchema (fan-out)', () => {
     expect(validateWorkflowDefinition(def)).toEqual(def);
   });
 
+  it('round-trips only the persisted FanOutInnerStep fields', () => {
+    const def = makeValidDefinition();
+    def.phases[1].steps[0].fanOut = {
+      over: 'tasks',
+      inner: [
+        { id: 'implement', agent: 'implement', name: 'Implement', optional: true },
+      ],
+    };
+    const raw = structuredClone(def);
+    const rawInner = raw.phases[1].steps[0].fanOut?.inner[0] as unknown as Record<string, unknown>;
+    rawInner.retries = 3;
+    rawInner.human = true;
+    rawInner.mcps = ['filesystem'];
+    rawInner.model = 'opus-4.5';
+
+    const parsed = validateWorkflowDefinition(raw);
+
+    expect(parsed.phases[1].steps[0].fanOut?.inner[0]).toEqual({
+      id: 'implement',
+      agent: 'implement',
+      name: 'Implement',
+      optional: true,
+    });
+  });
+
   // -------------------------------------------------------------------------
   // Reject: an empty inner array.
   // -------------------------------------------------------------------------

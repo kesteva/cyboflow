@@ -19,6 +19,7 @@ import { render, screen, act, fireEvent, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { WorkflowDefinition, WorkflowRow } from '../../../../../shared/types/workflows';
 import type { AgentEntry } from '../../../../../shared/types/agents';
+import { SPRINT_BATCH_CAP } from '../../../../../shared/types/sprintBatch';
 
 // ---------------------------------------------------------------------------
 // Fixtures shared by the mock + assertions
@@ -527,6 +528,99 @@ describe('WorkflowEditorModal — edit mode', () => {
 });
 
 describe('WorkflowEditorModal — fan-out editing', () => {
+  it('the canvas header Make parallel button enables fan-out and stays synced with the inspector switch', async () => {
+    await renderEditMode();
+
+    const inspectorToggle = screen.getByTestId('inspector-toggle-fanout');
+    expect(inspectorToggle).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('inspector-fanout-off-note')).toHaveTextContent(
+      'This step runs once unless fan-out is enabled',
+    );
+
+    fireEvent.click(screen.getByTestId('editor-step-make-parallel-context'));
+    await waitFor(() => expect(inspectorToggle).toHaveAttribute('aria-pressed', 'true'));
+    expect(screen.getByTestId('editor-step-parallel-chip-context')).toBeInTheDocument();
+    expect(screen.getByTestId('editor-step-fanout-frame-context')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('editor-step-parallel-chip-context'));
+    await waitFor(() => expect(inspectorToggle).toHaveAttribute('aria-pressed', 'false'));
+    expect(screen.queryByTestId('editor-step-fanout-frame-context')).toBeNull();
+  });
+
+  it('Make parallel on a non-selected card selects that card and syncs the inspector switch', async () => {
+    await renderEditMode();
+
+    expect(screen.getByTestId('inspector-name-input')).toHaveValue('Context');
+    fireEvent.click(screen.getByTestId('editor-step-make-parallel-approve-idea'));
+
+    await waitFor(() => expect(screen.getByTestId('inspector-name-input')).toHaveValue('Approve'));
+    expect(screen.getByTestId('inspector-toggle-fanout')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('editor-step-fanout-frame-approve-idea')).toBeInTheDocument();
+  });
+
+  it('the fan-out meta and inspector disclose tasks, system cap, and programmatic-only runtime scope', async () => {
+    await renderEditMode();
+
+    fireEvent.click(screen.getByTestId('inspector-toggle-fanout'));
+    await waitFor(() => expect(screen.getByTestId('editor-step-fanout-meta-context')).toBeInTheDocument());
+
+    const meta = screen.getByTestId('editor-step-fanout-meta-context');
+    expect(meta).toHaveTextContent('over tasks');
+    expect(meta).toHaveTextContent(`system cap ${SPRINT_BATCH_CAP}`);
+    expect(meta).toHaveTextContent('1 inner');
+    expect(meta).toHaveTextContent('programmatic batch only');
+
+    expect(screen.getByTestId('inspector-fanout-system-cap')).toHaveTextContent(`system cap ${SPRINT_BATCH_CAP}`);
+    expect(screen.getByText(/Programmatic batch runs only/)).toBeInTheDocument();
+  });
+
+  it('the fan-out item source picker is constrained to tasks', async () => {
+    await renderEditMode();
+
+    fireEvent.click(screen.getByTestId('inspector-toggle-fanout'));
+    const over = await screen.findByTestId('inspector-fanout-over-input') as HTMLSelectElement;
+    expect(over).toHaveValue('tasks');
+    expect(Array.from(over.options).map((option) => option.value)).toEqual(['tasks']);
+  });
+
+  it('preserves an unsupported loaded item source until the user chooses tasks', async () => {
+    const seeded = structuredClone(SEED_DEFINITION);
+    seeded.phases[0].steps[0].fanOut = {
+      over: 'ideas',
+      inner: [{ id: 'item', agent: 'idea-extractor', name: 'Item' }],
+    };
+    mockGetDefinition.mockResolvedValueOnce(seeded);
+    await renderEditMode();
+
+    const over = screen.getByTestId('inspector-fanout-over-input') as HTMLSelectElement;
+    expect(over).toHaveValue('ideas');
+    expect(Array.from(over.options).map((option) => option.value)).toEqual(['ideas', 'tasks']);
+    expect(screen.getByText(/Unsupported item sources run once/)).toBeInTheDocument();
+    // The canvas meta bar must not claim batch behavior for an unsupported
+    // source — resolveItems returns [] for over !== 'tasks' on every plane.
+    expect(screen.getByTestId('editor-step-fanout-meta-context')).toHaveTextContent(
+      'unsupported source · runs once',
+    );
+
+    fireEvent.change(over, { target: { value: 'tasks' } });
+    await waitFor(() => expect(over).toHaveValue('tasks'));
+    expect(screen.getByTestId('editor-step-fanout-meta-context')).toHaveTextContent(
+      'programmatic batch only',
+    );
+
+    const saveBtn = screen.getByTestId('editor-save-button');
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('save-scope-confirm'));
+    });
+
+    const savedStep = mockUpdateSpec.mock.calls[0][0].definition.phases[0].steps.find((s) => s.id === 'context');
+    expect(savedStep?.fanOut?.over).toBe('tasks');
+  });
+
   it('the fan-out toggle adds then removes step.fanOut and persists it through Save', async () => {
     const { onSaved } = await renderEditMode();
 
@@ -565,17 +659,32 @@ describe('WorkflowEditorModal — fan-out editing', () => {
   });
 
   it('disabling the fan-out toggle clears step.fanOut entirely', async () => {
+    const seeded = structuredClone(SEED_DEFINITION);
+    seeded.phases[0].steps[0].fanOut = {
+      over: 'tasks',
+      inner: [{ id: 'item', agent: 'idea-extractor', name: 'Item' }],
+    };
+    mockGetDefinition.mockResolvedValueOnce(seeded);
     await renderEditMode();
 
     const toggle = screen.getByTestId('inspector-toggle-fanout');
-
-    // Enable then disable — the editor disappears.
-    fireEvent.click(toggle);
-    await waitFor(() => expect(screen.getByTestId('inspector-fanout-editor')).toBeInTheDocument());
+    expect(toggle).toHaveAttribute('aria-pressed', 'true');
 
     fireEvent.click(toggle);
     await waitFor(() => expect(toggle).toHaveAttribute('aria-pressed', 'false'));
     expect(screen.queryByTestId('inspector-fanout-editor')).toBeNull();
+
+    const saveBtn = screen.getByTestId('editor-save-button');
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('save-scope-confirm'));
+    });
+
+    const savedStep = mockUpdateSpec.mock.calls[0][0].definition.phases[0].steps.find((s) => s.id === 'context');
+    expect(savedStep?.fanOut).toBeUndefined();
   });
 
   it('add/remove inner-step rows mutate the fan-out chain', async () => {
@@ -590,7 +699,9 @@ describe('WorkflowEditorModal — fan-out editing', () => {
     await waitFor(() => expect(screen.getByTestId('inspector-fanout-inner-1')).toBeInTheDocument());
 
     // Edit the second row's id + agent.
-    fireEvent.change(screen.getByTestId('inspector-fanout-inner-id-1'), { target: { value: 'verify' } });
+    const idInput = screen.getByTestId('inspector-fanout-inner-id-1');
+    fireEvent.change(idInput, { target: { value: 'verify' } });
+    fireEvent.blur(idInput);
     fireEvent.change(screen.getByTestId('inspector-fanout-inner-agent-1'), { target: { value: 'task-verify' } });
 
     // Persist and assert the two-step chain is saved.
@@ -631,6 +742,89 @@ describe('WorkflowEditorModal — fan-out editing', () => {
     // Clicking it is a no-op — the row stays.
     fireEvent.click(removeBtn);
     expect(screen.getByTestId('inspector-fanout-inner-0')).toBeInTheDocument();
+  });
+
+  it('inner-row selection edits only persisted FanOutInnerStep fields and saves through fanOut.inner', async () => {
+    await renderEditMode();
+
+    fireEvent.click(screen.getByTestId('inspector-toggle-fanout'));
+    await waitFor(() => expect(screen.getByTestId('editor-fanout-inner-card-context-0')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('editor-fanout-inner-card-context-0'));
+
+    expect(screen.getByTestId('inspector-fanout-inner-editor')).toBeInTheDocument();
+    expect(screen.queryByTestId('inspector-retries-input')).toBeNull();
+    expect(screen.queryByTestId('inspector-toggle-human')).toBeNull();
+    expect(screen.queryByTestId('inspector-tab-mcp')).toBeNull();
+    expect(screen.queryByTestId('inspector-mcp-filesystem')).toBeNull();
+
+    fireEvent.change(screen.getByTestId('inspector-fanout-inner-name-input'), { target: { value: 'Lane item' } });
+    const idInput = screen.getByTestId('inspector-fanout-inner-id-input');
+    fireEvent.change(idInput, { target: { value: 'Lane Item' } });
+    expect(idInput).toHaveValue('Lane Item');
+    fireEvent.blur(idInput);
+    await waitFor(() => expect(idInput).toHaveValue('lane-item'));
+    fireEvent.change(screen.getByTestId('inspector-fanout-inner-agent-select'), { target: { value: 'implement' } });
+    fireEvent.click(screen.getByTestId('inspector-fanout-inner-optional-toggle'));
+
+    const saveBtn = screen.getByTestId('editor-save-button');
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('save-scope-confirm'));
+    });
+
+    const savedStep = mockUpdateSpec.mock.calls[0][0].definition.phases[0].steps.find((s) => s.id === 'context');
+    expect(savedStep?.fanOut?.inner).toEqual([
+      { id: 'lane-item', agent: 'implement', name: 'Lane item', optional: true },
+    ]);
+  });
+
+  it('inner-row id input resyncs to the canonical id when normalization is a fixed point', async () => {
+    await renderEditMode();
+
+    fireEvent.click(screen.getByTestId('inspector-toggle-fanout'));
+    await waitFor(() => expect(screen.getByTestId('editor-fanout-inner-card-context-0')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('editor-fanout-inner-card-context-0'));
+
+    // 'ITEM' kebab-normalizes back to the CURRENT id 'item', so the persisted
+    // value never changes — the draft must still snap back to the canonical id
+    // instead of showing stale un-normalized text.
+    const idInput = screen.getByTestId('inspector-fanout-inner-id-input');
+    fireEvent.change(idInput, { target: { value: 'ITEM' } });
+    expect(idInput).toHaveValue('ITEM');
+    fireEvent.blur(idInput);
+    await waitFor(() => expect(idInput).toHaveValue('item'));
+  });
+
+  it('inner-row loopback picker excludes self, targets siblings, and labels loopback reserved', async () => {
+    await renderEditMode();
+
+    fireEvent.click(screen.getByTestId('inspector-toggle-fanout'));
+    await waitFor(() => expect(screen.getByTestId('inspector-fanout-inner-0')).toBeInTheDocument());
+    fireEvent.click(screen.getByTestId('inspector-fanout-inner-add'));
+    await waitFor(() => expect(screen.getByTestId('editor-fanout-inner-card-context-1')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTestId('editor-fanout-inner-card-context-1'));
+    const loopback = screen.getByTestId('inspector-fanout-inner-loopback-select') as HTMLSelectElement;
+    expect(Array.from(loopback.options).map((option) => option.value)).toEqual(['', 'item']);
+    expect(screen.getByTestId('inspector-fanout-inner-loopback-reserved')).toHaveTextContent(
+      'Reserved - not yet executed for lanes',
+    );
+
+    fireEvent.change(loopback, { target: { value: 'item' } });
+    const saveBtn = screen.getByTestId('editor-save-button');
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('save-scope-confirm'));
+    });
+
+    const savedStep = mockUpdateSpec.mock.calls[0][0].definition.phases[0].steps.find((s) => s.id === 'context');
+    expect(savedStep?.fanOut?.inner[1].loopback).toBe('item');
   });
 });
 

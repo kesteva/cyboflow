@@ -79,6 +79,7 @@ describe('initWorkflowEditorState', () => {
     const state = makeState();
     expect(state.name).toBe('planner');
     expect(state.selectedStepId).toBe('context');
+    expect(state.selectedFanOutInner).toBeNull();
     expect(state.definition.phases).toHaveLength(2);
   });
 
@@ -86,6 +87,7 @@ describe('initWorkflowEditorState', () => {
     const empty: WorkflowDefinition = { id: 'empty', phases: [] };
     const state = initWorkflowEditorState(empty, 'empty');
     expect(state.selectedStepId).toBeNull();
+    expect(state.selectedFanOutInner).toBeNull();
   });
 });
 
@@ -274,6 +276,280 @@ describe('workflowEditorReducer — SET_LOOPBACK', () => {
       loopback: 'context',
     });
     expect(findStep(next.definition, 'verify')?.loopback).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fan-out editing
+// ---------------------------------------------------------------------------
+
+describe('workflowEditorReducer — fan-out editing', () => {
+  it('SET_STEP_FANOUT seeds tasks plus one inner row and disabling deletes fanOut', () => {
+    const enabled = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+    expect(findStep(enabled.definition, 'implement')?.fanOut).toEqual({
+      over: 'tasks',
+      inner: [{ id: 'item', agent: 'executor', name: 'Item' }],
+    });
+
+    const disabled = workflowEditorReducer(enabled, {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: false,
+    });
+    expect(findStep(disabled.definition, 'implement')?.fanOut).toBeUndefined();
+  });
+
+  it('SET_STEP_FANOUT selects the target outer step so canvas chips and inspector stay in sync', () => {
+    const enabled = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+    expect(enabled.selectedStepId).toBe('implement');
+    expect(enabled.selectedFanOutInner).toBeNull();
+  });
+
+  it('preserves unsupported loaded item sources until the user explicitly chooses tasks', () => {
+    const definition = makeDefinition();
+    definition.phases[1].steps[0].fanOut = {
+      over: 'ideas',
+      inner: [{ id: 'item', agent: 'executor', name: 'Item' }],
+    };
+    const loaded = initWorkflowEditorState(definition, 'planner');
+    expect(findStep(loaded.definition, 'implement')?.fanOut?.over).toBe('ideas');
+
+    const edited = workflowEditorReducer(loaded, {
+      type: 'SET_FANOUT_OVER',
+      phaseId: 'execute',
+      stepId: 'implement',
+    });
+    expect(findStep(edited.definition, 'implement')?.fanOut?.over).toBe('tasks');
+  });
+
+  it('SELECT_FANOUT_INNER selects the owner step plus row context, and SELECT_STEP clears it', () => {
+    const enabled = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+    const innerSelected = workflowEditorReducer(enabled, {
+      type: 'SELECT_FANOUT_INNER',
+      stepId: 'implement',
+      innerIndex: 0,
+    });
+    expect(innerSelected.selectedStepId).toBe('implement');
+    expect(innerSelected.selectedFanOutInner).toEqual({ stepId: 'implement', innerIndex: 0 });
+
+    const stepSelected = workflowEditorReducer(innerSelected, { type: 'SELECT_STEP', stepId: 'verify' });
+    expect(stepSelected.selectedStepId).toBe('verify');
+    expect(stepSelected.selectedFanOutInner).toBeNull();
+  });
+
+  it('fan-out inner edits update name, id, agent, optional, and loopback', () => {
+    let state = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+    state = workflowEditorReducer(state, { type: 'ADD_FANOUT_INNER', phaseId: 'execute', stepId: 'implement' });
+    state = workflowEditorReducer(state, {
+      type: 'SET_FANOUT_INNER_FIELD',
+      phaseId: 'execute',
+      stepId: 'implement',
+      innerIndex: 1,
+      field: 'id',
+      value: 'verify-inner',
+    });
+    state = workflowEditorReducer(state, {
+      type: 'SET_FANOUT_INNER_FIELD',
+      phaseId: 'execute',
+      stepId: 'implement',
+      innerIndex: 1,
+      field: 'name',
+      value: 'Verify inner',
+    });
+    state = workflowEditorReducer(state, {
+      type: 'SET_FANOUT_INNER_FIELD',
+      phaseId: 'execute',
+      stepId: 'implement',
+      innerIndex: 1,
+      field: 'agent',
+      value: 'verifier',
+    });
+    state = workflowEditorReducer(state, {
+      type: 'TOGGLE_FANOUT_INNER_OPTIONAL',
+      phaseId: 'execute',
+      stepId: 'implement',
+      innerIndex: 1,
+    });
+    state = workflowEditorReducer(state, {
+      type: 'SET_FANOUT_INNER_LOOPBACK',
+      phaseId: 'execute',
+      stepId: 'implement',
+      innerIndex: 1,
+      loopback: 'item',
+    });
+
+    expect(findStep(state.definition, 'implement')?.fanOut?.inner[1]).toEqual({
+      id: 'verify-inner',
+      name: 'Verify inner',
+      agent: 'verifier',
+      optional: true,
+      loopback: 'item',
+    });
+  });
+
+  it('empty inner names are stored as absent so display can fall back to id', () => {
+    let state = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+    state = workflowEditorReducer(state, {
+      type: 'SET_FANOUT_INNER_FIELD',
+      phaseId: 'execute',
+      stepId: 'implement',
+      innerIndex: 0,
+      field: 'name',
+      value: '',
+    });
+
+    expect(findStep(state.definition, 'implement')?.fanOut?.inner[0]).toEqual({
+      id: 'item',
+      agent: 'executor',
+    });
+  });
+
+  it('inner id edits are kebab-case unique and update sibling loopback references', () => {
+    let state = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+    state = workflowEditorReducer(state, { type: 'ADD_FANOUT_INNER', phaseId: 'execute', stepId: 'implement' });
+    state = workflowEditorReducer(state, {
+      type: 'SET_FANOUT_INNER_LOOPBACK',
+      phaseId: 'execute',
+      stepId: 'implement',
+      innerIndex: 1,
+      loopback: 'item',
+    });
+    state = workflowEditorReducer(state, {
+      type: 'SET_FANOUT_INNER_FIELD',
+      phaseId: 'execute',
+      stepId: 'implement',
+      innerIndex: 0,
+      field: 'id',
+      value: 'Item 2',
+    });
+
+    expect(findStep(state.definition, 'implement')?.fanOut?.inner).toEqual([
+      { id: 'item-2-2', agent: 'executor', name: 'Item' },
+      { id: 'item-2', agent: 'executor', name: 'Item 2', loopback: 'item-2-2' },
+    ]);
+  });
+
+  it('inner loopback cannot target self or missing rows', () => {
+    let state = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+    state = workflowEditorReducer(state, { type: 'ADD_FANOUT_INNER', phaseId: 'execute', stepId: 'implement' });
+
+    const self = workflowEditorReducer(state, {
+      type: 'SET_FANOUT_INNER_LOOPBACK',
+      phaseId: 'execute',
+      stepId: 'implement',
+      innerIndex: 0,
+      loopback: 'item',
+    });
+    expect(findStep(self.definition, 'implement')?.fanOut?.inner[0].loopback).toBeUndefined();
+
+    const missing = workflowEditorReducer(state, {
+      type: 'SET_FANOUT_INNER_LOOPBACK',
+      phaseId: 'execute',
+      stepId: 'implement',
+      innerIndex: 0,
+      loopback: 'missing',
+    });
+    expect(findStep(missing.definition, 'implement')?.fanOut?.inner[0].loopback).toBeUndefined();
+  });
+
+  it('removing an inner row keeps at least one row, clears dangling loopbacks, and keeps selection valid', () => {
+    let state = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+    state = workflowEditorReducer(state, { type: 'ADD_FANOUT_INNER', phaseId: 'execute', stepId: 'implement' });
+    state = workflowEditorReducer(state, {
+      type: 'SET_FANOUT_INNER_LOOPBACK',
+      phaseId: 'execute',
+      stepId: 'implement',
+      innerIndex: 1,
+      loopback: 'item',
+    });
+    state = workflowEditorReducer(state, {
+      type: 'SELECT_FANOUT_INNER',
+      stepId: 'implement',
+      innerIndex: 1,
+    });
+
+    const removedFirst = workflowEditorReducer(state, {
+      type: 'REMOVE_FANOUT_INNER',
+      phaseId: 'execute',
+      stepId: 'implement',
+      innerIndex: 0,
+    });
+    expect(findStep(removedFirst.definition, 'implement')?.fanOut?.inner).toEqual([
+      { id: 'item-2', agent: 'executor', name: 'Item 2' },
+    ]);
+    expect(removedFirst.selectedFanOutInner).toEqual({ stepId: 'implement', innerIndex: 0 });
+
+    const stillOne = workflowEditorReducer(removedFirst, {
+      type: 'REMOVE_FANOUT_INNER',
+      phaseId: 'execute',
+      stepId: 'implement',
+      innerIndex: 0,
+    });
+    expect(findStep(stillOne.definition, 'implement')?.fanOut?.inner).toHaveLength(1);
+    expect(stillOne.selectedFanOutInner).toEqual({ stepId: 'implement', innerIndex: 0 });
+  });
+
+  it('disabling fan-out while an inner row is selected returns to the outer step selection', () => {
+    let state = workflowEditorReducer(makeState(), {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: true,
+    });
+    state = workflowEditorReducer(state, {
+      type: 'SELECT_FANOUT_INNER',
+      stepId: 'implement',
+      innerIndex: 0,
+    });
+    const disabled = workflowEditorReducer(state, {
+      type: 'SET_STEP_FANOUT',
+      phaseId: 'execute',
+      stepId: 'implement',
+      enabled: false,
+    });
+    expect(disabled.selectedStepId).toBe('implement');
+    expect(disabled.selectedFanOutInner).toBeNull();
   });
 });
 

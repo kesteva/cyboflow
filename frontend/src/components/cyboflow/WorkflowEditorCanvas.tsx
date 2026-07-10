@@ -23,13 +23,15 @@
  * FEATURE: user-editable workflow blueprint editor.
  */
 import type { WorkflowDefinition, WorkflowPhase, WorkflowStep } from '../../../../shared/types/workflows';
+import { SPRINT_BATCH_CAP } from '../../../../shared/types/sprintBatch';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
-import type { WorkflowEditorAction } from '../../hooks/useWorkflowEditorState';
+import type { WorkflowEditorAction, WorkflowEditorState } from '../../hooks/useWorkflowEditorState';
 import { PHASE_COLORS } from './workflowEditorOptions';
 
 export interface WorkflowEditorCanvasProps {
   definition: WorkflowDefinition;
   selectedStepId: string | null;
+  selectedFanOutInner: WorkflowEditorState['selectedFanOutInner'];
   dispatch: React.Dispatch<WorkflowEditorAction>;
 }
 
@@ -39,6 +41,7 @@ const COL_W = 178;
 export function WorkflowEditorCanvas({
   definition,
   selectedStepId,
+  selectedFanOutInner,
   dispatch,
 }: WorkflowEditorCanvasProps) {
   return (
@@ -66,6 +69,7 @@ export function WorkflowEditorCanvas({
           phaseIndex={phaseIdx}
           phaseCount={definition.phases.length}
           selectedStepId={selectedStepId}
+          selectedFanOutInner={selectedFanOutInner}
           dispatch={dispatch}
         />
       ))}
@@ -105,10 +109,18 @@ interface PhaseBandProps {
   phaseIndex: number;
   phaseCount: number;
   selectedStepId: string | null;
+  selectedFanOutInner: WorkflowEditorState['selectedFanOutInner'];
   dispatch: React.Dispatch<WorkflowEditorAction>;
 }
 
-function PhaseBand({ phase, phaseIndex, phaseCount, selectedStepId, dispatch }: PhaseBandProps) {
+function PhaseBand({
+  phase,
+  phaseIndex,
+  phaseCount,
+  selectedStepId,
+  selectedFanOutInner,
+  dispatch,
+}: PhaseBandProps) {
   return (
     <div
       style={{
@@ -221,6 +233,7 @@ function PhaseBand({ phase, phaseIndex, phaseCount, selectedStepId, dispatch }: 
             stepIndex={stepIdx}
             stepCount={phase.steps.length}
             selected={step.id === selectedStepId}
+            selectedFanOutInner={selectedFanOutInner?.stepId === step.id ? selectedFanOutInner : null}
             dispatch={dispatch}
           />
         ))}
@@ -261,26 +274,40 @@ interface StepNodeProps {
   stepIndex: number;
   stepCount: number;
   selected: boolean;
+  selectedFanOutInner: WorkflowEditorState['selectedFanOutInner'];
   dispatch: React.Dispatch<WorkflowEditorAction>;
 }
 
-function StepNode({ phase, step, stepIndex, stepCount, selected, dispatch }: StepNodeProps) {
+function StepNode({
+  phase,
+  step,
+  stepIndex,
+  stepCount,
+  selected,
+  selectedFanOutInner,
+  dispatch,
+}: StepNodeProps) {
   const isHuman = step.human === true;
   const isOptional = step.optional === true;
+  const fanOut = step.fanOut;
+  const isFanOut = fanOut !== undefined;
 
   // Head bar: black (Direction A) by default; hatched amber for human steps.
   const headBackground = isHuman
     ? 'repeating-linear-gradient(135deg, var(--human, #d99a3d) 0px 6px, var(--human-hatch, #c98a2d) 6px 12px)'
-    : 'var(--color-text-primary)';
+    : isFanOut
+      ? 'var(--color-status-error)'
+      : 'var(--color-text-primary)';
 
   return (
     <div
       onClick={() => dispatch({ type: 'SELECT_STEP', stepId: step.id })}
       style={{
         position: 'relative',
-        width: COL_W,
-        border: '1.4px solid var(--color-text-primary)',
-        background: 'var(--color-surface-primary)',
+        width: isFanOut ? COL_W + 24 : COL_W,
+        border: isFanOut ? '1.5px dashed var(--color-status-error)' : '1.4px solid var(--color-text-primary)',
+        background: isFanOut ? 'rgba(201,100,66,0.045)' : 'var(--color-surface-primary)',
+        padding: isFanOut ? 10 : 0,
         cursor: 'pointer',
         ...(selected
           ? {
@@ -294,6 +321,55 @@ function StepNode({ phase, step, stepIndex, stepCount, selected, dispatch }: Ste
       data-testid={`editor-step-node-${step.id}`}
       aria-pressed={selected}
     >
+      {isFanOut && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+            marginBottom: 9,
+            fontSize: 9,
+            letterSpacing: '0.14em',
+            textTransform: 'uppercase',
+            color: 'var(--color-status-error)',
+            fontWeight: 700,
+          }}
+          data-testid={`editor-step-fanout-title-${step.id}`}
+        >
+          <span style={{ fontSize: 12 }}>⇄</span>
+          <span>Fan-out template</span>
+          <span style={{ flex: 1 }} />
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              dispatch({ type: 'SET_STEP_FANOUT', phaseId: phase.id, stepId: step.id, enabled: false });
+            }}
+            style={{
+              fontFamily: 'inherit',
+              fontSize: 8.5,
+              letterSpacing: '0.12em',
+              textTransform: 'uppercase',
+              fontWeight: 700,
+              padding: '3px 7px',
+              border: '1px solid var(--color-status-error)',
+              background: 'var(--color-status-error)',
+              color: 'var(--color-bg-primary)',
+              cursor: 'pointer',
+            }}
+            data-testid={`editor-step-parallel-chip-${step.id}`}
+          >
+            ⇄ Parallel
+          </button>
+        </div>
+      )}
+
+      <div
+        style={{
+          border: isFanOut ? '1.4px solid var(--color-text-primary)' : '0',
+          background: 'var(--color-surface-primary)',
+        }}
+      >
       {/* Human badge */}
       {isHuman && (
         <span
@@ -398,7 +474,158 @@ function StepNode({ phase, step, stepIndex, stepCount, selected, dispatch }: Ste
             </span>
           )}
         </div>
+        {!isFanOut && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              dispatch({ type: 'SET_STEP_FANOUT', phaseId: phase.id, stepId: step.id, enabled: true });
+            }}
+            style={{
+              marginTop: 9,
+              width: '100%',
+              fontFamily: 'inherit',
+              fontSize: 8.5,
+              letterSpacing: '0.12em',
+              textTransform: 'uppercase',
+              fontWeight: 700,
+              padding: '4px 7px',
+              border: '1px solid var(--color-status-error)',
+              background: 'transparent',
+              color: 'var(--color-status-error)',
+              cursor: 'pointer',
+            }}
+            data-testid={`editor-step-make-parallel-${step.id}`}
+          >
+            ⇄ Make parallel
+          </button>
+        )}
       </div>
+      </div>
+
+      {fanOut !== undefined && (
+        <div data-testid={`editor-step-fanout-frame-${step.id}`}>
+          <div
+            style={{
+              display: 'flex',
+              flexWrap: 'wrap',
+              gap: '4px 8px',
+              marginTop: 9,
+              marginBottom: 11,
+              padding: '6px 8px',
+              border: '1px solid var(--color-border-primary)',
+              background: 'var(--color-surface-primary)',
+              fontSize: 9,
+              color: 'var(--color-text-secondary)',
+            }}
+            data-testid={`editor-step-fanout-meta-${step.id}`}
+          >
+            <span><span style={{ color: 'var(--color-text-tertiary)' }}>over </span><b style={{ color: 'var(--color-text-primary)' }}>{fanOut.over}</b></span>
+            <span><span style={{ color: 'var(--color-text-tertiary)' }}>system cap </span><b style={{ color: 'var(--color-text-primary)' }}>{SPRINT_BATCH_CAP}</b></span>
+            <span><b style={{ color: 'var(--color-status-error)' }}>{fanOut.inner.length} inner</b></span>
+            <span style={{ color: 'var(--color-text-tertiary)' }}>
+              {fanOut.over === 'tasks' ? 'programmatic batch only' : 'unsupported source · runs once'}
+            </span>
+          </div>
+
+          <div style={{ position: 'relative' }}>
+            <div
+              style={{
+                position: 'absolute',
+                left: 6,
+                top: 6,
+                right: -6,
+                bottom: -6,
+                border: '1.4px solid #c9b48f',
+                background: 'var(--color-surface-primary)',
+              }}
+            />
+            <div
+              style={{
+                position: 'absolute',
+                left: 3,
+                top: 3,
+                right: -3,
+                bottom: -3,
+                border: '1.4px solid #b9a887',
+                background: 'var(--color-surface-primary)',
+              }}
+            />
+            <div style={{ position: 'relative' }}>
+              {fanOut.inner.map((inner, innerIndex) => {
+                const selectedInner = selectedFanOutInner?.innerIndex === innerIndex;
+                return (
+                  <div
+                    key={`${inner.id}-${innerIndex}`}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      dispatch({ type: 'SELECT_FANOUT_INNER', stepId: step.id, innerIndex });
+                    }}
+                    style={{
+                      position: 'relative',
+                      border: '1.4px solid var(--color-text-primary)',
+                      background: 'var(--color-surface-primary)',
+                      marginBottom: innerIndex === fanOut.inner.length - 1 ? 0 : 9,
+                      cursor: 'pointer',
+                    }}
+                    data-testid={`editor-fanout-inner-card-${step.id}-${innerIndex}`}
+                    aria-pressed={selectedInner}
+                  >
+                    {selectedInner && (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          inset: -3,
+                          border: '2.5px solid var(--color-status-error)',
+                          pointerEvents: 'none',
+                        }}
+                      />
+                    )}
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        padding: '4px 7px',
+                        background: 'var(--color-status-error)',
+                        color: 'var(--color-bg-primary)',
+                        fontSize: 8.5,
+                        letterSpacing: '0.14em',
+                        textTransform: 'uppercase',
+                      }}
+                    >
+                      <span style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+                        <span>INR</span>
+                        {inner.optional === true && <span style={{ background: 'rgba(255,255,255,0.24)', padding: '0 4px' }}>OPT</span>}
+                        {inner.loopback && <span style={{ background: 'rgba(255,255,255,0.24)', padding: '0 4px' }}>⟲ RESERVED</span>}
+                      </span>
+                      <span style={{ opacity: 0.65 }}>{String(innerIndex + 1).padStart(2, '0')}</span>
+                    </div>
+                    <div style={{ padding: '7px 8px 8px' }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, lineHeight: 1.25 }}>
+                        {inner.name != null && inner.name.trim().length > 0 ? inner.name : inner.id}
+                      </div>
+                      <div
+                        style={{
+                          marginTop: 6,
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: 2,
+                          fontSize: 9.5,
+                          color: 'var(--color-text-secondary)',
+                        }}
+                      >
+                        <span><span style={{ color: 'var(--color-text-tertiary)', display: 'inline-block', width: 38 }}>agent</span><b style={{ color: 'var(--color-text-primary)' }}>{inner.agent}</b></span>
+                        <span><span style={{ color: 'var(--color-text-tertiary)', display: 'inline-block', width: 38 }}>id</span><b style={{ color: 'var(--color-text-primary)' }}>{inner.id}</b></span>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Foot — per-node controls (move up/down, remove) */}
       <div
