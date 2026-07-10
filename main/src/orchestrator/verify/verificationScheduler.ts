@@ -35,6 +35,7 @@ import { classifyErrorPattern } from '../programmatic/systemicError';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type {
   CaptureContext,
+  CaptureOrigin,
   DeliverableVerifyConfig,
   RequestStatus,
   ResolvedVisualVerifyConfig,
@@ -47,6 +48,11 @@ import type {
   VlmJudge,
 } from '../../../../shared/types/visualVerification';
 import { VERIFY_PORT_ANY, VISUAL_VERIFY_DEFAULTS } from '../../../../shared/types/visualVerification';
+
+// Re-exported for existing consumers — the type moved to shared so the
+// screenshots-artifact payload (shared/types/artifacts.ts) can carry it without a
+// shared->main import.
+export type { CaptureOrigin } from '../../../../shared/types/visualVerification';
 
 // ---------------------------------------------------------------------------
 // Verification terminal events
@@ -422,6 +428,25 @@ export type StaticHtmlContextResolver = (args: {
   staticRoot?: string;
 }) => Promise<{ absoluteHtmlPath: string; staticRoot: string } | null>;
 
+/**
+ * The `extra` payload runChosen hands markTerminal(AndDeliver) for one terminal
+ * write. `backend` / `verdict` / `error` are the load-bearing fields markTerminal
+ * persists (+ the seam-error tags). `captureOrigin` (Codex finding 9, type in
+ * shared/types/visualVerification.ts) and `diagnostics` (Codex finding 7) are
+ * PURELY ADDITIVE human-facing provenance: markTerminal does NOT persist them —
+ * markTerminalAndDeliver forwards them through deliver() into the onVerdict hook,
+ * whose concrete delivery (verdictDelivery.ts) renders them on the review-item
+ * finding body + the screenshots artifact payload. NOTHING derives pass/fail from
+ * them (diagnostics are page-controlled text and never reach the VlmJudge).
+ */
+export interface TerminalExtra {
+  backend?: VisualBackendId;
+  verdict?: VerdictV1;
+  error?: string;
+  captureOrigin?: CaptureOrigin;
+  diagnostics?: string[];
+}
+
 // ---------------------------------------------------------------------------
 // Golden-baseline pre-diff seam (S5 — SSIM gates the VLM)
 //
@@ -500,6 +525,20 @@ export type OnVerdict = (args: {
    * passes undefined (there is no lane to attribute and nothing to enrich).
    */
   input?: VerificationRequestInput;
+  /**
+   * HUMAN-FACING capture provenance (S9 / Codex finding 9): how the deliverable
+   * was stood up for this attempt. Present for every runChosen terminal; the
+   * processRow skip paths (no capture attempted) pass undefined.
+   */
+  captureOrigin?: CaptureOrigin;
+  /**
+   * UNTRUSTED capture diagnostics (S9 / Codex finding 7): capped page-console
+   * lines + capture-side notes (file:// breadcrumb, fold truncation). Page code
+   * controls this text — the delivery renders it on human surfaces (review-item
+   * finding body / screenshots payload) ONLY; it must never feed a judge or
+   * derive pass/fail.
+   */
+  diagnostics?: string[];
 }) => void | Promise<void>;
 
 /**
@@ -661,6 +700,8 @@ export class VerificationScheduler {
   private readonly requestTimeoutMs: number;
   private readonly devServerProvider?: DevServerProvider;
   private readonly devServerContextResolver?: DevServerContextResolver;
+  private readonly staticServerProvider?: StaticServerProvider;
+  private readonly staticHtmlContextResolver?: StaticHtmlContextResolver;
   private readonly baselinePreDiff?: BaselinePreDiffResolver;
   private readonly baselineMatchThreshold: number;
   private readonly now: () => number;
@@ -699,6 +740,8 @@ export class VerificationScheduler {
     this.requestTimeoutMs = deps.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.devServerProvider = deps.devServerProvider;
     this.devServerContextResolver = deps.devServerContextResolver;
+    this.staticServerProvider = deps.staticServerProvider;
+    this.staticHtmlContextResolver = deps.staticHtmlContextResolver;
     this.baselinePreDiff = deps.baselinePreDiff;
     this.baselineMatchThreshold = deps.baselineMatchThreshold ?? DEFAULT_SSIM_MATCH_THRESHOLD;
     this.now = deps.now ?? (() => Date.now());
@@ -1223,6 +1266,13 @@ export class VerificationScheduler {
    *     back to the deliverable `id` (the STABLE cross-run key that makes
    *     accept-as-baseline round-trippable). Without hydration a verify.json baseline
    *     never engages the SSIM pre-diff.
+   *   - `htmlPath` (S9) — a STATIC deliverable (built html, no running url, no dev
+   *     server) becomes first-class. Filled ONLY when the request declares neither a
+   *     `url` (a running server the agent pointed at) NOR an `htmlPath` (an explicit
+   *     target), so an agent-passed target is never shadowed. This gives the S9 static
+   *     server an entry path to stand up; `staticRoot` does NOT ride the input (it is a
+   *     serve-time concern flowing via resolvedContext at spawn) — only the entry path
+   *     belongs on the input the backend captures.
    */
   private hydrateInput(
     input: VerificationRequestInput,
@@ -1234,6 +1284,16 @@ export class VerificationScheduler {
     // `start` — the signal the Rung-1 Playwright backend's requiredLease reads.
     if ((hydrated.start === undefined || hydrated.start.trim().length === 0) && deliverable.start) {
       hydrated.start = deliverable.start;
+      changed = true;
+    }
+    // `htmlPath` (S9) — a static deliverable's built html entry. Fill ONLY when the
+    // request declares neither a running `url` nor an explicit `htmlPath`, so an
+    // agent-passed target is never clobbered. staticRoot deliberately does NOT ride the
+    // input (serve-time concern, threaded via resolvedContext at S9 spawn time).
+    const urlAbsent = hydrated.url === undefined || hydrated.url.trim().length === 0;
+    const htmlPathAbsent = hydrated.htmlPath === undefined || hydrated.htmlPath.trim().length === 0;
+    if (urlAbsent && htmlPathAbsent && deliverable.htmlPath && deliverable.htmlPath.trim().length > 0) {
+      hydrated.htmlPath = deliverable.htmlPath;
       changed = true;
     }
     // `assertions` — explicit deterministic checks (decision #3). Only fill when the
@@ -1341,6 +1401,12 @@ export class VerificationScheduler {
    * rung is L2+); a judge verdict drives passed/failed/low_confidence. The
    * per-request abort signal is plumbed to backend + judge for timeout / cancel.
    *
+   * Before capture it may stand a scheduler-owned server up and thread its URL into
+   * ctx.input.url — the S2 dev server for a startable deliverable (leased port) OR,
+   * when none is spawned, the S9 ephemeral static server for a built htmlPath (the
+   * file:// ES-module-block fix). The two are mutually exclusive (a startable
+   * deliverable is S2's job) and BOTH are released in the SAME finally as the lease.
+   *
    * Because the lease is held until this promise's finally, two SCREEN-lease rows
    * cannot run concurrently (the second couldn't acquire the lease in processRow),
    * while two NULL-lease rows both reach here and run in parallel.
@@ -1380,10 +1446,24 @@ export class VerificationScheduler {
     // The scheduler-owned dev server (S2) for this request, if one is spawned. Held
     // for the WHOLE capture lifetime and released in the SAME finally as the lease.
     let devServerHandle: DevServerHandle | null = null;
+    // The scheduler-owned static server (S9) for this request, if one is spawned. Held
+    // for the WHOLE capture lifetime and released in the SAME finally as the dev
+    // server. Null when no static server is stood up (a dev server was, or the request
+    // is not a bare-htmlPath deliverable) → the raw url/htmlPath capture runs unchanged.
+    let staticServerHandle: StaticServerHandle | null = null;
     // The batch worktree-sync mutex (L4) for a batched run, if this run carries a
     // batch_id. Held across capture+judge and released in the SAME finally as the
     // other leases. Null for a non-batch run (nothing acquired → nothing to release).
     let batchLease: LeaseHandle | null = null;
+    // HUMAN-FACING capture provenance (Codex finding 9), stamped onto every terminal
+    // payload. Computed ONCE per attempt and REFINED as each server spawns: it starts
+    // as the best-known origin (a running url the agent passed, else the raw file://
+    // htmlPath), is promoted to 'dev-server' if S2 stands one up, else to
+    // 'static-server' if S9 does. This progressive form is what lets the abort checks
+    // BEFORE the S9 spawn stamp the best-known origin (dev-server/url/file) without
+    // restructuring the flow, and keeps it in scope for the catch block below.
+    const originalUrlPresent = typeof input.url === 'string' && input.url.trim().length > 0;
+    let captureOrigin: CaptureOrigin = originalUrlPresent ? 'url' : 'file';
 
     try {
       // S2 — stand a dev server up on the leased port when the deliverable recipe
@@ -1391,13 +1471,45 @@ export class VerificationScheduler {
       // can be threaded into ctx.input.url. A null handle (no provider / no start /
       // lease is not a port lease) leaves the static url/htmlPath capture unchanged.
       devServerHandle = await this.maybeSpawnDevServer(row, lease, resolvedContext, controller.signal);
+      if (devServerHandle) {
+        captureOrigin = 'dev-server';
+      }
       // A timeout/cancel that fired DURING dev-server spawn: stop here, mark
-      // 'timeout', releasing both the dev server (in finally) and the lease.
+      // 'timeout', releasing both the dev server (in finally) and the lease. (The S9
+      // static server has not been attempted yet, so captureOrigin here is at most
+      // dev-server/url/file — the best-known origin at this point.)
       if (controller.signal.aborted) {
         await this.markTerminalAndDeliver(
           row,
           'timeout',
-          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted' },
+          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted', captureOrigin },
+          undefined,
+          [],
+          input,
+        );
+        return;
+      }
+
+      // S9 — when NO dev server was stood up, stand an ephemeral loopback static file
+      // server up for a bare-htmlPath deliverable (the file:// ES-module-block fix).
+      // Mutually exclusive with the dev server: a startable deliverable is S2's job, so
+      // we only consider a static serve when devServerHandle is null. Its baseUrl is
+      // threaded into ctx.input.url exactly like the dev server; released in the SAME
+      // finally. A null handle (no static deps / no htmlPath / a running url / resolve
+      // or spawn failed) leaves the raw url/htmlPath capture unchanged (pre-S9 behavior).
+      staticServerHandle = devServerHandle
+        ? null
+        : await this.maybeSpawnStaticServer(row, input, resolvedContext, controller.signal);
+      if (staticServerHandle) {
+        captureOrigin = 'static-server';
+      }
+      // A timeout/cancel that fired DURING static-server spawn: stop here, mark
+      // 'timeout', releasing both the static server (in finally) and the lease.
+      if (controller.signal.aborted) {
+        await this.markTerminalAndDeliver(
+          row,
+          'timeout',
+          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted', captureOrigin },
           undefined,
           [],
           input,
@@ -1417,7 +1529,7 @@ export class VerificationScheduler {
         await this.markTerminalAndDeliver(
           row,
           'timeout',
-          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted' },
+          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted', captureOrigin },
           undefined,
           [],
           input,
@@ -1425,9 +1537,13 @@ export class VerificationScheduler {
         return;
       }
 
+      // Thread the scheduler-owned server's URL into the capture input: the S2 dev
+      // server wins, else the S9 static server, else the raw url/htmlPath is captured.
       const captureInput: VerificationRequestInput = devServerHandle
         ? { ...input, url: devServerHandle.baseUrl }
-        : input;
+        : staticServerHandle
+          ? { ...input, url: staticServerHandle.baseUrl }
+          : input;
       const ctx: CaptureContext = {
         requestId: row.id,
         runId: row.run_id,
@@ -1453,18 +1569,34 @@ export class VerificationScheduler {
         await this.markTerminalAndDeliver(
           row,
           'timeout',
-          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted' },
+          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted', captureOrigin },
           undefined,
           [],
           input,
         );
         return;
       }
+
+      // UNTRUSTED capture diagnostics (Codex finding 7): error-level page console
+      // lines + capture-side notes the backend surfaced. Capped defensively (page code
+      // controls this text) and attached to the HUMAN-facing terminal payloads only —
+      // the capture-failure and judged-outcome ones below. They MUST NOT reach the
+      // VlmJudge inputs (prompt-injection surface); the judge call stays byte-identical.
+      const cappedDiagnostics =
+        Array.isArray(capture.diagnostics) && capture.diagnostics.length > 0
+          ? this.capDiagnostics(capture.diagnostics)
+          : undefined;
+
       if (!capture.ok || capture.fileNames.length === 0) {
         await this.markTerminalAndDeliver(
           row,
           'failed',
-          { backend: backend.id, error: capture.error ?? 'capture produced no images' },
+          {
+            backend: backend.id,
+            error: capture.error ?? 'capture produced no images',
+            captureOrigin,
+            ...(cappedDiagnostics ? { diagnostics: cappedDiagnostics } : {}),
+          },
           undefined,
           [],
           input,
@@ -1506,7 +1638,7 @@ export class VerificationScheduler {
           await this.markTerminalAndDeliver(
             row,
             'timeout',
-            { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted' },
+            { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted', captureOrigin },
             undefined,
             fileNames,
             input,
@@ -1576,7 +1708,7 @@ export class VerificationScheduler {
         await this.markTerminalAndDeliver(
           row,
           'timeout',
-          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted' },
+          { backend: backend.id, error: timedOut ? 'request timed out' : 'aborted', captureOrigin },
           undefined,
           fileNames,
           input,
@@ -1588,7 +1720,12 @@ export class VerificationScheduler {
       await this.markTerminalAndDeliver(
         row,
         status,
-        { backend: backend.id, verdict },
+        {
+          backend: backend.id,
+          verdict,
+          captureOrigin,
+          ...(cappedDiagnostics ? { diagnostics: cappedDiagnostics } : {}),
+        },
         verdict,
         fileNames,
         input,
@@ -1610,7 +1747,11 @@ export class VerificationScheduler {
       await this.markTerminalAndDeliver(
         row,
         status,
-        { backend: backend.id, error: aborted ? (timedOut ? 'request timed out' : 'aborted') : message },
+        {
+          backend: backend.id,
+          error: aborted ? (timedOut ? 'request timed out' : 'aborted') : message,
+          captureOrigin,
+        },
         undefined,
         fileNames,
         input,
@@ -1627,6 +1768,20 @@ export class VerificationScheduler {
           await devServerHandle.release();
         } catch (err) {
           this.logger?.error('[VerificationScheduler] dev-server teardown threw', {
+            requestId: row.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      // Tear the S9 static server down (closes the listener + force-destroys open
+      // sockets). Guarded on null (none spawned). Fail-soft in the SAME shape as the
+      // dev-server teardown: a release() throw is logged, never propagated, so it can
+      // never leave the port/screen lease un-released below.
+      if (staticServerHandle) {
+        try {
+          await staticServerHandle.release();
+        } catch (err) {
+          this.logger?.error('[VerificationScheduler] static-server teardown threw', {
             requestId: row.id,
             error: err instanceof Error ? err.message : String(err),
           });
@@ -1693,6 +1848,137 @@ export class VerificationScheduler {
       deliverable: deliverable.id,
     });
     return this.devServerProvider.spawn({ config: deliverable, port, cwd, signal });
+  }
+
+  /**
+   * Stand a scheduler-owned STATIC file server up for this request when it targets a
+   * BUILT html file with no running url and no dev-server recipe (S9 / the file://
+   * ES-module-block fix). Returns the live StaticServerHandle (the caller threads
+   * handle.baseUrl into ctx.input.url and release()s it in the SAME finally as the S2
+   * dev server), or null when no static server is stood up — and in EVERY null case
+   * the request captures its raw url/htmlPath UNCHANGED (pre-S9 file:// behavior), so
+   * a non-static request is byte-identical to before this layer:
+   *   - EITHER dep absent (staticServerProvider / staticHtmlContextResolver): a
+   *     deployment wired without the S9 seam — the static-capture path is preserved.
+   *   - the request carries no htmlPath (empty after trim): there is nothing to serve.
+   *   - the request already declares a running `url`: the agent pointed at a live
+   *     server, so we capture that url directly and NEVER shadow it with a static serve.
+   *   - the request declares a dev server (non-empty `start`): a STARTABLE deliverable
+   *     is S2's job (maybeSpawnDevServer stands it up on a leased port); statically
+   *     serving the UNBUILT source html would be wrong. inputDeclaresDevServer is the
+   *     SAME signal the dev-server selection gate keys off, so the two seams are
+   *     mutually exclusive by construction (runChosen also skips S9 when a dev server
+   *     was already spawned).
+   *   - the resolver returns null / THROWS: the html could not be worktree-resolved or
+   *     does not exist. Fail-soft (debug log) to the raw-htmlPath capture — the rung-0
+   *     backend's own file:// module-block diagnostic breadcrumb explains the resulting
+   *     blank styled shell to a human.
+   *   - the provider.spawn THROWS (bind failure / abort mid-listen): warn + return
+   *     null. A static-serve failure must NEVER wedge the request — capturing the raw
+   *     htmlPath (blank though it may render) is strictly better than a fabricated FAIL,
+   *     and the same file:// diagnostic breadcrumb covers the confusion.
+   *
+   * The confining static root rides `resolvedContext` (the matched verify.json
+   * deliverable's explicit `staticRoot`, when it declares one) rather than the request
+   * input — staticRoot is a serve-time concern, not an input field. The resolver
+   * defaults it to dirname(html) when absent.
+   */
+  private async maybeSpawnStaticServer(
+    row: VerificationRequestRow,
+    input: VerificationRequestInput,
+    resolvedContext: { cwd: string; deliverable: DeliverableVerifyConfig } | null,
+    signal: AbortSignal,
+  ): Promise<StaticServerHandle | null> {
+    if (!this.staticServerProvider || !this.staticHtmlContextResolver) {
+      return null;
+    }
+    const htmlPath = input.htmlPath?.trim() ?? '';
+    if (htmlPath.length === 0) {
+      return null;
+    }
+    // A running url the agent passed is captured directly — never shadowed by a static
+    // serve of a build output.
+    if (typeof input.url === 'string' && input.url.trim().length > 0) {
+      return null;
+    }
+    // A startable deliverable is the dev-server seam's job (S2), not ours.
+    if (this.inputDeclaresDevServer(input)) {
+      return null;
+    }
+
+    // Resolve the absolute html path + confining static root (fs work lives in the
+    // injected closure). A throw is the same fail-soft "no static server" path as a
+    // null return — the raw htmlPath capture runs unchanged.
+    let context: { absoluteHtmlPath: string; staticRoot: string } | null;
+    try {
+      context = await this.staticHtmlContextResolver({
+        runId: row.run_id,
+        projectId: row.project_id,
+        htmlPath,
+        staticRoot: resolvedContext?.deliverable?.staticRoot,
+      });
+    } catch (err) {
+      this.logger?.debug('[VerificationScheduler] static html context resolve threw; capturing raw htmlPath', {
+        requestId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+    if (!context) {
+      this.logger?.debug('[VerificationScheduler] no static html context; capturing raw htmlPath', {
+        requestId: row.id,
+      });
+      return null;
+    }
+
+    // Stand the server up. A bind/abort failure fail-softs to the raw htmlPath capture
+    // (never a request FAIL) — the rung-0 file:// diagnostic breadcrumb covers it.
+    try {
+      this.logger?.debug('[VerificationScheduler] spawning static server', {
+        requestId: row.id,
+        absoluteHtmlPath: context.absoluteHtmlPath,
+        staticRoot: context.staticRoot,
+      });
+      return await this.staticServerProvider.spawn({
+        absoluteHtmlPath: context.absoluteHtmlPath,
+        staticRoot: context.staticRoot,
+        signal,
+      });
+    } catch (err) {
+      this.logger?.warn('[VerificationScheduler] static server spawn threw; capturing raw htmlPath (fail-soft)', {
+        requestId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Bound UNTRUSTED capture diagnostics (Codex finding 7) before they ride a terminal
+   * payload to the human surfaces: cap at 10 entries AND 2000 total chars. Entries are
+   * taken in order; the entry that would overflow the char budget is TRUNCATED to the
+   * remaining budget and every entry after it is DROPPED. Page code controls this text
+   * (prompt-injection surface), so it is defensively bounded here and NEVER threaded
+   * into VlmJudge inputs — it is metadata for the result payload / review item only.
+   */
+  private capDiagnostics(diagnostics: string[]): string[] {
+    const MAX_ENTRIES = 10;
+    const MAX_TOTAL_CHARS = 2000;
+    const capped: string[] = [];
+    let total = 0;
+    for (const entry of diagnostics.slice(0, MAX_ENTRIES)) {
+      const remaining = MAX_TOTAL_CHARS - total;
+      if (remaining <= 0) break;
+      if (entry.length <= remaining) {
+        capped.push(entry);
+        total += entry.length;
+      } else {
+        // The overflowing entry is truncated to fit the budget; the rest are dropped.
+        capped.push(entry.slice(0, remaining));
+        break;
+      }
+    }
+    return capped;
   }
 
   /**
@@ -1976,7 +2262,7 @@ export class VerificationScheduler {
   private markTerminal(
     id: string,
     status: RequestStatus,
-    extra: { backend?: VisualBackendId; verdict?: VerdictV1; error?: string } = {},
+    extra: TerminalExtra = {},
   ): number {
     return this.db
       .prepare(
@@ -2012,7 +2298,7 @@ export class VerificationScheduler {
   private async markTerminalAndDeliver(
     row: VerificationRequestRow,
     status: RequestStatus,
-    extra: { backend?: VisualBackendId; verdict?: VerdictV1; error?: string },
+    extra: TerminalExtra,
     verdict: VerdictV1 | undefined,
     fileNames: string[],
     input?: VerificationRequestInput,
@@ -2046,7 +2332,7 @@ export class VerificationScheduler {
         errorClass: verifyErrorClass,
       });
     }
-    await this.deliver(row, status, verdict, fileNames, input);
+    await this.deliver(row, status, verdict, fileNames, input, extra);
   }
 
   // --------------------------------------------------------------------------
@@ -2068,6 +2354,7 @@ export class VerificationScheduler {
     verdict: VerdictV1 | undefined,
     fileNames: string[],
     input?: VerificationRequestInput,
+    extra?: TerminalExtra,
   ): Promise<void> {
     if (this.onVerdict) {
       try {
@@ -2080,6 +2367,13 @@ export class VerificationScheduler {
           verdict,
           fileNames,
           input,
+          // S9 human-facing provenance: forwarded (not persisted by markTerminal)
+          // so verdictDelivery can render origin + capped page diagnostics on the
+          // review-item finding body + screenshots payload.
+          ...(extra?.captureOrigin ? { captureOrigin: extra.captureOrigin } : {}),
+          ...(extra?.diagnostics && extra.diagnostics.length > 0
+            ? { diagnostics: extra.diagnostics }
+            : {}),
         });
       } catch (err) {
         this.logger?.error('[VerificationScheduler] onVerdict hook threw', {

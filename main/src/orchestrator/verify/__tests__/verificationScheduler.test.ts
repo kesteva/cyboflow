@@ -31,6 +31,12 @@ import {
   type DevServerHandle,
   type DevServerSpawnArgs,
   type DevServerContextResolver,
+  type StaticServerProvider,
+  type StaticServerHandle,
+  type StaticServerSpawnArgs,
+  type StaticHtmlContextResolver,
+  type CaptureOrigin,
+  type OnVerdict,
   type VerificationTerminalEvent,
 } from '../verificationScheduler';
 import { Mutex } from '../../../utils/mutex';
@@ -2299,5 +2305,532 @@ describe('VerificationScheduler — verify-request-failed seam gating (seam J)',
 
     expect(rowStatus(db, id).status).toBe('passed');
     expect(verifyReports()).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S9 — scheduler-owned static file server (the file:// ES-module-block fix).
+//
+// A request that points at a BUILT html file (no running url, no dev-server `start`)
+// must render correctly. Pre-S9 the rung-0 backend loaded it over file://, which
+// CORS-blocks every `<script type="module">` and silently renders a blank styled
+// shell. S9 stands the html's static root up on an ephemeral loopback server and
+// threads the tokenized entry URL into ctx.input.url, exactly like the S2 dev server.
+// A FAKE StaticServerProvider records spawn args + release calls; a FAKE resolver
+// echoes an absolute path so we assert the wiring without touching the fs.
+// ---------------------------------------------------------------------------
+
+interface StaticRecord {
+  spawnArgs?: StaticServerSpawnArgs;
+  released: number;
+}
+
+/** A fake static server: records the spawn args + release count; can throw on spawn. */
+function fakeStaticProvider(opts: {
+  record: StaticRecord;
+  baseUrl?: string;
+  throwOnSpawn?: boolean;
+}): StaticServerProvider {
+  return {
+    spawn: async (args): Promise<StaticServerHandle> => {
+      opts.record.spawnArgs = args;
+      if (opts.throwOnSpawn) throw new Error('bind EADDRINUSE');
+      return {
+        baseUrl: opts.baseUrl ?? 'http://127.0.0.1:54321/index.html',
+        release: async () => {
+          opts.record.released += 1;
+        },
+      };
+    },
+  };
+}
+
+/** A resolver that echoes an absolute path derived from the (possibly hydrated) htmlPath. */
+function echoStaticResolver(seen: { htmlPath?: string; staticRoot?: string }): StaticHtmlContextResolver {
+  return async ({ htmlPath, staticRoot }) => {
+    seen.htmlPath = htmlPath;
+    seen.staticRoot = staticRoot;
+    return { absoluteHtmlPath: `/abs/${htmlPath}`, staticRoot: staticRoot ?? '/abs' };
+  };
+}
+
+/**
+ * Collect onVerdict deliveries — THE real surface captureOrigin/diagnostics ride
+ * (markTerminalAndDeliver forwards them into deliver() → onVerdict, whose concrete
+ * hook renders them on the review-item finding body + screenshots payload). The
+ * provenance tests assert HERE, not on a private-method spy, so they fail if the
+ * fields ever stop reaching an actual consumer again.
+ */
+function collectVerdicts(): { onVerdict: OnVerdict; last: () => Parameters<OnVerdict>[0] | undefined } {
+  const calls: Array<Parameters<OnVerdict>[0]> = [];
+  return {
+    onVerdict: (args) => {
+      calls.push(args);
+    },
+    last: () => calls.at(-1),
+  };
+}
+
+describe('VerificationScheduler — static file server seam (S9)', () => {
+  it('an htmlPath-only request with both deps: spawns with the resolver paths, threads baseUrl into capture, releases after success', async () => {
+    const record: StaticRecord = { released: 0 };
+    const seen: { htmlPath?: string; staticRoot?: string } = {};
+    const provider = fakeStaticProvider({ record, baseUrl: 'http://127.0.0.1:5599/index.html' });
+    const sink: { ctx?: CaptureContext } = {};
+    const backend = fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      staticServerProvider: provider,
+      staticHtmlContextResolver: echoStaticResolver(seen),
+    });
+
+    const id = enqueueRowRaw(db, { chain: ['capturePage'], input: { htmlPath: 'dist/index.html' } });
+    await sched.drain();
+
+    // The resolver saw the raw htmlPath; the provider got its resolved absolute paths.
+    expect(seen.htmlPath).toBe('dist/index.html');
+    expect(record.spawnArgs?.absoluteHtmlPath).toBe('/abs/dist/index.html');
+    expect(record.spawnArgs?.staticRoot).toBe('/abs');
+    expect(record.spawnArgs?.signal).toBeInstanceOf(AbortSignal);
+    // The backend captured the SERVED url, not the raw htmlPath.
+    expect(sink.ctx?.input.url).toBe('http://127.0.0.1:5599/index.html');
+    expect(rowStatus(db, id).status).toBe('passed');
+    // The static server was torn down in finally.
+    expect(record.released).toBe(1);
+  });
+
+  it('does NOT spawn when the request already declares a running url (agent url captured directly)', async () => {
+    const record: StaticRecord = { released: 0 };
+    const seen: { htmlPath?: string } = {};
+    const provider = fakeStaticProvider({ record });
+    const sink: { ctx?: CaptureContext } = {};
+    const backend = fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      staticServerProvider: provider,
+      staticHtmlContextResolver: echoStaticResolver(seen),
+    });
+
+    // htmlPath AND url present → the running url wins; no static serve.
+    enqueueRowRaw(db, {
+      chain: ['capturePage'],
+      input: { htmlPath: 'dist/index.html', url: 'http://live-server' },
+    });
+    await sched.drain();
+
+    expect(record.spawnArgs).toBeUndefined();
+    expect(sink.ctx?.input.url).toBe('http://live-server');
+  });
+
+  it('does NOT spawn when a dev server is declared (S2 path wins)', async () => {
+    const staticRecord: StaticRecord = { released: 0 };
+    const staticProvider = fakeStaticProvider({ record: staticRecord });
+    let devSpawned = 0;
+    const devProvider: DevServerProvider = {
+      spawn: async (args): Promise<DevServerHandle> => {
+        devSpawned += 1;
+        return { baseUrl: `http://localhost:${args.port}`, release: async () => {} };
+      },
+    };
+    const sink: { ctx?: CaptureContext } = {};
+    // A port-capable backend so a startable deliverable routes to the S2 dev server.
+    const backend = fakeBackend({ id: 'playwright', rung: 1, lease: 'verify:port:5173', sink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { playwright: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      devServerProvider: devProvider,
+      devServerContextResolver: async () => ({ cwd: '/tmp/wt', deliverable: { id: 'web', start: 'serve' } }),
+      staticServerProvider: staticProvider,
+      staticHtmlContextResolver: echoStaticResolver({}),
+    });
+
+    enqueueRowRaw(db, {
+      chain: ['playwright'],
+      input: { htmlPath: 'dist/index.html', start: 'npm run dev' },
+    });
+    await sched.drain();
+
+    // The dev server was stood up; the static server was NEVER attempted.
+    expect(devSpawned).toBe(1);
+    expect(staticRecord.spawnArgs).toBeUndefined();
+    expect(sink.ctx?.input.url).toBe('http://localhost:5173');
+  });
+
+  it('does NOT spawn when either dep is absent (static-capture deployment)', async () => {
+    const record: StaticRecord = { released: 0 };
+    const sink: { ctx?: CaptureContext } = {};
+    const backend = fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink });
+
+    // Provider present, resolver ABSENT → no spawn (either-dep-absent short-circuit).
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      staticServerProvider: fakeStaticProvider({ record }),
+      // no staticHtmlContextResolver
+    });
+
+    const id = enqueueRowRaw(db, { chain: ['capturePage'], input: { htmlPath: 'dist/index.html' } });
+    await sched.drain();
+
+    expect(record.spawnArgs).toBeUndefined();
+    // Raw htmlPath preserved (no url threaded) — pre-S9 capture path.
+    expect(sink.ctx?.input.url).toBeUndefined();
+    expect(sink.ctx?.input.htmlPath).toBe('dist/index.html');
+    expect(rowStatus(db, id).status).toBe('passed');
+  });
+
+  it('a resolver that returns null leaves the raw htmlPath capture unchanged (no url, no spawn)', async () => {
+    const record: StaticRecord = { released: 0 };
+    const sink: { ctx?: CaptureContext } = {};
+    const backend = fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      staticServerProvider: fakeStaticProvider({ record }),
+      staticHtmlContextResolver: async () => null, // html could not be resolved
+    });
+
+    const id = enqueueRowRaw(db, { chain: ['capturePage'], input: { htmlPath: 'dist/index.html' } });
+    await sched.drain();
+
+    expect(record.spawnArgs).toBeUndefined();
+    expect(sink.ctx?.input.url).toBeUndefined();
+    expect(sink.ctx?.input.htmlPath).toBe('dist/index.html');
+    expect(rowStatus(db, id).status).toBe('passed');
+  });
+
+  it('a spawn THROW fail-softs: capture still runs against the raw htmlPath, the request is not failed by the spawn', async () => {
+    const record: StaticRecord = { released: 0 };
+    const sink: { ctx?: CaptureContext } = {};
+    const backend = fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      staticServerProvider: fakeStaticProvider({ record, throwOnSpawn: true }),
+      staticHtmlContextResolver: echoStaticResolver({}),
+    });
+
+    const id = enqueueRowRaw(db, { chain: ['capturePage'], input: { htmlPath: 'dist/index.html' } });
+    await sched.drain();
+
+    // spawn threw → fell back to the raw htmlPath capture (no url), and STILL passed.
+    expect(record.spawnArgs).toBeDefined(); // spawn was attempted
+    expect(record.released).toBe(0); // no handle to release
+    expect(sink.ctx?.input.url).toBeUndefined();
+    expect(sink.ctx?.input.htmlPath).toBe('dist/index.html');
+    expect(rowStatus(db, id).status).toBe('passed');
+  });
+
+  it('releases the static handle when the CAPTURE fails', async () => {
+    const record: StaticRecord = { released: 0 };
+    const sink: { ctx?: CaptureContext } = {};
+    const backend = fakeBackend({ id: 'capturePage', rung: 0, lease: null, throwOnCapture: true, sink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      staticServerProvider: fakeStaticProvider({ record }),
+      staticHtmlContextResolver: echoStaticResolver({}),
+    });
+
+    const id = enqueueRowRaw(db, { chain: ['capturePage'], input: { htmlPath: 'dist/index.html' } });
+    await sched.drain();
+
+    expect(rowStatus(db, id).status).toBe('failed');
+    expect(record.released).toBe(1); // static server STILL torn down in finally
+  });
+
+  it('releases the static handle when the request TIMES OUT mid-capture', async () => {
+    const record: StaticRecord = { released: 0 };
+    // A capture that never settles + ignores the signal — the deadline must abort it.
+    const hangBackend: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: () => new Promise<CaptureResult>(() => {}),
+    };
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: hangBackend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      requestTimeoutMs: 50,
+      staticServerProvider: fakeStaticProvider({ record }),
+      staticHtmlContextResolver: echoStaticResolver({}),
+    });
+
+    const id = sched.enqueue({
+      runId: 'run-1',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      input: { intent: 'looks right', htmlPath: 'dist/index.html' },
+      chain: ['capturePage'],
+    });
+
+    await waitFor(() => rowStatus(db, id).status === 'timeout');
+    // The static server is torn down even though the capture promise never settled.
+    await waitFor(() => record.released === 1);
+  });
+
+  it('caps capture diagnostics into the terminal payload and NEVER threads them into the judge', async () => {
+    // 15 entries × 300 chars = 4500 chars — well over both the 10-entry and 2000-char caps.
+    const rawDiagnostics = Array.from({ length: 15 }, (_, i) => `diag-${i}-`.padEnd(300, 'x'));
+    let judgeInput: Record<string, unknown> | undefined;
+    const capturingJudge: VlmJudge = {
+      judge: async (args) => {
+        judgeInput = args as unknown as Record<string, unknown>;
+        return PASS_VERDICT;
+      },
+    };
+    const diagBackend: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async (): Promise<CaptureResult> => ({
+        ok: true,
+        fileNames: ['default.png'],
+        diagnostics: rawDiagnostics,
+      }),
+    };
+
+    const verdicts = collectVerdicts();
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: diagBackend },
+      judge: capturingJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      onVerdict: verdicts.onVerdict,
+    });
+
+    enqueueRowRaw(db, { chain: ['capturePage'], input: { url: 'http://placeholder' } });
+    await sched.drain();
+
+    const delivered = verdicts.last();
+    expect(delivered?.diagnostics).toBeDefined();
+    // Capped to at most 10 entries AND 2000 total chars.
+    expect(delivered?.diagnostics?.length).toBeLessThanOrEqual(10);
+    const totalChars = (delivered?.diagnostics ?? []).reduce((n, s) => n + s.length, 0);
+    expect(totalChars).toBeLessThanOrEqual(2000);
+    // The untrusted text NEVER reaches the judge (prompt-injection surface).
+    expect(judgeInput).toBeDefined();
+    expect('diagnostics' in (judgeInput as Record<string, unknown>)).toBe(false);
+  });
+
+  it('does NOT truncate a small diagnostics list (passthrough under the caps)', async () => {
+    const diagBackend: VisualBackend = {
+      id: 'capturePage',
+      rung: 0,
+      requiredLease: () => null,
+      healthCheck: async () => true,
+      capture: async (): Promise<CaptureResult> => ({
+        ok: true,
+        fileNames: ['default.png'],
+        diagnostics: ['file:// module blocked', 'fold truncated at 20 lines'],
+      }),
+    };
+    const verdicts = collectVerdicts();
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: diagBackend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      onVerdict: verdicts.onVerdict,
+    });
+
+    enqueueRowRaw(db, { chain: ['capturePage'], input: { url: 'http://placeholder' } });
+    await sched.drain();
+
+    expect(verdicts.last()?.diagnostics).toEqual([
+      'file:// module blocked',
+      'fold truncated at 20 lines',
+    ]);
+  });
+
+  it("stamps captureOrigin 'static-server' when the S9 server served the capture", async () => {
+    const record: StaticRecord = { released: 0 };
+    const verdicts = collectVerdicts();
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink: {} }) },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      staticServerProvider: fakeStaticProvider({ record }),
+      staticHtmlContextResolver: echoStaticResolver({}),
+      onVerdict: verdicts.onVerdict,
+    });
+
+    enqueueRowRaw(db, { chain: ['capturePage'], input: { htmlPath: 'dist/index.html' } });
+    await sched.drain();
+
+    const origin: CaptureOrigin | undefined = verdicts.last()?.captureOrigin;
+    expect(origin).toBe('static-server');
+  });
+
+  it("stamps captureOrigin 'dev-server' / 'url' / 'file' appropriately", async () => {
+    // (a) dev-server: a startable deliverable stood up on a leased port.
+    const devVerdicts = collectVerdicts();
+    const devSched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { playwright: fakeBackend({ id: 'playwright', rung: 1, lease: 'verify:port:5173', sink: {} }) },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      leasePool: new ResourceLeasePool(new Mutex()),
+      devServerProvider: {
+        spawn: async (args): Promise<DevServerHandle> => ({
+          baseUrl: `http://localhost:${args.port}`,
+          release: async () => {},
+        }),
+      },
+      devServerContextResolver: async () => ({ cwd: '/tmp/wt', deliverable: { id: 'web', start: 'serve' } }),
+      onVerdict: devVerdicts.onVerdict,
+    });
+    enqueueRowRaw(db, { chain: ['playwright'], input: { start: 'npm run dev' } });
+    await devSched.drain();
+    expect(devVerdicts.last()?.captureOrigin).toBe('dev-server');
+    VerificationScheduler._resetForTesting();
+
+    // (b) url: a pre-existing running url, no server stood up.
+    const urlVerdicts = collectVerdicts();
+    const urlSched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink: {} }) },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      onVerdict: urlVerdicts.onVerdict,
+    });
+    enqueueRowRaw(db, { chain: ['capturePage'], input: { url: 'http://placeholder' } });
+    await urlSched.drain();
+    expect(urlVerdicts.last()?.captureOrigin).toBe('url');
+    VerificationScheduler._resetForTesting();
+
+    // (c) file: a bare htmlPath with NO static deps → the raw file:// capture.
+    const fileVerdicts = collectVerdicts();
+    const fileSched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink: {} }) },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      // no static deps
+      onVerdict: fileVerdicts.onVerdict,
+    });
+    enqueueRowRaw(db, { chain: ['capturePage'], input: { htmlPath: 'dist/index.html' } });
+    await fileSched.drain();
+    expect(fileVerdicts.last()?.captureOrigin).toBe('file');
+  });
+
+  it('hydrateInput fills htmlPath from a matched static deliverable for a bare-intent request', async () => {
+    const record: StaticRecord = { released: 0 };
+    const seen: { htmlPath?: string; staticRoot?: string } = {};
+    const sink: { ctx?: CaptureContext } = {};
+    const backend = fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink });
+
+    const sched = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: backend },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      // The verify.json deliverable carries htmlPath + staticRoot; the request is bare.
+      devServerContextResolver: async () => ({
+        cwd: '/tmp/wt',
+        deliverable: { id: 'web', htmlPath: 'dist/index.html', staticRoot: '/custom/root' },
+      }),
+      staticServerProvider: fakeStaticProvider({ record }),
+      staticHtmlContextResolver: echoStaticResolver(seen),
+    });
+
+    // Bare-intent request: no url, no htmlPath.
+    enqueueRowRaw(db, { chain: ['capturePage'], input: {} });
+    await sched.drain();
+
+    // htmlPath was hydrated from the deliverable → the static resolver saw it, and the
+    // deliverable's explicit staticRoot flowed via resolvedContext (NOT the input).
+    expect(seen.htmlPath).toBe('dist/index.html');
+    expect(seen.staticRoot).toBe('/custom/root');
+    expect(sink.ctx?.input.htmlPath).toBe('dist/index.html');
+    expect(record.spawnArgs?.staticRoot).toBe('/custom/root');
+  });
+
+  it('hydrateInput NEVER clobbers an agent-passed htmlPath or url', async () => {
+    // (a) agent htmlPath wins over the deliverable htmlPath.
+    const seenA: { htmlPath?: string } = {};
+    const schedA = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink: {} }) },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      devServerContextResolver: async () => ({
+        cwd: '/tmp/wt',
+        deliverable: { id: 'web', htmlPath: 'deliverable.html' },
+      }),
+      staticServerProvider: fakeStaticProvider({ record: { released: 0 } }),
+      staticHtmlContextResolver: echoStaticResolver(seenA),
+    });
+    enqueueRowRaw(db, { chain: ['capturePage'], input: { htmlPath: 'agent.html' } });
+    await schedA.drain();
+    expect(seenA.htmlPath).toBe('agent.html'); // agent value survived hydration
+    VerificationScheduler._resetForTesting();
+
+    // (b) an agent-passed url is never shadowed, and htmlPath is not back-filled.
+    const recordB: StaticRecord = { released: 0 };
+    const sinkB: { ctx?: CaptureContext } = {};
+    const schedB = VerificationScheduler.initialize({
+      db: dbAdapter(db),
+      backends: { capturePage: fakeBackend({ id: 'capturePage', rung: 0, lease: null, sink: sinkB }) },
+      judge: fakeJudge,
+      artifactsDirResolver: () => '/tmp/a',
+      config: baseConfig,
+      devServerContextResolver: async () => ({
+        cwd: '/tmp/wt',
+        deliverable: { id: 'web', htmlPath: 'deliverable.html' },
+      }),
+      staticServerProvider: fakeStaticProvider({ record: recordB }),
+      staticHtmlContextResolver: echoStaticResolver({}),
+    });
+    enqueueRowRaw(db, { chain: ['capturePage'], input: { url: 'http://live-server' } });
+    await schedB.drain();
+    expect(sinkB.ctx?.input.url).toBe('http://live-server'); // running url captured directly
+    expect(sinkB.ctx?.input.htmlPath).toBeUndefined(); // htmlPath NOT back-filled (url present)
+    expect(recordB.spawnArgs).toBeUndefined(); // no static serve
   });
 });

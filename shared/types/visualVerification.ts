@@ -267,6 +267,18 @@ export interface CaptureContext {
 }
 
 /**
+ * Where a request's capture was ultimately sourced from — stamped per attempt by
+ * the scheduler as HUMAN-FACING provenance (S9). Purely additive metadata: it
+ * never influences the verdict; it rides the onVerdict delivery into the review-
+ * item finding body + the screenshots artifact payload. The four origins:
+ *   - 'dev-server'    — the S2 scheduler-owned dev server was stood up on a leased port.
+ *   - 'static-server' — the S9 ephemeral loopback static server served a built htmlPath.
+ *   - 'url'           — the agent passed a pre-existing running `url` (no server stood up).
+ *   - 'file'          — the raw file:// htmlPath capture (no server, no url).
+ */
+export type CaptureOrigin = 'dev-server' | 'static-server' | 'url' | 'file';
+
+/**
  * The result of one backend capture attempt. `ok:false` (or an empty fileNames on
  * ok:true) is a runtime-failure fall-forward trigger — the scheduler advances to
  * the next rung in the chain. `fileNames` are relative to CaptureContext.artifactsDir.
