@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { execFileSync } from 'node:child_process';
 import type { Logger } from '../../../utils/logger';
 import type { ConfigManager } from '../../configManager';
 import type { SessionManager } from '../../sessionManager';
@@ -13,6 +14,12 @@ import type {
 } from '../../../../../shared/types/agentStream';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { resolveAgentModelAlias } from '../agentModelContext';
+import {
+  CODEX_EXECUTABLE_VERSION,
+  prependCodexPathToEnvironment,
+  resolveCodexExecutablePath,
+  type ResolvedCodexExecutable,
+} from './codexExecutablePath';
 import {
   CodexAppServerApprovalBridge,
   type ApprovalRouterPort,
@@ -58,10 +65,9 @@ export type CodexAppServerClientFactory = (
   options: CodexAppServerClientOptions,
 ) => CodexAppServerClientLike;
 
-export interface CodexMcpRuntimeConfig extends CodexAppServerMcpRuntimeConfig {
-  /** Retained while older startup composition still resolves the removed hook asset. */
-  codexHookScriptPath?: string;
-}
+export type CodexExecutableResolver = () => ResolvedCodexExecutable;
+
+export type CodexMcpRuntimeConfig = CodexAppServerMcpRuntimeConfig;
 
 interface ActiveCodexRun {
   abortController: AbortController;
@@ -146,6 +152,7 @@ export class CodexSdkManager extends AbstractCliManager {
   private readonly spawnKeysByPanelId = new Map<string, Set<string>>();
   private cyboflowMcpRuntimeConfig: CodexMcpRuntimeConfig | null = null;
   private approvalRouterProvider: (() => ApprovalRouterPort) | null = null;
+  private resolvedExecutable: ResolvedCodexExecutable | null = null;
 
   constructor(
     sessionManager: SessionManager,
@@ -153,6 +160,7 @@ export class CodexSdkManager extends AbstractCliManager {
     configManager: ConfigManager | undefined,
     private readonly db: Database.Database,
     private readonly createAppServerClient: CodexAppServerClientFactory = defaultCodexAppServerClientFactory,
+    private readonly resolveExecutable: CodexExecutableResolver = resolveCodexExecutablePath,
   ) {
     super(sessionManager, logger, configManager);
     if (db == null) {
@@ -173,7 +181,27 @@ export class CodexSdkManager extends AbstractCliManager {
   }
 
   protected async testCliAvailability(): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {
-    return { available: true, version: 'unverified', path: 'codex' };
+    try {
+      const executable = this.getResolvedExecutable();
+      const version = execFileSync(executable.executablePath, ['--version'], {
+        encoding: 'utf8',
+        timeout: 10_000,
+      }).trim();
+      if (!version.includes(CODEX_EXECUTABLE_VERSION)) {
+        return {
+          available: false,
+          error: `Codex version mismatch: expected ${CODEX_EXECUTABLE_VERSION}, got ${version}`,
+          version,
+          path: executable.executablePath,
+        };
+      }
+      return { available: true, version, path: executable.executablePath };
+    } catch (error) {
+      return {
+        available: false,
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
 
   protected buildCommandArgs(_options: ClaudeSpawnerOptions): string[] {
@@ -181,7 +209,7 @@ export class CodexSdkManager extends AbstractCliManager {
   }
 
   protected async getCliExecutablePath(): Promise<string> {
-    return 'codex';
+    return this.getResolvedExecutable().executablePath;
   }
 
   protected parseCliOutput(
@@ -256,7 +284,8 @@ export class CodexSdkManager extends AbstractCliManager {
 
     const runtimeConfig = this.requireMcpRuntimeConfig();
     const approvalRouter = this.requireApprovalRouter();
-    const command = await this.getCliExecutablePath();
+    const executable = this.getResolvedExecutable();
+    const command = executable.executablePath;
     const abortController = new AbortController();
     const terminal = createDeferred<void>();
     const router = new EventRouter<AgentStreamEvent>();
@@ -310,7 +339,10 @@ export class CodexSdkManager extends AbstractCliManager {
     const client = this.createAppServerClient({
       command,
       cwd: options.worktreePath,
-      env: buildCodexAppServerEnvironment(runId, runtimeConfig),
+      env: prependCodexPathToEnvironment(
+        buildCodexAppServerEnvironment(runId, runtimeConfig),
+        executable.pathDir,
+      ),
       onServerRequest: (request) => approvalBridge.handleServerRequest(request),
       onNotification: (notification) => turnSessionRef.current?.handleNotification(notification),
       onStderr: (chunk) => this.logger?.warn(`[Codex app-server stderr] ${chunk.trimEnd()}`),
@@ -388,6 +420,11 @@ export class CodexSdkManager extends AbstractCliManager {
         APP_SERVER_REQUEST_TIMEOUT_MS,
         'Codex app-server initialization',
       );
+      if (!initializeResponse.userAgent.includes(CODEX_EXECUTABLE_VERSION)) {
+        throw new Error(
+          `Codex app-server protocol mismatch: expected ${CODEX_EXECUTABLE_VERSION}, got ${initializeResponse.userAgent}`,
+        );
+      }
       const accountResponse = await withTimeout(
         client.sendRequest<unknown, { refreshToken: false }>(
           'account/read',
@@ -478,6 +515,11 @@ export class CodexSdkManager extends AbstractCliManager {
       throw new Error('Codex app-server manager missing Cyboflow MCP runtime config');
     }
     return this.cyboflowMcpRuntimeConfig;
+  }
+
+  private getResolvedExecutable(): ResolvedCodexExecutable {
+    this.resolvedExecutable ??= this.resolveExecutable();
+    return this.resolvedExecutable;
   }
 
   private requireApprovalRouter(): ApprovalRouterPort {

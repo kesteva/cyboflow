@@ -75,6 +75,12 @@ function makeManager(
     undefined,
     db,
     factory,
+    () => ({
+      executablePath: '/app/codex/bin/codex',
+      pathDir: '/app/codex/codex-path',
+      version: '0.143.0',
+      target: 'aarch64-apple-darwin',
+    }),
   );
   manager.setCyboflowMcpRuntimeConfig({
     orchSocketPath: '/tmp/cyboflow-orch.sock',
@@ -155,9 +161,10 @@ describe('CodexSdkManager app-server runtime', () => {
       expect(client.start).toHaveBeenCalledOnce();
       expect(client.stop).toHaveBeenCalledOnce();
       expect(client.options).toMatchObject({
-        command: 'codex',
+        command: '/app/codex/bin/codex',
         cwd: '/tmp/worktree',
         env: {
+          PATH: expect.stringContaining('/app/codex/codex-path'),
           CYBOFLOW_RUN_ID: 'run-1',
           CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
         },
