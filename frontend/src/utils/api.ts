@@ -5,6 +5,7 @@ import type { SessionCreationPreferences } from '../stores/sessionPreferencesSto
 import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
 import type { FastModeStateNotice } from '../../../shared/types/panels';
+import type { ClaudeDetectionResult } from '../../../shared/types/onboarding';
 
 // Type for IPC response.
 // T defaults to `unknown` (not `any`) so callers must narrow before reading .data.
@@ -576,6 +577,17 @@ export class API {
     onFastModeState(callback: (notice: FastModeStateNotice) => void): () => void {
       if (!isElectron()) return () => {};
       return window.electronAPI.claudePanels.onFastModeState(callback);
+    },
+  };
+
+  static claude = {
+    /**
+     * On-demand Claude Code login/binary probe for onboarding step 1. Uncached —
+     * safe to re-invoke behind a "Check again" button after the user logs in.
+     */
+    async detect(): Promise<IPCResponse<ClaudeDetectionResult>> {
+      if (!isElectron() || !window.electronAPI.claude) throw new Error('Electron API not available');
+      return window.electronAPI.claude.detect();
     },
   };
 
