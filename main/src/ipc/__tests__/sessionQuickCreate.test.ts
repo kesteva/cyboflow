@@ -222,6 +222,8 @@ function makeServices(opts?: {
     refreshSessionFromDatabase: vi.fn(() => fakeSession),
     updateSession: vi.fn(),
     addSessionOutput: vi.fn(),
+    addPanelConversationMessage: vi.fn(),
+    addPanelOutput: vi.fn(),
   };
 
   const fakeTaskQueue = {
@@ -262,6 +264,12 @@ function makeServices(opts?: {
     stopPanel: vi.fn(),
   };
 
+  const fakeCodexSdkManager = {
+    on: vi.fn(),
+    isPanelRunning: vi.fn(() => false),
+    spawnCliProcess: vi.fn(async () => undefined),
+  };
+
   // At-spawn runId→panelId seed (facade.registerInteractivePanel) — the spawn
   // sites must call it BEFORE the fire-and-forget startPanel.
   const fakeRegisterLivePanel = vi.fn();
@@ -275,6 +283,7 @@ function makeServices(opts?: {
     cliManagerFactory: {},
     claudeCodeManager: fakeClaudeCodeManager,
     interactiveCliManager: fakeInteractiveCliManager,
+    codexSdkManager: fakeCodexSdkManager,
     codexPtyManager: fakeCodexPtyManager,
     endLiveSession: vi.fn(async () => {}),
     killLiveSession: vi.fn(async () => {}),
@@ -305,6 +314,7 @@ function makeServices(opts?: {
     fakeDatabaseService,
     fakeClaudeCodeManager,
     fakeInteractiveCliManager,
+    fakeCodexSdkManager,
     fakeCodexPtyManager,
     fakeRegisterLivePanel,
     fakeRegisterCodexPtyPanel,
@@ -749,8 +759,14 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     );
   });
 
-  it('rejects codex-sdk on the quick-session IPC path until the SDK manager is wired', async () => {
-    const { services, fakeCodexPtyManager } = makeServices();
+  it('accepts codex-sdk for quick sessions, stamps the session and sentinel, and waits for first input', async () => {
+    const {
+      services,
+      dbRunCalls,
+      fakeCodexPtyManager,
+      fakeCodexSdkManager,
+      fakeInteractiveCliManager,
+    } = makeServices();
     const handlers = registerWith(services);
 
     const result = (await invoke(handlers, 'sessions:create-quick', {
@@ -758,11 +774,18 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
       branchName: TEST_BRANCH,
       agentProvider: 'codex',
       agentRuntime: 'codex-sdk',
-    })) as { success: boolean; error?: string };
+      agentModel: 'gpt-5.5',
+    })) as { success: boolean; data?: { claudePanelId?: string } };
 
-    expect(result.success).toBe(false);
-    expect(result.error).toContain('Codex SDK sessions are not wired yet');
+    expect(result.success).toBe(true);
+    expect(result.data ?? {}).not.toHaveProperty('claudePanelId');
+    const sessionStamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
+    expect(sessionStamp?.args).toEqual(['sdk', 'codex', 'codex-sdk', 'gpt-5.5', 'sess-001']);
+    const runStamp = dbRunCalls.find((c) => /UPDATE\s+workflow_runs\s+SET\s+agent_provider = 'codex'/.test(c.sql));
+    expect(runStamp?.args).toEqual(['gpt-5.5', 'test-run-id-abc']);
+    expect(fakeCodexSdkManager.spawnCliProcess).not.toHaveBeenCalled();
     expect(fakeCodexPtyManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
   });
 });
 
@@ -1006,5 +1029,40 @@ describe('sessions:input handler - substrate routing', () => {
     expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
     expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
     expect(fakeSessionManager.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'running' });
+  });
+
+  it('routes a codex-sdk session turn through the structured Codex manager', async () => {
+    const {
+      handlers,
+      fakeCodexSdkManager,
+      fakeCodexPtyManager,
+      fakeInteractiveCliManager,
+      fakeClaudeCodeManager,
+      fakeSessionManager,
+      fakeDatabaseService,
+    } = setupInput({ agentRuntime: 'codex-sdk', runId: 'run-quick-001' });
+    fakeDatabaseService.getPanelSettings.mockReturnValue({ model: 'gpt-5.5' });
+
+    const result = (await invoke(handlers, 'sessions:input', SESSION_ID, 'hello sdk')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    expect(fakeCodexSdkManager.spawnCliProcess).toHaveBeenCalledWith(
+      expect.objectContaining({
+        panelId: 'panel-1',
+        sessionId: SESSION_ID,
+        runId: 'run-quick-001',
+        worktreePath: `/tmp/project/${TEST_BRANCH}`,
+        prompt: 'hello sdk',
+        model: 'gpt-5.5',
+        systemPromptAppend: expect.stringContaining('cyboflow'),
+      }),
+    );
+    expect(fakeSessionManager.addPanelConversationMessage).toHaveBeenCalledWith('panel-1', 'user', 'hello sdk');
+    expect(fakeSessionManager.updateSession).toHaveBeenCalledWith(SESSION_ID, { status: 'running' });
+    expect(fakeCodexPtyManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();
+    expect(fakeClaudeCodeManager.startPanel).not.toHaveBeenCalled();
   });
 });

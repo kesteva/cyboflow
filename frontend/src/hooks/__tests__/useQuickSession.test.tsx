@@ -206,6 +206,38 @@ describe('useQuickSession — always creates both panels', () => {
 
     expect(callOrder).toEqual(['claude', 'terminal']);
   });
+
+  it('creates a Codex-titled chat panel for codex-sdk quick sessions', async () => {
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.start(
+        undefined,
+        undefined,
+        undefined,
+        'gpt-5.5',
+        false,
+        undefined,
+        undefined,
+        undefined,
+        'codex',
+        'codex-sdk',
+      );
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith(expect.objectContaining({
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      agentModel: 'gpt-5.5',
+    }));
+    expect(mockCreatePanel).toHaveBeenCalledWith({
+      sessionId: 'sess-001',
+      type: 'claude',
+      title: 'Codex',
+    });
+    expect(mockSetModel).toHaveBeenCalledWith('panel-001', 'gpt-5.5');
+    expect(mockSetFastMode).not.toHaveBeenCalled();
+  });
 });
 
 describe('useQuickSession — server-created claude panel (claudePanelId)', () => {

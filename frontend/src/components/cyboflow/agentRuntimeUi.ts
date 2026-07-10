@@ -24,7 +24,7 @@ export function workflowRuntimeForLaunch(runtime: LaunchAgentRuntime): WorkflowA
 }
 
 export function quickSessionRuntimeForLaunch(runtime: LaunchAgentRuntime): SessionAgentRuntime | null {
-  return runtime === 'codex-sdk' ? null : runtime;
+  return runtime;
 }
 
 export function isCodexRuntime(runtime: LaunchAgentRuntime): boolean {

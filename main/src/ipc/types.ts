@@ -10,6 +10,7 @@ import type { DatabaseService } from '../database/database';
 import type { RunCommandManager } from '../services/runCommandManager';
 import type { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import type { InteractiveClaudeManager } from '../services/panels/claude/interactiveClaudeManager';
+import type { CodexSdkManager } from '../services/panels/codex/codexSdkManager';
 import type { CodexPtyManager } from '../services/panels/codex/codexPtyManager';
 import type { CliManagerFactory } from '../services/cliManagerFactory';
 import type { AbstractCliManager } from '../services/panels/cli/AbstractCliManager';
@@ -34,6 +35,8 @@ export interface AppServices {
    * interactiveClaudeManager.ts imports nothing from ipc/ (no cycle).
    */
   interactiveCliManager: InteractiveClaudeManager;
+  /** Structured Codex app-server runtime for quick-session chat and future workflows. */
+  codexSdkManager: CodexSdkManager;
   /** Interactive Codex PTY runtime for quick sessions only. */
   codexPtyManager: CodexPtyManager;
   /**

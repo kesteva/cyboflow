@@ -21,8 +21,8 @@ describe('agentRuntimeUi compatibility', () => {
     expect(workflowRuntimeForLaunch('codex-pty')).toBeNull();
   });
 
-  it('preserves Codex PTY for quick sessions while keeping Codex SDK unavailable', () => {
+  it('preserves both Codex runtimes for quick sessions', () => {
     expect(quickSessionRuntimeForLaunch('codex-pty')).toBe('codex-pty');
-    expect(quickSessionRuntimeForLaunch('codex-sdk')).toBeNull();
+    expect(quickSessionRuntimeForLaunch('codex-sdk')).toBe('codex-sdk');
   });
 });

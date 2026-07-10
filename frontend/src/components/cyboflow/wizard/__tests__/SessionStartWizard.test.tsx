@@ -327,10 +327,10 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     await renderLockedWizard();
     await selectQuickAndConfigure();
 
-    // Quick sessions prompt for the CLI substrate the same way workflow
-    // launches do (opt-in interactive PTY quick sessions).
+    // Quick sessions can launch both structured Codex SDK chat and Codex PTY;
+    // workflows keep Codex disabled until workflow compatibility ships.
     expect(screen.getByLabelText('Select agent runtime')).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
     expect(screen.queryByTestId('wizard-edit-flow')).toBeNull();
     expect(screen.queryByTestId('wizard-new-flow')).toBeNull();

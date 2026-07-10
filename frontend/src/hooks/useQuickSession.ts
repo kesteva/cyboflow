@@ -135,17 +135,23 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
 
         const { sessionId, worktreePath, runId, claudePanelId } = result.data;
 
-        // Claude panel first (unless the server eagerly created it — interactive
-        // sessions spawn the PTY REPL during create-quick and return its panel id),
+        // Agent panel first (unless the server eagerly created it — interactive
+        // PTY sessions spawn during create-quick and return their panel id),
         // then Terminal.
-        if (claudePanelId === undefined && !isCodexRuntime) {
-          const claudePanel = await panelApi.createPanel({ sessionId, type: 'claude' });
+        if (claudePanelId === undefined && agentRuntime !== 'codex-pty') {
+          const claudePanel = await panelApi.createPanel({
+            sessionId,
+            type: 'claude',
+            ...(isCodexRuntime ? { title: 'Codex' } : {}),
+          });
           // Persist the launch model + fast-mode on the SDK panel so the first
           // (and every) sessions:input turn spawns with them — the request's
           // claudeConfig only reaches the interactive eager spawn, never this
           // frontend-created SDK panel.
           if (model !== undefined) await API.claudePanels.setModel(claudePanel.id, model);
-          await API.claudePanels.setFastMode(claudePanel.id, fastMode === true);
+          if (!isCodexRuntime) {
+            await API.claudePanels.setFastMode(claudePanel.id, fastMode === true);
+          }
         }
         await panelApi.createPanel({
           sessionId,

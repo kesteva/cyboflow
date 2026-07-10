@@ -41,6 +41,7 @@ import { normalizeAgentModelSelection } from '../../../shared/types/agentModels'
 import { isAgentStreamEvent } from '../../../shared/types/agentStream';
 import { isQuickSessionWorktreeMode } from '../../../shared/types/worktreeMode';
 import { DynamicWorkflowTracker } from '../orchestrator/dynamicWorkflows';
+import { AgentInvocationStore } from '../orchestrator/agentInvocationStore';
 import { encodeCwd } from '../services/panels/claude/transcript/encodeCwd';
 import { ClaudeCodeManager } from '../services/panels/claude/claudeCodeManager';
 import { updateSessionAgentPermissionMode } from '../orchestrator/sessionPermissionMode';
@@ -234,6 +235,13 @@ Session context:
 
 Acknowledge briefly and wait for the user's instructions.`;
 
+const QUICK_CODEX_SDK_BRIEFING = `You are running inside cyboflow, a desktop app that manages parallel AI coding sessions in isolated git worktrees.
+
+Session context:
+- This is a user-driven quick session: no predefined workflow and no step ceremony.
+- Your working directory is dedicated to this session. Commits stay local to its branch; the user merges or dismisses the session's work from the cyboflow UI when done.
+- A "cyboflow" MCP server may be connected; its tools write to cyboflow's project database. Use those tools only when the user asks you to interact with the cyboflow backlog.`;
+
 export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices): void {
   const {
     sessionManager,
@@ -243,6 +251,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     cliManagerFactory,
     claudeCodeManager, // For backward compatibility
     interactiveCliManager, // PTY substrate sibling (quick-session relay/spawn)
+    codexSdkManager, // Structured Codex app-server quick-session runtime
     codexPtyManager, // Codex PTY quick-session runtime
     killLiveSession, // hard-kill seam for a dismissed PTY quick session's REPL
     registerLivePanel, // at-spawn runId→panelId seed for the facade's relay translation
@@ -257,6 +266,40 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   // owns (created by sessions:create-quick). Undefined if none exists yet.
   const resolveClaudePanelId = (sessionId: string): string | undefined =>
     panelManager.getPanelsForSession(sessionId).find((p) => p.type === 'claude')?.id;
+
+  codexSdkManager.on('output', (payload: {
+    panelId?: string;
+    sessionId?: string;
+    type?: string;
+    data?: unknown;
+    timestamp?: Date;
+  }) => {
+    if (typeof payload.panelId !== 'string' || typeof payload.sessionId !== 'string') return;
+    const panel = panelManager.getPanel(payload.panelId);
+    if (!panel || panel.sessionId !== payload.sessionId || panel.type !== 'claude') return;
+    try {
+      sessionManager.addPanelOutput(payload.panelId, {
+        type: payload.type === 'json' || payload.type === 'stderr' || payload.type === 'error'
+          ? payload.type
+          : 'stdout',
+        data: payload.data ?? '',
+        timestamp: payload.timestamp ?? new Date(),
+      });
+    } catch (error) {
+      console.error(`[IPC] Failed to store Codex SDK panel output for ${payload.panelId}:`, error);
+    }
+  });
+
+  codexSdkManager.on('exit', (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => {
+    if (typeof payload.sessionId !== 'string') return;
+    const dbSession = databaseService.getSession(payload.sessionId);
+    if (dbSession?.agent_runtime !== 'codex-sdk') return;
+    try {
+      sessionManager.updateSession(payload.sessionId, { status: payload.exitCode === 0 ? 'stopped' : 'error' });
+    } catch (error) {
+      console.error(`[IPC] Failed to update Codex SDK session status for ${payload.sessionId}:`, error);
+    }
+  });
 
   // Wire the panel-input-queue re-drive collaborator ("always allow messaging a
   // running quick session"). At a turn's rest boundary ClaudeCodeManager hands us
@@ -543,28 +586,32 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         ? request.agentRuntime
         : undefined;
 
-      if (requestedAgentRuntime === 'codex-sdk') {
-        return {
-          success: false,
-          error: 'Codex SDK sessions are not wired yet. Use codex-pty for quick sessions.',
-        };
-      }
-      if (requestedAgentProvider === 'codex' && requestedAgentRuntime !== undefined && requestedAgentRuntime !== 'codex-pty') {
+      if (
+        requestedAgentProvider === 'codex' &&
+        requestedAgentRuntime !== undefined &&
+        requestedAgentRuntime !== 'codex-sdk' &&
+        requestedAgentRuntime !== 'codex-pty'
+      ) {
         return {
           success: false,
           error: `agentProvider codex conflicts with agentRuntime ${requestedAgentRuntime}`,
         };
       }
-      if (requestedAgentProvider === 'claude' && requestedAgentRuntime === 'codex-pty') {
+      if (
+        requestedAgentProvider === 'claude' &&
+        (requestedAgentRuntime === 'codex-sdk' || requestedAgentRuntime === 'codex-pty')
+      ) {
         return {
           success: false,
-          error: 'agentProvider claude conflicts with agentRuntime codex-pty',
+          error: `agentProvider claude conflicts with agentRuntime ${requestedAgentRuntime}`,
         };
       }
 
-      const useCodexPty =
-        requestedAgentRuntime === 'codex-pty' ||
+      const useCodexSdk =
+        requestedAgentRuntime === 'codex-sdk' ||
         (requestedAgentProvider === 'codex' && requestedAgentRuntime === undefined);
+      const useCodexPty =
+        requestedAgentRuntime === 'codex-pty';
 
       const substrateFromAgentRuntime =
         requestedAgentRuntime === 'claude-interactive'
@@ -577,8 +624,10 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // untyped IPC value; an absent/invalid value leaves the run + session on
       // the SDK default (byte-identical to before). During provider/runtime
       // migration, a Claude agentRuntime request projects back to substrate.
-      const requestedSubstrate = useCodexPty
-        ? 'interactive'
+      const requestedSubstrate = useCodexSdk
+        ? 'sdk'
+        : useCodexPty
+          ? 'interactive'
         : isCliSubstrate(request.substrate)
           ? request.substrate
           : substrateFromAgentRuntime;
@@ -591,7 +640,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
       // Per-launch model config for the quick session. Picker values are
       // provider-scoped so a stale Claude alias cannot be stamped onto Codex.
-      const quickAgentProvider: AgentProvider = useCodexPty ? 'codex' : 'claude';
+      const quickAgentProvider: AgentProvider = useCodexSdk || useCodexPty ? 'codex' : 'claude';
       const normalizedClaudeConfig = normalizeClaudeConfig(request.claudeConfig);
       const requestedModel = firstProviderModel(
         quickAgentProvider,
@@ -680,8 +729,12 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // session behaved SDK. NULL remains the legacy/SDK meaning for
       // pre-migration rows only; new quick sessions always carry the resolved
       // value.
-      const resolvedSessionAgentProvider = useCodexPty ? 'codex' : 'claude';
-      const resolvedSessionAgentRuntime = useCodexPty ? 'codex-pty' : claudeRuntimeFromSubstrate(resolvedSubstrate);
+      const resolvedSessionAgentProvider = useCodexSdk || useCodexPty ? 'codex' : 'claude';
+      const resolvedSessionAgentRuntime = useCodexSdk
+        ? 'codex-sdk'
+        : useCodexPty
+          ? 'codex-pty'
+          : claudeRuntimeFromSubstrate(resolvedSubstrate);
       const resolvedSessionSubstrate = useCodexPty ? 'interactive' : resolvedSubstrate;
       db.prepare(
         `UPDATE sessions
@@ -697,6 +750,16 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
         requestedModel ?? null,
         session.id,
       );
+      if (useCodexSdk) {
+        db.prepare(
+          `UPDATE workflow_runs
+              SET agent_provider = 'codex',
+                  agent_runtime = 'codex-sdk',
+                  model = ?,
+                  updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?`,
+        ).run(requestedModel ?? null, runId);
+      }
 
       // Persist the per-session agent effort (migration 029) so the unified
       // chat composer can surface it as a read-only pill (set at session start;
@@ -1261,6 +1324,45 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             });
           await sessionManager.updateSession(sessionId, { status: 'running' });
         }
+        return { success: true };
+      }
+
+      if (dbSession?.agent_runtime === 'codex-sdk') {
+        if (codexSdkManager.isPanelRunning(claudePanel.id)) {
+          return {
+            success: false,
+            error: 'Codex is still processing the previous message.',
+          };
+        }
+
+        const runId = dbSession.chat_run_id ?? dbSession.run_id;
+        if (!runId) {
+          return { success: false, error: 'Session is missing its chat run' };
+        }
+
+        const resumeTarget = new AgentInvocationStore(databaseService.getDb())
+          .getLatestTopLevelResumeTarget(runId);
+        const resumeSessionId =
+          resumeTarget?.provider === 'codex' && resumeTarget.runtime === 'codex-sdk'
+            ? resumeTarget.externalSessionId
+            : undefined;
+        const agentPermissionMode = isPermissionMode(dbSession.agent_permission_mode)
+          ? dbSession.agent_permission_mode
+          : undefined;
+
+        sessionManager.addPanelConversationMessage(claudePanel.id, 'user', finalInput);
+        await sessionManager.updateSession(sessionId, { status: 'running' });
+        await codexSdkManager.spawnCliProcess({
+          panelId: claudePanel.id,
+          sessionId,
+          runId,
+          worktreePath: session.worktreePath,
+          prompt: finalInput,
+          systemPromptAppend: QUICK_CODEX_SDK_BRIEFING,
+          ...(agentPermissionMode !== undefined ? { agentPermissionMode } : {}),
+          ...(panelModel !== undefined ? { model: panelModel } : {}),
+          ...(resumeSessionId !== undefined ? { resumeSessionId } : {}),
+        });
         return { success: true };
       }
 

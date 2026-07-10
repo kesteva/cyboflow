@@ -2109,6 +2109,7 @@ async function initializeServices() {
     cliManagerFactory,
     claudeCodeManager: defaultCliManager, // Backward compatibility
     interactiveCliManager, // PTY substrate sibling (narrowed to the concrete class above)
+    codexSdkManager: createdCodexSdkManager,
     codexPtyManager,
     // Live-session close-out seams for quick sessions (IDEA-030): route the
     // session merge/rebase/dismiss handlers through the SubstrateDispatchFacade
