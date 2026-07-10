@@ -121,17 +121,22 @@ describe('buildBuiltInWorkflows', () => {
     // Discarded section, NEVER as per-drop review-queue gates.
     expect(body, 'compound publishes a Discarded section in the doc').toMatch(/## Discarded/);
     expect(body, 'compound forbids filing a decision per discarded candidate').toMatch(
-      /discarded candidate.*belongs in the `## Discarded`|NEVER file a `decision` \(or any review item\) per drop/is,
+      /NEVER a `decision` per discarded candidate|per-item gates are the sequential-gate spam/is,
     );
 
-    // Doc-edit decisions emit at WRITE-BACK for APPROVED items only — never at the
-    // gate (that would file decisions for doc edits the user is about to reject).
-    // [Codex review finding 1]
+    // approve-learnings approves the PLAN and files no review items. [Codex finding 1]
     expect(body, 'approve-learnings gate emits no review items').toMatch(
-      /gate emits \*\*no review items\*\*/,
+      /emits \*\*no review items\*\*/,
     );
-    expect(body, 'write-back emits decisions for APPROVED doc learnings only').toMatch(
-      /APPROVED doc learning/,
+
+    // Write-back APPLIES approved doc edits in-place (not per-edit decisions) and
+    // opens exactly ONE batched final-review gate over the applied changes.
+    expect(body, 'write-back applies approved doc edits in-place').toMatch(
+      /apply the approved CLAUDE\.md \/ CODE-PATTERNS\.md edit \*\*in-place/,
+    );
+    expect(body, 'write-back opens ONE batched final-review gate').toMatch(/final-review gate/);
+    expect(body, 'final-review gate is a single batched decision, never per-edit').toMatch(
+      /NEVER emit a decision per edit|NEVER a `decision` per doc edit/,
     );
 
     // Seeded runs have no discovery, so the doc omits the Discarded section rather
@@ -188,13 +193,25 @@ describe('buildBuiltInWorkflows', () => {
     // both the Act on set and the Discarded set that replaces the per-drop gates.
     expect(extract!.desc ?? '', 'extract desc names the Discarded section').toMatch(/discarded/i);
 
-    // Neither driving desc may instruct emitting findings; write-back is quick/
-    // doc/task only.
+    // Neither driving desc may instruct emitting findings.
     expect(extract!.desc ?? '', 'extract desc forbids findings').not.toMatch(/emit findings/i);
     expect(writeBack!.desc ?? '', 'write-back desc no longer emits findings').not.toMatch(
       /emit findings/i,
     );
-    expect(writeBack!.desc ?? '', "write-back desc forbids kind:'finding'").toMatch(/never emit/i);
+    expect(writeBack!.desc ?? '', "write-back desc forbids kind:'finding'").toMatch(
+      /NEVER kind:'finding'/,
+    );
+    // Write-back applies every approved item in-place and opens ONE batched
+    // final-review decision — never a decision per edit.
+    expect(writeBack!.desc ?? '', 'write-back applies approved items in-place').toMatch(
+      /Apply EVERY approved item in-place/,
+    );
+    expect(writeBack!.desc ?? '', 'write-back opens ONE batched final-review decision').toMatch(
+      /ONE batched blocking cyboflow_report_finding decision — the final-review gate/,
+    );
+    expect(writeBack!.desc ?? '', 'write-back never files a decision per edit').toMatch(
+      /NEVER a decision per edit/,
+    );
   });
 
   it('ship is planner (idea → epics → tasks) concatenated with sprint to integration', () => {

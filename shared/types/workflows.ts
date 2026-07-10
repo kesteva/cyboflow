@@ -833,7 +833,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'compounder',
             mcps: ['filesystem'],
             retries: 0,
-            desc: "Apply approved items only: quick fixes in-place, tasks via cyboflow_create_task, approved doc edits as blocking cyboflow_report_finding decisions. NEVER emit kind:'finding', and NEVER a decision for a discarded candidate.",
+            desc: "Apply EVERY approved item in-place (quick fixes AND approved CLAUDE.md/CODE-PATTERNS.md doc edits) + create approved tasks + commit, then emit exactly ONE batched blocking cyboflow_report_finding decision — the final-review gate — listing all applied changes for final approval. NEVER a decision per edit, NEVER per discarded candidate, NEVER kind:'finding'.",
           },
         ],
       },

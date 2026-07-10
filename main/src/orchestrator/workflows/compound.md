@@ -14,20 +14,23 @@ one of three actionable buckets:
 
 - **quick** — an immediate fix small enough for a single agent to apply in-place
   in the worktree right now.
-- **doc** — a CLAUDE.md / CODE-PATTERNS.md edit, landed as a gated `decision`
-  review-queue item (never a direct file write).
+- **doc** — a CLAUDE.md / CODE-PATTERNS.md edit. Once approved at the
+  approve-learnings gate it is applied in-place at write-back like any other edit —
+  it is NOT filed as its own per-edit `decision`.
 - **task** — a follow-up backlog task (`cyboflow_create_task`) that queues for a
   future Sprint run.
 
-Before you act on or gate the learnings, you publish them as a single
-**summary-of-recommendations doc** — a `compound-recommendations` artifact (via
-`cyboflow_report_artifact`) that the human reviews at the approval gate instead
-of reading them crammed into inline option previews.
+The human reviews Compound at exactly **two** points and no more: the
+**approve-learnings** gate (approve the plan — which learnings to act on, read off
+the `compound-recommendations` artifact) and the **final-review** gate at
+write-back (ONE batched `decision` listing every applied change for final
+approval). No per-edit gates in between.
 
 You do **not** write learning files to disk — no per-learning markdown and no
 plugin state directory (one does not exist at runtime). The database is the
-single source of truth, and CLAUDE.md / CODE-PATTERNS.md edits land as gated
-review-queue items, never as direct file writes.
+single source of truth for backlog state; approved CLAUDE.md / CODE-PATTERNS.md
+edits are applied to those files in-place at write-back (they are the deliverable),
+then batched into the final-review gate.
 
 ## How to run this flow
 
@@ -98,16 +101,20 @@ from plugin state files:
 >    before moving to the next one:
 >    - **`quick`** (target `fix`) → apply the fix in-place in the worktree, then
 >      `cyboflow_resolve_finding(review_item_id:<id>, resolution_kind:"fixed")`.
->    - **`doc`** (target `docs`, incl. legacy `prompt`) → make the docs /
->      CLAUDE.md / CODE-PATTERNS.md edit. If the change must be human-gated, emit a
->      blocking `decision` review item via `cyboflow_report_finding`
->      (`kind: 'decision'`, `blocking: true`) and let the human apply it; either
->      way, then `cyboflow_resolve_finding(review_item_id:<id>,
->      resolution_kind:"triaged")`.
+>    - **`doc`** (target `docs`, incl. legacy `prompt`) → apply the docs /
+>      CLAUDE.md / CODE-PATTERNS.md edit in-place (the human already triaged it), then
+>      `cyboflow_resolve_finding(review_item_id:<id>, resolution_kind:"triaged")`.
+>      Do NOT emit a per-edit `decision` — the batched final-review gate below covers
+>      every applied doc edit.
 >    - **`task`** (target `backlog`) → `cyboflow_create_task` (title, body,
 >      acceptance criteria, file / dependency hints), then
 >      `cyboflow_resolve_finding(review_item_id:<id>, resolution_kind:"promoted",
 >      task_id:<the new task id>)`.
+>
+> After every finding's action has landed and been resolved, emit **exactly ONE**
+> blocking `decision` review item (`cyboflow_report_finding`, `kind: 'decision'`,
+> `blocking: true`) — the **final-review gate** — listing every applied change
+> grouped Quick fixes / Doc edits / Tasks, for the human's single final approval.
 >
 > **NEVER batch the resolves into a final cleanup step.** `cyboflow_resolve_finding`
 > is rejected once the run reaches a terminal status (`run_not_active` guard), so a
@@ -152,23 +159,29 @@ from plugin state files:
    Reject) and point the user at the **`compound-recommendations` artifact tab**
    for the full list — keep the option previews short (a bucket-count summary),
    not a dump of every learning. `cyboflow_report_step` each transition so the run
-   rail tracks the gate. This gate emits **no review items** — it only asks the
-   question; the `doc` `decision` items are emitted at write-back, for approved
-   items ONLY (emitting them here would file decisions for doc edits the user is
-   about to reject). Do **not** proceed to write-back until the user answers;
-   record which learnings were approved.
-5. **write-back** → apply **only the approved learnings**:
+   rail tracks the gate. This gate approves the PLAN (which learnings to act on)
+   and emits **no review items** — it only asks the question. Do **not** proceed to
+   write-back until the user answers; record which learnings were approved.
+5. **write-back** → **apply every approved learning in-place, then open ONE batched
+   final-review gate.** The approve-learnings gate already approved these, so you
+   APPLY them — you do not re-ask approval per edit:
    - **quick** → apply the fix in-place in the worktree (you hold Edit/Write as
-     the orchestrator). Keep it small and scoped to the learning; run the local
-     check the fix warrants.
+     the orchestrator). Keep it small and scoped; run the local check it warrants.
+   - **doc** → apply the approved CLAUDE.md / CODE-PATTERNS.md edit **in-place too**
+     (it was approved at the gate — do NOT defer it to the human and do NOT file a
+     per-edit `decision` re-asking approval).
    - **task** → `cyboflow_create_task` (title, body, acceptance criteria,
      file / dependency hints) so they queue for a future Sprint run.
-   - **doc** → for each APPROVED doc learning, emit ONE blocking `decision` review
-     item via `cyboflow_report_finding` (`kind: 'decision'`, `blocking: true`) so
-     the human gates that proposed CLAUDE.md / CODE-PATTERNS.md change in the review
-     queue — a decision is never self-applied. Emit these for approved doc learnings
-     only, never for a rejected or discarded one. The human applies the edit when
-     they resolve the decision — that is not your job.
+
+   Commit the applied changes atomically. THEN emit **exactly ONE** blocking
+   `decision` review item via `cyboflow_report_finding` (`kind: 'decision'`,
+   `blocking: true`) — the **final-review gate**: title it e.g. `Compound final
+   review: <N> changes applied`, and in the body list every applied change grouped
+   **Quick fixes / Doc edits / Tasks** (each with its file(s)), so the human gives
+   ONE final approval of the whole applied batch. NEVER emit a decision per edit —
+   the single batched gate IS the entire final review. On approval the run
+   completes and the branch is mergeable; on reject the applied changes are not
+   adopted.
 
 ## Recommendations doc
 
@@ -203,41 +216,40 @@ ENRICHES it, so you can refine the doc as you go.
   (`resolution_kind: "fixed" | "triaged" | "promoted"`); the tool records the
   correct `fixed:` / `triaged:` / `promoted:` prefix server-side — you never
   hand-type the prefix string. A `promoted` resolve carries the new `task_id`.
-- `decision` review items (the gated doc edits) carry no `severity`/`locations`
-  convention here — they are proposals the human applies, not code findings.
+- The single final-review `decision` carries no `severity`/`locations` convention —
+  it is the batched final-approval gate over the applied changes, not a code finding.
 
 ## Hard rules
 
 - **Outputs are proposed improvements, never findings.** Compound emits exactly
-  three buckets — **quick** (in-place fix), **doc** (gated `decision`), **task**
-  (`cyboflow_create_task`). NEVER call `cyboflow_report_finding` with
-  `kind: 'finding'` — a finding is Compound's input, not its output. (`decision`
-  items ARE `cyboflow_report_finding` calls with `kind: 'decision'`; that is the
-  gated-doc-edit path, not a finding.)
-- **One review point — discarded candidates NEVER become gates.** A candidate the
-  compounder considered and set aside belongs in the `## Discarded` section of the
-  `compound-recommendations` doc, and NOWHERE else. NEVER file a `decision` (or any
-  review item) per drop — that is the sequential-gate spam this flow exists to
-  avoid. A `decision` is only ever a human-APPROVED doc edit; the human reviews the
-  whole Act on / Discarded doc at the single `approve-learnings` gate.
+  three buckets — **quick** (in-place fix), **doc** (CLAUDE.md / CODE-PATTERNS.md
+  edit applied in-place at write-back), **task** (`cyboflow_create_task`). NEVER
+  call `cyboflow_report_finding` with `kind: 'finding'` — a finding is Compound's
+  input, not its output.
+- **Exactly TWO human gates, everything batched.** (1) `approve-learnings` — approve
+  the PLAN off the `compound-recommendations` doc. (2) The **final-review** gate at
+  write-back — ONE batched blocking `decision` (`cyboflow_report_finding`,
+  `kind: 'decision'`, `blocking: true`) listing every APPLIED change for final
+  approval. NEVER file a `decision` per doc edit and NEVER a `decision` per discarded
+  candidate — per-item gates are the sequential-gate spam this flow exists to avoid.
+  Discarded candidates live in the `## Discarded` section of the doc and NOWHERE
+  else; applied edits live in the single final-review decision.
 - **You are the single writer.** Only this session calls the `cyboflow_*` write
   tools (`cyboflow_create_task`, `cyboflow_report_artifact`, `cyboflow_report_finding`
   with `kind: 'decision'`, and — on a seeded run — `cyboflow_resolve_finding`); the
   `compounder` subagent returns results and you persist them.
   (`cyboflow_get_selected_findings` is read-only and likewise parent-only.) Never
-  write learnings to disk — no per-learning markdown files, no plugin state
-  directory, no direct edits to CLAUDE.md / CODE-PATTERNS.md (those go through
-  gated `decision` items).
-- **Publish the recommendations doc, then gate.** On the **unseeded** path,
-  publish the `compound-recommendations` artifact, use **AskUserQuestion** for the
-  `approve-learnings` gate (pointing at that tab), and — at **write-back**, for
-  **approved** doc learnings only — emit one blocking `decision` item per approved
-  doc edit; never emit them at the gate (that files decisions for doc edits the
-  user may reject) and never silently fold a learning back. On a **seeded** run the
-  `approve-learnings` gate is SKIPPED (the human already triaged the set in the
-  Insights tray) — publish the recommendations doc as a record, then act — but you
-  STILL emit a blocking `decision` item for any `doc` learning whose edit must be
-  human-gated before applying it. `cyboflow_report_step` is observational only and
-  never substitutes for a gate.
+  write per-learning markdown / plugin-state files to disk. Approved CLAUDE.md /
+  CODE-PATTERNS.md edits, by contrast, ARE applied to those files in-place at
+  write-back — they are the deliverable, then batched into the final-review gate.
+- **Two gates, both batched — never per-item.** On the **unseeded** path: publish
+  the `compound-recommendations` artifact, run the `approve-learnings`
+  **AskUserQuestion** gate (pointing at that tab) to approve the plan, apply the
+  approved changes at write-back, then emit the ONE batched final-review `decision`;
+  never silently fold a learning back. On a **seeded** run the `approve-learnings`
+  gate is SKIPPED (the human already triaged the set in the Insights tray) — apply
+  the curated set at write-back and emit the SAME single batched final-review
+  `decision` for the applied changes. `cyboflow_report_step` is observational only
+  and never substitutes for a gate.
 - Report every step transition via `cyboflow_report_step` from this main session —
   including the steps whose work you delegated to the subagent.

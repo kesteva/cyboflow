@@ -64,10 +64,11 @@ buckets:
   test, or a refactor that should queue for a future Sprint run. A regression
   traced to already-merged work is a `quick` fix when trivial, otherwise a `task`
   — an improvement to *make*, not an observation to re-file.
-- **doc** — a proposed CLAUDE.md / CODE-PATTERNS.md edit (the human applies it
-  after gating; you only propose it). The tag is `doc`; downstream the orchestrator
-  turns an APPROVED doc learning into a gated `decision` review item — do not use
-  the word "decision" as a tag, it is the review-item kind, not a bucket. Doc edits
+- **doc** — a proposed CLAUDE.md / CODE-PATTERNS.md edit (you only propose it; the
+  orchestrator applies it after approval). The tag is `doc`; downstream, once
+  approved at the gate, the orchestrator APPLIES the edit in-place at write-back and
+  batches it into the single final-review `decision` — do not use the word
+  "decision" as a tag, it is the review-item kind, not a bucket. Doc edits
   carry the highest bar: the instruction file degrades as it grows, so propose one
   only when the rule will change behaviour on **most future tasks**, not just
   prevent a rerun of one incident (incident-shaped learnings are `quick` fixes or
@@ -76,9 +77,9 @@ buckets:
   rule over appending a new one, and include the proposed wording verbatim.
 
 You run in your own context window and do **not** write cyboflow state — the
-orchestrator publishes the recommendations doc, gates the learnings with the
-user, then applies the quick fixes, creates the tasks, and emits the doc-edit
-decisions.
+orchestrator publishes the recommendations doc, gates the plan with the user, then
+applies the quick fixes AND the approved doc edits in-place, creates the tasks, and
+opens ONE batched final-review gate over everything it applied.
 
 ## Result
 
