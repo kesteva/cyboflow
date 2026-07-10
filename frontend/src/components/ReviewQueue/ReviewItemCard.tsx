@@ -34,6 +34,7 @@ import { formatAge } from '../../utils/approvalFormatters';
 import { trackEvent } from '../../utils/telemetry';
 import { trpc } from '../../trpc/client';
 import type { ReviewItem, ReviewItemKind, FindingProposedTarget } from '../../../../shared/types/reviews';
+import { IDLE_REVIEW_SOURCE_PREFIX } from '../../../../shared/types/reviews';
 import type { QuestionPayload } from '../../../../shared/types/questions';
 import { useReviewItemActions } from '../../hooks/useReviewItemActions';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
@@ -555,7 +556,12 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
         <p className="text-[10px] text-text-tertiary">{item.source}</p>
       )}
 
-      <div className="flex gap-2 mt-3 flex-wrap">{actions()}</div>
+      {/* Idle-session items are informational — the only affordance is the
+          queue row's "Open session →". Opening the session marks it viewed, which
+          auto-resolves the item on the next detector scan, so no triage CTAs. */}
+      {!item.source?.startsWith(IDLE_REVIEW_SOURCE_PREFIX) && (
+        <div className="flex gap-2 mt-3 flex-wrap">{actions()}</div>
+      )}
 
       {error && pendingItemId === item.id && (
         <p className="mt-2 text-xs text-status-error" role="alert">

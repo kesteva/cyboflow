@@ -99,6 +99,26 @@ describe('TypeGroupedQueue — Idle sessions group', () => {
     expect(within(idleGroup).getByText('Idle session needs your attention: quick-a')).toBeInTheDocument();
   });
 
+  it('renders no triage CTAs on an idle item (open is the only action)', () => {
+    mockReviewItems = [
+      makeItem({ id: 'rvw_idle', title: 'Idle session needs your attention: quick-a', source: `${IDLE_REVIEW_SOURCE_PREFIX}sess-a` }),
+    ];
+    render(<TypeGroupedQueue />);
+
+    const group = screen.getByTestId('queue-group-idle');
+    expect(within(group).queryByRole('button', { name: /resolve/i })).not.toBeInTheDocument();
+    expect(within(group).queryByRole('button', { name: /dismiss/i })).not.toBeInTheDocument();
+    expect(within(group).queryByRole('button', { name: /promote to task/i })).not.toBeInTheDocument();
+  });
+
+  it('still renders triage CTAs on a NON-idle human_task', () => {
+    mockReviewItems = [makeItem({ id: 'rvw_ht', title: 'Ping the owner', source: 'monitor' })];
+    render(<TypeGroupedQueue />);
+
+    const group = screen.getByTestId('queue-group-human-task');
+    expect(within(group).getByRole('button', { name: /resolve/i })).toBeInTheDocument();
+  });
+
   it('orders idle items oldest-idle first (earliest created_at at the top)', () => {
     mockReviewItems = [
       makeItem({ id: 'rvw_new', title: 'Idle session needs your attention: newer', source: `${IDLE_REVIEW_SOURCE_PREFIX}newer`, created_at: '2026-07-06T10:00:00.000Z' }),
