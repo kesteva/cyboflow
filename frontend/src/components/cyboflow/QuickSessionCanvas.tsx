@@ -31,6 +31,8 @@ import { useLaunchWorkflow } from '../../hooks/useLaunchWorkflow';
 import { IdeaPickerModal } from './IdeaPickerModal';
 import { TaskBatchPickerModal } from './TaskBatchPickerModal';
 import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
+import { ONBOARDING_ANCHOR_ATTR, ONBOARDING_ANCHORS } from '../../utils/onboarding';
+import { useOnboardingStore } from '../../stores/onboardingStore';
 import {
   useDynamicWorkflowStore,
   useDynamicWorkflowsForSession,
@@ -109,12 +111,18 @@ function WorkflowCmdButton({
   disabled,
   onClick,
   testId,
+  onboardingAnchor,
+  startHere = false,
 }: {
   label: string;
   dotColor: string;
   disabled: boolean;
   onClick: () => void;
   testId: string;
+  /** Onboarding coachmark anchor id (tour step 5 targets ONLY the /ship chip). */
+  onboardingAnchor?: string;
+  /** Tour step-5 treatment: rust inset bar + "Start here" tag (design packet step 5). */
+  startHere?: boolean;
 }) {
   const [hovered, setHovered] = useState(false);
   return (
@@ -125,19 +133,26 @@ function WorkflowCmdButton({
       onClick={onClick}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
+      {...(onboardingAnchor !== undefined ? { [ONBOARDING_ANCHOR_ATTR]: onboardingAnchor } : {})}
       style={{
         display: 'flex',
         alignItems: 'center',
         gap: 9,
         fontSize: 11,
         color: 'var(--color-text-primary)',
-        border: `1px solid ${hovered && !disabled ? 'var(--color-text-primary)' : 'var(--color-border-primary)'}`,
+        border: startHere
+          ? '1.4px solid var(--color-interactive-primary)'
+          : `1px solid ${hovered && !disabled ? 'var(--color-text-primary)' : 'var(--color-border-primary)'}`,
         background: 'var(--color-surface-primary)',
         padding: '8px 11px',
         textAlign: 'left',
         cursor: disabled ? 'not-allowed' : 'pointer',
         opacity: disabled ? 0.55 : 1,
-        boxShadow: hovered && !disabled ? '0 2px 0 var(--color-text-primary)' : 'none',
+        boxShadow: startHere
+          ? 'inset 3px 0 0 var(--color-interactive-primary)'
+          : hovered && !disabled
+            ? '0 2px 0 var(--color-text-primary)'
+            : 'none',
         transition: 'box-shadow .12s, border-color .12s',
       }}
     >
@@ -145,6 +160,21 @@ function WorkflowCmdButton({
         style={{ width: 6, height: 6, borderRadius: '50%', background: dotColor, flexShrink: 0 }}
       />
       <span style={{ fontWeight: 700 }}>{label}</span>
+      {startHere && (
+        <span
+          style={{
+            fontSize: 8.5,
+            letterSpacing: '.14em',
+            textTransform: 'uppercase',
+            color: 'var(--color-interactive-primary)',
+            border: '1px solid var(--color-interactive-primary)',
+            padding: '1px 5px',
+            flexShrink: 0,
+          }}
+        >
+          Start here
+        </span>
+      )}
       <span
         style={{
           marginLeft: 'auto',
@@ -182,6 +212,9 @@ export function QuickSessionCanvas({
   const { launch, isLaunching, error: launchError } = useLaunchWorkflow(projectId, {
     forceNew: isRawCheckout,
   });
+  // Tour step-5 accent on the /ship chip (design packet: rust inset bar +
+  // "Start here" tag while the coachmark points at it).
+  const onboardingShipStep = useOnboardingStore((s) => s.status === 'active' && s.step === 5);
 
   // Detected Claude Code dynamic workflows (the Workflow tool / `ultracode`)
   // launched by THIS session's agent — rendered prominently above the picker.
@@ -727,6 +760,8 @@ export function QuickSessionCanvas({
                   dotColor={phaseDotColor(row)}
                   disabled={isLaunching}
                   onClick={() => handleWorkflowClick(row)}
+                  onboardingAnchor={row.name === 'ship' ? ONBOARDING_ANCHORS.shipChip : undefined}
+                  startHere={row.name === 'ship' && onboardingShipStep}
                 />
               ))}
             </div>

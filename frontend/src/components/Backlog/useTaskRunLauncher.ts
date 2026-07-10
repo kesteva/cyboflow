@@ -25,6 +25,7 @@ import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { trackEvent } from '../../utils/telemetry';
 import { DEFAULT_WORKFLOW_MODEL } from '../cyboflow/ModelSelector';
 import type { TaskType } from '../../../../shared/types/tasks';
+import { notifyWorkflowRunStarted } from '../../utils/onboarding';
 
 export interface TaskRunLaunchState {
   /** Task id currently being launched, or null when idle. */
@@ -87,6 +88,7 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
           ...seed,
         });
         trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: wantName });
+        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'backlog' });
         return result.runId;
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to launch run');
@@ -124,6 +126,7 @@ export function useTaskRunLauncher(): TaskRunLaunchState {
           model: DEFAULT_WORKFLOW_MODEL,
         });
         trackEvent('workflow_run_started', { launch_surface: 'backlog', flow: 'sprint' });
+        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'backlog' });
         return result.runId;
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to launch sprint');

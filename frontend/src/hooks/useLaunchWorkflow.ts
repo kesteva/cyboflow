@@ -27,6 +27,7 @@ import { useForcedSubstrate } from './useForcedSubstrate';
 import { DEFAULT_SUBSTRATE } from '../../../shared/types/substrate';
 import { DEFAULT_WORKFLOW_MODEL } from '../components/cyboflow/ModelSelector';
 import { trackEvent } from '../utils/telemetry';
+import { notifyWorkflowRunStarted } from '../utils/onboarding';
 
 /** Pre-launch seed — at most one of ideaId (planner) / taskIds (sprint). */
 export interface LaunchSeed {
@@ -108,6 +109,7 @@ export function useLaunchWorkflow(
           substrate: base.substrate,
           permission_mode: globalPermissionMode,
         });
+        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'in_session' });
         onLaunched?.(result.runId);
         return result.runId;
       } catch (err: unknown) {

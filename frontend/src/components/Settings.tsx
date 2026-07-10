@@ -21,7 +21,8 @@ import {
   Terminal,
   FolderOpen,
   ScanEye,
-  AlarmClock
+  AlarmClock,
+  Compass
 } from 'lucide-react';
 import { Textarea, Checkbox } from './ui/Input';
 import { Button } from './ui/Button';
@@ -29,6 +30,8 @@ import { useTheme } from '../contexts/ThemeContext';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from './ui/Modal';
 import { CollapsibleCard } from './ui/CollapsibleCard';
 import { SettingsSection } from './ui/SettingsSection';
+import { PERMISSION_MODE_OPTIONS } from './cyboflow/AgentPermissionModeSelector';
+import { useOnboardingStore } from '../stores/onboardingStore';
 
 interface SettingsProps {
   isOpen: boolean;
@@ -383,12 +386,7 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                 icon={<ShieldCheck className="w-4 h-4" />}
               >
                 <div className="flex flex-col gap-1.5">
-                  {([
-                    { id: 'default', label: 'Ask before edits', hint: 'Prompt for each edit' },
-                    { id: 'acceptEdits', label: 'Allow edits', hint: 'Auto-allow file edits' },
-                    { id: 'auto', label: 'Auto', hint: 'Native Claude classifier' },
-                    { id: 'dontAsk', label: "Don't ask", hint: 'No prompts · skip permissions' },
-                  ] as const).map(({ id, label, hint }) => (
+                  {PERMISSION_MODE_OPTIONS.map(({ id, label, hint }) => (
                     <button
                       key={id}
                       type="button"
@@ -681,6 +679,31 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
               </SettingsSection>
             </CollapsibleCard>
             )}
+
+            {/* Onboarding — replay the first-run walkthrough on demand */}
+            <CollapsibleCard
+              title="Onboarding"
+              subtitle="First-run walkthrough"
+              icon={<Compass className="w-5 h-5" />}
+              defaultExpanded={false}
+              variant="subtle"
+            >
+              <SettingsSection
+                title="Onboarding"
+                description="First-run walkthrough"
+                icon={<Compass className="w-4 h-4" />}
+              >
+                <Button
+                  variant="secondary"
+                  onClick={() => {
+                    useOnboardingStore.getState().restart();
+                    onClose();
+                  }}
+                >
+                  Replay walkthrough
+                </Button>
+              </SettingsSection>
+            </CollapsibleCard>
 
             {/* Privacy & Telemetry */}
             <CollapsibleCard

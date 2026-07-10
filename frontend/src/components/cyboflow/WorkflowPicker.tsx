@@ -29,6 +29,7 @@ import { type WorkflowRow, CYBOFLOW_WORKFLOW_NAMES } from '../../../../shared/ty
 import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
 import { trackEvent } from '../../utils/telemetry';
 import type { TelemetryFlow } from '../../../../shared/types/telemetry';
+import { notifyWorkflowRunStarted } from '../../utils/onboarding';
 
 interface WorkflowPickerProps {
   projectId: number;
@@ -219,6 +220,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           substrate,
           permission_mode: permissionMode,
         });
+        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'topbar' });
         onWorkflowStarted?.(result.runId);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to start run');
@@ -266,6 +268,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           substrate,
           permission_mode: permissionMode,
         });
+        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'topbar' });
         onWorkflowStarted?.(result.runId);
       } catch (err: unknown) {
         setError(err instanceof Error ? err.message : 'Failed to start sprint run');

@@ -92,6 +92,7 @@ import type { QuickSessionWorktreeMode } from '../../../../../shared/types/workt
 import { trackEvent } from '../../../utils/telemetry';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
 import type { TelemetryFlow } from '../../../../../shared/types/telemetry';
+import { notifyQuickSessionCreated, notifyWorkflowRunStarted } from '../../../utils/onboarding';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -359,6 +360,7 @@ export default function SessionStartWizard(): React.JSX.Element {
     projectId: allowQuick ? selectedProjectId : null,
     onSuccess: () => {
       setToast(`Starting quick session on ${banner.name}`);
+      notifyQuickSessionCreated({ projectId: selectedProjectId });
       useNavigationStore.getState().goToSession();
     },
   });
@@ -568,6 +570,7 @@ export default function SessionStartWizard(): React.JSX.Element {
           substrate,
           permission_mode: permissionMode,
         });
+        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'wizard' });
         useNavigationStore.getState().goToSession();
       } catch (err: unknown) {
         setLaunchError(err instanceof Error ? err.message : 'Failed to start run');
@@ -618,6 +621,7 @@ export default function SessionStartWizard(): React.JSX.Element {
         const slash = meta?.slashCommand ?? '/sprint';
         setToast(`Launching ${slash} (${taskIds.length} tasks) on ${banner.name} ⌥ ${result.branchName}`);
 
+        notifyWorkflowRunStarted({ runId: result.runId, launchSurface: 'wizard' });
         useNavigationStore.getState().goToSession();
       } catch (err: unknown) {
         setLaunchError(err instanceof Error ? err.message : 'Failed to start sprint run');

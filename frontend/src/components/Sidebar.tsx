@@ -9,6 +9,8 @@ import { Modal, ModalHeader, ModalBody } from './ui/Modal';
 import { useConfigStore } from '../stores/configStore';
 import { useUpdater } from '../hooks/useUpdater';
 import { trackEvent } from '../utils/telemetry';
+import { useOnboardingStore } from '../stores/onboardingStore';
+import { ONBOARDING_ANCHOR_ATTR, ONBOARDING_ANCHORS } from '../utils/onboarding';
 
 interface SidebarProps {
   onAboutClick: () => void;
@@ -71,6 +73,11 @@ export function Sidebar({
   onToggleVerifyQueue,
 }: SidebarProps) {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const onboardingHydrated = useOnboardingStore((state) => state.hydrated);
+  const onboardingStatus = useOnboardingStore((state) => state.status);
+  const onboardingStep = useOnboardingStore((state) => state.step);
+  const showResumeSetup =
+    onboardingHydrated && (onboardingStatus === 'skipped' || onboardingStatus === 'pending');
   const [settingsInitialTab, setSettingsInitialTab] = useState<'general' | 'notifications' | 'updates'>('general');
   const demoModeEnabled = useConfigStore((state) => state.config?.demoMode ?? false);
   const [showStatusGuide, setShowStatusGuide] = useState(false);
@@ -208,12 +215,41 @@ export function Sidebar({
           </div>
         </div>
 
+        {/* Resume setup — only when the first-run tour was skipped/parked
+            (hydrated gate avoids a boot-time flash before the store resolves). */}
+        {showResumeSetup && (
+          <button
+            type="button"
+            onClick={() => useOnboardingStore.getState().resume()}
+            data-testid="onboarding-resume-setup"
+            className="mx-2 mt-2 flex items-center gap-2.5 border bg-surface-primary px-3 py-2.5 text-left transition-colors hover:bg-surface-hover"
+            style={{ borderWidth: '1.4px', borderColor: 'var(--color-interactive-primary)' }}
+          >
+            <span
+              className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center border text-interactive"
+              style={{ borderWidth: '1.4px', borderColor: 'var(--color-interactive-primary)' }}
+            >
+              ▸
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block text-[11.5px] font-bold leading-tight text-text-primary">Resume setup</span>
+              <span className="block text-[10px] text-text-secondary">
+                Step {onboardingStep + 1} of 8
+              </span>
+            </span>
+            <span className="flex-shrink-0 text-interactive" aria-hidden="true">
+              →
+            </span>
+          </button>
+        )}
+
         {/* Human review — primary rail item; opens the full-width review pane */}
         <button
           type="button"
           onClick={onToggleHumanReview}
           aria-pressed={humanReviewActive}
           data-testid="human-review-rail-item"
+          {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.humanReview }}
           className={`mx-2 mt-2 flex items-center gap-2.5 border px-3 py-2.5 text-left transition-colors ${
             humanReviewActive
               ? 'border-border-emphasized bg-surface-primary'

@@ -48,3 +48,18 @@ export const ONBOARDING_STEP_COUNT = 8;
 export const ONBOARDING_MODAL_STEPS: ReadonlyArray<number> = [0, 1, 2, 3, 7];
 /** Steps rendered as an anchored coachmark over the live UI. */
 export const ONBOARDING_COACH_STEPS: ReadonlyArray<number> = [4, 5, 6];
+
+/**
+ * Real-action dispatch helpers — call these at the SUCCESS point of the
+ * corresponding launch path (never on error paths). OnboardingGate is the
+ * sole listener; these just fire the window CustomEvents it forwards into
+ * `useOnboardingStore.realEvent`, so integration call sites never need to
+ * import the store directly.
+ */
+export function notifyQuickSessionCreated(detail?: unknown): void {
+  window.dispatchEvent(new CustomEvent(ONBOARDING_EVENTS.quickSessionCreated, { detail }));
+}
+
+export function notifyWorkflowRunStarted(detail?: unknown): void {
+  window.dispatchEvent(new CustomEvent(ONBOARDING_EVENTS.workflowRunStarted, { detail }));
+}
