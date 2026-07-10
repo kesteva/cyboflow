@@ -1640,7 +1640,7 @@ export function selectVariantStats(
 // ---------------------------------------------------------------------------
 // 8c. selectRotationArmStats / selectRotationExperimentRuns /
 //     selectRotationDashboardRows (rotation-experiment tracking, phase 3 read
-//     surface, migration 057)
+//     surface, migration 058)
 // ---------------------------------------------------------------------------
 
 interface RotationArmBaseRow {
@@ -1721,7 +1721,7 @@ function buildRotationArmStats(
 
 /**
  * Per-arm aggregate stats for ONE rotation experiment — the fair
- * baseline-vs-variant comparison (phase 3 read surface, migration 057).
+ * baseline-vs-variant comparison (phase 3 read surface, migration 058).
  * Modeled on {@link selectVariantStats}'s four-pass shape (base counts/duration/
  * usage, then SEPARATE grouped passes for eval score / findings / post-merge
  * bugs, merged in TS so a multi-row join can never fan out the base counts) with
@@ -1882,7 +1882,7 @@ interface RotationExperimentRunRow {
 
 /**
  * The per-run drill-down for ONE rotation experiment — which runs got which
- * arm (phase 3 read surface, migration 057). One row per `workflow_runs` stamped
+ * arm (phase 3 read surface, migration 058). One row per `workflow_runs` stamped
  * with `rotation_experiment_id = ?`; `LEFT JOIN run_usage` (1:1 with a run — no
  * fan-out) for tokens/cost, `LEFT JOIN experiment_rotation_arms` on the same
  * `COALESCE(variant_id, '__baseline__')` key as {@link selectRotationArmStats}
@@ -1958,7 +1958,7 @@ interface RotationArmSnapshotRow {
 /**
  * Dashboard rows for ALL rotation experiments (running + settled), so they can
  * render alongside past side-by-side experiments in Insights section 04 (phase 3
- * read surface, migration 057). `experiments.listForDashboard`'s `kind =
+ * read surface, migration 058). `experiments.listForDashboard`'s `kind =
  * 'side_by_side'` filter is UNCHANGED — this is the rotation-only sibling query.
  *
  * Per experiment: `armLabels` from its arm snapshot (created_at, variant_id

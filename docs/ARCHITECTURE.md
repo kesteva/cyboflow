@@ -676,7 +676,7 @@ stats (`selectVariantStats`, excluding experiment arms) power the Insights `04 E
 section; the compare view is `ExperimentComparisonView` (center-pane overlay routed via
 `navigationStore.experimentComparisonId`).
 
-**Rotation experiments (057).** A running randomized rotation is itself a first-class
+**Rotation experiments (058).** A running randomized rotation is itself a first-class
 `experiments` row (`kind='rotation'`): it auto-OPENS when a workflow's weighted pool
 reaches ≥2 arms (active weight>0 variants + the opted-in baseline), snapshotting the arm
 set into `experiment_rotation_arms` (`'__baseline__'` sentinel row; label/weight
@@ -721,7 +721,8 @@ via a relocate-then-delete that respects the `ON DELETE RESTRICT` stage FK, mirr
 `049_experiments.sql` / `050_experiment_comparisons.sql`, `051_experiment_seed_tasks.sql`,
 `052_experiment_promoted_variant.sql`, `053_experiment_arm_entities.sql`,
 `054_baseline_rotation.sql`, `055_visual_verification.sql`, `056_visual_verify_budget.sql`,
-`057_rotation_experiments.sql` (see the sections above). 015
+`057_entity_sort_order.sql` (manual board rank), `058_rotation_experiments.sql` (see the
+sections above). 015
 and 016 are forward-only with no backfill (no prod data existed); the destructive DROP+recreate
 in 015 is intentional and safe.
 

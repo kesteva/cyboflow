@@ -410,7 +410,7 @@ export async function dismissAndSweepHalfCreatedExperiment(
 }
 
 // ===========================================================================
-// Rotation experiments (migration 057, phase 2) — the ongoing randomized
+// Rotation experiments (migration 058, phase 2) — the ongoing randomized
 // rotation over a workflow's live baseline + its active variants, tracked as a
 // first-class experiment record. The lifecycle is MEMBERSHIP-driven (opened when
 // the weighted pool reaches >= 2 arms; superseded/replaced when the arm SET
@@ -635,7 +635,7 @@ export function reconcileRotationExperiment(
 
 /**
  * Boot-recovery sweep: reconcile EVERY workflow's rotation experiment against its
- * live pool (config could have drifted while a pre-057 build ran, or a crash
+ * live pool (config could have drifted while a pre-058 build ran, or a crash
  * interrupted a mid-reconcile). Per-workflow try/catch — one bad workflow never
  * aborts the rest — and NEVER throws. Skips the `__quick__` sentinel.
  */

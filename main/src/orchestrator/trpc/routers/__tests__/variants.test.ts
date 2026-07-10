@@ -22,7 +22,7 @@ function createVariantsTestDb(): Database.Database {
   db.pragma('foreign_keys = ON');
   db.exec(REGISTRY_SCHEMA);
   db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_id TEXT');
-  // Migration 057: run-attribution column read by the rotation reconcile's run count.
+  // Migration 058: run-attribution column read by the rotation reconcile's run count.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN rotation_experiment_id TEXT');
   // Migration 054 baseline columns (baseline is the champion — in rotation by default).
   db.exec('ALTER TABLE workflows ADD COLUMN baseline_in_rotation INTEGER NOT NULL DEFAULT 1');
@@ -35,8 +35,8 @@ function createVariantsTestDb(): Database.Database {
       created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
     CREATE UNIQUE INDEX idx_workflow_variants_wf_label ON workflow_variants(workflow_id, label);
-    -- Migration 057: the variant-config chokepoint reconciles the rotation experiment
-    -- inside the same transaction, so these tables must exist (057 shape).
+    -- Migration 058: the variant-config chokepoint reconciles the rotation experiment
+    -- inside the same transaction, so these tables must exist (058 shape).
     CREATE TABLE experiments (
       id TEXT PRIMARY KEY, project_id INTEGER, workflow_id TEXT NOT NULL,
       kind TEXT NOT NULL DEFAULT 'side_by_side' CHECK (kind IN ('side_by_side','rotation')),

@@ -38,10 +38,10 @@ function setupDb(): Database.Database {
   // baseline is the champion — in rotation by DEFAULT 1).
   db.exec('ALTER TABLE workflows ADD COLUMN baseline_in_rotation INTEGER NOT NULL DEFAULT 1');
   db.exec('ALTER TABLE workflows ADD COLUMN baseline_rotation_weight INTEGER NOT NULL DEFAULT 1');
-  // Migration 057 (rotation experiments): the registry's variant-config chokepoint
+  // Migration 058 (rotation experiments): the registry's variant-config chokepoint
   // now reconciles the rotation experiment inside the same transaction, so these
   // tables must exist or every setVariantStatus/updateVariant/deleteVariant/
-  // setBaselineRotation write would throw. 057 shape (widened CHECKs, relaxed NULLs).
+  // setBaselineRotation write would throw. 058 shape (widened CHECKs, relaxed NULLs).
   db.exec(`
     CREATE TABLE experiments (
       id TEXT PRIMARY KEY, project_id INTEGER, workflow_id TEXT NOT NULL,
@@ -193,7 +193,7 @@ describe('WorkflowRegistry variants', () => {
     expect(() => registry.setBaselineRotation('nope', { inRotation: true })).toThrow(/not found/);
   });
 
-  // -- Rotation-experiment reconcile chokepoint (migration 057) ---------------
+  // -- Rotation-experiment reconcile chokepoint (migration 058) ---------------
   describe('rotation reconcile via the variant-config chokepoint', () => {
     const rot = (): ReturnType<typeof getRunningRotationExperiment> =>
       getRunningRotationExperiment(dbAdapter(db), WF_PLANNER);

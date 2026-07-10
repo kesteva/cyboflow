@@ -173,7 +173,7 @@ export interface WorkflowRunRow {
    */
   merge_sha?: string | null;
   /**
-   * Rotation-experiment attribution (migration 057) — the resolver stamps this at
+   * Rotation-experiment attribution (migration 058) — the resolver stamps this at
    * pick time when a genuine weighted rotation assigns the run. SEPARATE from
    * experiment_id (the side-by-side sandbox tag) per the migration's CRITICAL
    * INVARIANT: rotation runs are normal runs. NULL for pins, baseline pins,

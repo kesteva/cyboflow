@@ -172,20 +172,20 @@ export function isExperimentSettled(status: string): boolean {
   return status === 'decided' || status === 'abandoned' || status === 'superseded';
 }
 
-/** `experiments` DB row (migration 049; nullable relaxations in 057). */
+/** `experiments` DB row (migration 049; nullable relaxations in 058). */
 export interface ExperimentRow {
   id: string;
-  /** Nullable since 057: a global-workflow rotation has no project. Always set for side-by-side. */
+  /** Nullable since 058: a global-workflow rotation has no project. Always set for side-by-side. */
   project_id: number | null;
   workflow_id: string;
   kind: ExperimentKind;
-  /** Nullable since 057: a rotation pins no base branch. Always set for side-by-side. */
+  /** Nullable since 058: a rotation pins no base branch. Always set for side-by-side. */
   base_branch: string | null;
-  /** Nullable since 057: a rotation pins no SHA. Always set for side-by-side. */
+  /** Nullable since 058: a rotation pins no SHA. Always set for side-by-side. */
   base_sha: string | null;
-  /** Nullable since 057: a rotation's arms live in experiment_rotation_arms. Always set for side-by-side. */
+  /** Nullable since 058: a rotation's arms live in experiment_rotation_arms. Always set for side-by-side. */
   variant_a_id: string | null;
-  /** Nullable since 057: see variant_a_id. */
+  /** Nullable since 058: see variant_a_id. */
   variant_b_id: string | null;
   run_a_id: string | null;
   run_b_id: string | null;
@@ -243,7 +243,7 @@ export interface ExperimentRotationArmRow {
 
 /**
  * Read-model summary of the OPEN rotation experiment for a workflow (phase 2,
- * migration 057). Assembled by the router's getRunningRotationSummary from the
+ * migration 058). Assembled by the router's getRunningRotationSummary from the
  * experiments row + its arm snapshot + a live count of attributed runs.
  */
 export interface RotationExperimentSummary {
@@ -432,7 +432,7 @@ export interface ExperimentComparisonReadyEvent {
 }
 
 // ===========================================================================
-// Phase 3 — rotation-experiment READ surface (migration 057). Backend types for
+// Phase 3 — rotation-experiment READ surface (migration 058). Backend types for
 // the fair baseline-vs-variant comparison (selectRotationArmStats), the per-run
 // drill-down (selectRotationExperimentRuns), and the Insights-04 dashboard rows
 // (selectRotationDashboardRows). No frontend consumer yet (phase 4).

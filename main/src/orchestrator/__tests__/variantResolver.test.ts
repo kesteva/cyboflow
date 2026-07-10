@@ -1,5 +1,5 @@
 /**
- * Unit tests for VariantResolver (A/B testing, migration 048; provenance 057).
+ * Unit tests for VariantResolver (A/B testing, migration 048; provenance 058).
  *
  * Covers the rotation seam: weighted pick determinism with an injected Rng,
  * zero/all-paused → none, weight=0 active excluded, explicit pin loads regardless
@@ -9,7 +9,7 @@
  * rotation experiment).
  *
  * Uses an in-memory better-sqlite3 with the workflows + workflow_variants +
- * experiments (057 shape) tables applied inline (no file I/O).
+ * experiments (058 shape) tables applied inline (no file I/O).
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -45,7 +45,7 @@ function makeDb(): Database.Database {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
-    -- Minimal 057-shape experiments table so the resolver's rotation-attribution
+    -- Minimal 058-shape experiments table so the resolver's rotation-attribution
     -- lookup (getRunningRotationExperiment) resolves. No arms table needed — the
     -- resolver only reads the running experiment id.
     CREATE TABLE experiments (
@@ -210,7 +210,7 @@ describe('VariantResolver', () => {
     expect(a.source).toBe('none');
   });
 
-  // -- Rotation attribution provenance (migration 057) -----------------------
+  // -- Rotation attribution provenance (migration 058) -----------------------
   describe('rotation attribution', () => {
     it('populates rotationExperimentId from the open rotation experiment on a weighted pick', () => {
       seedVariant(db, 'v1', { weight: 1 });

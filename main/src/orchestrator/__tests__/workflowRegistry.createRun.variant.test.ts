@@ -122,7 +122,7 @@ describe('WorkflowRegistry.createRun — variant/experiment stamping', () => {
     expect(executionModel).toBe('orchestrated');
   });
 
-  it('stamps rotation_experiment_id from opts (migration 057) without disturbing the other columns', () => {
+  it('stamps rotation_experiment_id from opts (migration 058) without disturbing the other columns', () => {
     const { runId } = registry.createRun(WF, undefined, SESSION, undefined, {
       variantId: 'wfv_rot',
       variantLabel: 'rot-arm',

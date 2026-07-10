@@ -2861,7 +2861,7 @@ app.whenReady().then(async () => {
     }
 
     // Boot recovery: reconcile EVERY workflow's rotation experiment against its live
-    // weighted pool (migration 057). Config could have drifted while a pre-057 build
+    // weighted pool (migration 058). Config could have drifted while a pre-058 build
     // ran (no reconcile hooks), or a crash interrupted a mid-reconcile — this heals
     // the drift (opens/supersedes/closes as the pool dictates). Per-workflow
     // try/catch inside; never throws.

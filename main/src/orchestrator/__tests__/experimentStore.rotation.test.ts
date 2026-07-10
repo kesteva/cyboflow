@@ -1,12 +1,12 @@
 /**
- * Unit tests for the rotation-experiment lifecycle store layer (migration 057,
+ * Unit tests for the rotation-experiment lifecycle store layer (migration 058,
  * phase 2). Exercises reconcileRotationExperiment's full matrix (open / none /
  * supersede / replace / close) plus the small primitives it composes
  * (insertRotationExperiment arm-count guard, setRotationLineage NULL-only fill,
  * computeRotationArmSet's __quick__ short-circuit, reconcileAll fail-soft).
  *
  * Self-contained in-memory schema: the workflows + workflow_variants + experiments
- * (057 shape) + experiment_rotation_arms + a minimal workflow_runs, applied inline.
+ * (058 shape) + experiment_rotation_arms + a minimal workflow_runs, applied inline.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -27,7 +27,7 @@ import { BASELINE_VARIANT_SENTINEL } from '../../../../shared/types/experiments'
 
 const WF = 'wf-1';
 
-/** The 057-shape experiments table + arms + a minimal workflows/variants/runs schema. */
+/** The 058-shape experiments table + arms + a minimal workflows/variants/runs schema. */
 const SCHEMA = `
   CREATE TABLE workflows (
     id TEXT PRIMARY KEY, project_id INTEGER, name TEXT NOT NULL,

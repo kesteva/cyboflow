@@ -542,7 +542,7 @@ export class WorkflowRegistry {
       throw new Error(`WorkflowRegistry.updateVariant: variant ${variantId} not found`);
     }
     const stmt = this.db.prepare(`UPDATE workflow_variants SET ${sets.join(', ')} WHERE id = ?`);
-    // Rotation-lifecycle chokepoint (migration 057): the write PLUS a pool
+    // Rotation-lifecycle chokepoint (migration 058): the write PLUS a pool
     // reconcile run atomically — a weight 0<->positive edit is a membership change,
     // so this can open/supersede/replace/close the workflow's rotation experiment.
     const tx = this.db.transaction(() => {
@@ -564,7 +564,7 @@ export class WorkflowRegistry {
     const stmt = this.db.prepare(
       "UPDATE workflow_variants SET status = ?, updated_at = datetime('now') WHERE id = ?",
     );
-    // Rotation-lifecycle chokepoint (migration 057): activating/pausing an arm is a
+    // Rotation-lifecycle chokepoint (migration 058): activating/pausing an arm is a
     // membership change; reconcile atomically with the status write.
     const tx = this.db.transaction(() => {
       const result = stmt.run(status, variantId);
@@ -596,7 +596,7 @@ export class WorkflowRegistry {
       );
     }
     const workflowId = variant.workflow_id;
-    // Rotation-lifecycle chokepoint (migration 057): deleting an arm is a membership
+    // Rotation-lifecycle chokepoint (migration 058): deleting an arm is a membership
     // change; reconcile atomically after the row is gone.
     const tx = this.db.transaction(() => {
       this.db.prepare('DELETE FROM workflow_variants WHERE id = ?').run(variantId);
@@ -642,7 +642,7 @@ export class WorkflowRegistry {
     }
     if (sets.length === 0) return;
     const stmt = this.db.prepare(`UPDATE workflows SET ${sets.join(', ')} WHERE id = ?`);
-    // Rotation-lifecycle chokepoint (migration 057): toggling the baseline into/out of
+    // Rotation-lifecycle chokepoint (migration 058): toggling the baseline into/out of
     // rotation (or its weight across 0) is a membership change; reconcile atomically.
     const tx = this.db.transaction(() => {
       const result = stmt.run(...params, workflowId);
@@ -930,7 +930,7 @@ export class WorkflowRegistry {
       experimentId?: string;
       experimentArm?: ExperimentArm;
       /**
-       * Rotation-experiment attribution (migration 057) supplied by the
+       * Rotation-experiment attribution (migration 058) supplied by the
        * VariantResolver via RunLauncher.launch on a GENUINE weighted rotation pick.
        * SEPARATE from experimentId (the side-by-side sandbox tag) per the migration's
        * CRITICAL INVARIANT — rotation runs are normal runs. Stamped immutably.
