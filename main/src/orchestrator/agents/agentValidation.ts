@@ -132,6 +132,17 @@ export function validateAgentDraft(draft: AgentDraft): void {
   }
 }
 
+/**
+ * True when `server` may be granted to an agent: a valid MCP server name that is
+ * NOT the single-writer `cyboflow` entity-write MCP. The predicate mirror of the
+ * `invalid_mcp` checks in {@link validateAgentDraft}, for callers that FILTER an
+ * unvalidated grant list (e.g. a workflow-embedded agent copy read from an
+ * out-of-band-edited spec) instead of throwing.
+ */
+export function isGrantableMcpServer(server: string): boolean {
+  return MCP_SERVER_RE.test(server) && server !== 'cyboflow' && !FORBIDDEN_WRITER_RE.test(server);
+}
+
 const RESULT_HEADING_RE = /^##\s+Result\b/m;
 
 const RESULT_STUB =

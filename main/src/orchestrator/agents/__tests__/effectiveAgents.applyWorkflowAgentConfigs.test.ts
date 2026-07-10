@@ -3,9 +3,10 @@
  *
  * A model-only config over a project override replaces the model but keeps the
  * prompt; a `custom` copy replaces description/systemPrompt/tools/enabledMcps, drops
- * rawContent + flips source to builtin-override, and filters unknown tools; an
- * unknown agentKey is ignored (configs never ADD agents); an empty config map — or
- * an empty per-agent config — is the identity.
+ * rawContent + flips source to builtin-override, filters unknown tools and
+ * ungrantable MCP servers (single-writer invariant), and normalizes the applied
+ * prompt via ensureResultSection; an unknown agentKey is ignored (configs never ADD
+ * agents); an empty config map — or an empty per-agent config — is the identity.
  */
 import { describe, it, expect } from 'vitest';
 import { applyWorkflowAgentConfigs, type EffectiveAgent } from '../effectiveAgents';
@@ -70,7 +71,9 @@ describe('applyWorkflowAgentConfigs', () => {
       },
     });
     expect(result.description).toBe('CUSTOM DESC');
-    expect(result.systemPrompt).toBe('CUSTOM PROMPT');
+    // The applied copy prompt is normalized: `## Result` is appended when missing.
+    expect(result.systemPrompt.startsWith('CUSTOM PROMPT')).toBe(true);
+    expect(result.systemPrompt).toContain('## Result');
     expect(result.tools).toEqual(['Read', 'Edit']);
     expect(result.enabledMcps).toEqual(['ctx7']);
     expect(result.source).toBe('builtin-override');
@@ -86,7 +89,7 @@ describe('applyWorkflowAgentConfigs', () => {
       },
     });
     expect(result.model).toBe('fable');
-    expect(result.systemPrompt).toBe('P');
+    expect(result.systemPrompt.startsWith('P')).toBe(true);
     expect(result.tools).toEqual(['Bash']);
   });
 
@@ -152,7 +155,7 @@ describe('applyWorkflowAgentConfigs', () => {
       },
     });
     expect(result.tools).toEqual([]);
-    expect(result.systemPrompt).toBe('P'); // the valid string field still applies
+    expect(result.systemPrompt.startsWith('P')).toBe(true); // the valid string field still applies
   });
 
   it('filters non-string entries out of enabledMcps — no throw', () => {
@@ -167,6 +170,38 @@ describe('applyWorkflowAgentConfigs', () => {
       },
     });
     expect(result.enabledMcps).toEqual(['git', 'ctx7']);
+  });
+
+  it('filters ungrantable MCP servers out of a custom copy (single-writer invariant)', () => {
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], {
+      planner: {
+        custom: {
+          description: 'D',
+          systemPrompt: 'P',
+          tools: ['Read'],
+          // 'cyboflow' + any 'cyboflow_'-token server are the never-grantable
+          // single-writer MCP; 'bad name!' fails the server-name shape check.
+          enabledMcps: ['git', 'cyboflow', 'cyboflow_writer', 'bad name!', 'ctx7'],
+        },
+      },
+    });
+    expect(result.enabledMcps).toEqual(['git', 'ctx7']);
+  });
+
+  it('appends a ## Result section to an applied copy prompt that lacks one', () => {
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], {
+      planner: { custom: { description: 'D', systemPrompt: 'NO RESULT HERE', tools: ['Read'], enabledMcps: [] } },
+    });
+    expect(result.systemPrompt.startsWith('NO RESULT HERE')).toBe(true);
+    expect(result.systemPrompt).toContain('## Result');
+  });
+
+  it('leaves an applied copy prompt byte-identical when it already has a ## Result section', () => {
+    const prompt = 'DO THE WORK\n\n## Result\nReturn a summary.';
+    const [result] = applyWorkflowAgentConfigs([builtin('planner')], {
+      planner: { custom: { description: 'D', systemPrompt: prompt, tools: ['Read'], enabledMcps: [] } },
+    });
+    expect(result.systemPrompt).toBe(prompt);
   });
 
   it('keeps the existing description/systemPrompt when the custom fields are non-strings', () => {

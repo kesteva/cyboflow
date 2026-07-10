@@ -386,6 +386,95 @@ describe('workflowDefinitionSchema (agentConfigs)', () => {
   });
 });
 
+describe('workflowDefinitionSchema (agentConfigs — Agents-pane validation parity)', () => {
+  // A workflow-scoped custom copy is spawned exactly like an Agents-pane override,
+  // so updateSpec must enforce the SAME chokepoint rules (validateAgentDraft) — it
+  // must not be a side door around the single-writer / MCP-grant invariants.
+
+  /** A parity-clean custom copy the cases below mutate one field at a time. */
+  function validCustom(): NonNullable<WorkflowAgentConfig['custom']> {
+    return {
+      description: 'Custom implement agent.',
+      systemPrompt: 'You are a focused implementer.',
+      tools: ['Read', 'Edit'],
+      enabledMcps: ['filesystem'],
+    };
+  }
+
+  it('rejects a custom copy granting the cyboflow MCP server (single-writer invariant)', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: { custom: { ...validCustom(), enabledMcps: ['cyboflow'] } } };
+    expect(() => validateWorkflowDefinition(def)).toThrow(/single-writer/);
+  });
+
+  it('rejects a custom copy granting a cyboflow_-prefixed MCP server', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: { custom: { ...validCustom(), enabledMcps: ['cyboflow_writer'] } } };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  it('rejects a custom copy whose enabledMcps entry is not a valid server name', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: { custom: { ...validCustom(), enabledMcps: ['bad name!'] } } };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  it('rejects a custom copy whose prompt references a cyboflow_* entity-write tool', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = {
+      implement: { custom: { ...validCustom(), systemPrompt: 'Then call cyboflow_report_finding.' } },
+    };
+    expect(() => validateWorkflowDefinition(def)).toThrow(/single-writer|forbidden/);
+  });
+
+  it('rejects a custom copy whose description references a cyboflow_* tool', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = {
+      implement: { custom: { ...validCustom(), description: 'Files findings via cyboflow_report_finding.' } },
+    };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  it('rejects a custom copy with an empty tools list', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: { custom: { ...validCustom(), tools: [] } } };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  it('rejects a custom copy with a whitespace-only description', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: { custom: { ...validCustom(), description: '   ' } } };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  it('rejects a custom copy whose prompt starts with a frontmatter fence', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = {
+      implement: { custom: { ...validCustom(), systemPrompt: '---\nname: hijack\n---\nbody' } },
+    };
+    expect(() => validateWorkflowDefinition(def)).toThrow(ZodError);
+  });
+
+  it('names the offending agent in the parity error message', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: { custom: { ...validCustom(), enabledMcps: ['cyboflow'] } } };
+    // ZodError.message JSON-escapes the inner quotes, so match the escaped form.
+    expect(() => validateWorkflowDefinition(def)).toThrow(/workflow copy of agent \\"implement\\"/);
+  });
+
+  it('still accepts a parity-clean custom copy (parity does not over-reject)', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: { model: 'sonnet', custom: validCustom() } };
+    expect(() => validateWorkflowDefinition(def)).not.toThrow();
+  });
+
+  it('does not run draft parity for model-only configs (no custom body to validate)', () => {
+    const def = makeValidDefinition();
+    def.agentConfigs = { implement: { model: 'haiku' } };
+    expect(() => validateWorkflowDefinition(def)).not.toThrow();
+  });
+});
+
 describe('workflowDefinitionSchema (direct .safeParse use as a tRPC input)', () => {
   // -------------------------------------------------------------------------
   // The schema is exported for direct use as a tRPC .input() field. Confirm it

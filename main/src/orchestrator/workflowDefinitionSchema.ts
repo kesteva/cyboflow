@@ -27,6 +27,7 @@ import type {
 } from '../../../shared/types/workflows';
 import { AGENT_MODEL_ALIASES } from '../../../shared/types/agents';
 import { CLI_TOOLS } from '../../../shared/types/cliTools';
+import { validateAgentDraft, AgentOverrideError } from './agents/agentValidation';
 
 /** Kebab-case identifier, e.g. `'task-verify'` — used for step and phase ids. */
 const kebabCaseId = z
@@ -209,6 +210,35 @@ export const workflowDefinitionSchema = z
         }
       });
     });
+
+    // A workflow-scoped custom agent copy is spawned exactly like an Agents-pane
+    // override (the overlay renders it into `.claude/agents/cyboflow-<key>.md`),
+    // so it must clear the SAME chokepoint checks — single-writer invariant (no
+    // cyboflow MCP grant / cyboflow_* prompt tokens), non-empty tools/description,
+    // MCP name shape, no frontmatter fence. Delegating to validateAgentDraft
+    // keeps the two write paths from drifting.
+    for (const [agentKey, config] of Object.entries(definition.agentConfigs ?? {})) {
+      if (config.custom === undefined) continue;
+      try {
+        validateAgentDraft({
+          agentKey,
+          name: `cyboflow-${agentKey}`,
+          role: null,
+          description: config.custom.description,
+          systemPrompt: config.custom.systemPrompt,
+          tools: config.custom.tools,
+          model: config.model ?? null,
+          enabledMcps: config.custom.enabledMcps,
+          isCustom: false,
+        });
+      } catch (err) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `workflow copy of agent "${agentKey}": ${err instanceof AgentOverrideError ? err.message : String(err)}`,
+          path: ['agentConfigs', agentKey, 'custom'],
+        });
+      }
+    }
   }) satisfies z.ZodType<WorkflowDefinition>;
 
 // ---------------------------------------------------------------------------

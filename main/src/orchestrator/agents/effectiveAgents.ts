@@ -24,6 +24,7 @@ import type {
 import { agentModelLabel, isAgentModelAlias } from '../../../../shared/types/agents';
 import type { WorkflowVariantAgentOverrides } from '../../../../shared/types/experiments';
 import type { WorkflowAgentConfig } from '../../../../shared/types/workflows';
+import { ensureResultSection, isGrantableMcpServer } from './agentValidation';
 import type { BuiltInAgent } from './agentCatalogue';
 
 /** The effective (post-override) view of one agent. */
@@ -201,10 +202,15 @@ export function applyVariantAgentDeltas(
  *     parseWorkflowDefinition passes `agentConfigs` through UNVALIDATED, so an
  *     out-of-band-edited spec can carry a non-object `custom`, non-array `tools`/
  *     `enabledMcps`, or non-string description/systemPrompt. Every embedded field is
- *     coerced defensively (non-object custom → treated as absent; tools/enabledMcps →
- *     `[]` when not an array, then filtered to known {@link CliTool} / string values;
- *     non-string description/systemPrompt → the existing value is kept) so a malformed
- *     config degrades THIS one agent instead of throwing out of the whole overlay;
+ *     coerced defensively (non-object custom → treated as absent; tools → `[]` when
+ *     not an array, then filtered to known {@link CliTool}s; enabledMcps → `[]` when
+ *     not an array, then filtered to GRANTABLE servers via
+ *     {@link isGrantableMcpServer} — the single-writer cyboflow MCP can never leak
+ *     into a rendered grant even from an out-of-band-edited spec; non-string
+ *     description/systemPrompt → the existing value is kept) so a malformed config
+ *     degrades THIS one agent instead of throwing out of the whole overlay. The
+ *     applied prompt is normalized via {@link ensureResultSection}, mirroring the
+ *     Agents-pane router's pre-persist normalization;
  *   - `model` (when a valid {@link isAgentModelAlias} alias) replaces the model; an
  *     unrecognized alias leaves the existing model unchanged;
  *   - in EITHER case `rawContent` is DROPPED and `source` flips `builtin →
@@ -238,14 +244,21 @@ export function applyWorkflowAgentConfigs(
     if (hasCustom) {
       const c = custom as Record<string, unknown>;
       if (typeof c.description === 'string') description = c.description;
-      if (typeof c.systemPrompt === 'string') systemPrompt = c.systemPrompt;
+      // Mirror the Agents-pane router's pre-persist normalization on the APPLIED
+      // copy prompt: a rendered body always carries a `## Result` section (no-op
+      // when already present). A non-string prompt keeps the base value verbatim.
+      if (typeof c.systemPrompt === 'string') systemPrompt = ensureResultSection(c.systemPrompt);
       // Drop any tool that isn't a known CliTool (mirrors effectiveAgents' parseTools);
       // a non-array tools field coerces to [].
       tools = Array.isArray(c.tools)
         ? c.tools.filter((t): t is CliTool => typeof t === 'string' && isCliTool(t))
         : [];
+      // Grants must survive the SAME single-writer/name checks the Agents-pane
+      // chokepoint enforces (the zod write path already rejects these, but an
+      // out-of-band-edited spec bypasses it and this list becomes a real
+      // `mcp__<server>__*` grant in the rendered frontmatter).
       enabledMcps = Array.isArray(c.enabledMcps)
-        ? c.enabledMcps.filter((m): m is string => typeof m === 'string')
+        ? c.enabledMcps.filter((m): m is string => typeof m === 'string' && isGrantableMcpServer(m))
         : [];
     }
     const model = isAgentModelAlias(config.model) ? config.model : agent.model;
