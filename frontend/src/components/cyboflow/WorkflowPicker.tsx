@@ -441,6 +441,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         value={permissionMode}
         onChange={setPermissionMode}
         agentProvider={selectedProvider}
+        agentRuntime={agentRuntime}
       />
 
       {/* Per-run model selector — pins the model a workflow run (or quick session)
