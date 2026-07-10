@@ -20,20 +20,16 @@
  * active projectId). The global approval queue ({@link useReviewQueueStore})
  * stays a singleton as before.
  */
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useReviewQueueStore, useReviewQueueView } from '../stores/reviewQueueStore';
 import { PendingApprovalCard } from './ReviewQueue/PendingApprovalCard';
 import { ReviewItemCard } from './ReviewQueue/ReviewItemCard';
 import { useReviewQueueKeyboard } from '../hooks/useReviewQueueKeyboard';
 import type { QueueItem } from '../utils/reviewQueueSelectors';
-import OnboardingCard, { dismissOnboarding } from './OnboardingCard';
 import { useReviewQueueSlice } from '../stores/reviewQueueSlice';
 import { useReviewItemsSlice } from '../stores/reviewItemsSlice';
 import type { WorkflowRunStatus } from '../../../shared/types/cyboflow';
 import type { ReviewItem } from '../../../shared/types/reviews';
-
-// Type for IPC response
-import type { IPCResponse } from '../utils/api';
 
 function itemId(item: QueueItem): string {
   return item.kind === 'single' ? item.approval.id : item.items[0].id;
@@ -81,16 +77,9 @@ export default function ReviewQueueView({ projectId = null }: ReviewQueueViewPro
   // that wraps this lookup — see frontend/src/stores/reviewQueueSlice.ts.
   const runStatusMap = useReviewQueueSlice((s) => s.runStatusMap);
 
-  // Lifted dismissed state — controls OnboardingCard visibility from here so
-  // both the "Got it" button and the card button / y/n keypress paths unmount
-  // the card within the same React render cycle.
-  const [onboardingDismissed, setOnboardingDismissed] = useState(false);
   // Findings live in a separate, collapsed-by-default section so blocking items
   // stay prominent.
   const [findingsOpen, setFindingsOpen] = useState(false);
-
-  // One-shot ref guards against writing the preference more than once.
-  const onboardingDismissedRef = useRef(false);
 
   useEffect(() => useReviewQueueStore.getState().init(), []);
 
@@ -101,36 +90,7 @@ export default function ReviewQueueView({ projectId = null }: ReviewQueueViewPro
     return unsubscribe;
   }, [projectId]);
 
-  // Read the onboarding preference on mount to initialise lifted state.
-  useEffect(() => {
-    const electronInvoke = window.electron?.invoke;
-    if (!electronInvoke) return;
-    void (async () => {
-      try {
-        const result = (await electronInvoke(
-          'preferences:get',
-          'cyboflow_onboarding_dismissed',
-        )) as IPCResponse<string>;
-        if (result?.data === 'true') {
-          setOnboardingDismissed(true);
-          onboardingDismissedRef.current = true;
-        }
-      } catch {
-        // Silently proceed — show card if the preference can't be read.
-      }
-    })();
-  }, []);
-
-  // Single shared dismiss callback — wired to keyboard shortcuts and card buttons.
-  // Guards via onboardingDismissedRef so it is idempotent (no-op after first call).
-  const handleDecide = useCallback(() => {
-    if (onboardingDismissedRef.current) return;
-    onboardingDismissedRef.current = true;
-    setOnboardingDismissed(true);
-    void dismissOnboarding();
-  }, []);
-
-  const { focusedIndex } = useReviewQueueKeyboard(allItems, handleDecide);
+  const { focusedIndex } = useReviewQueueKeyboard(allItems);
 
   // Partition the review_items by kind/status. Pending only — triaged items drop
   // out of the inbox. Permission items are rendered via the approval path above,
@@ -193,10 +153,6 @@ export default function ReviewQueueView({ projectId = null }: ReviewQueueViewPro
 
       <div className="flex-1 overflow-y-auto px-7 py-4">
         <div className="mx-auto w-full max-w-[860px]">
-          <OnboardingCard
-            dismissed={onboardingDismissed}
-            onDismiss={handleDecide}
-          />
           {isEmpty ? (
             <div className="py-16 text-center text-sm text-text-muted">
               <b className="mb-1.5 block text-base text-text-primary">No pending reviews</b>
@@ -217,7 +173,6 @@ export default function ReviewQueueView({ projectId = null }: ReviewQueueViewPro
                       item={item}
                       isFocused={i === focusedIndex}
                       runStatus={runStatusMap[itemRunId(item)]}
-                      onDecide={handleDecide}
                     />
                   ))}
                   {decisionItems.map((it) => (
@@ -241,7 +196,6 @@ export default function ReviewQueueView({ projectId = null }: ReviewQueueViewPro
                       item={item}
                       isFocused={blocking.length + i === focusedIndex}
                       runStatus={runStatusMap[itemRunId(item)]}
-                      onDecide={handleDecide}
                     />
                   ))}
                 </section>

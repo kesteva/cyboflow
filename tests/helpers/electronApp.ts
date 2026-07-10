@@ -97,13 +97,16 @@ export async function launchElectronApp(dataDir: string): Promise<{
 
 /**
  * Consolidated startup-dialog dismisser (replaces 4 copy-pasted variants).
- * Fresh data dirs show the Welcome modal ("Get Started"); seeded dirs may show
- * an analytics/consent prompt. Both are optional and best-effort.
+ * Fresh data dirs (zero projects, no onboarding snapshot) boot into the
+ * first-run onboarding tour — its full-screen scrim captures pointer events,
+ * so it MUST be skipped before any spec interacts with the app. Seeded dirs
+ * (projects > 0) are auto-marked onboarded and never show it. An
+ * analytics/consent prompt may also appear. All probes are best-effort.
  */
 export async function dismissDialogs(page: Page): Promise<void> {
-  const getStarted = page.locator('button:has-text("Get Started")');
-  if (await getStarted.isVisible({ timeout: 2_000 }).catch(() => false)) {
-    await getStarted.click().catch(() => {});
+  const onboardingSkip = page.locator('[data-testid="onboarding-skip"]');
+  if (await onboardingSkip.isVisible({ timeout: 2_000 }).catch(() => false)) {
+    await onboardingSkip.click().catch(() => {});
     await settle(page, 300);
   }
 

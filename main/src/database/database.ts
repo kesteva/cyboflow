@@ -861,31 +861,14 @@ export class DatabaseService {
       `).run();
       this.db.prepare("CREATE INDEX idx_user_preferences_key ON user_preferences(key)").run();
       console.log('[Database] Created user_preferences table');
-      
-      // Set default preferences
-      this.db.prepare(`
-        INSERT INTO user_preferences (key, value) VALUES
-        ('hide_welcome', 'false'),
-        ('welcome_shown', 'false')
-      `).run();
-    } else {
-      // For existing users, ensure default preferences exist
-      const defaultPreferences = [
-        { key: 'hide_welcome', value: 'false' },
-        { key: 'welcome_shown', value: 'false' }
-      ];
-      
-      for (const pref of defaultPreferences) {
-        const existing = this.db.prepare('SELECT value FROM user_preferences WHERE key = ?').get(pref.key);
-        if (!existing) {
-          this.db.prepare('INSERT INTO user_preferences (key, value) VALUES (?, ?)').run(pref.key, pref.value);
-          console.log(`[Database] Added missing default preference: ${pref.key} = ${pref.value}`);
-        }
-      }
     }
+    // No seeded defaults: the onboarding tour snapshot (cyboflow_onboarding_state_v1)
+    // is written lazily by the renderer's OnboardingGate on first transition.
 
-    // Clean up the legacy 'hide_discord' preference row (IDEA-016). Idempotent: no-op if absent.
-    this.db.prepare("DELETE FROM user_preferences WHERE key = 'hide_discord'").run();
+    // Clean up legacy preference rows. Idempotent: no-op if absent.
+    // - 'hide_discord' (IDEA-016)
+    // - 'hide_welcome' / 'welcome_shown' (retired Welcome modal, replaced by the onboarding tour)
+    this.db.prepare("DELETE FROM user_preferences WHERE key IN ('hide_discord', 'hide_welcome', 'welcome_shown')").run();
 
     // Add worktree_folder column to projects table if it doesn't exist
     const projectsTableInfoWorktree = this.db.prepare("PRAGMA table_info(projects)").all() as SqliteTableInfo[];

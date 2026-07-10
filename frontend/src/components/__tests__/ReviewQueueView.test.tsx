@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import ReviewQueueView from '../ReviewQueueView';
 import { ErrorBoundary } from '../ErrorBoundary';
@@ -46,17 +46,11 @@ vi.mock('../../stores/reviewQueueStore', () => {
   };
 });
 
-// Capture the onDecide callback so dismissal tests can trigger the keyboard path.
-let capturedOnDecide: (() => void) | undefined;
-
 // Mock useReviewQueueKeyboard — ReviewQueueView.tsx imports this hook which in
 // turn imports the real trpc client (Electron IPC bridge). Mocking it here
 // keeps the test self-contained.
 vi.mock('../../hooks/useReviewQueueKeyboard', () => ({
-  useReviewQueueKeyboard: (_queue: QueueItem[], onDecide?: () => void) => {
-    capturedOnDecide = onDecide;
-    return { focusedIndex: 0, setFocusedIndex: vi.fn() };
-  },
+  useReviewQueueKeyboard: (_queue: QueueItem[]) => ({ focusedIndex: 0, setFocusedIndex: vi.fn() }),
 }));
 
 // Mock the reviewQueueSlice — ReviewQueueView uses useRunStatus from this slice.
@@ -124,23 +118,10 @@ function makeRI(kind: ReviewItemKind, id: string, blocking: boolean): ReviewItem
   };
 }
 
-// Fixture approval for onboarding dismissal tests
-const onboardingApproval: Approval = {
-  id: 'onb-1',
-  runId: 'run-onb',
-  workflowName: 'Onboarding WF',
-  toolName: 'Bash',
-  payloadPreview: 'echo hello',
-  rationale: null,
-  createdAt: '2026-01-01T00:00:00Z',
-  status: 'pending',
-};
-
 describe('ReviewQueueView', () => {
   beforeEach(() => {
     mockQueue = [];
     mockReviewItems = [];
-    capturedOnDecide = undefined;
     mockInit.mockClear();
     // Reset the slice's runStatusMap so tests start from a clean state.
     useReviewQueueSlice.setState({ runStatusMap: {} });
@@ -244,78 +225,6 @@ describe('ReviewQueueView', () => {
     const cards = screen.getAllByTestId('pending-approval-card');
     expect(cards[0]).toHaveAttribute('data-run-status', '');
     expect(cards[1]).toHaveAttribute('data-run-status', '');
-  });
-
-  // ---------------------------------------------------------------------------
-  // Onboarding card dismissal tests (TASK-625)
-  // ---------------------------------------------------------------------------
-
-  it('OnboardingCard is visible by default when queue is non-empty and preference is unset', () => {
-    mockQueue = [onboardingApproval];
-    render(<ReviewQueueView />);
-    // OnboardingCard renders with role="status" when not dismissed
-    expect(screen.getByRole('status')).toBeInTheDocument();
-  });
-
-  it('clicking Approve in a PendingApprovalCard dismisses the OnboardingCard', async () => {
-    mockQueue = [onboardingApproval];
-    render(<ReviewQueueView />);
-    expect(screen.getByRole('status')).toBeInTheDocument();
-
-    // The mock PendingApprovalCard renders an Approve button that fires onDecide
-    const approveButtons = screen.getAllByRole('button', { name: 'Approve' });
-    fireEvent.click(approveButtons[0]);
-
-    await waitFor(() => {
-      expect(screen.queryByRole('status')).not.toBeInTheDocument();
-    });
-  });
-
-  it('clicking Reject in a PendingApprovalCard dismisses the OnboardingCard', async () => {
-    mockQueue = [onboardingApproval];
-    render(<ReviewQueueView />);
-    expect(screen.getByRole('status')).toBeInTheDocument();
-
-    // The mock PendingApprovalCard renders a Reject button that fires onDecide
-    const rejectButtons = screen.getAllByRole('button', { name: 'Reject' });
-    fireEvent.click(rejectButtons[0]);
-
-    await waitFor(() => {
-      expect(screen.queryByRole('status')).not.toBeInTheDocument();
-    });
-  });
-
-  it('keyboard-path onDecide callback dismisses the OnboardingCard', async () => {
-    mockQueue = [onboardingApproval];
-    render(<ReviewQueueView />);
-    expect(screen.getByRole('status')).toBeInTheDocument();
-
-    // Trigger the captured onDecide callback (the keyboard hook's path)
-    expect(capturedOnDecide).toBeDefined();
-    act(() => { capturedOnDecide?.(); });
-
-    await waitFor(() => {
-      expect(screen.queryByRole('status')).not.toBeInTheDocument();
-    });
-  });
-
-  it('onDecide is idempotent — multiple calls do not re-show the card', async () => {
-    mockQueue = [onboardingApproval];
-    render(<ReviewQueueView />);
-    expect(screen.getByRole('status')).toBeInTheDocument();
-
-    // First call dismisses
-    act(() => { capturedOnDecide?.(); });
-    await waitFor(() => {
-      expect(screen.queryByRole('status')).not.toBeInTheDocument();
-    });
-
-    // Subsequent calls are no-ops (card stays dismissed)
-    act(() => { capturedOnDecide?.(); });
-    act(() => { capturedOnDecide?.(); });
-    await waitFor(() => {
-      expect(screen.queryByRole('status')).not.toBeInTheDocument();
-    });
   });
 
   // ---------------------------------------------------------------------------

@@ -592,8 +592,14 @@ When a component's visibility depends on an async IPC preference (`preferences:g
 track the read result as `boolean | null` in the parent and render nothing while it is
 `null`. Do NOT initialise the child's own state to "hidden by default" and rely on an
 async effect to flip it — that produces the correct steady state but a one-frame flash
-on every page reload for returning users. Consumers: `OnboardingCard`, `Welcome`,
-`DiscordPopup`, `AnalyticsConsentDialog` (audit via `grep -rln 'preferences:get' frontend/src`).
+on every page reload for returning users. Canonical example: the first-run onboarding
+tour's `OnboardingGate` (`frontend/src/components/onboarding/`) reads the persisted
+snapshot under `ONBOARDING_PREF_KEY` (`frontend/src/utils/onboarding.ts`) via
+`preferences:get`/`preferences:set` and only calls `useOnboardingStore.hydrate` once
+that read resolves — the store's `hydrated` flag is the no-flash gate consumers (e.g.
+Sidebar's "Resume setup" button) key off of, instead of a naive default-hidden boolean.
+Other consumers: `DiscordPopup`, `AnalyticsConsentDialog` (audit via
+`grep -rln 'preferences:get' frontend/src`).
 
 ### Telemetry: scrub chokepoint + environment gating
 
