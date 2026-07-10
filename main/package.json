@@ -1,6 +1,6 @@
 {
   "name": "main",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "description": "Electron main process for Cyboflow",
   "main": "dist/main/src/index.js",
   "type": "commonjs",

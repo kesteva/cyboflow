@@ -6,6 +6,43 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.21] — 2026-07-10
+
+### Added
+
+- **Manual backlog ordering.** Kanban cards can now be reordered within a column
+  by drag-and-drop, backed by a fractional `sort_order` rank so a reorder touches
+  only the moved card. A card-menu **Move up / Move down / Move to top** gives the
+  same control from the keyboard (WCAG 2.5.7). [migration 057]
+- **Rotation experiments.** A new experiment **kind (`rotation`)** alongside the
+  existing side-by-side variant experiments: instead of a fixed arm split, runs
+  are attributed to arms as they happen and an arm can be **superseded** as the
+  champion. Includes the full lifecycle (reconcile chokepoint, resolver
+  provenance, per-run attribution, decide / abandon), a read surface (per-arm
+  stats, run drill-down, dashboard rows), and Insights UI (rotation compare view
+  + supersede confirm). [migration 058]
+- **Fan-out step editor treatment.** The workflow editor now renders a parallel
+  (fan-out) stage as a canvas lane-band frame with an inner-row inspector, framed
+  and centered within its phase band.
+
+### Changed
+
+- **Experiment lifecycle polish.** A lifecycle-aware experiment home view, a
+  sidebar experiment group row, an experiment-aware session-dismiss guard, a
+  shared `<workflow> A/B · <challenger>` display-name helper, and a project
+  picker on the A/B test modal (locked to global workflows) so a global sprint
+  flow seeds from the right project. Abandoning an experiment now stamps
+  `abandoned` first and cleans up its reports, and the seed-task fold no longer
+  strands the originals short of Done.
+
+### Fixed
+
+- The run monitor is now torn down on a programmatic→orchestrated handover.
+- The full-height chat dock sizes to its container instead of the window.
+- Findings are dropped from the run's central-pane "Needs your input" strip
+  (they belong in the triage queue, not the run gate surface).
+- Stuck `sending` chat rows are cleared for users in eastern time zones.
+
 ## [0.1.20] — 2026-07-09
 
 ### Added
