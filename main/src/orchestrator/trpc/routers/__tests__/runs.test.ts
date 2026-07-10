@@ -475,7 +475,7 @@ describe('cyboflow.runs.start', () => {
       });
 
       expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith('wf-codex-restart', '/projects/my-project', 'sdk', undefined, undefined, 'sess-1', 'acceptEdits', undefined, undefined, 1, undefined, undefined, 'gpt-5.5', undefined, undefined, { baseline: true }, 'codex', 'codex-sdk');
+      expect(launchMock).toHaveBeenCalledWith('wf-codex-restart', '/projects/my-project', 'sdk', undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, 'orchestrated', undefined, 'gpt-5.5', undefined, undefined, { baseline: true }, 'codex', 'codex-sdk');
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
