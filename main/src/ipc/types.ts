@@ -34,13 +34,14 @@ export interface AppServices {
    */
   interactiveCliManager: InteractiveClaudeManager;
   /**
-   * Live-REPL close-out seams for PTY QUICK sessions (mirrors the RelayDeps
+   * Live-session close-out seams for QUICK sessions (mirrors the RelayDeps
    * closures wired in index.ts). Both take the session's sentinel `__quick__`
-   * runId — the SubstrateDispatchFacade translates it to the live panelId and
-   * strictly NO-OPs for the SDK substrate. `endLiveSession` writes the graceful
-   * EOF/`/exit` (merge/rebase: claude is idle and reads it); `killLiveSession`
-   * hard-kills the process tree (dismiss/archive: claude may be mid-turn and
-   * never read PTY stdin). Callers must treat both as fail-soft.
+   * runId. Interactive: the SubstrateDispatchFacade translates it to the live
+   * panelId; `endLiveSession` writes the graceful EOF/`/exit` (merge/rebase:
+   * claude is idle and reads it); `killLiveSession` hard-kills the process tree
+   * (dismiss/archive: claude may be mid-turn and never read PTY stdin). SDK:
+   * both route to the manager's killProcess so a WARM persistent query() does
+   * not outlive close-out. Callers must treat both as fail-soft.
    */
   endLiveSession: (runId: string) => Promise<void>;
   killLiveSession: (runId: string) => Promise<void>;

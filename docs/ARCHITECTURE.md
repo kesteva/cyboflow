@@ -209,6 +209,28 @@ immutably onto `workflow_runs.substrate` at launch. The seam has three load-bear
   `spawnPtyProcess` / `setupProcessHandlers` / `killProcessTree` are LIVE and load-bearing for
   the interactive sibling — do NOT prune them or mark them `@cyboflow-hidden`.
 
+**Warm persistent SDK sessions (per-turn subprocess respawn eliminated).** The SDK substrate
+keeps ONE `query()`/claude subprocess alive across turns of the same conversation instead of
+respawning per turn (which cost ~5s of bootstrap — settings scan, MCP handshakes, `--resume`
+reload — on every prompt). The seam is invisible above `ClaudeCodeManager`: `spawnCliProcess`
+keeps its per-turn await contract (resolves on THAT turn's terminal `result`; rejects with
+`SdkSessionTerminalError` for a failed flow turn), so `RunExecutor`/`session.ts`/`events.ts`
+are unchanged. Internally a non-lane spawn parks WARM at its result boundary
+(`createPersistentPromptInput` holds stdin open; the for-await loop spans turns); a follow-up
+spawn that is a resume-continuation of the SAME conversation (quick `isResume` / workflow
+`resumeSessionId` matching the captured claude session id) with an UNCHANGED options
+fingerprint (model, betas, settings overlay, MCP config, deny guards, permission allow-rules,
+system prompt, env, permission mode) is PUSHED into the live query; anything else — fresh
+conversation, fingerprint drift, idle TTL (15 min), terminal error, kill switch
+`CYBOFLOW_DISABLE_WARM_SDK=1` — closes the warm process and cold-spawns with `--resume`
+(worst case = the old per-turn behavior). `'spawned'`/`session_info`/`'exit'` are emitted per
+LOGICAL TURN (not per OS process), so the whole `events.ts` quick-session lifecycle is
+byte-identical; the bookkeeping maps (`processes`/`sdkRuns`/`pipelines`/`spawnKeysByRunId`)
+stay populated while warm so every kill path reaches the warm process; boot recovery is
+unaffected (warm state is in-memory and dies with the app; first post-restart turn always
+cold-spawns with `--resume`). Fan-out lanes and programmatic DAG steps stay single-shot.
+Per-turn `[Timing] sdk turn …` log lines record cold/warm path + submit→first-event latency.
+
 **Structured-panel preservation (Q3).** The structured Claude panel renders interactive runs
 with **zero frontend change**. The interactive substrate produces a `claude` transcript JSONL
 whose per-line schema diverges from the SDK wire shape; `TranscriptSource` /

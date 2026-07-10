@@ -1945,12 +1945,12 @@ async function initializeServices() {
     cliManagerFactory,
     claudeCodeManager: defaultCliManager, // Backward compatibility
     interactiveCliManager, // PTY substrate sibling (narrowed to the concrete class above)
-    // Live-REPL close-out seams for PTY quick sessions (IDEA-030): route the
+    // Live-session close-out seams for quick sessions (IDEA-030): route the
     // session merge/rebase/dismiss handlers through the SubstrateDispatchFacade
-    // so a quick session's persistent interactive REPL is gracefully ended
-    // (EOF/`/exit`) or hard-killed instead of orphaned. Mirrors the RelayDeps
-    // closures wired in app.whenReady(); the facade translates the sentinel
-    // runId to the live panelId and strictly NO-OPs for the SDK substrate.
+    // so a quick session's persistent process is never orphaned — interactive
+    // REPLs are gracefully ended (EOF/`/exit`) or hard-killed; a warm SDK
+    // query() is killed. Mirrors the RelayDeps closures wired in
+    // app.whenReady(); the facade translates the sentinel runId per substrate.
     endLiveSession: (runId: string) => substrateFacade.endSession(runId),
     killLiveSession: (runId: string) => substrateFacade.killSession(runId),
     // Deterministic at-spawn runId→panelId registration for PTY quick sessions:
@@ -2293,8 +2293,8 @@ app.whenReady().then(async () => {
     // the run's panel and calls killProcess on it — the SDK manager overrides
     // killProcess to abort its query() iterator, the interactive manager inherits
     // it to kill the PTY tree — so a single call stops whichever substrate ran.
-    // (killSession is interactive-ONLY — a strict no-op for SDK — so it is the
-    // wrong seam for a universal cancel.) Reuses the SAME `db`, `runQueues`,
+    // (killSession targets a run's persistent live process at close-out; abort()
+    // is still the canonical universal-cancel seam.) Reuses the SAME `db`, `runQueues`,
     // ApprovalRouter / QuestionRouter accessors, and `loggerLike` as the
     // cancelAndRestart wiring above. emitRunStatusChanged emits on the SAME
     // module-level `runStatusEvents` 'changed' channel the lifecycleTransitions
@@ -2970,10 +2970,11 @@ app.whenReady().then(async () => {
     // PTY and NO-OPs for the SDK substrate (Q3 byte-identical). runId === panelId
     // per the orchestrator invariant, so the facade maps directly.
     // IDEA-030 / TASK-818: endSession is the explicit-termination seam for a
-    // persistent interactive REPL — the close-out mutations (merge / createPr /
-    // dismiss) call it BEFORE worktree removal so the live PTY's spawn promise
-    // resolves. It rides the SAME RelayDeps bag (the single bag for live-session
-    // collaborators) and routes through the facade, which NO-OPs for SDK.
+    // persistent live process — the close-out mutations (merge / createPr /
+    // dismiss) call it BEFORE worktree removal so the interactive PTY's spawn
+    // promise resolves (and a warm SDK query() is killed). It rides the SAME
+    // RelayDeps bag (the single bag for live-session collaborators) and routes
+    // through the facade, which dispatches per substrate.
     setRelayDeps({
       relayInput: (runId, text) => substrateFacade.relayInput(runId, text),
       relayResize: (runId, cols, rows) => substrateFacade.relayResize(runId, cols, rows),

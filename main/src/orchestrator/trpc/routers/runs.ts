@@ -416,10 +416,11 @@ export interface RelayDeps {
    * TASK-818). Writes the EOF/`/exit` control sequence so the interactive
    * manager's inherited onExit settles the run's spawn promise and tears the run
    * down — the ONLY non-kill spawn-promise resolver for a persistent interactive
-   * run. Strict NO-OP for the SDK substrate (no PTY). Called by the close-out
-   * mutations (merge / createPr / dismiss) BEFORE worktree removal so the live
-   * REPL is terminated as part of close-out. RelayDeps is the SINGLE bag for
-   * live-session collaborators (relay + end-session).
+   * run. For the SDK substrate it routes to killProcess instead (no PTY to write
+   * EOF into; a WARM persistent query() must not outlive close-out). Called by
+   * the close-out mutations (merge / createPr / dismiss) BEFORE worktree removal
+   * so the live process is terminated as part of close-out. RelayDeps is the
+   * SINGLE bag for live-session collaborators (relay + end-session).
    */
   endSession(runId: string): Promise<void>;
   /**
@@ -429,7 +430,8 @@ export interface RelayDeps {
    * claude is busy and never reads the polite request — so on Dismiss of an
    * in-flight flow the process would linger orphaned. Used by `dismiss` ONLY;
    * merge / createPr keep `endSession` (their claude is idle at awaiting-review).
-   * Strict NO-OP for the SDK substrate. Idempotent.
+   * SDK substrate: routes to killProcess (same primitive as endSession there).
+   * Idempotent.
    */
   killSession(runId: string): Promise<void>;
   /**
@@ -1963,9 +1965,10 @@ export const runsRouter = router({
       // deps is guaranteed non-null after resolveRunForCloseout (it throws otherwise).
       const wm = deps!.worktreeManager;
 
-      // Terminate the live interactive REPL (IDEA-030 / TASK-818) BEFORE the
-      // worktree mutation so its spawn promise resolves as part of close-out.
-      // NO-OP for the SDK substrate and when the relay bag is unwired.
+      // Terminate the live session process (IDEA-030 / TASK-818) BEFORE the
+      // worktree mutation so close-out never orphans it: interactive REPL spawn
+      // promise resolves; a warm SDK query() is killed. NO-OP when the relay bag
+      // is unwired.
       await endLiveInteractiveSession(input.runId);
 
       const mainBranch = await wm.getProjectMainBranch(projectPath);
@@ -2062,9 +2065,9 @@ export const runsRouter = router({
       // deps is guaranteed non-null after resolveRunForCloseout (it throws otherwise).
       const wm = deps!.worktreeManager;
 
-      // Terminate the live interactive REPL (IDEA-030 / TASK-818) BEFORE pushing
-      // so its spawn promise resolves as part of close-out. NO-OP for SDK /
-      // unwired relay bag.
+      // Terminate the live session process (IDEA-030 / TASK-818) BEFORE pushing
+      // so close-out never orphans it (interactive REPL or warm SDK query()).
+      // NO-OP when the relay bag is unwired.
       await endLiveInteractiveSession(input.runId);
 
       await wm.gitPush(worktreePath);
