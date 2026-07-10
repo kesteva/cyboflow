@@ -16,8 +16,8 @@
  *      "TERMINAL · folder · branch" header and its hint text are gone.
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent } from '@testing-library/react';
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { render, screen, fireEvent, act } from '@testing-library/react';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import { TerminalDock, DOCK_OPEN_HEIGHT } from '../TerminalDock';
 
@@ -269,6 +269,67 @@ describe('TerminalDock — three levels (collapsed / standard / full)', () => {
     expect(dockHeight()).toBe(DOCK_OPEN_HEIGHT);
     expect(screen.getByTestId('terminal-dock-expand')).toBeInTheDocument();
     expect(screen.getByTestId('terminal-dock-collapse')).toBeInTheDocument();
+  });
+});
+
+describe('TerminalDock — container-aware sizing', () => {
+  // A ResizeObserver stub whose callbacks we can fire on demand to trigger a
+  // re-measure (jsdom has no ResizeObserver and does no layout).
+  let roCallbacks: ResizeObserverCallback[];
+
+  beforeEach(() => {
+    roCallbacks = [];
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(cb: ResizeObserverCallback) {
+          roCallbacks.push(cb);
+        }
+        observe(): void {}
+        unobserve(): void {}
+        disconnect(): void {}
+      },
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** Stub the dock's container height and fire the observers so it re-measures. */
+  function setContainerHeight(px: number): void {
+    const parent = screen.getByTestId('terminal-dock').parentElement as HTMLElement;
+    Object.defineProperty(parent, 'clientHeight', { configurable: true, get: () => px });
+    act(() => {
+      roCallbacks.forEach((cb) => cb([], {} as ResizeObserver));
+    });
+  }
+
+  it('full level fills the measured container, not the window height', () => {
+    render(
+      <TerminalDock open onToggle={() => {}}>
+        <div data-testid="child" />
+      </TerminalDock>,
+    );
+    setContainerHeight(700);
+    // ▴ → full: fills the 700px container, NOT the 2000px viewport.
+    fireEvent.click(screen.getByTestId('terminal-dock-expand'));
+    expect(dockHeight()).toBe(700);
+  });
+
+  it('caps a too-tall persisted standard height at the container height', () => {
+    localStorage.setItem(HEIGHT_KEY, '1500'); // taller than the pane below
+    render(
+      <TerminalDock open onToggle={() => {}}>
+        <div data-testid="child" />
+      </TerminalDock>,
+    );
+    // Before measuring, it uses the persisted height (window is the only ceiling).
+    expect(dockHeight()).toBe(1500);
+    // Once the container is measured, the standard height is capped to it so it
+    // can't overshoot the pane and scroll the header/grip off-screen.
+    setContainerHeight(400);
+    expect(dockHeight()).toBe(400);
   });
 });
 

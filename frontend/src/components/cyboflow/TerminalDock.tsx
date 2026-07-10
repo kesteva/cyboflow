@@ -26,7 +26,7 @@
  * remount path. Resizing and the standard↔full switch only mutate the wrapper
  * height — the children never remount.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 
 /** Default standard (open) dock height (design handoff). Collapsed = the strip. */
@@ -127,6 +127,51 @@ export function TerminalDock({
   const level: DockLevel = open ? (full ? 'full' : 'standard') : 'collapsed';
   const canResize = level === 'standard';
 
+  // Live available height of the dock's CONTAINER (the bounded center-pane
+  // column that hosts this dock). The full level fills exactly this — never
+  // window.innerHeight, which overshoots by the header + tab strip and can force
+  // an ancestor taller than the viewport, scrolling the header and this dock's
+  // OWN grip strip (the ▾ collapse chevron) off-screen so the chat can't be
+  // collapsed back down. It also caps the standard-level resize ceiling.
+  //
+  // = container.clientHeight minus the dock's fixed (non-growing) siblings — the
+  // tab strip and pending-input strip — so those stay visible and nothing (the
+  // grip, the composer) is clipped. The flex:1 content sibling is excluded (it
+  // collapses to 0 under the dock) by skipping any sibling with flex-grow > 0.
+  // Null when the container is unmeasurable (SSR/jsdom, height 0) → callers fall
+  // back to the window-based height.
+  const [availableHeight, setAvailableHeight] = useState<number | null>(null);
+  const availableHeightRef = useRef<number | null>(null);
+  availableHeightRef.current = availableHeight;
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const el = wrapperRef.current;
+    const parent = el?.parentElement ?? null;
+    const measure = (): void => {
+      if (el === null || parent === null) {
+        setAvailableHeight(null);
+        return;
+      }
+      const paneHeight = parent.clientHeight;
+      if (paneHeight <= 0) {
+        setAvailableHeight(null);
+        return;
+      }
+      let fixedSiblings = 0;
+      for (let n = el.previousElementSibling; n !== null; n = n.previousElementSibling) {
+        const node = n as HTMLElement;
+        if (getComputedStyle(node).flexGrow === '0') fixedSiblings += node.offsetHeight;
+      }
+      setAvailableHeight(Math.max(DOCK_MIN_HEIGHT, paneHeight - fixedSiblings));
+    };
+    measure();
+    if (parent === null || typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(() => measure());
+    ro.observe(parent);
+    return () => ro.disconnect();
+  }, [level, open]);
+
   // In the standard level the grip background is a resize handle. A press there is
   // a drag once it crosses DRAG_THRESHOLD; the chevron buttons stop the press from
   // ever reaching the grip, so they never start a resize.
@@ -156,7 +201,12 @@ export function TerminalDock({
       document.body.style.cursor = 'ns-resize';
     }
     if (it.dragged) {
-      setHeight(clampDockHeight(it.startHeight + deltaY));
+      // Cap the drag at the measured container ceiling so it can never overshoot
+      // the pane (the window-based clampDockHeight ceiling would let a drag push
+      // the dock past the viewport and scroll the header/grip out of reach).
+      const ceiling = availableHeightRef.current;
+      const next = clampDockHeight(it.startHeight + deltaY);
+      setHeight(ceiling !== null ? Math.min(next, ceiling) : next);
     }
   }, []);
 
@@ -196,11 +246,16 @@ export function TerminalDock({
     level === 'collapsed'
       ? DOCK_TOGGLE_HEIGHT
       : level === 'full'
-        ? fullDockHeight()
-        : height;
+        ? // Fill the container exactly; fall back to the window height only when
+          // the container is unmeasurable (SSR/jsdom).
+          (availableHeight ?? fullDockHeight())
+        : // Standard: never exceed the container, so a tall persisted height (or a
+          // large drag) can't push the header/grip off-screen.
+          Math.min(height, availableHeight ?? Infinity);
 
   return (
     <div
+      ref={wrapperRef}
       data-testid="terminal-dock"
       style={{
         flexShrink: 0,
