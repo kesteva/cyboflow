@@ -2,7 +2,7 @@
 
 Date: 2026-07-08
 Updated: 2026-07-10
-Status: Runtime foundation landed; Codex workflow launch remains gated
+Status: Runtime foundation, raw notifications, questions, and session follow-up landed; Codex workflow launch remains gated
 
 ## Summary
 
@@ -77,12 +77,18 @@ Completed foundations:
 
 - Provider/runtime persistence and provider-scoped model handling, while retaining
   the legacy Claude `substrate` compatibility projection.
-- Provider-neutral agent events, raw-event persistence, run/session message
-  projection, and Codex event correlation.
-- Codex 0.143.0 app-server transport, initialize/thread/turn lifecycle, resume,
-  interruption, terminal error handling, and internal runtime dispatch.
+- Provider-neutral agent-event projection, normalized-event persistence,
+  run/session message projection, Codex event correlation, and a separate
+  `codex_app_server_notification` audit row for each original notification.
+- Codex 0.143.0 app-server transport, initialize/thread/turn lifecycle,
+  thread-start/thread-resume primitives, interruption, terminal error handling,
+  and internal runtime dispatch. Codex SDK quick-session follow-ups route through
+  `sessions:send-input` and resume the latest Codex thread; the manager's legacy
+  `continuePanel` compatibility method remains unsupported.
 - Native command, file-change, and MCP tool approval requests bridged into
   `ApprovalRouter` and the shared review queue.
+- Native `item/tool/requestUserInput` requests bridged into `QuestionRouter` and
+  returned to app-server after the user answers.
 - Nested `mcp_servers.cyboflow` injection on each `thread/start` and
   `thread/resume`, including run/socket correlation. This is the configuration
   foundation, not proof of workflow progress semantics.
@@ -109,7 +115,8 @@ an internal Codex turn fixture as workflow support.
 - Let users choose Claude or Codex as the session's default chat agent.
 - Keep the architecture capable of provider-scoped workflow plans without
   exposing Codex workflows before the compatibility gates pass.
-- Preserve Cyboflow's product invariant: all human attention routes through the shared review queue.
+- Preserve Cyboflow's workflow invariant: workflow human attention routes through
+  the shared review queue. Codex PTY quick-session prompts remain terminal-native.
 - Reuse the existing worktree, run lifecycle, MCP, raw event, message projection, review item, and usage infrastructure.
 - Keep Claude as the default and avoid behavior changes for existing users.
 - Make model labels provider-scoped so `Opus` and `GPT-5.5` do not share one selector namespace.
@@ -411,7 +418,9 @@ Expected flow:
 5. Create an append-only `agent_invocations` row for this concrete turn.
 6. Start or resume a thread with `cwd = worktreePath`, permission-derived sandbox policy, model, developer instructions, and nested Cyboflow MCP server config.
 7. Persist the returned Codex thread ID as the invocation `external_session_id`.
-8. Start the turn, project app-server notifications into `AgentStreamEvent`, persist raw events, and emit legacy-compatible panel output through the facade.
+8. Start the turn, persist each original app-server notification in a dedicated
+   raw-event row, project notifications into `AgentStreamEvent`, persist those
+   normalized events, and emit legacy-compatible panel output through the facade.
 9. Interrupt active turns on cancellation, then tear down approval bridges and the app-server process.
 
 `CodexPtyManager` should be separate and intentionally narrow:
@@ -473,7 +482,11 @@ Then implement adapters:
 - Claude SDK/transcript normalizer -> `AgentStreamEvent`
 - Codex app-server notification projector -> `AgentStreamEvent`
 
-The raw provider event should still be stored in `raw_events.payload_json` for replay/debugging. The normalized event should drive message projection, review queue, usage, and workflow progress.
+The original app-server notification is stored with event type
+`codex_app_server_notification` for replay/debugging. The normalized event is
+stored separately and drives message projection, review queue, usage, and
+workflow progress. Consumers must distinguish the original-notification audit row
+from the normalized event row rather than treating both as the same payload shape.
 
 This boundary landed with the Codex app-server manager work, not after Codex rendered through a temporary `Codex -> ClaudeStreamEvent` shim. Rendering Codex messages and usage in the existing run view means rendering provider-neutral `AgentStreamEvent` projections and only adapting outward for legacy listeners.
 
@@ -584,6 +597,13 @@ Codex:
 - Network/web search toggles.
 
 Runtime should appear before model because available model choices can differ by runtime.
+
+The current permission mapping is explicit: `default` uses a read-only sandbox
+with on-request approval; `acceptEdits` uses workspace-write with on-request
+approval; and `dontAsk` uses danger-full-access with approvals disabled. For the
+structured `codex-sdk` runtime, `auto` uses workspace-write/on-request plus
+`approvalsReviewer: 'auto_review'`. For `codex-pty`, `auto` has the same CLI flags
+as `acceptEdits`; the UI must distinguish those two runtime-specific meanings.
 
 Do not expose a separate Codex sandbox dropdown in the launch configure step if session permission settings already represent the same decision. Treat sandbox mode as provider-specific implementation detail behind the shared permission control.
 
@@ -714,7 +734,7 @@ Exit criteria:
   compatibility error, while persisted `codex-sdk` rows remain readable.
 - Quick-session launch validation accepts `codex-pty`.
 
-### Phase 2: Provider-Neutral Event Boundary And Codex App-Server Manager (Complete)
+### Phase 2: Provider-Neutral Event Boundary And Codex App-Server Manager (Foundation Complete)
 
 - Add `AgentStreamEvent`.
 - Move message projection and run usage from Claude-specific assumptions to provider-neutral events.
@@ -725,11 +745,17 @@ Exit criteria:
 - Register `codex-pty` only in quick-session dispatch.
 - Persist Codex thread ID as invocation `external_session_id`.
 - Render Codex messages and usage in the existing run view.
-- Keep raw provider payloads for audit.
+- Persist normalized `AgentStreamEvent` payloads and original app-server
+  notifications as distinct raw-event rows.
+- Bridge native Codex questions through `QuestionRouter`.
+- Route Codex SDK quick-session follow-ups through session input and thread resume;
+  do not claim support for the manager's legacy `continuePanel` method.
 
 Exit criteria:
 
-- An internal Codex app-server fixture starts, streams messages, writes raw events, and finishes cleanly without exposing workflow launch in the UI.
+- An internal Codex app-server fixture starts, streams messages, writes normalized
+  events and original notifications to `raw_events`, and finishes cleanly without
+  exposing workflow launch in the UI.
 - Claude and Codex both flow through the same normalized event pipeline.
 - Provider-specific code is isolated to adapters/managers.
 - Codex usage renders with provider-normalized usage and cost fields.
@@ -796,7 +822,7 @@ Add integration coverage:
 - Claude SDK parity remains unchanged.
 - Codex app-server mocked stream runs through the runtime dispatch path.
 - Codex PTY quick session launches outside workflow dispatch.
-- Raw events persist.
+- Normalized events and original provider notifications persist as distinct rows.
 - Messages project.
 - Usage rolls up.
 - Review items appear for permission cases.
