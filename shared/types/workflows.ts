@@ -366,9 +366,20 @@ export interface FanOutSpec {
  * `maxConcurrency` when set, else the SPRINT_BATCH_CAP default. Single source
  * of truth for both planes (programmatic wave sizing, orchestrated prompt
  * instructions) so neither can drift from the other.
+ *
+ * Hardened against invalid READ-path values: the editor's zod schema
+ * (workflowDefinitionSchema.ts) rejects a non-positive/fractional cap on save,
+ * but `parseWorkflowDefinition` only shape-checks phases/steps, so a frozen
+ * spec_json written outside the editor (import, direct registry write, old
+ * variant) can still carry e.g. `maxConcurrency: 0` — which, passed through
+ * raw, makes the programmatic controller slice an empty wave and spin forever
+ * (`ready.slice(0, 0)` never shrinks `remaining`). A non-finite value falls
+ * back to the default cap; anything below 1 clamps to serial.
  */
 export function effectiveMaxConcurrency(fanOut: FanOutSpec): number {
-  return fanOut.maxConcurrency ?? SPRINT_BATCH_CAP;
+  const raw = fanOut.maxConcurrency;
+  if (raw === undefined || !Number.isFinite(raw)) return SPRINT_BATCH_CAP;
+  return Math.max(1, Math.floor(raw));
 }
 
 /**

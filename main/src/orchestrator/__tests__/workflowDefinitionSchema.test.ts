@@ -571,6 +571,22 @@ describe('effectiveMaxConcurrency (shared/types/workflows helper)', () => {
     expect(effectiveMaxConcurrency(capped)).toBe(3);
   });
 
+  it('clamps invalid read-path caps instead of trusting them (empty-wave spin guard)', () => {
+    const inner = [{ id: 'implement', agent: 'implement' }];
+    // 0 / negative would slice an empty wave in the programmatic controller and
+    // spin forever — clamp to serial.
+    expect(effectiveMaxConcurrency({ over: 'tasks', inner, maxConcurrency: 0 })).toBe(1);
+    expect(effectiveMaxConcurrency({ over: 'tasks', inner, maxConcurrency: -3 })).toBe(1);
+    // Fractional values floor (then clamp).
+    expect(effectiveMaxConcurrency({ over: 'tasks', inner, maxConcurrency: 2.7 })).toBe(2);
+    expect(effectiveMaxConcurrency({ over: 'tasks', inner, maxConcurrency: 0.4 })).toBe(1);
+    // Non-finite values fall back to the default cap.
+    expect(effectiveMaxConcurrency({ over: 'tasks', inner, maxConcurrency: Number.NaN })).toBe(SPRINT_BATCH_CAP);
+    expect(effectiveMaxConcurrency({ over: 'tasks', inner, maxConcurrency: Number.POSITIVE_INFINITY })).toBe(
+      SPRINT_BATCH_CAP,
+    );
+  });
+
   it("sprint and ship's built-in execute-tasks fanOut both resolve to the default cap (no explicit maxConcurrency)", () => {
     const sprintExecute = WORKFLOW_DEFINITIONS.sprint.phases
       .flatMap((p) => p.steps)
