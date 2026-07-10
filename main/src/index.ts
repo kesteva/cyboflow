@@ -2153,6 +2153,22 @@ app.whenReady().then(async () => {
       console.log(`[Main] Recovered active-state orphans (running: ${orphanRecovery.runningRecovered}, starting: ${orphanRecovery.startingRecovered}, approvals canceled: ${orphanRecovery.approvalsCanceled})`);
     }
 
+    // Report boot-recovery force-fails to Sentry as ONE aggregate event (these
+    // runs were force-failed with the synthetic 'app_restart' reason — the prior
+    // process crashed, so no per-run error object exists). Count is bucketed to
+    // keep tag cardinality low; a spike here signals frequent unclean shutdowns.
+    const bootForceFailed =
+      recoveredCount + orphanRecovery.runningRecovered + orphanRecovery.startingRecovered;
+    if (bootForceFailed > 0) {
+      const countBucket =
+        bootForceFailed === 1 ? '1' : bootForceFailed <= 5 ? '2-5' : bootForceFailed <= 20 ? '6-20' : '20+';
+      captureSeamError(
+        'boot-recovery-force-failed',
+        new Error(`${bootForceFailed} run(s) force-failed on boot recovery (app_restart)`),
+        { errorClass: 'app-restart', recoveryReason: 'app_restart', countBucket },
+      );
+    }
+
     // Boot recovery: verification_requests left 'leased'/'running' by a prior
     // process have no live scheduler worker (the in-memory AbortController + lease +
     // detached promise died with that process), so they cannot resume — re-drain

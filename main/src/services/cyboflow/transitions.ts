@@ -5,6 +5,8 @@ import { assertTransitionAllowed } from './stateMachine';
 import { emitUsage } from '../../orchestrator/telemetrySink';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
 import type { TelemetryFlow } from '../../../../shared/types/telemetry';
+import { captureSeamError } from '../telemetry';
+import { classifyErrorPattern } from '../../orchestrator/programmatic/systemicError';
 
 /**
  * Emit an anonymized `workflow_run_completed` usage event after a terminal
@@ -42,6 +44,47 @@ function emitRunCompletedUsage(
     emitUsage('workflow_run_completed', { outcome, flow, duration_seconds: durationSeconds });
   } catch {
     // Derivation/telemetry must never break a state transition.
+  }
+}
+
+/**
+ * Report a run's terminal FAILURE to Sentry (best-effort). This is the single
+ * guarded chokepoint every executor-driven run failure funnels through, so it is
+ * where the failure surface becomes visible in error telemetry. Mirrors
+ * {@link emitRunCompletedUsage}'s row derivation for the low-cardinality tags and
+ * buckets the workflow name to a `flow` (built-in name or 'custom') so a
+ * user-named custom flow never leaks. The error text rides in the (bounded,
+ * home-path-redacted-by-scrub) message; `errorClass` groups by cause. Never
+ * throws into the transition. No-op unless Sentry is active.
+ */
+function reportRunFinalizeFailure(
+  db: Database.Database,
+  runId: string,
+  fromStatus: string,
+  errorMessage: string,
+): void {
+  try {
+    const row = db
+      .prepare(
+        `SELECT w.name AS workflow_name, wr.substrate AS substrate
+           FROM workflow_runs wr
+           LEFT JOIN workflows w ON w.id = wr.workflow_id
+          WHERE wr.id = ?`,
+      )
+      .get(runId) as { workflow_name: string | null; substrate: string | null } | undefined;
+    const name = row?.workflow_name ?? undefined;
+    const flow: TelemetryFlow =
+      name !== undefined && (CYBOFLOW_WORKFLOW_NAMES as readonly string[]).includes(name)
+        ? (name as TelemetryFlow)
+        : 'custom';
+    captureSeamError('run-finalize-failed', new Error(errorMessage.slice(0, 1000)), {
+      errorClass: classifyErrorPattern(errorMessage),
+      fromStatus,
+      flow,
+      substrate: row?.substrate ?? 'sdk',
+    });
+  } catch {
+    // Telemetry must never break a state transition.
   }
 }
 
@@ -352,6 +395,7 @@ export function transitionToFailed(
     );
   }
   emitRunCompletedUsage(db, params.runId, 'failed');
+  reportRunFinalizeFailure(db, params.runId, params.fromStatus, params.errorMessage);
 }
 
 // ---------------------------------------------------------------------------

@@ -33,6 +33,8 @@ import type { TaskChange } from './taskChangeRouter';
 import type { VariantResolver } from './variantResolver';
 import type { ExperimentArm } from '../../../shared/types/experiments';
 import { resolveRunFrozenSpec } from './runFrozenSpec';
+import { emitSeamError } from './telemetrySink';
+import { classifyErrorPattern } from './programmatic/systemicError';
 import {
   updateSessionAgentPermissionMode,
   type SessionAgentPermissionModeDeps,
@@ -652,6 +654,10 @@ export class RunLauncher {
       return { runId, worktreePath, branchName, permissionMode };
     } catch (err) {
       const errMsg = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err);
+      // LAUNCH-time failure — worktree/MCP-config/spawn-setup threw before the run
+      // began executing. This raw UPDATE bypasses transitionToFailed, so this is
+      // the only place the launch failure reaches error telemetry.
+      emitSeamError('run-launch-failed', err, { errorClass: classifyErrorPattern(errMsg) });
       try {
         this.db
           .prepare(
@@ -659,6 +665,11 @@ export class RunLauncher {
           )
           .run(errMsg, runId);
       } catch (dbErr) {
+        // Double fault: the mark-as-failed write itself threw, so the run is
+        // orphaned in a non-terminal state. Report the DB error distinctly.
+        emitSeamError('run-launch-mark-failed-failed', dbErr, {
+          errorClass: classifyErrorPattern(dbErr instanceof Error ? dbErr.message : String(dbErr)),
+        });
         this.logger.error('RunLauncher: failed to mark run as failed after launch error', {
           runId,
           originalError: errMsg,

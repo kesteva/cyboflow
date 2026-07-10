@@ -13,6 +13,7 @@
 import { EventEmitter } from 'node:events';
 import type { DatabaseLike, LoggerLike, PreparedStatement } from './types';
 import type { StuckReason, StuckDetectedEvent } from '../../../shared/types/stuckDetection';
+import { emitSeamError } from './telemetrySink';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -280,6 +281,13 @@ export class StuckDetector {
         detectedAt,
       };
       this.emitter.emit('runs:stuck', event);
+      // Report the wedge to Sentry — the literal "session timed out" symptom.
+      // reason.kind is a fixed low-cardinality classification, so it doubles as
+      // the errorClass tag; no PII (no run id) rides in tags.
+      emitSeamError('run-stuck-detected', new Error(`Run wedged (stuck): ${reason.kind}`), {
+        stuckReason: reason.kind,
+        errorClass: reason.kind,
+      });
     }
   }
 }

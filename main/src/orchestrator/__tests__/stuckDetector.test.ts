@@ -35,6 +35,7 @@ import type { StuckDetectedEvent } from '../../../../shared/types/stuckDetection
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { makeSpyLogger } from '../__test_fixtures__/loggerLikeSpy';
 import { createTestDb, seedApproval } from '../__test_fixtures__/orchestratorTestDb';
+import { setSeamErrorSink } from '../telemetrySink';
 
 // ---------------------------------------------------------------------------
 // Seed helpers
@@ -448,6 +449,46 @@ describe('StuckDetector idempotency', () => {
 
     // Only one event should have fired (the transition guard prevents re-firing)
     expect(stuckEvents).toHaveLength(1);
+
+    rawDb.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TEST 5b: Seam-error telemetry — a stuck transition reports run-stuck-detected
+// ---------------------------------------------------------------------------
+
+describe('StuckDetector seam-error telemetry (seam B)', () => {
+  afterEach(() => {
+    // Unregister the sink so it never leaks into other suites in this worker.
+    setSeamErrorSink(undefined as never);
+  });
+
+  it('reports run-stuck-detected with the stuckReason as errorClass, once', async () => {
+    const seamCalls: Array<{ seam: string; tags?: Record<string, string> }> = [];
+    setSeamErrorSink((seam, _error, tags) => seamCalls.push({ seam, tags }));
+
+    const rawDb = createTestDb({ includeStuckDetectedAt: true });
+    const db = dbAdapter(rawDb);
+    const emitter = new EventEmitter();
+    const logger = makeSpyLogger();
+
+    seedRun(rawDb, 'run-seam-stuck', 'awaiting_review');
+    seedApproval(rawDb, { id: 'approval-seam-stuck', runId: 'run-seam-stuck', toolName: 'Bash', createdAt: ageMsToIso(6 * 60 * 1000) });
+
+    const detector = new StuckDetector({
+      db,
+      claudeManager: makeClaudeManager(new Set()), // no active run → orphan_pty
+      emitter,
+      logger,
+    });
+
+    await detector.scan();
+    await detector.scan(); // idempotency guard → still one seam report
+
+    const stuckReports = seamCalls.filter((c) => c.seam === 'run-stuck-detected');
+    expect(stuckReports).toHaveLength(1);
+    expect(stuckReports[0].tags).toEqual({ stuckReason: 'orphan_pty', errorClass: 'orphan_pty' });
 
     rawDb.close();
   });
