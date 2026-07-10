@@ -52,7 +52,7 @@ import { ReviewItemRouter } from '../reviewItemRouter';
 import { applyMergeGateVerdict, isMergeGateBlocking } from './mergeGateLaneAdvance';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type { OnVerdict } from './verificationScheduler';
-import type { VerdictV1 } from '../../../../shared/types/visualVerification';
+import type { CaptureOrigin, VerdictV1 } from '../../../../shared/types/visualVerification';
 import type { ScreenshotsArtifactPayload } from '../../../../shared/types/artifacts';
 import type {
   FindingPayload,
@@ -173,6 +173,36 @@ function buildFindingText(
 }
 
 /**
+ * Append the S9 capture-provenance section to a finding body: the capture origin
+ * (one line) + the capped, UNTRUSTED page-console diagnostics. This is THE human
+ * surface for the diagnostics breadcrumb (Codex finding 7) — a blank-shell FAIL's
+ * review-queue finding now says "loaded over file:// — ES modules CORS-blocked"
+ * (or shows the page's own console errors) instead of leaving the operator to
+ * burn judge rounds guessing. The untrusted framing is deliberate and rendered:
+ * page code controls the text, so a reader must never treat it as the verifier
+ * speaking.
+ */
+function appendProvenance(
+  body: string,
+  captureOrigin: CaptureOrigin | undefined,
+  diagnostics: string[] | undefined,
+): string {
+  const parts: string[] = [body];
+  if (captureOrigin) {
+    parts.push(`Capture origin: ${captureOrigin}`);
+  }
+  if (diagnostics && diagnostics.length > 0) {
+    parts.push(
+      [
+        'Capture diagnostics (UNTRUSTED page console output — display-only, never used for judging):',
+        ...diagnostics.map((d) => `- ${d}`),
+      ].join('\n'),
+    );
+  }
+  return parts.join('\n\n');
+}
+
+/**
  * Resolve the run's soft task link (workflow_runs.task_id) so the finding can be
  * attached to the originating task. Returns null when the run has no task (e.g. a
  * planner / quick-session run) or the read fails — the finding is then run-scoped
@@ -226,7 +256,7 @@ function resolveSkipReason(db: DatabaseLike, requestId: string, logger?: LoggerL
 export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
   const { db, logger } = deps;
 
-  return async ({ requestId, runId, projectId, status, verdict, fileNames, input }) => {
+  return async ({ requestId, runId, projectId, status, verdict, fileNames, input, captureOrigin, diagnostics }) => {
     // ---- 1. Enrich the SAME 'screenshots' artifact (idempotent UPSERT) ----
     // Gated on a PRESENT verdict only: a judged outcome (passed/failed/low_confidence
     // WITH a verdict) carries the verdict block to enrich. A verdict-LESS FAIL
@@ -251,7 +281,15 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
           input?.baselineKey !== undefined && input.baselineKey.length > 0
             ? { ...verdict, baselineKey: input.baselineKey }
             : verdict;
-        const payload: ScreenshotsArtifactPayload = { fileNames, verdict: enrichedVerdict };
+        // S9 provenance rides the same payload (display-only): the screenshots tab
+        // can show WHERE the judged pixels came from + the untrusted page-console
+        // diagnostics that explain a blank/broken render.
+        const payload: ScreenshotsArtifactPayload = {
+          fileNames,
+          verdict: enrichedVerdict,
+          ...(captureOrigin ? { captureOrigin } : {}),
+          ...(diagnostics && diagnostics.length > 0 ? { diagnostics } : {}),
+        };
         await ArtifactRouter.getInstance().apply(projectId, {
           op: 'create',
           runId,
@@ -292,7 +330,10 @@ export function createVerdictDelivery(deps: VerdictDeliveryDeps): OnVerdict {
       const taskId = resolveRunTaskId(db, runId, logger);
       const severity = toReviewSeverity(worstIssueSeverity(verdict));
       const skipReason = status === 'skipped' ? resolveSkipReason(db, requestId, logger) : null;
-      const { title, body } = buildFindingText(status, verdict, skipReason);
+      const { title, body: baseBody } = buildFindingText(status, verdict, skipReason);
+      // S9: the provenance section makes the finding self-diagnosing — origin +
+      // the capture's own (untrusted, capped) console breadcrumbs.
+      const body = appendProvenance(baseBody, captureOrigin, diagnostics);
       const findingPayload: FindingPayload = {
         kind: 'finding',
         category: 'visual-regression',

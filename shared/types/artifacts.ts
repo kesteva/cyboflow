@@ -14,7 +14,7 @@
  * change events) is added to this same file when the artifacts backend lands
  * (migration 029) — keep this the single home for artifact types.
  */
-import type { VerdictV1 } from './visualVerification';
+import type { CaptureOrigin, VerdictV1 } from './visualVerification';
 
 /**
  * Artifact kinds. The four bespoke (templated) types plus a `generic` fallback
@@ -212,6 +212,18 @@ export interface ScreenshotsArtifactPayload {
    * banner + per-image issues.
    */
   verdict?: VerdictV1;
+  /**
+   * HUMAN-FACING capture provenance (S9): how the judged deliverable was stood up
+   * ('dev-server' | 'static-server' | 'url' | 'file'). Written by the verdict-
+   * delivery hook alongside the verdict; absent for pre-S9 rows.
+   */
+  captureOrigin?: CaptureOrigin;
+  /**
+   * UNTRUSTED page-console diagnostics collected during capture (capped by the
+   * backend + scheduler). Page code controls this text — display-only metadata,
+   * never judge input, never a pass/fail signal.
+   */
+  diagnostics?: string[];
   [key: string]: unknown;
 }
 

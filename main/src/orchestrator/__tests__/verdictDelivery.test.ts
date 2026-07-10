@@ -509,6 +509,74 @@ describe('verdictDelivery (P8a)', () => {
     const payload = JSON.parse(after[0].payload_json ?? '{}') as ScreenshotsArtifactPayload;
     expect(payload.verdict?.status).toBe('fail'); // now carries the verdict
   });
+
+  it('S9: captureOrigin + diagnostics reach BOTH human surfaces (finding body + screenshots payload)', async () => {
+    // The end-to-end assertion the provenance sub-feature exists for: a FAIL whose
+    // capture collected the file:// breadcrumb must surface it where a human reads
+    // it — the review-queue finding body and the screenshots artifact payload —
+    // with the untrusted framing rendered.
+    seedRun(db, 'run-7', 'tsk_prov');
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+
+    await deliver({
+      requestId: 'vr_7',
+      runId: 'run-7',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'failed',
+      verdict: FAIL_VERDICT,
+      fileNames: ['home.png'],
+      captureOrigin: 'static-server',
+      diagnostics: ['file:// module blocked — serve over http', 'Uncaught TypeError: x is undefined'],
+    });
+
+    const payload = JSON.parse(
+      screenshotsRows(db, 'run-7')[0].payload_json ?? '{}',
+    ) as ScreenshotsArtifactPayload;
+    expect(payload.captureOrigin).toBe('static-server');
+    expect(payload.diagnostics).toEqual([
+      'file:// module blocked — serve over http',
+      'Uncaught TypeError: x is undefined',
+    ]);
+
+    const findings = findingRows(db, 'run-7');
+    expect(findings).toHaveLength(1);
+    const bodyRow = db
+      .prepare('SELECT body FROM review_items WHERE id = ?')
+      .get(findings[0].id) as { body: string };
+    expect(bodyRow.body).toContain('Capture origin: static-server');
+    expect(bodyRow.body).toContain('UNTRUSTED page console output');
+    expect(bodyRow.body).toContain('- file:// module blocked — serve over http');
+    expect(bodyRow.body).toContain('- Uncaught TypeError: x is undefined');
+  });
+
+  it('S9: a delivery WITHOUT provenance leaves the finding body + payload byte-identical to pre-S9', async () => {
+    seedRun(db, 'run-8', 'tsk_noprov');
+    const deliver = createVerdictDelivery({ db: dbAdapter(db) });
+
+    await deliver({
+      requestId: 'vr_8',
+      runId: 'run-8',
+      projectId: 1,
+      type: 'static-render-snapshot',
+      status: 'failed',
+      verdict: FAIL_VERDICT,
+      fileNames: ['home.png'],
+    });
+
+    const payload = JSON.parse(
+      screenshotsRows(db, 'run-8')[0].payload_json ?? '{}',
+    ) as ScreenshotsArtifactPayload;
+    expect('captureOrigin' in payload).toBe(false);
+    expect('diagnostics' in payload).toBe(false);
+
+    const findings = findingRows(db, 'run-8');
+    const bodyRow = db
+      .prepare('SELECT body FROM review_items WHERE id = ?')
+      .get(findings[0].id) as { body: string };
+    expect(bodyRow.body).not.toContain('Capture origin:');
+    expect(bodyRow.body).not.toContain('Capture diagnostics');
+  });
 });
 
 // ---------------------------------------------------------------------------
