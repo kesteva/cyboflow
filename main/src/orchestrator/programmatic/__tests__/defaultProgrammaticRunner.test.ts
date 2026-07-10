@@ -397,6 +397,49 @@ describe('DefaultProgrammaticRunner', () => {
     expect(driver.driveLane).toHaveBeenCalled();
   });
 
+  it('grounds step prompts with the sprint task scope AFTER the mid-run batch_id stamp (the ship task-scope regression)', async () => {
+    // Companion to the driver regression above: the SAME mid-run stamp must also
+    // be observed by the taskScope thunk, or ship's per-task inner spawns carry
+    // only the opaque item id with no `# Sprint tasks` grounding block (a
+    // snapshot-gated taskScope was decided once from the null run-start batch_id).
+    let liveBatchId: string | null = null;
+    const readRunBatchId = vi.fn((): string | null => liveBatchId);
+    const driver: FanOutDriver = { resolveItems: vi.fn(() => ['task-1']), driveLane: vi.fn() };
+    const fanOutDriverFactory = vi.fn<(ctx: { runId: string; batchId: string | null }) => FanOutDriver | undefined>(
+      () => driver,
+    );
+    const seedTasksProvider = vi.fn((batchId: string) => `## TASK-001: Ship it\n\nSeeded from ${batchId}.`);
+    const spawner = makeSpawner(async () => {
+      liveBatchId = 'batch-ship';
+    });
+
+    const runner = new DefaultProgrammaticRunner({
+      spawner,
+      reporter,
+      gate: gateOf('approve'),
+      fanOutDriverFactory,
+      readRunBatchId,
+      seedTasksProvider,
+    });
+
+    await expect(runner.run(ctxFor(shipShapedDef(), { batchId: null }))).resolves.toBeUndefined();
+
+    const prompts = vi
+      .mocked(spawner.spawnCliProcess)
+      .mock.calls.map(([o]) => (o as ClaudeSpawnerOptions).prompt);
+    const materializePrompt = prompts.find((p) => p.includes('id: `materialize-batch`'));
+    const innerPrompt = prompts.find((p) => p.includes('id: `impl`'));
+    expect(materializePrompt).toBeDefined();
+    expect(innerPrompt).toBeDefined();
+
+    // materialize-batch spawned BEFORE the stamp — no batch yet, no scope block.
+    expect(materializePrompt).not.toContain('# Sprint tasks');
+    // The fanOut inner spawn came AFTER the stamp — grounded with the live block.
+    expect(seedTasksProvider).toHaveBeenCalledWith('batch-ship');
+    expect(innerPrompt).toContain('# Sprint tasks');
+    expect(innerPrompt).toContain('Seeded from batch-ship.');
+  });
+
   // ── Systemic-pause gate wiring (the 2026-07-06 planner-incident fix) ────────
   it('threads the systemicGate into the host so a systemic step failure routes through it', async () => {
     // A spawner whose turn dies on a usage-limit error ⇒ SpawnStepRunner stamps the

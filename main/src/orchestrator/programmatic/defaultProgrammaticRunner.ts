@@ -148,6 +148,23 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
       );
     }
 
+    // LIVE batch-id resolution, shared by the task-scope thunk below and the
+    // fan-out driver provider further down. `ctx.run.batch_id` is a run-start
+    // SNAPSHOT; `ship` stamps batch_id MID-RUN (see readRunBatchId's docblock),
+    // so BOTH consumers must keep re-reading until the stamp lands — a
+    // snapshot-gated taskScope left ship's per-task step prompts without the
+    // `# Sprint tasks` grounding block even after the driver resolved. Memoized
+    // on first success: batch_id only ever transitions null → non-null. Absent
+    // readRunBatchId ⇒ the snapshot is all there is (sprint stamps at launch,
+    // so this is byte-identical for it).
+    let resolvedBatchId: string | null =
+      typeof ctx.run.batch_id === 'string' && ctx.run.batch_id.length > 0 ? ctx.run.batch_id : null;
+    const liveBatchId = (): string | null => {
+      if (resolvedBatchId) return resolvedBatchId;
+      resolvedBatchId = this.deps.readRunBatchId ? this.deps.readRunBatchId(ctx.runId) : null;
+      return resolvedBatchId;
+    };
+
     // A seeded sprint (non-empty batch_id) threads its `# Sprint tasks` block into
     // every step prompt so the step agent always sees the real task set. The block
     // is resolved PER STEP (a thunk, not a run-start snapshot) so a lane the monitor
@@ -155,11 +172,10 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     // grounded with its real title/body on first dispatch. buildSeedTasksBlock reads
     // the batch's lanes live, so re-invoking it picks up the added lane. Non-sprint
     // runs ⇒ no block.
-    const batchId =
-      typeof ctx.run.batch_id === 'string' && ctx.run.batch_id.length > 0 ? ctx.run.batch_id : null;
-    const taskScope = batchId
-      ? () => this.deps.seedTasksProvider?.(batchId) ?? undefined
-      : undefined;
+    const taskScope = (): string | undefined => {
+      const batchId = liveBatchId();
+      return batchId ? (this.deps.seedTasksProvider?.(batchId) ?? undefined) : undefined;
+    };
 
     // Live operator steering for this run (RunDirectives). RunExecutor owns the
     // per-run object and threads it in; absent (tests / no monitor wiring) ⇒ an
@@ -183,7 +199,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         // Per-step operator-guidance resolver (RunDirectives live steering): read
         // this step's guidance off the SAME directives object each turn.
         stepGuidance: (stepId) => directives.stepGuidance.get(stepId),
-        ...(taskScope ? { taskScope } : {}),
+        taskScope,
       },
       this.deps.logger,
     );
@@ -214,9 +230,9 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
     let resolvedFanOutDriver: FanOutDriver | undefined;
     const fanOutDriverProvider = (): FanOutDriver | undefined => {
       if (resolvedFanOutDriver) return resolvedFanOutDriver;
-      const liveBatchId = this.deps.readRunBatchId ? this.deps.readRunBatchId(ctx.runId) : batchId;
-      if (!liveBatchId) return undefined;
-      resolvedFanOutDriver = this.deps.fanOutDriverFactory?.({ runId: ctx.runId, batchId: liveBatchId });
+      const batchId = liveBatchId();
+      if (!batchId) return undefined;
+      resolvedFanOutDriver = this.deps.fanOutDriverFactory?.({ runId: ctx.runId, batchId });
       return resolvedFanOutDriver;
     };
 
