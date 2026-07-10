@@ -133,10 +133,12 @@ function makeDeps(
 ): HandoverRunDeps & {
   emitRunStatusChanged: ReturnType<typeof vi.fn>;
   clearPendingGateItems: (runId: string) => Promise<number>;
+  disposeMonitor: ReturnType<typeof vi.fn>;
 } {
   const emitRunStatusChanged = vi.fn<(runId: string, status: 'starting') => void>();
   const clearPendingGateItems =
     opts?.clearPendingGateItems ?? vi.fn<(runId: string) => Promise<number>>().mockResolvedValue(0);
+  const disposeMonitor = vi.fn<(runId: string) => void>();
   return {
     db,
     runQueues: opts?.runQueues ?? new RunQueueRegistry(),
@@ -144,6 +146,7 @@ function makeDeps(
     emitRunStatusChanged,
     clearPendingGateItems,
     stopLiveRun: opts?.stopLiveRun,
+    disposeMonitor,
     readWorkflowPrompt: opts?.readWorkflowPrompt ?? (() => 'PROMPT BODY VERBATIM'),
     listStepResults: opts?.listStepResults ?? (() => []),
     logger: opts?.logger,
@@ -200,14 +203,13 @@ describe('handoverRunHandler — pre-flight guard matrix', () => {
     const { runId } = seedRun(db, { status: 'failed' });
     // execution_model defaults to 'orchestrated' (GATE_SCHEMA default) — no override.
     const executor = makeFakeExecutor();
-    const result = await handoverRunHandler(
-      runId,
-      'take over',
-      makeDeps(dbAdapter(db), executor, { runQueues }),
-    );
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues });
+    const result = await handoverRunHandler(runId, 'take over', deps);
     expect(result).toEqual({ noOp: true, reason: 'not_programmatic' });
     expect(getOrCreateSpy).not.toHaveBeenCalled();
     expect(executor.execute).not.toHaveBeenCalled();
+    // A refused handover must NOT tear down the monitor — the run stays programmatic.
+    expect(deps.disposeMonitor).not.toHaveBeenCalled();
     db.close();
   });
 
@@ -388,6 +390,12 @@ describe('handoverRunHandler — delivery mechanics', () => {
     expect(result).toEqual({ delivered: true });
     expect(clearPendingGateItems).toHaveBeenCalledWith(runId);
     expect(deps.emitRunStatusChanged).toHaveBeenCalledWith(runId, 'starting');
+    // The monitor is torn down on handover (orchestrated runs have no monitor), and
+    // BEFORE the status emit so the frontend's status-keyed re-probe sees it gone.
+    expect(deps.disposeMonitor).toHaveBeenCalledWith(runId);
+    expect(deps.disposeMonitor.mock.invocationCallOrder[0]).toBeLessThan(
+      deps.emitRunStatusChanged.mock.invocationCallOrder[0],
+    );
 
     // The seeded brief carries the reason verbatim + a completed line + a remaining line.
     expect(executor.setPendingNudge).toHaveBeenCalledTimes(1);

@@ -2479,6 +2479,14 @@ app.whenReady().then(async () => {
         runStatusEvents.emit('changed', { runId, status }),
       clearPendingGateItems: (runId) => HumanStepManager.getInstance().clearPendingForRun(runId),
       stopLiveRun: (runId: string) => substrateFacade.abort(runId),
+      // Handover tears down the run's monitor (same as terminal close-out's
+      // disposeMonitorResources): the orchestrated agent now owns the chat, so the
+      // composer must stop routing turns to the read-only monitor. Enforces the
+      // "orchestrated runs have no monitor" invariant the rehydrator already asserts.
+      disposeMonitor: (runId: string) => {
+        runExecutor.disposeMonitorResources(runId);
+        MonitorRegistry.getInstance().unregister(runId);
+      },
       readWorkflowPrompt: (workflowId) => {
         try {
           const row = workflowRegistry.getById(workflowId);

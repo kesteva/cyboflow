@@ -147,6 +147,22 @@ export interface HandoverRunDeps {
    */
   stopLiveRun?: (runId: string) => Promise<void>;
   /**
+   * Tear down the run's on-demand MONITOR after the flip: dispose its per-run inject
+   * plumbing (RunExecutor.disposeMonitorResources) AND unregister its MonitorRegistry
+   * entry. Enforces the invariant "orchestrated runs have no monitor" on the LIVE
+   * registry — the rehydrator already refuses to revive an orchestrated run's monitor
+   * (monitorRehydration.ts), but a run that started programmatic registered a live
+   * monitor session that would otherwise outlive the handover, keeping the chat
+   * composer wired to the (now-inappropriate, read-only) monitor instead of the fresh
+   * orchestrated agent that just took over the chat. Called AFTER the flip succeeds
+   * and BEFORE emitRunStatusChanged, so the frontend's status-keyed monitor.isActive
+   * re-probe observes the torn-down session and reverts to the orchestrated send path.
+   * Fail-soft (a throw must not un-do the flip). Production:
+   * runExecutor.disposeMonitorResources + MonitorRegistry.unregister. Optional —
+   * absent in older wiring / tests is a no-op.
+   */
+  disposeMonitor?: (runId: string) => void;
+  /**
    * Read a workflow's prompt body by WORKFLOW ID (production:
    * WorkflowRegistry.getById -> readWorkflowPromptForRow at the composition root).
    * Keyed by id, not name — workflow names are not unique across projects. Used to
@@ -226,6 +242,7 @@ export async function handoverRunHandler(
     emitRunStatusChanged,
     clearPendingGateItems,
     stopLiveRun,
+    disposeMonitor,
     readWorkflowPrompt,
     listStepResults,
     logger,
@@ -352,6 +369,24 @@ export async function handoverRunHandler(
   });
 
   runExecutor.setPendingNudge(runId, prompt);
+
+  // Tear down the run's on-demand monitor now that it is orchestrated: the fresh
+  // orchestrated agent owns the chat from here, so the composer must stop routing
+  // human turns to the (read-only) monitor. Done BEFORE emitRunStatusChanged so the
+  // frontend's status-keyed monitor.isActive re-probe sees the session gone and
+  // reverts to the orchestrated send path. Fail-soft — a throw must not un-do the
+  // flip or block the re-drive.
+  if (disposeMonitor) {
+    try {
+      disposeMonitor(runId);
+    } catch (err) {
+      logger?.error('[handoverRun] disposeMonitor threw (fail-soft)', {
+        runId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   emitRunStatusChanged(runId, 'starting');
 
   // Fire-and-forget, mirroring retryRunHandler / boot recovery: a fresh
