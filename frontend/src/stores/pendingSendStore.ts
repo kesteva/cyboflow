@@ -60,6 +60,28 @@ function newId(): string {
   return `ps-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+/**
+ * Parse a server-written transcript timestamp to epoch ms.
+ *
+ * Quick-session user turns carry SQLite `CURRENT_TIMESTAMP` strings — UTC, but
+ * SPACE-SEPARATED and offset-less ("YYYY-MM-DD HH:MM:SS"). V8's `Date.parse`
+ * treats that non-ISO form as LOCAL time, shifting the instant by the machine's
+ * UTC offset. For anyone east of Greenwich (e.g. UTC+5:30) that pushes the turn
+ * BEFORE the pending entry's `createdAt`, so the reconciliation window at
+ * {@link CLOCK_SKEW_MS} never clears and the row is stranded 'sending' forever.
+ * SDK-stream timestamps already carry a `Z`/±offset and parse correctly — trust
+ * those; only an offset-less string is coerced to UTC.
+ */
+function parseServerTimestamp(ts: string): number {
+  if (typeof ts !== 'string') return NaN;
+  const s = ts.trim();
+  if (s.length === 0) return NaN;
+  // Already carries a timezone designator (Z or ±HH[:]MM) — parse verbatim.
+  if (/(?:Z|[+-]\d{2}:?\d{2})$/i.test(s)) return Date.parse(s);
+  // Offset-less (SQLite space form or bare ISO): the server writes UTC, so pin it.
+  return Date.parse(`${s.replace(' ', 'T')}Z`);
+}
+
 /** Flatten a UnifiedMessage's text segments into a single trimmed string. */
 function messageText(msg: UnifiedMessage): string {
   return msg.segments
@@ -138,7 +160,7 @@ export const usePendingSendStore = create<PendingSendState>((set, get) => ({
 
     const userTurns = messages
       .filter((m) => m.role === 'user')
-      .map((m) => ({ text: messageText(m), time: Date.parse(m.timestamp) }))
+      .map((m) => ({ text: messageText(m), time: parseServerTimestamp(m.timestamp) }))
       .sort((a, b) => a.time - b.time);
 
     const matchedIds = new Set<string>();

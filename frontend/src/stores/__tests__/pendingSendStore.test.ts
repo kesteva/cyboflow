@@ -9,7 +9,7 @@
  *   - requestReopen: removes the entry and stages a nonce-bumped draft request
  *   - clearDraftRequest / resetHost
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { usePendingSendStore } from '../pendingSendStore';
 import type { UnifiedMessage } from '../../../../shared/types/unifiedMessage';
 
@@ -100,6 +100,44 @@ describe('pendingSendStore — reconcile', () => {
     s.addPending(HOST, 'same');
     s.reconcile(HOST, [userMsg('same', new Date().toISOString())]);
     expect(usePendingSendStore.getState().byHost[HOST]).toHaveLength(1);
+  });
+
+});
+
+/**
+ * Regression: SQLite `CURRENT_TIMESTAMP` user turns are UTC but SPACE-SEPARATED
+ * and offset-less ("YYYY-MM-DD HH:MM:SS"). Parsed as local time (V8's default for
+ * that non-ISO form), east of Greenwich the turn lands BEFORE the pending
+ * entry's createdAt and the row never reconciles — stuck 'sending' forever.
+ * Pin an eastern timezone so this fails deterministically without the UTC fix
+ * (on a UTC/negative-offset host the two interpretations coincide and hide it).
+ */
+describe('pendingSendStore — reconcile (eastern-TZ SQLite timestamps)', () => {
+  const savedTZ = process.env.TZ;
+  beforeEach(() => {
+    process.env.TZ = 'Asia/Kolkata'; // UTC+5:30
+  });
+  afterEach(() => {
+    process.env.TZ = savedTZ;
+  });
+
+  it('reconciles a space-separated UTC turn stamped ~now (no TZ shift stranding)', () => {
+    const s = usePendingSendStore.getState();
+    s.addPending(HOST, 'ship it');
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const sqliteUtc =
+      `${now.getUTCFullYear()}-${pad(now.getUTCMonth() + 1)}-${pad(now.getUTCDate())} ` +
+      `${pad(now.getUTCHours())}:${pad(now.getUTCMinutes())}:${pad(now.getUTCSeconds())}`;
+    s.reconcile(HOST, [userMsg('ship it', sqliteUtc)]);
+    expect(usePendingSendStore.getState().byHost[HOST]).toHaveLength(0);
+  });
+
+  it('still trusts an explicit Z/offset timestamp (SDK-stream form)', () => {
+    const s = usePendingSendStore.getState();
+    s.addPending(HOST, 'iso form');
+    s.reconcile(HOST, [userMsg('iso form', new Date().toISOString())]);
+    expect(usePendingSendStore.getState().byHost[HOST]).toHaveLength(0);
   });
 });
 
