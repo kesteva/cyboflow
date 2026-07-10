@@ -1,6 +1,8 @@
 # Codex Provider Integration Proposal
 
 Date: 2026-07-08
+Updated: 2026-07-10
+Status: Runtime foundation landed; Codex workflow launch remains gated
 
 ## Summary
 
@@ -49,13 +51,58 @@ Keep `sessions.substrate` and `workflow_runs.substrate` during the migration win
 
 Current v1 implementation decisions:
 
-- Workflow launches remain Claude-only. `codex-sdk` stays in persisted types and
-  internal fixtures but is rejected at UI, tRPC, registry creation, and restart.
-- Quick sessions may use `codex-pty` for an interactive terminal-style Codex experience.
-- Both Codex workflow runtimes are intentionally unsupported until prompt
-  compilation, human gates, MCP progress, and approval parity are proven.
+- The workflow execution transport is the native Codex 0.143.0 app-server over
+  stdio JSON-RPC. Cyboflow packages `@openai/codex` at exactly `0.143.0` and does
+  not use `@openai/codex-sdk` for workflow execution.
+- `codex-sdk` remains the persisted `AgentRuntime` value, wire value, fixture
+  name, and manager/factory compatibility name. It now means "the structured
+  Codex workflow runtime" and dispatches to app-server; it is not a claim about
+  the underlying npm SDK.
+- Workflow launches remain Claude-only. `codex-sdk` rows remain readable and
+  internally dispatchable, but new Codex workflow launch and restart requests
+  are rejected at the UI, tRPC, and registry boundaries.
+- Quick sessions may use `codex-pty` for an interactive terminal-style Codex
+  experience. Quick-session `codex-sdk` chat is not wired.
+- Native app-server approvals and nested per-thread MCP configuration are proven
+  Phase 0 findings. The remaining workflow gate is provider-specific prompt
+  compilation plus human-gate and MCP workflow-progress contract coverage.
 - `codex-exec` remains internal-only for diagnostics and fixture capture.
-- Codex auth starts with ChatGPT login. API-key auth is a later product/billing decision.
+- Codex app-server launch requires a ChatGPT account. Cyboflow performs an
+  `account/read` preflight before starting or resuming a thread and rejects API-key
+  or malformed account state. API-key auth remains a later product/billing decision.
+
+## Implementation Status
+
+Completed foundations:
+
+- Provider/runtime persistence and provider-scoped model handling, while retaining
+  the legacy Claude `substrate` compatibility projection.
+- Provider-neutral agent events, raw-event persistence, run/session message
+  projection, and Codex event correlation.
+- Codex 0.143.0 app-server transport, initialize/thread/turn lifecycle, resume,
+  interruption, terminal error handling, and internal runtime dispatch.
+- Native command, file-change, and MCP tool approval requests bridged into
+  `ApprovalRouter` and the shared review queue.
+- Nested `mcp_servers.cyboflow` injection on each `thread/start` and
+  `thread/resume`, including run/socket correlation. This is the configuration
+  foundation, not proof of workflow progress semantics.
+- Codex token usage parsing and rollup, including cache-read and reasoning tokens.
+- `codex-pty` quick-session launch, relay, respawn, and close behavior.
+- ChatGPT `account/read` preflight and a packaged native executable resolver that
+  validates the exact version, platform target, manifest, executable, and bundled
+  PATH directory without falling back to an arbitrary system command.
+
+Still gated:
+
+- Compiling each built-in workflow into provider-appropriate Codex prompts rather
+  than passing Claude-specific delegation and question instructions through.
+- Host-owned human gates with contract coverage for pause, response, resume,
+  cancellation, and failure.
+- MCP workflow-progress contracts for step reporting, entity/finding writes, and
+  artifact reporting across Planner, Sprint, Compound, and Ship.
+
+Until those contracts pass, Cyboflow must not expose Codex workflows or describe
+an internal Codex turn fixture as workflow support.
 
 ## Goals
 
@@ -78,53 +125,84 @@ Current v1 implementation decisions:
 
 ## Source Research
 
-The current official Codex docs expose these relevant surfaces:
+The initial research covered the Codex SDK, `codex exec --json`, MCP, sandbox,
+and auth surfaces. Phase 0 then established that the pinned app-server protocol is
+the correct workflow integration surface for this repository:
 
-- Codex SDK: `@openai/codex-sdk` embeds Codex in Node apps, starts/resumes threads, and supports streamed structured events via `runStreamed()`.
-- Codex non-interactive mode: `codex exec --json` streams JSONL events such as `thread.started`, `turn.started`, `turn.completed`, `turn.failed`, `item.*`, and `error`.
-- Codex MCP: Codex reads MCP server config from `config.toml` and supports STDIO and streamable HTTP servers, environment variables, tool allow/deny lists, and per-tool approval modes.
-- Codex sandboxing: Codex has explicit sandbox modes (`read-only`, `workspace-write`, `danger-full-access`) and approval policies (`untrusted`, `on-request`, `never`).
-- Codex auth: local CLI/SDK flows support ChatGPT login or API key auth. Cyboflow should start with ChatGPT auth for v1, then revisit API-key auth as a product/billing decision.
-- Codex models: current docs recommend `gpt-5.5` for most Codex tasks, `gpt-5.4-mini` for faster/lower-cost work, and `gpt-5.3-codex-spark` as a research preview for near-instant iteration.
+- `@openai/codex` 0.143.0 supplies the platform-native executable that Cyboflow
+  launches as `codex app-server --listen stdio://`.
+- App-server supports structured initialize, account, thread, turn, item, usage,
+  and error traffic over stdio JSON-RPC.
+- App-server sends native server-to-client approval requests for command execution,
+  file changes, and marked MCP tool calls. Those requests can block on Cyboflow's
+  existing `ApprovalRouter` and receive an accept, decline, or cancel response.
+- Nested `config.mcp_servers` is accepted on per-thread start and resume parameters,
+  so Cyboflow can inject its run-scoped MCP server without mutating the user's
+  global `~/.codex/config.toml` or creating a per-run `CODEX_HOME`.
+- Codex sandbox modes and approval policies map behind Cyboflow's shared permission
+  modes. App-server remains the technical execution boundary; the review queue is
+  the human decision surface.
+- ChatGPT login is the only accepted v1 auth state. The app-server process inherits
+  the user's Codex environment, then Cyboflow verifies it with `account/read` before
+  any thread starts or resumes.
+- `codex exec --json` remains useful for diagnostics and fixture exploration, but
+  it is not the production workflow runtime.
 
 Primary source links:
 
-- Codex SDK README: https://raw.githubusercontent.com/openai/codex/main/sdk/typescript/README.md
-- Codex SDK source types: https://github.com/openai/codex/tree/main/sdk/typescript/src
 - Codex manual: https://developers.openai.com/codex/codex-manual.md
+- Codex app-server README: https://github.com/openai/codex/blob/rust-v0.143.0/codex-rs/app-server/README.md
+- Codex app-server generated protocol: generated from the pinned `@openai/codex@0.143.0` executable with `codex app-server generate-ts`
 
 Local Cyboflow seams reviewed:
 
-- `shared/types/substrate.ts`
-- `main/src/orchestrator/substrateResolver.ts`
+- `shared/types/agentRuntime.ts`
+- `shared/types/agentStream.ts`
 - `main/src/services/substrateDispatchFacade.ts`
 - `main/src/services/cliManagerFactory.ts`
-- `main/src/services/panels/claude/claudeCodeManager.ts`
-- `main/src/services/panels/claude/interactiveClaudeManager.ts`
+- `main/src/services/panels/codex/codexSdkManager.ts`
+- `main/src/services/panels/codex/codexExecutablePath.ts`
+- `main/src/services/panels/codex/appServer/`
+- `main/src/services/panels/codex/codexPtyManager.ts`
+- `main/src/orchestrator/workflowRegistry.ts`
+- `main/src/orchestrator/runLauncher.ts`
+- `main/src/orchestrator/trpc/routers/runs.ts`
 - `frontend/src/components/cyboflow/WorkflowPicker.tsx`
 - `frontend/src/components/cyboflow/SubstrateSelector.tsx`
-- `frontend/src/components/cyboflow/RunChatView.tsx`
-- `frontend/src/components/cyboflow/ChatInput.tsx`
 
 ## Recommended Integration Surface
 
-### Primary: Codex SDK
+### Primary: Pinned Codex 0.143.0 App-Server
 
-Use `@openai/codex-sdk` as the main implementation path.
+Use the packaged native executable from `@openai/codex` 0.143.0 and communicate
+with `app-server --listen stdio://` as the workflow runtime.
 
 Reasons:
 
-- It is designed for embedding Codex into internal tools and workflows.
-- It provides structured streamed events through `runStreamed()`.
-- It supports thread resume by ID.
-- It supports working-directory control, sandbox mode, approval policy, model choice, additional writable directories, network access, web search, and controlled environment injection.
-- It wraps the local Codex CLI, which preserves Codex's local agent behavior, sandboxing, config, and MCP support.
+- It exposes a host-owned structured lifecycle for initialize, account preflight,
+  thread start/resume, turn start/interrupt, notifications, and terminal results.
+- Its native server requests provide the blocking approval seam Cyboflow needs for
+  review-queue parity. No shell-hook approximation is required.
+- Thread start/resume accepts working directory, sandbox, approval policy, model,
+  developer instructions, and nested MCP configuration in one invocation-scoped
+  request.
+- Pinning the executable and validating its native package manifest prevents silent
+  protocol drift and avoids dependence on whichever `codex` happens to be on PATH.
+- The app-server notifications can be projected into the existing provider-neutral
+  event boundary and usage pipeline without pretending they are Claude events.
+
+The persisted runtime remains `codex-sdk` for compatibility. `CodexSdkManager` and
+factory/tool IDs retain that name during migration, but their production workflow
+implementation is app-server. Renaming storage is unnecessary churn and would not
+change the physical transport.
 
 ### Secondary: `codex exec --json`
 
-Use this only for an implementation spike or a fallback runner.
+Use this only for diagnostics or fixture capture, not as a production fallback
+runner.
 
-It is useful because the JSONL stream is easy to inspect and maps to the same event family as the SDK. It is less attractive as the main product path because the SDK already provides a Node-native lifecycle wrapper.
+Its JSONL stream is useful for event-shape exploration, but it lacks the host-owned
+bidirectional approval request/response lifecycle now proven through app-server.
 
 ### Avoid: Raw Responses API
 
@@ -303,7 +381,7 @@ While a workflow is active, chat and workflow execution should route through the
 After the compatibility gate is lifted, this target model makes these cases explicit:
 
 - A plain session can use Claude SDK for normal chat.
-- The user can launch a compiled workflow whose default is Codex SDK.
+- The user can launch a compiled workflow whose default is Codex's structured app-server runtime.
 - One workflow can run a planning step on Claude and an implementation or review step on Codex.
 - After workflow completion, the session returns to the Claude SDK agent it had before the workflow started.
 
@@ -316,22 +394,25 @@ Add:
 ```txt
 main/src/services/panels/codex/codexSdkManager.ts
 main/src/services/panels/codex/codexPtyManager.ts
-main/src/services/panels/codex/codexEventNormalizer.ts
-main/src/services/panels/codex/codexModelContext.ts
+main/src/services/panels/codex/appServer/
+main/src/services/panels/codex/codexExecutablePath.ts
 ```
 
-`CodexSdkManager` should extend `AbstractCliManager` for lifecycle parity with existing managers, but it should drive the Codex SDK rather than a PTY.
+`CodexSdkManager` extends `AbstractCliManager` for lifecycle parity with existing managers, but it drives the pinned Codex app-server rather than a PTY. The name is a compatibility artifact: the persisted runtime remains `codex-sdk`, while the concrete transport is `codex app-server --listen stdio://`.
 
-This follows the current Claude SDK precedent: the class can inherit PTY lifecycle helpers from `AbstractCliManager` without using `spawnPtyProcess` for the SDK path. Do not wire Codex SDK through the interactive PTY path.
+This follows the current Claude SDK precedent: the class can inherit PTY lifecycle helpers from `AbstractCliManager` without using `spawnPtyProcess` for the structured runtime. Do not wire Codex workflows through the interactive PTY path.
 
 Expected flow:
 
-1. Build a `Codex` client with a controlled environment.
-2. Start or resume a thread with `workingDirectory = worktreePath`.
-3. Call `thread.runStreamed(prompt, { signal })`.
-4. Persist `thread.started.thread_id` as the invocation `external_session_id`.
-5. Normalize each `ThreadEvent` into Cyboflow's provider-neutral stream envelope.
-6. Emit `output` and `exit` through the same facade path the run executor consumes.
+1. Resolve and validate the packaged `@openai/codex` 0.143.0 native executable.
+2. Launch `codex app-server --listen stdio://` with run-scoped environment.
+3. Initialize the app-server and verify its `userAgent` contains the pinned version.
+4. Call `account/read` and require ChatGPT auth before creating any thread.
+5. Create an append-only `agent_invocations` row for this concrete turn.
+6. Start or resume a thread with `cwd = worktreePath`, permission-derived sandbox policy, model, developer instructions, and nested Cyboflow MCP server config.
+7. Persist the returned Codex thread ID as the invocation `external_session_id`.
+8. Start the turn, project app-server notifications into `AgentStreamEvent`, persist raw events, and emit legacy-compatible panel output through the facade.
+9. Interrupt active turns on cancellation, then tear down approval bridges and the app-server process.
 
 `CodexPtyManager` should be separate and intentionally narrow:
 
@@ -390,17 +471,17 @@ export type AgentStreamEvent =
 Then implement adapters:
 
 - Claude SDK/transcript normalizer -> `AgentStreamEvent`
-- Codex SDK event normalizer -> `AgentStreamEvent`
+- Codex app-server notification projector -> `AgentStreamEvent`
 
 The raw provider event should still be stored in `raw_events.payload_json` for replay/debugging. The normalized event should drive message projection, review queue, usage, and workflow progress.
 
-This boundary should land with the Codex SDK manager work, not after Codex is rendering through a temporary `Codex -> ClaudeStreamEvent` shim. Rendering Codex messages and usage in the existing run view should mean rendering provider-neutral `AgentStreamEvent` projections.
+This boundary landed with the Codex app-server manager work, not after Codex rendered through a temporary `Codex -> ClaudeStreamEvent` shim. Rendering Codex messages and usage in the existing run view means rendering provider-neutral `AgentStreamEvent` projections and only adapting outward for legacy listeners.
 
 ### Codex Event Mapping
 
 Initial mapping:
 
-| Codex event | Cyboflow normalized event |
+| Codex app-server event | Cyboflow normalized event |
 | --- | --- |
 | `thread.started` | `agent.session.started` |
 | `turn.started` | `agent.turn.started` |
@@ -426,10 +507,11 @@ Cyboflow's MCP server should be available to Codex the same way it is available 
 - artifact tools
 - shell approval hook path if needed
 
-Do not ask the user to globally edit `~/.codex/config.toml` as the main path. Generate per-run config through SDK `config` overrides where possible, and avoid replacing the SDK process environment unless isolation requires it:
+Do not ask the user to globally edit `~/.codex/config.toml` as the main path. Inject the Cyboflow MCP server through nested app-server `config.mcp_servers` on every `thread/start` and `thread/resume` request:
 
 ```ts
-new Codex({
+thread.start({
+  cwd: worktreePath,
   config: {
     mcp_servers: {
       cyboflow: {
@@ -439,21 +521,17 @@ new Codex({
           CYBOFLOW_RUN_ID: runId,
           CYBOFLOW_ORCH_SOCKET: socketPath,
         },
-        required: true,
-        default_tools_approval_mode: 'approve',
       },
     },
   },
 });
 ```
 
-If SDK config override support is insufficient for nested MCP config in practice, write a per-run `CODEX_HOME/config.toml` in app-owned state, not in the user's repo.
+The app-server protocol accepts this per-thread nested config, so no per-run `CODEX_HOME/config.toml` fallback is needed for the current pinned version.
 
 ## Approval And Review Queue
 
-This is the main risk area.
-
-Cyboflow cannot ship Codex as a full peer until Codex permission requests reliably land in `review_items`.
+Cyboflow cannot ship Codex as a full workflow peer until Codex permission requests reliably land in `review_items` and the workflow human-gate contracts are covered.
 
 Target behavior:
 
@@ -462,18 +540,17 @@ Target behavior:
 - Any out-of-policy command, filesystem write outside scope, network request, or sensitive action becomes a blocking `review_items.kind = 'permission'`.
 - The run remains blocked until the user resolves the review item.
 
-Recommended implementation:
+Implemented approval bridge:
 
-1. Start Codex with `sandboxMode = 'workspace-write'` and `approvalPolicy = 'on-request'` by default.
-2. Add a Codex PreToolUse hook or equivalent policy bridge that calls back into Cyboflow's `ApprovalRouter`.
-3. Preserve Codex's own sandbox as the technical boundary.
-4. Use the review queue as the human decision surface.
+1. Start Codex app-server threads with permission-derived `sandbox` and `approvalPolicy` values.
+2. Handle native app-server approval requests for commands, file changes, and marked MCP tools.
+3. Route those requests through Cyboflow's `ApprovalRouter`.
+4. Preserve Codex's own sandbox as the technical boundary.
+5. Use the review queue as the human decision surface.
 
-Beta limitation if hook parity is not ready:
+Important nuance:
 
-- Codex can run in `workspace-write` with Codex-native approvals, but Cyboflow should mark review queue parity as incomplete.
-- Do not present Codex as equivalent to Claude until approvals are bridged.
-- The local `@openai/codex-sdk` type surface currently exposes approval policy flags, not a Claude-style synchronous `canUseTool` callback. Treat that as a Phase 0 gate for product honesty, not a detail to discover during workflow rollout.
+Codex does not expose a Claude-style pre-tool `canUseTool` callback before Codex's own policy classifier. The bridge operates at the app-server server-request boundary after Codex has decided host approval is required. That is still the right parity point for Cyboflow's review queue because it preserves Codex's sandbox/classifier and lets Cyboflow own the final human approval decision.
 
 ## UI Approach
 
@@ -592,38 +669,27 @@ Do not add provider tabs by default. Filtering by provider can be a later advanc
 
 ## Rollout Plan
 
-### Phase 0: Spike
-
-- Install `@openai/codex-sdk`.
-- Run a single `CodexSdkManager` fixture against a temporary git repo.
-- Capture real `runStreamed()` events for message, command, file change, MCP, and failure cases.
-- Save event fixtures under a Codex-specific test fixture directory.
-- Verify whether the SDK exposes a synchronous approve/deny hook that can back Cyboflow's review queue approval bridge.
-- Verify whether per-run nested `mcp_servers` config works through SDK config overrides. If not, prove the per-run `CODEX_HOME/config.toml` fallback.
-- Verify how Codex usage/cost fields are exposed and what normalization is required for `run_usage`.
-
-Approval bridging and MCP config injection are Phase 0 feasibility gates. They determine whether Codex can be presented as a workflow peer or must launch with explicit beta limitations.
-
-Findings from the initial docs and local CLI spike:
+### Phase 0: Transport And Feasibility Spike (Complete)
 
 - ChatGPT auth is viable as the first auth path. `codex login status` reports a ChatGPT login on a configured machine, and the official Codex auth path uses ChatGPT by default when no valid CLI session is available.
 - The interactive PTY path should launch `codex` directly. The CLI accepts `--model`, `--sandbox`, `--ask-for-approval`, `--cd`, and `--no-alt-screen`, which are enough for a constrained quick-session terminal runtime.
-- The TypeScript SDK does not currently appear to expose a Claude-style in-process approval callback equivalent to `canUseTool`. It exposes approval policy configuration, but a blocking Cyboflow review-queue bridge likely needs a Codex hook or app-server protocol bridge.
-- The SDK exposes constructor-level `env` and `config` controls. First try a per-run Codex client with nested `config.mcp_servers`; if that does not provide complete isolation, use a per-run `CODEX_HOME/config.toml`.
+- The TypeScript SDK path was not the right production surface for this repo because approval and MCP parity are better served by the app-server protocol.
+- The pinned app-server exposes host approval requests for command execution, file changes, and marked MCP calls. These requests can be routed through `ApprovalRouter`.
+- The pinned app-server accepts nested per-thread `config.mcp_servers`, so Cyboflow can inject its MCP bridge without mutating the user's global Codex config.
+- App-server usage notifications expose token counts that can be normalized into Cyboflow's usage fields without assuming Claude's `total_cost_usd` shape.
 - `codex exec --json` is useful for diagnostics, fixture capture, and event-shape exploration. Keep `codex-exec` internal-only; do not promote it to a user-facing workflow runtime.
 
 Exit criteria:
 
 - Can start a Codex turn in a worktree.
 - Can stream structured events.
-- Can cancel via `AbortController`.
+- Can interrupt and cancel active turns.
 - Can resume by `thread_id`.
-- Can answer whether Codex can be approval-bridged into `ApprovalRouter` for v1 parity.
-- Can answer whether Cyboflow MCP can be injected without mutating the user's global Codex config.
-- Can map Codex usage to Cyboflow usage fields without assuming Claude's `total_cost_usd` shape.
-- Can decide whether a Codex hook bridge or app-server protocol bridge is required before promising review-queue parity.
+- Can approval-bridge Codex app-server requests into `ApprovalRouter`.
+- Can inject Cyboflow MCP without mutating the user's global Codex config.
+- Can map Codex usage to Cyboflow usage fields.
 
-### Phase 1: Schema And UI Plumbing
+### Phase 1: Schema And UI Plumbing (Complete)
 
 - Add provider/runtime shared types.
 - Add DB migration for both `sessions` and `workflow_runs`.
@@ -648,13 +714,13 @@ Exit criteria:
   compatibility error, while persisted `codex-sdk` rows remain readable.
 - Quick-session launch validation accepts `codex-pty`.
 
-### Phase 2: Provider-Neutral Event Boundary And Codex SDK Manager
+### Phase 2: Provider-Neutral Event Boundary And Codex App-Server Manager (Complete)
 
 - Add `AgentStreamEvent`.
 - Move message projection and run usage from Claude-specific assumptions to provider-neutral events.
-- Add `CodexSdkManager`.
+- Add `CodexSdkManager` backed by app-server.
 - Add `CodexPtyManager` for quick sessions only.
-- Add Codex event normalizer.
+- Add Codex app-server notification projector.
 - Register `codex-sdk` in the runtime dispatch facade.
 - Register `codex-pty` only in quick-session dispatch.
 - Persist Codex thread ID as invocation `external_session_id`.
@@ -663,33 +729,33 @@ Exit criteria:
 
 Exit criteria:
 
-- An internal Codex SDK fixture starts, streams messages, writes raw events, and finishes cleanly without exposing workflow launch in the UI.
+- An internal Codex app-server fixture starts, streams messages, writes raw events, and finishes cleanly without exposing workflow launch in the UI.
 - Claude and Codex both flow through the same normalized event pipeline.
 - Provider-specific code is isolated to adapters/managers.
 - Codex usage renders with provider-normalized usage and cost fields.
 - A Codex PTY quick session can launch and close without participating in workflow execution.
 
-### Phase 3: Prompt Compilation, MCP, And Workflow Progress
+### Phase 3: Prompt Compilation, Human Gates, And Workflow Progress (Next)
 
 - Compile effective workflow prompts and agents for Codex rather than sending
   Claude `Agent` / `AskUserQuestion` instructions or `.claude/agents` bundles.
 - Prefer the programmatic execution plane first so the host owns sequencing,
   fan-out, retries, and human gates.
-- Inject Cyboflow MCP config into Codex.
-- Verify `cyboflow_report_step`.
+- Verify `cyboflow_report_step` through the injected MCP bridge.
 - Verify entity writes and findings.
 - Verify artifact reporting.
+- Verify pause, resume, cancellation, failure, and host-owned human-gate behavior.
 
 Exit criteria:
 
 - Planner/Sprint/Compound/Ship pass provider-specific prompt and human-gate contract tests and advance through the same MCP-driven workflow progress path under Codex.
 - A session returns to its original default chat agent after workflow completion, failure, or cancellation.
 
-### Phase 4: Review Queue Approval Bridge
+### Phase 4: Review Queue Approval Bridge Hardening
 
-- Route Codex tool/sandbox approvals to `ApprovalRouter`.
-- Create blocking `review_items`.
-- Resume Codex after approval or rejection.
+- Keep Codex app-server approval requests routed to `ApprovalRouter`.
+- Verify command, file-change, and MCP approval/rejection/cancellation cases against real workflow prompts.
+- Verify blocking `review_items` recover correctly across app restart.
 
 Exit criteria:
 
@@ -717,7 +783,7 @@ Add focused unit coverage first:
   and both launch surfaces.
 - DB migration parity for `sessions` and `workflow_runs`.
 - Provider-scoped model alias resolution.
-- Codex event normalizer fixtures.
+- Codex app-server event projector fixtures.
 - Provider-neutral `AgentStreamEvent` projection.
 - Runtime dispatch selection.
 - Invocation-level external session ID persistence.
@@ -728,14 +794,14 @@ Add focused unit coverage first:
 Add integration coverage:
 
 - Claude SDK parity remains unchanged.
-- Codex SDK mocked stream runs through `RunExecutor`.
+- Codex app-server mocked stream runs through the runtime dispatch path.
 - Codex PTY quick session launches outside workflow dispatch.
 - Raw events persist.
 - Messages project.
 - Usage rolls up.
 - Review items appear for permission cases.
 
-Use `pnpm test:unit` as the code-change gate when implementation starts.
+Use `pnpm test:unit` as the code-change gate for implementation work.
 
 ## Remaining Product Questions
 
@@ -747,12 +813,11 @@ Build Codex support as a provider/runtime expansion:
 
 1. Provider/runtime schema and UI.
 2. Provider-neutral event adapter.
-3. Codex PTY manager for quick sessions plus internal Codex SDK fixtures.
+3. Codex PTY manager for quick sessions plus internal Codex app-server fixtures.
 4. Provider-specific workflow prompt compilation and host-owned human gates.
-5. MCP and review queue approval parity.
+5. MCP workflow-progress contracts and review queue approval hardening.
 
-Until steps 4-5 pass their contract tests, gate `codex-sdk` from every workflow
-launch and restart. Do not present raw Codex turn execution as workflow parity.
+Until steps 4-5 pass their contract tests, gate `codex-sdk` from every workflow launch and restart. Do not present raw Codex turn execution as workflow parity.
 
 Use ChatGPT auth for the initial Codex integration. Keep `codex-exec` internal-only for diagnostics and fixture capture.
 
