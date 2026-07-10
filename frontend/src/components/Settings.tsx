@@ -20,7 +20,8 @@ import {
   ShieldCheck,
   Terminal,
   FolderOpen,
-  ScanEye
+  ScanEye,
+  AlarmClock
 } from 'lucide-react';
 import { Textarea, Checkbox } from './ui/Input';
 import { Button } from './ui/Button';
@@ -82,6 +83,11 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
   // Layered visual verification master switch (default OFF). MVP exposes only the
   // master toggle; advanced numeric fields stay config-only for now.
   const [visualVerifyEnabled, setVisualVerifyEnabled] = useState(false);
+  // Auto-surface idle PTY quick sessions into the human review queue (default ON).
+  // A blocking human_task is minted for an interactive quick session that finished
+  // a turn and has sat unviewed longer than idleReviewThresholdMinutes.
+  const [idleReviewEnabled, setIdleReviewEnabled] = useState(true);
+  const [idleReviewThresholdMinutes, setIdleReviewThresholdMinutes] = useState(5);
   const [notificationSettings, setNotificationSettings] = useState({
     enabled: true,
     playSound: true,
@@ -138,6 +144,8 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
       setUsageMetricsEnabled(data.telemetry?.usageMetricsEnabled ?? true);
       setArtifactCommitDir(data.artifactCommitDir ?? '');
       setVisualVerifyEnabled(data.visualVerify?.enabled ?? false);
+      setIdleReviewEnabled(data.idleSessionReview?.enabled ?? true);
+      setIdleReviewThresholdMinutes(data.idleSessionReview?.thresholdMinutes ?? 5);
 
       // Load additional paths
       const paths = data.additionalPaths || [];
@@ -186,6 +194,15 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
         // Preserve any advanced visualVerify fields the user set in config.json
         // (the UI exposes only the master switch); overwrite just `enabled`.
         visualVerify: { ..._config?.visualVerify, enabled: visualVerifyEnabled },
+        // Idle-session auto-review. A non-positive/NaN threshold floors to 5 on
+        // the main side too, but clamp here so the persisted value stays sane.
+        idleSessionReview: {
+          enabled: idleReviewEnabled,
+          thresholdMinutes:
+            Number.isFinite(idleReviewThresholdMinutes) && idleReviewThresholdMinutes > 0
+              ? idleReviewThresholdMinutes
+              : 5,
+        },
         additionalPaths: parsedPaths,
         notifications: notificationSettings,
         // Spread the existing telemetry first so the persisted installId is
@@ -592,6 +609,40 @@ export function Settings({ isOpen, onClose, initialTab }: SettingsProps) {
                   captures a screenshot (offscreen render, headless browser, or the live app) and a
                   vision model judges it against the stated intent. Off by default; no captures run
                   while disabled.
+                </p>
+              </SettingsSection>
+
+              <SettingsSection
+                title="Idle Session Review"
+                description="Surface quiet PTY quick sessions in the human review queue"
+                icon={<AlarmClock className="w-4 h-4" />}
+              >
+                <Checkbox
+                  label="Surface idle quick sessions for review"
+                  checked={idleReviewEnabled}
+                  onChange={(e) => setIdleReviewEnabled(e.target.checked)}
+                />
+                <p className="text-xs text-text-tertiary mt-1 mb-3">
+                  When an interactive quick session finishes its turn and sits unviewed past the
+                  threshold below, Cyboflow adds a blocking item to Human review — so a session waiting
+                  on you shows up even if the agent never filed a finding. The item clears itself once
+                  you reopen the session or it starts a new turn.
+                </p>
+                <label htmlFor="idleReviewThreshold" className="block text-sm text-text-secondary mb-1">
+                  Idle threshold (minutes)
+                </label>
+                <input
+                  id="idleReviewThreshold"
+                  type="number"
+                  min={1}
+                  step={1}
+                  disabled={!idleReviewEnabled}
+                  value={idleReviewThresholdMinutes}
+                  onChange={(e) => setIdleReviewThresholdMinutes(e.target.valueAsNumber)}
+                  className="w-28 px-3 py-2 border border-border-primary rounded-md focus:outline-none focus:ring-2 focus:ring-interactive text-text-primary bg-surface-secondary disabled:opacity-50"
+                />
+                <p className="text-xs text-text-tertiary mt-2">
+                  How long a session may sit finished-and-unviewed before it's surfaced. Defaults to 5.
                 </p>
               </SettingsSection>
             </CollapsibleCard>
