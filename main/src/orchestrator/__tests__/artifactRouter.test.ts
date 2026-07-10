@@ -36,7 +36,8 @@ import {
 } from '../artifactRouter';
 import { snapshotPathFor, resolveArtifactCommitDir } from '../artifactSnapshot';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
-import type { ArtifactChangedEvent, ScreenshotsArtifactPayload } from '../../../../shared/types/artifacts';
+import type { ArtifactChangedEvent, ScreenshotsArtifactPayload, ArtifactType } from '../../../../shared/types/artifacts';
+import { ARTIFACT_RENDER_MODE } from '../../../../shared/types/artifacts';
 import type { VerdictV1 } from '../../../../shared/types/visualVerification';
 
 // ---------------------------------------------------------------------------
@@ -66,6 +67,8 @@ function buildDb(): Database.Database {
     '015_entity_model_rebuild.sql',
     '016_review_items.sql',
     '035_artifacts.sql',
+    '045_arch_design_atype.sql',
+    '059_compound_recommendations_atype.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
@@ -266,6 +269,28 @@ describe('ArtifactRouter', () => {
     await expect(
       router.apply(1, { op: 'create', runId: 'nope', atype: 'generic', label: 'x', actor: 'user' }),
     ).rejects.toMatchObject({ code: 'run_not_found' });
+  });
+
+  it('accepts every atype in the ArtifactType union — incl. compound-recommendations', async () => {
+    // Regression: `compound-recommendations` was added to the union + MCP schema +
+    // DB CHECK but omitted from the router's VALID_ATYPES, so this write chokepoint
+    // threw `invalid_atype` and the Compound agent fell back to `generic` (the
+    // empty-canvas incident). VALID_ATYPES is now derived from the exhaustive
+    // ARTIFACT_RENDER_MODE registry, so no union member can be rejected here.
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+
+    for (const atype of Object.keys(ARTIFACT_RENDER_MODE) as ArtifactType[]) {
+      // Each atype is agent- or orchestrator-reportable; a unique run per atype
+      // avoids the UNIQUE(run_id, atype) upsert path so each is a fresh insert.
+      const runId = `run-${atype}`;
+      seedRun(db, runId);
+      await expect(
+        router.apply(1, { op: 'create', runId, atype, label: atype, actor: 'orchestrator' }),
+        `atype '${atype}' must be accepted by the router`,
+      ).resolves.toMatchObject({ artifactId: expect.any(String) });
+    }
   });
 
   it('FK cascade removes a run\'s artifacts when the run is deleted', async () => {

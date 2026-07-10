@@ -204,14 +204,17 @@ interface FieldDelta {
   to: unknown;
 }
 
-const VALID_ATYPES: ReadonlySet<ArtifactType> = new Set<ArtifactType>([
-  'idea-spec',
-  'decomposed-stories',
-  'screenshots',
-  'ui-prototype',
-  'generic',
-  'arch-design',
-]);
+// Every known artifact type, DERIVED from the exhaustive
+// `ARTIFACT_RENDER_MODE` registry (a `Record<ArtifactType, …>` the compiler
+// forces to list every member) rather than hand-maintained. A hand-written
+// subset silently rejected a real atype once — `compound-recommendations` was
+// added to the union + the MCP schema + the DB CHECK but omitted here, so the
+// write chokepoint threw `invalid_atype` and the agent fell back to `generic`
+// (the empty-canvas incident). Deriving it means a new atype is accepted here
+// the moment it exists in the union — no parallel list to forget.
+const VALID_ATYPES: ReadonlySet<ArtifactType> = new Set<ArtifactType>(
+  Object.keys(ARTIFACT_RENDER_MODE) as ArtifactType[],
+);
 
 // ---------------------------------------------------------------------------
 // Router
