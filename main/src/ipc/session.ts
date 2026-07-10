@@ -267,7 +267,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
   const resolveClaudePanelId = (sessionId: string): string | undefined =>
     panelManager.getPanelsForSession(sessionId).find((p) => p.type === 'claude')?.id;
 
-  codexSdkManager.on('output', (payload: {
+  codexSdkManager?.on('output', (payload: {
     panelId?: string;
     sessionId?: string;
     type?: string;
@@ -290,7 +290,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     }
   });
 
-  codexSdkManager.on('exit', (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => {
+  codexSdkManager?.on('exit', (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => {
     if (typeof payload.sessionId !== 'string') return;
     const dbSession = databaseService.getSession(payload.sessionId);
     if (dbSession?.agent_runtime !== 'codex-sdk') return;
@@ -1328,6 +1328,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       }
 
       if (dbSession?.agent_runtime === 'codex-sdk') {
+        if (!codexSdkManager) {
+          return { success: false, error: 'Codex SDK manager is not available' };
+        }
         if (codexSdkManager.isPanelRunning(claudePanel.id)) {
           return {
             success: false,

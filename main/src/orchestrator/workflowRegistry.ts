@@ -19,9 +19,7 @@ import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName,
 import { isCyboflowWorkflowName, resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import {
-  WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE,
   claudeRuntimeFromSubstrate,
-  isWorkflowRuntimeSupported,
   type AgentProvider,
   type WorkflowAgentRuntime,
 } from '../../../shared/types/agentRuntime';
@@ -1034,8 +1032,8 @@ export class WorkflowRegistry {
 
     // Provider/runtime are the forward-compatible agent route. During the
     // migration window, Claude runtimes project to the legacy substrate. The
-    // persisted Codex SDK shape remains for old rows and internal fixtures, but
-    // createRun rejects it below until provider-specific workflow prompts ship.
+    // Codex SDK requests keep the substrate on the SDK compatibility path and
+    // route through the provider/runtime dispatch facade.
     // Demo mode ignores every provider/runtime request: its scripted
     // manager consumes Claude-shaped events, and no persisted run may resolve to
     // a real Codex dispatch route.
@@ -1058,12 +1056,6 @@ export class WorkflowRegistry {
     }
     const codexSdkRequested =
       requestedAgentProvider === 'codex' || requestedAgentRuntime === 'codex-sdk';
-    const effectiveRequestedRuntime: WorkflowAgentRuntime | undefined = codexSdkRequested
-      ? 'codex-sdk'
-      : requestedAgentRuntime;
-    if (effectiveRequestedRuntime && !isWorkflowRuntimeSupported(effectiveRequestedRuntime)) {
-      throw new Error(`WorkflowRegistry.createRun: ${WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE}`);
-    }
     const substrateFromRuntime: CliSubstrate | undefined =
       requestedAgentRuntime === 'claude-interactive'
         ? 'interactive'

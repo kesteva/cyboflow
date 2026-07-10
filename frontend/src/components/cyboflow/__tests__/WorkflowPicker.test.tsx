@@ -443,7 +443,7 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
     ]);
   });
 
-  it('renders an agent runtime selector before model and gates Codex workflows', async () => {
+  it('renders an agent runtime selector before model and gates Codex PTY for workflows', async () => {
     render(<WorkflowPicker projectId={1} />);
 
     const runtimeSelect = (await screen.findByLabelText('Select agent runtime')) as HTMLSelectElement;
@@ -452,9 +452,9 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
     expect(runtimeSelect.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Default reflects ConfigManager.defaultSubstrate floor ('sdk').
     expect(runtimeSelect.value).toBe('claude-sdk');
-    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
+    expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
-    expect(screen.getByText(/Workflows currently use Claude/i)).toBeInTheDocument();
+    expect(screen.getByText(/Codex SDK can run workflows or quick sessions/i)).toBeInTheDocument();
     expect(screen.getByText('Native Claude classifier')).toBeInTheDocument();
   });
 
@@ -509,26 +509,47 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
     });
   });
 
-  it('ignores attempts to select the disabled Codex SDK workflow runtime', async () => {
+  it('launches workflows with the Codex SDK runtime', async () => {
     render(<WorkflowPicker projectId={1} />);
 
     const runtimeSelect = (await screen.findByLabelText('Select agent runtime')) as HTMLSelectElement;
-    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
+    expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
     await act(async () => {
       fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
     });
 
-    expect(screen.getByLabelText('Select Claude model')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Select Codex model')).toBeNull();
-    expect(mockCreateQuick).not.toHaveBeenCalled();
-    expect(mockRunStart).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Select Claude model')).toBeNull();
+
+    const startRunBtn = await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith({
+      projectId: 1,
+      prompt: '',
+      worktreeMode: 'worktree',
+    });
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: 'wf-1',
+      projectId: 1,
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      sessionId: 'session-quick-001',
+      permissionMode: 'default',
+      model: 'auto',
+    });
   });
 
-  it('keeps Quick Session available because unsupported Codex SDK cannot be selected', async () => {
+  it('keeps Quick Session available when Codex SDK is selected', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    await screen.findByLabelText('Select agent runtime');
-    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
+    const runtimeSelect = await screen.findByLabelText('Select agent runtime');
+    await act(async () => {
+      fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
+    });
+
     expect(screen.getByTestId('quick-session-button')).not.toBeDisabled();
   });
 

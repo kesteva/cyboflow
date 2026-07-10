@@ -53,7 +53,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { isAsyncIterable, callProcedure } from '@trpc/server/unstable-core-do-not-import';
 import type Database from 'better-sqlite3';
 import { TRPCError } from '@trpc/server';
-import { WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE } from '../../../../../../shared/types/agentRuntime';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -337,7 +336,7 @@ describe('cyboflow.runs.start', () => {
     }
   });
 
-  it('rejects codex-sdk workflow launches before calling the launcher', async () => {
+  it('forwards codex-sdk workflow launches to the launcher', async () => {
     const launchMock = vi.fn().mockResolvedValue({
       runId: 'run-start-codex',
       worktreePath: '/tmp/wt/codex',
@@ -351,34 +350,22 @@ describe('cyboflow.runs.start', () => {
 
     try {
       const caller = appRouter.createCaller(createContext());
-      await expect(
-        caller.cyboflow.runs.start({
-          workflowId: 'wf-sprint',
-          projectId: 1,
-          sessionId: 'sess-1',
-          agentProvider: 'codex',
-        }),
-      ).rejects.toSatisfy(
-        (err: unknown) =>
-          err instanceof TRPCError &&
-          err.code === 'BAD_REQUEST' &&
-          err.message === WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE,
-      );
-      await expect(
-        caller.cyboflow.runs.start({
-          workflowId: 'wf-sprint',
-          projectId: 1,
-          sessionId: 'sess-1',
-          agentRuntime: 'codex-sdk',
-        }),
-      ).rejects.toSatisfy(
-        (err: unknown) =>
-          err instanceof TRPCError &&
-          err.code === 'BAD_REQUEST' &&
-          err.message === WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE,
-      );
+      await caller.cyboflow.runs.start({
+        workflowId: 'wf-sprint',
+        projectId: 1,
+        sessionId: 'sess-1',
+        agentProvider: 'codex',
+      });
+      await caller.cyboflow.runs.start({
+        workflowId: 'wf-sprint',
+        projectId: 1,
+        sessionId: 'sess-1',
+        agentRuntime: 'codex-sdk',
+      });
 
-      expect(launchMock).not.toHaveBeenCalled();
+      expect(launchMock).toHaveBeenCalledTimes(2);
+      expect(launchMock).toHaveBeenNthCalledWith(1, 'wf-sprint', '/projects/my-project', 'sdk', undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined, undefined, 'codex', undefined);
+      expect(launchMock).toHaveBeenNthCalledWith(2, 'wf-sprint', '/projects/my-project', 'sdk', undefined, undefined, 'sess-1', undefined, undefined, undefined, 1, undefined, undefined, undefined, undefined, undefined, undefined, undefined, 'codex-sdk');
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -448,7 +435,7 @@ describe('cyboflow.runs.start', () => {
     }
   });
 
-  it('rejects restart of a persisted failed Codex workflow run', async () => {
+  it('restarts a persisted failed Codex workflow run through codex-sdk', async () => {
     const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
     const { runId } = seedRun(db, {
@@ -481,14 +468,14 @@ describe('cyboflow.runs.start', () => {
 
     try {
       const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
-      await expect(caller.cyboflow.runs.restart({ runId })).rejects.toSatisfy(
-        (err: unknown) =>
-          err instanceof TRPCError &&
-          err.code === 'BAD_REQUEST' &&
-          err.message.includes(WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE),
-      );
+      await expect(caller.cyboflow.runs.restart({ runId })).resolves.toEqual({
+        runId: 'run-restarted-codex',
+        worktreePath: '/tmp/wt/codex',
+        branchName: 'cyboflow/sprint/restart',
+      });
 
-      expect(launchMock).not.toHaveBeenCalled();
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock).toHaveBeenCalledWith('wf-codex-restart', '/projects/my-project', 'sdk', undefined, undefined, 'sess-1', 'acceptEdits', undefined, undefined, 1, undefined, undefined, 'gpt-5.5', undefined, undefined, { baseline: true }, 'codex', 'codex-sdk');
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },

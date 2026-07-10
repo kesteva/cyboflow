@@ -25,9 +25,8 @@
  *
  * Shared by WorkflowPicker (legacy modal) and SessionStartWizard step 3 so the
  * caveats text + lock behavior are single-sourced (no drift). `runtimeScope`
- * controls Codex availability: Codex SDK and Codex PTY are launchable for
- * quick sessions; workflows remain Claude-only until the workflow compatibility
- * gates ship.
+ * controls Codex availability: Codex SDK is launchable for workflows and quick
+ * sessions; Codex PTY remains session-only.
  */
 import { useEffect } from 'react';
 import {
@@ -77,12 +76,12 @@ function isRuntimeDisabled(runtime: LaunchAgentRuntime, scope: NonNullable<Subst
 
 function scopeHelp(scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): string {
   if (scope === 'workflow') {
-    return 'Workflows currently use Claude. Codex workflow support is coming later.';
+    return 'Workflows can run on Claude or Codex SDK. Codex PTY remains quick-session-only.';
   }
   if (scope === 'session') {
     return 'Codex SDK runs structured quick-session chat. Codex PTY opens an interactive terminal-style Codex session.';
   }
-  return 'Workflows currently use Claude. Codex SDK and PTY start quick sessions.';
+  return 'Codex SDK can run workflows or quick sessions. Codex PTY starts quick sessions only.';
 }
 
 function InteractiveCaveats({ testId }: { testId: string }): React.JSX.Element {
@@ -170,7 +169,7 @@ export function SubstrateSelector({
         <option value="claude-sdk">Claude SDK (default)</option>
         <option value="claude-interactive">Claude interactive (PTY)</option>
         <option value="codex-sdk" disabled={isRuntimeDisabled('codex-sdk', runtimeScope)}>
-          Codex SDK — quick sessions only
+          Codex SDK
         </option>
         <option value="codex-pty" disabled={isRuntimeDisabled('codex-pty', runtimeScope)}>
           Codex PTY — quick sessions only

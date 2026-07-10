@@ -14,10 +14,10 @@ describe('agentRuntimeUi compatibility', () => {
     expect(workflowRuntimeForLaunch('claude-interactive')).toBe('claude-interactive');
   });
 
-  it('blocks both Codex runtimes from workflow launches in v1', () => {
+  it('allows Codex SDK but blocks Codex PTY for workflow launches', () => {
     expect(isWorkflowAgentRuntime('codex-sdk')).toBe(true);
-    expect(isWorkflowRuntimeSupported('codex-sdk')).toBe(false);
-    expect(workflowRuntimeForLaunch('codex-sdk')).toBeNull();
+    expect(isWorkflowRuntimeSupported('codex-sdk')).toBe(true);
+    expect(workflowRuntimeForLaunch('codex-sdk')).toBe('codex-sdk');
     expect(workflowRuntimeForLaunch('codex-pty')).toBeNull();
   });
 

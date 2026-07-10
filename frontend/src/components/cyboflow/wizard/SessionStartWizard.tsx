@@ -89,7 +89,6 @@ import type { WorkflowCardMeta } from './workflowMeta';
 import { DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
 import {
   DEFAULT_SESSION_AGENT_RUNTIME,
-  WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE,
 } from '../../../../../shared/types/agentRuntime';
 import type { LaunchAgentRuntime } from '../agentRuntimeUi';
 import {
@@ -553,7 +552,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       try {
         const workflowRuntime = workflowRuntimeForLaunch(agentRuntime);
         if (workflowRuntime === null) {
-          throw new Error(WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE);
+          throw new Error('Codex PTY is only available for quick sessions.');
         }
         const launchSubstrate = substrateForRuntime(workflowRuntime);
         // Ensure the run executes INSIDE a session. This wizard IS the explicit
@@ -646,7 +645,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       try {
         const workflowRuntime = workflowRuntimeForLaunch(agentRuntime);
         if (workflowRuntime === null) {
-          throw new Error(WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE);
+          throw new Error('Codex PTY is only available for quick sessions.');
         }
         const launchSubstrate = substrateForRuntime(workflowRuntime);
         // forceNew: the wizard always starts a NEW session (see launchRun).

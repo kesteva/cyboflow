@@ -25,7 +25,6 @@ import { WorkflowRegistry, QUICK_WORKFLOW_NAME, type WorkflowDescriptor, type Wo
 import { computeSpecHash } from '../specHash';
 import type { PermissionMode } from '../../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
-import { WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE } from '../../../../shared/types/agentRuntime';
 import type { CyboflowWorkflowName, WorkflowDefinition } from '../../../../shared/types/workflows';
 import { CYBOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../shared/types/workflows';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
@@ -830,26 +829,27 @@ describe('WorkflowRegistry', () => {
       });
     });
 
-    it('rejects codex-sdk workflow creation without removing its persisted runtime type', async () => {
+    it('creates codex-sdk workflow runs through the sdk substrate', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'codex-sdk-workflow.md', '---\n---\n');
         registry.seed(1, [{ name: 'sprint', path }]);
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        expect(() =>
-          registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
-            requestedAgentProvider: 'codex',
-          }),
-        ).toThrow(WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE);
-        expect(() =>
-          registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
-            requestedAgentRuntime: 'codex-sdk',
-          }),
-        ).toThrow(WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE);
+        const result = registry.createRun(workflowId, undefined, TEST_SESSION_ID, undefined, {
+          requestedAgentProvider: 'codex',
+        });
 
-        const row = db.prepare('SELECT COUNT(*) AS count FROM workflow_runs').get() as { count: number };
-        expect(row.count).toBe(0);
+        interface AgentRow { substrate: string; agent_provider: string; agent_runtime: string }
+        const row = db.prepare(
+          'SELECT substrate, agent_provider, agent_runtime FROM workflow_runs WHERE id = ?',
+        ).get(result.runId) as AgentRow;
+        expect(result.substrate).toBe('sdk');
+        expect(row).toEqual({
+          substrate: 'sdk',
+          agent_provider: 'codex',
+          agent_runtime: 'codex-sdk',
+        });
       });
     });
 
@@ -881,7 +881,7 @@ describe('WorkflowRegistry', () => {
       });
     });
 
-    it('returns the compatibility error before evaluating a Codex substrate conflict', async () => {
+    it('rejects codex-sdk workflows when paired with the interactive substrate', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'codex-sdk-interactive-conflict.md', '---\n---\n');
         registry.seed(1, [{ name: 'sprint', path }]);
@@ -894,7 +894,7 @@ describe('WorkflowRegistry', () => {
             requestedAgentProvider: 'codex',
             requestedAgentRuntime: 'codex-sdk',
           }),
-        ).toThrow(WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE);
+        ).toThrow(/substrate interactive conflicts with agentRuntime codex-sdk/);
       });
     });
 
@@ -957,37 +957,53 @@ describe('WorkflowRegistry', () => {
       });
     });
 
-    it('does not let a Codex model selection bypass the workflow runtime gate', async () => {
+    it('stamps a Codex model selection for a Codex workflow run', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'model-codex.md', '---\n---\n');
         registry.seed(1, [{ name: 'sprint', path }]);
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        expect(() =>
-          registry.createRun(workflowId, undefined, 'sess-model', undefined, {
-            requestedAgentProvider: 'codex',
-            requestedAgentRuntime: 'codex-sdk',
-            requestedModel: 'gpt-5.5',
-          }),
-        ).toThrow(/Codex SDK workflows are not supported in v1/);
+        const result = registry.createRun(workflowId, undefined, 'sess-model', undefined, {
+          requestedAgentProvider: 'codex',
+          requestedAgentRuntime: 'codex-sdk',
+          requestedModel: 'gpt-5.5',
+        });
+
+        interface ModelRow { model: string | null; agent_provider: string; agent_runtime: string }
+        const row = db.prepare(
+          'SELECT model, agent_provider, agent_runtime FROM workflow_runs WHERE id = ?',
+        ).get(result.runId) as ModelRow;
+        expect(row).toEqual({
+          model: 'gpt-5.5',
+          agent_provider: 'codex',
+          agent_runtime: 'codex-sdk',
+        });
       });
     });
 
-    it('does not let a stale Claude model bypass the Codex workflow runtime gate', async () => {
+    it('clears a stale Claude model for a Codex workflow run', async () => {
       await withTempDir('workflow-registry-test-', async (tmpDir) => {
         const path = writeTempMd(tmpDir, 'model-codex-stale-claude.md', '---\n---\n');
         registry.seed(1, [{ name: 'sprint', path }]);
 
         interface IdRow { id: string }
         const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('sprint') as IdRow;
-        expect(() =>
-          registry.createRun(workflowId, undefined, 'sess-model', undefined, {
-            requestedAgentProvider: 'codex',
-            requestedAgentRuntime: 'codex-sdk',
-            requestedModel: 'opus',
-          }),
-        ).toThrow(/Codex SDK workflows are not supported in v1/);
+        const result = registry.createRun(workflowId, undefined, 'sess-model', undefined, {
+          requestedAgentProvider: 'codex',
+          requestedAgentRuntime: 'codex-sdk',
+          requestedModel: 'opus',
+        });
+
+        interface ModelRow { model: string | null; agent_provider: string; agent_runtime: string }
+        const row = db.prepare(
+          'SELECT model, agent_provider, agent_runtime FROM workflow_runs WHERE id = ?',
+        ).get(result.runId) as ModelRow;
+        expect(row).toEqual({
+          model: null,
+          agent_provider: 'codex',
+          agent_runtime: 'codex-sdk',
+        });
       });
     });
 

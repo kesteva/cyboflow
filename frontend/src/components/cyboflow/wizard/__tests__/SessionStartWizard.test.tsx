@@ -313,7 +313,7 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     const modelSelect = screen.getByLabelText('Select Claude model');
     expect(runtimeSelect).toBeInTheDocument();
     expect(runtimeSelect.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
+    expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).toBeDisabled();
     expect(screen.getByTestId('wizard-edit-flow')).toBeInTheDocument();
     expect(screen.getByTestId('wizard-new-flow')).toBeInTheDocument();
@@ -659,21 +659,32 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     );
   });
 
-  it('does not select or launch the disabled Codex SDK workflow runtime', async () => {
+  it('selects and launches the Codex SDK workflow runtime', async () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
     const runtimeSelect = screen.getByLabelText('Select agent runtime') as HTMLSelectElement;
-    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
+    expect(screen.getByRole('option', { name: /^Codex SDK$/i })).not.toBeDisabled();
     await act(async () => {
       fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
     });
 
-    expect(screen.getByLabelText('Select Claude model')).toBeInTheDocument();
-    expect(screen.queryByLabelText('Select Codex model')).toBeNull();
-    expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('Claude SDK');
-    expect(mockEnsureSession).not.toHaveBeenCalled();
-    expect(mockRunStart).not.toHaveBeenCalled();
+    expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Select Claude model')).toBeNull();
+    expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('Codex SDK');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    await waitFor(() => {
+      expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({
+        agentProvider: 'codex',
+        agentRuntime: 'codex-sdk',
+        model: 'auto',
+      }));
+    });
+    expect(mockEnsureSession).toHaveBeenCalled();
   });
 
   it('seeds the permission selector from the global default', async () => {

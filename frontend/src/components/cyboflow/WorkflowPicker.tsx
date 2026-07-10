@@ -27,10 +27,7 @@ import { VariantSelector } from './VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from './variantSelectorLogic';
 import { type WorkflowRow, CYBOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
 import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
-import {
-  DEFAULT_SESSION_AGENT_RUNTIME,
-  WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE,
-} from '../../../../shared/types/agentRuntime';
+import { DEFAULT_SESSION_AGENT_RUNTIME } from '../../../../shared/types/agentRuntime';
 import type { LaunchAgentRuntime } from './agentRuntimeUi';
 import {
   isCodexRuntime,
@@ -64,8 +61,9 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
 
   /**
    * The per-launch agent runtime choice. Claude runtimes project onto the legacy
-   * substrate field. On this mixed launch surface, Codex SDK is disabled in v1;
-   * Codex PTY is quick-session-only and disables Start Run.
+   * substrate field. On this mixed launch surface, Codex SDK can launch
+   * workflows or quick sessions; Codex PTY is quick-session-only and disables
+   * Start Run.
    */
   const [agentRuntime, setAgentRuntime] = useState<LaunchAgentRuntime>(DEFAULT_SESSION_AGENT_RUNTIME);
 
@@ -216,7 +214,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       try {
         const workflowRuntime = workflowRuntimeForLaunch(agentRuntime);
         if (workflowRuntime === null) {
-          throw new Error(WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE);
+          throw new Error('Codex PTY is only available for quick sessions.');
         }
         const launchSubstrate = substrateForRuntime(workflowRuntime);
         // Ensure the run executes INSIDE a session (active one if selected, else
@@ -280,7 +278,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
       try {
         const workflowRuntime = workflowRuntimeForLaunch(agentRuntime);
         if (workflowRuntime === null) {
-          throw new Error(WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE);
+          throw new Error('Codex PTY is only available for quick sessions.');
         }
         const launchSubstrate = substrateForRuntime(workflowRuntime);
         const sessionId = await ensureSessionForLaunch(projectId, { forceNew: forceNewSession });
@@ -455,12 +453,6 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         agentProvider={selectedProvider}
         agentRuntime={agentRuntime}
       />
-      {workflowRuntimeBlocked && (
-        <p className="text-xs text-text-tertiary">
-          {WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE}
-        </p>
-      )}
-
       {/* Per-run A/B variant selector (migration 048) — hidden entirely for a
           workflow with zero variants. Threaded into runs.start as variantId /
           baseline (never both); rotation sends neither field. */}
