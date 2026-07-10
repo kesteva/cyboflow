@@ -34,6 +34,7 @@ import { experimentDisplayName, armDisplayLabel } from '../../utils/experimentDi
 import { ScoreSummary, type FindingRow } from './WorkflowSummaryPanel';
 import { DiffBody } from './FileTabRenderer';
 import { IdeaPickerModal } from './IdeaPickerModal';
+import { RotationComparisonBody } from './RotationComparisonBody';
 import { ConfirmDialog } from '../ConfirmDialog';
 import { parseFileDiffs, findFileDiff } from '../../utils/parseFileHunks';
 import { formatRuntime } from './runEvalDisplay';
@@ -190,12 +191,20 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
     exp: ExperimentRow | null;
     payload: ExperimentComparisonPayload | null;
   }> => {
-    const [expRow, comparisonPayload, diffsPayload] = await Promise.all([
-      trpc.cyboflow.experiments.get.query({ experimentId }),
+    const expRow = await trpc.cyboflow.experiments.get.query({ experimentId });
+    setExp(expRow);
+    // A rotation experiment has no paired arms — getComparison/getComparisonDiffs
+    // THROW (INTERNAL_SERVER_ERROR via requireSideBySideFields) for it, so skip
+    // them entirely; RotationComparisonBody owns its own data + polling.
+    if (expRow === null || expRow.kind === 'rotation') {
+      setPayload(null);
+      setDiffs(null);
+      return { exp: expRow, payload: null };
+    }
+    const [comparisonPayload, diffsPayload] = await Promise.all([
       trpc.cyboflow.experiments.getComparison.query({ experimentId }),
       trpc.cyboflow.experiments.getComparisonDiffs.query({ experimentId }),
     ]);
-    setExp(expRow);
     setPayload(comparisonPayload);
     setDiffs(diffsPayload);
     return { exp: expRow, payload: comparisonPayload };
@@ -214,11 +223,18 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
       .then((r) => {
         if (!aliveRef.current) return;
         setInitialLoading(false);
-        if (r.exp === null || r.payload === null) {
+        if (r.exp === null) {
           setLoadError('This experiment could not be found.');
           return;
         }
         setLoadError(null);
+        // Rotation experiments carry no side-by-side comparison payload to poll —
+        // RotationComparisonBody arms its own poll off exp.status instead.
+        if (r.exp.kind === 'rotation') return;
+        if (r.payload === null) {
+          setLoadError('This experiment could not be found.');
+          return;
+        }
         const keepPolling =
           r.payload.comparisonStatus === 'absent' ||
           r.payload.comparisonStatus === 'pending' ||
@@ -431,10 +447,58 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
     );
   }
 
-  if (loadError !== null || exp === null || payload === null) {
+  if (loadError !== null || exp === null) {
     return (
       <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-bg-primary" data-testid="experiment-comparison-error">
         <p className="text-sm text-status-error">{loadError ?? 'This experiment could not be found.'}</p>
+        <button
+          type="button"
+          onClick={() => useNavigationStore.getState().closeExperimentComparison()}
+          className="rounded-button border border-border-primary bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-hover"
+        >
+          Close
+        </button>
+      </div>
+    );
+  }
+
+  // A rotation experiment renders its own body (per-arm stats + attributed run
+  // lists) — no side-by-side payload exists for it (getComparison/getComparisonDiffs
+  // throw via requireSideBySideFields), so branch BEFORE anything touches `payload`.
+  if (exp.kind === 'rotation') {
+    return (
+      <div className="flex h-full w-full flex-col overflow-hidden bg-bg-primary" data-testid="experiment-comparison-view">
+        <div className="flex flex-shrink-0 items-center justify-between border-b border-border-primary bg-bg-secondary px-7 py-4">
+          <div>
+            <div className="eyebrow text-text-tertiary">Randomized rotation experiment</div>
+            <h2 className="mt-1 text-[20px] font-bold tracking-[-0.01em] text-text-primary">Experiment comparison</h2>
+          </div>
+          <button
+            type="button"
+            data-testid="experiment-comparison-close"
+            onClick={() => useNavigationStore.getState().closeExperimentComparison()}
+            className="rounded-button p-1.5 text-text-tertiary hover:bg-bg-hover hover:text-text-primary"
+            aria-label="Close comparison"
+          >
+            <X size={18} />
+          </button>
+        </div>
+        <RotationComparisonBody
+          exp={exp}
+          onReload={async () => {
+            await load();
+          }}
+        />
+      </div>
+    );
+  }
+
+  // The side-by-side kind always has a payload once `exp` resolves (getComparison
+  // returns null only when the experiment itself is absent, already ruled out above).
+  if (payload === null) {
+    return (
+      <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-bg-primary" data-testid="experiment-comparison-error">
+        <p className="text-sm text-status-error">This experiment could not be found.</p>
         <button
           type="button"
           onClick={() => useNavigationStore.getState().closeExperimentComparison()}
@@ -453,56 +517,60 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
   );
   const pillLabel = experimentStatusPill(exp.status, payload.comparisonStatus);
 
-  return (
-    <div className="flex h-full w-full flex-col overflow-hidden bg-bg-primary" data-testid="experiment-comparison-view">
-      <div className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-border-primary bg-bg-secondary px-7 py-4">
-        <div className="flex min-w-0 items-center gap-3">
-          <FlaskConical size={22} className="flex-shrink-0 text-interactive" aria-hidden />
-          <div className="min-w-0">
-            <div className="eyebrow text-text-tertiary">A/B experiment</div>
-            <div className="mt-0.5 flex items-center gap-2">
-              <h2
-                data-testid="experiment-display-name"
-                title={displayName}
-                className="truncate text-[18px] font-bold tracking-[-0.01em] text-text-primary"
-              >
-                {displayName}
-              </h2>
-              <span
-                data-testid="experiment-status-pill"
-                className={cn(
-                  'flex-shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold',
-                  statusPillClasses(pillLabel),
-                )}
-              >
-                {pillLabel}
-              </span>
-            </div>
+  const header = (
+    <div className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-border-primary bg-bg-secondary px-7 py-4">
+      <div className="flex min-w-0 items-center gap-3">
+        <FlaskConical size={22} className="flex-shrink-0 text-interactive" aria-hidden />
+        <div className="min-w-0">
+          <div className="eyebrow text-text-tertiary">A/B experiment</div>
+          <div className="mt-0.5 flex items-center gap-2">
+            <h2
+              data-testid="experiment-display-name"
+              title={displayName}
+              className="truncate text-[18px] font-bold tracking-[-0.01em] text-text-primary"
+            >
+              {displayName}
+            </h2>
+            <span
+              data-testid="experiment-status-pill"
+              className={cn(
+                'flex-shrink-0 rounded-full border px-2 py-0.5 text-[11px] font-semibold',
+                statusPillClasses(pillLabel),
+              )}
+            >
+              {pillLabel}
+            </span>
           </div>
         </div>
-        <div className="flex flex-shrink-0 items-center gap-2">
-          {!expSettled && (
-            <button
-              type="button"
-              data-testid="experiment-cancel"
-              disabled={actionBusy !== null}
-              onClick={() => setCancelConfirmOpen(true)}
-              className="inline-flex items-center gap-1.5 rounded-button border border-status-error/40 px-3 py-1.5 text-sm font-medium text-status-error hover:bg-status-error/10 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              <Ban size={14} /> Cancel experiment
-            </button>
-          )}
+      </div>
+      <div className="flex flex-shrink-0 items-center gap-2">
+        {!expSettled && (
           <button
             type="button"
-            data-testid="experiment-comparison-close"
-            onClick={() => useNavigationStore.getState().closeExperimentComparison()}
-            className="rounded-button p-1.5 text-text-tertiary hover:bg-bg-hover hover:text-text-primary"
-            aria-label="Close comparison"
+            data-testid="experiment-cancel"
+            disabled={actionBusy !== null}
+            onClick={() => setCancelConfirmOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-button border border-status-error/40 px-3 py-1.5 text-sm font-medium text-status-error hover:bg-status-error/10 disabled:cursor-not-allowed disabled:opacity-50"
           >
-            <X size={18} />
+            <Ban size={14} /> Cancel experiment
           </button>
-        </div>
+        )}
+        <button
+          type="button"
+          data-testid="experiment-comparison-close"
+          onClick={() => useNavigationStore.getState().closeExperimentComparison()}
+          className="rounded-button p-1.5 text-text-tertiary hover:bg-bg-hover hover:text-text-primary"
+          aria-label="Close comparison"
+        >
+          <X size={18} />
+        </button>
       </div>
+    </div>
+  );
+
+  return (
+    <div className="flex h-full w-full flex-col overflow-hidden bg-bg-primary" data-testid="experiment-comparison-view">
+      {header}
 
       <div className="flex-1 overflow-y-auto px-7 py-5">
         <div className="mx-auto flex w-full max-w-[1080px] flex-col gap-6">

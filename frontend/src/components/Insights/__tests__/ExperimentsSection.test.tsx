@@ -11,18 +11,22 @@ import '@testing-library/jest-dom';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ExperimentsSection } from '../ExperimentsSection';
-import type { VariantStats, ExperimentSummary } from '../../../../../shared/types/experiments';
+import type { VariantStats, ExperimentSummary, RotationDashboardRow } from '../../../../../shared/types/experiments';
 import type { WorkflowRunStats } from '../../../../../shared/types/insights';
 
 const variantStatsQuery = vi.fn();
 const listForDashboardQuery = vi.fn();
+const listRotationsForDashboardQuery = vi.fn();
 const openExperimentComparison = vi.fn();
 
 vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
       insights: { variantStats: { query: (...a: unknown[]) => variantStatsQuery(...a) } },
-      experiments: { listForDashboard: { query: (...a: unknown[]) => listForDashboardQuery(...a) } },
+      experiments: {
+        listForDashboard: { query: (...a: unknown[]) => listForDashboardQuery(...a) },
+        listRotationsForDashboard: { query: (...a: unknown[]) => listRotationsForDashboardQuery(...a) },
+      },
     },
   },
 }));
@@ -94,6 +98,21 @@ function makeVariantStats(over: Partial<VariantStats> = {}): VariantStats {
   };
 }
 
+function makeRotationDashboardRow(over: Partial<RotationDashboardRow> = {}): RotationDashboardRow {
+  return {
+    experimentId: 'rot_1',
+    workflowId: 'wf-1',
+    armLabels: ['Baseline', 'variant-a'],
+    status: 'running',
+    runCount: 4,
+    createdAt: '2026-07-05T00:00:00.000Z',
+    decidedAt: null,
+    winnerLabel: null,
+    seriesKey: 'wf-1:__baseline__|wfv_a',
+    ...over,
+  };
+}
+
 function makeExperimentSummary(over: Partial<ExperimentSummary> = {}): ExperimentSummary {
   return {
     experimentId: 'exp_1',
@@ -119,6 +138,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockWorkflowStats = [];
   mockProjectFilter = null;
+  listRotationsForDashboardQuery.mockResolvedValue([]);
 });
 
 describe('ExperimentsSection', () => {
@@ -215,5 +235,50 @@ describe('ExperimentsSection', () => {
     await waitFor(() =>
       expect(listForDashboardQuery).toHaveBeenCalledWith({ projectId: null, includeAbandoned: true }),
     );
+  });
+
+  it('renders no rotations block when listRotationsForDashboard resolves empty', async () => {
+    mockWorkflowStats = [];
+    listForDashboardQuery.mockResolvedValue([]);
+    listRotationsForDashboardQuery.mockResolvedValue([]);
+
+    render(<ExperimentsSection />);
+    await waitFor(() => expect(listRotationsForDashboardQuery).toHaveBeenCalled());
+    expect(screen.queryByTestId('experiments-rotations-list')).not.toBeInTheDocument();
+    expect(screen.queryByText('Randomized rotations')).not.toBeInTheDocument();
+  });
+
+  it('renders rotation rows partitioned running-first (both newest-first), routes click to openExperimentComparison, and shows winnerLabel on a decided row', async () => {
+    mockWorkflowStats = [];
+    listForDashboardQuery.mockResolvedValue([]);
+    // Input already newest-first, as the real query returns it — partitioning
+    // must preserve this relative order within each group, not re-sort.
+    listRotationsForDashboardQuery.mockResolvedValue([
+      makeRotationDashboardRow({ experimentId: 'rot_decided_new', status: 'decided', winnerLabel: 'variant-a', createdAt: '2026-07-06T00:00:00.000Z' }),
+      makeRotationDashboardRow({ experimentId: 'rot_running_new', status: 'running', createdAt: '2026-07-03T00:00:00.000Z' }),
+      makeRotationDashboardRow({ experimentId: 'rot_decided_old', status: 'decided', winnerLabel: 'Baseline', createdAt: '2026-07-02T00:00:00.000Z' }),
+      makeRotationDashboardRow({ experimentId: 'rot_running_old', status: 'running', createdAt: '2026-07-01T00:00:00.000Z' }),
+    ]);
+
+    render(<ExperimentsSection />);
+
+    const list = await screen.findByTestId('experiments-rotations-list');
+    const rowIds = Array.from(list.querySelectorAll('[data-testid^="experiments-rotation-row-"]')).map((el) =>
+      el.getAttribute('data-testid'),
+    );
+    expect(rowIds).toEqual([
+      'experiments-rotation-row-rot_running_new',
+      'experiments-rotation-row-rot_running_old',
+      'experiments-rotation-row-rot_decided_new',
+      'experiments-rotation-row-rot_decided_old',
+    ]);
+
+    const decidedRow = screen.getByTestId('experiments-rotation-row-rot_decided_new');
+    expect(decidedRow).toHaveTextContent('variant-a');
+    expect(decidedRow).toHaveTextContent('Baseline vs variant-a');
+    expect(decidedRow).toHaveTextContent('4 runs');
+
+    fireEvent.click(screen.getByTestId('experiments-rotation-row-rot_running_old'));
+    expect(openExperimentComparison).toHaveBeenCalledWith('rot_running_old');
   });
 });

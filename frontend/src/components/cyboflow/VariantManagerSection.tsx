@@ -18,12 +18,22 @@
  * Every mutation calls `useVariantsStore.getState().invalidate(workflowId)` so
  * the list (and any open VariantSelector) stays live.
  */
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { trpc } from '../../trpc/client';
-import { useWorkflowVariants, useVariantsStore, type WorkflowVariantRow } from '../../stores/variantsStore';
+import {
+  useWorkflowVariants,
+  useVariantsStore,
+  type BaselineRotation,
+  type WorkflowVariantRow,
+} from '../../stores/variantsStore';
 import { FlowNameDialog } from './FlowNameDialog';
 import { VariantEditorModal } from './VariantEditorModal';
-import type { WorkflowVariantStatus } from '../../../../shared/types/experiments';
+import { ConfirmDialog } from '../ConfirmDialog';
+import {
+  BASELINE_VARIANT_SENTINEL,
+  type RotationExperimentSummary,
+  type WorkflowVariantStatus,
+} from '../../../../shared/types/experiments';
 
 export interface VariantManagerSectionProps {
   workflowId: string;
@@ -66,6 +76,78 @@ function BaselinePill({ inRotation }: { inRotation: boolean }): React.JSX.Elemen
   );
 }
 
+/** Minimal per-variant fields the rotation-pool prediction needs. */
+export type RotationPoolVariant = Pick<WorkflowVariantRow, 'id' | 'status' | 'weight'>;
+
+/**
+ * The weighted-rotation resolver's arm pool for a `{ variants, baseline }`
+ * snapshot: every ACTIVE variant with weight > 0, plus the baseline sentinel
+ * when it is in rotation with weight > 0. Pure + exported so the confirm-modal
+ * gate below is unit-testable directly against the weight-boundary cases.
+ */
+export function computeRotationPoolIds(
+  variants: readonly RotationPoolVariant[],
+  baseline: BaselineRotation | null,
+): Set<string> {
+  const ids = new Set<string>();
+  for (const variant of variants) {
+    if (variant.status === 'active' && variant.weight > 0) ids.add(variant.id);
+  }
+  if (baseline !== null && baseline.inRotation && baseline.weight > 0) {
+    ids.add(BASELINE_VARIANT_SENTINEL);
+  }
+  return ids;
+}
+
+/**
+ * True when a hypothetical config change (`nextVariants` / `nextBaseline`) would
+ * change the rotation pool relative to `currentArmIds` — the arm-variant-id set
+ * the OPEN rotation experiment actually snapshotted (`rotation.arms`), not a
+ * locally-recomputed "current" pool. A pure weight edit that keeps an arm on the
+ * same side of zero never flips membership, matching the product rule that a
+ * pure weight change never supersedes a running rotation.
+ */
+export function wouldChangeArmSet(
+  currentArmIds: readonly string[],
+  nextVariants: readonly RotationPoolVariant[],
+  nextBaseline: BaselineRotation | null,
+): boolean {
+  const nextIds = computeRotationPoolIds(nextVariants, nextBaseline);
+  if (currentArmIds.length !== nextIds.size) return true;
+  for (const id of currentArmIds) {
+    if (!nextIds.has(id)) return true;
+  }
+  return false;
+}
+
+/** `variants` with one row's status/weight hypothetically overridden (delete = filter it out). */
+function withVariantOverride(
+  variants: readonly WorkflowVariantRow[],
+  variantId: string,
+  patch: Partial<Pick<WorkflowVariantRow, 'status' | 'weight'>>,
+): RotationPoolVariant[] {
+  return variants.map((v) => (v.id === variantId ? { ...v, ...patch } : v));
+}
+
+function withoutVariant(variants: readonly WorkflowVariantRow[], variantId: string): RotationPoolVariant[] {
+  return variants.filter((v) => v.id !== variantId);
+}
+
+/** Message body for the supersede-confirm modal: fixed lead-in + the specific action. */
+function buildSupersedeMessage(rotation: RotationExperimentSummary, actionDescription: string): string {
+  const armLabels = rotation.arms.map((a) => a.label).join(' vs ');
+  return (
+    `This changes the arm set of the running rotation experiment (${armLabels}, ${rotation.runCount} runs recorded). ` +
+    `It will be closed as superseded and a new rotation experiment will start. ${actionDescription}`
+  );
+}
+
+/** A config write that is pending confirmation because it would change the running rotation's arm set. */
+interface PendingSupersedeAction {
+  run: () => Promise<void>;
+  description: string;
+}
+
 function StatusPill({ status }: { status: WorkflowVariantStatus }): React.JSX.Element {
   const tone =
     status === 'active'
@@ -99,9 +181,51 @@ export function VariantManagerSection({
   const busySetRef = useRef<Set<string>>(new Set());
   const [, forceRerender] = useState(0);
 
+  // The rotation experiment currently running for this workflow (if any) — kept
+  // live so config writes below can predict whether they'd change its arm set.
+  // Advisory only: a failed fetch is treated as "no rotation running" rather than
+  // surfaced as an action error.
+  const [rotation, setRotation] = useState<RotationExperimentSummary | null>(null);
+  const [pendingSupersede, setPendingSupersede] = useState<PendingSupersedeAction | null>(null);
+
+  const refreshRotation = useCallback(async () => {
+    try {
+      const summary = await trpc.cyboflow.experiments.getRunningRotation.query({ workflowId });
+      setRotation(summary);
+    } catch {
+      setRotation(null);
+    }
+  }, [workflowId]);
+
+  useEffect(() => {
+    void refreshRotation();
+  }, [refreshRotation]);
+
   const invalidate = useCallback(async () => {
     await useVariantsStore.getState().invalidate(workflowId);
-  }, [workflowId]);
+    await refreshRotation();
+  }, [workflowId, refreshRotation]);
+
+  /**
+   * Gate for a config write that may change the rotation pool: if a rotation is
+   * running and `nextVariants`/`nextBaseline` predicts a different arm set, park
+   * `run` behind the supersede-confirm modal instead of firing it immediately.
+   */
+  const guardSupersede = useCallback(
+    (
+      run: () => Promise<void>,
+      description: string,
+      nextVariants: readonly RotationPoolVariant[],
+      nextBaseline: BaselineRotation | null,
+    ): void => {
+      if (rotation !== null && wouldChangeArmSet(rotation.arms.map((a) => a.variantId), nextVariants, nextBaseline)) {
+        setPendingSupersede({ run, description });
+        return;
+      }
+      void run();
+    },
+    [rotation],
+  );
 
   const withBusy = useCallback(async (variantId: string, fn: () => Promise<void>) => {
     if (busySetRef.current.has(variantId)) return;
@@ -133,55 +257,88 @@ export function VariantManagerSection({
   );
 
   const handleSetStatus = useCallback(
-    (variantId: string, status: WorkflowVariantStatus) =>
-      withBusy(variantId, async () => {
-        await trpc.cyboflow.variants.setStatus.mutate({ variantId, status });
-        await invalidate();
-      }),
-    [withBusy, invalidate],
+    (variantId: string, status: WorkflowVariantStatus) => {
+      const run = () =>
+        withBusy(variantId, async () => {
+          await trpc.cyboflow.variants.setStatus.mutate({ variantId, status });
+          await invalidate();
+        });
+      const label = variants.find((v) => v.id === variantId)?.label ?? variantId;
+      const description =
+        status === 'active'
+          ? `Activating "${label}" for rotation.`
+          : status === 'paused'
+            ? `Pausing "${label}".`
+            : `Retiring "${label}".`;
+      guardSupersede(run, description, withVariantOverride(variants, variantId, { status }), baseline);
+    },
+    [withBusy, invalidate, variants, baseline, guardSupersede],
   );
 
   const handleDelete = useCallback(
-    (variantId: string) =>
-      withBusy(variantId, async () => {
-        await trpc.cyboflow.variants.delete.mutate({ variantId });
-        await invalidate();
-      }),
-    [withBusy, invalidate],
+    (variantId: string) => {
+      const run = () =>
+        withBusy(variantId, async () => {
+          await trpc.cyboflow.variants.delete.mutate({ variantId });
+          await invalidate();
+        });
+      const label = variants.find((v) => v.id === variantId)?.label ?? variantId;
+      guardSupersede(run, `Deleting "${label}".`, withoutVariant(variants, variantId), baseline);
+    },
+    [withBusy, invalidate, variants, baseline, guardSupersede],
   );
 
   const commitWeight = useCallback(
-    (variantId: string, raw: string) =>
-      withBusy(variantId, async () => {
-        const parsed = Number.parseInt(raw, 10);
-        if (!Number.isFinite(parsed) || parsed < 0) return;
-        await trpc.cyboflow.variants.update.mutate({ variantId, weight: parsed });
-        await invalidate();
-      }),
-    [withBusy, invalidate],
+    (variantId: string, raw: string) => {
+      const parsed = Number.parseInt(raw, 10);
+      if (!Number.isFinite(parsed) || parsed < 0) return;
+      const run = () =>
+        withBusy(variantId, async () => {
+          await trpc.cyboflow.variants.update.mutate({ variantId, weight: parsed });
+          await invalidate();
+        });
+      const label = variants.find((v) => v.id === variantId)?.label ?? variantId;
+      guardSupersede(
+        run,
+        `Setting "${label}"'s weight to ${parsed}.`,
+        withVariantOverride(variants, variantId, { weight: parsed }),
+        baseline,
+      );
+    },
+    [withBusy, invalidate, variants, baseline, guardSupersede],
   );
 
   // The baseline (the workflow's live definition) is a rotation participant too
   // (migration 054) — tracked on `workflows`, not `workflow_variants`, so it uses a
   // synthetic '__baseline__' busy key and the variants.setBaselineRotation mutation.
   const commitBaselineWeight = useCallback(
-    (raw: string) =>
-      withBusy(BASELINE_BUSY_KEY, async () => {
-        const parsed = Number.parseInt(raw, 10);
-        if (!Number.isFinite(parsed) || parsed < 0) return;
-        await trpc.cyboflow.variants.setBaselineRotation.mutate({ workflowId, weight: parsed });
-        await invalidate();
-      }),
-    [withBusy, invalidate, workflowId],
+    (raw: string) => {
+      const parsed = Number.parseInt(raw, 10);
+      if (!Number.isFinite(parsed) || parsed < 0) return;
+      const run = () =>
+        withBusy(BASELINE_BUSY_KEY, async () => {
+          await trpc.cyboflow.variants.setBaselineRotation.mutate({ workflowId, weight: parsed });
+          await invalidate();
+        });
+      const nextBaseline: BaselineRotation | null = baseline === null ? null : { ...baseline, weight: parsed };
+      guardSupersede(run, `Setting the baseline's weight to ${parsed}.`, variants, nextBaseline);
+    },
+    [withBusy, invalidate, workflowId, variants, baseline, guardSupersede],
   );
 
   const handleSetBaselineInRotation = useCallback(
-    (inRotation: boolean) =>
-      withBusy(BASELINE_BUSY_KEY, async () => {
-        await trpc.cyboflow.variants.setBaselineRotation.mutate({ workflowId, inRotation });
-        await invalidate();
-      }),
-    [withBusy, invalidate, workflowId],
+    (inRotation: boolean) => {
+      const run = () =>
+        withBusy(BASELINE_BUSY_KEY, async () => {
+          await trpc.cyboflow.variants.setBaselineRotation.mutate({ workflowId, inRotation });
+          await invalidate();
+        });
+      const nextBaseline: BaselineRotation | null =
+        baseline === null ? { inRotation, weight: 1 } : { ...baseline, inRotation };
+      const description = inRotation ? 'Adding the baseline to rotation.' : 'Removing the baseline from rotation.';
+      guardSupersede(run, description, variants, nextBaseline);
+    },
+    [withBusy, invalidate, workflowId, variants, baseline, guardSupersede],
   );
 
   return (
@@ -397,6 +554,21 @@ export function VariantManagerSection({
           onClose={() => setEditingVariant(null)}
           onSaved={() => setEditingVariant(null)}
         />
+      )}
+
+      {pendingSupersede !== null && rotation !== null && (
+        <div data-testid="rotation-supersede-confirm">
+          <ConfirmDialog
+            isOpen
+            onClose={() => setPendingSupersede(null)}
+            onConfirm={() => void pendingSupersede.run()}
+            title="Start a new rotation experiment?"
+            message={buildSupersedeMessage(rotation, pendingSupersede.description)}
+            confirmText="Continue"
+            cancelText="Cancel"
+            confirmButtonClass="bg-interactive hover:bg-interactive-hover text-text-on-interactive"
+          />
+        </div>
       )}
     </div>
   );

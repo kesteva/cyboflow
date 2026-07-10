@@ -14,8 +14,9 @@
  *   (h) Edit opens VariantEditorModal (stubbed) seeded with the row's variant.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import type { WorkflowVariantRow } from '../../../stores/variantsStore';
+import { BASELINE_VARIANT_SENTINEL, type RotationExperimentSummary } from '../../../../../shared/types/experiments';
 
 const {
   mockCreate,
@@ -25,6 +26,7 @@ const {
   mockSetBaseline,
   mockInvalidate,
   mockUseWorkflowVariants,
+  mockGetRunningRotation,
 } = vi.hoisted(() => ({
   mockCreate: vi.fn(),
   mockUpdate: vi.fn(),
@@ -33,6 +35,7 @@ const {
   mockSetBaseline: vi.fn(),
   mockInvalidate: vi.fn(),
   mockUseWorkflowVariants: vi.fn(),
+  mockGetRunningRotation: vi.fn(),
 }));
 
 vi.mock('../../../trpc/client', () => ({
@@ -44,6 +47,9 @@ vi.mock('../../../trpc/client', () => ({
         setStatus: { mutate: mockSetStatus },
         delete: { mutate: mockDelete },
         setBaselineRotation: { mutate: mockSetBaseline },
+      },
+      experiments: {
+        getRunningRotation: { query: mockGetRunningRotation },
       },
     },
   },
@@ -60,7 +66,11 @@ vi.mock('../VariantEditorModal', () => ({
   ),
 }));
 
-import { VariantManagerSection } from '../VariantManagerSection';
+import {
+  VariantManagerSection,
+  computeRotationPoolIds,
+  wouldChangeArmSet,
+} from '../VariantManagerSection';
 
 function makeVariant(overrides: Partial<WorkflowVariantRow> = {}): WorkflowVariantRow {
   return {
@@ -79,6 +89,24 @@ function makeVariant(overrides: Partial<WorkflowVariantRow> = {}): WorkflowVaria
   };
 }
 
+function makeRotation(overrides: Partial<RotationExperimentSummary> = {}): RotationExperimentSummary {
+  return {
+    experimentId: 'exp_1',
+    workflowId: 'wf-1',
+    startedAt: '2026-07-01T00:00:00.000Z',
+    arms: [{ variantId: 'wfv_1', label: 'Variant A', weightAtOpen: 1 }],
+    runCount: 12,
+    ...overrides,
+  };
+}
+
+/** Flush the mount-time getRunningRotation fetch (and its resulting setState) before interacting. */
+async function flushRotationLoad(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+  });
+}
+
 beforeEach(() => {
   mockCreate.mockReset().mockResolvedValue(makeVariant());
   mockUpdate.mockReset().mockResolvedValue({ ok: true });
@@ -87,6 +115,7 @@ beforeEach(() => {
   mockSetBaseline.mockReset().mockResolvedValue({ ok: true });
   mockInvalidate.mockReset().mockResolvedValue(undefined);
   mockUseWorkflowVariants.mockReset();
+  mockGetRunningRotation.mockReset().mockResolvedValue(null);
 });
 
 describe('VariantManagerSection', () => {
@@ -340,5 +369,208 @@ describe('VariantManagerSection', () => {
       expect(mockSetBaseline).toHaveBeenCalledWith({ workflowId: 'wf-1', weight: 7 });
     });
     expect(mockInvalidate).toHaveBeenCalledWith('wf-1');
+  });
+});
+
+// -- Rotation supersede-confirm modal ----------------------------------------
+
+describe('VariantManagerSection — rotation supersede-confirm', () => {
+  it('(o) no rotation running: "Add to rotation" fires setStatus directly, no modal', async () => {
+    mockUseWorkflowVariants.mockReturnValue({
+      variants: [makeVariant({ status: 'draft', weight: 1 })],
+      baseline: null,
+      loading: false,
+      error: null,
+    });
+    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    await flushRotationLoad();
+
+    fireEvent.click(screen.getByTestId('variant-activate-button-wfv_1'));
+
+    await waitFor(() => {
+      expect(mockSetStatus).toHaveBeenCalledWith({ variantId: 'wfv_1', status: 'active' });
+    });
+    expect(screen.queryByTestId('rotation-supersede-confirm')).not.toBeInTheDocument();
+  });
+
+  it('(p) rotation running: activating a variant that would join the pool shows the modal instead of firing', async () => {
+    mockUseWorkflowVariants.mockReturnValue({
+      variants: [makeVariant({ id: 'wfv_1', label: 'Variant A', status: 'draft', weight: 1 })],
+      baseline: { inRotation: true, weight: 1 },
+      loading: false,
+      error: null,
+    });
+    mockGetRunningRotation.mockResolvedValue(
+      makeRotation({ arms: [{ variantId: BASELINE_VARIANT_SENTINEL, label: 'Baseline', weightAtOpen: 1 }] }),
+    );
+    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    await flushRotationLoad();
+
+    fireEvent.click(screen.getByTestId('variant-activate-button-wfv_1'));
+
+    expect(await screen.findByTestId('rotation-supersede-confirm')).toBeInTheDocument();
+    expect(mockSetStatus).not.toHaveBeenCalled();
+  });
+
+  it('(q) rotation running: pausing an active arm shows the modal instead of firing', async () => {
+    mockUseWorkflowVariants.mockReturnValue({
+      variants: [makeVariant({ id: 'wfv_1', label: 'Variant A', status: 'active', weight: 1 })],
+      baseline: null,
+      loading: false,
+      error: null,
+    });
+    mockGetRunningRotation.mockResolvedValue(
+      makeRotation({ arms: [{ variantId: 'wfv_1', label: 'Variant A', weightAtOpen: 1 }] }),
+    );
+    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    await flushRotationLoad();
+
+    fireEvent.click(screen.getByTestId('variant-pause-button-wfv_1'));
+
+    expect(await screen.findByTestId('rotation-supersede-confirm')).toBeInTheDocument();
+    expect(mockSetStatus).not.toHaveBeenCalled();
+  });
+
+  it('(r) rotation running: removing the baseline from rotation shows the modal instead of firing', async () => {
+    mockUseWorkflowVariants.mockReturnValue({
+      variants: [],
+      baseline: { inRotation: true, weight: 2 },
+      loading: false,
+      error: null,
+    });
+    mockGetRunningRotation.mockResolvedValue(
+      makeRotation({ arms: [{ variantId: BASELINE_VARIANT_SENTINEL, label: 'Baseline', weightAtOpen: 2 }] }),
+    );
+    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    await flushRotationLoad();
+
+    fireEvent.click(screen.getByTestId('baseline-pause-button'));
+
+    expect(await screen.findByTestId('rotation-supersede-confirm')).toBeInTheDocument();
+    expect(mockSetBaseline).not.toHaveBeenCalled();
+  });
+
+  it('(s) rotation running: committing a weight of 0 on an in-pool arm shows the modal instead of firing', async () => {
+    mockUseWorkflowVariants.mockReturnValue({
+      variants: [makeVariant({ id: 'wfv_1', label: 'Variant A', status: 'active', weight: 2 })],
+      baseline: null,
+      loading: false,
+      error: null,
+    });
+    mockGetRunningRotation.mockResolvedValue(
+      makeRotation({ arms: [{ variantId: 'wfv_1', label: 'Variant A', weightAtOpen: 2 }] }),
+    );
+    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    await flushRotationLoad();
+
+    const input = screen.getByTestId('variant-weight-input-wfv_1');
+    fireEvent.change(input, { target: { value: '0' } });
+    fireEvent.blur(input);
+
+    expect(await screen.findByTestId('rotation-supersede-confirm')).toBeInTheDocument();
+    expect(mockUpdate).not.toHaveBeenCalled();
+  });
+
+  it('(t) rotation running: a non-zero-to-non-zero weight edit on an in-pool arm never shows the modal', async () => {
+    mockUseWorkflowVariants.mockReturnValue({
+      variants: [makeVariant({ id: 'wfv_1', label: 'Variant A', status: 'active', weight: 1 })],
+      baseline: null,
+      loading: false,
+      error: null,
+    });
+    mockGetRunningRotation.mockResolvedValue(
+      makeRotation({ arms: [{ variantId: 'wfv_1', label: 'Variant A', weightAtOpen: 1 }] }),
+    );
+    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    await flushRotationLoad();
+
+    const input = screen.getByTestId('variant-weight-input-wfv_1');
+    fireEvent.change(input, { target: { value: '5' } });
+    fireEvent.blur(input);
+
+    await waitFor(() => {
+      expect(mockUpdate).toHaveBeenCalledWith({ variantId: 'wfv_1', weight: 5 });
+    });
+    expect(screen.queryByTestId('rotation-supersede-confirm')).not.toBeInTheDocument();
+  });
+
+  it('(u) confirming the modal runs the pending mutation and closes it; cancel runs nothing', async () => {
+    mockUseWorkflowVariants.mockReturnValue({
+      variants: [makeVariant({ id: 'wfv_1', label: 'Variant A', status: 'active', weight: 2 })],
+      baseline: null,
+      loading: false,
+      error: null,
+    });
+    mockGetRunningRotation.mockResolvedValue(
+      makeRotation({ arms: [{ variantId: 'wfv_1', label: 'Variant A', weightAtOpen: 2 }], runCount: 4 }),
+    );
+    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+    await flushRotationLoad();
+
+    // Cancel first: no mutation fires and the modal closes.
+    fireEvent.click(screen.getByTestId('variant-pause-button-wfv_1'));
+    const cancelDialog = await screen.findByTestId('rotation-supersede-confirm');
+    fireEvent.click(within(cancelDialog).getByRole('button', { name: 'Cancel' }));
+    expect(mockSetStatus).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('rotation-supersede-confirm')).not.toBeInTheDocument();
+
+    // Then confirm: the parked mutation fires and invalidate/refresh follows.
+    fireEvent.click(screen.getByTestId('variant-pause-button-wfv_1'));
+    const confirmDialog = await screen.findByTestId('rotation-supersede-confirm');
+    expect(confirmDialog).toHaveTextContent('Start a new rotation experiment?');
+    expect(confirmDialog).toHaveTextContent('Pausing "Variant A".');
+    fireEvent.click(within(confirmDialog).getByRole('button', { name: 'Continue' }));
+
+    await waitFor(() => {
+      expect(mockSetStatus).toHaveBeenCalledWith({ variantId: 'wfv_1', status: 'paused' });
+    });
+    expect(mockInvalidate).toHaveBeenCalledWith('wf-1');
+  });
+});
+
+describe('computeRotationPoolIds / wouldChangeArmSet (pure membership prediction)', () => {
+  it('includes only active, weight > 0 variants, plus the baseline sentinel when in rotation with weight > 0', () => {
+    const ids = computeRotationPoolIds(
+      [
+        { id: 'wfv_active', status: 'active', weight: 3 },
+        { id: 'wfv_active_zero', status: 'active', weight: 0 },
+        { id: 'wfv_paused', status: 'paused', weight: 5 },
+      ],
+      { inRotation: true, weight: 2 },
+    );
+    expect(ids).toEqual(new Set(['wfv_active', BASELINE_VARIANT_SENTINEL]));
+  });
+
+  it('excludes the baseline sentinel when in rotation but weight is 0', () => {
+    const ids = computeRotationPoolIds(
+      [{ id: 'wfv_active', status: 'active', weight: 1 }],
+      { inRotation: true, weight: 0 },
+    );
+    expect(ids).toEqual(new Set(['wfv_active']));
+  });
+
+  it('a weight-to-zero transition on an in-pool arm changes the arm set', () => {
+    const currentArmIds = ['wfv_1'];
+    const nextVariants = [{ id: 'wfv_1', status: 'active' as const, weight: 0 }];
+    expect(wouldChangeArmSet(currentArmIds, nextVariants, null)).toBe(true);
+  });
+
+  it('a weight-from-zero transition on a NOT-currently-in-pool arm changes the arm set', () => {
+    const currentArmIds: string[] = [];
+    const nextVariants = [{ id: 'wfv_1', status: 'active' as const, weight: 1 }];
+    expect(wouldChangeArmSet(currentArmIds, nextVariants, null)).toBe(true);
+  });
+
+  it('a non-zero-to-non-zero weight edit on an in-pool arm does NOT change the arm set', () => {
+    const currentArmIds = ['wfv_1'];
+    const nextVariants = [{ id: 'wfv_1', status: 'active' as const, weight: 9 }];
+    expect(wouldChangeArmSet(currentArmIds, nextVariants, null)).toBe(false);
+  });
+
+  it('the baseline sentinel crossing the 0 boundary changes the arm set', () => {
+    const currentArmIds = [BASELINE_VARIANT_SENTINEL];
+    expect(wouldChangeArmSet(currentArmIds, [], { inRotation: true, weight: 0 })).toBe(true);
+    expect(wouldChangeArmSet([], [], { inRotation: true, weight: 3 })).toBe(true);
+    expect(wouldChangeArmSet(currentArmIds, [], { inRotation: true, weight: 3 })).toBe(false);
   });
 });

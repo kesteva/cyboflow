@@ -57,6 +57,14 @@ vi.mock('../trpc/client', () => ({
       experiments: {
         listForDashboard: { query: vi.fn().mockResolvedValue([]) },
         comparisonStatus: { query: vi.fn().mockResolvedValue({ status: 'absent' }) },
+        // Rotation experiments (migration 057) — ExperimentsSection lists rotation
+        // dashboard rows, VariantManagerSection probes the running rotation for its
+        // supersede-confirm gate, RotationComparisonBody fetches per-arm stats/runs.
+        // Benign defaults so components render their empty states without per-file mocks.
+        listRotationsForDashboard: { query: vi.fn().mockResolvedValue([]) },
+        getRunningRotation: { query: vi.fn().mockResolvedValue(null) },
+        rotationStats: { query: vi.fn().mockResolvedValue([]) },
+        rotationRuns: { query: vi.fn().mockResolvedValue([]) },
       },
       events: {
         onStuckDetected: { subscribe: vi.fn().mockReturnValue({ unsubscribe: vi.fn() }) },

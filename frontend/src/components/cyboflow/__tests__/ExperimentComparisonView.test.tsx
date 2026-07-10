@@ -75,6 +75,12 @@ vi.mock('../IdeaPickerModal', () => ({
   IdeaPickerModal: () => null,
 }));
 
+vi.mock('../RotationComparisonBody', () => ({
+  RotationComparisonBody: ({ exp }: { exp: ExperimentRow }) => (
+    <div data-testid="rotation-comparison-body-stub">{exp.id}</div>
+  ),
+}));
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -585,5 +591,19 @@ describe('ExperimentComparisonView', () => {
     fireEvent.click(screen.getByTestId('experiment-open-session-a'));
     await waitFor(() => expect(bootstrapArmSessionPanels).toHaveBeenCalledWith('sess-a'));
     await waitFor(() => expect(setActiveRun).toHaveBeenCalledWith('run-a', 'sess-a'));
+  });
+
+  it('renders the rotation body for a rotation-kind experiment without calling getComparison/getComparisonDiffs', async () => {
+    getQuery.mockResolvedValue(makeExp({ id: 'exp_rot_1', kind: 'rotation', status: 'running', variant_a_id: null, variant_b_id: null, base_branch: null, base_sha: null }));
+
+    render(<ExperimentComparisonView experimentId="exp_rot_1" />);
+
+    expect(await screen.findByTestId('rotation-comparison-body-stub')).toHaveTextContent('exp_rot_1');
+    expect(screen.getByTestId('experiment-comparison-close')).toBeInTheDocument();
+    expect(getComparisonQuery).not.toHaveBeenCalled();
+    expect(getComparisonDiffsQuery).not.toHaveBeenCalled();
+    // The side-by-side verdict/arm/file-list/footer surfaces do not render for a rotation.
+    expect(screen.queryByTestId('experiment-verdict-card')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('experiment-accept-a')).not.toBeInTheDocument();
   });
 });

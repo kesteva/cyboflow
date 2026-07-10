@@ -2,7 +2,7 @@
  * ExperimentsSection — Insights mockup section 04 (A/B testing slice C).
  *
  * "04 EXPERIMENTS — how workflow variants perform, and past head-to-heads."
- * Three parts, per workflow known to the store's `workflowStats` slice (the
+ * Four parts, per workflow known to the store's `workflowStats` slice (the
  * same per-workflow list StatsSection cards from):
  *
  *   1. Per-variant stats table (`insights.variantStats`) — every VariantStats
@@ -15,7 +15,12 @@
  *      weights, read from {@link useWorkflowVariants} (variantsStore) rather
  *      than variantStats, since a freshly-activated variant with zero runs
  *      would not appear there yet.
- *   3. The past-experiments list (`experiments.listForDashboard`), grouped by
+ *   3. A randomized-rotations list (`experiments.listRotationsForDashboard`) —
+ *      cross-project rotation experiments (baseline vs. variants, `kind:
+ *      "rotation"`), running rows first then settled, both newest-first; a
+ *      decided row shows the winning arm's label. Row click opens the same
+ *      comparison view as a side-by-side experiment.
+ *   4. The past-experiments list (`experiments.listForDashboard`), grouped by
  *      `seriesKey` so a chain of reruns collapses into one aggregate line
  *      (e.g. "B preferred 2 of 3") with the individual experiments beneath —
  *      row click opens the comparison view via
@@ -23,7 +28,7 @@
  *
  * This section reads trpc directly (unlike its siblings, which read a shared
  * store slice hydrated by InsightsView's single init() fan-out) — its data
- * (variant stats + the experiments dashboard list) is NOT part of that shared
+ * (variant stats + the experiments dashboard lists) is NOT part of that shared
  * fetch, and fetching it per-workflow here keeps the shared store free of an
  * A/B-testing-specific slice. Every read is advisory: a failed fetch degrades
  * to an empty/muted state rather than surfacing an error banner.
@@ -35,7 +40,7 @@ import { useWorkflowVariants } from '../../stores/variantsStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import { cn } from '../../utils/cn';
 import { MIN_VARIANT_RUNS } from '../../../../shared/types/experiments';
-import type { VariantStats, ExperimentSummary } from '../../../../shared/types/experiments';
+import type { VariantStats, ExperimentSummary, RotationDashboardRow } from '../../../../shared/types/experiments';
 
 function formatCost(n: number | null): string {
   return n === null ? '—' : `$${n.toFixed(2)}`;
@@ -164,6 +169,82 @@ function WorkflowVariantsBlock({
         <VariantStatsTable workflowName={workflowName} rows={rows} />
       )}
       <RotationStatusLine workflowId={workflowId} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Randomized rotations — cross-project dashboard rows
+// ---------------------------------------------------------------------------
+
+function RotationRow({ item }: { item: RotationDashboardRow }): React.JSX.Element {
+  return (
+    <button
+      type="button"
+      data-testid={`experiments-rotation-row-${item.experimentId}`}
+      onClick={() => useNavigationStore.getState().openExperimentComparison(item.experimentId)}
+      className="flex w-full items-center justify-between gap-2 rounded-button px-2 py-1.5 text-left text-xs hover:bg-surface-hover"
+    >
+      <span className="truncate text-text-secondary">{item.armLabels.join(' vs ')}</span>
+      <span className="flex flex-shrink-0 items-center gap-2 text-text-tertiary">
+        <span>{item.runCount} runs</span>
+        {item.winnerLabel !== null && (
+          <span className="rounded-full border border-border-primary px-1.5 py-px text-[10px] font-medium uppercase">
+            {item.winnerLabel}
+          </span>
+        )}
+        <span
+          className={cn(
+            'rounded-full border px-1.5 py-px text-[10px] font-medium uppercase',
+            item.status === 'decided'
+              ? 'border-status-success/40 text-status-success'
+              : item.status === 'abandoned' || item.status === 'superseded'
+                ? 'border-text-tertiary/40 text-text-tertiary'
+                : 'border-interactive/40 text-interactive',
+          )}
+        >
+          {STATUS_LABEL[item.status]}
+        </span>
+        <span>{new Date(item.createdAt).toLocaleDateString()}</span>
+      </span>
+    </button>
+  );
+}
+
+function RandomizedRotationsList(): React.JSX.Element | null {
+  const [items, setItems] = useState<RotationDashboardRow[] | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    // Rotation experiments are cross-project — no projectFilter param, and the
+    // list renders regardless of the section's project filter.
+    trpc.cyboflow.experiments.listRotationsForDashboard
+      .query({})
+      .then((r) => {
+        if (alive) setItems(r);
+      })
+      .catch(() => {
+        if (alive) setItems([]);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Never render an empty list.
+  if (items === null || items.length === 0) return null;
+
+  const running = items.filter((it) => it.status === 'running');
+  const settled = items.filter((it) => it.status !== 'running');
+
+  return (
+    <div className="flex flex-col gap-2">
+      <h4 className="text-sm font-semibold text-text-primary">Randomized rotations</h4>
+      <div className="divide-y divide-border-primary/60 rounded-card border border-border-primary" data-testid="experiments-rotations-list">
+        {[...running, ...settled].map((item) => (
+          <RotationRow key={item.experimentId} item={item} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -367,6 +448,8 @@ export function ExperimentsSection(): React.JSX.Element {
           ))}
         </div>
       )}
+
+      <RandomizedRotationsList />
 
       <div className="flex flex-col gap-2">
         <h4 className="text-sm font-semibold text-text-primary">Past experiments</h4>
