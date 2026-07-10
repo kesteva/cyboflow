@@ -31,16 +31,16 @@ beforeEach(() => {
 });
 
 describe('SubstrateSelector — no forced pin', () => {
-  it('renders workflow runtimes with Codex SDK enabled and Codex PTY disabled', () => {
+  it('renders workflow runtimes with both Codex runtimes disabled', () => {
     const onChange = vi.fn();
     render(<SubstrateSelector value="claude-sdk" onChange={onChange} />);
 
     expect(screen.getByRole('combobox', { name: /select agent runtime/i })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /Claude SDK/i })).not.toBeDisabled();
     expect(screen.getByRole('option', { name: /Claude interactive/i })).not.toBeDisabled();
-    expect(screen.getByRole('option', { name: /Codex SDK/i })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).toBeDisabled();
-    expect(screen.getByText(/Codex SDK can run workflows/i)).toBeInTheDocument();
+    expect(screen.getByText(/Workflows currently use Claude/i)).toBeInTheDocument();
     expect(screen.queryByTestId('substrate-locked')).not.toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
   });
@@ -51,6 +51,14 @@ describe('SubstrateSelector — no forced pin', () => {
     expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
     expect(screen.getByText(/Codex PTY can start quick sessions/i)).toBeInTheDocument();
+  });
+
+  it('keeps Codex PTY available on the mixed launcher while disabling Codex SDK', () => {
+    render(<SubstrateSelector value="claude-sdk" onChange={vi.fn()} runtimeScope="mixed" />);
+
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
+    expect(screen.getByText(/Codex PTY starts quick sessions/i)).toBeInTheDocument();
   });
 
   it('ignores programmatic changes to a runtime disabled for the current scope', () => {

@@ -18,8 +18,13 @@ import type { LoggerLike, DatabaseLike } from './types';
 import type { PermissionMode, WorkflowRow, WorkflowRunRow, CyboflowWorkflowName, WorkflowDefinition } from '../../../shared/types/workflows';
 import { isCyboflowWorkflowName, resolveWorkflowDefinition } from '../../../shared/types/workflows';
 import type { CliSubstrate } from '../../../shared/types/substrate';
-import type { AgentProvider, WorkflowAgentRuntime } from '../../../shared/types/agentRuntime';
-import { claudeRuntimeFromSubstrate } from '../../../shared/types/agentRuntime';
+import {
+  WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE,
+  claudeRuntimeFromSubstrate,
+  isWorkflowRuntimeSupported,
+  type AgentProvider,
+  type WorkflowAgentRuntime,
+} from '../../../shared/types/agentRuntime';
 import { normalizeAgentModelSelection } from '../../../shared/types/agentModels';
 import type { ExecutionModel } from '../../../shared/types/executionModel';
 import type {
@@ -1028,10 +1033,10 @@ export class WorkflowRegistry {
     });
 
     // Provider/runtime are the forward-compatible agent route. During the
-    // migration window, Claude runtimes project to the legacy substrate and a
-    // Codex SDK workflow stores provider/runtime while keeping substrate='sdk'
-    // for compatibility with substrate-only caps, session stamps, and dispatch
-    // seams. Demo mode ignores every provider/runtime request: its scripted
+    // migration window, Claude runtimes project to the legacy substrate. The
+    // persisted Codex SDK shape remains for old rows and internal fixtures, but
+    // createRun rejects it below until provider-specific workflow prompts ship.
+    // Demo mode ignores every provider/runtime request: its scripted
     // manager consumes Claude-shaped events, and no persisted run may resolve to
     // a real Codex dispatch route.
     const demoMode = this.config?.isDemoMode?.() === true;
@@ -1053,6 +1058,12 @@ export class WorkflowRegistry {
     }
     const codexSdkRequested =
       requestedAgentProvider === 'codex' || requestedAgentRuntime === 'codex-sdk';
+    const effectiveRequestedRuntime: WorkflowAgentRuntime | undefined = codexSdkRequested
+      ? 'codex-sdk'
+      : requestedAgentRuntime;
+    if (effectiveRequestedRuntime && !isWorkflowRuntimeSupported(effectiveRequestedRuntime)) {
+      throw new Error(`WorkflowRegistry.createRun: ${WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE}`);
+    }
     const substrateFromRuntime: CliSubstrate | undefined =
       requestedAgentRuntime === 'claude-interactive'
         ? 'interactive'

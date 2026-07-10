@@ -87,7 +87,10 @@ import { UltracodeCard } from './UltracodeCard';
 import { buildWorkflowMeta, DEFAULT_WORKFLOW_NAME } from './workflowMeta';
 import type { WorkflowCardMeta } from './workflowMeta';
 import { DEFAULT_SUBSTRATE } from '../../../../../shared/types/substrate';
-import { DEFAULT_SESSION_AGENT_RUNTIME } from '../../../../../shared/types/agentRuntime';
+import {
+  DEFAULT_SESSION_AGENT_RUNTIME,
+  WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE,
+} from '../../../../../shared/types/agentRuntime';
 import type { LaunchAgentRuntime } from '../agentRuntimeUi';
 import {
   isCodexRuntime,
@@ -234,7 +237,10 @@ export default function SessionStartWizard(): React.JSX.Element {
   const [model, setModel] = useState<string>(DEFAULT_QUICK_MODEL);
   const [fastMode, setFastMode] = useState<boolean>(false);
   useEffect(() => {
-    if (selection?.kind === 'workflow' && agentRuntime === 'codex-pty') {
+    if (
+      selection?.kind === 'workflow' &&
+      workflowRuntimeForLaunch(agentRuntime) === null
+    ) {
       setAgentRuntime(DEFAULT_SESSION_AGENT_RUNTIME);
     }
     if (selection?.kind === 'quick' && quickSessionRuntimeForLaunch(agentRuntime) === null) {
@@ -547,7 +553,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       try {
         const workflowRuntime = workflowRuntimeForLaunch(agentRuntime);
         if (workflowRuntime === null) {
-          throw new Error('Codex PTY is available for quick sessions only. Choose a workflow runtime to start a run.');
+          throw new Error(WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE);
         }
         const launchSubstrate = substrateForRuntime(workflowRuntime);
         // Ensure the run executes INSIDE a session. This wizard IS the explicit
@@ -640,7 +646,7 @@ export default function SessionStartWizard(): React.JSX.Element {
       try {
         const workflowRuntime = workflowRuntimeForLaunch(agentRuntime);
         if (workflowRuntime === null) {
-          throw new Error('Codex PTY is available for quick sessions only. Choose a workflow runtime to start a run.');
+          throw new Error(WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE);
         }
         const launchSubstrate = substrateForRuntime(workflowRuntime);
         // forceNew: the wizard always starts a NEW session (see launchRun).
@@ -688,7 +694,7 @@ export default function SessionStartWizard(): React.JSX.Element {
     if (selection.kind === 'quick') {
       const sessionRuntime = quickSessionRuntimeForLaunch(agentRuntime);
       if (sessionRuntime === null) {
-        setLaunchError('Codex SDK is available for workflow runs only. Choose Codex PTY or a Claude runtime for a quick session.');
+        setLaunchError('Codex SDK is not available in v1. Choose Codex PTY or a Claude runtime for a quick session.');
         return;
       }
       // Fast mode is Opus-only; never request it for another model even if the
@@ -803,6 +809,8 @@ export default function SessionStartWizard(): React.JSX.Element {
 
   // ── CTA label / disabled ─────────────────────────────────────────────────
   const ctaBusy = isLaunching || isQuickStarting;
+  const workflowRuntimeBlocked =
+    selection?.kind === 'workflow' && workflowRuntimeForLaunch(agentRuntime) === null;
   const effectiveRuntime: LaunchAgentRuntime =
     selection?.kind === 'ultracode' ? 'claude-interactive' : agentRuntime;
   const effectiveProvider = providerForRuntime(effectiveRuntime);
@@ -1378,7 +1386,7 @@ export default function SessionStartWizard(): React.JSX.Element {
               <button
                 type="button"
                 onClick={handleStart}
-                disabled={selection === null || ctaBusy}
+                disabled={selection === null || ctaBusy || workflowRuntimeBlocked}
                 data-testid="wizard-cta"
                 className="w-full bg-interactive px-4 py-2 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
               >

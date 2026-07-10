@@ -3,6 +3,7 @@ import type {
   SessionAgentRuntime,
   WorkflowAgentRuntime,
 } from '../../../../shared/types/agentRuntime';
+import { isWorkflowRuntimeSupported } from '../../../../shared/types/agentRuntime';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 
 export type LaunchAgentRuntime = SessionAgentRuntime | WorkflowAgentRuntime;
@@ -18,7 +19,8 @@ export function substrateForRuntime(runtime: LaunchAgentRuntime): CliSubstrate |
 }
 
 export function workflowRuntimeForLaunch(runtime: LaunchAgentRuntime): WorkflowAgentRuntime | null {
-  return runtime === 'codex-pty' ? null : runtime;
+  if (runtime === 'codex-pty') return null;
+  return isWorkflowRuntimeSupported(runtime) ? runtime : null;
 }
 
 export function quickSessionRuntimeForLaunch(runtime: LaunchAgentRuntime): SessionAgentRuntime | null {

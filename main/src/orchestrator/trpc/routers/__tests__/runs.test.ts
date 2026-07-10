@@ -53,6 +53,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { isAsyncIterable, callProcedure } from '@trpc/server/unstable-core-do-not-import';
 import type Database from 'better-sqlite3';
 import { TRPCError } from '@trpc/server';
+import { WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE } from '../../../../../../shared/types/agentRuntime';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -336,7 +337,7 @@ describe('cyboflow.runs.start', () => {
     }
   });
 
-  it('accepts codex-sdk workflows and forwards the SDK substrate compatibility stamp plus provider/runtime', async () => {
+  it('rejects codex-sdk workflow launches before calling the launcher', async () => {
     const launchMock = vi.fn().mockResolvedValue({
       runId: 'run-start-codex',
       worktreePath: '/tmp/wt/codex',
@@ -350,33 +351,34 @@ describe('cyboflow.runs.start', () => {
 
     try {
       const caller = appRouter.createCaller(createContext());
-      await caller.cyboflow.runs.start({
-        workflowId: 'wf-sprint',
-        projectId: 1,
-        sessionId: 'sess-1',
-        agentProvider: 'codex',
-        agentRuntime: 'codex-sdk',
-      });
-
-      expect(launchMock).toHaveBeenCalledOnce();
-      expect(launchMock).toHaveBeenCalledWith(
-        'wf-sprint',
-        '/projects/my-project',
-        'sdk',
-        undefined,
-        undefined,
-        'sess-1',
-        undefined,
-        undefined,
-        undefined,
-        1,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        'codex',
-        'codex-sdk',
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-sprint',
+          projectId: 1,
+          sessionId: 'sess-1',
+          agentProvider: 'codex',
+        }),
+      ).rejects.toSatisfy(
+        (err: unknown) =>
+          err instanceof TRPCError &&
+          err.code === 'BAD_REQUEST' &&
+          err.message === WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE,
       );
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-sprint',
+          projectId: 1,
+          sessionId: 'sess-1',
+          agentRuntime: 'codex-sdk',
+        }),
+      ).rejects.toSatisfy(
+        (err: unknown) =>
+          err instanceof TRPCError &&
+          err.code === 'BAD_REQUEST' &&
+          err.message === WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE,
+      );
+
+      expect(launchMock).not.toHaveBeenCalled();
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
@@ -446,7 +448,7 @@ describe('cyboflow.runs.start', () => {
     }
   });
 
-  it('preserves provider/runtime and model when restarting a failed Codex run', async () => {
+  it('rejects restart of a persisted failed Codex workflow run', async () => {
     const db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
     const { runId } = seedRun(db, {
@@ -479,26 +481,14 @@ describe('cyboflow.runs.start', () => {
 
     try {
       const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
-      await caller.cyboflow.runs.restart({ runId });
-
-      expect(launchMock).toHaveBeenCalledWith(
-        'wf-codex-restart',
-        '/projects/my-project',
-        'sdk',
-        undefined,
-        undefined,
-        'sess-1',
-        'acceptEdits',
-        undefined,
-        undefined,
-        1,
-        undefined,
-        undefined,
-        'gpt-5.5',
-        undefined,
-        'codex',
-        'codex-sdk',
+      await expect(caller.cyboflow.runs.restart({ runId })).rejects.toSatisfy(
+        (err: unknown) =>
+          err instanceof TRPCError &&
+          err.code === 'BAD_REQUEST' &&
+          err.message.includes(WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE),
       );
+
+      expect(launchMock).not.toHaveBeenCalled();
     } finally {
       setStartRunDeps({
         runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },

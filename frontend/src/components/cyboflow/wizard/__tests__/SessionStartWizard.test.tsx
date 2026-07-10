@@ -262,6 +262,7 @@ beforeEach(() => {
   });
   mockRunStart.mockClear();
   mockCreateQuick.mockClear();
+  mockEnsureSession.mockClear();
   modelAvailability.fableUnavailable = false;
   mockCreateQuick.mockResolvedValue({
     success: true,
@@ -312,7 +313,7 @@ describe('SessionStartWizard — step ③ adaptive controls', () => {
     const modelSelect = screen.getByLabelText('Select Claude model');
     expect(runtimeSelect).toBeInTheDocument();
     expect(runtimeSelect.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(screen.getByRole('option', { name: /Codex SDK/i })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).toBeDisabled();
     expect(screen.getByTestId('wizard-edit-flow')).toBeInTheDocument();
     expect(screen.getByTestId('wizard-new-flow')).toBeInTheDocument();
@@ -658,38 +659,21 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     );
   });
 
-  it('threads Codex SDK into a workflow launch without a Claude substrate', async () => {
+  it('does not select or launch the disabled Codex SDK workflow runtime', async () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
+    const runtimeSelect = screen.getByLabelText('Select agent runtime') as HTMLSelectElement;
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
+      fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
     });
 
-    expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
-    expect(screen.getByText('Codex decides when to ask')).toBeInTheDocument();
-    expect(screen.getByText(/Cyboflow review-queue permission prompts are Claude-only/i)).toBeInTheDocument();
-    expect(screen.queryByText('Native Claude classifier')).toBeNull();
-    expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('Codex SDK');
-
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('wizard-cta'));
-    });
-
-    expect(mockRunStart).toHaveBeenCalledOnce();
-    const startArg = mockRunStart.mock.calls[0][0] as Record<string, unknown>;
-    expect(startArg).toEqual(
-      expect.objectContaining({
-        workflowId: 'wf-1',
-        projectId: 1,
-        sessionId: 'session-ensured-001',
-        agentProvider: 'codex',
-        agentRuntime: 'codex-sdk',
-        permissionMode: 'default',
-        model: 'auto',
-      }),
-    );
-    expect(startArg).not.toHaveProperty('substrate');
+    expect(screen.getByLabelText('Select Claude model')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Select Codex model')).toBeNull();
+    expect(screen.getByTestId('wizard-launch-summary')).toHaveTextContent('Claude SDK');
+    expect(mockEnsureSession).not.toHaveBeenCalled();
+    expect(mockRunStart).not.toHaveBeenCalled();
   });
 
   it('seeds the permission selector from the global default', async () => {
@@ -745,39 +729,26 @@ describe('SessionStartWizard — step ③ launch threading', () => {
     );
   });
 
-  it('does not carry Codex SDK from workflow configure into a quick-session launch', async () => {
+  it('does not carry Codex PTY from quick configure into a workflow launch', async () => {
     await renderLockedWizard();
-    await selectWorkflowAndConfigure();
+    await selectQuickAndConfigure();
 
     await act(async () => {
-      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-sdk' } });
+      fireEvent.change(screen.getByLabelText('Select agent runtime'), { target: { value: 'codex-pty' } });
     });
     expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
 
     await act(async () => {
       fireEvent.click(screen.getByTestId('wizard-back-to-workflow'));
     });
-    await selectQuickAndConfigure();
+    await selectWorkflowAndConfigure();
 
     const runtimeSelect = screen.getByLabelText('Select agent runtime') as HTMLSelectElement;
     await waitFor(() => expect(runtimeSelect.value).toBe('claude-sdk'));
 
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('wizard-cta'));
-    });
-
+    expect(mockEnsureSession).not.toHaveBeenCalled();
     expect(mockRunStart).not.toHaveBeenCalled();
-    expect(mockCreateQuick).toHaveBeenCalledOnce();
-    const quickArg = mockCreateQuick.mock.calls[0][0] as unknown as Record<string, unknown>;
-    expect(quickArg).toEqual(
-      expect.objectContaining({
-        projectId: 1,
-        substrate: 'sdk',
-        agentProvider: 'claude',
-        agentRuntime: 'claude-sdk',
-      }),
-    );
-    expect(quickArg.agentRuntime).not.toBe('codex-sdk');
+    expect(mockCreateQuick).not.toHaveBeenCalled();
   });
 
   it('defaults the model to Opus, surfaces the fast-mode toggle (off), and threads both on launch', async () => {

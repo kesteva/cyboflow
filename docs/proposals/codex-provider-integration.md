@@ -49,16 +49,19 @@ Keep `sessions.substrate` and `workflow_runs.substrate` during the migration win
 
 Current v1 implementation decisions:
 
-- Workflow launches use `codex-sdk` for Codex. This gives Cyboflow structured events, resumable threads, usage accounting, and MCP workflow progress.
+- Workflow launches remain Claude-only. `codex-sdk` stays in persisted types and
+  internal fixtures but is rejected at UI, tRPC, registry creation, and restart.
 - Quick sessions may use `codex-pty` for an interactive terminal-style Codex experience.
-- Workflow PTY is intentionally unsupported. It does not provide the event, MCP, usage, and review-queue hooks workflows need.
+- Both Codex workflow runtimes are intentionally unsupported until prompt
+  compilation, human gates, MCP progress, and approval parity are proven.
 - `codex-exec` remains internal-only for diagnostics and fixture capture.
 - Codex auth starts with ChatGPT login. API-key auth is a later product/billing decision.
 
 ## Goals
 
 - Let users choose Claude or Codex as the session's default chat agent.
-- Let workflows run with their own provider/runtime/model plan, and keep the architecture capable of mixed Claude/Codex steps as a fast-follow after the v1 parity gates pass.
+- Keep the architecture capable of provider-scoped workflow plans without
+  exposing Codex workflows before the compatibility gates pass.
 - Preserve Cyboflow's product invariant: all human attention routes through the shared review queue.
 - Reuse the existing worktree, run lifecycle, MCP, raw event, message projection, review item, and usage infrastructure.
 - Keep Claude as the default and avoid behavior changes for existing users.
@@ -297,10 +300,10 @@ interface WorkflowAgentPlan {
 
 While a workflow is active, chat and workflow execution should route through the workflow's active agent invocation rather than the session default. When the workflow finishes, fails, or is cancelled, Cyboflow should release workflow ownership and route subsequent chat back to the session's pre-existing runtime agent.
 
-This makes these cases explicit:
+After the compatibility gate is lifted, this target model makes these cases explicit:
 
 - A plain session can use Claude SDK for normal chat.
-- The user can launch a workflow whose default is Codex SDK.
+- The user can launch a compiled workflow whose default is Codex SDK.
 - One workflow can run a planning step on Claude and an implementation or review step on Codex.
 - After workflow completion, the session returns to the Claude SDK agent it had before the workflow started.
 
@@ -497,7 +500,8 @@ Claude:
 Codex:
 
 - Runtime for quick sessions: Interactive PTY.
-- Runtime for workflows: SDK only.
+- Runtime for workflows in v1: unavailable. Keep `codex-sdk` as a persisted,
+  internal-fixture runtime until provider-specific workflow prompts compile.
 - Model: Auto, GPT-5.5, GPT-5.4 mini, Custom.
 - Permission mode: maps to Codex sandbox and approval policy internally.
 - Network/web search toggles.
@@ -506,13 +510,13 @@ Runtime should appear before model because available model choices can differ by
 
 Do not expose a separate Codex sandbox dropdown in the launch configure step if session permission settings already represent the same decision. Treat sandbox mode as provider-specific implementation detail behind the shared permission control.
 
-Codex PTY should be selectable only when the user is launching a quick session. If the user is launching a workflow, hide it or show it disabled with concise copy such as "Quick sessions only." Workflows should use `codex-sdk` because they need structured events, MCP workflow progress, usage accounting, and review queue integration.
+Codex PTY should be selectable only when the user is launching a quick session. If the user is launching a workflow, hide or disable both Codex runtimes with concise copy such as "Workflows currently use Claude." The backend must reject `codex-sdk` workflow creation and restart even when a caller bypasses the launch UI. Keep the runtime in shared and persisted unions for forward compatibility and internal fixtures.
 
 ### Workflow Configuration
 
-V1 workflow configuration should be run-scoped: a workflow chooses one provider/runtime/model setup for the whole workflow, and the session returns to its default agent afterward.
+V1 workflow configuration is Claude-only. A workflow still chooses one runtime/model setup for the whole run, and the session returns to its default agent afterward. Provider/runtime storage remains wider than the launch capability so existing rows and internal Codex fixtures continue to deserialize.
 
-Mixed-provider workflow steps should be a fast-follow after Codex event, MCP, and approval parity are proven. At that point, workflow definitions should have their own step-level agent configuration, separate from the session default:
+Codex workflow support should follow only after prompt compilation, event/MCP behavior, human gates, and approval parity are proven. At that point, workflow definitions should have their own step-level agent configuration, separate from the session default:
 
 - Workflow default provider/runtime/model.
 - Optional per-step provider/runtime/model overrides.
@@ -626,7 +630,8 @@ Exit criteria:
 - Add tRPC input fields with Claude defaults.
 - Add provider selector UI.
 - Add session default agent config backed by `sessions.agent_provider`, `sessions.agent_runtime`, and `sessions.agent_model`.
-- Add runtime capability guards so `codex-pty` is valid for quick sessions but invalid for workflows.
+- Add runtime capability guards so `codex-pty` is valid for quick sessions while
+  both Codex runtimes are invalid for workflow launch and restart in v1.
 - Keep workflow agent config run-scoped for v1. Document mixed-provider per-step config as a fast-follow, not as required v1 schema.
 - Keep all launches defaulting to Claude SDK.
 - Branch model alias resolution by provider so Claude aliases and Codex model names cannot collide.
@@ -639,7 +644,8 @@ Exit criteria:
 - Existing `sessions.substrate` and `workflow_runs.substrate` rows backfill to equivalent Claude provider/runtime values.
 - Existing model alias behavior remains unchanged for Claude.
 - Codex model choices do not pass through Claude-scoped alias resolution.
-- Workflow launch validation rejects `codex-pty`.
+- Workflow launch validation rejects `codex-pty` and `codex-sdk` with a clear
+  compatibility error, while persisted `codex-sdk` rows remain readable.
 - Quick-session launch validation accepts `codex-pty`.
 
 ### Phase 2: Provider-Neutral Event Boundary And Codex SDK Manager
@@ -657,14 +663,18 @@ Exit criteria:
 
 Exit criteria:
 
-- A Codex run starts from the UI, streams messages, writes raw events, and finishes cleanly.
+- An internal Codex SDK fixture starts, streams messages, writes raw events, and finishes cleanly without exposing workflow launch in the UI.
 - Claude and Codex both flow through the same normalized event pipeline.
 - Provider-specific code is isolated to adapters/managers.
 - Codex usage renders with provider-normalized usage and cost fields.
 - A Codex PTY quick session can launch and close without participating in workflow execution.
 
-### Phase 3: MCP And Workflow Progress
+### Phase 3: Prompt Compilation, MCP, And Workflow Progress
 
+- Compile effective workflow prompts and agents for Codex rather than sending
+  Claude `Agent` / `AskUserQuestion` instructions or `.claude/agents` bundles.
+- Prefer the programmatic execution plane first so the host owns sequencing,
+  fan-out, retries, and human gates.
 - Inject Cyboflow MCP config into Codex.
 - Verify `cyboflow_report_step`.
 - Verify entity writes and findings.
@@ -672,7 +682,7 @@ Exit criteria:
 
 Exit criteria:
 
-- Planner/Sprint/Compound/Ship can advance through the same MCP-driven workflow progress path under Codex.
+- Planner/Sprint/Compound/Ship pass provider-specific prompt and human-gate contract tests and advance through the same MCP-driven workflow progress path under Codex.
 - A session returns to its original default chat agent after workflow completion, failure, or cancellation.
 
 ### Phase 4: Review Queue Approval Bridge
@@ -703,6 +713,8 @@ Exit criteria:
 Add focused unit coverage first:
 
 - Provider/runtime resolver.
+- Workflow runtime compatibility gate across shared, tRPC, registry, restart,
+  and both launch surfaces.
 - DB migration parity for `sessions` and `workflow_runs`.
 - Provider-scoped model alias resolution.
 - Codex event normalizer fixtures.
@@ -735,9 +747,12 @@ Build Codex support as a provider/runtime expansion:
 
 1. Provider/runtime schema and UI.
 2. Provider-neutral event adapter.
-3. Codex SDK manager for workflows and Codex PTY manager for quick sessions.
-4. MCP parity.
-5. Review queue approval parity.
+3. Codex PTY manager for quick sessions plus internal Codex SDK fixtures.
+4. Provider-specific workflow prompt compilation and host-owned human gates.
+5. MCP and review queue approval parity.
+
+Until steps 4-5 pass their contract tests, gate `codex-sdk` from every workflow
+launch and restart. Do not present raw Codex turn execution as workflow parity.
 
 Use ChatGPT auth for the initial Codex integration. Keep `codex-exec` internal-only for diagnostics and fixture capture.
 

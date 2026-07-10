@@ -26,7 +26,12 @@ import { withRunFileErrorMapping } from '../runFileErrors';
 import type { RunFileEntry, RunFileContent, RunGitDiff } from '../../../../../shared/types/runFiles';
 import type { StreamEnvelope } from '../../../../../shared/types/claudeStream';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
-import type { AgentProvider, WorkflowAgentRuntime } from '../../../../../shared/types/agentRuntime';
+import {
+  WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE,
+  isWorkflowRuntimeSupported,
+  type AgentProvider,
+  type WorkflowAgentRuntime,
+} from '../../../../../shared/types/agentRuntime';
 import type { ExecutionModel } from '../../../../../shared/types/executionModel';
 import type { ExperimentArm } from '../../../../../shared/types/experiments';
 import type { SprintLaneRow, SprintLaneChangedEvent } from '../../../../../shared/types/sprintBatch';
@@ -319,7 +324,8 @@ export interface RunLauncherLike {
    * omitted the run pins no model and falls through to the SDK default.
    * `requestedAgentProvider` / `requestedAgentRuntime` carry the workflow's
    * run-scoped agent route. Omitted means the registry keeps the Claude default;
-   * `codex-sdk` maps to legacy substrate='sdk' for compatibility.
+   * `codex-sdk` remains in the wire type for persisted-row compatibility but is
+   * rejected by the v1 workflow capability gate.
    */
   launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[] }, requestedAgentProvider?: AgentProvider, requestedAgentRuntime?: WorkflowAgentRuntime): Promise<{
     runId: string;
@@ -853,8 +859,8 @@ export const runsRouter = router({
       projectId: z.number().int().positive(),
       substrate: z.enum(['sdk', 'interactive']).optional(),
       // Provider/runtime are the forward-compatible agent selection surface.
-      // Codex runtime execution is not wired yet; Claude runtimes project back to
-      // the existing substrate path during the migration window.
+      // Codex SDK remains valid persisted data but is rejected for v1 workflow
+      // launches below; Claude runtimes project onto the legacy substrate.
       agentProvider: z.enum(['claude', 'codex']).optional(),
       agentRuntime: z.enum(['claude-sdk', 'claude-interactive', 'codex-sdk']).optional(),
       // Optional native-task link (migration 014). When supplied, the launcher
@@ -988,6 +994,15 @@ export const runsRouter = router({
       }
       const codexSdkRequested =
         input.agentProvider === 'codex' || input.agentRuntime === 'codex-sdk';
+      const effectiveAgentRuntime: WorkflowAgentRuntime | undefined = codexSdkRequested
+        ? 'codex-sdk'
+        : input.agentRuntime;
+      if (effectiveAgentRuntime && !isWorkflowRuntimeSupported(effectiveAgentRuntime)) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE,
+        });
+      }
       const substrateFromRuntime =
         input.agentRuntime === 'claude-interactive'
           ? 'interactive'
@@ -1212,6 +1227,14 @@ export const runsRouter = router({
       // Only a terminally-FAILED run may restart — a running / rested / completed run
       // is not a restart candidate (the panel only shows the CTA for 'failed').
       if (row.status !== 'failed') return { noOp: true, reason: 'not_failed' };
+      const restartRuntime: WorkflowAgentRuntime | null =
+        row.agent_provider === 'codex' ? 'codex-sdk' : row.agent_runtime;
+      if (restartRuntime && !isWorkflowRuntimeSupported(restartRuntime)) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: `${WORKFLOW_RUNTIME_UNSUPPORTED_MESSAGE} Existing Codex workflow runs cannot be restarted.`,
+        });
+      }
       // A/B testing (migration 048): REFUSE restarting an experiment-tagged arm.
       // The arm's run identity is load-bearing for the experiment (its entity writes
       // are sandboxed by experiment_id); a fresh run would silently lose the tag and

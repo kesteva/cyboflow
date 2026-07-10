@@ -25,8 +25,8 @@
  *
  * Shared by WorkflowPicker (legacy modal) and SessionStartWizard step 3 so the
  * caveats text + lock behavior are single-sourced (no drift). `runtimeScope`
- * controls Codex availability: Codex SDK is workflow-only; Codex PTY is
- * quick-session-only.
+ * controls Codex availability: Codex SDK remains a forward-compatible stored
+ * runtime but is not launchable in v1; Codex PTY is quick-session-only.
  */
 import { useEffect } from 'react';
 import {
@@ -34,7 +34,11 @@ import {
   isWorkflowAgentRuntime,
 } from '../../../../shared/types/agentRuntime';
 import { useForcedSubstrate } from '../../hooks/useForcedSubstrate';
-import type { LaunchAgentRuntime } from './agentRuntimeUi';
+import {
+  quickSessionRuntimeForLaunch,
+  workflowRuntimeForLaunch,
+  type LaunchAgentRuntime,
+} from './agentRuntimeUi';
 
 /**
  * The v1 limits of the interactive PTY substrate, surfaced when 'interactive' is
@@ -62,19 +66,22 @@ interface SubstrateSelectorProps {
 }
 
 function isRuntimeDisabled(runtime: LaunchAgentRuntime, scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): boolean {
-  if (runtime === 'codex-sdk') return scope === 'session';
-  if (runtime === 'codex-pty') return scope === 'workflow';
-  return false;
+  if (scope === 'workflow') return workflowRuntimeForLaunch(runtime) === null;
+  if (scope === 'session') return quickSessionRuntimeForLaunch(runtime) === null;
+  return (
+    workflowRuntimeForLaunch(runtime) === null &&
+    quickSessionRuntimeForLaunch(runtime) === null
+  );
 }
 
 function scopeHelp(scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): string {
   if (scope === 'workflow') {
-    return 'Codex SDK can run workflows. Codex PTY is quick-session-only.';
+    return 'Workflows currently use Claude. Codex workflow support is coming later.';
   }
   if (scope === 'session') {
-    return 'Codex PTY can start quick sessions. Codex SDK is workflow-only.';
+    return 'Codex PTY can start quick sessions. Codex SDK is not available in v1.';
   }
-  return 'Codex SDK starts workflow runs. Codex PTY starts quick sessions.';
+  return 'Workflows currently use Claude. Codex PTY starts quick sessions.';
 }
 
 function InteractiveCaveats({ testId }: { testId: string }): React.JSX.Element {
@@ -162,7 +169,7 @@ export function SubstrateSelector({
         <option value="claude-sdk">Claude SDK (default)</option>
         <option value="claude-interactive">Claude interactive (PTY)</option>
         <option value="codex-sdk" disabled={isRuntimeDisabled('codex-sdk', runtimeScope)}>
-          Codex SDK — workflows only
+          Codex SDK — coming later
         </option>
         <option value="codex-pty" disabled={isRuntimeDisabled('codex-pty', runtimeScope)}>
           Codex PTY — quick sessions only

@@ -443,7 +443,7 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
     ]);
   });
 
-  it('renders an agent runtime selector before model, defaults to Claude SDK, and labels Codex runtime scope', async () => {
+  it('renders an agent runtime selector before model and gates Codex workflows', async () => {
     render(<WorkflowPicker projectId={1} />);
 
     const runtimeSelect = (await screen.findByLabelText('Select agent runtime')) as HTMLSelectElement;
@@ -452,9 +452,9 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
     expect(runtimeSelect.compareDocumentPosition(modelSelect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     // Default reflects ConfigManager.defaultSubstrate floor ('sdk').
     expect(runtimeSelect.value).toBe('claude-sdk');
-    expect(screen.getByRole('option', { name: /Codex SDK/i })).not.toBeDisabled();
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
     expect(screen.getByRole('option', { name: /Codex PTY/i })).not.toBeDisabled();
-    expect(screen.getByText(/Codex SDK starts workflow runs/i)).toBeInTheDocument();
+    expect(screen.getByText(/Workflows currently use Claude/i)).toBeInTheDocument();
     expect(screen.getByText('Native Claude classifier')).toBeInTheDocument();
   });
 
@@ -509,51 +509,27 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
     });
   });
 
-  it('threads Codex SDK into a workflow launch without a Claude substrate', async () => {
+  it('ignores attempts to select the disabled Codex SDK workflow runtime', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const runtimeSelect = await screen.findByLabelText('Select agent runtime');
+    const runtimeSelect = (await screen.findByLabelText('Select agent runtime')) as HTMLSelectElement;
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
     await act(async () => {
       fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
     });
 
-    expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
-    expect(screen.getByText('Codex decides when to ask')).toBeInTheDocument();
-    expect(screen.getByText(/Cyboflow review-queue permission prompts are Claude-only/i)).toBeInTheDocument();
-    expect(screen.queryByText('Native Claude classifier')).toBeNull();
-    const startRunBtn = await findEnabledStartRun();
-    expect(screen.getByTestId('quick-session-button')).toBeDisabled();
-
-    await act(async () => {
-      fireEvent.click(startRunBtn);
-    });
-
-    expect(mockRunStart).toHaveBeenCalledOnce();
-    const startArg = mockRunStart.mock.calls[0][0] as Record<string, unknown>;
-    expect(startArg).toEqual(
-      expect.objectContaining({
-        workflowId: 'wf-1',
-        projectId: 1,
-        agentProvider: 'codex',
-        agentRuntime: 'codex-sdk',
-        sessionId: 'session-quick-001',
-        permissionMode: 'default',
-        model: 'auto',
-      }),
-    );
-    expect(startArg).not.toHaveProperty('substrate');
+    expect(screen.getByLabelText('Select Claude model')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Select Codex model')).toBeNull();
+    expect(mockCreateQuick).not.toHaveBeenCalled();
+    expect(mockRunStart).not.toHaveBeenCalled();
   });
 
-  it('does not let Quick Session launch while Codex SDK is selected', async () => {
+  it('keeps Quick Session available because unsupported Codex SDK cannot be selected', async () => {
     render(<WorkflowPicker projectId={1} />);
 
-    const runtimeSelect = await screen.findByLabelText('Select agent runtime');
-    await act(async () => {
-      fireEvent.change(runtimeSelect, { target: { value: 'codex-sdk' } });
-    });
-
-    expect(screen.getByText(/Codex SDK is workflow-only/i)).toBeInTheDocument();
-    expect(screen.getByTestId('quick-session-button')).toBeDisabled();
+    await screen.findByLabelText('Select agent runtime');
+    expect(screen.getByRole('option', { name: /Codex SDK/i })).toBeDisabled();
+    expect(screen.getByTestId('quick-session-button')).not.toBeDisabled();
   });
 
   it('threads an explicit per-run model override (migration 037) into the mutate payload', async () => {
