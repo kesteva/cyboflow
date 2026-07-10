@@ -228,8 +228,8 @@ describe('projectTurnSessionEvent', () => {
       id: 'file-1',
       status: 'completed',
       changes: [
-        { path: 'added.ts', kind: 'add', diff: '+export {};' },
-        { path: 'updated.ts', kind: 'update', diff: '@@ -1 +1 @@' },
+        { path: 'added.ts', kind: { type: 'add' }, diff: '+export {};' },
+        { path: 'updated.ts', kind: { type: 'update', move_path: null }, diff: '@@ -1 +1 @@' },
       ],
     }))).toEqual([
       expect.objectContaining({
@@ -241,8 +241,8 @@ describe('projectTurnSessionEvent', () => {
           name: 'Edit',
           input: {
             changes: [
-              { path: 'added.ts', kind: 'add', diff: '+export {};' },
-              { path: 'updated.ts', kind: 'update', diff: '@@ -1 +1 @@' },
+              { path: 'added.ts', kind: { type: 'add' }, diff: '+export {};' },
+              { path: 'updated.ts', kind: { type: 'update', move_path: null }, diff: '@@ -1 +1 @@' },
             ],
           },
         }],
@@ -261,7 +261,7 @@ describe('projectTurnSessionEvent', () => {
       type: 'fileChange',
       id: 'file-2',
       status: 'failed',
-      changes: [{ path: 'failed.ts', kind: 'delete', diff: '' }],
+      changes: [{ path: 'failed.ts', kind: { type: 'delete' }, diff: '' }],
     }))[1]).toMatchObject({
       content: [{ type: 'tool_result', tool_call_id: 'file-2', is_error: true }],
     });

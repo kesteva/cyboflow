@@ -35,7 +35,14 @@ export type TurnSessionItem =
       type: 'fileChange';
       id: string;
       status: 'inProgress' | 'completed' | 'failed' | 'declined';
-      changes: Array<{ path: string; kind: 'add' | 'delete' | 'update'; diff: string }>;
+      changes: Array<{
+        path: string;
+        kind:
+          | { type: 'add' }
+          | { type: 'delete' }
+          | { type: 'update'; move_path: string | null };
+        diff: string;
+      }>;
     }
   | {
       type: 'mcpToolCall';
@@ -166,6 +173,20 @@ function parseStringArray(value: unknown): string[] | null {
     : null;
 }
 
+function parsePatchChangeKind(
+  value: unknown,
+): Extract<TurnSessionItem, { type: 'fileChange' }>['changes'][number]['kind'] | null {
+  if (!isRecord(value) || typeof value.type !== 'string') return null;
+  if (value.type === 'add' || value.type === 'delete') return { type: value.type };
+  if (
+    value.type === 'update'
+    && (typeof value.move_path === 'string' || value.move_path === null)
+  ) {
+    return { type: 'update', move_path: value.move_path };
+  }
+  return null;
+}
+
 function parseItem(value: unknown): TurnSessionItem | null {
   if (!isJsonValue(value)) return null;
   if (!isRecord(value) || typeof value.type !== 'string' || typeof value.id !== 'string') {
@@ -211,17 +232,18 @@ function parseItem(value: unknown): TurnSessionItem | null {
       ) {
         return rawItem(value);
       }
-      const changes: Array<{ path: string; kind: 'add' | 'delete' | 'update'; diff: string }> = [];
+      const changes: Extract<TurnSessionItem, { type: 'fileChange' }>['changes'] = [];
       for (const change of value.changes) {
+        const kind = isRecord(change) ? parsePatchChangeKind(change.kind) : null;
         if (
           !isRecord(change)
           || typeof change.path !== 'string'
-          || (change.kind !== 'add' && change.kind !== 'delete' && change.kind !== 'update')
+          || kind === null
           || typeof change.diff !== 'string'
         ) {
           return rawItem(value);
         }
-        changes.push({ path: change.path, kind: change.kind, diff: change.diff });
+        changes.push({ path: change.path, kind, diff: change.diff });
       }
       return { type: 'fileChange', id: value.id, status, changes };
     }

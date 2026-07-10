@@ -336,7 +336,7 @@ describe('CodexAppServerTurnSession', () => {
         type: 'fileChange',
         id: 'file',
         status: 'completed',
-        changes: [{ path: 'a.ts', kind: 'update', diff: '@@ change' }],
+        changes: [{ path: 'a.ts', kind: { type: 'update', move_path: null }, diff: '@@ change' }],
       },
       {
         type: 'mcpToolCall',
