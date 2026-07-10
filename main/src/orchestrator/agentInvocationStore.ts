@@ -126,15 +126,28 @@ export class AgentInvocationStore {
       return this.toResumeTarget(invocation);
     }
 
-    const legacy = this.db
-      .prepare(
-        `SELECT agent_provider AS provider,
-                agent_runtime AS runtime,
-                claude_session_id AS externalSessionId
-           FROM workflow_runs
-          WHERE id = ?`,
-      )
-      .get(runId) as LegacyResumeTargetRow | undefined;
+    let legacy: LegacyResumeTargetRow | undefined;
+    try {
+      legacy = this.db
+        .prepare(
+          `SELECT agent_provider AS provider,
+                  agent_runtime AS runtime,
+                  claude_session_id AS externalSessionId
+             FROM workflow_runs
+            WHERE id = ?`,
+        )
+        .get(runId) as LegacyResumeTargetRow | undefined;
+    } catch (error) {
+      if (!(error instanceof Error) || !/no such column:\s*agent_(provider|runtime)/i.test(error.message)) {
+        throw error;
+      }
+      const preProviderRow = this.db
+        .prepare('SELECT claude_session_id AS externalSessionId FROM workflow_runs WHERE id = ?')
+        .get(runId) as { externalSessionId: string | null } | undefined;
+      legacy = preProviderRow
+        ? { provider: 'claude', runtime: 'claude-sdk', ...preProviderRow }
+        : undefined;
+    }
     if (
       legacy?.provider !== 'claude' ||
       (legacy.runtime !== 'claude-sdk' && legacy.runtime !== 'claude-interactive')

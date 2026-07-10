@@ -230,12 +230,12 @@ describe('nudgeRunHandler — delivery', () => {
     const adapter: DatabaseLike = {
       prepare: (sql: string): PreparedStatement => {
         const stmt = real.prepare(sql);
-        if (sql.includes('SELECT id, status, claude_session_id')) {
+        if (sql.includes('SELECT id, status FROM workflow_runs')) {
           // Override only .get() to report awaiting_review; .run()/.all() delegate
           // to the real statement so the guarded UPDATE still hits the actual row.
           return {
             run: (...params: unknown[]) => stmt.run(...params),
-            get: () => ({ id: runId, status: 'awaiting_review', claude_session_id: 'sess-1' }),
+            get: () => ({ id: runId, status: 'awaiting_review' }),
             all: (...params: unknown[]) => stmt.all(...params),
           };
         }

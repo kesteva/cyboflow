@@ -1187,7 +1187,8 @@ export const runsRouter = router({
         .prepare(
           `SELECT workflow_id, project_id, status, substrate, session_id,
                   permission_mode_snapshot, model, task_id, seed_idea_id, seed_idea_ids, seed_finding_ids, batch_id,
-                  eval_enabled, variant_id, experiment_id, agent_provider, agent_runtime
+                  eval_enabled, variant_id, experiment_id, agent_provider, agent_runtime,
+                  execution_model
              FROM workflow_runs WHERE id = ?`,
         )
         .get(input.runId) as
@@ -1209,6 +1210,7 @@ export const runsRouter = router({
             experiment_id: string | null;
             agent_provider: AgentProvider | null;
             agent_runtime: WorkflowAgentRuntime | null;
+            execution_model: ExecutionModel | null;
           }
         | undefined;
       if (!row) return { noOp: true, reason: 'not_found' };
@@ -1283,11 +1285,13 @@ export const runsRouter = router({
         row.task_id ?? undefined,
         row.seed_idea_id ?? undefined,
         row.session_id,
-        row.permission_mode_snapshot ?? undefined,
+        // Restart must not overwrite the host session's live permission setting
+        // with the failed run's audit snapshot.
+        undefined,
         undefined,
         taskIds,
         row.project_id,
-        undefined,
+        row.execution_model ?? undefined,
         findingIds,
         row.model ?? undefined,
         // Copy the failed run's per-run eval pin (1/0 → true/false; NULL → inherit

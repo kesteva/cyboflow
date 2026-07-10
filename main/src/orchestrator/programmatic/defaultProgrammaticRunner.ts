@@ -192,6 +192,7 @@ export class DefaultProgrammaticRunner implements ProgrammaticRunner {
         runId: ctx.runId,
         worktreePath: ctx.worktreePath,
         workflowName: ctx.workflow.name,
+        ...(ctx.run.model ? { model: ctx.run.model } : {}),
         promptRenderContext: {
           provider: ctx.run.agent_provider ?? 'claude',
           runtime: ctx.run.agent_runtime ?? 'claude-sdk',

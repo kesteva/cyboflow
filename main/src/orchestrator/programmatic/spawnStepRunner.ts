@@ -81,6 +81,8 @@ export interface SpawnStepRunnerOptions {
    * the compatibility adapter around each fresh per-step prompt.
    */
   promptRenderContext?: WorkflowPromptRenderContext;
+  /** Provider-scoped model pinned on the owning workflow run. */
+  model?: string;
 }
 
 export class SpawnStepRunner implements StepRunner {
@@ -132,6 +134,8 @@ export class SpawnStepRunner implements StepRunner {
         runId: this.opts.runId,
         worktreePath: this.opts.worktreePath,
         prompt,
+        agentInvocationStepId: step.id,
+        ...(this.opts.model ? { model: this.opts.model } : {}),
         ...(agentPermissionMode ? { agentPermissionMode } : {}),
         // Additive per-lane spawn identity — forwarded ONLY when present so the
         // non-fan-out (no-item) case stays byte-identical; the spawner defaults

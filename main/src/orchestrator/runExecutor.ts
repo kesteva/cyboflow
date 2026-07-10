@@ -19,6 +19,7 @@ import { EventEmitter } from 'node:events';
 import type { LoggerLike } from './types';
 import type { WorkflowRow, WorkflowRunRow } from '../../../shared/types/workflows';
 import type { PermissionMode } from '../../../shared/types/workflows';
+import { AgentInvocationStore } from './agentInvocationStore';
 import type { ClaudeStreamEvent } from '../../../shared/types/claudeStream';
 import type { RunEventBridge, BridgeEventsOptions } from './runEventBridge';
 import { bridgeEvents as bridgeEventsImpl } from './runEventBridge';
@@ -186,6 +187,8 @@ export interface ClaudeSpawnerOptions {
    * SDK uses its own default (byte-identical to before migration 037).
    */
   model?: string;
+  /** Workflow step owning this concrete invocation; absent for run-level turns. */
+  agentInvocationStepId?: string;
 }
 
 /**
@@ -759,9 +762,9 @@ export class RunExecutor {
       // run (neither pending) this is undefined and the spawn options stay
       // byte-identical (zero-behavior-change floor).
       const resumeSessionId =
-        ((this.pendingNudge.has(runId) || this.pendingResume.has(runId)) &&
-          run.claude_session_id) ||
-        undefined;
+        this.pendingNudge.has(runId) || this.pendingResume.has(runId)
+          ? this.resolveResumeSessionId(runId, run.claude_session_id)
+          : undefined;
 
       try {
         await this.spawner.spawnCliProcess({
@@ -801,6 +804,12 @@ export class RunExecutor {
     } finally {
       this.teardownRun(runId);
     }
+  }
+
+  private resolveResumeSessionId(runId: string, legacyClaudeSessionId?: string | null): string | undefined {
+    if (!this.db) return legacyClaudeSessionId ?? undefined;
+    return new AgentInvocationStore(this.db).getLatestTopLevelResumeTarget(runId)
+      ?.externalSessionId ?? legacyClaudeSessionId ?? undefined;
   }
 
   /**

@@ -106,6 +106,7 @@ export class ApprovalNotFoundError extends Error {
 
 interface PendingEntry {
   request: ApprovalRequest;
+  source: string;
   /** Writes the decision to the bridge socket (closes the Claude tool-call wait). */
   socketReply: (decision: ApprovalDecision) => void;
   /** Resolves or rejects the Promise returned from requestApproval. */
@@ -335,6 +336,7 @@ export class ApprovalRouter extends EventEmitter {
         if (grabbed) {
           this.pending.set(approvalId, {
             request,
+            source,
             socketReply,
             resolve: resolveDecision,
             reject: rejectDecision,
@@ -639,6 +641,34 @@ export class ApprovalRouter extends EventEmitter {
       console.warn(
         `[ApprovalRouter] clearPendingForRun: DB sweep failed for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
       );
+    }
+  }
+
+  /** Settle only one transport invocation's approvals, preserving sibling lanes. */
+  clearPendingForSource(runId: string, source: string): void {
+    const denyDecision: ApprovalDecision = {
+      behavior: 'deny',
+      message: 'Agent invocation ended before approval could be processed',
+    };
+    const toClose = [...this.pending.entries()].filter(
+      ([, entry]) => entry.request.runId === runId && entry.source === source,
+    );
+    for (const [approvalId, entry] of toClose) {
+      this.pending.delete(approvalId);
+      try {
+        const now = new Date().toISOString();
+        this.db.prepare(
+          `UPDATE approvals SET status = 'rejected', decided_at = ?, decided_by = 'system'
+           WHERE id = ? AND status = 'pending'`,
+        ).run(now, approvalId);
+        resolvePermissionReviewItem(this.db, approvalId, 'system', 'invocation_terminated', now, runId);
+      } catch (err) {
+        console.warn(
+          `[ApprovalRouter] clearPendingForSource failed for ${approvalId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      entry.resolve(denyDecision);
+      this.emit('approvalDecided', { approvalId, decision: 'rejected' });
     }
   }
 

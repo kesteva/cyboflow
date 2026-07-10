@@ -28,6 +28,7 @@ import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import { countPendingBlockingReviewItems } from './reviewItemListing';
 import { TERMINAL_RUN_STATUSES } from '../../../shared/types/cyboflow';
+import { AgentInvocationStore } from './agentInvocationStore';
 
 // ---------------------------------------------------------------------------
 // Collaborator interfaces
@@ -109,7 +110,6 @@ export type NudgeRunResult =
 interface NudgeRunRow {
   id: string;
   status: string;
-  claude_session_id: string | null;
 }
 
 const TERMINAL_STATUSES = new Set<string>(TERMINAL_RUN_STATUSES);
@@ -163,7 +163,7 @@ export async function nudgeRunHandler(
   // Phase 1: guards + the running flip, serialized inside the per-run PQueue.
   const guardResult = await runQueues.getOrCreate(runId).add(async () => {
     const row = db
-      .prepare('SELECT id, status, claude_session_id FROM workflow_runs WHERE id = ?')
+      .prepare('SELECT id, status FROM workflow_runs WHERE id = ?')
       .get(runId) as NudgeRunRow | undefined;
 
     if (!row) {
@@ -181,7 +181,7 @@ export async function nudgeRunHandler(
     if (countPendingBlockingReviewItems(db, runId, opts.ignoreBlockingReviewItemId) > 0) {
       return { ok: false as const, reason: 'blocked' as const };
     }
-    if (!row.claude_session_id) {
+    if (!new AgentInvocationStore(db).getLatestTopLevelResumeTarget(runId)) {
       return { ok: false as const, reason: 'no_session' as const };
     }
 

@@ -471,18 +471,6 @@ export class CodexSdkManager extends AbstractCliManager {
         'Codex ChatGPT account check',
       );
       requireCodexChatGptAccount(accountResponse);
-      new AgentInvocationStore(this.db).createInvocation({
-        agentInvocationId,
-        runId,
-        stepId: (options as ClaudeSpawnerOptions & { agentInvocationStepId?: string })
-          .agentInvocationStepId,
-        provider: 'codex',
-        runtime: 'codex-sdk',
-        model: resolveAgentModelAlias('codex', options.model),
-      });
-      if (options.resumeSessionId) {
-        this.captureInvocationCodexThreadId(runId, agentInvocationId, options.resumeSessionId);
-      }
       const thread = options.resumeSessionId
         ? await withTimeout(
             turnSession.resumeThread(buildCodexAppServerThreadResumeParams(
@@ -500,6 +488,14 @@ export class CodexSdkManager extends AbstractCliManager {
             'Codex app-server thread start',
           );
       threadId = thread.threadId;
+      new AgentInvocationStore(this.db).createInvocation({
+        agentInvocationId,
+        runId,
+        stepId: options.agentInvocationStepId,
+        provider: 'codex',
+        runtime: 'codex-sdk',
+        model: resolveAgentModelAlias('codex', options.model),
+      });
       this.captureInvocationCodexThreadId(runId, agentInvocationId, thread.threadId);
       this.emitProjected(
         router,

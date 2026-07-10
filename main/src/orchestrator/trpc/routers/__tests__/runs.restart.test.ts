@@ -91,8 +91,9 @@ describe('cyboflow.runs.restart', () => {
       branchName: 'cyboflow/planner/new',
     });
     // Full-form launch: workflow, project path, substrate, taskId(undef), ideaId,
-    // sessionId, permissionMode, baseBranch(undef), seedTaskIds(undef), projectId,
-    // requestedExecutionModel(undef), findingIds(undef), model, evalEnabled
+    // sessionId, permissionMode(undef: preserve live session setting),
+    // baseBranch(undef), seedTaskIds(undef), projectId,
+    // requestedExecutionModel, findingIds(undef), model, evalEnabled
     // (per-run pin 1 → true; NULL would thread undefined = inherit global),
     // verifyEnabled (restart always threads undefined — verify_enabled is the
     // resolved posture, not a request, so a restart re-inherits it),
@@ -103,7 +104,7 @@ describe('cyboflow.runs.restart', () => {
     expect(launchMock).toHaveBeenCalledOnce();
     expect(launchMock).toHaveBeenCalledWith(
       workflowId, '/projects/p', 'interactive', undefined, 'IDEA-9', 'sess-host',
-      'acceptEdits', undefined, undefined, 1, undefined, undefined, 'opus', true,
+      undefined, undefined, undefined, 1, 'orchestrated', undefined, 'opus', true,
       undefined, { baseline: true }, 'claude', 'claude-interactive',
     );
 

@@ -40,7 +40,19 @@ describe('SpawnStepRunner', () => {
     expect(passed.panelId).toBe('r');
     expect(passed.worktreePath).toBe('/wt');
     expect(passed.agentPermissionMode).toBe('auto');
+    expect(passed.agentInvocationStepId).toBe('epics');
     expect(passed.prompt).toContain('`epics`'); // the step-scoped prompt
+  });
+
+  it('threads the run model into each step invocation', async () => {
+    const spawner = makeSpawner();
+    const runner = new SpawnStepRunner(spawner, { ...opts, model: 'gpt-5.6-codex' });
+
+    await runner.runStep(step({ id: 'review' }), ctx);
+
+    const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(passed.model).toBe('gpt-5.6-codex');
+    expect(passed.agentInvocationStepId).toBe('review');
   });
 
   it('wraps Codex programmatic step prompts with the runtime adapter', async () => {

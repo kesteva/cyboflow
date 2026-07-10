@@ -42,6 +42,7 @@
  */
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
+import { AgentInvocationStore } from './agentInvocationStore';
 
 // ---------------------------------------------------------------------------
 // Dependency bag
@@ -122,7 +123,6 @@ export type PauseRunResult =
 interface PauseRunRow {
   status: string;
   substrate: string | null;
-  claude_session_id: string | null;
   execution_model: 'orchestrated' | 'programmatic' | null;
 }
 
@@ -199,7 +199,7 @@ export async function pauseRunHandler(
   // (a) Fetch the run row.
   const row = db
     .prepare(
-      'SELECT status, substrate, claude_session_id, execution_model FROM workflow_runs WHERE id = ?',
+      'SELECT status, substrate, execution_model FROM workflow_runs WHERE id = ?',
     )
     .get(runId) as PauseRunRow | undefined;
 
@@ -229,7 +229,7 @@ export async function pauseRunHandler(
   // re-drive it, so refuse the pause up front rather than stranding the run in a
   // non-resumable state. A PROGRAMMATIC run skips this — its resume path threads
   // step pointers, never a conversation id.
-  if (!isProgrammatic && !row.claude_session_id) {
+  if (!isProgrammatic && !new AgentInvocationStore(db).getLatestTopLevelResumeTarget(runId)) {
     return { noOp: true as const, reason: 'no_session' };
   }
 

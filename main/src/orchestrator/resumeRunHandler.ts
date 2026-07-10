@@ -46,6 +46,7 @@
  */
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
+import { AgentInvocationStore } from './agentInvocationStore';
 
 // ---------------------------------------------------------------------------
 // Collaborator interfaces
@@ -117,7 +118,6 @@ export type ResumeRunResult =
 interface ResumeRunRow {
   status: string;
   substrate: string | null;
-  claude_session_id: string | null;
   execution_model: 'orchestrated' | 'programmatic' | null;
   current_step_id: string | null;
 }
@@ -168,7 +168,7 @@ export async function resumeRunHandler(
   const guardResult = await runQueues.getOrCreate(runId).add(async () => {
     const row = db
       .prepare(
-        'SELECT status, substrate, claude_session_id, execution_model, current_step_id FROM workflow_runs WHERE id = ?',
+        'SELECT status, substrate, execution_model, current_step_id FROM workflow_runs WHERE id = ?',
       )
       .get(runId) as ResumeRunRow | undefined;
 
@@ -188,7 +188,7 @@ export async function resumeRunHandler(
     const isProgrammatic = row.execution_model === 'programmatic';
     // ORCHESTRATED only: no captured SDK conversation id → nothing to --resume. A
     // PROGRAMMATIC run resumes via step pointers, so it skips this guard.
-    if (!isProgrammatic && !row.claude_session_id) {
+    if (!isProgrammatic && !new AgentInvocationStore(db).getLatestTopLevelResumeTarget(runId)) {
       return { ok: false as const, reason: 'no_session' as const };
     }
 
