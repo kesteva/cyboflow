@@ -146,6 +146,33 @@ describe('detectClaudeCredentials', () => {
       expect(result.found).toBe(false);
     });
 
+    it('rejects stale/partial markers with no concrete value', async () => {
+      keychainReturns(new Error('exit 44'));
+      mockStatSync.mockImplementation(() => {
+        throw new Error('ENOENT');
+      });
+      const staleConfigs = [
+        { oauthAccount: {} },
+        { userID: null },
+        { userID: '' },
+        { userID: '   ' },
+        { oauthAccount: { emailAddress: '', displayName: '' }, userID: '' },
+      ];
+      for (const config of staleConfigs) {
+        mockReadFileSync.mockReturnValue(JSON.stringify(config));
+        expect((await detectClaudeCredentials()).found).toBe(false);
+      }
+    });
+
+    it('accepts an oauthAccount whose only concrete field is accountUuid (no label)', async () => {
+      keychainReturns(new Error('exit 44'));
+      mockStatSync.mockImplementation(() => {
+        throw new Error('ENOENT');
+      });
+      mockReadFileSync.mockReturnValue(JSON.stringify({ oauthAccount: { accountUuid: 'acc-uuid-1' } }));
+      expect(await detectClaudeCredentials()).toEqual({ found: true, source: 'claudeConfig', account: null });
+    });
+
     it('treats a zero-byte credentials file as absent', async () => {
       keychainReturns(new Error('exit 44'));
       mockStatSync.mockReturnValue({ isFile: () => true, size: 0 });

@@ -63,11 +63,19 @@ function fileHasContent(p: string): boolean {
   }
 }
 
+/** Non-empty (after trim) string — the bar for a "concrete" marker value. */
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
 /**
  * Parse ~/.claude.json and look for a Claude-login marker: an `oauthAccount`
- * object and/or a top-level `userID`. Returns the account label
- * (oauthAccount.emailAddress, falling back to displayName) when present. Only
- * these non-secret label fields are ever read out of the file.
+ * object and/or a top-level `userID`. A marker only counts when it carries a
+ * CONCRETE value — a stale/partial config like `{ "oauthAccount": {} }` or
+ * `{ "userID": null }` must NOT report a login, or onboarding tells the user
+ * they are connected when no credential exists anywhere. Returns the account
+ * label (oauthAccount.emailAddress, falling back to displayName) when present.
+ * Only these non-secret label fields are ever read out of the file.
  */
 function probeClaudeConfig(homeDir: string): ClaudeCredentialDetection | null {
   const configPath = path.join(homeDir, '.claude.json');
@@ -84,13 +92,20 @@ function probeClaudeConfig(homeDir: string): ClaudeCredentialDetection | null {
     typeof record.oauthAccount === 'object' && record.oauthAccount !== null
       ? (record.oauthAccount as Record<string, unknown>)
       : null;
-  const hasLoginMarker = oauthAccount !== null || 'userID' in record;
+  const oauthAccountIsConcrete =
+    oauthAccount !== null &&
+    (nonEmptyString(oauthAccount.emailAddress) ||
+      nonEmptyString(oauthAccount.displayName) ||
+      nonEmptyString(oauthAccount.accountUuid));
+  const hasLoginMarker = oauthAccountIsConcrete || nonEmptyString(record.userID);
   if (!hasLoginMarker) return null;
 
-  const label =
-    (oauthAccount && typeof oauthAccount.emailAddress === 'string' && oauthAccount.emailAddress) ||
-    (oauthAccount && typeof oauthAccount.displayName === 'string' && oauthAccount.displayName) ||
-    null;
+  let label: string | null = null;
+  if (oauthAccount && nonEmptyString(oauthAccount.emailAddress)) {
+    label = oauthAccount.emailAddress;
+  } else if (oauthAccount && nonEmptyString(oauthAccount.displayName)) {
+    label = oauthAccount.displayName;
+  }
   return { found: true, source: 'claudeConfig', account: label };
 }
 
