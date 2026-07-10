@@ -2131,9 +2131,15 @@ app.whenReady().then(async () => {
     console.log('[Main] QuestionRouter initialized');
 
     // Boot recovery: any awaiting_input rows from a previous session have a dead SDK session.
+    // Split counts: `resumable` are rested in awaiting_review (nudge-resumable, NOT a
+    // force-fail); `failed` are force-failed with app_restart. Only `failed` feeds the
+    // boot-recovery force-fail aggregate below.
     const staleQuestionsRecovered = QuestionRouter.getInstance().recoverStaleAwaitingInput();
-    if (staleQuestionsRecovered > 0) {
-      console.log(`[Main] Recovered ${staleQuestionsRecovered} stale awaiting_input run(s) on boot`);
+    if (staleQuestionsRecovered.resumable + staleQuestionsRecovered.failed > 0) {
+      console.log(
+        `[Main] Recovered ${staleQuestionsRecovered.resumable + staleQuestionsRecovered.failed} stale awaiting_input run(s) on boot ` +
+          `(${staleQuestionsRecovered.resumable} resumable, ${staleQuestionsRecovered.failed} failed)`,
+      );
     }
 
     // Boot recovery: any awaiting_review rows from a previous session have a dead socket.
@@ -2157,8 +2163,15 @@ app.whenReady().then(async () => {
     // runs were force-failed with the synthetic 'app_restart' reason — the prior
     // process crashed, so no per-run error object exists). Count is bucketed to
     // keep tag cardinality low; a spike here signals frequent unclean shutdowns.
+    // Includes ALL three app_restart force-fail paths: stale awaiting_review
+    // (recoveredCount), active-state orphans, AND the FAILED (unresumable) subset
+    // of stale awaiting_input — but NOT the resumable awaiting_input runs, which
+    // are rested in awaiting_review rather than failed.
     const bootForceFailed =
-      recoveredCount + orphanRecovery.runningRecovered + orphanRecovery.startingRecovered;
+      recoveredCount +
+      orphanRecovery.runningRecovered +
+      orphanRecovery.startingRecovered +
+      staleQuestionsRecovered.failed;
     if (bootForceFailed > 0) {
       const countBucket =
         bootForceFailed === 1 ? '1' : bootForceFailed <= 5 ? '2-5' : bootForceFailed <= 20 ? '6-20' : '20+';

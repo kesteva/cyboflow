@@ -698,10 +698,13 @@ describe('QuestionRouter', () => {
     // R4 also has a session but was last touched long ago → past the age cap.
     db.prepare("UPDATE workflow_runs SET claude_session_id = 'sess-old', updated_at = datetime('now','-30 days') WHERE id = ?").run('qrun-R4');
 
-    const count = router.recoverStaleAwaitingInput();
+    const result = router.recoverStaleAwaitingInput();
 
-    // All three awaiting_input rows were recovered (the running one was not).
-    expect(count).toBe(3);
+    // All three awaiting_input rows were recovered (the running one was not),
+    // split by resumability: R1 (fresh + session) rests resumable; R2 (sessionless)
+    // and R4 (stale) are force-failed. Only `failed` feeds the boot force-fail
+    // telemetry aggregate.
+    expect(result).toEqual({ resumable: 1, failed: 2 });
 
     // R1 is reopenable: rests in awaiting_review (NOT failed), session preserved.
     const r1 = db

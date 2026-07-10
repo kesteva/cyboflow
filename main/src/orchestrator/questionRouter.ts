@@ -1288,9 +1288,12 @@ export class QuestionRouter extends EventEmitter {
    * consistency + no lingering blocking items). A resumable run re-opens via a
    * fresh nudge turn, not by answering the stale gate.
    *
-   * Returns the total number of workflow_runs rows transitioned.
+   * Returns the split counts: `resumable` runs rested in awaiting_review (NOT a
+   * force-fail — nudge-resumable) and `failed` runs force-failed with
+   * error_message='app_restart'. The boot-recovery telemetry aggregate counts
+   * ONLY `failed` (see index.ts), so the two must stay separate.
    */
-  recoverStaleAwaitingInput(): number {
+  recoverStaleAwaitingInput(): { resumable: number; failed: number } {
     const resolvedReviewItemIds: string[] = [];
     // Durable recovery gates minted for RESUMABLE runs below, emitted AFTER the
     // transaction commits (mirrors clearPendingForRun's minted-then-emit order).
@@ -1432,7 +1435,7 @@ export class QuestionRouter extends EventEmitter {
         `${failed} failed (no session / stale > ${STALE_RESUMABLE_RECOVERY_DAYS}d)`,
       );
     }
-    return total;
+    return { resumable, failed };
   }
 
   /**
