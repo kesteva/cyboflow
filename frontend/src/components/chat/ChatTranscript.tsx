@@ -84,6 +84,15 @@ export interface ChatTranscriptProps {
   showSystemMessages?: boolean;
   /** Whether to render the thinking placeholder / inline working indicator at the tail. */
   isWaitingForResponse?: boolean;
+  /**
+   * Transient progressive-render node (LiveTail) for the in-flight assistant
+   * message, rendered in place of ThinkingPlaceholder/InlineWorkingIndicator
+   * while `isWaitingForResponse`. The caller (UnifiedChatView, fed by
+   * RunChatView/ClaudePanel) is responsible for only passing a non-null node
+   * once it has actual content — a null/undefined value here falls back to
+   * the existing placeholder/indicator.
+   */
+  liveTail?: React.ReactNode;
 
   /** Per-message collapse state (keyed by message id). Owned by the caller. */
   collapsedMessages: Set<string>;
@@ -131,6 +140,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
   agentName,
   showSystemMessages: showSystemMessagesProp,
   isWaitingForResponse = false,
+  liveTail,
   collapsedMessages,
   onToggleMessageCollapse,
   expandedTools,
@@ -1278,11 +1288,13 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
             <div className="space-y-4 px-4">
               {renderedMessages}
               {isWaitingForResponse && (
-                filteredMessages.length === 0 ||
-                (filteredMessages.length > 0 && filteredMessages[filteredMessages.length - 1].role === 'user') ? (
-                  <ThinkingPlaceholder />
-                ) : (
-                  <InlineWorkingIndicator />
+                liveTail ?? (
+                  filteredMessages.length === 0 ||
+                  (filteredMessages.length > 0 && filteredMessages[filteredMessages.length - 1].role === 'user') ? (
+                    <ThinkingPlaceholder />
+                  ) : (
+                    <InlineWorkingIndicator />
+                  )
                 )
               )}
               <div ref={messagesEndRef} />

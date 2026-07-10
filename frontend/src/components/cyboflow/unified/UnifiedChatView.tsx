@@ -86,6 +86,15 @@ export interface UnifiedChatViewProps {
   loadError?: string | null;
   /** Render the inline working indicator at the tail (quick-session waiting). */
   isWaitingForResponse?: boolean;
+  /**
+   * Progressive-render node (LiveTail) for the in-flight assistant message,
+   * built by the host (RunChatView/ClaudePanel) from its own event source and
+   * forwarded to ChatTranscript unchanged. Pass `undefined`/`null` when there
+   * is no active content — ChatTranscript falls back to the existing
+   * ThinkingPlaceholder/InlineWorkingIndicator. Never rendered on the
+   * interactive substrate (the live xterm IS the transcript there).
+   */
+  liveTail?: ReactNode;
 
   // -- meta strip ----------------------------------------------------------
   folderLabel: string | null;
@@ -138,6 +147,7 @@ export function UnifiedChatView({
   messages,
   loadError = null,
   isWaitingForResponse = false,
+  liveTail,
   folderLabel,
   folderTitle,
   branchName,
@@ -410,6 +420,7 @@ export function UnifiedChatView({
               settings={settings}
               agentName="Claude"
               isWaitingForResponse={isWaitingForResponse}
+              liveTail={liveTail}
               collapsedMessages={collapsedMessages}
               onToggleMessageCollapse={toggleMessageCollapse}
               expandedTools={expandedTools}

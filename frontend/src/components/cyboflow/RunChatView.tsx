@@ -27,6 +27,8 @@ import { API } from '../../utils/api';
 import { InteractiveTerminalView } from './InteractiveTerminalView';
 import { UnifiedChatView } from './unified/UnifiedChatView';
 import { deriveRunContextUsageParts, formatContextUsage } from './unified/runContextUsage';
+import { LiveTail } from '../chat/LiveTail';
+import { reduceLiveTail } from '../../utils/liveTailReducer';
 import { trpc } from '../../trpc/client';
 import { useUnifiedRunMessages } from './unified/useUnifiedRunMessages';
 import { usePendingSendStore } from '../../stores/pendingSendStore';
@@ -119,6 +121,22 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // Messages — run-scoped source. Interactive runs keep the live xterm as the
   // transcript, so the structured fetch is disabled there.
   const { messages, loadError } = useUnifiedRunMessages(runId, !isInteractive);
+
+  // Progressive-render live tail (Option A — see render-map.md): reconstruct
+  // the in-flight assistant message's text/thinking blocks from the SAME
+  // streamEvents the context-% meter above already reads. Interactive runs
+  // never populate streamEvents (Q3 store isolation) and never render
+  // ChatTranscript at all, so the tail is skipped there. Only pass a node once
+  // it has actual content — ChatTranscript's fallback (ThinkingPlaceholder /
+  // InlineWorkingIndicator) depends on `undefined` meaning "nothing yet".
+  const liveTailState = useMemo(
+    () => (isInteractive ? { activeBlocks: [], isGenerating: false } : reduceLiveTail(streamEvents)),
+    [isInteractive, streamEvents],
+  );
+  const liveTail =
+    liveTailState.activeBlocks.length > 0 ? (
+      <LiveTail blocks={liveTailState.activeBlocks} agentName="Claude" />
+    ) : undefined;
 
   // Pending-send (optimistic echo) — keyed by runId (the flow host key + railId).
   // Reconcile against the run transcript so a 'sending'/'queued' row is dropped
@@ -222,6 +240,8 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
       runStatus={run?.status ?? null}
       messages={messages}
       loadError={loadError}
+      isWaitingForResponse={running}
+      liveTail={liveTail}
       folderLabel={folderLabel}
       folderTitle={worktreePath}
       branchName={branchName}
