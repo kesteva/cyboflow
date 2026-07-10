@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { randomUUID } from 'crypto';
+import { randomUUID, createHash } from 'crypto';
 import { app } from 'electron';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { resolveMcpServerScriptPath } from '../../../orchestrator/mcpServer/scriptPath';
@@ -46,7 +46,8 @@ import type { PermissionPayload } from '../../../../../shared/types/reviews';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { WorkflowBundleWriter } from './workflowBundleWriter';
 import { installWorkflowBundle } from './workflowBundleInstall';
-import { createStreamingPromptInput } from './streamingPromptInput';
+import { createStreamingPromptInput, createPersistentPromptInput } from './streamingPromptInput';
+import type { PersistentPromptInput } from './streamingPromptInput';
 import { withLock } from '../../../utils/mutex';
 import { enhancePromptForStructuredCommit } from '../../../utils/promptEnhancer';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
@@ -256,6 +257,76 @@ const CYBOFLOW_MCP_TOOL_PREFIX = 'mcp__cyboflow__';
  */
 const SDK_FIRST_EVENT_TIMEOUT_MS = 30_000;
 
+/**
+ * Idle time a WARM SDK session is kept alive between turns before it is closed
+ * gracefully. Armed at each turn's rest boundary, cleared at the next turn's
+ * start. Expiry closes the persistent input (normal process-death teardown); the
+ * next turn cold-spawns with `--resume`, so the recovery path is exercised
+ * routinely. 15 min balances the ~5s bootstrap saving against holding a claude
+ * subprocess (and its worktree file handles) open on an abandoned session.
+ */
+const SDK_WARM_SESSION_TTL_MS = 15 * 60_000;
+
+/**
+ * v1 rollback lever: when `CYBOFLOW_DISABLE_WARM_SDK=1`, every SDK turn closes its
+ * subprocess at the result event (today's single-shot behavior) instead of parking
+ * the session warm. Read per turn so it can be flipped without a restart.
+ */
+function warmSdkDisabled(): boolean {
+  return process.env.CYBOFLOW_DISABLE_WARM_SDK === '1';
+}
+
+/** A promise a producer settles out-of-band. Used for per-turn completion. */
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  resolve: (value: T) => void;
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+/** SHA-1 hex of a string — a bounded, stable fingerprint digest (not for crypto). */
+function sha1(input: string): string {
+  return createHash('sha1').update(input).digest('hex');
+}
+
+/**
+ * Recursively sort object keys and drop functions so structurally-equal values
+ * serialize identically regardless of key insertion order (composeMcpServers etc.
+ * build records in a non-deterministic order). Used for the options fingerprint.
+ */
+function canonicalize(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') {
+    return typeof value === 'function' ? null : value;
+  }
+  if (Array.isArray(value)) return value.map(canonicalize);
+  const record = value as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(record).sort()) {
+    if (typeof record[key] === 'function') continue;
+    out[key] = canonicalize(record[key]);
+  }
+  return out;
+}
+
+/** Stable JSON of a value with sorted keys — the fingerprint's per-field input. */
+function stableSerialize(value: unknown): string {
+  return JSON.stringify(canonicalize(value)) ?? 'null';
+}
+
+/** Name the first fingerprint field whose hash differs (for the cold-respawn reason). */
+function firstChangedFingerprintField(prev: OptionsFingerprint, next: OptionsFingerprint): string {
+  for (const key of Object.keys(next.fields).sort()) {
+    if (prev.fields[key] !== next.fields[key]) return key;
+  }
+  return 'combined';
+}
+
 interface ClaudeSpawnOptions {
   panelId: string;
   sessionId: string;
@@ -327,10 +398,69 @@ interface ClaudeSpawnOptions {
 }
 
 /**
+ * A per-field hash of the spawn-baked MUTABLE SDK inputs (model, betas, settings
+ * overlay, composed mcpServers, deny guards, systemPrompt, env, permissionMode,
+ * merged permission allowRules) plus a `combined` digest. Warm reuse requires a
+ * `combined` match; a mismatch is diffed field-by-field to name the changed input
+ * for the cold-respawn reason. Everything a warm turn cannot mutate live (the v1
+ * choice is respawn, not SDK mutators) lives here.
+ */
+interface OptionsFingerprint {
+  combined: string;
+  fields: Readonly<Record<string, string>>;
+}
+
+/**
+ * The cold-spawn reason recorded on a turn for the timing log — either a plain
+ * cold start or the specific ineligibility that forced a respawn over a warm push.
+ * `fingerprint:<field>` names the first mutable input that changed.
+ */
+type ColdSpawnReason =
+  | 'fresh'
+  | 'no-warm'
+  | 'ttl-expired'
+  | 'post-error'
+  | 'disabled'
+  | `fingerprint:${string}`;
+
+/**
+ * One cyboflow turn on an SDK run. `done` settles when the turn reaches its rest
+ * boundary (result event) OR the process dies mid-turn; `terminalError` carries a
+ * fatal turn's message for spawnCliProcess to reject on. The timestamps drive the
+ * per-turn [Timing] log.
+ */
+interface SdkTurn {
+  done: Deferred<void>;
+  terminalError: string | null;
+  path: 'cold' | 'warm';
+  reason: ColdSpawnReason | null;
+  submitTs: number;
+  firstEventTs: number | null;
+}
+
+/**
+ * Warm-session state for a persistent (non-lane) SDK run: the multi-turn input
+ * pushes feed, the captured claude conversation id + options fingerprint that
+ * gate warm reuse, and the idle/first-event timers. Null on a lane spawn (which
+ * stays single-shot and never parks).
+ */
+interface WarmSession {
+  input: PersistentPromptInput;
+  claudeSessionId: string | null;
+  fingerprint: OptionsFingerprint;
+  idleTimer: ReturnType<typeof setTimeout> | null;
+  turnWatchdog: ReturnType<typeof setTimeout> | null;
+}
+
+/**
  * A running SDK query, keyed by spawnKey in the sdkRuns map (per-lane on a
  * programmatic fan-out, else === panelId).
  * abortController cancels the in-flight query(); iteratorDone resolves when
- * the async-for loop finishes (naturally or on abort).
+ * the async-for loop finishes (naturally or on abort). A non-lane run stays WARM
+ * between turns: `warm` carries the persistent input + reuse fingerprint, and the
+ * whole run record STAYS registered in the sdkRuns/processes maps so every
+ * existing teardown path (killProcess/killRun/killAllProcesses/facade.abort)
+ * reaches the warm process with no new wiring.
  */
 interface ClaudeSdkRun {
   abortController: AbortController;
@@ -338,6 +468,24 @@ interface ClaudeSdkRun {
   panelId: string;
   sessionId: string;
   worktreePath: string;
+  runId: string;
+  displayPanelId: string;
+  /** The turn currently in flight (null while warm-idle between turns). */
+  currentTurn: SdkTurn | null;
+  turnInFlight: boolean;
+  /** Completed-turn count; gates the first-turn-only model-fallback retry. */
+  turnCount: number;
+  /**
+   * Set the instant this process's teardown is INITIATED (terminal-error close /
+   * idle-TTL / abort) — BEFORE the persistent input is closed or the query is
+   * aborted. A warm-idle record is still in `sdkRuns` (turnInFlight=false) during
+   * the window between that initiation and the loop's finally deleting the maps;
+   * `evaluateWarmReuse` rejects a `closing` run so a spawn in that window
+   * cold-respawns instead of pushing into a dying (already-closed) input.
+   */
+  closing: boolean;
+  /** Warm persistence; null for lane spawns (single-shot, never parks). */
+  warm: WarmSession | null;
 }
 
 /** Stub CliProcess shape that satisfies AbstractCliManager's processes map. */
@@ -409,13 +557,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
   private readonly sdkRuns = new Map<string, ClaudeSdkRun>();
 
   /**
-   * TERMINAL turn errors captured by runSdkQuery, keyed by spawnKey. Set when a
-   * flow-run turn ends on a fatal is_error result / thrown SDK error (see
-   * terminalResultError); read+cleared once by spawnCliProcess right after the
-   * iterator drains so it can reject the spawn and drive the run to `failed`.
-   * Per-spawnKey so concurrent fan-out lanes never clobber each other.
+   * Why a warm session for a spawnKey last closed WITHOUT the caller respawning it
+   * in the same breath (idle-TTL expiry or a terminal-error kill). Read + cleared
+   * by the next cold spawn so its [Timing] log records `reason=ttl-expired` /
+   * `reason=post-error` instead of a bare `no-warm`. Best-effort diagnostics only.
    */
-  private readonly terminalErrorBySpawn = new Map<string, string>();
+  private readonly warmCloseReasonBySpawn = new Map<string, 'ttl-expired' | 'post-error'>();
 
   /**
    * Latest per-panel fast-mode report, keyed by displayPanelId. The CLI stamps
@@ -678,14 +825,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
     const effectiveOptions: ClaudeSpawnOptions = isLaneSpawn
       ? { ...options, isResume: false, resumeSessionId: undefined }
       : options;
+    // withLock now scopes ONE TURN (cold spawn OR warm push → that turn's result),
+    // NOT the whole process lifetime — the background for-await loop of a warm
+    // session runs OUTSIDE the lock, so the next turn's lock acquisition is not
+    // blocked by the still-alive query().
     return await withLock(`claude-spawn-${spawnKey}`, async () => {
       const { panelId, sessionId, isResume } = effectiveOptions;
-
-      // Guard: reject duplicate spawns of the SAME lane (keyed by spawnKey so
-      // concurrent fan-out lanes under one panelId do not collide).
-      if (this.processes.has(spawnKey)) {
-        throw new Error(`Claude process already running for spawn ${spawnKey}`);
-      }
 
       // Resume validation.
       if (isResume) {
@@ -762,6 +907,63 @@ export class ClaudeCodeManager extends AbstractCliManager {
         this.logger
       );
 
+      // Build SDK options (uses runId for the approval-router hook). Built from
+      // effectiveOptions so a lane spawn's stripped resume signals (M5(1)) reach
+      // buildSdkOptions — a lane never resumes. Non-lane spawns: effectiveOptions
+      // === options, so this is byte-identical. Runs BEFORE the bundle install
+      // (no dependency on the installed files) so a rejection here strands no
+      // refcount; it also drives the warm-reuse fingerprint below.
+      const sdkOptions = await this.buildSdkOptions({ ...effectiveOptions, runId });
+      const fingerprint = this.computeOptionsFingerprint(sdkOptions, options.worktreePath);
+
+      // Warm-session tri-state (non-lane only). A live warm-idle session for this
+      // spawnKey that is a resume-continuation of the SAME conversation and whose
+      // mutable options are unchanged → PUSH into it (skip the ~5s respawn). A turn
+      // already in flight → the today dup-guard message. An ineligible warm session
+      // (fresh-conversation request / fingerprint drift / disabled) → close it
+      // gracefully, then cold-spawn (with --resume where the caller asked for it).
+      let coldReason: ColdSpawnReason = warmSdkDisabled()
+        ? 'disabled'
+        : this.warmCloseReasonBySpawn.get(spawnKey) ?? 'no-warm';
+      this.warmCloseReasonBySpawn.delete(spawnKey);
+      const existing = isLaneSpawn ? undefined : this.sdkRuns.get(spawnKey);
+      if (existing !== undefined) {
+        if (existing.turnInFlight) {
+          throw new Error(`Claude process already running for spawn ${spawnKey}`);
+        }
+        const reuse = this.evaluateWarmReuse(existing, effectiveOptions, displayPanelId, fingerprint);
+        if (reuse.eligible) {
+          const outcome = await this.driveWarmTurn(
+            existing,
+            spawnKey,
+            displayPanelId,
+            sessionId,
+            runId,
+            finalPrompt,
+            options,
+            dbSession,
+          );
+          if (outcome.dispatched) return;
+          // The push LOST a race to a concurrent close (abort / TTL / terminal-error
+          // teardown that fired AFTER eligibility but BEFORE the push landed — the
+          // spawn lock does not serialize abortCurrentRun). The message was NOT
+          // delivered; close the dying session (await its drain) and cold-respawn so
+          // it is not silently dropped.
+          coldReason = 'no-warm';
+          await this.closeWarmSession(spawnKey, 'no-warm');
+        } else {
+          // Ineligible: close the warm session and fall through to a cold respawn.
+          coldReason = reuse.reason;
+          await this.closeWarmSession(spawnKey, reuse.reason);
+        }
+      }
+
+      // COLD SPAWN. Guard: a live process under this spawnKey with no warm record
+      // (concurrent duplicate / lane dup) still rejects.
+      if (this.processes.has(spawnKey)) {
+        throw new Error(`Claude process already running for spawn ${spawnKey}`);
+      }
+
       // Install the run's co-located `/cyboflow-<phase>` command bundle (+ any
       // subagents) into `<worktree>/.claude/commands` | `.claude/agents` BEFORE
       // the query() runs. The SDK auto-discovers them via settingSources
@@ -775,33 +977,14 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // `.claude/agents`. Leaving bundleWorktrees unset also makes the paired
       // removeBundleForSession a no-op (it early-returns on a missing entry), so no
       // teardown touches the real checkout either.
+      //
+      // The refcount is bumped ONCE per COLD spawn (the warm process's whole
+      // lifetime), decremented once at process-death by removeBundleForSession — a
+      // warm turn re-writes the bundle (driveWarmTurn) but does NOT re-bump.
       if (!dbSession?.in_place) {
         installWorkflowBundle(this.db, this.bundleWriter, runId, options.worktreePath, makeLoggerLike(this.logger));
         this.bundleWorktrees.set(sessionId, options.worktreePath);
-        // SHARED-BUNDLE refcount: this spawn now relies on the bundle for the rest
-        // of its turn. Increment so a finishing sibling lane (same sessionId) cannot
-        // remove the bundle out from under this one — removeBundleForSession only
-        // strips it when the LAST lane decrements back to 0.
         this.bundleRefcountBySession.set(sessionId, (this.bundleRefcountBySession.get(sessionId) ?? 0) + 1);
-      }
-
-      // Build SDK options (uses runId for the approval-router hook). Built from
-      // effectiveOptions so a lane spawn's stripped resume signals (M5(1)) reach
-      // buildSdkOptions — a lane never resumes. Non-lane spawns: effectiveOptions
-      // === options, so this is byte-identical.
-      //
-      // SHARED-BUNDLE leak fix: buildSdkOptions assembles SDK options (mode
-      // resolution, env compose, hook wiring) and can REJECT. It runs AFTER the
-      // bundleRefcountBySession bump above but BEFORE runSdkQuery (whose finally
-      // owns the paired decrement), so a rejection here would strand the refcount
-      // at +1 — and the genuinely-last lane could then never strip the shared
-      // bundle. Undo the bump on failure, then rethrow so the caller still sees it.
-      let sdkOptions: Options;
-      try {
-        sdkOptions = await this.buildSdkOptions({ ...effectiveOptions, runId });
-      } catch (buildErr) {
-        this.removeBundleForSession(sessionId);
-        throw buildErr;
       }
 
       // Set up the per-run pipeline (EventRouter + RawEventsSink).
@@ -838,24 +1021,6 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // Abort controller for cancellation.
       const abortController = new AbortController();
 
-      // Emit session_info descriptor (renderer-visible context).
-      const sessionInfoMessage = {
-        type: 'session_info',
-        initial_prompt: options.prompt,
-        claude_command: 'sdk-in-process',
-        worktree_path: options.worktreePath,
-        model: options.model || 'default',
-        permission_mode: options.permissionMode || DEFAULT_PERMISSION_MODE,
-        timestamp: new Date().toISOString()
-      };
-      this.emit('output', {
-        panelId: displayPanelId,
-        sessionId,
-        type: 'json',
-        data: sessionInfoMessage,
-        timestamp: new Date()
-      });
-
       // Push stub into processes map so isPanelRunning / getAllProcesses work.
       const stub: StubCliProcess = {
         process: undefined as never,
@@ -868,54 +1033,199 @@ export class ClaudeCodeManager extends AbstractCliManager {
       // Keyed by spawnKey so concurrent fan-out lanes do not overwrite each other.
       (this.processes as Map<string, StubCliProcess>).set(spawnKey, stub);
 
-      // Wire up the ClaudeSdkRun entry. runSdkQuery's finally tears down by
-      // spawnKey, so it is threaded in. displayPanelId (the run/session panel) is
-      // threaded too so every event runSdkQuery emits re-attributes to the run
-      // panel, never to the per-lane spawnKey.
-      const iteratorDone = this.runSdkQuery(spawnKey, displayPanelId, sessionId, finalPrompt, sdkOptions, abortController, router, runId);
+      // Warm-eligibility for THIS process: a non-lane spawn parks warm between
+      // turns unless the kill switch forbids it. A lane / disabled path uses a
+      // single-shot input that closes at the result event (today's behavior).
+      const warmEnabled = !isLaneSpawn && !warmSdkDisabled();
 
+      // First turn of this process.
+      const firstTurn: SdkTurn = {
+        done: createDeferred<void>(),
+        terminalError: null,
+        path: 'cold',
+        reason: coldReason,
+        submitTs: Date.now(),
+        firstEventTs: null,
+      };
+
+      // Wire up the ClaudeSdkRun entry BEFORE runSdkQuery so the background loop
+      // can settle turns via the shared record. runSdkQuery's process-death
+      // boundary tears the record down by spawnKey; displayPanelId re-attributes
+      // every event to the run/session panel, never to the per-lane spawnKey.
       const run: ClaudeSdkRun = {
         abortController,
-        iteratorDone,
+        iteratorDone: Promise.resolve(),
         panelId,
         sessionId,
-        worktreePath: options.worktreePath
+        worktreePath: options.worktreePath,
+        runId,
+        displayPanelId,
+        currentTurn: firstTurn,
+        turnInFlight: true,
+        turnCount: 0,
+        closing: false,
+        warm: warmEnabled
+          ? {
+              input: createPersistentPromptInput(finalPrompt),
+              claudeSessionId: null,
+              fingerprint,
+              idleTimer: null,
+              turnWatchdog: null,
+            }
+          : null,
       };
       this.sdkRuns.set(spawnKey, run);
 
-      // Emit spawned — matching the upstream AbstractAIPanelManager listener.
-      // Re-attributed to the run display panelId so a fan-out lane's spawn shows
-      // under the run panel, not its per-lane spawnKey.
-      this.emit('spawned', { panelId: displayPanelId, sessionId });
+      const iteratorDone = this.runSdkQuery(
+        spawnKey,
+        displayPanelId,
+        sessionId,
+        finalPrompt,
+        sdkOptions,
+        abortController,
+        router,
+        runId,
+        run,
+      );
+      run.iteratorDone = iteratorDone;
+
+      // Per-turn 'spawned' + session_info — events.ts keys the quick-session status
+      // lifecycle on these, so a warm turn emits them exactly as a cold turn does.
+      this.emitTurnStart(displayPanelId, sessionId, options);
 
       this.logger?.info(`[ClaudeCodeManager] SDK query started for panel ${displayPanelId} (session ${sessionId})`);
 
-      // Wait for the SDK iterator to drain before returning. Callers (RunExecutor,
-      // continueConversation) await spawnCliProcess to know when the turn is done —
-      // runExecutor.ts:217 fires `transitionToCompleted` immediately after this
-      // resolves, expecting status='running' from the matching `pre_spawn` transition.
-      // Returning before the iterator drains races those transitions: status flips
-      // running → completed before SDK tool calls fire, then ApprovalRouter rejects
-      // every tool request with RunNotRunningError. runSdkQuery's try/catch swallows
-      // SDK errors, so this await never throws — the lock releases on iterator drain.
-      await iteratorDone;
+      // Await THIS turn's completion — NOT the full iterator drain (a warm session's
+      // loop outlives its turns). A lane keeps awaiting iteratorDone (single-shot:
+      // its turn IS the process, and its caller relies on full teardown at return).
+      // Both settle turn.terminalError before resolving, so the terminal-error
+      // propagation below reads the same value regardless of path.
+      if (isLaneSpawn) {
+        await iteratorDone;
+      } else {
+        await firstTurn.done.promise;
+      }
 
       // TERMINAL-error propagation. A fatal turn (usage limit / auth failure / spawn
       // error) is surfaced by the CLI as an is_error RESULT event or a thrown SDK
       // error — neither rejects the iterator, so without this spawnCliProcess would
       // RESOLVE and RunExecutor.execute() would rest the run in awaiting_review (the
-      // false "Workflow complete" state; see WorkflowSummaryPanel). runSdkQuery stashed
-      // the reason (terminalResultError) under spawnKey; read+clear it and REJECT for a
-      // FLOW-RUN spawn (runId === displayPanelId) so execute()'s catch routes the run
-      // through its single `failed` transition. A quick CHAT turn resolves its runId to
-      // the `__quick__` sentinel (≠ displayPanelId) and is left untouched — its Session
+      // false "Workflow complete" state; see WorkflowSummaryPanel). runSdkQuery
+      // stamped the reason onto the turn record; REJECT for a FLOW-RUN spawn
+      // (runId === displayPanelId) so execute()'s catch routes the run through its
+      // single `failed` transition. A quick CHAT turn resolves its runId to the
+      // `__quick__` sentinel (≠ displayPanelId) and is left untouched — its Session
       // Error stays inline exactly as before.
-      const terminalError = this.terminalErrorBySpawn.get(spawnKey);
-      this.terminalErrorBySpawn.delete(spawnKey);
-      if (terminalError !== undefined && runId === displayPanelId) {
-        throw new SdkSessionTerminalError(terminalError);
+      if (firstTurn.terminalError !== null && runId === displayPanelId) {
+        throw new SdkSessionTerminalError(firstTurn.terminalError);
       }
     });
+  }
+
+  /**
+   * Emit the per-turn 'spawned' + session_info descriptor. Both fire once per
+   * LOGICAL turn (cold spawn AND warm push) so events.ts drives the quick-session
+   * status lifecycle, auto-context, context meter and git refresh identically on
+   * warm turns as it did when every turn was a fresh subprocess.
+   */
+  private emitTurnStart(displayPanelId: string, sessionId: string, options: ClaudeSpawnOptions): void {
+    const sessionInfoMessage = {
+      type: 'session_info',
+      initial_prompt: options.prompt,
+      claude_command: 'sdk-in-process',
+      worktree_path: options.worktreePath,
+      model: options.model || 'default',
+      permission_mode: options.permissionMode || DEFAULT_PERMISSION_MODE,
+      timestamp: new Date().toISOString(),
+    };
+    this.emit('output', {
+      panelId: displayPanelId,
+      sessionId,
+      type: 'json',
+      data: sessionInfoMessage,
+      timestamp: new Date(),
+    });
+    this.emit('spawned', { panelId: displayPanelId, sessionId });
+  }
+
+  /**
+   * Push a follow-up turn into a live WARM session instead of respawning: refresh
+   * the co-located bundle, disarm the idle timer, push the prompt into the
+   * persistent input, and — only if the push was ACCEPTED — commit the turn (emit
+   * turn-start, arm the watchdog) and await its rest boundary.
+   *
+   * Returns `{ dispatched: false }` when the push was REJECTED (the input was
+   * closed by a teardown racing between eligibility and here). Pushing FIRST and
+   * committing the turn (currentTurn / turnInFlight) only on success is what stops
+   * a phantom turn being settled on a dying record — the process-death boundary
+   * only settles a turn that was actually committed. This ordering is safe because
+   * the generator's wake is async: the pushed message cannot be processed before
+   * the synchronous commit + emits below run.
+   *
+   * Rejects with SdkSessionTerminalError for a flow run whose warm turn ends
+   * terminally, matching the cold path's contract exactly.
+   */
+  private async driveWarmTurn(
+    run: ClaudeSdkRun,
+    spawnKey: string,
+    displayPanelId: string,
+    sessionId: string,
+    runId: string,
+    finalPrompt: string,
+    options: ClaudeSpawnOptions,
+    dbSession: { in_place?: unknown } | undefined,
+  ): Promise<{ dispatched: boolean }> {
+    const warm = run.warm;
+    if (warm === null) return { dispatched: false }; // caller only reaches here for warm runs.
+
+    // Refresh the co-located bundle (idempotent file write). NO refcount bump —
+    // the cold spawn's single bump covers the warm process's whole lifetime.
+    if (!dbSession?.in_place) {
+      installWorkflowBundle(this.db, this.bundleWriter, runId, run.worktreePath, makeLoggerLike(this.logger));
+    }
+
+    this.clearWarmIdleTimer(run);
+
+    const turn: SdkTurn = {
+      done: createDeferred<void>(),
+      terminalError: null,
+      path: 'warm',
+      reason: null,
+      submitTs: Date.now(),
+      firstEventTs: null,
+    };
+
+    // Push BEFORE committing the turn. A `false` return means the input was closed
+    // by a concurrent teardown — do NOT set currentTurn/turnInFlight (that would
+    // make the dying process-death boundary settle a phantom turn) and signal the
+    // caller to cold-respawn so the message is not dropped.
+    if (!warm.input.push(finalPrompt)) {
+      return { dispatched: false };
+    }
+    run.currentTurn = turn;
+    run.turnInFlight = true;
+
+    // Per-turn report-only watchdog: a warm turn that yields no first event is a
+    // silently-stalled warm process. Cleared by the loop on the turn's first event.
+    warm.turnWatchdog = setTimeout(() => {
+      if (run.abortController.signal.aborted) return;
+      const msg = `warm SDK turn yielded no event within ${SDK_FIRST_EVENT_TIMEOUT_MS}ms`;
+      this.logger?.error(`[ClaudeCodeManager] ${msg} (panel ${displayPanelId})`);
+      captureSeamError('sdk-warm-turn-first-event-timeout', new Error(msg), {
+        substrate: 'sdk',
+        packaged: String(Boolean(app.isPackaged)),
+      });
+    }, SDK_FIRST_EVENT_TIMEOUT_MS);
+
+    this.emitTurnStart(displayPanelId, sessionId, options);
+    this.logger?.info(`[ClaudeCodeManager] SDK warm turn pushed for panel ${displayPanelId} (session ${sessionId})`);
+
+    await turn.done.promise;
+
+    if (turn.terminalError !== null && runId === displayPanelId) {
+      throw new SdkSessionTerminalError(turn.terminalError);
+    }
+    return { dispatched: true };
   }
 
   /**
@@ -937,7 +1247,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
     abortController: AbortController,
     router: EventRouter,
     runId: string,
+    run: ClaudeSdkRun,
   ): Promise<void> {
+    // PROCESS exit code — 1 only on a THROWN SDK error that ends the process. A
+    // per-turn terminal is_error result emits its own exitCode=1 at the turn
+    // boundary without ending the loop's exit code (the loop may keep running).
     let exitCode = 0;
     // Piece C — capture the SDK conversation id ONCE per workflow run from the
     // first system/init event, so an idle-chat nudge can re-spawn with --resume.
@@ -950,20 +1264,22 @@ export class ClaudeCodeManager extends AbstractCliManager {
     // is eligible so an Opus error can never loop.
     let activeOptions: Options = sdkOptions;
     let attempt = 0;
-    // A fatal turn-ending error (is_error result or thrown SDK error) for THIS
-    // (final) attempt — stashed for spawnCliProcess to reject on. Reset at the top
-    // of each attempt so a recovered model-fallback retry never leaves a stale one.
+    // A fatal turn-ending error (is_error result or thrown SDK error) for the turn
+    // in flight — stamped onto the turn record so spawnCliProcess can reject on it.
+    // Reset at each turn boundary and at each model-fallback retry.
     let terminalError: string | null = null;
-    // First-event watchdog (see SDK_FIRST_EVENT_TIMEOUT_MS): armed per attempt,
-    // cleared by the first event and in the finally. Report-only — never aborts.
+    // First-event watchdog for the COLD query attempt (see SDK_FIRST_EVENT_TIMEOUT_MS):
+    // armed per attempt, cleared by the first event and in the finally. A warm
+    // turn's per-turn watchdog is armed separately (driveWarmTurn). Report-only.
     let firstEventTimer: ReturnType<typeof setTimeout> | null = null;
-    // Durable gate recovery: watch this turn's stream for an AskUserQuestion gate
+    // Durable gate recovery: watch each turn's stream for an AskUserQuestion gate
     // that failed at the SDK control-channel layer ("Stream closed"). On failure
     // synthesize a blocking review-queue decision so the run parks as
     // awaiting-decision instead of silently false-completing. Fires at most once
-    // per turn. Skipped for fan-out lanes (spawnKey ≠ runId) — sprint lanes never
-    // open gates and share a runId, so a lane must not mint a run-level gate.
-    const gateRecoveryDetector =
+    // PER TURN, so it is re-instantiated at each turn boundary. Skipped for fan-out
+    // lanes (spawnKey ≠ runId) — sprint lanes never open gates and share a runId,
+    // so a lane must not mint a run-level gate.
+    const makeGateDetector = (): AskUserQuestionFailureDetector | null =>
       spawnKey === runId
         ? new AskUserQuestionFailureDetector({
             onFailure: (questions) =>
@@ -971,6 +1287,7 @@ export class ClaudeCodeManager extends AbstractCliManager {
             logger: makeLoggerLike(this.logger),
           })
         : null;
+    let gateRecoveryDetector = makeGateDetector();
     try {
       retry: while (true) {
         attempt++;
@@ -986,18 +1303,18 @@ export class ClaudeCodeManager extends AbstractCliManager {
           });
         }, SDK_FIRST_EVENT_TIMEOUT_MS);
         // Streaming-input mode (SDK 0.3.201): drive query() with an AsyncIterable
-        // that yields `prompt` then PARKS, keeping the CLI's stdin open so
-        // can_use_tool control roundtrips (AskUserQuestion + every interactive
-        // permission "ask") can be answered over the input stream. A bare string
-        // prompt closes stdin after the first message, which made every such gate
-        // fail with "Stream closed" and killed all human gates on the SDK
-        // substrate (regressed by the 0.2→0.3 bump). The input is released — the
-        // generator returns, stdin closes, the CLI exits — on the terminal
-        // `result` event (see the isResultEvent close below), on ANY loop exit
-        // (the finally), and on abort (the listener). Closing on `result` is
-        // load-bearing: without it the CLI waits for more input and this
-        // `for await` never drains.
-        const promptInput = createStreamingPromptInput(prompt);
+        // that keeps the CLI's stdin open so can_use_tool control roundtrips
+        // (AskUserQuestion + every interactive permission "ask") can be answered
+        // over the input stream. A bare string prompt closes stdin after the first
+        // message, which made every such gate fail with "Stream closed" and killed
+        // all human gates on the SDK substrate (regressed by the 0.2→0.3 bump).
+        //
+        // A WARM (non-lane) run uses the PERSISTENT input created by spawnCliProcess
+        // — its query() spans many turns; each subsequent turn is a push, and only a
+        // fingerprint respawn / idle-TTL / kill closes it. A lane / disabled run uses
+        // a SINGLE-SHOT input that closes at the result event (today's behavior),
+        // tearing the subprocess down at turn end.
+        const promptInput = run.warm ? run.warm.input : createStreamingPromptInput(prompt);
         const closeInputOnAbort = (): void => promptInput.close();
         abortController.signal.addEventListener('abort', closeInputOnAbort, { once: true });
         try {
@@ -1007,14 +1324,25 @@ export class ClaudeCodeManager extends AbstractCliManager {
               clearTimeout(firstEventTimer);
               firstEventTimer = null;
             }
+            // Clear the warm-turn watchdog on the turn's first event, and stamp the
+            // first-event time for the [Timing] log.
+            if (run.warm?.turnWatchdog) {
+              clearTimeout(run.warm.turnWatchdog);
+              run.warm.turnWatchdog = null;
+            }
+            if (run.currentTurn && run.currentTurn.firstEventTs === null) {
+              run.currentTurn.firstEventTs = Date.now();
+            }
             if (abortController.signal.aborted) break;
 
             // Mid-call graceful fallback: the CLI reports an unusable `--model` as an
             // is_error RESULT event (never a throw), so it lands here, not in the
-            // catch. On the FIRST attempt only, mark the guarded model unavailable
-            // (greys the pickers) and retry THIS turn with the fallback model,
-            // DISCARDING the error result so the user sees the fallback's answer.
-            if (attempt === 1) {
+            // catch. Restricted to the FIRST attempt of the FIRST turn (turnCount 0)
+            // — on a later warm turn the retry would re-create the input and resend
+            // the wrong (initial) prompt. Marks the guarded model unavailable (greys
+            // the pickers) and retries THIS turn with the fallback model, DISCARDING
+            // the error result so the user sees the fallback's answer.
+            if (attempt === 1 && run.turnCount === 0) {
               const fb = this.modelUnavailableFallback(activeOptions.model, event);
               if (fb) {
                 this.logger?.warn(
@@ -1032,6 +1360,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
                 });
                 activeOptions = { ...activeOptions, model: fb.model, betas: fb.betas.length > 0 ? fb.betas : undefined };
                 runClaudeSessionCaptured = false;
+                // Re-create the input for the fresh query() — the current generator
+                // has already yielded its initial message. For a warm run update the
+                // record so the NEXT push feeds the retry's input; for a single-shot
+                // run the top-of-loop re-reads a fresh createStreamingPromptInput.
+                if (run.warm) run.warm.input = createPersistentPromptInput(prompt);
                 continue retry;
               }
             }
@@ -1039,10 +1372,15 @@ export class ClaudeCodeManager extends AbstractCliManager {
             // Forward to EventRouter / RawEventsSink pipeline via validated narrowing.
             const typed = this.narrowing.narrow(event);
 
-            // Persist the run's SDK session_id from its first system/init event.
+            // Persist the run's SDK session_id from its first system/init event, and
+            // record it on the warm record for the resume-continuation eligibility
+            // check (quick panels also store it via sessionManager's capture path).
             if (!runClaudeSessionCaptured) {
-              const captured = this.captureRunClaudeSessionId(runId, event);
-              if (captured) runClaudeSessionCaptured = true;
+              const capturedId = this.captureRunClaudeSessionId(runId, event);
+              if (capturedId !== null) {
+                runClaudeSessionCaptured = true;
+                if (run.warm) run.warm.claudeSessionId = capturedId;
+              }
             }
 
             // Surface the CLI's per-turn fast_mode_state (system/init + result
@@ -1100,14 +1438,38 @@ export class ClaudeCodeManager extends AbstractCliManager {
               });
             }
 
-            // Turn is over: release the input gate so the CLI stops waiting for more
-            // input and exits, letting this for-await drain. Placed AFTER the
-            // fallback `continue retry` above so a model-unavailable result never
-            // closes the input for the retry attempt (that attempt spawns a fresh
-            // promptInput). Idempotent with the finally + abort closes.
-            if (isResultEvent(event)) promptInput.close();
+            // PER-TURN BOUNDARY. The result event ends THIS cyboflow turn.
+            if (isResultEvent(event)) {
+              const aborted = abortController.signal.aborted;
+              // A warm session PARKS between turns; everything else (lane / kill-
+              // switch / terminal error / abort) closes the input so the loop drains
+              // to process death. A parked warm session keeps the loop alive, waiting
+              // on the persistent input's next push.
+              const shouldClose = run.warm === null || warmSdkDisabled() || terminalError !== null || aborted;
+              // Mark the record CLOSING before finishTurn — finishTurn fires the
+              // quick-input drain (setImmediate → continuePanel → spawnCliProcess),
+              // which must find `closing` true and cold-respawn rather than push into
+              // this now-closing input.
+              if (shouldClose) run.closing = true;
+              // A warm process killed by a TERMINAL error must never be reused — the
+              // next re-drive respawns fresh with --resume. Record it so that cold
+              // spawn's timing log reads `reason=post-error`.
+              if (run.warm !== null && terminalError !== null) {
+                this.warmCloseReasonBySpawn.set(spawnKey, 'post-error');
+              }
+              this.finishTurn(run, spawnKey, displayPanelId, sessionId, runId, terminalError, aborted);
+              // One recovery gate per turn — arm a fresh detector for the next turn.
+              gateRecoveryDetector = makeGateDetector();
+              if (shouldClose) {
+                promptInput.close();
+              } else {
+                this.armWarmIdleTimer(run, spawnKey);
+              }
+              // Reset for the next warm turn.
+              terminalError = null;
+            }
           }
-          break; // iterator drained without triggering a fallback retry
+          break; // iterator drained (process death) — no fallback retry pending
         } finally {
           // Close on ANY loop exit (clean drain, break, thrown error, or a
           // `continue retry` fallback) so a parked generator never strands the
@@ -1149,63 +1511,254 @@ export class ClaudeCodeManager extends AbstractCliManager {
         this.noteModelUnavailabilityFromError(activeOptions.model, errMsg);
       }
     } finally {
+      // PROCESS-DEATH BOUNDARY. The for-await loop has fully exited (abort, thrown
+      // error, graceful close / idle-TTL, or a single-shot lane's turn). Tear down
+      // the process-scoped resources; a per-turn boundary already fired for a turn
+      // that ended cleanly, so this covers the process itself.
       if (firstEventTimer) {
         clearTimeout(firstEventTimer);
         firstEventTimer = null;
       }
+      this.clearWarmTimers(run);
       this.cleanupPipeline(spawnKey);
-      // Clear pending approvals and questions under runId — the same id passed to
-      // requestApproval() / requestQuestion() via makePreToolUseHook. STAYS on
-      // runId (run-scoped, not per-lane) — see M5 for the fan-out hazard.
+      // Clear pending approvals/questions under runId AGAIN (idempotent) — covers a
+      // crash MID-TURN (no per-turn boundary fired). preserveGates on a non-abort
+      // death preserves the askUserQuestionRecoveryGate semantics for real session
+      // death; an abort (user cancel) destroys the gate with the run.
       ApprovalRouter.getInstance().clearPendingForRun(runId);
-      // preserveGates: a CLEAN drain (not aborted) means the SDK session EXPIRED
-      // with a gate still pending — re-home it into a durable recovery gate so the
-      // human can still answer + resume. An ABORT is a user cancel: destroy the
-      // gate with the run. Only for a non-lane spawn (spawnKey === runId); a
-      // fan-out lane must never mint a run-level gate.
       QuestionRouter.getInstance().clearPendingForRun(runId, {
         preserveGates: spawnKey === runId && !abortController.signal.aborted,
       });
-      // Remove the run's cyboflow-* command/agent bundle on normal completion
-      // (cleanupCliResources only fires on the abort path) — single-sourced with
-      // it via removeBundleForSession so the bundleWorktrees entry never leaks.
-      // STAYS on sessionId; its refcount hazard is handled in M5.
+      // Remove the run's cyboflow-* command/agent bundle (single-sourced with
+      // cleanupCliResources via removeBundleForSession so the bundleWorktrees entry
+      // never leaks). STAYS on sessionId; its refcount hazard is handled in M5.
       this.removeBundleForSession(sessionId);
       // Per-spawn teardown keyed by spawnKey so a finishing lane never evicts a
       // still-live sibling lane sharing the same panelId.
       this.processes.delete(spawnKey);
       this.sdkRuns.delete(spawnKey);
       this.forgetSpawnKey(runId, spawnKey);
-      // Re-attributed to displayPanelId. NOTE (M3 step 3): emitting this 'exit'
-      // does NOT, by itself, flip the run to a terminal state — this handler
-      // writes NO workflow_runs terminal status. Terminal run state is the
-      // WorkflowController's job once ALL lanes of the fan-out have settled.
-      this.emit('exit', {
-        panelId: displayPanelId,
-        sessionId,
-        exitCode,
-        signal: null
-      });
-    }
 
-    // Stash a terminal turn error (never on an abort — that is an intentional
-    // cancel, not a failure) AFTER the 'exit' emit so the run's UI teardown is
-    // unchanged. spawnCliProcess reads+clears this by spawnKey and rejects for a
-    // flow-run spawn; the iterator promise itself still RESOLVES so the run.iteratorDone
-    // awaiters (e.g. cancel) are unaffected.
-    if (terminalError !== null && !abortController.signal.aborted) {
-      this.terminalErrorBySpawn.set(spawnKey, terminalError);
+      // If a turn was still in flight when the process died (abort mid-turn, thrown
+      // error, or a graceful close before a result), settle it here: emit its
+      // 'exit', stamp the terminal error, resolve its promise, and re-drive queued
+      // quick input on a non-abort death. An IDLE graceful close (turn already
+      // settled at its result boundary) emits NO extra 'exit'.
+      if (run.turnInFlight && run.currentTurn) {
+        const turn = run.currentTurn;
+        turn.terminalError = terminalError;
+        this.logTurnTiming(displayPanelId, turn);
+        run.turnInFlight = false;
+        run.currentTurn = null;
+        // Re-attributed to displayPanelId. NOTE (M3 step 3): emitting 'exit' does
+        // NOT flip the run to a terminal state — terminal run state is the
+        // WorkflowController's job once ALL lanes have settled.
+        this.emit('exit', {
+          panelId: displayPanelId,
+          sessionId,
+          exitCode,
+          signal: null,
+        });
+        turn.done.resolve();
+        if (!abortController.signal.aborted && spawnKey === displayPanelId) {
+          this.maybeDrainPanelInputQueue(displayPanelId);
+        }
+      }
     }
+  }
+
+  /**
+   * PER-TURN boundary bookkeeping (fired on every result event). Clears this
+   * turn's approval/question debris, logs its timing, emits the per-turn 'exit'
+   * (exitCode 0, or 1 on a terminal error), advances the turn count, resolves the
+   * turn's completion promise (unblocking spawnCliProcess for a non-lane spawn),
+   * and re-drives any mid-turn-queued quick input at this rest boundary. Does NOT
+   * decide whether the process parks warm or dies — the caller does.
+   */
+  private finishTurn(
+    run: ClaudeSdkRun,
+    spawnKey: string,
+    displayPanelId: string,
+    sessionId: string,
+    runId: string,
+    terminalError: string | null,
+    aborted: boolean,
+  ): void {
+    // Leftover approvals/questions are turn debris. preserveGates re-homes a
+    // still-pending question on the WEDGE case (a result coexisting with a pending
+    // gate = control-channel failure), identical to today's clean-drain-with-gate.
+    ApprovalRouter.getInstance().clearPendingForRun(runId);
+    QuestionRouter.getInstance().clearPendingForRun(runId, {
+      preserveGates: spawnKey === runId && !aborted,
+    });
+
+    const turn = run.currentTurn;
+    if (turn) {
+      turn.terminalError = terminalError;
+      this.logTurnTiming(displayPanelId, turn);
+    }
+    run.turnInFlight = false;
+    run.currentTurn = null;
+    run.turnCount++;
+
+    // Per-turn 'exit' — events.ts keys the whole quick-session status lifecycle,
+    // auto-context, context meter and git refresh on this.
+    this.emit('exit', {
+      panelId: displayPanelId,
+      sessionId,
+      exitCode: terminalError !== null ? 1 : 0,
+      signal: null,
+    });
+
+    if (turn) turn.done.resolve();
 
     // Turn rest boundary: deliver any mid-turn-queued quick-session input as the
-    // next continuation ("always allow messaging a running quick session"). Only
-    // fires on a NON-abort end (a user cancel should not auto-resume) and only for
-    // a non-fan-out spawn (displayPanelId === spawnKey → a quick panel; a flow
-    // run's panel queue is always empty so this is a no-op there). Deferred inside
-    // maybeDrainPanelInputQueue so this turn's locks release first.
-    if (!abortController.signal.aborted && spawnKey === displayPanelId) {
+    // next continuation ("always allow messaging a running quick session"). Only a
+    // non-abort end for a non-fan-out spawn (a flow run's panel queue is empty).
+    // Deferred inside maybeDrainPanelInputQueue so this turn's locks release first.
+    if (!aborted && spawnKey === displayPanelId) {
       this.maybeDrainPanelInputQueue(displayPanelId);
     }
+  }
+
+  /** One-line per-turn [Timing] log (submit → first event, submit → result). */
+  private logTurnTiming(displayPanelId: string, turn: SdkTurn): void {
+    const firstMs = turn.firstEventTs !== null ? turn.firstEventTs - turn.submitTs : -1;
+    const totalMs = Date.now() - turn.submitTs;
+    const reason = turn.path === 'cold' && turn.reason ? ` reason=${turn.reason}` : '';
+    this.logger?.info(
+      `[Timing] sdk turn panel=${displayPanelId} path=${turn.path} submitToFirstEvent=${firstMs} turnTotal=${totalMs}${reason}`,
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Warm-session helpers (persistent SDK query lifecycle)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Decide whether a warm-idle run can absorb the incoming spawn as a PUSH rather
+   * than a cold respawn. Eligible only when: warm sessions are enabled, the spawn
+   * is a resume-continuation of the SAME conversation (quick: isResume + the
+   * panel's stored claude session id matches; workflow: resumeSessionId matches
+   * the captured id), and every spawn-baked mutable input is unchanged (fingerprint
+   * match). Any miss returns the specific cold-respawn reason for the timing log.
+   */
+  private evaluateWarmReuse(
+    run: ClaudeSdkRun,
+    effectiveOptions: ClaudeSpawnOptions,
+    displayPanelId: string,
+    fingerprint: OptionsFingerprint,
+  ): { eligible: true } | { eligible: false; reason: ColdSpawnReason } {
+    const warm = run.warm;
+    if (warm === null || warmSdkDisabled()) return { eligible: false, reason: 'disabled' };
+    // A record whose teardown has been INITIATED (its input is closing / closed but
+    // the maps are not yet torn down) must never be reused — pushing into it would
+    // silently drop the message. Reject so the caller closes it (awaiting the drain)
+    // and cold-respawns with a clean process.
+    if (run.closing) return { eligible: false, reason: 'no-warm' };
+    const isQuickResume =
+      effectiveOptions.isResume === true &&
+      warm.claudeSessionId !== null &&
+      this.sessionManager.getPanelClaudeSessionId(displayPanelId) === warm.claudeSessionId;
+    const isWorkflowResume =
+      typeof effectiveOptions.resumeSessionId === 'string' &&
+      warm.claudeSessionId !== null &&
+      effectiveOptions.resumeSessionId === warm.claudeSessionId;
+    if (!isQuickResume && !isWorkflowResume) return { eligible: false, reason: 'fresh' };
+    if (warm.fingerprint.combined !== fingerprint.combined) {
+      return { eligible: false, reason: `fingerprint:${firstChangedFingerprintField(warm.fingerprint, fingerprint)}` };
+    }
+    return { eligible: true };
+  }
+
+  /**
+   * Gracefully close a warm session (fingerprint respawn / fresh-conversation /
+   * idle-TTL / disabled): close the persistent input so the loop drains through the
+   * normal process-death teardown, and await it so the maps are clear before the
+   * caller cold-spawns. Records a close reason (idle-TTL / post-error) for the next
+   * cold spawn's timing log.
+   */
+  private async closeWarmSession(spawnKey: string, reason: ColdSpawnReason): Promise<void> {
+    const run = this.sdkRuns.get(spawnKey);
+    if (!run || run.warm === null) return;
+    // Mark closing BEFORE closing the input so any spawn racing this teardown sees
+    // it and cold-respawns. Idempotent: a second call (e.g. the ineligible-warm
+    // path re-invoking after a TTL close already started) re-closes harmlessly and
+    // awaits the same iteratorDone.
+    run.closing = true;
+    if (reason === 'ttl-expired' || reason === 'post-error') {
+      this.warmCloseReasonBySpawn.set(spawnKey, reason);
+    }
+    this.clearWarmTimers(run);
+    run.warm.input.close();
+    await run.iteratorDone.catch(() => {});
+  }
+
+  /** Disarm the warm-idle TTL timer (turn start / teardown). */
+  private clearWarmIdleTimer(run: ClaudeSdkRun): void {
+    if (run.warm?.idleTimer) {
+      clearTimeout(run.warm.idleTimer);
+      run.warm.idleTimer = null;
+    }
+  }
+
+  /** Disarm both warm timers (idle TTL + per-turn watchdog) at process death/abort. */
+  private clearWarmTimers(run: ClaudeSdkRun): void {
+    if (run.warm === null) return;
+    if (run.warm.idleTimer) {
+      clearTimeout(run.warm.idleTimer);
+      run.warm.idleTimer = null;
+    }
+    if (run.warm.turnWatchdog) {
+      clearTimeout(run.warm.turnWatchdog);
+      run.warm.turnWatchdog = null;
+    }
+  }
+
+  /** Arm the warm-idle TTL: after SDK_WARM_SESSION_TTL_MS idle, close the session. */
+  private armWarmIdleTimer(run: ClaudeSdkRun, spawnKey: string): void {
+    if (run.warm === null) return;
+    this.clearWarmIdleTimer(run);
+    run.warm.idleTimer = setTimeout(() => {
+      this.logger?.info(
+        `[ClaudeCodeManager] warm SDK session idle ${SDK_WARM_SESSION_TTL_MS}ms — closing (spawn ${spawnKey})`,
+      );
+      void this.closeWarmSession(spawnKey, 'ttl-expired');
+    }, SDK_WARM_SESSION_TTL_MS);
+  }
+
+  /**
+   * Fingerprint the spawn-baked MUTABLE SDK inputs so a warm turn whose config
+   * changed (model / fast-mode / plugins / MCP deny-list / allow-rules / …) forces
+   * a respawn instead of silently applying stale options (the v1 choice is respawn,
+   * not live SDK mutators). The merged permission allowRules are read fresh from
+   * disk here so a mid-session allow-list edit also invalidates the warm session.
+   */
+  private computeOptionsFingerprint(sdkOptions: Options, worktreePath: string): OptionsFingerprint {
+    const allowRules = loadMergedPermissionRules(worktreePath);
+    const material: Record<string, unknown> = {
+      model: sdkOptions.model ?? null,
+      betas: sdkOptions.betas ?? null,
+      settings: sdkOptions.settings ?? null,
+      mcpServers: sdkOptions.mcpServers ?? null,
+      disallowedTools: sdkOptions.disallowedTools ?? null,
+      strictMcpConfig: sdkOptions.strictMcpConfig ?? null,
+      systemPrompt: sdkOptions.systemPrompt ?? null,
+      env: sdkOptions.env ?? null,
+      permissionMode: sdkOptions.permissionMode ?? null,
+      allowRules,
+    };
+    const fields: Record<string, string> = {};
+    for (const [key, value] of Object.entries(material)) {
+      fields[key] = sha1(stableSerialize(value));
+    }
+    const combined = sha1(
+      Object.keys(fields)
+        .sort()
+        .map((k) => `${k}=${fields[k]}`)
+        .join('&'),
+    );
+    return { combined, fields };
   }
 
   /**
@@ -1214,8 +1767,9 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * Reads `session_id` from the first system/init event of the run's SDK query
    * and writes it to workflow_runs.claude_session_id with a guarded
    * `claude_session_id IS NULL` clause so only the FIRST init event ever wins.
-   * Returns true once a non-empty session_id has been observed (so the caller
-   * can stop probing subsequent events).
+   * Returns the observed session_id once seen (so the caller can stop probing AND
+   * record it on the warm-session record for the resume-continuation check), else
+   * null.
    *
    * Fail-soft: any DB error is logged at warn level and swallowed — session-id
    * capture must never crash the SDK iterator. The quick-session capture
@@ -1224,11 +1778,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
    * `event` is an SDK message of unknown runtime shape; narrowed structurally
    * here (no `any`) the same way sessionManager.ts:529 does for the quick path.
    */
-  private captureRunClaudeSessionId(runId: string, event: unknown): boolean {
-    if (typeof event !== 'object' || event === null) return false;
+  private captureRunClaudeSessionId(runId: string, event: unknown): string | null {
+    if (typeof event !== 'object' || event === null) return null;
     const e = event as { type?: unknown; subtype?: unknown; session_id?: unknown };
-    if (e.type !== 'system' || e.subtype !== 'init') return false;
-    if (typeof e.session_id !== 'string' || e.session_id === '') return false;
+    if (e.type !== 'system' || e.subtype !== 'init') return null;
+    if (typeof e.session_id !== 'string' || e.session_id === '') return null;
 
     try {
       this.db
@@ -1243,9 +1797,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
         `[ClaudeCodeManager] failed to capture claude_session_id for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-    // Return true regardless of UPDATE row count: the session_id has been
-    // observed for this run, so the caller stops probing further events.
-    return true;
+    // Return the id regardless of UPDATE row count: it has been observed for this
+    // run (the warm record + latch both key on that), even if a prior init already
+    // won the guarded write.
+    return e.session_id;
   }
 
   /**
@@ -2289,6 +2844,12 @@ export class ClaudeCodeManager extends AbstractCliManager {
   private async abortCurrentRun(spawnKey: string): Promise<void> {
     const run = this.sdkRuns.get(spawnKey);
     if (!run) return;
+    // Mark closing BEFORE firing the abort (which closes the persistent input) so a
+    // concurrent spawn racing this teardown — abortCurrentRun is NOT serialized by
+    // the spawn lock — sees it and cold-respawns instead of pushing into the dying
+    // input. Disarm warm timers first so a firing idle-TTL cannot race the abort.
+    run.closing = true;
+    this.clearWarmTimers(run);
     run.abortController.abort();
     await run.iteratorDone.catch(() => {});
     this.sdkRuns.delete(spawnKey);
@@ -2377,17 +2938,22 @@ export class ClaudeCodeManager extends AbstractCliManager {
       }
       console.log(`[ClaudeCodeManager] Validated panel ${panelId} belongs to session ${sessionId}`);
 
-      // Abort any active SDK run for this panel.
-      if (this.processes.has(panelId)) {
-        console.log(`[ClaudeCodeManager] Aborting existing run for panel ${panelId} before continuing`);
+      // Abort ONLY a genuinely in-flight turn before continuing. A WARM-IDLE
+      // session (no turn in flight) is left alive: spawnClaudeCode → spawnCliProcess
+      // decides warm-push vs cold-respawn (fingerprint / claude-session match, or a
+      // skip_continue fresh restart → cold). Killing it here on every follow-up
+      // would defeat the whole warm-session saving.
+      const existing = this.sdkRuns.get(panelId);
+      const turnInFlight = existing ? existing.turnInFlight : this.processes.has(panelId);
+      if (turnInFlight) {
+        console.log(`[ClaudeCodeManager] Aborting in-flight turn for panel ${panelId} before continuing`);
         await this.abortCurrentRun(panelId);
         this.processes.delete(panelId);
         await new Promise(resolve => setTimeout(resolve, 100));
-      }
-
-      if (this.processes.has(panelId)) {
-        console.error(`[ClaudeCodeManager] Process ${panelId} still exists after abort attempt, aborting continue`);
-        throw new Error('Failed to stop previous panel instance');
+        if (this.processes.has(panelId)) {
+          console.error(`[ClaudeCodeManager] Process ${panelId} still exists after abort attempt, aborting continue`);
+          throw new Error('Failed to stop previous panel instance');
+        }
       }
 
       const dbSession = this.sessionManager.getDbSession(sessionId);
@@ -2419,6 +2985,22 @@ export class ClaudeCodeManager extends AbstractCliManager {
 
   async stopPanel(panelId: string): Promise<void> {
     await this.killProcess(panelId);
+  }
+
+  /**
+   * SDK override of the base PTY sendInput. The base writes to `cliProcess.process`
+   * — which is `undefined as never` on the SDK stub — so it would crash the moment
+   * `sessions:input` reaches it against a WARM-IDLE panel (isPanelRunning now true
+   * between turns). Instead: buffer the message and, if no turn is in flight, drive
+   * the rest-boundary drain immediately (else the running turn's boundary drains
+   * it). Never touches base sendInput; a mid-turn message is delivered as the next
+   * continuation, exactly like the panel input queue.
+   */
+  override sendInput(panelId: string, input: string): void {
+    this.enqueuePanelInput(panelId, randomUUID(), input);
+    const run = this.sdkRuns.get(panelId);
+    const turnInFlight = run ? run.turnInFlight : false;
+    if (!turnInFlight) this.maybeDrainPanelInputQueue(panelId);
   }
 
   // ---------------------------------------------------------------------------

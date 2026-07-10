@@ -267,9 +267,12 @@ describe('ClaudeCodeManager.composeSystemPromptAppend — per-spawn precedence',
     const streamed = prompt as AsyncIterable<SDKUserMessage>;
     expect(await readInitialPromptText(streamed)).toBe('stream this prompt');
 
-    // The iterable COMPLETES after the turn: production released the input gate when
-    // the fake emitted its terminal `result`, so a pull past the initial message
-    // returns done (the generator returned → stdin would close → CLI exits).
+    // The iterable COMPLETES here because this single-result fake exhausts after its
+    // terminal `result`: the manager PARKS the session warm at the result (it no
+    // longer closes stdin per turn — see the persistent-session change), but the
+    // fake's generator then returns, so the for-await drains to PROCESS DEATH, whose
+    // teardown closes the persistent input → a pull past the initial returns done.
+    // (Multi-turn warm reuse lives in claudeCodeManager.warmSession.test.ts.)
     const settled = await streamed[Symbol.asyncIterator]().next();
     expect(settled.done).toBe(true);
   });

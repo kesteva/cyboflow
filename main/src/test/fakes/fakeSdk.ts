@@ -340,12 +340,15 @@ export type FakeQueryFn = (params: FakeQueryParams) => AsyncGenerator<SDKMessage
 /**
  * Read the initial prompt text `query()` was driven with, tolerating BOTH shapes:
  * a bare string (the legacy single-shot path — monitor/eval queries) or the
- * streaming-input `AsyncIterable<SDKUserMessage>` production now uses for flow
- * turns (`createStreamingPromptInput`), whose FIRST yielded message carries the
- * prompt. Pulls exactly one message and returns — it does NOT drain the iterable,
- * so the generator's post-yield gate stays parked (production closes it at turn
- * end). Throws if the stream is empty or the first message is not a plain-text
- * user message. Test-only helper for asserting the prompt reached `query()`.
+ * streaming-input `AsyncIterable<SDKUserMessage>` production uses for flow / warm
+ * turns (`createStreamingPromptInput` / `createPersistentPromptInput`), whose FIRST
+ * yielded message carries the prompt. Pulls exactly one message and returns — it
+ * does NOT drain the iterable, so a single-shot generator's post-yield gate stays
+ * parked (production closes it at turn end) and a persistent generator stays open
+ * for further pushes. NOTE: for a MULTI-TURN scenario the fake generator itself
+ * drives the iterable, so assert pushed continuations via `scenario.pushed`
+ * instead of racing this helper on the same iterator. Throws if the stream is
+ * empty or the first message is not a plain-text user message.
  */
 export async function readInitialPromptText(
   prompt: string | AsyncIterable<SDKUserMessage>,
@@ -396,6 +399,15 @@ type ScenarioStep =
 export class ScenarioBuilder {
   private readonly steps: ScenarioStep[] = [];
   private readonly permissionDeferreds: Deferred<void>[] = [];
+  /**
+   * Text of the user messages PUSHED into the streaming prompt for turns 2+ of a
+   * warm/persistent query (one entry per turn boundary the scenario drove). Empty
+   * for a single-turn scenario. Read by a test to assert what the manager pushed
+   * into the live query() on a warm continuation.
+   */
+  private readonly pushedTexts: string[] = [];
+  /** The initial streamed prompt text captured on a multi-turn scenario (else null). */
+  private capturedInitial: string | null = null;
 
   /** Emit any pre-built `SDKMessage`. */
   emit(message: SDKMessage): this {
@@ -458,15 +470,65 @@ export class ScenarioBuilder {
     return this.permissionDeferreds;
   }
 
-  /** Compile this scenario to a `FakeQueryFn`. */
+  /**
+   * The user-message text PUSHED into the live query() for turns 2+ (one per turn
+   * boundary the multi-turn scenario drove). Lets a warm-session test assert the
+   * exact continuation the manager pushed without respawning query().
+   */
+  get pushed(): readonly string[] {
+    return this.pushedTexts;
+  }
+
+  /** The initial streamed prompt captured on a multi-turn scenario (else null). */
+  get initialPrompt(): string | null {
+    return this.capturedInitial;
+  }
+
+  /**
+   * Compile this scenario to a `FakeQueryFn`.
+   *
+   * MULTI-TURN (persistent/warm) scenarios — a scenario whose `result` step is NOT
+   * its last step — model ONE query() spanning many cyboflow turns: after each
+   * terminal `result`, the generator PULLS the next message off the streaming
+   * prompt iterable (blocking until the manager pushes it) before continuing with
+   * the next turn's steps, recording each pushed text on {@link pushed}. A
+   * single-turn scenario never touches the prompt iterable, so every existing
+   * single-shot test (which reads the prompt via {@link readInitialPromptText})
+   * is unaffected.
+   */
   toQueryFn(): FakeQueryFn {
     const steps = this.steps;
+    const pushedTexts = this.pushedTexts;
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const builder = this;
+    const multiTurn = steps.some(
+      (s, i) => s.kind === 'emit' && s.message.type === 'result' && i < steps.length - 1,
+    );
     return function fakeQuery(params: FakeQueryParams): AsyncGenerator<SDKMessage, void> {
       return (async function* run() {
-        const { options } = params;
-        for (const step of steps) {
+        const { options, prompt } = params;
+        const promptIterator = typeof prompt === 'string' ? null : prompt[Symbol.asyncIterator]();
+        // Consume the initial message up front on a multi-turn scenario so a later
+        // pull (at a turn boundary) returns turn 2's PUSHED message, not the initial.
+        if (multiTurn && promptIterator) {
+          const first = await promptIterator.next();
+          if (!first.done) builder.capturedInitial = readStreamedText(first.value);
+        }
+        for (let i = 0; i < steps.length; i++) {
+          const step = steps[i];
           if (step.kind === 'emit') {
             yield step.message;
+            // Turn boundary: after a terminal result with more turns to come, block
+            // on the next pushed user message so the test can assert it, then run on.
+            if (multiTurn && promptIterator && step.message.type === 'result' && i < steps.length - 1) {
+              const nextMsg = await promptIterator.next();
+              // A closed stream (the manager parked → then closed the persistent
+              // input on TTL / kill / fingerprint respawn) models the CLI exiting
+              // when stdin closes: stop yielding further turns.
+              if (nextMsg.done) return;
+              const text = readStreamedText(nextMsg.value);
+              if (text !== null) pushedTexts.push(text);
+            }
             continue;
           }
           const canUseTool = options.canUseTool;
@@ -497,6 +559,12 @@ export class ScenarioBuilder {
       })();
     };
   }
+}
+
+/** Plain-text content of a streamed user message, or null if it is block content. */
+function readStreamedText(value: SDKUserMessage): string | null {
+  const content = value.message.content;
+  return typeof content === 'string' ? content : null;
 }
 
 /** Start a new fluent scenario. */
