@@ -68,6 +68,21 @@ describe('readWorkflowPromptForRow — built-in / edited built-in (non-null work
     });
   });
 
+  it('appends BOTH the step-reporting and the fan-out execution block for sprint (has a fanOut step)', async () => {
+    await withTempDir('wpra-test-', (tmpDir) => {
+      const mdPath = join(tmpDir, 'sprint.md');
+      writeFileSync(mdPath, '---\nsystem_prompt_append: "Be terse."\n---\nDo the sprint.');
+      const result = readWorkflowPromptForRow(
+        makeWorkflowRow({ name: 'sprint', workflow_path: mdPath, spec_json: '{}' }),
+      );
+      // Frontmatter first, then step-reporting, then the derived fan-out block.
+      expect(result.systemPromptAppend.startsWith('Be terse.')).toBe(true);
+      expect(result.systemPromptAppend).toContain('cyboflow_report_step');
+      expect(result.systemPromptAppend).toContain('## Fan-out execution — `execute-tasks`');
+      expect(result.systemPromptAppend).toContain('at most **5**');
+    });
+  });
+
   it('returns the bare base prompt when the resolved def yields no step ids (non-SoloFlow name)', async () => {
     await withTempDir('wpra-test-', (tmpDir) => {
       const mdPath = join(tmpDir, 'custom.md');
@@ -104,6 +119,45 @@ describe('readWorkflowPromptForRow — custom flow (null workflow_path)', () => 
     // step-reporting append rides on systemPromptAppend
     expect(result.systemPromptAppend).toContain('cyboflow_report_step');
     expect(result.systemPromptAppend).toContain('do-the-thing');
+  });
+
+  it('appends the fan-out execution block for a custom flow whose spec has a fanOut step', () => {
+    const specWithFanOut = JSON.stringify({
+      id: 'custom-fanout-flow',
+      phases: [
+        {
+          id: 'execute',
+          label: 'Execute',
+          color: '#c96442',
+          steps: [
+            {
+              id: 'run-each',
+              name: 'Run each item',
+              agent: 'implement',
+              mcps: [],
+              retries: 0,
+              fanOut: {
+                over: 'items',
+                maxConcurrency: 2,
+                inner: [
+                  { id: 'build', agent: 'implement', name: 'Build' },
+                  { id: 'check', agent: 'task-verify', name: 'Check', loopback: 'build' },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const result = readWorkflowPromptForRow(
+      makeWorkflowRow({ name: 'custom-fanout-flow', workflow_path: null, spec_json: specWithFanOut }),
+    );
+    // step-reporting AND the fan-out block both ride on systemPromptAppend.
+    expect(result.systemPromptAppend).toContain('cyboflow_report_step');
+    expect(result.systemPromptAppend).toContain('## Fan-out execution — `run-each`');
+    expect(result.systemPromptAppend).toContain('at most **2**');
+    // The custom-flow prompt body itself flags the fan-out step (one-line pointer).
+    expect(result.prompt).toContain('fans out over `items`');
   });
 
   it('throws WorkflowPromptReadError when spec_json is empty ({})', () => {

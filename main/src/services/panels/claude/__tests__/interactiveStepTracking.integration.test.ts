@@ -37,6 +37,7 @@ import { buildStepTransitionEvent } from '../../../../orchestrator/stepTransitio
 import { appRouter } from '../../../../orchestrator/trpc/router';
 import { createContext } from '../../../../orchestrator/trpc/context';
 import { buildStepReportingAppend } from '../../../../orchestrator/prompts/step-reporting-instructions';
+import { buildFanOutAppend } from '../../../../orchestrator/prompts/fan-out-instructions';
 import {
   resolveWorkflowDefinition,
   type WorkflowStepTransitionEvent,
@@ -341,17 +342,25 @@ describe('InteractiveClaudeManager — workflow step tracking (TASK-811)', () =>
       expect(mgr.capturedEnv?.CYBOFLOW_ORCH_SOCKET).toBe('/tmp/orch.sock');
 
       // The initial prompt rides claude's POSITIONAL argv (last arg): the
-      // step-reporting append, a blank line, then the prompt body. The expected
-      // append is built from the run's RESOLVED definition (dynamic step-id model).
-      const expectedAppend = buildStepReportingAppend(resolveWorkflowDefinition('sprint', '{}'));
-      expect(expectedAppend.length).toBeGreaterThan(0);
+      // per-run workflow appends — step-reporting THEN the derived fan-out block
+      // (sprint's execute-tasks step carries a fanOut spec) — each separated by a
+      // blank line, then the prompt body. Both derive from the run's RESOLVED
+      // definition (dynamic step-id model).
+      const resolvedDef = resolveWorkflowDefinition('sprint', '{}');
+      const expectedStepReporting = buildStepReportingAppend(resolvedDef);
+      const expectedFanOut = buildFanOutAppend(resolvedDef);
+      expect(expectedStepReporting.length).toBeGreaterThan(0);
+      expect(expectedFanOut.length).toBeGreaterThan(0);
+      const expectedAppend = `${expectedStepReporting}\n\n${expectedFanOut}`;
 
       const promptArg = mgr.capturedArgs?.[mgr.capturedArgs.length - 1] ?? '';
-      expect(promptArg.startsWith(expectedAppend)).toBe(true);
+      expect(promptArg.startsWith(expectedStepReporting)).toBe(true);
       expect(promptArg).toBe(`${expectedAppend}\n\n${prompt}`);
-      // The instruction names cyboflow_report_step and lists the run's step ids.
+      // The instruction names cyboflow_report_step and lists the run's step ids,
+      // and the fan-out block governs the execute-tasks step.
       expect(promptArg).toContain('cyboflow_report_step');
       expect(promptArg).toContain('`analyze-dependencies`');
+      expect(promptArg).toContain('## Fan-out execution — `execute-tasks`');
 
       mgr.ptys[0].fireExit(0);
       await new Promise((r) => setTimeout(r, 600));

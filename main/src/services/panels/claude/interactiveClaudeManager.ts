@@ -24,6 +24,7 @@ import { InteractiveSettingsWriter, resolveInlineGatingHooks } from './interacti
 import { InteractiveMcpEnabler } from './interactiveMcpEnabler';
 import type { LoggerLike } from '../../../orchestrator/types';
 import { buildStepReportingAppend } from '../../../orchestrator/prompts/step-reporting-instructions';
+import { buildFanOutAppend } from '../../../orchestrator/prompts/fan-out-instructions';
 import { QUICK_WORKFLOW_NAME } from '../../../orchestrator/workflowRegistry';
 import { resolveRunFrozenSpec } from '../../../orchestrator/runFrozenSpec';
 import { resolveGateRunId } from '../../../orchestrator/chatSentinelProvider';
@@ -32,7 +33,7 @@ import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelPro
 import { isPermissionMode, resolveWorkflowDefinition } from '../../../../../shared/types/workflows';
 import { WorkflowBundleWriter } from './workflowBundleWriter';
 import { installWorkflowBundle } from './workflowBundleInstall';
-import type { PermissionMode } from '../../../../../shared/types/workflows';
+import type { PermissionMode, WorkflowDefinition } from '../../../../../shared/types/workflows';
 
 /**
  * InteractiveClaudeManager — the interactive (subscription-billed) Claude
@@ -108,8 +109,13 @@ import type { PermissionMode } from '../../../../../shared/types/workflows';
  *                      so the spawn path binds it directly from EOF
  *                      (bindKnownFileFromEnd) to keep the structured pipeline (token
  *                      meter) flowing; the live xterm rides the raw PTY byte path.
- *   systemPromptAppend: NO interactive append channel exists. Delivery is via
- *                      prompt-body prepend in S6/TASK-811 — NOT implemented here.
+ *   systemPromptAppend: the `options.systemPromptAppend` field is intentionally
+ *                      UNREAD on this substrate (the interactive REPL has no SDK
+ *                      `systemPrompt.append` channel). The workflow prompt appends
+ *                      — step-reporting (S6/TASK-811) AND the derived fan-out
+ *                      execution instructions — are delivered instead via a
+ *                      prompt-body PREPEND in `composePromptBody`, both resolved
+ *                      from the run's frozen effective definition.
  * ------------------------------------------------------------------------- */
 
 /** CLI spawn options accepted by the interactive substrate. */
@@ -1197,66 +1203,77 @@ export class InteractiveClaudeManager extends AbstractCliManager {
   }
 
   /**
-   * Compose the initial prompt body written to PTY stdin: the per-run
-   * step-reporting instruction (TASK-803 `buildStepReportingAppend`) prepended to
-   * the run prompt, separated by a blank line.
+   * Compose the initial prompt body written to PTY stdin: the per-run workflow
+   * prompt appends — step-reporting (TASK-803 `buildStepReportingAppend`) followed
+   * by the derived fan-out execution instructions (`buildFanOutAppend`) — prepended
+   * to the run prompt, each separated by a blank line.
    *
-   * This is the ONE new seam this slice owns. It is the interactive analogue of
-   * the SDK manager's `composeSystemPromptAppend` (claudeCodeManager.ts:478) /
-   * the index.ts promptReader adapter (index.ts:614) — the interactive REPL has
-   * no SDK `systemPrompt.append`, so the instruction reaches the MAIN session by
-   * concatenation to the prompt HEAD instead.
+   * This is the interactive substrate's ONLY append-delivery seam. The interactive
+   * REPL has no SDK `systemPrompt.append` channel (see the parity table above), so
+   * these instructions — which the SDK path rides on `options.systemPromptAppend`
+   * via the index.ts promptReader adapter (`workflowPromptReaderAdapter.ts`) —
+   * reach the MAIN session by concatenation to the prompt HEAD instead. Both
+   * appends derive from the SAME resolved definition, matching the adapter's order.
    *
-   * Dynamic step-id model (post main-merge): step ids are per-row, user-editable
-   * data. `resolveWorkflowDefinition(name, spec_json)` is the RUNTIME source of
-   * truth (a FULL override of the static WORKFLOW_DEFINITIONS seed), so we resolve
-   * the run's EFFECTIVE definition from the run's workflow row BEFORE building the
-   * append — never keying WORKFLOW_DEFINITIONS[name] directly. Mirrors the JOIN in
-   * stepTransitionBridge.ts:134 / index.ts:617-622.
-   *
-   * Fail-soft: a missing run row, a non-SoloFlow name, or a broken/empty
-   * `spec_json` resolves to a `null` definition → `buildStepReportingAppend(null)`
-   * returns `''` → the prompt is sent UNCHANGED. Mirrors `resolveInitialStepId`'s
-   * null branch (stepTransitionBridge.ts:52); nothing is ever prepended as garbage.
+   * Fail-soft: a missing run row, a non-SoloFlow name, a `__quick__` sentinel, or a
+   * broken/empty `spec_json` resolves to a `null` definition → both builders return
+   * `''` → the prompt is sent UNCHANGED. Nothing is ever prepended as garbage.
    */
   private composePromptBody(runId: string, prompt: string): string {
-    const append = this.buildStepReportingAppendForRun(runId);
-    return append ? `${append}\n\n${prompt}` : prompt;
+    const def = this.resolveRunEffectiveDefinition(runId);
+    const append = [buildStepReportingAppend(def), buildFanOutAppend(def)]
+      .filter((part) => part.length > 0)
+      .join('\n\n');
+    return append.length > 0 ? `${append}\n\n${prompt}` : prompt;
   }
 
   /**
-   * Resolve the run's effective WorkflowDefinition and build its step-reporting
-   * append. Returns `''` (fail-soft) when the run row cannot be found or its
-   * workflow has no resolvable definition (TASK-803 contract), and ALWAYS `''`
-   * for the `__quick__` sentinel workflow — quick sessions have no real steps,
-   * so step-reporting instructions must never be prepended to their prompts.
-   * No DB write, no emit — this is a pure read of the run's workflow row.
+   * Resolve the run's EFFECTIVE `WorkflowDefinition` (the source both prompt
+   * appends derive from). Returns `null` (fail-soft) when the run row cannot be
+   * found or its workflow has no resolvable definition, and ALWAYS `null` for the
+   * `__quick__` sentinel workflow — quick sessions have no real steps, so neither
+   * step-reporting nor fan-out instructions must ever be prepended to their
+   * prompts. No DB write, no emit — this is a pure read of the run's workflow row.
+   *
+   * Dynamic step-id model (post main-merge): step ids are per-row, user-editable
+   * data. `resolveWorkflowDefinition(name, spec_json)` is the RUNTIME source of
+   * truth (a FULL override of the static WORKFLOW_DEFINITIONS seed). A/B testing
+   * (migration 048): resolve the run's FROZEN effective spec (its variant graph,
+   * else the live spec) via `resolveRunFrozenSpec`, so an interactive variant run
+   * reports + fans out against ITS definition.
    */
-  private buildStepReportingAppendForRun(runId: string): string {
-    // A/B testing (migration 048): resolve the run's FROZEN effective spec (its
-    // variant graph, else the live spec) via resolveRunFrozenSpec instead of a live
-    // JOIN read, so an interactive variant run reports against ITS definition.
+  private resolveRunEffectiveDefinition(runId: string): WorkflowDefinition | null {
     let row: { workflowName: string; specJson: string | null } | null;
     try {
       row = resolveRunFrozenSpec(this.db, runId);
     } catch (err) {
       this.logger?.warn(
-        `[InteractiveClaudeManager] step-reporting workflow lookup failed for runId=${runId}: ${err instanceof Error ? err.message : String(err)}`,
+        `[InteractiveClaudeManager] workflow-append lookup failed for runId=${runId}: ${err instanceof Error ? err.message : String(err)}`,
       );
-      return '';
+      return null;
     }
 
-    if (!row) return '';
+    if (!row) return null;
     const name = row.workflowName;
     // __quick__ sentinel suppression: a quick session's run row points at the
     // per-project sentinel workflow (workflowRegistry.ensureQuickWorkflow), which
-    // has NO real steps — prepending step-reporting instructions to its prompts
-    // would be nonsense. ensureQuickWorkflow seeds spec_json='{}' (which already
-    // resolves to a null definition), but guard by NAME so a spec ever written
-    // onto the sentinel row cannot leak workflow instructions into quick-session
-    // prompts.
-    if (name === QUICK_WORKFLOW_NAME) return '';
-    return buildStepReportingAppend(resolveWorkflowDefinition(name, row.specJson));
+    // has NO real steps — prepending workflow instructions to its prompts would be
+    // nonsense. ensureQuickWorkflow seeds spec_json='{}' (which already resolves to
+    // a null definition), but guard by NAME so a spec ever written onto the
+    // sentinel row cannot leak workflow instructions into quick-session prompts.
+    if (name === QUICK_WORKFLOW_NAME) return null;
+    return resolveWorkflowDefinition(name, row.specJson);
+  }
+
+  /**
+   * Build ONLY the step-reporting append for a run (step-reporting-instructions
+   * `buildStepReportingAppend` over the run's effective definition). Returns `''`
+   * fail-soft / for the `__quick__` sentinel. Retained as a named seam for the
+   * `__quick__` suppression test; the live prompt-body prepend path composes both
+   * appends via `composePromptBody`.
+   */
+  private buildStepReportingAppendForRun(runId: string): string {
+    return buildStepReportingAppend(this.resolveRunEffectiveDefinition(runId));
   }
 
   /**

@@ -12,7 +12,8 @@
  * Voice + invariants are deliberately aligned with the built-in prose:
  *   - the orchestrator is the SINGLE WRITER of cyboflow state (subagents never
  *     write it),
- *   - phases/steps run strictly IN ORDER,
+ *   - phases/steps run strictly IN ORDER (a fan-out step excepted — it dispatches
+ *     its inner chain per-item per the appended fan-out execution instructions),
  *   - `cyboflow_report_step` drives the live timeline,
  *   - heavy steps are delegated via the Task tool with `subagent_type:
  *     "cyboflow-<agent>"`,
@@ -24,6 +25,7 @@
  * plain vitest. It imports types/helpers only from `shared/types`.
  */
 import type { WorkflowDefinition, WorkflowStep } from '../../../shared/types/workflows';
+import { effectiveMaxConcurrency } from '../../../shared/types/workflows';
 import { HUMAN_GATE_AGENT } from '../../../shared/types/agentIdentity';
 
 /**
@@ -48,7 +50,9 @@ subagents you delegate to are **edit-only** and **never** write cyboflow state �
 that is your job, so single-writer invariants hold.
 
 Execute the phases and their steps **strictly in order** — top to bottom, one at
-a time. There are no parallel steps in this flow.
+a time — EXCEPT a step that declares a **fan-out** (flagged in the graph below):
+that step dispatches its inner chain per-item with bounded concurrency, following
+the **fan-out execution instructions appended to this prompt**.
 
 For **each** step:
 
@@ -75,7 +79,9 @@ For **each** step:
 - **Single writer.** Only this session calls the \`cyboflow_*\` write tools;
   subagents return results and you persist them. Never write workflow state to
   disk.
-- **In order, one at a time.** No parallel steps in v1.
+- **In order, one at a time** — except a **fan-out** step, which fans its inner
+  chain out per-item with bounded concurrency per the appended fan-out execution
+  instructions.
 - **Optional steps.** When a step is marked **optional** and it does not apply to
   this run, **skip it** and move on.
 - **On failure.** If a step fails and it defines an **on failure → loop back**
@@ -112,6 +118,11 @@ function isHumanGate(step: WorkflowStep): boolean {
  *     - optional                                            (only when optional)
  *     - retries: <n>                                        (only when retries > 0)
  *     - on failure → loop back to `<loopback>`              (only when loopback set)
+ *     - fans out over `<over>` …                            (only when fanOut set)
+ *
+ * A fan-out step gets only a ONE-LINE pointer here (id + cap + inner count) — the
+ * full per-item chain / dispatch / loopback block is appended to the prompt once
+ * by the adapter (`buildFanOutAppend`), so it is not duplicated per step.
  */
 function renderStep(step: WorkflowStep): string {
   const action = isHumanGate(step)
@@ -131,6 +142,13 @@ function renderStep(step: WorkflowStep): string {
   }
   if (step.loopback !== undefined && step.loopback.length > 0) {
     lines.push(`  - on failure → loop back to \`${step.loopback}\``);
+  }
+  if (step.fanOut !== undefined) {
+    const cap = effectiveMaxConcurrency(step.fanOut);
+    lines.push(
+      `  - fans out over \`${step.fanOut.over}\` — ${step.fanOut.inner.length}-step inner ` +
+        `chain, at most ${cap} concurrent (see the appended fan-out execution instructions)`,
+    );
   }
 
   return lines.join('\n');

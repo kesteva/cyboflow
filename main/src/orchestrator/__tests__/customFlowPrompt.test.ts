@@ -123,6 +123,13 @@ describe('CUSTOM_ORCHESTRATOR_HARNESS', () => {
     expect(CUSTOM_ORCHESTRATOR_HARNESS).toMatch(/optional/i);
   });
 
+  it('carves out the fan-out exception to the strictly-in-order rule', () => {
+    // A fan-out step is no longer "no parallel steps" — it dispatches per-item.
+    expect(CUSTOM_ORCHESTRATOR_HARNESS).toMatch(/fan-out/i);
+    expect(CUSTOM_ORCHESTRATOR_HARNESS).not.toContain('There are no parallel steps');
+    expect(CUSTOM_ORCHESTRATOR_HARNESS).not.toContain('No parallel steps in v1');
+  });
+
   it('instructs loopback + retries handling on failure', () => {
     expect(CUSTOM_ORCHESTRATOR_HARNESS).toMatch(/loop back/i);
     expect(CUSTOM_ORCHESTRATOR_HARNESS).toMatch(/retries/i);
@@ -180,6 +187,44 @@ describe('renderWorkflowGraph', () => {
   it('is deterministic for a given definition', () => {
     const def = makeFixture();
     expect(renderWorkflowGraph(def)).toBe(renderWorkflowGraph(def));
+  });
+
+  it('renders a one-line fan-out pointer (over + inner count + cap) for a fanOut step', () => {
+    const def: WorkflowDefinition = {
+      id: 'fanout-flow',
+      phases: [
+        {
+          id: 'execute',
+          label: 'Execute',
+          color: '#c96442',
+          steps: [
+            {
+              id: 'run-each',
+              name: 'Run each item',
+              agent: 'implement',
+              mcps: [],
+              retries: 0,
+              fanOut: {
+                over: 'tasks',
+                maxConcurrency: 3,
+                inner: [
+                  { id: 'build', agent: 'implement', name: 'Build' },
+                  { id: 'check', agent: 'task-verify', name: 'Check', loopback: 'build' },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    };
+    const graph = renderWorkflowGraph(def);
+    expect(graph).toContain('- `run-each` — Run each item → delegate to `cyboflow-implement`');
+    // One-line pointer: item source, inner-chain length, and the cap.
+    expect(graph).toContain('fans out over `tasks`');
+    expect(graph).toContain('2-step inner');
+    expect(graph).toContain('at most 3 concurrent');
+    // The full per-item block is NOT duplicated in the graph (adapter appends it).
+    expect(graph).not.toContain('## Fan-out execution');
   });
 });
 

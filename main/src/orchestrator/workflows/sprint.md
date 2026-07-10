@@ -70,78 +70,25 @@ The pattern for every phase:
 whole fan-out; per-task progress is tracked in the lanes, not in extra step
 reports.
 
-Run the sprint as **DAG waves** over the dependency edges you just recorded:
+This phase's execution mechanics — the **per-task chain** each lane walks, the
+**concurrency cap**, the DAG-wave dispatch, and the loopback / attempt /
+stuck-subagent rules — are **appended to this prompt at runtime** under a
+**Fan-out execution** heading, derived from the `execute-tasks` step's fan-out
+spec. Follow that appended block:
 
-- A task is **READY** when every task it has a blocking edge on is complete.
-- Dispatch at most **5** tasks concurrently.
-- **Before each wave**, compare the expected files of the wave's members — two
-  tasks that would touch the same file must not run concurrently; serialize one of
-  them into a later wave instead.
-- All work happens in **this session's shared worktree** — there are no per-task
-  branches or worktrees.
+- Dispatch the tasks per its dispatch rules (DAG waves over the blocking edges you
+  recorded, bounded by its concurrency cap, holding same-file tasks out of the same
+  wave — all in **this session's shared worktree**, no per-task branches).
+- Drive each task's lane through its per-task chain, moving the lane's
+  `current_step` with `cyboflow_update_sprint_task` as each stage begins, using the
+  EXACT lane step ids and `cyboflow-<agent>` subagent_type names it lists.
+- Honor its loopback + attempt protocol (re-delegate with `attempt: <n>`, up to 3×,
+  then the lane is `failed`) and its stuck-subagent rule.
 
-For each dispatched task, set its lane to `running` via
-`cyboflow_update_sprint_task`, then drive its per-task chain by delegating
-subagents — updating the lane's `current_step` as each stage begins. Independent
-tasks' subagent calls go out **in parallel** (multiple Agent tool calls in one
-message); as each returns, you continue that task's chain.
-
-1. **implement** → delegate to `cyboflow-implement` with the task body + acceptance
-   criteria. It returns an `## Implementation` summary. **Retain its list of files
-   touched** — the shared worktree holds several lanes' uncommitted changes at once,
-   so every later step in this task's chain needs that list to scope to THIS task's
-   diff.
-2. **write-tests** → delegate to `cyboflow-write-tests` with the task + diff summary
-   (including the files touched). If its `## Tests` outcome reports a failing test,
-   loop back to `cyboflow-implement` to fix the cause before continuing. Read its
-   final `TESTS:` line — on `TESTS: skipped(<reason>)`, record a **non-blocking
-   finding** via `cyboflow_report_finding` (category `test-infra` when the reason is
-   missing infrastructure, else `test-gap`; name the task ref and the reason) so the
-   gap lands in the review queue instead of silently vanishing, then continue the
-   chain. A skip never fails the lane by itself.
-3. **code-review** → delegate to `cyboflow-code-review` with the task **and the
-   files it touched** (implement's list, plus any test files write-tests added) so
-   it reviews this task's diff and not other lanes' in-flight work. For each entry
-   in its `## Findings`, record a finding via `cyboflow_report_finding` (non-blocking;
-   lands in the review queue for human triage). When the finding concerns code, always
-   pass `category` and `locations` (each `{ path, line }`) so the review queue can
-   group and jump to it. If it returns a `## Blocking` defect, loop back to
-   `cyboflow-implement` to fix it before proceeding.
-4. **task-verify** → delegate to `cyboflow-task-verify` with the task, its
-   acceptance criteria, **and the files it touched** (same list, so it judges this
-   task's changes only). Read its `VERDICT`. On
-   `FAIL`, re-delegate to `cyboflow-implement` with its `## Fix guidance`, then
-   re-verify — up to 3× before marking the lane `failed` and **continuing the other
-   lanes**. Whenever you re-delegate implement (task-verify `FAIL` or a blocking
-   review defect), include `attempt: <n>` (2 on the first re-delegate, 3 on the
-   second) in the same `cyboflow_update_sprint_task` call that moves the lane's
-   `current_step` back to `implement`.
-5. **visual-verify** (optional) → when visual verification is enabled, delegate to
-   `cyboflow-visual-verify`; otherwise skip. The subagent FIRES a verification
-   request (`cyboflow_request_verification`, passing this lane's `task_ref`) and
-   returns immediately — it does NOT wait for the verdict. Move the lane to the
-   `awaiting-verify` step via `cyboflow_update_sprint_task` (`current_step:
-   'awaiting-verify'`): this is the **visual merge-gate**. The main-process verifier
-   captures + judges the deliverable asynchronously and drives the lane off the park
-   step for you — **PASS** advances the lane toward `integrated`; **FAIL** loops the
-   lane back to `implement` with a bumped `attempt` and a BLOCKING finding carrying
-   the judge's `feedback` (up to 3× before the lane is marked `failed`); **low
-   confidence** raises a non-blocking "needs human visual review" finding and lets
-   the lane proceed. When you observe a lane the gate looped back to `implement` (its
-   `current_step` returned to `implement` with a higher `attempt` and a blocking
-   visual finding), RE-DELEGATE `cyboflow-implement` with that finding's feedback,
-   then re-fire `cyboflow_request_verification` — the same 3× loop as task-verify.
-   Do NOT advance a lane to `integrated`/commit until its visual merge-gate has
-   PASSED (or the run has visual verification disabled). A `VERDICT: SKIPPED` from
-   the subagent (not configured / missing precondition) is NOT a gate — proceed.
-   When a regression traces to already-merged work, the finding carries
-   `category: 'post-merge-bug'`. Batch integration of the shared worktree is held
-   until **all** lanes reach `integrated`.
-
-If a subagent comes back stuck (no usable result), re-delegate it **once** with a
-sharper, narrower scope; if it is still stuck, mark the lane `failed` and move on.
-A failed lane never stops the sprint — the remaining lanes keep running and the
-failure is surfaced at the human gate.
+Edit the chain, the cap, or the dispatch mode in the **workflow editor** — not
+here. A failed lane never stops the sprint: the remaining lanes keep running and
+the failure is surfaced at the human gate. Batch integration of the shared worktree
+is held until **all** lanes reach `integrated`.
 
 **On task success** — when the task's chain drains clean (all checks pass):
 
@@ -194,9 +141,9 @@ Run sprint-verify and sprint-review normally ONLY when every lane is `integrated
 1. **sprint-verify** → delegate to `cyboflow-sprint-verify` (runs the full suite
    ONCE over the whole sprint's combined state). On `VERDICT: FAIL`, identify the
    offending task(s) from the failures, set those lanes back to `running`, and loop
-   them back through the Phase 2 per-task pattern; then re-run sprint-verify. At
-   most **2** such loops — after that, surface the failure at the human gate rather
-   than merging silently.
+   them back through the appended per-task fan-out chain (Phase 2); then re-run
+   sprint-verify. At most **2** such loops — after that, surface the failure at the
+   human gate rather than merging silently.
 2. **sprint-review** → delegate to `cyboflow-sprint-review`; record each entry in its
    `## Findings` via `cyboflow_report_finding`, passing `category` + code `locations`
    and a `severity` (this is a verify-phase step).
