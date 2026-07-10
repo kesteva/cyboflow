@@ -22,9 +22,10 @@
  *
  * FEATURE: user-editable workflow blueprint editor.
  */
-import type { WorkflowDefinition, WorkflowPhase, WorkflowStep } from '../../../../shared/types/workflows';
+import type { WorkflowAgentConfig, WorkflowDefinition, WorkflowPhase, WorkflowStep } from '../../../../shared/types/workflows';
 import { SPRINT_BATCH_CAP } from '../../../../shared/types/sprintBatch';
-import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
+import { resolveStepAgentKey, HUMAN_GATE_AGENT } from '../../../../shared/types/agentIdentity';
+import { AGENT_MODEL_LABELS, type AgentModelAlias } from '../../../../shared/types/agents';
 import type { WorkflowEditorAction, WorkflowEditorState } from '../../hooks/useWorkflowEditorState';
 import { PHASE_COLORS } from './workflowEditorOptions';
 
@@ -33,6 +34,12 @@ export interface WorkflowEditorCanvasProps {
   selectedStepId: string | null;
   selectedFanOutInner: WorkflowEditorState['selectedFanOutInner'];
   dispatch: React.Dispatch<WorkflowEditorAction>;
+  /**
+   * agentKey → the agent's Agents-pane model pin (`null` = inherits the run
+   * model). Falls back to the literal "run model" when a key is absent.
+   * Optional so the canvas compiles before the modal wires it through.
+   */
+  agentModelPins?: Record<string, AgentModelAlias | null>;
 }
 
 // Editor step-node width — matches the documented Direction A editor node (178px).
@@ -43,6 +50,7 @@ export function WorkflowEditorCanvas({
   selectedStepId,
   selectedFanOutInner,
   dispatch,
+  agentModelPins,
 }: WorkflowEditorCanvasProps) {
   return (
     <div
@@ -65,12 +73,14 @@ export function WorkflowEditorCanvas({
       {definition.phases.map((phase, phaseIdx) => (
         <PhaseBand
           key={phase.id}
+          definition={definition}
           phase={phase}
           phaseIndex={phaseIdx}
           phaseCount={definition.phases.length}
           selectedStepId={selectedStepId}
           selectedFanOutInner={selectedFanOutInner}
           dispatch={dispatch}
+          agentModelPins={agentModelPins}
         />
       ))}
 
@@ -105,21 +115,25 @@ export function WorkflowEditorCanvas({
 // ---------------------------------------------------------------------------
 
 interface PhaseBandProps {
+  definition: WorkflowDefinition;
   phase: WorkflowPhase;
   phaseIndex: number;
   phaseCount: number;
   selectedStepId: string | null;
   selectedFanOutInner: WorkflowEditorState['selectedFanOutInner'];
   dispatch: React.Dispatch<WorkflowEditorAction>;
+  agentModelPins?: Record<string, AgentModelAlias | null>;
 }
 
 function PhaseBand({
+  definition,
   phase,
   phaseIndex,
   phaseCount,
   selectedStepId,
   selectedFanOutInner,
   dispatch,
+  agentModelPins,
 }: PhaseBandProps) {
   return (
     <div
@@ -228,6 +242,7 @@ function PhaseBand({
         {phase.steps.map((step, stepIdx) => (
           <StepNode
             key={step.id}
+            definition={definition}
             phase={phase}
             step={step}
             stepIndex={stepIdx}
@@ -235,6 +250,7 @@ function PhaseBand({
             selected={step.id === selectedStepId}
             selectedFanOutInner={selectedFanOutInner?.stepId === step.id ? selectedFanOutInner : null}
             dispatch={dispatch}
+            agentModelPins={agentModelPins}
           />
         ))}
       </div>
@@ -269,6 +285,7 @@ function PhaseBand({
 // ---------------------------------------------------------------------------
 
 interface StepNodeProps {
+  definition: WorkflowDefinition;
   phase: WorkflowPhase;
   step: WorkflowStep;
   stepIndex: number;
@@ -276,9 +293,11 @@ interface StepNodeProps {
   selected: boolean;
   selectedFanOutInner: WorkflowEditorState['selectedFanOutInner'];
   dispatch: React.Dispatch<WorkflowEditorAction>;
+  agentModelPins?: Record<string, AgentModelAlias | null>;
 }
 
 function StepNode({
+  definition,
   phase,
   step,
   stepIndex,
@@ -286,11 +305,18 @@ function StepNode({
   selected,
   selectedFanOutInner,
   dispatch,
+  agentModelPins,
 }: StepNodeProps) {
   const isHuman = step.human === true;
   const isOptional = step.optional === true;
   const fanOut = step.fanOut;
   const isFanOut = fanOut !== undefined;
+  // Canonical agent key this step's config/model overlay is keyed by — same
+  // resolver used for the display label so legacy labels (e.g. 'idea-extractor')
+  // and the canonical key (e.g. 'context') agree on which agentConfigs entry applies.
+  const agentKey = resolveStepAgentKey(step.id, step.agent) ?? step.agent;
+  const isHumanGate = step.agent === HUMAN_GATE_AGENT;
+  const stepAgentConfig = definition.agentConfigs?.[agentKey];
 
   // Head bar: black (Direction A) by default; hatched amber for human steps.
   const headBackground = isHuman
@@ -465,8 +491,26 @@ function StepNode({
         >
           <span>
             <span style={{ display: 'inline-block', width: 42, color: 'var(--color-text-tertiary)' }}>agent</span>
-            <b style={{ color: 'var(--color-text-primary)', fontWeight: 600 }}>{resolveStepAgentKey(step.id, step.agent) ?? step.agent}</b>
+            <b style={{ color: 'var(--color-text-primary)', fontWeight: 600 }}>
+              {agentKey}
+              {stepAgentConfig?.custom !== undefined && (
+                <span
+                  title="Customized for this flow"
+                  data-testid={`editor-step-agent-custom-${step.id}`}
+                >
+                  *
+                </span>
+              )}
+            </b>
           </span>
+          <ModelMetaRow
+            agentKey={agentKey}
+            isHumanGate={isHumanGate}
+            agentConfig={stepAgentConfig}
+            agentModelPins={agentModelPins}
+            labelWidth={42}
+            testId={`editor-step-model-${step.id}`}
+          />
           <span>
             <span style={{ display: 'inline-block', width: 42, color: 'var(--color-text-tertiary)' }}>retry</span>
             <b style={{ color: 'var(--color-text-primary)', fontWeight: 600 }}>×{step.retries}</b>
@@ -609,19 +653,47 @@ function StepNode({
                       <div style={{ fontSize: 11, fontWeight: 600, lineHeight: 1.25 }}>
                         {inner.name != null && inner.name.trim().length > 0 ? inner.name : inner.id}
                       </div>
-                      <div
-                        style={{
-                          marginTop: 6,
-                          display: 'flex',
-                          flexDirection: 'column',
-                          gap: 2,
-                          fontSize: 9.5,
-                          color: 'var(--color-text-secondary)',
-                        }}
-                      >
-                        <span><span style={{ color: 'var(--color-text-tertiary)', display: 'inline-block', width: 38 }}>agent</span><b style={{ color: 'var(--color-text-primary)' }}>{inner.agent}</b></span>
-                        <span><span style={{ color: 'var(--color-text-tertiary)', display: 'inline-block', width: 38 }}>id</span><b style={{ color: 'var(--color-text-primary)' }}>{inner.id}</b></span>
-                      </div>
+                      {(() => {
+                        const innerAgentKey = resolveStepAgentKey(inner.id, inner.agent) ?? inner.agent;
+                        const innerIsHumanGate = inner.agent === HUMAN_GATE_AGENT;
+                        const innerAgentConfig = definition.agentConfigs?.[innerAgentKey];
+                        return (
+                          <div
+                            style={{
+                              marginTop: 6,
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 2,
+                              fontSize: 9.5,
+                              color: 'var(--color-text-secondary)',
+                            }}
+                          >
+                            <span>
+                              <span style={{ color: 'var(--color-text-tertiary)', display: 'inline-block', width: 38 }}>agent</span>
+                              <b style={{ color: 'var(--color-text-primary)' }}>
+                                {inner.agent}
+                                {innerAgentConfig?.custom !== undefined && (
+                                  <span
+                                    title="Customized for this flow"
+                                    data-testid={`editor-fanout-inner-agent-custom-${inner.id}`}
+                                  >
+                                    *
+                                  </span>
+                                )}
+                              </b>
+                            </span>
+                            <ModelMetaRow
+                              agentKey={innerAgentKey}
+                              isHumanGate={innerIsHumanGate}
+                              agentConfig={innerAgentConfig}
+                              agentModelPins={agentModelPins}
+                              labelWidth={38}
+                              testId={`editor-fanout-inner-model-${inner.id}`}
+                            />
+                            <span><span style={{ color: 'var(--color-text-tertiary)', display: 'inline-block', width: 38 }}>id</span><b style={{ color: 'var(--color-text-primary)' }}>{inner.id}</b></span>
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
                 );
@@ -677,6 +749,54 @@ function StepNode({
         </IconBtn>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// ModelMetaRow — shared "model" meta line for the outer step card and each
+// fan-out inner card. Effective value, in precedence order:
+//   (a) this workflow's agentConfigs override for the agent  → styled as an
+//       explicit override (var(--color-status-info), the reads-as-"set here"
+//       accent that is NOT the loop row's error red)
+//   (b) the agent's Agents-pane model pin                    → normal <b>
+//   (c) neither set                                           → literal
+//       "run model", tertiary + italic (inherits silently)
+// Always rendered except for the human gate, which has no model to pin.
+// ---------------------------------------------------------------------------
+
+interface ModelMetaRowProps {
+  agentKey: string;
+  isHumanGate: boolean;
+  agentConfig: WorkflowAgentConfig | undefined;
+  agentModelPins?: Record<string, AgentModelAlias | null>;
+  labelWidth: number;
+  testId: string;
+}
+
+function ModelMetaRow({ isHumanGate, agentConfig, agentModelPins, agentKey, labelWidth, testId }: ModelMetaRowProps) {
+  if (isHumanGate) return null;
+
+  const override = agentConfig?.model;
+  const pin = agentModelPins?.[agentKey];
+
+  let text: string;
+  let valueStyle: React.CSSProperties;
+  if (override !== undefined) {
+    text = AGENT_MODEL_LABELS[override];
+    valueStyle = { color: 'var(--color-status-info)', fontWeight: 700 };
+  } else if (pin != null) {
+    text = AGENT_MODEL_LABELS[pin];
+    valueStyle = { color: 'var(--color-text-primary)', fontWeight: 600 };
+  } else {
+    text = 'run model';
+    valueStyle = { color: 'var(--color-text-tertiary)', fontStyle: 'italic', fontWeight: 400 };
+  }
+
+  return (
+    <span>
+      <span style={{ display: 'inline-block', width: labelWidth, color: 'var(--color-text-tertiary)' }}>model</span>
+      <b style={valueStyle} data-testid={testId}>{text}</b>
+    </span>
   );
 }
 
