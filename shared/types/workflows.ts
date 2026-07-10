@@ -807,7 +807,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'compounder',
             mcps: ['filesystem', 'git'],
             retries: 0,
-            desc: 'Gather the session diff + raw run data for recently merged/completed runs.',
+            desc: 'Gather the session diff + raw run data for recently merged/completed runs; the compounder returns ONLY a Merged work summary here — no learnings and no discarded list yet (those come at extract), and nothing is filed as a review item.',
           },
           {
             id: 'extract',

@@ -12,6 +12,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
+import { join, dirname } from 'path';
 import { buildBuiltInWorkflows } from '../builtInWorkflows';
 import { CYBOFLOW_WORKFLOW_NAMES, WORKFLOW_DEFINITIONS } from '../../../../../shared/types/workflows';
 import { CANONICAL_AGENT_KEYS, HUMAN_GATE_AGENT } from '../../../../../shared/types/agentIdentity';
@@ -122,16 +123,60 @@ describe('buildBuiltInWorkflows', () => {
     expect(body, 'compound forbids filing a decision per discarded candidate').toMatch(
       /discarded candidate.*belongs in the `## Discarded`|NEVER file a `decision` \(or any review item\) per drop/is,
     );
+
+    // Doc-edit decisions emit at WRITE-BACK for APPROVED items only — never at the
+    // gate (that would file decisions for doc edits the user is about to reject).
+    // [Codex review finding 1]
+    expect(body, 'approve-learnings gate emits no review items').toMatch(
+      /gate emits \*\*no review items\*\*/,
+    );
+    expect(body, 'write-back emits decisions for APPROVED doc learnings only').toMatch(
+      /APPROVED doc learning/,
+    );
+
+    // Seeded runs have no discovery, so the doc omits the Discarded section rather
+    // than inventing one. [Codex review finding 4]
+    expect(body, 'seeded path omits the Discarded section').toMatch(/omit `## Discarded`/);
+  });
+
+  it('compound compounder subagent tags quick/task/doc (not "decision") and scopes load vs extract', () => {
+    // The compounder returns the learning TAG `doc`, not `decision` — `decision` is
+    // the review-item KIND, and overloading the word made the step agent file
+    // decisions prematurely. It also returns only Merged work at the load phase.
+    // [Codex review findings 2 + 3]
+    const compound = buildBuiltInWorkflows().find((d) => d.name === 'compound')!;
+    const compounderPath = join(dirname(compound.path), 'compound', 'agents', 'compounder.md');
+    // Collapse wrapped-prose whitespace so multi-word phrases match regardless of
+    // where markdown line-wrapping falls.
+    const body = readFileSync(compounderPath, 'utf-8').replace(/\s+/g, ' ');
+    expect(body, 'compounder tags are quick / task / doc').toContain('quick / task / doc');
+    expect(body, 'compounder does not use "decision" as a bucket tag').toContain(
+      'do not use the word "decision" as a tag',
+    );
+    expect(body, 'compounder load phase returns ONLY Merged work').toContain(
+      'Load phase',
+    );
+    expect(body, 'compounder load phase returns only the Merged work summary').toMatch(
+      /Load phase[^:]*:[^)]*return ONLY a `## Merged work`/,
+    );
   });
 
   it('compound DEFINITION drives the programmatic path: extract outputs the recommendations doc, write-back emits no findings', () => {
     const def = WORKFLOW_DEFINITIONS.compound;
     expect(def, 'WORKFLOW_DEFINITIONS.compound present').toBeDefined();
     const steps = def.phases.flatMap((p) => p.steps);
+    const loadSprint = steps.find((s) => s.id === 'load-sprint');
     const extract = steps.find((s) => s.id === 'extract');
     const writeBack = steps.find((s) => s.id === 'write-back');
+    expect(loadSprint, 'load-sprint step present').toBeDefined();
     expect(extract, 'extract step present').toBeDefined();
     expect(writeBack, 'write-back step present').toBeDefined();
+
+    // load-sprint returns only the Merged work summary — no premature mining of
+    // learnings/drops (the original per-drop-gate leak was at this step). [finding 2]
+    expect(loadSprint!.desc ?? '', 'load-sprint desc scopes to Merged work only').toMatch(
+      /Merged work summary.*no learnings/is,
+    );
 
     // The programmatic step prompt is built from desc + outputArtifact, so the
     // recommendations artifact MUST be a declared step output (else a programmatic

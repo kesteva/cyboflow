@@ -152,21 +152,23 @@ from plugin state files:
    Reject) and point the user at the **`compound-recommendations` artifact tab**
    for the full list — keep the option previews short (a bucket-count summary),
    not a dump of every learning. `cyboflow_report_step` each transition so the run
-   rail tracks the gate. For the `doc` learnings, ALSO emit a **blocking
-   `decision`** review item via `cyboflow_report_finding` (`kind: 'decision'`,
-   `blocking: true`) so the human gates each proposed CLAUDE.md / CODE-PATTERNS.md
-   change in the review queue — a decision is never self-applied. Do **not**
-   proceed to write-back until the user answers; record which learnings were
-   approved.
+   rail tracks the gate. This gate emits **no review items** — it only asks the
+   question; the `doc` `decision` items are emitted at write-back, for approved
+   items ONLY (emitting them here would file decisions for doc edits the user is
+   about to reject). Do **not** proceed to write-back until the user answers;
+   record which learnings were approved.
 5. **write-back** → apply **only the approved learnings**:
    - **quick** → apply the fix in-place in the worktree (you hold Edit/Write as
      the orchestrator). Keep it small and scoped to the learning; run the local
      check the fix warrants.
    - **task** → `cyboflow_create_task` (title, body, acceptance criteria,
      file / dependency hints) so they queue for a future Sprint run.
-   - **doc** → the blocking `decision` items you already emitted at the gate;
-     do not re-create them. The human applies the CLAUDE.md / CODE-PATTERNS.md edit
-     when they resolve the decision — that is not your job.
+   - **doc** → for each APPROVED doc learning, emit ONE blocking `decision` review
+     item via `cyboflow_report_finding` (`kind: 'decision'`, `blocking: true`) so
+     the human gates that proposed CLAUDE.md / CODE-PATTERNS.md change in the review
+     queue — a decision is never self-applied. Emit these for approved doc learnings
+     only, never for a rejected or discarded one. The human applies the edit when
+     they resolve the decision — that is not your job.
 
 ## Recommendations doc
 
@@ -176,12 +178,15 @@ summary of what Compound proposes. Compose it as markdown and report it via
 `{"markdown": "<doc>"}`). One artifact per run: a repeat call with the same atype
 ENRICHES it, so you can refine the doc as you go.
 
-- Structure it in TWO top-level sections: **`## Act on`** — grouped `### Quick
-  fixes` / `### Doc edits` / `### Tasks`, in that order, one entry per learning —
-  and **`## Discarded`** — the candidates the compounder considered and set aside,
-  one line each with its reason. The Discarded section is the "here's what I
-  discarded" half of the single review; it lives in this doc ONLY and never
-  becomes review-queue items.
+- Always include an **`## Act on`** section — grouped `### Quick fixes` /
+  `### Doc edits` / `### Tasks`, in that order, one entry per learning.
+- On the **unseeded** path, ALSO include a **`## Discarded`** section — the
+  candidates the compounder considered and set aside, one line each with its
+  reason. It is the "here's what I discarded" half of the single review; it lives
+  in this doc ONLY and never becomes review-queue items.
+- On the **seeded** path there is no discovery (the human pre-selected the exact
+  findings), so there are no discarded candidates — **omit `## Discarded`** rather
+  than invent one. The doc is just the `## Act on` list of the curated set.
 - Each **Act on** entry states the **general rule** (not the one instance), its
   **evidence / computed impact** (recurrence across runs with ids, files touched,
   token/cost deltas only when the digest attributes them), and the concrete action.
@@ -225,12 +230,14 @@ ENRICHES it, so you can refine the doc as you go.
   gated `decision` items).
 - **Publish the recommendations doc, then gate.** On the **unseeded** path,
   publish the `compound-recommendations` artifact, use **AskUserQuestion** for the
-  `approve-learnings` gate (pointing at that tab), and emit blocking `decision`
-  items for every proposed doc edit; never silently fold a learning back. On a
-  **seeded** run the `approve-learnings` gate is SKIPPED (the human already
-  triaged the set in the Insights tray) — publish the recommendations doc as a
-  record, then act — but you STILL emit a blocking `decision` item for any `doc`
-  learning whose edit must be human-gated before applying it.
-  `cyboflow_report_step` is observational only and never substitutes for a gate.
+  `approve-learnings` gate (pointing at that tab), and — at **write-back**, for
+  **approved** doc learnings only — emit one blocking `decision` item per approved
+  doc edit; never emit them at the gate (that files decisions for doc edits the
+  user may reject) and never silently fold a learning back. On a **seeded** run the
+  `approve-learnings` gate is SKIPPED (the human already triaged the set in the
+  Insights tray) — publish the recommendations doc as a record, then act — but you
+  STILL emit a blocking `decision` item for any `doc` learning whose edit must be
+  human-gated before applying it. `cyboflow_report_step` is observational only and
+  never substitutes for a gate.
 - Report every step transition via `cyboflow_report_step` from this main session —
   including the steps whose work you delegated to the subagent.
