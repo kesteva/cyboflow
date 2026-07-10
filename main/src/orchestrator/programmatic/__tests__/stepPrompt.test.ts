@@ -159,6 +159,26 @@ describe('composeStepPrompt', () => {
     expect(out).not.toContain('report_artifact');
   });
 
+  it('instructs a compound extract step to compose the doc and call cyboflow_report_artifact', () => {
+    const out = composeStepPrompt({
+      step: step({
+        id: 'extract',
+        name: 'Extract learnings',
+        agent: 'compounder',
+        outputArtifact: { atype: 'compound-recommendations', label: 'Recommendations' },
+      }),
+      workflowName: 'compound',
+      attempt: 1,
+    });
+    expect(out).toContain('## Artifact to report');
+    expect(out).toContain('cyboflow_report_artifact');
+    expect(out).toContain("atype: 'compound-recommendations'");
+    expect(out).toContain('"Recommendations"');
+    expect(out).toContain('{"markdown": "<the doc>"}');
+    // And it must forbid re-emitting the learnings as findings.
+    expect(out).toContain("kind:'finding'");
+  });
+
   it('adds no artifact addendum for an outputArtifact atype that mints without a follow-up (idea-spec)', () => {
     const out = composeStepPrompt({
       step: step({

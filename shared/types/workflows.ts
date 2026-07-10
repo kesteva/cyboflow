@@ -785,11 +785,14 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
     ],
   },
 
-  // compound — mine recently merged runs for durable learnings and fold them
-  // back as clean-up tasks (cyboflow_create_task) + review-queue items
-  // (cyboflow_report_finding: 'finding' observations, 'decision' doc edits).
-  // Single 'Compound' phase; the approve-learnings human gate sits between the
-  // draft and the write-back so nothing lands without sign-off.
+  // compound — mine recently merged runs for durable learnings and fold the
+  // approved ones back as PROPOSED IMPROVEMENTS in three buckets: quick (an
+  // in-place fix), doc (a gated cyboflow_report_finding 'decision'), and task
+  // (cyboflow_create_task). It NEVER emits 'finding' items — a finding is
+  // Compound's input, not its output. The 'extract' step also publishes a
+  // 'compound-recommendations' artifact (the summary doc the human reads at the
+  // gate). Single 'Compound' phase; the approve-learnings human gate sits
+  // between the draft and the write-back so nothing lands without sign-off.
   compound: {
     id: 'compound',
     phases: [
@@ -812,7 +815,8 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'compounder',
             mcps: ['filesystem'],
             retries: 0,
-            desc: 'Draft durable learnings with computed impact (token deltas, recurrence counts).',
+            outputArtifact: { atype: 'compound-recommendations', label: 'Recommendations' },
+            desc: 'Draft durable learnings tagged quick / doc / task (NEVER findings), then publish the summary-of-recommendations doc for the gate.',
           },
           {
             id: 'approve-learnings',
@@ -821,7 +825,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             mcps: [],
             retries: 0,
             human: true,
-            desc: 'You decide which learnings become tasks / doc edits before any write-back.',
+            desc: 'Review the recommendations doc; decide which quick fixes / doc edits / tasks apply before write-back.',
           },
           {
             id: 'write-back',
@@ -829,7 +833,7 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'compounder',
             mcps: ['filesystem'],
             retries: 0,
-            desc: 'Apply only approved items: create tasks + emit findings via cyboflow_*.',
+            desc: "Apply approved items only: quick fixes in-place, tasks via cyboflow_create_task, doc edits as blocking cyboflow_report_finding decisions. NEVER emit kind:'finding'.",
           },
         ],
       },

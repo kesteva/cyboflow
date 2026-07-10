@@ -87,12 +87,13 @@ export interface ComposeStepPromptArgs {
  * 'decomposed-stories' mint automatically by re-deriving from the entity DB
  * once the step's own `cyboflow_*` writes land as part of "do the work" (step
  * 1 of the numbered list above) — no separate reporting action exists for
- * those, so adding an addendum would just be prompt noise. Only 'ui-prototype'
- * and 'arch-design' have a deliverable that lives OUTSIDE that entity write (a
- * served localhost URL; a subagent-returned section that must be folded into
- * the idea body by hand) — those need to be told explicitly. Any future atype
- * defaults to no addendum (the `default` branch) unless it is proven to need
- * one and added here deliberately.
+ * those, so adding an addendum would just be prompt noise. 'ui-prototype',
+ * 'arch-design', and 'compound-recommendations' have a deliverable that lives
+ * OUTSIDE that entity write (a served localhost URL; a subagent-returned section
+ * that must be folded into the idea body by hand; a payload-backed markdown doc
+ * the agent composes from its subagent's learnings) — those need to be told
+ * explicitly. Any future atype defaults to no addendum (the `default` branch)
+ * unless it is proven to need one and added here deliberately.
  */
 function artifactFollowUp(outputArtifact: NonNullable<WorkflowStep['outputArtifact']>): string {
   switch (outputArtifact.atype) {
@@ -100,6 +101,8 @@ function artifactFollowUp(outputArtifact: NonNullable<WorkflowStep['outputArtifa
       return `\n\n## Artifact to report\n\nWhen your \`cyboflow-ui-prototype\` subagent returns its \`## Prototype\` section, it includes a \`URL: http://localhost:<port>/\` line. Extract that URL and call \`cyboflow_report_artifact\` yourself with \`atype: 'ui-prototype'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"url": "<the url>"}\` — that call is the ONLY thing that mints this run's UI-prototype tab. Skipping it leaves the tab permanently empty.`;
     case 'arch-design':
       return `\n\n## Artifact to report\n\nWhen your \`cyboflow-architecture\` subagent returns its \`## Architecture design\` section, fold it into the IDEA's body yourself via \`cyboflow_update_task\`: if the body already has an \`## Architecture design\` section, REPLACE that section (never stack a second copy); otherwise append it. The arch-design deliverable tab derives from the body automatically, so you do not report an artifact for this step.`;
+    case 'compound-recommendations':
+      return `\n\n## Artifact to report\n\nAfter your \`cyboflow-compounder\` subagent returns its \`## Learnings\` list, compose ONE summary-of-recommendations markdown doc — grouped by bucket as \`## Quick fixes\` / \`## Doc edits\` / \`## Tasks\`, one entry per learning with its general rule, evidence (recurrence + run ids, files), and computed impact — and call \`cyboflow_report_artifact\` yourself with \`atype: 'compound-recommendations'\`, label \`"${outputArtifact.label}"\`, and \`payload_json\` \`{"markdown": "<the doc>"}\`. That call is the ONLY thing that mints this run's recommendations tab, and it is exactly what the human reads at the approve-learnings gate — skipping it leaves the gate with nothing to review. Do NOT emit these learnings as \`cyboflow_report_finding\` \`kind:'finding'\` items; a finding is Compound's input, not its output.`;
     default:
       return '';
   }

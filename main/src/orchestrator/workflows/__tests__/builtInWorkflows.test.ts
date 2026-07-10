@@ -117,6 +117,31 @@ describe('buildBuiltInWorkflows', () => {
     );
   });
 
+  it('compound DEFINITION drives the programmatic path: extract outputs the recommendations doc, write-back emits no findings', () => {
+    const def = WORKFLOW_DEFINITIONS.compound;
+    expect(def, 'WORKFLOW_DEFINITIONS.compound present').toBeDefined();
+    const steps = def.phases.flatMap((p) => p.steps);
+    const extract = steps.find((s) => s.id === 'extract');
+    const writeBack = steps.find((s) => s.id === 'write-back');
+    expect(extract, 'extract step present').toBeDefined();
+    expect(writeBack, 'write-back step present').toBeDefined();
+
+    // The programmatic step prompt is built from desc + outputArtifact, so the
+    // recommendations artifact MUST be a declared step output (else a programmatic
+    // run never mints it — the gap that shipped the doc-less run).
+    expect(extract!.outputArtifact?.atype, 'extract declares the recommendations artifact').toBe(
+      'compound-recommendations',
+    );
+
+    // Neither driving desc may instruct emitting findings; write-back is quick/
+    // doc/task only.
+    expect(extract!.desc ?? '', 'extract desc forbids findings').not.toMatch(/emit findings/i);
+    expect(writeBack!.desc ?? '', 'write-back desc no longer emits findings').not.toMatch(
+      /emit findings/i,
+    );
+    expect(writeBack!.desc ?? '', "write-back desc forbids kind:'finding'").toMatch(/never emit/i);
+  });
+
   it('ship is planner (idea → epics → tasks) concatenated with sprint to integration', () => {
     const ship = buildBuiltInWorkflows().find((d) => d.name === 'ship');
     expect(ship, 'ship descriptor present').toBeDefined();
