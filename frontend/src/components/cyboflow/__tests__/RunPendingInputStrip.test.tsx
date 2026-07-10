@@ -145,10 +145,10 @@ describe('RunPendingInputStrip', () => {
 
   it('renders only pending items for this run, blocking-first', () => {
     mockItems = [
-      makeReviewItem({ id: 'rvw-non-blocking', run_id: 'run-1', blocking: false }),
-      makeReviewItem({ id: 'rvw-other-run', run_id: 'run-2', blocking: true }),
-      makeReviewItem({ id: 'rvw-blocking', run_id: 'run-1', blocking: true }),
-      makeReviewItem({ id: 'rvw-resolved', run_id: 'run-1', blocking: true, status: 'resolved' }),
+      makeReviewItem({ id: 'rvw-non-blocking', run_id: 'run-1', kind: 'decision', blocking: false }),
+      makeReviewItem({ id: 'rvw-other-run', run_id: 'run-2', kind: 'decision', blocking: true }),
+      makeReviewItem({ id: 'rvw-blocking', run_id: 'run-1', kind: 'decision', blocking: true }),
+      makeReviewItem({ id: 'rvw-resolved', run_id: 'run-1', kind: 'decision', blocking: true, status: 'resolved' }),
     ];
     render(<RunPendingInputStrip runId="run-1" projectId={5} />);
     const cards = screen.getAllByTestId('review-item-card');
@@ -156,14 +156,14 @@ describe('RunPendingInputStrip', () => {
   });
 
   it('shows the header chip + shown count', () => {
-    mockItems = [makeReviewItem({ id: 'rvw-1', run_id: 'run-1' })];
+    mockItems = [makeReviewItem({ id: 'rvw-1', run_id: 'run-1', kind: 'decision' })];
     render(<RunPendingInputStrip runId="run-1" projectId={5} />);
     expect(screen.getByTestId('pending-input-chip')).toHaveTextContent('Needs your input');
     expect(screen.getByTestId('pending-input-count')).toHaveTextContent('1');
   });
 
   it('caps max-height with an internal scroll region and a top border on the strip', () => {
-    mockItems = [makeReviewItem({ id: 'rvw-1', run_id: 'run-1' })];
+    mockItems = [makeReviewItem({ id: 'rvw-1', run_id: 'run-1', kind: 'decision' })];
     render(<RunPendingInputStrip runId="run-1" projectId={5} />);
     const strip = screen.getByTestId('run-pending-input-strip');
     expect(strip).toHaveClass('border-t');
@@ -189,16 +189,27 @@ describe('RunPendingInputStrip', () => {
   it('suppresses a source===question review item for the run when a live question is present (no duplicate surface)', () => {
     mockItems = [
       makeReviewItem({ id: 'rvw-question', run_id: 'run-1', kind: 'decision', source: 'question', payload: null }),
-      makeReviewItem({ id: 'rvw-finding', run_id: 'run-1', kind: 'finding' }),
+      makeReviewItem({ id: 'rvw-decision', run_id: 'run-1', kind: 'decision' }),
     ];
     mockQuestionQueue = [makeQuestion({ toolUseId: 'tool-live', runId: 'run-1' })];
     render(<RunPendingInputStrip runId="run-1" projectId={5} />);
 
     const reviewCards = screen.getAllByTestId('review-item-card');
-    expect(reviewCards.map((c) => c.getAttribute('data-item-id'))).toEqual(['rvw-finding']);
+    expect(reviewCards.map((c) => c.getAttribute('data-item-id'))).toEqual(['rvw-decision']);
 
     const questionCards = screen.getAllByTestId('ask-question-card');
     expect(questionCards).toHaveLength(1);
+  });
+
+  it('drops kind===finding items — findings go to the triage queue, not the strip', () => {
+    mockItems = [
+      makeReviewItem({ id: 'rvw-finding', run_id: 'run-1', kind: 'finding' }),
+      makeReviewItem({ id: 'rvw-decision', run_id: 'run-1', kind: 'decision' }),
+    ];
+    render(<RunPendingInputStrip runId="run-1" projectId={5} />);
+    expect(screen.getAllByTestId('review-item-card').map((c) => c.getAttribute('data-item-id'))).toEqual([
+      'rvw-decision',
+    ]);
   });
 
   it('keeps a source===question review item when no live question is present for the run', () => {
