@@ -318,10 +318,12 @@ describe('SubstrateDispatchFacade — abort dispatches to the panel-owning manag
 // ---------------------------------------------------------------------------
 // killSession (IDEA-030) — the Dismiss close-out's HARD-kill twin of endSession.
 // Resolves the manager by per-run substrate and routes to killProcess (teardown
-// + process-tree kill) for interactive; strict NO-OP for SDK.
+// + process-tree kill) for interactive; for SDK it is ALSO the only close-out
+// primitive (no PTY to write a graceful EOF into — a warm persistent SDK query()
+// must be aborted, not merely disconnected).
 // ---------------------------------------------------------------------------
 
-describe('SubstrateDispatchFacade — killSession hard-kills the interactive REPL', () => {
+describe('SubstrateDispatchFacade — killSession hard-kills the live process', () => {
   it('killSession(runId) routes to interactiveManager.killProcess for an interactive run', async () => {
     const run = makeWorkflowRunRow({ substrate: 'interactive' });
     const registry = makeRegistry(run);
@@ -336,7 +338,7 @@ describe('SubstrateDispatchFacade — killSession hard-kills the interactive REP
     expect(sdk.killProcess).not.toHaveBeenCalled();
   });
 
-  it('killSession(runId) is a strict NO-OP for an SDK run (no PTY to kill)', async () => {
+  it('killSession(runId) routes to sdkManager.killProcess for an SDK run (warm-process kill)', async () => {
     const run = makeWorkflowRunRow({ substrate: 'sdk' });
     const registry = makeRegistry(run);
     const sdk = makeSpyManager();
@@ -345,8 +347,45 @@ describe('SubstrateDispatchFacade — killSession hard-kills the interactive REP
 
     await facade.killSession(run.id);
 
-    expect(sdk.killProcess).not.toHaveBeenCalled();
+    expect(sdk.killProcess).toHaveBeenCalledOnce();
+    expect(sdk.killProcess).toHaveBeenCalledWith(run.id);
     expect(interactive.killProcess).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// endSession (IDEA-030 / TASK-818) — graceful close-out for interactive; for
+// SDK there is no graceful primitive, so it converges on the same killProcess
+// abort as killSession (a warm persistent query() must be killed, not merely
+// asked nicely — there is no PTY stdin to write EOF into).
+// ---------------------------------------------------------------------------
+
+describe('SubstrateDispatchFacade — endSession dispatches an SDK kill (no graceful primitive)', () => {
+  it('endSession(runId) routes to sdkManager.killProcess for an SDK run', async () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    await facade.endSession(run.id);
+
+    expect(sdk.killProcess).toHaveBeenCalledOnce();
+    expect(sdk.killProcess).toHaveBeenCalledWith(run.id);
+    expect(interactive.killProcess).not.toHaveBeenCalled();
+  });
+
+  it('endSession(runId) routes to sdkManager.killProcess when substrate is undefined (legacy/default floor)', async () => {
+    const run = makeWorkflowRunRow({ substrate: undefined });
+    const registry = makeRegistry(run);
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    await facade.endSession(run.id);
+
+    expect(sdk.killProcess).toHaveBeenCalledOnce();
+    expect(sdk.killProcess).toHaveBeenCalledWith(run.id);
   });
 });
 

@@ -543,6 +543,30 @@ describe('cancelAndRestartHandler', () => {
   });
 
   // -------------------------------------------------------------------------
+  // SDK-substrate regression pin (teardown-gaps fix): cancelAndRestart is wired
+  // via a DIFFERENT, facade-bypassing seam than runs.cancel/pause/handover
+  // (index.ts wires claudeManagerStop -> defaultCliManager.stopPanel(sessionId)
+  // directly, not SubstrateDispatchFacade.abort). This handler does not branch
+  // on substrate — it always calls claudeManagerStop(runId) — but that is
+  // exactly what makes this seam a silent-divergence risk under SDK-process
+  // persistence: a future refactor that made claudeManagerStop conditional on
+  // substrate could quietly stop reaching a warm SDK run's process. Pin the
+  // seam explicitly against an SDK-substrate run row.
+  // -------------------------------------------------------------------------
+
+  it('calls the injected claudeManagerStop for an SDK-substrate run (facade-bypassing seam stays reachable)', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+    db.prepare(`UPDATE workflow_runs SET substrate = 'sdk' WHERE id = ?`).run(runId);
+
+    const result = await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
+    if ('noOp' in result) throw new Error('Expected a real result, got noOp');
+
+    expect(spy.claudeManagerStop).toHaveBeenCalledOnce();
+    expect(spy.claudeManagerStop).toHaveBeenCalledWith(runId);
+  });
+
+  // -------------------------------------------------------------------------
   // Race branch: changes === 0 (FIND-SPRINT-013-17)
   //
   // Scenario: the row-fetch guard passes (run is 'stuck'), but a concurrent

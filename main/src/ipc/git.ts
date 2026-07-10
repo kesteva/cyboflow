@@ -61,18 +61,22 @@ interface RawCommitData {
 export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): void {
   const { sessionManager, gitDiffManager, worktreeManager, claudeCodeManager, gitStatusManager, databaseService, configManager, endLiveSession } = services;
 
-  // PTY quick-session close-out (IDEA-030): after a merge/rebase the session's
-  // work is accepted, so a live persistent interactive REPL should exit instead
-  // of lingering orphaned. Graceful EOF/`/exit` (endLiveSession) is correct here
-  // — claude is idle post-merge and reads PTY stdin. The facade translates the
-  // chat `__quick__` sentinel runId to the live panelId and strictly NO-OPs for the
-  // SDK substrate / workflow runs. Fire-and-forget fail-soft: a close failure
-  // must never fail the git operation itself. Role-G: the live REPL gates on the
-  // chatRunId sentinel (the gate vehicle), not runId (the latest flow run).
-  const endLiveReplIfInteractive = (session: Session, sessionId: string): void => {
-    if (session.substrate !== 'interactive' || !session.chatRunId) return;
+  // Quick-session close-out (IDEA-030): after a merge/rebase the session's work
+  // is accepted, so a live persistent chat process should exit instead of
+  // lingering orphaned — this now applies on EITHER substrate. `endLiveSession`
+  // is the SubstrateDispatchFacade.endSession seam: for the interactive REPL it
+  // writes a graceful EOF/`/exit` (claude is idle post-merge and reads PTY
+  // stdin) and translates the chat `__quick__` sentinel runId to the live
+  // panelId; for the SDK substrate (a warm persistent query() under
+  // SDK-process persistence) it dispatches the same killProcess abort used by
+  // killSession, since there is no PTY stdin to write a graceful EOF into.
+  // Fire-and-forget fail-soft: a close failure must never fail the git
+  // operation itself. Role-G: the live process gates on the chatRunId sentinel
+  // (the gate vehicle), not runId (the latest flow run).
+  const endLiveSessionProcesses = (session: Session, sessionId: string): void => {
+    if (!session.chatRunId) return;
     void endLiveSession(session.chatRunId).catch((err: unknown) => {
-      console.warn(`[IPC:git] Failed to end live interactive REPL for session ${sessionId}:`, err);
+      console.warn(`[IPC:git] Failed to end live session process for session ${sessionId}:`, err);
     });
   };
 
@@ -1133,9 +1137,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
           console.warn(`[IPC:git] Failed to auto-resolve dynamic-workflow review items for session ${sessionId}:`, err);
         });
 
-      // Gracefully end a PTY quick session's live REPL — the merge closes out
-      // the session's work (see endLiveReplIfInteractive).
-      endLiveReplIfInteractive(session, sessionId);
+      // End a quick session's live process (either substrate) — the merge
+      // closes out the session's work (see endLiveSessionProcesses).
+      endLiveSessionProcesses(session, sessionId);
 
       // Update git status for ALL sessions in the project since main was updated
       // Wait for this to complete before returning so UI sees the updated status immediately
@@ -1253,9 +1257,9 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
           console.warn(`[IPC:git] Failed to auto-resolve dynamic-workflow review items for session ${sessionId}:`, err);
         });
 
-      // Gracefully end a PTY quick session's live REPL — the merge closes out
-      // the session's work (see endLiveReplIfInteractive).
-      endLiveReplIfInteractive(session, sessionId);
+      // End a quick session's live process (either substrate) — the merge
+      // closes out the session's work (see endLiveSessionProcesses).
+      endLiveSessionProcesses(session, sessionId);
 
       // Update git status for ALL sessions in the project since main was updated
       // Wait for this to complete before returning so UI sees the updated status immediately

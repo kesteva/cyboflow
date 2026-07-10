@@ -319,23 +319,28 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   }
 
   /**
-   * Explicitly end a LIVE interactive run's persistent REPL (IDEA-030 / TASK-818).
+   * Explicitly end a LIVE run's persistent process (IDEA-030 / TASK-818).
    *
-   * The ONLY non-kill spawn-promise resolver for a persistent interactive run:
-   * routes to the interactive manager's `endSession`, which writes the EOF/`/exit`
-   * control sequence so the inherited onExit settles the run's spawn promise and
-   * teardownRun fires. Wired from the run close-out mutations (Merge / Dismiss /
-   * Create-PR) via the RelayDeps bag. Strict NO-OP for the SDK substrate (no PTY,
-   * the SDK iterator owns its own drain) — Q3 byte-identity holds. Close-out
-   * passes the RUN id; workflow runs hit the manager directly (panelId === runId
-   * per the orchestrator invariant) while PTY quick sessions translate via
-   * toLivePanelId. Feature-detected via the narrow EndSessionCapable interface
-   * (no `any`) so it is harmless if the manager ever lacks the seam.
+   * For the interactive manager this is the ONLY non-kill spawn-promise resolver:
+   * it routes to `endSession`, which writes the EOF/`/exit` control sequence so
+   * the inherited onExit settles the run's spawn promise and teardownRun fires.
+   * For the SDK manager there is no equivalent graceful shutdown (no PTY stdin to
+   * write EOF into), so this routes to the SAME `killProcess` abort primitive as
+   * killSession — under SDK-process persistence a warm query() otherwise outlives
+   * this close-out. Wired from the run close-out mutations (Merge / Dismiss /
+   * Create-PR) via the RelayDeps bag. Close-out passes the RUN id; workflow runs
+   * hit the manager directly (panelId === runId per the orchestrator invariant),
+   * PTY quick sessions translate via toLivePanelId, and SDK quick sessions
+   * resolve their own runId→spawnKey bridge internally (killProcess accepts
+   * either a panelId or a runId — see ClaudeCodeManager.killProcess). Interactive
+   * `endSession` stays feature-detected via the narrow EndSessionCapable
+   * interface (no `any`) so it is harmless if that manager ever lacks the seam.
    */
   async endSession(runId: string): Promise<void> {
     const mgr = this.resolveManager(runId);
     if (mgr !== this.interactiveManager) {
-      this.logger.debug('[SubstrateDispatchFacade] endSession no-op for SDK substrate', { runId });
+      this.logger.info('[SubstrateDispatchFacade] endSession dispatch kill for SDK substrate', { runId });
+      await mgr.killProcess(runId);
       return;
     }
     if (isEndSessionCapable(mgr)) {
@@ -348,24 +353,28 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
   }
 
   /**
-   * HARD-terminate a LIVE interactive run's persistent REPL (IDEA-030).
+   * HARD-terminate a LIVE run's persistent process (IDEA-030).
    *
-   * The discard twin of `endSession`: where `endSession` writes a GRACEFUL
-   * EOF/`/exit` (which a RUNNING claude — busy, not reading PTY stdin — never
-   * reads, so the process would linger orphaned in the Claude app), this routes
-   * to the manager's inherited `killProcess`, which runs cleanupCliResources/
-   * teardownRun AND kills the process tree. Idempotent (no-op when the process is
-   * already gone). Used by the Dismiss close-out, where the run is being discarded
-   * and a polite request is the wrong tool. Strict NO-OP for the SDK substrate
-   * (no PTY; the SDK iterator owns its own drain) — Q3 byte-identity holds.
-   * Takes the RUN id (workflow runs: panelId === runId per the orchestrator
-   * invariant; PTY quick sessions translate via toLivePanelId). `killProcess`
-   * is on `AbstractCliManager` so no feature-detection is needed.
+   * The discard twin of `endSession`: where interactive `endSession` writes a
+   * GRACEFUL EOF/`/exit` (which a RUNNING claude — busy, not reading PTY stdin —
+   * never reads, so the process would linger orphaned in the Claude app), this
+   * routes to the manager's inherited `killProcess`, which runs
+   * cleanupCliResources/teardownRun AND kills the process tree. Idempotent
+   * (no-op when the process is already gone). Used by the Dismiss close-out,
+   * where the run is being discarded and a polite request is the wrong tool. For
+   * the SDK manager this is ALSO the only close-out primitive (no PTY to write a
+   * graceful EOF into) — under SDK-process persistence a warm query() otherwise
+   * outlives the discard. Takes the RUN id: workflow runs and SDK quick sessions
+   * hit the manager directly (killProcess accepts either a panelId or a runId —
+   * see ClaudeCodeManager.killProcess), PTY quick sessions translate via
+   * toLivePanelId. `killProcess` is on `AbstractCliManager` so no
+   * feature-detection is needed.
    */
   async killSession(runId: string): Promise<void> {
     const mgr = this.resolveManager(runId);
     if (mgr !== this.interactiveManager) {
-      this.logger.debug('[SubstrateDispatchFacade] killSession no-op for SDK substrate', { runId });
+      this.logger.info('[SubstrateDispatchFacade] killSession dispatch kill for SDK substrate', { runId });
+      await mgr.killProcess(runId);
       return;
     }
     await mgr.killProcess(this.toLivePanelId(runId));

@@ -78,15 +78,23 @@ interface WtOverrides {
   getProjectMainBranch?: ReturnType<typeof vi.fn>;
   gitPush?: ReturnType<typeof vi.fn>;
   abortRebase?: ReturnType<typeof vi.fn>;
+  hasChangesToRebase?: ReturnType<typeof vi.fn>;
+  squashAndMergeWorktreeToMain?: ReturnType<typeof vi.fn>;
+  mergeWorktreeToMain?: ReturnType<typeof vi.fn>;
+  getHeadCommit?: ReturnType<typeof vi.fn>;
 }
 
-function makeServices(session: Record<string, unknown> | undefined, wt: WtOverrides = {}) {
+function makeServices(session: Record<string, unknown> | undefined, wt: WtOverrides = {}, endLiveSession = vi.fn(async () => {})) {
   const worktreeManager = {
     getProjectMainBranch: wt.getProjectMainBranch ?? vi.fn(async () => 'main'),
     checkForRebaseConflicts: wt.checkForRebaseConflicts ?? vi.fn(async () => ({ hasConflicts: false })),
     rebaseMainIntoWorktree: wt.rebaseMainIntoWorktree ?? vi.fn(async () => {}),
     gitPush: wt.gitPush ?? vi.fn(async () => ({ output: 'pushed' })),
     abortRebase: wt.abortRebase ?? vi.fn(async () => {}),
+    hasChangesToRebase: wt.hasChangesToRebase ?? vi.fn(async () => false),
+    squashAndMergeWorktreeToMain: wt.squashAndMergeWorktreeToMain ?? vi.fn(async () => {}),
+    mergeWorktreeToMain: wt.mergeWorktreeToMain ?? vi.fn(async () => {}),
+    getHeadCommit: wt.getHeadCommit ?? vi.fn(async () => 'abc123'),
   };
   const services = {
     sessionManager: {
@@ -105,7 +113,7 @@ function makeServices(session: Record<string, unknown> | undefined, wt: WtOverri
     },
     databaseService: { getDb: () => inertDb() },
     configManager: { isDemoMode: () => false, getConfig: () => ({}) },
-    endLiveSession: vi.fn(async () => {}),
+    endLiveSession,
   } as unknown as AppServices;
   return { services, worktreeManager };
 }
@@ -253,5 +261,85 @@ describe('sessions:rebase-main-into-worktree — Promise.race timeout', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// endLiveSessionProcesses close-out (SDK-aware teardown gap fix): both
+// squash-and-rebase-to-main AND rebase-to-main must reach services.endLiveSession
+// (the SubstrateDispatchFacade.endSession seam) for a session with a chatRunId,
+// on EITHER substrate — not just 'interactive'. Prior behavior gated the call
+// on `session.substrate === 'interactive'`, silently orphaning a warm SDK
+// process across close-out.
+// ---------------------------------------------------------------------------
+
+describe('sessions:squash-and-rebase-to-main — endLiveSessionProcesses close-out', () => {
+  it('calls endLiveSession with the chatRunId for an interactive-substrate session', async () => {
+    const session = { ...SESSION, substrate: 'interactive', chatRunId: 'chat-run-1' };
+    const endLiveSession = vi.fn(async () => {});
+    const { services } = makeServices(session, {}, endLiveSession);
+    const handlers = register(services);
+
+    const result = (await invoke(handlers, 'sessions:squash-and-rebase-to-main', 's1', 'commit msg')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    expect(endLiveSession).toHaveBeenCalledOnce();
+    expect(endLiveSession).toHaveBeenCalledWith('chat-run-1');
+  });
+
+  it('calls endLiveSession with the chatRunId for an SDK-substrate session (the fixed gap)', async () => {
+    const session = { ...SESSION, substrate: 'sdk', chatRunId: 'chat-run-2' };
+    const endLiveSession = vi.fn(async () => {});
+    const { services } = makeServices(session, {}, endLiveSession);
+    const handlers = register(services);
+
+    const result = (await invoke(handlers, 'sessions:squash-and-rebase-to-main', 's1', 'commit msg')) as {
+      success: boolean;
+    };
+
+    expect(result.success).toBe(true);
+    expect(endLiveSession).toHaveBeenCalledOnce();
+    expect(endLiveSession).toHaveBeenCalledWith('chat-run-2');
+  });
+
+  it('does NOT call endLiveSession when the session has no chatRunId', async () => {
+    const session = { ...SESSION, substrate: 'sdk', chatRunId: null };
+    const endLiveSession = vi.fn(async () => {});
+    const { services } = makeServices(session, {}, endLiveSession);
+    const handlers = register(services);
+
+    await invoke(handlers, 'sessions:squash-and-rebase-to-main', 's1', 'commit msg');
+
+    expect(endLiveSession).not.toHaveBeenCalled();
+  });
+});
+
+describe('sessions:rebase-to-main — endLiveSessionProcesses close-out', () => {
+  it('calls endLiveSession with the chatRunId for an SDK-substrate session (the fixed gap)', async () => {
+    const session = { ...SESSION, substrate: 'sdk', chatRunId: 'chat-run-3' };
+    const endLiveSession = vi.fn(async () => {});
+    const { services } = makeServices(session, {}, endLiveSession);
+    const handlers = register(services);
+
+    const result = (await invoke(handlers, 'sessions:rebase-to-main', 's1')) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(endLiveSession).toHaveBeenCalledOnce();
+    expect(endLiveSession).toHaveBeenCalledWith('chat-run-3');
+  });
+
+  it('calls endLiveSession with the chatRunId for an interactive-substrate session', async () => {
+    const session = { ...SESSION, substrate: 'interactive', chatRunId: 'chat-run-4' };
+    const endLiveSession = vi.fn(async () => {});
+    const { services } = makeServices(session, {}, endLiveSession);
+    const handlers = register(services);
+
+    const result = (await invoke(handlers, 'sessions:rebase-to-main', 's1')) as { success: boolean };
+
+    expect(result.success).toBe(true);
+    expect(endLiveSession).toHaveBeenCalledOnce();
+    expect(endLiveSession).toHaveBeenCalledWith('chat-run-4');
   });
 });
