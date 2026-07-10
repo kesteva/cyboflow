@@ -217,24 +217,24 @@ Using the Responses API directly would bypass Codex's local coding-agent runtime
 
 ## Data Model
 
-Add migrations `048` through `053`. Keep each `ALTER TABLE ADD COLUMN` in its own migration file, then run one idempotent backfill migration. This avoids the file-migration runner's coarse duplicate-column handling marking a multi-`ALTER` migration applied after only the first column exists.
+Add migrations `059` through `065`. Keep each `ALTER TABLE ADD COLUMN` in its own migration file, then run one idempotent backfill migration. This avoids the file-migration runner's coarse duplicate-column handling marking a multi-`ALTER` migration applied after only the first column exists.
 
 Session defaults need their own storage. The existing `sessions.substrate` column only captures the Claude-era quick-session runtime (`'sdk' | 'interactive'`) and cannot represent Codex provider state or `codex-pty` without silently dropping the new `SessionAgentConfig` shape.
 
 Add session columns:
 
 ```sql
--- 057_session_agent_provider.sql
+-- 059_session_agent_provider.sql
 ALTER TABLE sessions
   ADD COLUMN agent_provider TEXT NOT NULL DEFAULT 'claude'
     CHECK (agent_provider IN ('claude','codex'));
 
--- 058_session_agent_runtime.sql
+-- 060_session_agent_runtime.sql
 ALTER TABLE sessions
   ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk'
     CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk','codex-pty'));
 
--- 059_session_agent_model.sql
+-- 061_session_agent_model.sql
 ALTER TABLE sessions
   ADD COLUMN agent_model TEXT;
 ```
@@ -242,7 +242,7 @@ ALTER TABLE sessions
 Backfill after all new columns exist:
 
 ```sql
--- 062_agent_provider_runtime_backfill.sql
+-- 064_agent_provider_runtime_backfill.sql
 UPDATE sessions
 SET
   agent_provider = 'claude',
@@ -261,12 +261,12 @@ Do not ship workflow-run columns without parallel session columns. The session o
 Add workflow run columns:
 
 ```sql
--- 060_workflow_run_agent_provider.sql
+-- 062_workflow_run_agent_provider.sql
 ALTER TABLE workflow_runs
   ADD COLUMN agent_provider TEXT NOT NULL DEFAULT 'claude'
     CHECK (agent_provider IN ('claude','codex'));
 
--- 061_workflow_run_agent_runtime.sql
+-- 063_workflow_run_agent_runtime.sql
 ALTER TABLE workflow_runs
   ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk'
     CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk'));
@@ -275,7 +275,7 @@ ALTER TABLE workflow_runs
 Backfill after all new columns exist:
 
 ```sql
--- 062_agent_provider_runtime_backfill.sql
+-- 064_agent_provider_runtime_backfill.sql
 UPDATE workflow_runs
 SET
   agent_provider = 'claude',

@@ -1,4 +1,4 @@
--- Migration 057: sessions.agent_provider.
+-- Migration 059: sessions.agent_provider.
 --
 -- Session default agent provider. Existing rows default to Claude.
 

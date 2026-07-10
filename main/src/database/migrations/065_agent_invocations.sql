@@ -1,4 +1,4 @@
--- Migration 063: provider-neutral agent invocation persistence.
+-- Migration 065: provider-neutral agent invocation persistence.
 --
 -- Each row represents one concrete agent turn. Invocation rows are append-only
 -- except for the one-time external_session_id capture performed after a

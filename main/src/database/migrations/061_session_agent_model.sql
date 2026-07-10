@@ -1,4 +1,4 @@
--- Migration 059: sessions.agent_model.
+-- Migration 061: sessions.agent_model.
 --
 -- Provider-scoped session default model. NULL means "runtime default".
 

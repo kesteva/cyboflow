@@ -1,4 +1,4 @@
--- Migration 060: workflow_runs.agent_provider.
+-- Migration 062: workflow_runs.agent_provider.
 --
 -- Workflow-run agent provider stamp. Existing rows default to Claude.
 

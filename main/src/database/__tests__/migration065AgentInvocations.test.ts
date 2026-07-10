@@ -1,5 +1,5 @@
 /**
- * Migration 063: provider-neutral agent invocation persistence.
+ * Migration 065: provider-neutral agent invocation persistence.
  *
  * Uses the exact workflow-run columns consumed by the migration so the tests
  * can focus on table constraints, legacy backfill, replay safety, and FK
@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 const MIGRATION = readFileSync(
-  join(__dirname, '..', 'migrations', '063_agent_invocations.sql'),
+  join(__dirname, '..', 'migrations', '065_agent_invocations.sql'),
   'utf-8',
 );
 
@@ -26,7 +26,7 @@ interface InvocationRow {
   created_at: string;
 }
 
-function buildPre063Db(): Database.Database {
+function buildPre065Db(): Database.Database {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
   db.exec(`
@@ -71,9 +71,9 @@ function applyMigration(db: Database.Database): void {
   db.exec(MIGRATION);
 }
 
-describe('Migration 063: agent_invocations', () => {
+describe('Migration 065: agent_invocations', () => {
   it('creates the invocation columns and newest run/step index', () => {
-    const db = buildPre063Db();
+    const db = buildPre065Db();
     applyMigration(db);
 
     const columns = (
@@ -101,7 +101,7 @@ describe('Migration 063: agent_invocations', () => {
   });
 
   it('backfills nonempty legacy ids with provider/runtime/model/time provenance', () => {
-    const db = buildPre063Db();
+    const db = buildPre065Db();
     seedRun(db, {
       id: 'run-claude',
       externalSessionId: 'claude-session-1',
@@ -156,7 +156,7 @@ describe('Migration 063: agent_invocations', () => {
   });
 
   it('is idempotent when the whole migration is replayed', () => {
-    const db = buildPre063Db();
+    const db = buildPre065Db();
     seedRun(db, { id: 'run-1', externalSessionId: 'session-1' });
 
     applyMigration(db);
@@ -169,7 +169,7 @@ describe('Migration 063: agent_invocations', () => {
   });
 
   it('enforces provider/runtime domains and unique invocation ids', () => {
-    const db = buildPre063Db();
+    const db = buildPre065Db();
     seedRun(db, { id: 'run-1' });
     applyMigration(db);
 
@@ -186,7 +186,7 @@ describe('Migration 063: agent_invocations', () => {
   });
 
   it('cascades invocation rows when their run is deleted', () => {
-    const db = buildPre063Db();
+    const db = buildPre065Db();
     seedRun(db, { id: 'run-1' });
     applyMigration(db);
     db.prepare(

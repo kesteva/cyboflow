@@ -1,4 +1,4 @@
--- Migration 058: sessions.agent_runtime.
+-- Migration 060: sessions.agent_runtime.
 --
 -- Session default agent runtime. This is broader than workflow runtime because
 -- quick sessions can use codex-pty. codex-exec remains internal-only.

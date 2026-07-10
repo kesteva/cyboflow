@@ -6,7 +6,7 @@ import { AgentInvocationStore } from './agentInvocationStore';
 import { dbAdapter } from './__test_fixtures__/dbAdapter';
 
 const MIGRATION = readFileSync(
-  join(__dirname, '..', 'database', 'migrations', '063_agent_invocations.sql'),
+  join(__dirname, '..', 'database', 'migrations', '065_agent_invocations.sql'),
   'utf-8',
 );
 

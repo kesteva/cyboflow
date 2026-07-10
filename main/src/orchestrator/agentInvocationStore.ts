@@ -100,7 +100,7 @@ export class AgentInvocationStore {
    *
    * The legacy workflow_runs.claude_session_id is considered only when no
    * top-level invocation exists, and only for a coherent Claude provider/runtime
-   * pair. This also supports a pre-063 database during a rolling boot.
+   * pair. This also supports a pre-065 database during a rolling boot.
    */
   getLatestTopLevelResumeTarget(runId: string): AgentResumeTarget | null {
     let invocation: ResumeTargetRow | undefined;
