@@ -5,6 +5,7 @@ import type { Project, ProjectRunCommand, Folder, Session, SessionOutput, Create
 import type { ToolPanel, ToolPanelType, ToolPanelState, ToolPanelMetadata } from '../../../shared/types/panels';
 import { DEFAULT_PERMISSION_MODE } from '../../../shared/types/permissionMode';
 import { sumSessionOutputTokenUsage, type SessionTokenTotals } from './sessionTokenUsage';
+import { reconcileSessionsPluginsColumn } from './reconcileSessionsPluginsColumn';
 
 // Interface for legacy claude_panel_settings during migration
 interface ClaudePanelSetting {
@@ -1373,6 +1374,22 @@ export class DatabaseService {
     // them when missing. Fresh installs no-op (columns already created by 006).
     this.reconcileWorkflowsSchema();
     this.reconcileWorkflowRunsSchema();
+    this.reconcileSessionsSchema();
+  }
+
+  /**
+   * Shape-guarded rebuild of sessions.enabled_plugins_json (migration 039's
+   * NOT NULL DEFAULT '[]' → nullable DEFAULT NULL, so untouched sessions inherit
+   * the user's file-enabled plugins instead of force-disabling all of them). The
+   * value-keyed '[]' → NULL backfill can't be a re-run-safe file migration, so the
+   * numbered 059 slot is inert and the real work lives here — idempotent, marker-
+   * independent, a no-op once the column is already nullable. See
+   * reconcileSessionsPluginsColumn for the full rationale.
+   */
+  private reconcileSessionsSchema(): void {
+    if (reconcileSessionsPluginsColumn(this.db)) {
+      console.log('[Database] Reconciled sessions: enabled_plugins_json default → NULL (inherit)');
+    }
   }
 
   private reconcileWorkflowRunsSchema(): void {

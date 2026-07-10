@@ -1,29 +1,20 @@
 -- Migration 059: sessions.enabled_plugins_json default '[]' → NULL (inherit).
 --
--- Migration 039 declared `enabled_plugins_json TEXT NOT NULL DEFAULT '[]'`, but the
--- per-session plugin design treats the stored value as a three-way sentinel
--- (see buildExclusiveEnabledPluginsMap in orchestrator/integrations/installedPlugins.ts):
---   NULL / '' / malformed  → undefined → INHERIT the user's ~/.claude/settings.json plugins
---   present-but-empty '[]'  → disable EVERY installed plugin (the "turn it all off" intent)
---   non-empty array         → exclusive: selected on, every other installed plugin off
+-- INTENTIONALLY INERT. This numbered slot documents the schema change and bumps the
+-- binary's schema-capability version (computeAppMaxMigrationVersion → user_version),
+-- but performs NO SQL. The actual column rebuild is done by the shape-guarded
+-- reconciler reconcileSessionsPluginsColumn (main/src/database/reconcileSessionsPluginsColumn.ts),
+-- invoked from Database.reconcileSessionsSchema() after the file migrations run.
 --
--- The NOT NULL DEFAULT '[]' made the NULL/inherit state unreachable: every session
--- that never explicitly picked plugins fell to '[]' and had ALL plugins force-disabled
--- at the flag precedence tier, overriding the user's file-enabled plugins (e.g. codex).
--- The launch wizard's "unchanged → undefined → inherit" contract silently collapsed,
--- since undefined and "disable all" both stored as '[]'.
---
--- Fix: rebuild the column so its default is NULL (inherit) and backfill every legacy
--- '[]' → NULL. Genuine "disable all" choices are indistinguishable from the default
--- today, so all current '[]' rows are treated as inherit; a deliberate non-empty
--- selection is preserved verbatim. Future explicit '[]' from the wizard still stores
--- '[]' (distinct from the new NULL default) and keeps its disable-all meaning.
---
--- SQLite has no ALTER COLUMN, so swap via a temp column. No index/trigger/view
--- references enabled_plugins_json, so the ADD/DROP/RENAME is safe. NULLIF maps
--- '[]' → NULL and leaves real selections (and any existing NULL) untouched.
-
-ALTER TABLE sessions ADD COLUMN enabled_plugins_json_v2 TEXT DEFAULT NULL;
-UPDATE sessions SET enabled_plugins_json_v2 = NULLIF(enabled_plugins_json, '[]');
-ALTER TABLE sessions DROP COLUMN enabled_plugins_json;
-ALTER TABLE sessions RENAME COLUMN enabled_plugins_json_v2 TO enabled_plugins_json;
+-- WHY NOT A NORMAL FILE MIGRATION:
+-- Migration 039 declared `enabled_plugins_json TEXT NOT NULL DEFAULT '[]'`, which made
+-- the NULL/inherit sentinel unreachable — every untouched session stored '[]' and, via
+-- buildExclusiveEnabledPluginsMap, force-disabled ALL file-enabled plugins (e.g. codex)
+-- at the flag precedence tier. The fix flips the default to NULL and backfills legacy
+-- '[]' → NULL. That backfill is value-keyed (NULLIF(x,'[]')): expressed as an
+-- ADD/DROP/RENAME swap in a .sql file it is NOT re-run-safe — the temp column is renamed
+-- away, so a re-run (migration marker lost/reset) would NOT trip the runner's
+-- "duplicate column name" idempotency signal and would silently re-convert a DELIBERATE
+-- post-fix '[]' (disable-all) back to inherit. The reconciler guards on the column's
+-- current shape (rebuild only while still NOT NULL), so it is idempotent regardless of
+-- any marker and never re-touches a deliberate '[]'.
