@@ -17,6 +17,7 @@ import {
   CodexAppServerApprovalBridge,
   type ApprovalRouterPort,
 } from './appServer/approvalBridge';
+import { requireCodexChatGptAccount } from './appServer/account';
 import {
   CodexAppServerClient,
   type CodexAppServerClientOptions,
@@ -387,6 +388,15 @@ export class CodexSdkManager extends AbstractCliManager {
         APP_SERVER_REQUEST_TIMEOUT_MS,
         'Codex app-server initialization',
       );
+      const accountResponse = await withTimeout(
+        client.sendRequest<unknown, { refreshToken: false }>(
+          'account/read',
+          { refreshToken: false },
+        ),
+        APP_SERVER_REQUEST_TIMEOUT_MS,
+        'Codex ChatGPT account check',
+      );
+      requireCodexChatGptAccount(accountResponse);
       const thread = options.resumeSessionId
         ? await withTimeout(
             turnSession.resumeThread(buildCodexAppServerThreadResumeParams(

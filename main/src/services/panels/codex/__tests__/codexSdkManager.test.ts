@@ -95,6 +95,12 @@ function makeManager(
 }
 
 function successfulHandler(method: string, _params: unknown, client: FakeAppServerClient): unknown {
+  if (method === 'account/read') {
+    return {
+      account: { type: 'chatgpt', email: 'user@example.com', planType: 'pro' },
+      requiresOpenaiAuth: true,
+    };
+  }
   if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
   if (method === 'thread/resume') return { thread: { id: 'codex-thread-1' } };
   if (method === 'turn/interrupt') return {};
@@ -156,7 +162,11 @@ describe('CodexSdkManager app-server runtime', () => {
           CYBOFLOW_ORCH_SOCKET: '/tmp/cyboflow-orch.sock',
         },
       });
-      expect(client.requests[0]).toMatchObject({
+      expect(client.requests[0]).toEqual({
+        method: 'account/read',
+        params: { refreshToken: false },
+      });
+      expect(client.requests[1]).toMatchObject({
         method: 'thread/start',
         params: {
           cwd: '/tmp/worktree',
@@ -167,7 +177,7 @@ describe('CodexSdkManager app-server runtime', () => {
           developerInstructions: 'Report through Cyboflow.',
         },
       });
-      expect(client.requests[1]).toEqual({
+      expect(client.requests[2]).toEqual({
         method: 'turn/start',
         params: {
           threadId: 'codex-thread-1',
@@ -227,7 +237,7 @@ describe('CodexSdkManager app-server runtime', () => {
         resumeSessionId: 'codex-thread-1',
       });
 
-      expect(getClient().requests[0]).toMatchObject({
+      expect(getClient().requests[1]).toMatchObject({
         method: 'thread/resume',
         params: { threadId: 'codex-thread-1', excludeTurns: false },
       });
@@ -240,6 +250,12 @@ describe('CodexSdkManager app-server runtime', () => {
     const db = createDb();
     try {
       const { manager } = makeManager(db, (method, _params, client) => {
+        if (method === 'account/read') {
+          return {
+            account: { type: 'chatgpt', email: null, planType: 'plus' },
+            requiresOpenaiAuth: true,
+          };
+        }
         if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
         if (method === 'turn/start') {
           setTimeout(() => client.notify({
@@ -289,6 +305,12 @@ describe('CodexSdkManager app-server runtime', () => {
         markTurnStarted = resolve;
       });
       const { manager, getClient } = makeManager(db, (method) => {
+        if (method === 'account/read') {
+          return {
+            account: { type: 'chatgpt', email: null, planType: 'plus' },
+            requiresOpenaiAuth: true,
+          };
+        }
         if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
         if (method === 'turn/start') {
           setTimeout(markTurnStarted, 0);
@@ -315,6 +337,34 @@ describe('CodexSdkManager app-server runtime', () => {
         params: { threadId: 'codex-thread-1', turnId: 'turn-1' },
       });
       expect(client.stop).toHaveBeenCalledOnce();
+    } finally {
+      db.close();
+    }
+  });
+
+  it('rejects API-key auth before creating a thread', async () => {
+    const db = createDb();
+    try {
+      const { manager, getClient } = makeManager(db, (method) => {
+        if (method === 'account/read') {
+          return { account: { type: 'apiKey' }, requiresOpenaiAuth: true };
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      });
+      manager.on('error', () => undefined);
+
+      await expect(manager.spawnCliProcess({
+        panelId: 'run-1',
+        sessionId: 'run-1',
+        runId: 'run-1',
+        worktreePath: '/tmp/worktree',
+        prompt: 'do not start',
+      })).rejects.toThrow('Codex requires a ChatGPT login');
+
+      expect(getClient().requests).toEqual([{
+        method: 'account/read',
+        params: { refreshToken: false },
+      }]);
     } finally {
       db.close();
     }
