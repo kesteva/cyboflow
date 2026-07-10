@@ -2081,6 +2081,7 @@ async function initializeServices() {
     codexHookScriptPath: resolveShellHookScriptPathForFilename('codexPreToolUseHook.js'),
     nodeExecutablePath: await nodeResolver.getNodePath(),
   });
+  createdCodexSdkManager.setApprovalRouterProvider(() => ApprovalRouter.getInstance());
 
   // OrchestratorHealth — constructed with the real McpServerLifecycle so both the
   // raw-IPC cyboflow:mcp-health channel and the tRPC cyboflow.health.mcpServer

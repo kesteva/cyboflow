@@ -160,9 +160,15 @@ export class CliManagerFactory {
             : demoManager;
 
         if (toolId === 'codex-sdk') {
-          Object.defineProperty(manager, 'setCyboflowMcpRuntimeConfig', {
-            configurable: true,
-            value: () => {},
+          Object.defineProperties(manager, {
+            setCyboflowMcpRuntimeConfig: {
+              configurable: true,
+              value: () => {},
+            },
+            setApprovalRouterProvider: {
+              configurable: true,
+              value: () => {},
+            },
           });
         } else if (toolId === 'codex-pty') {
           Object.defineProperties(manager, {

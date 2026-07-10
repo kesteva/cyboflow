@@ -26,6 +26,7 @@ import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { codexPermissionFlagsForMode } from './codexPtyManager';
 import { resolveAgentModelAlias } from '../agentModelContext';
 import type { PermissionMode } from '../../../../../shared/types/workflows';
+import type { ApprovalRouterPort } from './appServer/approvalBridge';
 
 interface StubCliProcess {
   process: never;
@@ -191,6 +192,7 @@ export class CodexSdkManager extends AbstractCliManager {
   private readonly activeRuns = new Map<string, ActiveCodexRun>();
   private readonly spawnKeysByPanelId = new Map<string, Set<string>>();
   private cyboflowMcpRuntimeConfig: CodexMcpRuntimeConfig | null = null;
+  private approvalRouterProvider: (() => ApprovalRouterPort) | null = null;
 
   constructor(
     sessionManager: SessionManager,
@@ -211,6 +213,10 @@ export class CodexSdkManager extends AbstractCliManager {
 
   setCyboflowMcpRuntimeConfig(config: CodexMcpRuntimeConfig): void {
     this.cyboflowMcpRuntimeConfig = config;
+  }
+
+  setApprovalRouterProvider(provider: () => ApprovalRouterPort): void {
+    this.approvalRouterProvider = provider;
   }
 
   protected async testCliAvailability(): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {

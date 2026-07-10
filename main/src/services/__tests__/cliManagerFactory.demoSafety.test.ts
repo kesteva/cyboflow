@@ -44,6 +44,7 @@ describe('CliManagerFactory demo safety', () => {
     expect(demoSdkManager.spawnCliProcess).toBe(DemoCliManager.prototype.spawnCliProcess);
     expect(demoPtyManager.spawnCliProcess).toBe(DemoCliManager.prototype.spawnCliProcess);
     expect(typeof (demoSdkManager as CodexSdkManager).setCyboflowMcpRuntimeConfig).toBe('function');
+    expect(typeof (demoSdkManager as CodexSdkManager).setApprovalRouterProvider).toBe('function');
     expect(typeof (demoPtyManager as CodexPtyManager).relayUserTurn).toBe('function');
 
     demoMode = false;
