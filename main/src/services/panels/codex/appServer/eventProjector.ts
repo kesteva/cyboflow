@@ -1,0 +1,272 @@
+import type {
+  AgentAssistantMessageEvent,
+  AgentResultEvent,
+  AgentStreamEvent,
+  AgentUnknownEvent,
+  AgentUserMessageEvent,
+} from '../../../../../../shared/types/agentStream';
+import type { AppServerJsonValue } from './protocol';
+import type {
+  TurnSessionError,
+  TurnSessionEvent,
+  TurnSessionItem,
+} from './turnSession';
+
+export interface TurnSessionEventProjectionContext {
+  model: string;
+  durationMs: number;
+}
+
+const CODEX_EVENT_SOURCE = {
+  provider: 'codex' as const,
+  runtime: 'codex-sdk' as const,
+};
+
+function buildAssistantEvent(
+  id: string,
+  text: string,
+  contentType: 'text' | 'thinking',
+  threadId: string,
+  model: string,
+): AgentAssistantMessageEvent {
+  return {
+    type: 'agent_message',
+    ...CODEX_EVENT_SOURCE,
+    role: 'assistant',
+    id,
+    model,
+    content: [{ type: contentType, text }],
+    external_session_id: threadId,
+  };
+}
+
+function buildToolProjection(input: {
+  id: string;
+  name: string;
+  toolInput: Record<string, unknown>;
+  result: string;
+  isError: boolean;
+  threadId: string;
+  model: string;
+}): [AgentAssistantMessageEvent, AgentUserMessageEvent] {
+  return [
+    {
+      type: 'agent_message',
+      ...CODEX_EVENT_SOURCE,
+      role: 'assistant',
+      id: `${input.id}:call`,
+      model: input.model,
+      content: [{
+        type: 'tool_call',
+        id: input.id,
+        name: input.name,
+        input: input.toolInput,
+      }],
+      external_session_id: input.threadId,
+    },
+    {
+      type: 'agent_message',
+      ...CODEX_EVENT_SOURCE,
+      role: 'user',
+      content: [{
+        type: 'tool_result',
+        tool_call_id: input.id,
+        content: input.result,
+        is_error: input.isError,
+      }],
+      external_session_id: input.threadId,
+    },
+  ];
+}
+
+function buildResultEvent(input: {
+  threadId: string;
+  durationMs: number;
+  isError: boolean;
+  result?: string;
+}): AgentResultEvent {
+  return {
+    type: 'agent_result',
+    ...CODEX_EVENT_SOURCE,
+    subtype: input.isError ? 'error_during_execution' : 'success',
+    is_error: input.isError,
+    duration_ms: input.durationMs,
+    num_turns: 1,
+    ...(input.result !== undefined ? { result: input.result } : {}),
+    external_session_id: input.threadId,
+  };
+}
+
+function buildUnknownEvent(raw: Record<string, unknown>): AgentUnknownEvent {
+  return {
+    type: 'agent_unknown',
+    ...CODEX_EVENT_SOURCE,
+    raw,
+  };
+}
+
+function stringifyJson(value: AppServerJsonValue | null): string {
+  if (typeof value === 'string') return value;
+  if (value === null) return '';
+  return JSON.stringify(value, null, 2);
+}
+
+function reasoningText(item: Extract<TurnSessionItem, { type: 'reasoning' }>): string {
+  return [...item.summary, ...item.content].join('\n');
+}
+
+function rawTurnError(
+  event: Extract<TurnSessionEvent, { type: 'turn.error' }>,
+): Record<string, unknown> {
+  return {
+    type: event.type,
+    threadId: event.threadId,
+    turnId: event.turnId,
+    error: event.error,
+    willRetry: event.willRetry,
+  };
+}
+
+function rawCompletedItem(
+  event: Extract<TurnSessionEvent, { type: 'item.completed' }>,
+  item: Extract<TurnSessionItem, { type: 'raw' }>,
+): Record<string, unknown> {
+  return {
+    type: event.type,
+    threadId: event.threadId,
+    turnId: event.turnId,
+    completedAtMs: event.completedAtMs,
+    itemType: item.itemType,
+    item: item.item,
+  };
+}
+
+function projectCompletedItem(
+  event: Extract<TurnSessionEvent, { type: 'item.completed' }>,
+  context: TurnSessionEventProjectionContext,
+): AgentStreamEvent[] {
+  const { item, threadId } = event;
+  switch (item.type) {
+    case 'agentMessage':
+      return item.text.trim().length === 0
+        ? []
+        : [buildAssistantEvent(item.id, item.text, 'text', threadId, context.model)];
+    case 'reasoning': {
+      const text = reasoningText(item);
+      return text.trim().length === 0
+        ? []
+        : [buildAssistantEvent(item.id, text, 'thinking', threadId, context.model)];
+    }
+    case 'commandExecution':
+      return buildToolProjection({
+        id: item.id,
+        name: 'Bash',
+        toolInput: { command: item.command },
+        result: item.aggregatedOutput ?? '',
+        isError: item.status === 'failed'
+          || item.status === 'declined'
+          || (item.exitCode !== null && item.exitCode !== 0),
+        threadId,
+        model: context.model,
+      });
+    case 'fileChange':
+      return buildToolProjection({
+        id: item.id,
+        name: 'Edit',
+        toolInput: { changes: item.changes },
+        result: JSON.stringify({ status: item.status, changes: item.changes }, null, 2),
+        isError: item.status === 'failed' || item.status === 'declined',
+        threadId,
+        model: context.model,
+      });
+    case 'mcpToolCall':
+      return buildToolProjection({
+        id: item.id,
+        name: item.tool,
+        toolInput: { server: item.server, arguments: item.arguments },
+        result: item.error?.message ?? stringifyJson(item.result),
+        isError: item.status === 'failed' || item.error !== null,
+        threadId,
+        model: context.model,
+      });
+    case 'webSearch':
+      return buildToolProjection({
+        id: item.id,
+        name: 'WebSearch',
+        toolInput: { query: item.query },
+        result: `Searched for ${item.query}`,
+        isError: false,
+        threadId,
+        model: context.model,
+      });
+    case 'plan':
+      return item.text.trim().length === 0
+        ? []
+        : [buildAssistantEvent(item.id, item.text, 'thinking', threadId, context.model)];
+    case 'raw':
+      return [buildUnknownEvent(rawCompletedItem(event, item))];
+  }
+}
+
+function projectTurnError(
+  event: Extract<TurnSessionEvent, { type: 'turn.error' }>,
+  context: TurnSessionEventProjectionContext,
+): AgentStreamEvent[] {
+  const unknown = buildUnknownEvent(rawTurnError(event));
+  if (event.willRetry) return [unknown];
+  return [
+    unknown,
+    buildResultEvent({
+      threadId: event.threadId,
+      durationMs: context.durationMs,
+      isError: true,
+      result: event.error.message,
+    }),
+  ];
+}
+
+function projectFailedTurn(
+  threadId: string,
+  error: TurnSessionError,
+  durationMs: number,
+): AgentResultEvent {
+  return buildResultEvent({
+    threadId,
+    durationMs,
+    isError: true,
+    result: error.message,
+  });
+}
+
+export function projectTurnSessionEvent(
+  event: TurnSessionEvent,
+  context: TurnSessionEventProjectionContext,
+): AgentStreamEvent[] {
+  switch (event.type) {
+    case 'thread.started':
+    case 'turn.started':
+    case 'item.started':
+      return [];
+    case 'item.completed':
+      return projectCompletedItem(event, context);
+    case 'turn.error':
+      return projectTurnError(event, context);
+    case 'turn.completed':
+      return event.status === 'completed'
+        ? [buildResultEvent({
+            threadId: event.threadId,
+            durationMs: context.durationMs,
+            isError: false,
+          })]
+        : [buildResultEvent({
+            threadId: event.threadId,
+            durationMs: context.durationMs,
+            isError: true,
+            result: 'Codex turn interrupted',
+          })];
+    case 'turn.failed':
+      return [projectFailedTurn(event.threadId, event.error, context.durationMs)];
+    case 'raw':
+      return [buildUnknownEvent({ ...event.notification })];
+  }
+}
