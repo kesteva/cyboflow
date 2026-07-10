@@ -6,7 +6,6 @@ import type {
   AgentUsage,
   AgentUserMessageEvent,
 } from '../../../../../../shared/types/agentStream';
-import type { AppServerJsonValue } from './protocol';
 import type {
   TurnSessionError,
   TurnSessionEvent,
@@ -109,12 +108,6 @@ function buildUnknownEvent(raw: Record<string, unknown>): AgentUnknownEvent {
   };
 }
 
-function stringifyJson(value: AppServerJsonValue | null): string {
-  if (typeof value === 'string') return value;
-  if (value === null) return '';
-  return JSON.stringify(value, null, 2);
-}
-
 function reasoningText(item: Extract<TurnSessionItem, { type: 'reasoning' }>): string {
   return [...item.summary, ...item.content].join('\n');
 }
@@ -165,8 +158,19 @@ function projectCompletedItem(
       return buildToolProjection({
         id: item.id,
         name: 'Bash',
-        toolInput: { command: item.command },
-        result: item.aggregatedOutput ?? '',
+        toolInput: {
+          command: item.command,
+          cwd: item.cwd,
+          source: item.source,
+          processId: item.processId,
+          commandActions: item.commandActions,
+        },
+        result: JSON.stringify({
+          status: item.status,
+          output: item.aggregatedOutput,
+          exitCode: item.exitCode,
+          durationMs: item.durationMs,
+        }, null, 2),
         isError: item.status === 'failed'
           || item.status === 'declined'
           || (item.exitCode !== null && item.exitCode !== 0),
@@ -187,8 +191,21 @@ function projectCompletedItem(
       return buildToolProjection({
         id: item.id,
         name: item.tool,
-        toolInput: { server: item.server, arguments: item.arguments },
-        result: item.error?.message ?? stringifyJson(item.result),
+        toolInput: {
+          server: item.server,
+          arguments: item.arguments,
+          appContext: item.appContext,
+          ...(item.mcpAppResourceUri !== undefined
+            ? { mcpAppResourceUri: item.mcpAppResourceUri }
+            : {}),
+          pluginId: item.pluginId,
+        },
+        result: JSON.stringify({
+          status: item.status,
+          result: item.result,
+          error: item.error,
+          durationMs: item.durationMs,
+        }, null, 2),
         isError: item.status === 'failed' || item.error !== null,
         threadId,
         model: context.model,
@@ -197,7 +214,7 @@ function projectCompletedItem(
       return buildToolProjection({
         id: item.id,
         name: 'WebSearch',
-        toolInput: { query: item.query },
+        toolInput: { query: item.query, action: item.action },
         result: `Searched for ${item.query}`,
         isError: false,
         threadId,

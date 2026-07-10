@@ -124,9 +124,14 @@ describe('projectTurnSessionEvent', () => {
       type: 'commandExecution',
       id: 'command-1',
       command: 'pnpm test',
+      cwd: '/tmp/worktree',
+      processId: 'process-1',
+      source: 'agent',
+      commandActions: [{ type: 'unknown', command: 'pnpm test' }],
       status: 'failed',
       aggregatedOutput: 'one test failed',
       exitCode: 1,
+      durationMs: 50,
     }))).toEqual([
       {
         type: 'agent_message',
@@ -139,7 +144,13 @@ describe('projectTurnSessionEvent', () => {
           type: 'tool_call',
           id: 'command-1',
           name: 'Bash',
-          input: { command: 'pnpm test' },
+          input: {
+            command: 'pnpm test',
+            cwd: '/tmp/worktree',
+            source: 'agent',
+            processId: 'process-1',
+            commandActions: [{ type: 'unknown', command: 'pnpm test' }],
+          },
         }],
         external_session_id: 'thread-1',
       },
@@ -151,7 +162,12 @@ describe('projectTurnSessionEvent', () => {
         content: [{
           type: 'tool_result',
           tool_call_id: 'command-1',
-          content: 'one test failed',
+          content: JSON.stringify({
+            status: 'failed',
+            output: 'one test failed',
+            exitCode: 1,
+            durationMs: 50,
+          }, null, 2),
           is_error: true,
         }],
         external_session_id: 'thread-1',
@@ -165,8 +181,11 @@ describe('projectTurnSessionEvent', () => {
       tool: 'report',
       status: 'completed',
       arguments: { step: 'verify' },
+      appContext: null,
+      pluginId: null,
       result: { accepted: true },
       error: null,
+      durationMs: 10,
     }))).toEqual([
       expect.objectContaining({
         type: 'agent_message',
@@ -178,7 +197,12 @@ describe('projectTurnSessionEvent', () => {
           type: 'tool_call',
           id: 'mcp-1',
           name: 'report',
-          input: { server: 'cyboflow', arguments: { step: 'verify' } },
+          input: {
+            server: 'cyboflow',
+            arguments: { step: 'verify' },
+            appContext: null,
+            pluginId: null,
+          },
         }],
         external_session_id: 'thread-1',
       }),
@@ -190,7 +214,12 @@ describe('projectTurnSessionEvent', () => {
         content: [{
           type: 'tool_result',
           tool_call_id: 'mcp-1',
-          content: '{\n  "accepted": true\n}',
+          content: JSON.stringify({
+            status: 'completed',
+            result: { accepted: true },
+            error: null,
+            durationMs: 10,
+          }, null, 2),
           is_error: false,
         }],
         external_session_id: 'thread-1',
@@ -201,6 +230,7 @@ describe('projectTurnSessionEvent', () => {
       type: 'webSearch',
       id: 'search-1',
       query: 'Codex app-server protocol',
+      action: { type: 'search', query: 'Codex app-server protocol', queries: null },
     }));
     expect(webSearch).toHaveLength(2);
     expect(webSearch[0]).toMatchObject({
@@ -210,7 +240,10 @@ describe('projectTurnSessionEvent', () => {
         type: 'tool_call',
         id: 'search-1',
         name: 'WebSearch',
-        input: { query: 'Codex app-server protocol' },
+        input: {
+          query: 'Codex app-server protocol',
+          action: { type: 'search', query: 'Codex app-server protocol', queries: null },
+        },
       }],
     });
     expect(webSearch[1]).toMatchObject({

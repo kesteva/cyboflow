@@ -10,6 +10,7 @@ import type {
   AppServerTurnInterruptResponse,
   AppServerTurnStartParams,
   AppServerUserInput,
+  CommandAction,
   ThreadTokenUsage,
   ThreadTokenUsageUpdatedNotification,
   TokenUsageBreakdown,
@@ -27,9 +28,14 @@ export type TurnSessionItem =
       type: 'commandExecution';
       id: string;
       command: string;
+      cwd: string;
+      processId: string | null;
+      source: 'agent' | 'userShell' | 'unifiedExecStartup' | 'unifiedExecInteraction';
+      commandActions: CommandAction[];
       status: 'inProgress' | 'completed' | 'failed' | 'declined';
       aggregatedOutput: string | null;
       exitCode: number | null;
+      durationMs: number | null;
     }
   | {
       type: 'fileChange';
@@ -51,10 +57,14 @@ export type TurnSessionItem =
       tool: string;
       status: 'inProgress' | 'completed' | 'failed';
       arguments: AppServerJsonValue;
+      appContext: AppServerJsonValue | null;
+      mcpAppResourceUri?: string;
+      pluginId: string | null;
       result: AppServerJsonValue | null;
       error: { message: string } | null;
+      durationMs: number | null;
     }
-  | { type: 'webSearch'; id: string; query: string }
+  | { type: 'webSearch'; id: string; query: string; action: AppServerJsonValue | null }
   | { type: 'plan'; id: string; text: string }
   | { type: 'raw'; itemType: string | null; item: AppServerJsonValue };
 
@@ -187,6 +197,47 @@ function parsePatchChangeKind(
   return null;
 }
 
+function parseCommandAction(value: unknown): CommandAction | null {
+  if (!isRecord(value) || typeof value.type !== 'string' || typeof value.command !== 'string') {
+    return null;
+  }
+  switch (value.type) {
+    case 'read':
+      return typeof value.name === 'string' && typeof value.path === 'string'
+        ? { type: 'read', command: value.command, name: value.name, path: value.path }
+        : null;
+    case 'listFiles':
+      return typeof value.path === 'string' || value.path === null
+        ? { type: 'listFiles', command: value.command, path: value.path }
+        : null;
+    case 'search':
+      return (typeof value.query === 'string' || value.query === null)
+        && (typeof value.path === 'string' || value.path === null)
+        ? {
+            type: 'search',
+            command: value.command,
+            query: value.query,
+            path: value.path,
+          }
+        : null;
+    case 'unknown':
+      return { type: 'unknown', command: value.command };
+    default:
+      return null;
+  }
+}
+
+function parseCommandActions(value: unknown): CommandAction[] | null {
+  if (!Array.isArray(value)) return null;
+  const actions: CommandAction[] = [];
+  for (const entry of value) {
+    const action = parseCommandAction(entry);
+    if (!action) return null;
+    actions.push(action);
+  }
+  return actions;
+}
+
 function parseItem(value: unknown): TurnSessionItem | null {
   if (!isJsonValue(value)) return null;
   if (!isRecord(value) || typeof value.type !== 'string' || typeof value.id !== 'string') {
@@ -207,11 +258,22 @@ function parseItem(value: unknown): TurnSessionItem | null {
     }
     case 'commandExecution': {
       const status = value.status;
+      const commandActions = parseCommandActions(value.commandActions);
       if (
         typeof value.command !== 'string'
+        || typeof value.cwd !== 'string'
+        || (value.processId !== null && typeof value.processId !== 'string')
+        || (
+          value.source !== 'agent'
+          && value.source !== 'userShell'
+          && value.source !== 'unifiedExecStartup'
+          && value.source !== 'unifiedExecInteraction'
+        )
+        || commandActions === null
         || (status !== 'inProgress' && status !== 'completed' && status !== 'failed' && status !== 'declined')
         || (value.aggregatedOutput !== null && typeof value.aggregatedOutput !== 'string')
         || (value.exitCode !== null && !isFiniteNumber(value.exitCode))
+        || (value.durationMs !== null && !isFiniteNumber(value.durationMs))
       ) {
         return rawItem(value);
       }
@@ -219,9 +281,14 @@ function parseItem(value: unknown): TurnSessionItem | null {
         type: 'commandExecution',
         id: value.id,
         command: value.command,
+        cwd: value.cwd,
+        processId: value.processId,
+        source: value.source,
+        commandActions,
         status,
         aggregatedOutput: value.aggregatedOutput,
         exitCode: value.exitCode,
+        durationMs: value.durationMs,
       };
     }
     case 'fileChange': {
@@ -255,8 +322,12 @@ function parseItem(value: unknown): TurnSessionItem | null {
         || typeof value.tool !== 'string'
         || (status !== 'inProgress' && status !== 'completed' && status !== 'failed')
         || !isJsonValue(value.arguments)
+        || !isJsonValue(value.appContext)
+        || (value.mcpAppResourceUri !== undefined && typeof value.mcpAppResourceUri !== 'string')
+        || (value.pluginId !== null && typeof value.pluginId !== 'string')
         || !isJsonValue(value.result)
         || (value.error !== null && error === null)
+        || (value.durationMs !== null && !isFiniteNumber(value.durationMs))
       ) {
         return rawItem(value);
       }
@@ -267,13 +338,19 @@ function parseItem(value: unknown): TurnSessionItem | null {
         tool: value.tool,
         status,
         arguments: value.arguments,
+        appContext: value.appContext,
+        ...(value.mcpAppResourceUri !== undefined
+          ? { mcpAppResourceUri: value.mcpAppResourceUri }
+          : {}),
+        pluginId: value.pluginId,
         result: value.result,
         error: error ? { message: error.message } : null,
+        durationMs: value.durationMs,
       };
     }
     case 'webSearch':
-      return typeof value.query === 'string'
-        ? { type: 'webSearch', id: value.id, query: value.query }
+      return typeof value.query === 'string' && isJsonValue(value.action)
+        ? { type: 'webSearch', id: value.id, query: value.query, action: value.action }
         : rawItem(value);
     case 'plan':
       return typeof value.text === 'string'
