@@ -71,6 +71,7 @@ function makeServices(opts: {
   sessions?: SessRow[];
   removeWorktreeImpl?: (path: string, name: string, folder?: string) => Promise<void>;
   deleteBranchImpl?: (path: string, branch: string, o?: { force?: boolean }) => Promise<void>;
+  cancelHostedRunsImpl?: (sessionId: string) => Promise<void>;
 }) {
   const project = 'project' in opts ? opts.project : { id: 1, name: 'Proj', path: '/proj', worktree_folder: null };
   const sessions = opts.sessions ?? [];
@@ -79,6 +80,7 @@ function makeServices(opts: {
   const deleteBranch = vi.fn(opts.deleteBranchImpl ?? (async () => {}));
   const deleteProject = vi.fn(() => true);
   const stopRunningScript = vi.fn(async () => {});
+  const cancelHostedRuns = vi.fn(opts.cancelHostedRunsImpl ?? (async () => {}));
 
   const services = {
     databaseService: {
@@ -96,9 +98,10 @@ function makeServices(opts: {
     worktreeManager: { removeWorktree, deleteBranch },
     killLiveSession: vi.fn(async () => {}),
     configManager: { isDemoMode: () => false },
+    cyboflow: { cancelHostedRuns },
   } as unknown as AppServices;
 
-  return { services, removeWorktree, deleteBranch, deleteProject, stopRunningScript };
+  return { services, removeWorktree, deleteBranch, deleteProject, stopRunningScript, cancelHostedRuns };
 }
 
 function register(services: AppServices) {
@@ -265,5 +268,80 @@ describe('projects:delete — branch close-out', () => {
     expect(made.deleteProject).toHaveBeenCalledTimes(1);
     const lastBranchOrder = Math.max(...made.deleteBranch.mock.invocationCallOrder);
     expect(lastBranchOrder).toBeLessThan(made.deleteProject.mock.invocationCallOrder[0]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// hosted-run cancellation (SDK-aware teardown gap fix): a project's sessions
+// may host non-terminal workflow runs on EITHER substrate — unlike the
+// interactive-only killLiveSession kill above, cancelHostedRuns (the same seam
+// sessions:delete uses) must be called for every worktree-bearing session,
+// BEFORE its worktree is removed, so a live agent (interactive OR a warm SDK
+// process) is never orphaned/stranded when its cwd disappears.
+// ---------------------------------------------------------------------------
+
+describe('projects:delete — hosted-run cancellation', () => {
+  it('calls cancelHostedRuns for each worktree-bearing session before its worktree is removed', async () => {
+    const made = makeServices({
+      project: { id: 1, name: 'Proj', path: '/proj', worktree_folder: null },
+      sessions: [
+        { id: 's1', project_id: 1, is_main_repo: false, worktree_name: 'wt-1', substrate: 'sdk' },
+        { id: 's2', project_id: 1, is_main_repo: false, worktree_name: 'wt-2', substrate: 'interactive', chat_run_id: 'chat-2' },
+      ],
+    });
+    const handlers = register(made.services);
+
+    const result = (await invoke(handlers, 'projects:delete', '1')) as { success: boolean };
+    expect(result.success).toBe(true);
+
+    // Cancelled for BOTH substrates — the fixed gap.
+    expect(made.cancelHostedRuns).toHaveBeenCalledTimes(2);
+    expect(made.cancelHostedRuns).toHaveBeenCalledWith('s1');
+    expect(made.cancelHostedRuns).toHaveBeenCalledWith('s2');
+
+    // Ordering: each session's cancel precedes its own worktree removal.
+    const cancelOrders = made.cancelHostedRuns.mock.invocationCallOrder;
+    const removeOrders = made.removeWorktree.mock.invocationCallOrder;
+    expect(Math.max(...cancelOrders)).toBeLessThan(Math.max(...removeOrders));
+  });
+
+  it('skips main-repo, worktree-less, and in-place sessions (mirrors the existing worktree-cleanup skip)', async () => {
+    const made = makeServices({
+      project: { id: 1, name: 'Proj', path: '/proj', worktree_folder: null },
+      sessions: [
+        { id: 'main', project_id: 1, is_main_repo: true, worktree_name: 'ignored' },
+        { id: 'no-wt', project_id: 1, is_main_repo: false },
+        { id: 's3', project_id: 1, is_main_repo: false, worktree_name: 'wt-3' },
+      ],
+    });
+    const handlers = register(made.services);
+
+    await invoke(handlers, 'projects:delete', '1');
+
+    expect(made.cancelHostedRuns).toHaveBeenCalledTimes(1);
+    expect(made.cancelHostedRuns).toHaveBeenCalledWith('s3');
+  });
+
+  it('is fail-soft: a cancelHostedRuns failure does not abort the sweep or block the project deletion', async () => {
+    const made = makeServices({
+      project: { id: 1, name: 'Proj', path: '/proj', worktree_folder: null },
+      sessions: [
+        { id: 's1', project_id: 1, is_main_repo: false, worktree_name: 'wt-1' },
+        { id: 's2', project_id: 1, is_main_repo: false, worktree_name: 'wt-2' },
+      ],
+      cancelHostedRunsImpl: async (sessionId) => {
+        if (sessionId === 's1') throw new Error('cancel failed');
+      },
+    });
+    const handlers = register(made.services);
+
+    const result = (await invoke(handlers, 'projects:delete', '1')) as { success: boolean };
+    expect(result.success).toBe(true);
+
+    // Both sessions' cancel was attempted despite the first throwing…
+    expect(made.cancelHostedRuns).toHaveBeenCalledTimes(2);
+    // …and worktree cleanup + project deletion still proceeded normally.
+    expect(made.removeWorktree).toHaveBeenCalledTimes(2);
+    expect(made.deleteProject).toHaveBeenCalledTimes(1);
   });
 });

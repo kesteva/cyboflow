@@ -47,7 +47,7 @@ async function stopProjectScriptInternal(projectId?: number): Promise<{ success:
 }
 
 export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices): void {
-  const { databaseService, sessionManager, worktreeManager, killLiveSession } = services;
+  const { databaseService, sessionManager, worktreeManager, killLiveSession, cyboflow } = services;
   // (demo seeding below reads services.configManager directly)
 
   ipcMain.handle('projects:get-all', async () => {
@@ -339,13 +339,28 @@ export function registerProjectHandlers(ipcMain: IpcMain, services: AppServices)
           continue;
         }
 
+        // Deleting a project must not strand its sessions' hosted workflow runs
+        // (mirrors the sessions:delete pattern in session.ts): cancel every
+        // non-terminal run FIRST, before worktree removal tears the cwd out from
+        // under a still-live agent — same seam sessions:delete uses
+        // (cyboflow.cancelHostedRuns), git-neutral (stops the live agent and
+        // settles pending approvals/questions; a sprint run's lane batch is
+        // closed too). Fail-soft: a cancel failure must never block the deletion.
+        try {
+          await cyboflow.cancelHostedRuns(session.id);
+        } catch (error) {
+          console.error(`[Main] Failed to cancel hosted runs for session ${session.id}:`, error);
+        }
+
         // PTY quick-session close-out (mirrors the sessions:delete pattern in
         // session.ts): a live interactive REPL must not be orphaned when its
         // worktree is torn out from under it below. HARD kill (not the graceful
         // EOF/`/exit` end — claude may be mid-turn and never read PTY stdin).
         // The facade translates the chat sentinel runId to the live panelId and
-        // NO-OPs for SDK/NULL-substrate rows. Fail-soft: a kill failure must
-        // never block the project deletion. Role-G: the live REPL gates on the
+        // NO-OPs for SDK/NULL-substrate rows — a warm SDK process for the
+        // session's `__quick__` sentinel run is instead reached by the
+        // cancelHostedRuns call above. Fail-soft: a kill failure must never
+        // block the project deletion. Role-G: the live REPL gates on the
         // chat_run_id sentinel (the gate vehicle), not sessions.run_id.
         if (session.substrate === 'interactive' && session.chat_run_id) {
           try {
