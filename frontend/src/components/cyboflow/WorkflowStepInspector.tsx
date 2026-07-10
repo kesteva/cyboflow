@@ -14,8 +14,22 @@
  */
 import { useEffect, useState } from 'react';
 import type { ReactElement } from 'react';
-import type { FanOutInnerStep, WorkflowDefinition, WorkflowPhase, WorkflowStep } from '../../../../shared/types/workflows';
+import type {
+  FanOutInnerStep,
+  WorkflowAgentConfig,
+  WorkflowAgentCustomCopy,
+  WorkflowDefinition,
+  WorkflowPhase,
+  WorkflowStep,
+} from '../../../../shared/types/workflows';
 import { SPRINT_BATCH_CAP } from '../../../../shared/types/sprintBatch';
+import { AGENT_MODEL_ALIASES, AGENT_MODEL_LABELS } from '../../../../shared/types/agents';
+import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
+import { HUMAN_GATE_AGENT, resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
+import { CLI_TOOLS } from '../../../../shared/types/cliTools';
+import type { CliTool } from '../../../../shared/types/cliTools';
+import type { McpEntry } from '../../../../shared/types/integrations';
+import { trpc } from '../../trpc/client';
 import type { WorkflowEditorAction, WorkflowEditorState } from '../../hooks/useWorkflowEditorState';
 import { AGENT_OPTIONS, MCP_OPTIONS } from './workflowEditorOptions';
 
@@ -33,6 +47,14 @@ export interface WorkflowStepInspectorProps {
    * use prose, not step bindings, so the list is only effective in custom flows).
    */
   customAgentKeys?: string[];
+  /**
+   * The FULL effective agent catalogue (builtins + overrides + customs) for the
+   * editor project, threaded from the modal's `agents.list` fetch. Drives the
+   * per-workflow-agent config section (model pin + read-only/customizable agent
+   * body). Optional — defaults to none, which renders the "no predefined agent"
+   * note for every bound key.
+   */
+  agentEntries?: AgentEntry[];
 }
 
 /** Locate the selected step and its containing phase within the definition. */
@@ -90,10 +112,12 @@ export function WorkflowStepInspector({
   selectedFanOutInner,
   dispatch,
   customAgentKeys = [],
+  agentEntries = [],
 }: WorkflowStepInspectorProps) {
   const [tab, setTab] = useState<InspectorTab>('step');
   const foundInner = findFanOutInner(definition, selectedFanOutInner);
   const found = findStep(definition, selectedStepId);
+  const agentConfigs = definition.agentConfigs;
 
   if (foundInner !== null) {
     return (
@@ -115,6 +139,8 @@ export function WorkflowStepInspector({
           innerIndex={foundInner.innerIndex}
           dispatch={dispatch}
           customAgentKeys={customAgentKeys}
+          agentEntries={agentEntries}
+          agentConfigs={agentConfigs}
         />
       </div>
     );
@@ -181,6 +207,8 @@ export function WorkflowStepInspector({
             step={found.step}
             dispatch={dispatch}
             customAgentKeys={customAgentKeys}
+            agentEntries={agentEntries}
+            agentConfigs={agentConfigs}
           />
         ) : (
           <McpTab phase={found.phase} step={found.step} dispatch={dispatch} />
@@ -216,6 +244,8 @@ function InnerFanOutInspector({
   innerIndex,
   dispatch,
   customAgentKeys,
+  agentEntries,
+  agentConfigs,
 }: {
   phase: WorkflowPhase;
   step: WorkflowStep;
@@ -223,6 +253,8 @@ function InnerFanOutInspector({
   innerIndex: number;
   dispatch: React.Dispatch<WorkflowEditorAction>;
   customAgentKeys: readonly string[];
+  agentEntries: readonly AgentEntry[];
+  agentConfigs: Record<string, WorkflowAgentConfig> | undefined;
 }) {
   const { agentOptions, customKeySet, agentInList } = agentOptionsFor(inner.agent, customAgentKeys);
   const siblingTargets = step.fanOut?.inner
@@ -334,6 +366,18 @@ function InnerFanOutInspector({
               ))}
             </select>
           </div>
+
+          <AgentConfigSection
+            variant="inner"
+            // Key the config by the CANONICAL agent key (the same key the canvas +
+            // run-side overlay use), not the raw step label — a legacy label like
+            // 'executor' resolves to 'implement'. `?? inner.agent` preserves the
+            // human-gate early-return (resolveStepAgentKey returns null for it).
+            agentKey={resolveStepAgentKey(inner.id, inner.agent) ?? inner.agent}
+            agentEntries={agentEntries}
+            agentConfigs={agentConfigs}
+            dispatch={dispatch}
+          />
 
           <ToggleRow
             label="optional"
@@ -743,7 +787,13 @@ function AgentTab({
   step,
   dispatch,
   customAgentKeys,
-}: TabProps & { customAgentKeys: readonly string[] }) {
+  agentEntries,
+  agentConfigs,
+}: TabProps & {
+  customAgentKeys: readonly string[];
+  agentEntries: readonly AgentEntry[];
+  agentConfigs: Record<string, WorkflowAgentConfig> | undefined;
+}) {
   // Merge the static suggestion list with the project's CUSTOM agent keys so a
   // custom-flow step can bind a project custom agent from the dropdown rather
   // than free-typing its key. Built-ins come first, then any custom key not
@@ -783,6 +833,18 @@ function AgentTab({
         </select>
       </div>
 
+      <AgentConfigSection
+        variant="agent"
+        // Key the config by the CANONICAL agent key (the same key the canvas +
+        // run-side overlay use), not the raw step label — a legacy label like
+        // 'executor' resolves to 'implement'. `?? step.agent` preserves the
+        // human-gate early-return (resolveStepAgentKey returns null for it).
+        agentKey={resolveStepAgentKey(step.id, step.agent) ?? step.agent}
+        agentEntries={agentEntries}
+        agentConfigs={agentConfigs}
+        dispatch={dispatch}
+      />
+
       <div>
         <label style={labelStyle} htmlFor="insp-loopback">loopback (on failure)</label>
         <select
@@ -809,6 +871,385 @@ function AgentTab({
         </p>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Workflow-scoped agent config — model pin + read-only / customizable body.
+// Shared by the AGENT tab and the fan-out inner inspector; scope is per
+// WORKFLOW-AGENT (keyed by agent key), NOT per step, so a config edited here
+// applies to every step (including fan-out inner steps) binding this agent.
+// ---------------------------------------------------------------------------
+
+const hintStyle: React.CSSProperties = {
+  marginTop: 6,
+  fontSize: 9.5,
+  color: 'var(--color-text-tertiary)',
+  lineHeight: 1.45,
+};
+
+const microLabelStyle: React.CSSProperties = {
+  fontSize: 9,
+  letterSpacing: '0.16em',
+  textTransform: 'uppercase',
+  color: 'var(--color-text-secondary)',
+};
+
+/** Read-only / editable system-prompt block (shared dimensions + rail aesthetic). */
+const promptBlockStyle: React.CSSProperties = {
+  maxHeight: 220,
+  overflow: 'auto',
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  fontSize: 10,
+  lineHeight: 1.5,
+  whiteSpace: 'pre-wrap',
+  border: '1px solid var(--color-border-primary)',
+  background: 'var(--color-bg-primary)',
+  padding: '8px',
+  color: 'var(--color-text-primary)',
+  boxSizing: 'border-box',
+};
+
+const sectionButtonStyle: React.CSSProperties = {
+  fontFamily: 'inherit',
+  fontSize: 9.5,
+  letterSpacing: '0.14em',
+  textTransform: 'uppercase',
+  background: 'transparent',
+  border: '1px solid var(--color-text-primary)',
+  color: 'var(--color-text-primary)',
+  padding: '5px 10px',
+  cursor: 'pointer',
+  alignSelf: 'flex-start',
+};
+
+/** The AgentConfigSection outer container (dotted top rule + column layout). */
+const sectionContainerStyle: React.CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 12,
+  paddingTop: 12,
+  borderTop: '1px dotted var(--color-border-primary)',
+};
+
+function AgentConfigSection({
+  variant,
+  agentKey,
+  agentEntries,
+  agentConfigs,
+  dispatch,
+}: {
+  variant: 'agent' | 'inner';
+  agentKey: string;
+  agentEntries: readonly AgentEntry[];
+  agentConfigs: Record<string, WorkflowAgentConfig> | undefined;
+  dispatch: React.Dispatch<WorkflowEditorAction>;
+}) {
+  // The human gate is not an agent (no model to pin, no body to edit).
+  if (agentKey === HUMAN_GATE_AGENT) return null;
+
+  const isInner = variant === 'inner';
+  const config = agentConfigs?.[agentKey];
+  const entry = agentEntries.find((e) => e.agentKey === agentKey);
+  const sectionTestId = isInner ? 'inspector-inner-agent-config' : 'inspector-agent-config';
+
+  // A free-typed unknown key has no effective agent to bind a config onto — the
+  // run-side overlay only maps configs onto EXISTING effective agents, so a model
+  // pinned here could never apply. Show just the muted note (no model select).
+  if (entry === undefined) {
+    return (
+      <div style={sectionContainerStyle} data-testid={sectionTestId}>
+        <p style={hintStyle} data-testid={`${sectionTestId}-unknown`}>
+          No predefined agent exists for this key.
+        </p>
+      </div>
+    );
+  }
+
+  const modelId = isInner ? 'insp-inner-model' : 'insp-model';
+  const modelTestId = isInner ? 'inspector-inner-model-select' : 'inspector-model-select';
+  const hintTestId = isInner ? 'inspector-inner-model-hint' : 'inspector-model-hint';
+
+  const selectedModel: AgentModelAlias | '' = config?.model ?? '';
+  const inheriting = config?.model === undefined;
+  const pinLabel = entry.model != null ? AGENT_MODEL_LABELS[entry.model] : null;
+  const inheritSentence =
+    pinLabel !== null ? `Inherits ${pinLabel} (agent setting).` : 'Inherits the run model.';
+
+  return (
+    <div style={sectionContainerStyle} data-testid={sectionTestId}>
+      {/* ── Model pin ─────────────────────────────────────────────────────── */}
+      <div>
+        <label style={labelStyle} htmlFor={modelId}>model</label>
+        <select
+          id={modelId}
+          value={selectedModel}
+          onChange={(e) =>
+            dispatch({
+              type: 'SET_AGENT_MODEL',
+              agentKey,
+              model: e.target.value === '' ? null : (e.target.value as AgentModelAlias),
+            })
+          }
+          style={inputStyle}
+          data-testid={modelTestId}
+        >
+          <option value="">(inherit)</option>
+          {AGENT_MODEL_ALIASES.map((alias) => (
+            <option key={alias} value={alias}>{AGENT_MODEL_LABELS[alias]}</option>
+          ))}
+        </select>
+        <p style={hintStyle} data-testid={hintTestId}>
+          {inheriting ? `${inheritSentence} ` : ''}Applies to every step using <b>{agentKey}</b> in this flow.
+        </p>
+      </div>
+
+      {/* ── Agent definition (read-only view, or workflow-scoped custom copy) ─ */}
+      {config?.custom === undefined ? (
+        <AgentDefinitionReadOnly agentKey={agentKey} entry={entry} dispatch={dispatch} />
+      ) : (
+        <AgentDefinitionEditable agentKey={agentKey} custom={config.custom} dispatch={dispatch} />
+      )}
+    </div>
+  );
+}
+
+/** The base agent body, verbatim + read-only, with a "customize for this flow" CTA. */
+function AgentDefinitionReadOnly({
+  agentKey,
+  entry,
+  dispatch,
+}: {
+  agentKey: string;
+  entry: AgentEntry;
+  dispatch: React.Dispatch<WorkflowEditorAction>;
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={microLabelStyle}>agent definition</div>
+      <p style={{ margin: 0, fontSize: 10.5, color: 'var(--color-text-primary)' }}>{entry.description}</p>
+
+      <div>
+        <span style={microLabelStyle}>tools </span>
+        <span style={{ fontSize: 10.5 }}>{entry.tools.length > 0 ? entry.tools.join(', ') : '(none)'}</span>
+      </div>
+      <div>
+        <span style={microLabelStyle}>mcps </span>
+        <span style={{ fontSize: 10.5 }}>{entry.enabledMcps.length > 0 ? entry.enabledMcps.join(', ') : '(none)'}</span>
+      </div>
+
+      <div style={promptBlockStyle} data-testid="inspector-agent-prompt">{entry.systemPrompt}</div>
+
+      <button
+        type="button"
+        onClick={() =>
+          dispatch({
+            type: 'SET_AGENT_CUSTOM',
+            agentKey,
+            custom: {
+              description: entry.description,
+              systemPrompt: entry.systemPrompt,
+              tools: [...entry.tools],
+              enabledMcps: [...entry.enabledMcps],
+            },
+          })
+        }
+        style={sectionButtonStyle}
+        data-testid="inspector-agent-customize"
+      >
+        Customize for this flow
+      </button>
+    </div>
+  );
+}
+
+/** The editable workflow-scoped custom copy: description / prompt / tools / mcps + revert. */
+function AgentDefinitionEditable({
+  agentKey,
+  custom,
+  dispatch,
+}: {
+  agentKey: string;
+  custom: WorkflowAgentCustomCopy;
+  dispatch: React.Dispatch<WorkflowEditorAction>;
+}) {
+  const mcpOptions = useMcpOptions(custom.enabledMcps);
+  const toolsSet = new Set<string>(custom.tools);
+  const mcpSet = new Set(custom.enabledMcps);
+
+  const toggleTool = (tool: CliTool) => {
+    const next = toolsSet.has(tool)
+      ? custom.tools.filter((t) => t !== tool)
+      : [...custom.tools, tool];
+    dispatch({ type: 'SET_AGENT_CUSTOM_FIELD', agentKey, field: 'tools', value: next });
+  };
+  const toggleMcp = (server: string) => {
+    const next = mcpSet.has(server)
+      ? custom.enabledMcps.filter((m) => m !== server)
+      : [...custom.enabledMcps, server];
+    dispatch({ type: 'SET_AGENT_CUSTOM_FIELD', agentKey, field: 'enabledMcps', value: next });
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span style={microLabelStyle}>agent definition</span>
+        <span
+          style={{
+            fontSize: 8.5,
+            letterSpacing: '0.12em',
+            textTransform: 'uppercase',
+            color: 'var(--color-status-info)',
+            border: '1px solid var(--color-status-info)',
+            padding: '1px 5px',
+          }}
+          data-testid="inspector-agent-workflow-copy-badge"
+        >
+          workflow copy
+        </span>
+      </div>
+
+      <p style={hintStyle} data-testid="inspector-agent-workflow-scope-hint">
+        Applies to every step using <b>{agentKey}</b> in this flow.
+      </p>
+
+      <div>
+        <label style={labelStyle} htmlFor="insp-agent-desc">description</label>
+        <input
+          id="insp-agent-desc"
+          type="text"
+          value={custom.description}
+          onChange={(e) =>
+            dispatch({ type: 'SET_AGENT_CUSTOM_FIELD', agentKey, field: 'description', value: e.target.value })
+          }
+          style={inputStyle}
+          data-testid="inspector-agent-description-input"
+        />
+      </div>
+
+      <div>
+        <label style={labelStyle} htmlFor="insp-agent-prompt">system prompt</label>
+        <textarea
+          id="insp-agent-prompt"
+          value={custom.systemPrompt}
+          onChange={(e) =>
+            dispatch({ type: 'SET_AGENT_CUSTOM_FIELD', agentKey, field: 'systemPrompt', value: e.target.value })
+          }
+          style={{ ...promptBlockStyle, width: '100%', minHeight: 140, resize: 'vertical' }}
+          data-testid="inspector-agent-prompt"
+        />
+      </div>
+
+      <div>
+        <div style={{ ...microLabelStyle, marginBottom: 6 }}>tools</div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }} data-testid="inspector-agent-tools">
+          {CLI_TOOLS.map((tool) => (
+            <ChipToggle
+              key={tool}
+              label={tool}
+              on={toolsSet.has(tool)}
+              onToggle={() => toggleTool(tool)}
+              testId={`inspector-agent-tool-${tool}`}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <div style={{ ...microLabelStyle, marginBottom: 6 }}>mcps</div>
+        {mcpOptions.length === 0 ? (
+          <p style={hintStyle} data-testid="inspector-agent-mcps-empty">No MCP servers are configured.</p>
+        ) : (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }} data-testid="inspector-agent-mcps">
+            {mcpOptions.map((server) => (
+              <ChipToggle
+                key={server}
+                label={server}
+                on={mcpSet.has(server)}
+                onToggle={() => toggleMcp(server)}
+                testId={`inspector-agent-mcp-${server}`}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+
+      <button
+        type="button"
+        onClick={() => dispatch({ type: 'SET_AGENT_CUSTOM', agentKey, custom: null })}
+        style={sectionButtonStyle}
+        data-testid="inspector-agent-revert"
+      >
+        Revert to predefined
+      </button>
+    </div>
+  );
+}
+
+/**
+ * The selectable MCP server names — the CLI catalogue (`mcps.list`) deduped by
+ * name minus the single-writer `cyboflow` server, unioned with any already-
+ * granted server so a stale grant stays visible. Mirrors AgentEditorForm's
+ * source of truth. A fetch failure degrades to just the granted servers.
+ */
+function useMcpOptions(enabledMcps: readonly string[]): string[] {
+  const [mcps, setMcps] = useState<McpEntry[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await trpc.cyboflow.mcps.list.query();
+        if (!cancelled) setMcps(list);
+      } catch {
+        if (!cancelled) setMcps([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const names = new Set<string>();
+  for (const entry of mcps) {
+    if (entry.name === 'cyboflow' || entry.name.startsWith('cyboflow_')) continue;
+    names.add(entry.name);
+  }
+  for (const server of enabledMcps) names.add(server);
+  return Array.from(names).sort();
+}
+
+/** Compact paper-token toggle chip (tools / mcps). */
+function ChipToggle({
+  label,
+  on,
+  onToggle,
+  testId,
+}: {
+  label: string;
+  on: boolean;
+  onToggle: () => void;
+  testId: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-pressed={on}
+      style={{
+        fontFamily: 'inherit',
+        fontSize: 9.5,
+        letterSpacing: '0.04em',
+        padding: '3px 7px',
+        border: '1px solid var(--color-text-primary)',
+        background: on ? 'var(--color-text-primary)' : 'transparent',
+        color: on ? 'var(--color-bg-primary)' : 'var(--color-text-primary)',
+        cursor: 'pointer',
+        borderRadius: 0,
+      }}
+      data-testid={testId}
+    >
+      {label}
+    </button>
   );
 }
 

@@ -504,6 +504,35 @@ describe('WorkflowEditorModal — edit mode', () => {
     expect(mockRunStart).toHaveBeenCalledTimes(1);
   });
 
+  it('blocks Save with a friendly inline error when a workflow-copy prompt is empty', async () => {
+    // Seed a definition whose agentConfigs carries a workflow-copy with a blank
+    // (whitespace-only) system prompt — the zod write path would reject it.
+    const seeded = structuredClone(SEED_DEFINITION);
+    seeded.agentConfigs = {
+      'idea-extractor': {
+        custom: { description: 'Forked.', systemPrompt: '   ', tools: [], enabledMcps: [] },
+      },
+    };
+    mockGetDefinition.mockResolvedValueOnce(seeded);
+    await renderEditMode();
+
+    // Make an edit so Save is enabled.
+    fireEvent.change(screen.getByTestId('inspector-name-input'), { target: { value: 'Context (edited)' } });
+    const saveBtn = screen.getByTestId('editor-save-button');
+    await waitFor(() => expect(saveBtn).not.toBeDisabled());
+
+    await act(async () => {
+      fireEvent.click(saveBtn);
+    });
+
+    // The scope dialog never opens; a human inline error names the agent; no mutation.
+    expect(screen.queryByTestId('save-scope-confirm')).toBeNull();
+    const alert = await screen.findByTestId('editor-error');
+    expect(alert).toHaveTextContent('idea-extractor');
+    expect(alert).toHaveTextContent('empty system prompt');
+    expect(mockUpdateSpec).not.toHaveBeenCalled();
+  });
+
   it('surfaces a server validation error inline when Save (global) fails', async () => {
     mockUpdateSpec.mockRejectedValue(new Error('phase ids must be unique'));
     await renderEditMode();

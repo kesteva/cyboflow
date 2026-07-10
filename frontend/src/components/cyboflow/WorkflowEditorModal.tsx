@@ -32,6 +32,7 @@ import { ensureSessionForLaunch } from '../../utils/ensureSessionForLaunch';
 import { trackEvent } from '../../utils/telemetry';
 import { isCyboflowWorkflowName } from '../../../../shared/types/workflows';
 import type { WorkflowDefinition, PermissionMode } from '../../../../shared/types/workflows';
+import type { AgentEntry, AgentModelAlias } from '../../../../shared/types/agents';
 import { useWorkflowEditorState } from '../../hooks/useWorkflowEditorState';
 import { WorkflowEditorCanvas } from './WorkflowEditorCanvas';
 import { WorkflowStepInspector } from './WorkflowStepInspector';
@@ -148,16 +149,23 @@ export function WorkflowEditorModal({
   const [sourceProjectId, setSourceProjectId] = useState<number | null>(null);
 
   /**
-   * The project's CUSTOM agent keys (bare, e.g. `my-helper`), surfaced in the
-   * step inspector's agent picker so a custom-flow step can bind one without
-   * free-typing its key. Fetched independently of the definition seed; a fetch
-   * failure (or no customs) just yields an empty list — never a broken editor.
-   * Scoped to the editor's `projectId` so a chosen key always has a matching
-   * `cyboflow-<key>.md` overlay at runtime (a foreign-project key would
-   * dispatch-fail). Built-ins ignore step bindings (they dispatch via prose), so
-   * the list only takes effect in custom flows.
+   * The FULL effective agent catalogue (builtins + overrides + customs) for the
+   * editor's `projectId`. Fetched independently of the definition seed; a fetch
+   * failure just yields an empty list — never a broken editor. Two derived views
+   * feed the editor: the CUSTOM agent keys surfaced in the step picker, and the
+   * per-agent model pins (`agentModelPins`) the canvas + inspector read to show
+   * what each agent inherits. Scoped to `projectId` so a chosen custom key always
+   * has a matching `cyboflow-<key>.md` overlay at runtime.
    */
-  const [customAgentKeys, setCustomAgentKeys] = useState<string[]>([]);
+  const [agentEntries, setAgentEntries] = useState<AgentEntry[]>([]);
+  const customAgentKeys = useMemo(
+    () => agentEntries.filter((e) => e.isCustom).map((e) => e.agentKey),
+    [agentEntries],
+  );
+  const agentModelPins = useMemo<Record<string, AgentModelAlias | null>>(
+    () => Object.fromEntries(agentEntries.map((e) => [e.agentKey, e.model])),
+    [agentEntries],
+  );
 
   /**
    * Save-scope dialog (edit mode): chooses "Save globally" (updateSpec on the
@@ -252,10 +260,10 @@ export function WorkflowEditorModal({
       try {
         const entries = await trpc.cyboflow.agents.list.query({ projectId });
         if (cancelled) return;
-        setCustomAgentKeys(entries.filter((e) => e.isCustom).map((e) => e.agentKey));
+        setAgentEntries(entries);
       } catch {
         // A picker without custom options is acceptable; never block the editor.
-        if (!cancelled) setCustomAgentKeys([]);
+        if (!cancelled) setAgentEntries([]);
       }
     })();
     return () => {
@@ -316,15 +324,37 @@ export function WorkflowEditorModal({
 
   // ── Handlers ────────────────────────────────────────────────────────────────
 
+  /**
+   * Pre-save guard: the zod write path (workflowDefinitionSchema) rejects a
+   * workflow-copy agent whose `custom.systemPrompt` is empty, but the editor lets
+   * the user blank it — so Save would otherwise surface a raw TRPCClientError zod
+   * blob. Scan `agentConfigs` for the first offending copy and, if found, surface a
+   * human message naming the agent + return true so the caller aborts the save.
+   */
+  const blockOnEmptyWorkflowPrompt = useCallback((): boolean => {
+    const configs = state.definition.agentConfigs;
+    if (configs === undefined) return false;
+    for (const [agentKey, config] of Object.entries(configs)) {
+      if (config.custom !== undefined && config.custom.systemPrompt.trim().length === 0) {
+        setError(
+          `Workflow copy of agent "${agentKey}" has an empty system prompt — fill it in or revert to predefined.`,
+        );
+        return true;
+      }
+    }
+    return false;
+  }, [state.definition]);
+
   // Save presents the scope choice (migration 030): "Save globally" updates the
   // (global) row; "Create a project-specific copy" forks via createCustom. The
   // dialog opening is non-mutating, so it does NOT take the in-flight latch — the
   // latch is acquired only on the dialog's confirm (handleSaveScopeConfirm).
   const handleSave = useCallback(() => {
     if (!canSave || actionInFlightRef.current) return;
+    if (blockOnEmptyWorkflowPrompt()) return;
     setError(null);
     setSaveScopeOpen(true);
-  }, [canSave]);
+  }, [canSave, blockOnEmptyWorkflowPrompt]);
 
   /**
    * Resolve of the Save-scope dialog. 'global' updates the existing row in place
@@ -375,10 +405,11 @@ export function WorkflowEditorModal({
   // dialog from permanently blocking future actions.
   const handleSaveAsNew = useCallback(() => {
     if (actionInFlightRef.current) return;
+    if (blockOnEmptyWorkflowPrompt()) return;
     setError(null);
     setPendingAction('save-as-new');
     setNameDialogOpen(true);
-  }, []);
+  }, [blockOnEmptyWorkflowPrompt]);
 
   const handleReset = useCallback(async () => {
     if (!isBuiltIn || actionInFlightRef.current) return;
@@ -432,6 +463,7 @@ export function WorkflowEditorModal({
 
   const handleRunWithModifications = useCallback(() => {
     if (actionInFlightRef.current) return;
+    if (blockOnEmptyWorkflowPrompt()) return;
     // Persist first. Edit mode updates the existing row ONLY when the graph was
     // actually modified — running an untouched built-in must not pin its
     // spec_json (which would freeze it from future WORKFLOW_DEFINITIONS updates).
@@ -444,7 +476,7 @@ export function WorkflowEditorModal({
       setPendingAction('run-with-modifications');
       setNameDialogOpen(true);
     }
-  }, [mode, isDirty, workflowId, saveEdit, persistAndRun]);
+  }, [mode, isDirty, workflowId, saveEdit, persistAndRun, blockOnEmptyWorkflowPrompt]);
 
   /**
    * Resolve of the FlowNameDialog: run the same downstream logic the
@@ -631,6 +663,7 @@ export function WorkflowEditorModal({
                 selectedStepId={state.selectedStepId}
                 selectedFanOutInner={state.selectedFanOutInner}
                 dispatch={dispatch}
+                agentModelPins={agentModelPins}
               />
               <WorkflowStepInspector
                 definition={state.definition}
@@ -638,6 +671,7 @@ export function WorkflowEditorModal({
                 selectedFanOutInner={state.selectedFanOutInner}
                 dispatch={dispatch}
                 customAgentKeys={customAgentKeys}
+                agentEntries={agentEntries}
               />
             </>
           )}
