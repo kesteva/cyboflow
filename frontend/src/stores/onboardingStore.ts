@@ -184,7 +184,12 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
   resume: () => {
     const s = get();
     if (s.status !== 'skipped' && s.status !== 'pending') return;
-    set({ status: 'active', step: clampResumeStep(s.step) });
+    // No clamp here: the boot path already clamps in hydrate(), and a live
+    // same-session resume (e.g. /ship idea modal dismissed while 'pending')
+    // should return to the step it parked on — its anchor is usually still
+    // mounted, and the Coachmark's anchor-lost fallback covers the case where
+    // it is not.
+    set({ status: 'active', step: s.step });
   },
 
   finish: () => set({ status: 'completed' }),

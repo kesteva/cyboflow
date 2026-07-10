@@ -7,7 +7,7 @@ import { Sidebar } from './components/Sidebar';
 import { TitleBar } from './components/TitleBar';
 import { CyboflowRoot } from './components/cyboflow/CyboflowRoot';
 import { PromptHistoryModal } from './components/PromptHistoryModal';
-import Welcome from './components/Welcome';
+import { OnboardingGate } from './components/onboarding/OnboardingGate';
 import { AboutDialog } from './components/AboutDialog';
 import { MainProcessLogger } from './components/MainProcessLogger';
 import { ErrorDialog } from './components/ErrorDialog';
@@ -15,7 +15,6 @@ import { useErrorStore } from './stores/errorStore';
 import { useSessionStore } from './stores/sessionStore';
 import { useConfigStore } from './stores/configStore';
 import { useNavigationStore } from './stores/navigationStore';
-import { API } from './utils/api';
 import { migrateLocalStorageKey } from './utils/migrateLocalStorageKey';
 import { ContextMenuProvider } from './contexts/ContextMenuContext';
 import { TokenTest } from './components/TokenTest';
@@ -36,13 +35,8 @@ import { useBacklogStore } from './stores/backlogStore';
 import { useActiveRunsStore } from './stores/activeRunsStore';
 import { useLandingStore, useAggregatedReviewItems } from './stores/landingStore';
 
-// Type for IPC response
-import type { IPCResponse } from './utils/api';
-
 function App() {
-  const [isWelcomeOpen, setIsWelcomeOpen] = useState(false);
   const [isAboutOpen, setIsAboutOpen] = useState(false);
-  const [hasCheckedWelcome, setHasCheckedWelcome] = useState(false);
   const [isPromptHistoryOpen, setIsPromptHistoryOpen] = useState(false);
   const [globalSearch, setGlobalSearch] = useState('');
   const view = useNavigationStore((s) => s.view);
@@ -82,7 +76,6 @@ function App() {
   );
   const [isTokenTestOpen, setIsTokenTestOpen] = useState(false);
   const { currentError, clearError } = useErrorStore();
-  const { isLoaded } = useSessionStore();
   const { fetchConfig } = useConfigStore();
   const { activeProjectId } = useNavigationStore();
   
@@ -198,56 +191,6 @@ function App() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
-
-  useEffect(() => {
-    // Show welcome screen intelligently based on user state
-    // This should only run once when the app is loaded, not when sessions change
-    if (!isLoaded || hasCheckedWelcome) {
-      return;
-    }
-
-    const checkInitialState = async () => {
-      if (!window.electron?.invoke) {
-        return;
-      }
-
-      // Get preferences from database
-      const hideWelcomeResult = await window.electron.invoke('preferences:get', 'hide_welcome') as IPCResponse<string>;
-      const welcomeShownResult = await window.electron.invoke('preferences:get', 'welcome_shown') as IPCResponse<string>;
-
-      const hideWelcome = hideWelcomeResult?.data === 'true';
-      const hasSeenWelcome = welcomeShownResult?.data === 'true';
-
-      // If user explicitly said "don't show again", respect that preference
-      if (!hideWelcome) {
-        try {
-          const projectsResponse = await API.projects.getAll();
-          const hasProjects = projectsResponse.success && projectsResponse.data && projectsResponse.data.length > 0;
-          // Get sessions from the API to avoid stale closure
-          const sessionsResponse = await API.sessions.getAll();
-          const hasSessions = sessionsResponse.success && sessionsResponse.data && sessionsResponse.data.length > 0;
-
-          // Show welcome if:
-          // 1. First time user (no projects and never seen welcome)
-          // 2. Returning user with no active data (no projects and no sessions)
-          const isFirstTimeUser = !hasProjects && !hasSeenWelcome;
-          const isReturningUserWithNoData = !hasProjects && !hasSessions && hasSeenWelcome;
-
-          if (isFirstTimeUser || isReturningUserWithNoData) {
-            setIsWelcomeOpen(true);
-            // Mark that welcome has been shown at least once
-            await window.electron.invoke('preferences:set', 'welcome_shown', 'true');
-          }
-        } catch (error) {
-          console.error('Error checking initial state:', error);
-        }
-      }
-    };
-    
-    // Set the flag first to prevent re-runs
-    setHasCheckedWelcome(true);
-    checkInitialState();
-  }, [isLoaded]);
 
   // Add keyboard shortcut for token test page (Cmd/Ctrl + Shift + T) - Development only
   useEffect(() => {
@@ -397,7 +340,7 @@ function App() {
         </div>
         {/* Persistent status bar at the bottom of the app shell */}
         <StatusBar />
-        <Welcome isOpen={isWelcomeOpen} onClose={() => setIsWelcomeOpen(false)} />
+        <OnboardingGate />
         <AboutDialog isOpen={isAboutOpen} onClose={() => setIsAboutOpen(false)} />
         <ErrorDialog
           isOpen={!!currentError}
