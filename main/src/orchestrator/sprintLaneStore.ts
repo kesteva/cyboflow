@@ -38,10 +38,13 @@ import type {
   SprintLaneStepId,
 } from '../../../shared/types/sprintBatch';
 import {
+  AWAITING_VERIFY_STEP,
   SPRINT_BATCH_CAP,
   SPRINT_LANE_STEP_IDS,
   TERMINAL_BATCH_STATUSES,
 } from '../../../shared/types/sprintBatch';
+import { resolveRunFanOutInner } from './laneChainResolution';
+import type { FanOutInnerStep } from '../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
 // Auto-derive: parent-orchestrator subagent dispatch -> lane step
@@ -53,6 +56,14 @@ import {
 // Task-tool dispatches and advances the matching lane WITHOUT relying on the
 // agent. It is called from BOTH PreToolUse seams (the interactive orchestrator-
 // socket handler AND the SDK in-process hook) so it fires on either substrate.
+//
+// The agent->step map + step ordering below are the CANONICAL FALLBACK, not the
+// only vocabulary: deriveLaneFromTaskDispatch now first tries to derive both from
+// the calling run's resolved fan-out chain (resolveRunFanOutInner — chain-derived,
+// user-editable via the workflow editor) and only falls back to this static map/
+// order when the run's definition is unresolvable or has no fanOut step. The
+// fallback IS the canonical mapping, so an unedited sprint/ship run behaves
+// byte-identically either way.
 // ---------------------------------------------------------------------------
 
 /**
@@ -60,7 +71,8 @@ import {
  * agents are mapped; the sprint-wide phase-1/phase-3 agents
  * (cyboflow-dependency-analyzer / cyboflow-sprint-verify / cyboflow-sprint-review)
  * have no per-task lane and are deliberately absent -> an unmapped subagent_type
- * is a no-op.
+ * is a no-op. This is the FALLBACK map (see the module doc above) — used only
+ * when the run's fan-out chain does not resolve.
  */
 const SPRINT_SUBAGENT_TO_LANE_STEP: Readonly<Record<string, SprintLaneStepId>> = {
   'cyboflow-implement': 'implement',
@@ -69,6 +81,26 @@ const SPRINT_SUBAGENT_TO_LANE_STEP: Readonly<Record<string, SprintLaneStepId>> =
   'cyboflow-task-verify': 'task-verify',
   'cyboflow-visual-verify': 'visual-verify',
 };
+
+/**
+ * Build a `cyboflow-<agent>` -> step-id map + the monotonic step ordering from a
+ * resolved fan-out inner chain, widened with AWAITING_VERIFY_STEP appended LAST
+ * (mirroring SPRINT_LANE_STEP_IDS's shape — the park step is not itself an inner
+ * chain id, but a lane parked there must still out-rank every inner step in the
+ * monotonic-forward guard below). For the canonical (unedited) sprint/ship chain
+ * this produces a map and an ordering byte-identical to
+ * SPRINT_SUBAGENT_TO_LANE_STEP / SPRINT_LANE_STEP_IDS.
+ */
+function buildDynamicStepVocabulary(inner: readonly FanOutInnerStep[]): {
+  agentMap: ReadonlyMap<string, string>;
+  order: readonly string[];
+} {
+  const agentMap = new Map<string, string>();
+  for (const step of inner) {
+    agentMap.set(`cyboflow-${step.agent}`, step.id);
+  }
+  return { agentMap, order: [...inner.map((s) => s.id), AWAITING_VERIFY_STEP] };
+}
 
 /**
  * True when `token` appears in `prompt` as a whole token — present and NOT
@@ -151,10 +183,32 @@ interface LaneDbRow {
 export class SprintLaneStore {
   private static instance: SprintLaneStore | null = null;
 
+  /**
+   * Per-runId cache of resolveRunFanOutInner's result, so
+   * deriveLaneFromTaskDispatch (fired on EVERY PreToolUse Task dispatch) does not
+   * re-read + re-resolve the frozen spec on every call. Safe to cache for the
+   * process lifetime: a run's frozen spec (workflow_runs.spec_hash) is stamped
+   * once at createRun and never changes, so the resolved chain for a given runId
+   * is immutable for the run's lifetime. Never explicitly evicted — bounded by
+   * the number of DISTINCT runIds a single process observes, which is small
+   * relative to session lifetime (mirrors the singleton's own unbounded-but-small
+   * lifetime scope; a process restart clears it).
+   */
+  private readonly fanOutInnerCache = new Map<string, readonly FanOutInnerStep[] | null>();
+
   constructor(
     private readonly db: DatabaseLike,
     private readonly logger?: LoggerLike,
   ) {}
+
+  /** Cached resolveRunFanOutInner — see fanOutInnerCache's doc for why. */
+  private resolveFanOutInnerCached(runId: string): readonly FanOutInnerStep[] | null {
+    const cached = this.fanOutInnerCache.get(runId);
+    if (cached !== undefined) return cached;
+    const inner = resolveRunFanOutInner(this.db, runId);
+    this.fanOutInnerCache.set(runId, inner);
+    return inner;
+  }
 
   // --------------------------------------------------------------------------
   // Lifecycle (singleton, mirroring TaskChangeRouter)
@@ -672,6 +726,14 @@ export class SprintLaneStore {
    * lane lists, ambiguous multi-lane attribution, and any lane already
    * at-or-past the derived step (monotonic-forward — loopbacks that re-dispatch
    * `implement` keep the further-along step; terminal lanes are never resurrected).
+   *
+   * The agent->step map and the monotonic ordering are CHAIN-DERIVED (resolved
+   * from the calling run's fanOut.inner, cached per runId via
+   * resolveFanOutInnerCached) rather than always the static
+   * SPRINT_SUBAGENT_TO_LANE_STEP / SPRINT_LANE_STEP_IDS pair — see the module doc
+   * above. A custom chain's derived step id is passed as `allowedStepIds` on the
+   * updateLane call so the write is not rejected against the (irrelevant) fixed
+   * default vocabulary.
    */
   deriveLaneFromTaskDispatch(args: {
     runId: string;
@@ -685,8 +747,30 @@ export class SprintLaneStore {
 
       const subagentType = toolInput['subagent_type'];
       if (typeof subagentType !== 'string') return;
-      const step = SPRINT_SUBAGENT_TO_LANE_STEP[subagentType];
-      if (step === undefined) return;
+
+      // Chain-derived vocabulary first (resolveRunFanOutInner, cached per runId);
+      // fall back to the static SPRINT_SUBAGENT_TO_LANE_STEP map/SPRINT_LANE_STEP_IDS
+      // ordering when the run's definition is unresolvable or has no fanOut step.
+      // The fallback IS the canonical mapping, so an unedited sprint/ship run is
+      // byte-identical either way.
+      const inner = this.resolveFanOutInnerCached(runId);
+      let step: string;
+      let stepOrder: readonly string[];
+      let allowedStepIds: readonly string[] | undefined;
+      if (inner && inner.length > 0) {
+        const { agentMap, order } = buildDynamicStepVocabulary(inner);
+        const derived = agentMap.get(subagentType);
+        if (derived === undefined) return;
+        step = derived;
+        stepOrder = order;
+        allowedStepIds = order;
+      } else {
+        const fallback = SPRINT_SUBAGENT_TO_LANE_STEP[subagentType];
+        if (fallback === undefined) return;
+        step = fallback;
+        stepOrder = SPRINT_LANE_STEP_IDS;
+        allowedStepIds = undefined; // SprintLaneStore's own canonical default.
+      }
 
       // Resolve the run's batch (migration 022). NULL/absent batch = non-sprint
       // run -> strict no-op (mirrors handleUpdateSprintTask's read).
@@ -721,16 +805,23 @@ export class SprintLaneStore {
 
       // Monotonic-forward guard: never resurrect a terminal lane; never regress a
       // lane already at-or-past this step (applies to running AND blocked; a
-      // queued lane has currentStepId=null -> index -1 -> always advances).
+      // queued lane has currentStepId=null -> index -1 -> always advances). Indexed
+      // against `stepOrder` (chain-derived + AWAITING_VERIFY_STEP appended, or the
+      // canonical SPRINT_LANE_STEP_IDS fallback) so a lane parked at the merge-gate
+      // is never regressed even when a custom chain resolved.
       if (lane.status === 'integrated' || lane.status === 'failed') return;
-      const existingIdx =
-        lane.currentStepId === null
-          ? -1
-          : (SPRINT_LANE_STEP_IDS as readonly string[]).indexOf(lane.currentStepId);
-      const derivedIdx = (SPRINT_LANE_STEP_IDS as readonly string[]).indexOf(step);
+      const existingIdx = lane.currentStepId === null ? -1 : stepOrder.indexOf(lane.currentStepId);
+      const derivedIdx = stepOrder.indexOf(step);
       if (existingIdx >= derivedIdx) return;
 
-      this.updateLane({ runId, batchId, taskId: lane.taskId, status: 'running', currentStepId: step });
+      this.updateLane({
+        runId,
+        batchId,
+        taskId: lane.taskId,
+        status: 'running',
+        currentStepId: step,
+        ...(allowedStepIds !== undefined ? { allowedStepIds } : {}),
+      });
     } catch (err) {
       // Best-effort UI backstop — a lane read/write failure must never disturb
       // the caller's PreToolUse gating/verdict path.

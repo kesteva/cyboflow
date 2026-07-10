@@ -53,12 +53,25 @@
  * chokepoint + shared types + the narrow DatabaseLike/LoggerLike — no 'electron' /
  * 'better-sqlite3' / 'fs' / services import. All lane writes funnel through
  * SprintLaneStore.updateLane (+ sprintLaneEvents) — never a direct UPDATE.
+ *
+ * `visual-verify` / `implement` above describe the CANONICAL sprint/ship chain.
+ * The actual advance/loopback step ids `applyMergeGateVerdict` writes are
+ * resolved from the calling run's fan-out chain (resolveMergeGateStepIds, below)
+ * rather than hardcoded — an edited chain's renamed visual/implement steps (or
+ * loopback target) are honored, with the literals above as the fallback when the
+ * chain is unresolvable or lacks a `visual-verify`-id step.
  */
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type { RequestStatus, VerdictV1 } from '../../../../shared/types/visualVerification';
 import type { SprintLaneRow } from '../../../../shared/types/sprintBatch';
-import { AWAITING_VERIFY_STEP, SPRINT_LANE_STEP_IDS } from '../../../../shared/types/sprintBatch';
+import {
+  AWAITING_VERIFY_STEP,
+  SPRINT_IMPLEMENT_STEP,
+  SPRINT_LANE_STEP_IDS,
+  SPRINT_VISUAL_VERIFY_STEP,
+} from '../../../../shared/types/sprintBatch';
+import { resolveRunFanOutInner } from '../laneChainResolution';
 
 /**
  * The same 3× implement→verify cap task-verify enforces (sprint.md: "up to 3×
@@ -144,6 +157,62 @@ interface ResolvedLane {
   lane: SprintLaneRow;
 }
 
+/** The step ids the merge-gate write side stamps on advance / loopback. */
+interface MergeGateStepIds {
+  /** currentStepId written on advance-integrated (was the literal 'visual-verify'). */
+  advanceStepId: string;
+  /** currentStepId written on loopback-implement (was the literal 'implement'). */
+  loopbackStepId: string;
+  /**
+   * The lane-step vocabulary these ids must validate against — the resolved
+   * chain's ids widened with AWAITING_VERIFY_STEP (mirroring Seam 2/3's park-step
+   * widening), or undefined to fall back to SprintLaneStore's own
+   * SPRINT_LANE_STEP_IDS default when the run's chain did not resolve. Threaded
+   * onto every updateLane call below so a custom advance/loopback id (outside the
+   * canonical default) is not rejected by SprintLaneStore's own validation.
+   */
+  allowedStepIds: readonly string[] | undefined;
+}
+
+/**
+ * Resolve the merge-gate's advance/loopback step ids from the run's resolved
+ * fan-out chain (the ORCHESTRATED-plane mirror of the programmatic controller's
+ * `implementIndex` lookup, programmatic/workflowController.ts runFanOut) instead
+ * of the two hardcoded literals this module used to write unconditionally:
+ *   - advanceStepId  = the chain's `visual-verify`-id inner step's OWN id (an
+ *     edited chain may have renamed it) — falls back to the literal
+ *     SPRINT_VISUAL_VERIFY_STEP when the chain has no such step (unresolvable
+ *     definition, or an edited chain that removed it) so canonical sprint/ship
+ *     runs are byte-identical and behavior never regresses.
+ *   - loopbackStepId = that visual step's own `loopback` field, else (if absent)
+ *     the chain's `implement`-id step when present, else the chain's first inner
+ *     id, else (chain unresolved) the literal SPRINT_IMPLEMENT_STEP.
+ *
+ * Both built-in chains (sprint + ship) stamp `visual-verify`'s `loopback:
+ * 'implement'`, so an unedited run resolves to the exact same two literals this
+ * module wrote before this derivation existed.
+ */
+function resolveMergeGateStepIds(db: DatabaseLike, runId: string): MergeGateStepIds {
+  const inner = resolveRunFanOutInner(db, runId);
+  const visualStep = inner === null ? undefined : inner.find((s) => s.id === SPRINT_VISUAL_VERIFY_STEP);
+  if (inner === null || visualStep === undefined) {
+    // Unresolvable definition, OR a resolved chain that lacks a `visual-verify`-id
+    // step: write the literal fallback ids AND fall back to SprintLaneStore's own
+    // canonical vocabulary (allowedStepIds: undefined) — a narrower chain-derived
+    // vocabulary here would NOT contain these literals and the write would be
+    // rejected as out-of-vocabulary.
+    return {
+      advanceStepId: SPRINT_VISUAL_VERIFY_STEP,
+      loopbackStepId: SPRINT_IMPLEMENT_STEP,
+      allowedStepIds: undefined,
+    };
+  }
+  const allowedStepIds = [...inner.map((s) => s.id), AWAITING_VERIFY_STEP];
+  const hasImplementStep = inner.some((s) => s.id === SPRINT_IMPLEMENT_STEP);
+  const loopbackStepId = visualStep.loopback ?? (hasImplementStep ? SPRINT_IMPLEMENT_STEP : inner[0].id);
+  return { advanceStepId: visualStep.id, loopbackStepId, allowedStepIds };
+}
+
 /**
  * Resolve the run's batch and the SINGLE lane a verdict applies to. Attribution:
  *   1. The run must carry a non-null workflow_runs.batch_id (a non-sprint run has
@@ -205,10 +274,12 @@ function resolveLaneForVerdict(
  * Apply a terminal visual verdict to the run's lane via the SprintLaneStore
  * chokepoint (the merge-gate write side). Resolves the lane (run→batch→ref/single),
  * runs the PURE decision, and performs the single lane write:
- *   advance-integrated  → updateLane({ status:'integrated', currentStepId:'visual-verify' })
- *   loopback-implement  → updateLane({ status:'running', currentStepId:'implement', attempt })
+ *   advance-integrated  → updateLane({ status:'integrated', currentStepId:<advanceStepId> })
+ *   loopback-implement  → updateLane({ status:'running', currentStepId:<loopbackStepId>, attempt })
  *   mark-failed         → updateLane({ status:'failed', currentStepId:'awaiting-verify' })
  *   noop                → no write
+ * where <advanceStepId>/<loopbackStepId> are resolveMergeGateStepIds' chain-derived
+ * ids ('visual-verify'/'implement' for the canonical, unedited chain).
  *
  * Monotonic-forward parity with deriveLaneFromTaskDispatch: a lane already terminal
  * (integrated/failed) is never resurrected (the decision still runs for logging,
@@ -253,6 +324,12 @@ export function applyMergeGateVerdict(args: {
 
   const action = decideMergeGate({ status, verdict, currentAttempts: lane.attempts });
 
+  // Chain-derived advance/loopback ids (resolveMergeGateStepIds) — see its doc for
+  // the fallback-to-literals contract. allowedStepIds threads the SAME resolved
+  // vocabulary onto every write below so a custom id is not rejected by
+  // SprintLaneStore's own (irrelevant, fixed) default.
+  const { advanceStepId, loopbackStepId, allowedStepIds } = resolveMergeGateStepIds(db, runId);
+
   try {
     switch (action.kind) {
       case 'advance-integrated':
@@ -261,7 +338,8 @@ export function applyMergeGateVerdict(args: {
           batchId,
           taskId: lane.taskId,
           status: 'integrated',
-          currentStepId: 'visual-verify',
+          currentStepId: advanceStepId,
+          ...(allowedStepIds !== undefined ? { allowedStepIds } : {}),
         });
         break;
       case 'loopback-implement':
@@ -270,8 +348,9 @@ export function applyMergeGateVerdict(args: {
           batchId,
           taskId: lane.taskId,
           status: 'running',
-          currentStepId: 'implement',
+          currentStepId: loopbackStepId,
           attempt: action.nextAttempt,
+          ...(allowedStepIds !== undefined ? { allowedStepIds } : {}),
         });
         break;
       case 'mark-failed':
@@ -281,6 +360,7 @@ export function applyMergeGateVerdict(args: {
           taskId: lane.taskId,
           status: 'failed',
           currentStepId: AWAITING_VERIFY_STEP,
+          ...(allowedStepIds !== undefined ? { allowedStepIds } : {}),
         });
         break;
       case 'noop':

@@ -75,8 +75,9 @@ import type {
   VisualBackendId,
 } from '../../../../shared/types/visualVerification';
 import { SprintLaneStore, SprintLaneError } from '../sprintLaneStore';
-import { SPRINT_BATCH_MAX_TASKS } from '../../../../shared/types/sprintBatch';
-import type { SprintBatchTaskStatus, SprintLaneStepId } from '../../../../shared/types/sprintBatch';
+import { SPRINT_BATCH_MAX_TASKS, AWAITING_VERIFY_STEP } from '../../../../shared/types/sprintBatch';
+import type { SprintBatchTaskStatus } from '../../../../shared/types/sprintBatch';
+import { resolveRunFanOutInner } from '../laneChainResolution';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import { runStatusEvents } from '../trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../../shared/types/cyboflow';
@@ -194,8 +195,15 @@ export type McpQueryMessage =
       taskId: string;
       /** New lane status; at least one of status/currentStepId must be set. */
       status?: SprintBatchTaskStatus;
-      /** New lane step (SPRINT_LANE_STEP_IDS); at least one of status/currentStepId must be set. */
-      currentStepId?: SprintLaneStepId;
+      /**
+       * New lane step id; at least one of status/currentStepId must be set.
+       * NOT narrowed to SprintLaneStepId — the MCP tool now accepts any non-empty
+       * string (cyboflowMcpServer.ts's CallTool check) and this handler validates
+       * it against the CALLING RUN's resolved chain-derived vocabulary
+       * (resolveRunFanOutInner), falling back to SPRINT_LANE_STEP_IDS. A narrower
+       * type here would misrepresent the wire contract this handler enforces.
+       */
+      currentStepId?: string;
       /** 1-based attempt counter (integer >= 1) — reported when implement is re-delegated after a verify failure. */
       attempt?: number;
     }
@@ -1453,6 +1461,17 @@ export class McpQueryHandler {
       return;
     }
 
+    // Orchestrated-plane mirror of the programmatic plane's driveLane threading
+    // (programmatic/workflowController.ts runFanOut: allowedStepIds = inner ids,
+    // widened with AWAITING_VERIFY_STEP for the merge-gate park step). Resolve the
+    // CALLING run's chain-derived vocabulary instead of validating against the
+    // fixed SPRINT_LANE_STEP_IDS default. Fail-soft: an unresolvable run/definition
+    // or a definition with no fanOut step yields `undefined`, so
+    // SprintLaneStore.updateLane degrades to today's canonical default — never
+    // fail-closed.
+    const inner = resolveRunFanOutInner(this.db, msg.runId);
+    const allowedStepIds = inner ? [...inner.map((s) => s.id), AWAITING_VERIFY_STEP] : undefined;
+
     try {
       const lane = SprintLaneStore.getInstance().updateLane({
         runId: msg.runId,
@@ -1461,6 +1480,7 @@ export class McpQueryHandler {
         ...(msg.status !== undefined ? { status: msg.status } : {}),
         ...(msg.currentStepId !== undefined ? { currentStepId: msg.currentStepId } : {}),
         ...(msg.attempt !== undefined ? { attempt: msg.attempt } : {}),
+        ...(allowedStepIds !== undefined ? { allowedStepIds } : {}),
       });
       this.writeResponse(client, {
         type: 'mcp-query-response',

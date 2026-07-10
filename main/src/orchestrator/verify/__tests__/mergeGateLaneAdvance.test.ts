@@ -359,4 +359,156 @@ describe('applyMergeGateVerdict (lane write side)', () => {
     const action = applyMergeGateVerdict({ db: dbAdapter(db), runId: 'run-1', status: 'passed', verdict: passVerdict() });
     expect(action).toEqual({ kind: 'noop', reason: 'store-uninitialized' });
   });
+
+  // ---------------------------------------------------------------------------
+  // Chain-derived advance/loopback step ids (Phase D Seam 4). resolveMergeGateStepIds
+  // is exercised indirectly through applyMergeGateVerdict's writes.
+  // ---------------------------------------------------------------------------
+
+  describe('chain-derived advance/loopback step ids', () => {
+    /** Seed a workflow_runs row against a CUSTOM workflow name/spec_json (not 'sprint'). */
+    function seedRunWithSpec(
+      targetDb: Database.Database,
+      runId: string,
+      batchId: string | null,
+      workflowId: string,
+      name: string,
+      specJson: string,
+    ): void {
+      targetDb
+        .prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, ?)`)
+        .run(workflowId, name, specJson);
+      targetDb
+        .prepare(
+          `INSERT INTO workflow_runs (id, workflow_id, project_id, status, batch_id) VALUES (?, ?, 1, 'running', ?)`,
+        )
+        .run(runId, workflowId, batchId);
+    }
+
+    // A chain that RENAMES the loopback target: the 'visual-verify'-id step loops
+    // back to 'redo-design' (not the canonical 'implement').
+    const RENAMED_LOOPBACK_SPEC = JSON.stringify({
+      id: 'wf-renamed-loopback',
+      phases: [
+        {
+          id: 'execute',
+          label: 'Execute',
+          color: '#3b6dd6',
+          steps: [
+            {
+              id: 'execute-tasks',
+              name: 'Execute tasks',
+              agent: 'implement',
+              mcps: [],
+              retries: 0,
+              fanOut: {
+                over: 'tasks',
+                inner: [
+                  { id: 'redo-design', agent: 'design', name: 'Design' },
+                  {
+                    id: 'visual-verify',
+                    agent: 'visual-verify',
+                    name: 'Visual check',
+                    loopback: 'redo-design',
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    // A chain with NO 'visual-verify'-id step at all — the merge-gate must fall
+    // back to the literal 'visual-verify' / 'implement' ids (and the canonical
+    // default vocabulary), even though this chain's own ids are 'design'/'build'.
+    const NO_VISUAL_STEP_SPEC = JSON.stringify({
+      id: 'wf-no-visual-step',
+      phases: [
+        {
+          id: 'execute',
+          label: 'Execute',
+          color: '#3b6dd6',
+          steps: [
+            {
+              id: 'execute-tasks',
+              name: 'Execute tasks',
+              agent: 'implement',
+              mcps: [],
+              retries: 0,
+              fanOut: {
+                over: 'tasks',
+                inner: [
+                  { id: 'design', agent: 'design', name: 'Design' },
+                  { id: 'build', agent: 'build', name: 'Build' },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    it('the canonical (unedited) sprint chain resolves the SAME literals as before this derivation existed', () => {
+      // seedRun (top-of-file helper) stamps name='sprint', spec_json='{}', which
+      // resolves via resolveWorkflowDefinition to WORKFLOW_DEFINITIONS.sprint — the
+      // real canonical chain, whose visual-verify step has loopback:'implement'.
+      seedTask(db, 'tsk_a', 'TASK-001', 'A');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      seedRun(db, 'run-1', batchId);
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'awaiting-verify' });
+
+      const action = applyMergeGateVerdict({ db: dbAdapter(db), runId: 'run-1', status: 'failed', verdict: failVerdict() });
+      expect(action).toEqual({ kind: 'loopback-implement', nextAttempt: 2 });
+      expect(readLane(batchId, 'tsk_a')).toEqual({ status: 'running', step: 'implement', attempts: 2 });
+    });
+
+    it("FAIL loops back to a CUSTOM loopback target ('redo-design') on an edited chain", () => {
+      seedTask(db, 'tsk_a', 'TASK-001', 'A');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      seedRunWithSpec(db, 'run-1', batchId, 'wf-renamed', 'renamed-flow', RENAMED_LOOPBACK_SPEC);
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'awaiting-verify' });
+
+      const action = applyMergeGateVerdict({ db: dbAdapter(db), runId: 'run-1', status: 'failed', verdict: failVerdict() });
+      expect(action).toEqual({ kind: 'loopback-implement', nextAttempt: 2 });
+      expect(readLane(batchId, 'tsk_a')).toEqual({ status: 'running', step: 'redo-design', attempts: 2 });
+    });
+
+    it('PASS on the edited chain advances with currentStepId = the chain\'s own visual-verify id (unchanged id here, but resolved dynamically)', () => {
+      seedTask(db, 'tsk_a', 'TASK-001', 'A');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      seedRunWithSpec(db, 'run-1', batchId, 'wf-renamed', 'renamed-flow', RENAMED_LOOPBACK_SPEC);
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'awaiting-verify' });
+
+      const action = applyMergeGateVerdict({ db: dbAdapter(db), runId: 'run-1', status: 'passed', verdict: passVerdict() });
+      expect(action).toEqual({ kind: 'advance-integrated' });
+      expect(readLane(batchId, 'tsk_a')).toEqual({ status: 'integrated', step: 'visual-verify', attempts: 0 });
+    });
+
+    it('a chain missing a visual-verify-id step falls back to the literal ids (PASS)', () => {
+      seedTask(db, 'tsk_a', 'TASK-001', 'A');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      seedRunWithSpec(db, 'run-1', batchId, 'wf-no-visual', 'no-visual-flow', NO_VISUAL_STEP_SPEC);
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'awaiting-verify' });
+
+      const action = applyMergeGateVerdict({ db: dbAdapter(db), runId: 'run-1', status: 'passed', verdict: passVerdict() });
+      expect(action).toEqual({ kind: 'advance-integrated' });
+      // Falls back to the literal 'visual-verify' — NOT one of this chain's own
+      // ids ('design'/'build') — and the write still succeeds (allowedStepIds
+      // also falls back to SprintLaneStore's canonical default).
+      expect(readLane(batchId, 'tsk_a')).toEqual({ status: 'integrated', step: 'visual-verify', attempts: 0 });
+    });
+
+    it('a chain missing a visual-verify-id step falls back to the literal ids (FAIL loopback)', () => {
+      seedTask(db, 'tsk_a', 'TASK-001', 'A');
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      seedRunWithSpec(db, 'run-1', batchId, 'wf-no-visual', 'no-visual-flow', NO_VISUAL_STEP_SPEC);
+      store.updateLane({ runId: 'run-1', batchId, taskId: 'tsk_a', status: 'running', currentStepId: 'awaiting-verify' });
+
+      const action = applyMergeGateVerdict({ db: dbAdapter(db), runId: 'run-1', status: 'failed', verdict: failVerdict() });
+      expect(action).toEqual({ kind: 'loopback-implement', nextAttempt: 2 });
+      // Falls back to the literal 'implement' — NOT one of this chain's own ids.
+      expect(readLane(batchId, 'tsk_a')).toEqual({ status: 'running', step: 'implement', attempts: 2 });
+    });
+  });
 });

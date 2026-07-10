@@ -700,6 +700,175 @@ describe('SprintLaneStore', () => {
       .run(runId, workflowId, batchId);
   }
 
+  // ---------------------------------------------------------------------------
+  // deriveLaneFromTaskDispatch — chain-derived agent-map + monotonic ordering
+  // (Phase D Seam 3). The static SPRINT_SUBAGENT_TO_LANE_STEP map / SPRINT_LANE_STEP_IDS
+  // ordering are now only the FALLBACK — deriveLaneFromTaskDispatch first tries the
+  // calling run's resolved fan-out chain (resolveRunFanOutInner).
+  // ---------------------------------------------------------------------------
+
+  describe('deriveLaneFromTaskDispatch', () => {
+    const CUSTOM_CHAIN_SPEC = JSON.stringify({
+      id: 'wf-custom-chain',
+      phases: [
+        {
+          id: 'execute',
+          label: 'Execute',
+          color: '#3b6dd6',
+          steps: [
+            {
+              id: 'execute-tasks',
+              name: 'Execute tasks',
+              agent: 'implement',
+              mcps: [],
+              retries: 0,
+              fanOut: {
+                over: 'tasks',
+                inner: [
+                  { id: 'design', agent: 'design', name: 'Design' },
+                  { id: 'build', agent: 'build', name: 'Build', loopback: 'design' },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    /** Insert an owning workflow_runs row with a CUSTOM workflow name/spec_json. */
+    function seedOwningRunWithSpec(
+      targetDb: Database.Database,
+      batchId: string,
+      runId: string,
+      workflowId: string,
+      name: string,
+      specJson: string,
+    ): void {
+      targetDb
+        .prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, ?)`)
+        .run(workflowId, name, specJson);
+      targetDb
+        .prepare(
+          `INSERT INTO workflow_runs (id, workflow_id, project_id, status, batch_id) VALUES (?, ?, 1, 'running', ?)`,
+        )
+        .run(runId, workflowId, batchId);
+    }
+
+    function laneFor(batchId: string, taskId: string) {
+      return store.listLanes(batchId).find((l) => l.taskId === taskId);
+    }
+
+    it("a custom chain's cyboflow-<agent> dispatch advances the lane to its own inner id", () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      seedOwningRunWithSpec(db, batchId, 'run-1', 'wf-custom', 'custom-flow', CUSTOM_CHAIN_SPEC);
+
+      store.deriveLaneFromTaskDispatch({
+        runId: 'run-1',
+        toolName: 'Task',
+        toolInput: { subagent_type: 'cyboflow-design' },
+      });
+
+      const lane = laneFor(batchId, 'tsk_a');
+      expect(lane?.status).toBe('running');
+      expect(lane?.currentStepId).toBe('design');
+    });
+
+    it("advances the SAME custom lane further on a later inner-step dispatch ('build')", () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      seedOwningRunWithSpec(db, batchId, 'run-1', 'wf-custom', 'custom-flow', CUSTOM_CHAIN_SPEC);
+
+      store.deriveLaneFromTaskDispatch({
+        runId: 'run-1',
+        toolName: 'Task',
+        toolInput: { subagent_type: 'cyboflow-design' },
+      });
+      store.deriveLaneFromTaskDispatch({
+        runId: 'run-1',
+        toolName: 'Task',
+        toolInput: { subagent_type: 'cyboflow-build' },
+      });
+
+      expect(laneFor(batchId, 'tsk_a')?.currentStepId).toBe('build');
+    });
+
+    it('monotonic-forward guard (derived ordering): a re-dispatch of an EARLIER custom step does not regress the lane', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      seedOwningRunWithSpec(db, batchId, 'run-1', 'wf-custom', 'custom-flow', CUSTOM_CHAIN_SPEC);
+
+      store.deriveLaneFromTaskDispatch({
+        runId: 'run-1',
+        toolName: 'Task',
+        toolInput: { subagent_type: 'cyboflow-build' },
+      });
+      expect(laneFor(batchId, 'tsk_a')?.currentStepId).toBe('build');
+
+      // A loopback-style re-dispatch of 'design' (earlier in the custom chain)
+      // must NOT regress the lane off 'build'.
+      store.deriveLaneFromTaskDispatch({
+        runId: 'run-1',
+        toolName: 'Task',
+        toolInput: { subagent_type: 'cyboflow-design' },
+      });
+      expect(laneFor(batchId, 'tsk_a')?.currentStepId).toBe('build');
+    });
+
+    it('an unmapped subagent_type on a RESOLVED custom chain is a no-op (no fallback to the static map)', () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      seedOwningRunWithSpec(db, batchId, 'run-1', 'wf-custom', 'custom-flow', CUSTOM_CHAIN_SPEC);
+
+      // 'cyboflow-implement' is a canonical agent id, but this custom chain's
+      // agents are 'design'/'build' only — it must NOT fall back to the static
+      // SPRINT_SUBAGENT_TO_LANE_STEP map once a chain has resolved.
+      store.deriveLaneFromTaskDispatch({
+        runId: 'run-1',
+        toolName: 'Task',
+        toolInput: { subagent_type: 'cyboflow-implement' },
+      });
+
+      const lane = laneFor(batchId, 'tsk_a');
+      expect(lane?.status).toBe('queued');
+      expect(lane?.currentStepId).toBeNull();
+    });
+
+    it("canonical fallback still works when the run's definition has no fanOut step", () => {
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      // seedOwningRun's workflow (name='test-workflow', spec_json='{}') resolves to
+      // NO fan-out chain (not a built-in name, and '{}' parses to nothing) — the
+      // canonical SPRINT_SUBAGENT_TO_LANE_STEP / SPRINT_LANE_STEP_IDS fallback applies.
+      seedOwningRun(db, batchId, 'run-1');
+
+      store.deriveLaneFromTaskDispatch({
+        runId: 'run-1',
+        toolName: 'Task',
+        toolInput: { subagent_type: 'cyboflow-implement' },
+      });
+
+      const lane = laneFor(batchId, 'tsk_a');
+      expect(lane?.status).toBe('running');
+      expect(lane?.currentStepId).toBe('implement');
+    });
+
+    it('the canonical (unedited) chain resolves byte-identically to the static fallback', () => {
+      // A real 'sprint' workflow name with an empty spec_json resolves via
+      // resolveWorkflowDefinition to WORKFLOW_DEFINITIONS.sprint — whose
+      // execute-tasks fanOut.inner ids EQUAL SPRINT_LANE_STEP_IDS in order, so a
+      // dispatch here must land on the exact same step as the fallback path.
+      const { batchId } = store.createForRun(1, 'sdk', ['tsk_a']);
+      db.prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-sprint', 1, 'sprint', '{}')`).run();
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, batch_id) VALUES ('run-1', 'wf-sprint', 1, 'running', ?)`,
+      ).run(batchId);
+
+      store.deriveLaneFromTaskDispatch({
+        runId: 'run-1',
+        toolName: 'Task',
+        toolInput: { subagent_type: 'cyboflow-write-tests' },
+      });
+
+      expect(laneFor(batchId, 'tsk_a')?.currentStepId).toBe('write-tests');
+    });
+  });
+
   describe('addLane', () => {
     it('inserts a queued lane, returns it, and it appears in listLanes', () => {
       seedTask(db, 'tsk_a', 'TASK-001', 'First task');

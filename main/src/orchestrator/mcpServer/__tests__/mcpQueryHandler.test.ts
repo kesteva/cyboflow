@@ -2447,6 +2447,27 @@ describe('mcp-update-sprint-task (sprint lane writes)', () => {
       .run(opts.runId, opts.status ?? 'running', opts.batchId ?? null);
   }
 
+  /**
+   * Seed a workflows + workflow_runs pair with a CUSTOM workflow id/spec_json,
+   * for Seam 2 (chain-derived allowedStepIds) coverage — unlike seedSprintRun,
+   * the workflow id is caller-chosen (not the fixed 'wf-1') so multiple custom
+   * defs can coexist across tests in this describe block.
+   */
+  function seedSprintRunWithSpec(
+    laneDb: Database.Database,
+    opts: { runId: string; batchId: string | null; workflowId: string; name: string; specJson: string },
+  ): void {
+    laneDb
+      .prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES (?, 1, ?, ?)`)
+      .run(opts.workflowId, opts.name, opts.specJson);
+    laneDb
+      .prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, current_step_id, steps_snapshot_json, batch_id)
+         VALUES (?, ?, 1, 'running', 'execute-tasks', '{"execute-tasks":"executor"}', ?)`,
+      )
+      .run(opts.runId, opts.workflowId, opts.batchId);
+  }
+
   let laneDb: Database.Database;
   let laneHandler: McpQueryHandler;
 
@@ -2656,6 +2677,177 @@ describe('mcp-update-sprint-task (sprint lane writes)', () => {
     const response = parseLastWrite(writes);
     expect(response.ok).toBe(false);
     expect(response.error).toBe('bad_request');
+  });
+
+  // -------------------------------------------------------------------------
+  // Seam 2 — chain-derived allowedStepIds (Phase D). The handler now resolves
+  // the CALLING run's fan-out chain (resolveRunFanOutInner) and threads it as
+  // SprintLaneStore.updateLane's allowedStepIds instead of relying on the
+  // fixed SPRINT_LANE_STEP_IDS default — mirroring the programmatic plane's
+  // driveLane threading (programmatic/workflowController.ts).
+  // -------------------------------------------------------------------------
+
+  describe('chain-derived allowedStepIds', () => {
+    const CUSTOM_FANOUT_SPEC = JSON.stringify({
+      id: 'wf-custom-chain',
+      phases: [
+        {
+          id: 'execute',
+          label: 'Execute',
+          color: '#3b6dd6',
+          steps: [
+            {
+              id: 'execute-tasks',
+              name: 'Execute tasks',
+              agent: 'implement',
+              mcps: [],
+              retries: 0,
+              fanOut: {
+                over: 'tasks',
+                inner: [
+                  { id: 'design', agent: 'design', name: 'Design' },
+                  { id: 'build', agent: 'build', name: 'Build', loopback: 'design' },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    const CUSTOM_NO_FANOUT_SPEC = JSON.stringify({
+      id: 'wf-custom-no-fanout',
+      phases: [
+        {
+          id: 'p1',
+          label: 'P1',
+          color: '#3b6dd6',
+          steps: [{ id: 'step-a', name: 'Step A', agent: 'human', mcps: [], retries: 0 }],
+        },
+      ],
+    });
+
+    it("accepts a custom chain's own inner id ('design') and reaches the SprintLaneStore write", async () => {
+      const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+      seedSprintRunWithSpec(laneDb, {
+        runId: 'run-custom',
+        batchId,
+        workflowId: 'wf-custom',
+        name: 'custom-flow',
+        specJson: CUSTOM_FANOUT_SPEC,
+      });
+
+      const { socket, writes } = makeSocketDouble();
+      await laneHandler.handleMessage(
+        {
+          type: 'mcp-update-sprint-task',
+          requestId: 'us-c1',
+          runId: 'run-custom',
+          taskId: 'tsk_a',
+          currentStepId: 'design',
+        },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+      expect((response.data as { current_step_id: string }).current_step_id).toBe('design');
+    });
+
+    it("rejects an out-of-chain id ('implement' — a canonical id absent from this custom chain)", async () => {
+      const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+      seedSprintRunWithSpec(laneDb, {
+        runId: 'run-custom2',
+        batchId,
+        workflowId: 'wf-custom2',
+        name: 'custom-flow-2',
+        specJson: CUSTOM_FANOUT_SPEC,
+      });
+
+      const { socket, writes } = makeSocketDouble();
+      await laneHandler.handleMessage(
+        {
+          type: 'mcp-update-sprint-task',
+          requestId: 'us-c2',
+          runId: 'run-custom2',
+          taskId: 'tsk_a',
+          currentStepId: 'implement',
+        },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(false);
+      expect(response.error).toBe('bad_request');
+    });
+
+    it("accepts 'awaiting-verify' (the park step) on a custom chain — always widened in", async () => {
+      const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+      seedSprintRunWithSpec(laneDb, {
+        runId: 'run-custom3',
+        batchId,
+        workflowId: 'wf-custom3',
+        name: 'custom-flow-3',
+        specJson: CUSTOM_FANOUT_SPEC,
+      });
+
+      const { socket, writes } = makeSocketDouble();
+      await laneHandler.handleMessage(
+        {
+          type: 'mcp-update-sprint-task',
+          requestId: 'us-c3',
+          runId: 'run-custom3',
+          taskId: 'tsk_a',
+          currentStepId: 'awaiting-verify',
+        },
+        socket,
+      );
+
+      const response = parseLastWrite(writes);
+      expect(response.ok).toBe(true);
+    });
+
+    it('a definition with no fanOut step falls back to the canonical SPRINT_LANE_STEP_IDS default', async () => {
+      const { batchId } = SprintLaneStore.getInstance().createForRun(1, 'sdk', ['tsk_a']);
+      seedSprintRunWithSpec(laneDb, {
+        runId: 'run-nofanout',
+        batchId,
+        workflowId: 'wf-nofanout',
+        name: 'custom-no-fanout',
+        specJson: CUSTOM_NO_FANOUT_SPEC,
+      });
+
+      // A canonical id is accepted (fallback to SPRINT_LANE_STEP_IDS).
+      const { socket: okSocket, writes: okWrites } = makeSocketDouble();
+      await laneHandler.handleMessage(
+        {
+          type: 'mcp-update-sprint-task',
+          requestId: 'us-nf1',
+          runId: 'run-nofanout',
+          taskId: 'tsk_a',
+          currentStepId: 'implement',
+        },
+        okSocket,
+      );
+      expect(parseLastWrite(okWrites).ok).toBe(true);
+
+      // A custom-chain-only id ('design') is rejected — there is no fan-out
+      // chain to accept it, and it is not in the canonical fallback either.
+      const { socket: badSocket, writes: badWrites } = makeSocketDouble();
+      await laneHandler.handleMessage(
+        {
+          type: 'mcp-update-sprint-task',
+          requestId: 'us-nf2',
+          runId: 'run-nofanout',
+          taskId: 'tsk_a',
+          currentStepId: 'design',
+        },
+        badSocket,
+      );
+      const badResponse = parseLastWrite(badWrites);
+      expect(badResponse.ok).toBe(false);
+      expect(badResponse.error).toBe('bad_request');
+    });
   });
 });
 

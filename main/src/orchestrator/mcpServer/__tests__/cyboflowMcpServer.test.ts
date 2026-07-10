@@ -342,16 +342,13 @@ describe('cyboflowMcpServer ListTools cyboflow_update_sprint_task', () => {
       'failed',
       'blocked',
     ]);
-    // The per-task lane step vocabulary (SPRINT_LANE_STEP_IDS) — includes the
-    // visual merge-gate park step 'awaiting-verify' (P8b).
-    expect(schema.properties['current_step'].enum).toEqual([
-      'implement',
-      'write-tests',
-      'code-review',
-      'task-verify',
-      'visual-verify',
-      'awaiting-verify',
-    ]);
+    // The per-task lane step vocabulary is now CHAIN-DERIVED (a workflow's
+    // fanOut.inner ids, user-editable) — current_step is declared as a plain
+    // string, NOT a fixed enum; server-side validation (mcpQueryHandler /
+    // SprintLaneStore) is the sole authority. See the CallTool suite below.
+    expect(schema.properties['current_step'].type).toBe('string');
+    expect(schema.properties['current_step'].enum).toBeUndefined();
+    expect(schema.properties['current_step'].description).toContain('validated server-side');
     // The 1-based implement→verify retry counter (migration 025).
     expect(schema.properties['attempt'].type).toBe('number');
     expect(schema.properties['attempt'].description).toContain('re-delegating');
@@ -380,10 +377,35 @@ describe('cyboflowMcpServer CallTool cyboflow_update_sprint_task validation', ()
     ).toMatchObject({ error: 'invalid_arguments' });
   });
 
-  it('rejects an out-of-enum current_step', async () => {
+  it('accepts an arbitrary non-empty current_step and reaches the dispatch path (server-side validates)', async () => {
+    // The lane step vocabulary is chain-derived and now validated SERVER-SIDE
+    // (mcpQueryHandler.handleUpdateSprintTask -> SprintLaneStore.updateLane)
+    // against the calling run's resolved fan-out chain — the client-side check
+    // no longer rejects an id it doesn't recognize. A truly bogus id like
+    // 'deploy' is expected to be rejected server-side (covered by
+    // mcpQueryHandler.test.ts / sprintLaneStore.test.ts), not here — this mocked
+    // socket double never reaches a real orchestrator, so there is nothing
+    // server-side to assert against in this file.
+    const res = await callTool('cyboflow_update_sprint_task', { task_id: 'tsk_a', current_step: 'deploy' });
+    expect(res['error']).not.toBe('invalid_arguments');
+  });
+
+  it('rejects an empty current_step', async () => {
     expect(
-      await callTool('cyboflow_update_sprint_task', { task_id: 'tsk_a', current_step: 'deploy' }),
+      await callTool('cyboflow_update_sprint_task', { task_id: 'tsk_a', current_step: '' }),
     ).toMatchObject({ error: 'invalid_arguments' });
+  });
+
+  it("accepts current_step: 'awaiting-verify' and reaches the dispatch path (regression — was client-rejected)", async () => {
+    // Regression test: the OLD client-side enum check was missing
+    // 'awaiting-verify', so sprint.md/ship.md's instructed park-the-lane call
+    // was rejected with invalid_arguments before it ever reached the socket.
+    // The loosened non-empty-string check fixes this.
+    const res = await callTool('cyboflow_update_sprint_task', {
+      task_id: 'tsk_a',
+      current_step: 'awaiting-verify',
+    });
+    expect(res['error']).not.toBe('invalid_arguments');
   });
 
   it('rejects a call with NEITHER status nor current_step', async () => {

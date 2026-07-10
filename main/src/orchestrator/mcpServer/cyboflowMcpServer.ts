@@ -295,9 +295,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             current_step: {
               type: 'string',
-              enum: ['implement', 'write-tests', 'code-review', 'task-verify', 'visual-verify', 'awaiting-verify'],
+              // NOT an enum: the lane step vocabulary is now CHAIN-DERIVED (a
+              // workflow's fanOut.inner ids, editable via the workflow editor) —
+              // authoritatively validated server-side against the calling run's
+              // resolved chain, not client-side against a fixed list. See the
+              // CallTool handler below.
               description:
-                "Optional per-task lane step the executing subagent is on. Use 'awaiting-verify' to park the lane at the visual merge-gate after firing cyboflow_request_verification — the verifier drives the lane off it (PASS→integrated, FAIL→implement loopback).",
+                "Optional per-task lane step the executing subagent is on — must be one of this run's lane step ids (the fan-out chain listed in the orchestrator's instructions; canonical default: implement, write-tests, code-review, task-verify, visual-verify, awaiting-verify), authoritatively validated server-side. Use 'awaiting-verify' to park the lane at the visual merge-gate after firing cyboflow_request_verification — the verifier drives the lane off it (PASS→integrated, FAIL→implement loopback).",
             },
             attempt: {
               type: 'number',
@@ -981,22 +985,21 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
-      if (
-        current_step !== undefined &&
-        current_step !== 'implement' &&
-        current_step !== 'write-tests' &&
-        current_step !== 'code-review' &&
-        current_step !== 'task-verify' &&
-        current_step !== 'visual-verify'
-      ) {
+      // NOT a fixed-enum check: a confirmed pre-existing bug had this list missing
+      // 'awaiting-verify' — sprint.md/ship.md instruct the orchestrator to park
+      // lanes there and this check rejected it with invalid_arguments before the
+      // call ever reached the socket. The lane step vocabulary is chain-derived
+      // (per-run fanOut.inner ids) and validated server-side by
+      // SprintLaneStore.updateLane against the calling run's resolved chain —
+      // this client-side check now only guards the wire shape (non-empty string).
+      if (current_step !== undefined && (typeof current_step !== 'string' || current_step.length === 0)) {
         return {
           content: [
             {
               type: 'text',
               text: JSON.stringify({
                 error: 'invalid_arguments',
-                expected:
-                  "current_step: 'implement' | 'write-tests' | 'code-review' | 'task-verify' | 'visual-verify' (optional)",
+                expected: 'current_step: non-empty string (optional) — validated server-side',
               }),
             },
           ],
