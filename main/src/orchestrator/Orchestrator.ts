@@ -13,6 +13,7 @@
 import { EventEmitter } from 'node:events';
 import type { OrchestratorDeps } from './types';
 import { StuckDetector, type ClaudeManagerLike } from './stuckDetector';
+import { IdleSessionDetector } from './idleSessionDetector';
 
 export class Orchestrator {
   private readonly deps: OrchestratorDeps;
@@ -20,6 +21,9 @@ export class Orchestrator {
 
   /** Periodic stuck-state scanner — constructed in start(), stopped in stop(). */
   private detector?: StuckDetector;
+
+  /** Periodic idle-quick-session review scanner — constructed in start(), stopped in stop(). */
+  private idleDetector?: IdleSessionDetector;
 
   /**
    * Construct an Orchestrator with all collaborators provided by the caller.
@@ -60,6 +64,19 @@ export class Orchestrator {
     });
 
     this.detector.start();
+
+    // Construct and start the idle-session detector when both collaborators are
+    // injected (the review-item chokepoint + the config reader). Omitting either
+    // leaves the feature dark — the detector never mints without a write path.
+    if (this.deps.applyReviewItem && this.deps.getIdleSessionReviewConfig) {
+      this.idleDetector = new IdleSessionDetector({
+        db: this.deps.db,
+        applyReviewItem: this.deps.applyReviewItem,
+        getConfig: this.deps.getIdleSessionReviewConfig,
+        logger: this.deps.logger,
+      });
+      this.idleDetector.start();
+    }
   }
 
   /**
@@ -80,6 +97,12 @@ export class Orchestrator {
     if (this.detector) {
       this.detector.stop();
       this.detector = undefined;
+    }
+
+    // Stop the idle-session detector.
+    if (this.idleDetector) {
+      this.idleDetector.stop();
+      this.idleDetector = undefined;
     }
 
     await this.deps.runQueues.drainAll();

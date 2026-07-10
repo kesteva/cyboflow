@@ -2066,7 +2066,16 @@ app.whenReady().then(async () => {
     // code called db.prepare() or db.transaction().
     const db = makeDatabaseLike(databaseService);
     const loggerLike = makeLoggerLike(logger);
-    orchestrator = new Orchestrator({ db, logger: loggerLike, runQueues });
+    orchestrator = new Orchestrator({
+      db,
+      logger: loggerLike,
+      runQueues,
+      // Idle-quick-session review: the write chokepoint + the live config reader.
+      // Together they enable IdleSessionDetector (see Orchestrator.start).
+      applyReviewItem: (projectId, change) =>
+        ReviewItemRouter.getInstance().applyReviewItem(projectId, change),
+      getIdleSessionReviewConfig: () => configManager.getIdleSessionReviewConfig(),
+    });
     await orchestrator.start();
     if (!mainWindow) {
       throw new Error(
