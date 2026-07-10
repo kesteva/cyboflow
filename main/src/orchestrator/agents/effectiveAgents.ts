@@ -23,6 +23,7 @@ import type {
 } from '../../../../shared/types/agents';
 import { agentModelLabel, isAgentModelAlias } from '../../../../shared/types/agents';
 import type { WorkflowVariantAgentOverrides } from '../../../../shared/types/experiments';
+import type { WorkflowAgentConfig } from '../../../../shared/types/workflows';
 import type { BuiltInAgent } from './agentCatalogue';
 
 /** The effective (post-override) view of one agent. */
@@ -187,6 +188,80 @@ export function applyVariantAgentDeltas(
     const { rawContent: _dropped, ...rest } = agent;
     void _dropped;
     return { ...rest, systemPrompt, model, source };
+  });
+}
+
+/**
+ * Apply a WORKFLOW's per-agent configs (workflow-scoped agent configs) ON TOP of an
+ * already-computed effective agent set. Pure — no DB / FS.
+ *
+ * For each agent whose `agentKey` has a config:
+ *   - `custom` (when a non-null OBJECT) REPLACES description/systemPrompt/tools/
+ *     enabledMcps from the embedded copy — a workflow-scoped custom agent.
+ *     parseWorkflowDefinition passes `agentConfigs` through UNVALIDATED, so an
+ *     out-of-band-edited spec can carry a non-object `custom`, non-array `tools`/
+ *     `enabledMcps`, or non-string description/systemPrompt. Every embedded field is
+ *     coerced defensively (non-object custom → treated as absent; tools/enabledMcps →
+ *     `[]` when not an array, then filtered to known {@link CliTool} / string values;
+ *     non-string description/systemPrompt → the existing value is kept) so a malformed
+ *     config degrades THIS one agent instead of throwing out of the whole overlay;
+ *   - `model` (when a valid {@link isAgentModelAlias} alias) replaces the model; an
+ *     unrecognized alias leaves the existing model unchanged;
+ *   - in EITHER case `rawContent` is DROPPED and `source` flips `builtin →
+ *     builtin-override`, so the overlay renders the config via `renderAgentMarkdown`
+ *     instead of writing the stale verbatim builtin `.md`. (A `builtin-override` /
+ *     `custom` agent keeps its source; it already renders.)
+ *
+ * Merge order at the call site (agentOverlayWriter) is
+ * `computeEffectiveAgents(builtins, projectOverrides)` FIRST, THEN this, THEN
+ * `applyVariantAgentDeltas` — so a WORKFLOW config WINS over the project override
+ * (Agents-pane pin/body) but a VARIANT delta still wins over the workflow config for
+ * the fields it touches. A config key with no matching effective agent is silently
+ * ignored (configs never ADD agents — an unspawnable key is a no-op). An empty
+ * config (neither `model` nor `custom`, which the editor never persists) leaves its
+ * agent unchanged.
+ */
+export function applyWorkflowAgentConfigs(
+  effective: EffectiveAgent[],
+  configs: Record<string, WorkflowAgentConfig>,
+): EffectiveAgent[] {
+  return effective.map((agent) => {
+    const config = configs[agent.agentKey];
+    if (!config || (config.custom === undefined && config.model === undefined)) return agent;
+
+    let { description, systemPrompt, tools, enabledMcps } = agent;
+    // The embedded copy is unvalidated (see the doc comment) — read it as unknown
+    // and coerce each field so a malformed spec never throws here. A non-object
+    // custom is treated as absent (no body fields change).
+    const custom: unknown = config.custom;
+    const hasCustom = custom !== null && typeof custom === 'object';
+    if (hasCustom) {
+      const c = custom as Record<string, unknown>;
+      if (typeof c.description === 'string') description = c.description;
+      if (typeof c.systemPrompt === 'string') systemPrompt = c.systemPrompt;
+      // Drop any tool that isn't a known CliTool (mirrors effectiveAgents' parseTools);
+      // a non-array tools field coerces to [].
+      tools = Array.isArray(c.tools)
+        ? c.tools.filter((t): t is CliTool => typeof t === 'string' && isCliTool(t))
+        : [];
+      enabledMcps = Array.isArray(c.enabledMcps)
+        ? c.enabledMcps.filter((m): m is string => typeof m === 'string')
+        : [];
+    }
+    const model = isAgentModelAlias(config.model) ? config.model : agent.model;
+
+    // Nothing valid applied (a malformed custom that degraded to absent AND no valid
+    // model) → leave the agent fully untouched, exactly like an empty `{}` config:
+    // no spurious source flip / rawContent drop.
+    if (!hasCustom && model === agent.model) return agent;
+
+    const source = agent.source === 'builtin' ? 'builtin-override' : agent.source;
+
+    // Drop rawContent so the overlay renders via renderAgentMarkdown (the flipped
+    // source guarantees a builtin no longer writes its stale verbatim body).
+    const { rawContent: _dropped, ...rest } = agent;
+    void _dropped;
+    return { ...rest, description, systemPrompt, tools, enabledMcps, model, source };
   });
 }
 

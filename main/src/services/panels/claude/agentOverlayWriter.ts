@@ -16,6 +16,14 @@
  * the bundled `.md`); otherwise we render via `renderAgentMarkdown` (which forces the
  * frontmatter name to `cyboflow-<key>` regardless of any stored name).
  *
+ * The effective set is composed low→high as
+ * `builtin → project agent_overrides → WORKFLOW agentConfigs → variant deltas`: a
+ * workflow-scoped agent config (from the run's frozen `spec_json.agentConfigs`) is
+ * applied ON TOP of the project overrides, and an A/B variant's per-agent deltas are
+ * applied LAST — so a workflow config beats the Agents-pane pin/body while a variant
+ * delta still beats the workflow config. Every layer read is fail-soft (a broken
+ * spec / variant is skipped, never a spawn break).
+ *
  * NEVER removes/clears anything (the bundle writer owns the cyboflow-* lifecycle) and
  * NEVER throws — an overlay failure must not break a spawn (wrapped in try/catch +
  * `logger?.warn`).
@@ -37,10 +45,13 @@ import type { AgentOverrideRow } from '../../../database/models';
 import { loadBuiltInAgents } from '../../../orchestrator/agents/agentCatalogue';
 import {
   computeEffectiveAgents,
+  applyWorkflowAgentConfigs,
   applyVariantAgentDeltas,
   type EffectiveAgent,
 } from '../../../orchestrator/agents/effectiveAgents';
 import { renderAgentMarkdown } from '../../../orchestrator/agents/agentMarkdown';
+import { resolveRunFrozenSpec } from '../../../orchestrator/runFrozenSpec';
+import { parseWorkflowDefinition, type WorkflowAgentConfig } from '../../../../../shared/types/workflows';
 import type { WorkflowVariantAgentOverrides } from '../../../../../shared/types/experiments';
 import { bareModelId } from './modelContext';
 import { isModelUsable } from '../../modelAvailabilityService';
@@ -140,13 +151,44 @@ function readVariantAgentDeltas(
 }
 
 /**
+ * Read a run's WORKFLOW agent configs (workflow-scoped agent configs): resolve the
+ * run's FROZEN spec via resolveRunFrozenSpec (its variant graph, else the live
+ * spec — already keyed by the run's `(workflow_id, spec_hash)`), parse it with
+ * parseWorkflowDefinition, and return `definition.agentConfigs`. Returns `null`
+ * (apply nothing) when the run/spec is missing, the spec is malformed, or it carries
+ * no agentConfigs — a broken spec must NEVER break a spawn (fail-soft, warn once,
+ * never throw; resolveRunFrozenSpec can rethrow a genuine DB error, which this
+ * catch degrades to the skip path).
+ */
+function readWorkflowAgentConfigs(
+  db: Database.Database,
+  runId: string,
+  logger?: LoggerLike,
+): Record<string, WorkflowAgentConfig> | null {
+  try {
+    const frozen = resolveRunFrozenSpec(db, runId);
+    const definition = parseWorkflowDefinition(frozen?.specJson);
+    return definition?.agentConfigs ?? null;
+  } catch (err) {
+    logger?.warn(
+      `[AgentOverlay] workflow agentConfigs read failed for runId=${runId}; skipping workflow layer: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return null;
+  }
+}
+
+/**
  * Materialize the project's full effective agent set into `<worktreePath>/.claude/agents/`
  * as `cyboflow-<agentKey>.md` files. No-op (writes nothing) when the run row is missing.
  * Never removes anything; never throws — a failure here must not break a spawn.
  *
- * A/B testing (migration 048): after computing the project-override effective set,
- * a variant run applies its per-agent deltas ON TOP via applyVariantAgentDeltas —
- * so the variant delta WINS over the project override for the fields it touches.
+ * Precedence (low → high), applied left-to-right below:
+ *   builtin → project `agent_overrides` → WORKFLOW `agentConfigs` → variant deltas.
+ * The WORKFLOW layer (workflow-scoped agent configs) applies its per-agent config
+ * ON TOP of the project-override effective set — so a workflow config WINS over the
+ * project override — and a variant run's per-agent deltas (A/B testing, migration
+ * 048) then apply LAST, so a variant delta still WINS over the workflow config for
+ * the fields it touches.
  */
 export function installAgentOverlay(
   db: Database.Database,
@@ -163,6 +205,10 @@ export function installAgentOverlay(
 
     const overrides = readOverrides(db, projectId, logger);
     let effective: EffectiveAgent[] = computeEffectiveAgents(loadBuiltInAgents(), overrides);
+    const workflowConfigs = readWorkflowAgentConfigs(db, runId, logger);
+    if (workflowConfigs) {
+      effective = applyWorkflowAgentConfigs(effective, workflowConfigs);
+    }
     const variantDeltas = readVariantAgentDeltas(db, runId, logger);
     if (variantDeltas) {
       effective = applyVariantAgentDeltas(effective, variantDeltas);

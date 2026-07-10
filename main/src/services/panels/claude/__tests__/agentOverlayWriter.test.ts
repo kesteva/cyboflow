@@ -426,3 +426,202 @@ describe('agentOverlayWriter — variant agent deltas (A/B testing, migration 04
     db.close();
   });
 });
+
+describe('agentOverlayWriter — workflow agent configs (workflow-scoped)', () => {
+  let worktree: string;
+
+  beforeEach(() => {
+    worktree = tmpWorktree();
+  });
+
+  afterEach(() => {
+    fs.rmSync(worktree, { recursive: true, force: true });
+  });
+
+  /**
+   * DB with the frozen-spec surface resolveRunFrozenSpec reads: a `workflows` row
+   * (name + spec_json) joined via workflow_runs.workflow_id. spec_hash stays NULL so
+   * the frozen lookup degrades to the live spec_json (no workflow_revisions row
+   * needed) — agentConfigs rides that spec_json.
+   */
+  function makeWorkflowDb(): Database.Database {
+    const db = makeDb();
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN workflow_id TEXT');
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
+    db.exec('CREATE TABLE workflows (id TEXT PRIMARY KEY, name TEXT NOT NULL, spec_json TEXT)');
+    return db;
+  }
+
+  /** A minimal structurally-valid WorkflowDefinition carrying the given agentConfigs. */
+  function makeSpecJson(agentConfigs: unknown): string {
+    return JSON.stringify({
+      id: 'sprint',
+      phases: [
+        {
+          id: 'p1',
+          label: 'Build',
+          color: '#3b6dd6',
+          steps: [{ id: 's1', name: 'Implement', agent: 'implement' }],
+        },
+      ],
+      agentConfigs,
+    });
+  }
+
+  function insertWorkflow(db: Database.Database, id: string, specJson: string | null): void {
+    db.prepare('INSERT INTO workflows (id, name, spec_json) VALUES (?, ?, ?)').run(id, 'sprint', specJson);
+  }
+
+  function insertWorkflowRun(db: Database.Database, id: string, projectId: number, workflowId: string): void {
+    db.prepare(
+      'INSERT INTO workflow_runs (id, project_id, workflow_path, workflow_id) VALUES (?, ?, NULL, ?)',
+    ).run(id, projectId, workflowId);
+  }
+
+  it('a workflow model config beats a project-override pin in the rendered frontmatter', () => {
+    const db = makeWorkflowDb();
+    const projectId = insertProject(db, 'Acme');
+    // Project pins implement → sonnet.
+    insertOverride(db, projectId, {
+      agentKey: 'implement',
+      baseAgentKey: 'implement',
+      description: 'Project override.',
+      systemPrompt: 'PROJECT BODY.\n\n## Result\nstub',
+      tools: ['Read', 'Edit'],
+      isCustom: false,
+      model: 'sonnet',
+    });
+    // Workflow config pins implement → opus (beats the project pin).
+    insertWorkflow(db, 'wf-1', makeSpecJson({ implement: { model: 'opus' } }));
+    insertWorkflowRun(db, 'run-wf', projectId, 'wf-1');
+
+    installAgentOverlay(db, 'run-wf', worktree, makeSpyLogger());
+
+    const md = fs.readFileSync(agentFile(worktree, 'implement'), 'utf8');
+    expect(md).toContain('model: claude-opus-4-8\n');
+    expect(md).not.toContain('model: claude-sonnet-5');
+
+    db.close();
+  });
+
+  it('a workflow custom copy renders the embedded body (not the builtin verbatim rawContent)', () => {
+    const db = makeWorkflowDb();
+    const projectId = insertProject(db, 'Acme');
+    insertWorkflow(
+      db,
+      'wf-1',
+      makeSpecJson({
+        implement: {
+          custom: {
+            description: 'Workflow-scoped implement.',
+            systemPrompt: 'WORKFLOW CUSTOM BODY.\n\n## Result\nstub',
+            tools: ['Read', 'Edit', 'Write'],
+            enabledMcps: [],
+          },
+        },
+      }),
+    );
+    insertWorkflowRun(db, 'run-wf', projectId, 'wf-1');
+
+    installAgentOverlay(db, 'run-wf', worktree, makeSpyLogger());
+
+    const md = fs.readFileSync(agentFile(worktree, 'implement'), 'utf8');
+    expect(md).toContain('WORKFLOW CUSTOM BODY.');
+    const bundled = loadBuiltInAgents().get('implement')?.rawContent;
+    expect(md).not.toBe(bundled); // rawContent dropped, rendered via renderAgentMarkdown
+
+    db.close();
+  });
+
+  it('a variant delta still WINS over the workflow config for the fields it touches', () => {
+    const db = makeWorkflowDb();
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN variant_id TEXT');
+    db.exec(`
+      CREATE TABLE workflow_variants (
+        id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, label TEXT NOT NULL,
+        spec_json TEXT NOT NULL DEFAULT '{}', agent_overrides_json TEXT, model TEXT, execution_model TEXT,
+        weight INTEGER NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',
+        created_at TEXT, updated_at TEXT
+      );
+    `);
+    const projectId = insertProject(db, 'Acme');
+    insertWorkflow(
+      db,
+      'wf-1',
+      makeSpecJson({
+        implement: {
+          custom: {
+            description: 'Workflow implement.',
+            systemPrompt: 'WORKFLOW BODY.\n\n## Result\nstub',
+            tools: ['Read', 'Edit'],
+            enabledMcps: [],
+          },
+        },
+      }),
+    );
+    db.prepare(
+      "INSERT INTO workflow_variants (id, workflow_id, label, agent_overrides_json) VALUES (?, 'wf-1', ?, ?)",
+    ).run('wfv_1', 'wfv_1', JSON.stringify({ implement: { systemPrompt: 'VARIANT BODY.\n\n## Result\nstub' } }));
+    // A variant run: workflow_id set (frozen spec resolves to the live agentConfigs)
+    // AND variant_id set (variant deltas apply LAST, so they win).
+    db.prepare(
+      'INSERT INTO workflow_runs (id, project_id, workflow_path, workflow_id, variant_id) VALUES (?, ?, NULL, ?, ?)',
+    ).run('run-wfv', projectId, 'wf-1', 'wfv_1');
+
+    installAgentOverlay(db, 'run-wfv', worktree, makeSpyLogger());
+
+    const md = fs.readFileSync(agentFile(worktree, 'implement'), 'utf8');
+    expect(md).toContain('VARIANT BODY.');
+    expect(md).not.toContain('WORKFLOW BODY.');
+
+    db.close();
+  });
+
+  it('is fail-soft: a malformed spec_json skips the workflow layer (builtin lands verbatim)', () => {
+    const db = makeWorkflowDb();
+    const projectId = insertProject(db, 'Acme');
+    insertWorkflow(db, 'wf-bad', '{not valid json');
+    insertWorkflowRun(db, 'run-bad', projectId, 'wf-bad');
+
+    expect(() => installAgentOverlay(db, 'run-bad', worktree, makeSpyLogger())).not.toThrow();
+
+    const md = fs.readFileSync(agentFile(worktree, 'implement'), 'utf8');
+    const bundled = loadBuiltInAgents().get('implement')?.rawContent;
+    expect(md).toBe(bundled); // workflow layer skipped → builtin verbatim
+
+    db.close();
+  });
+
+  it('reads agentConfigs from the FROZEN revision (spec_hash), not the live spec_json', () => {
+    const db = makeWorkflowDb();
+    // The frozen-spec surface: (workflow_id, spec_hash) → workflow_revisions.spec_json
+    // (see resolveRunFrozenSpec). A stamped spec_hash resolves the revision instead of
+    // the live workflows.spec_json.
+    db.exec(
+      `CREATE TABLE workflow_revisions (
+         workflow_id TEXT NOT NULL, spec_hash TEXT NOT NULL, spec_json TEXT NOT NULL,
+         PRIMARY KEY (workflow_id, spec_hash)
+       )`,
+    );
+    const projectId = insertProject(db, 'Acme');
+
+    // Live spec pins implement → sonnet; the FROZEN revision pins it → haiku.
+    insertWorkflow(db, 'wf-1', makeSpecJson({ implement: { model: 'sonnet' } }));
+    db.prepare(
+      'INSERT INTO workflow_revisions (workflow_id, spec_hash, spec_json) VALUES (?, ?, ?)',
+    ).run('wf-1', 'hash-frozen', makeSpecJson({ implement: { model: 'haiku' } }));
+
+    // Stamp the run's spec_hash so the frozen lookup resolves the revision.
+    db.prepare(
+      'INSERT INTO workflow_runs (id, project_id, workflow_path, workflow_id, spec_hash) VALUES (?, ?, NULL, ?, ?)',
+    ).run('run-frozen', projectId, 'wf-1', 'hash-frozen');
+
+    installAgentOverlay(db, 'run-frozen', worktree, makeSpyLogger());
+
+    const md = fs.readFileSync(agentFile(worktree, 'implement'), 'utf8');
+    expect(md).toContain('model: claude-haiku-4-5\n'); // the FROZEN config wins
+    expect(md).not.toContain('model: claude-sonnet-5'); // NOT the live spec
+
+    db.close();
+  });
+});
