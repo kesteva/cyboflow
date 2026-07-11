@@ -3,6 +3,7 @@ import {
   buildCodexAppServerEnvironment,
   buildCodexAppServerThreadResumeParams,
   buildCodexAppServerThreadStartParams,
+  buildCodexAppServerTurnOptions,
 } from './runConfig';
 
 const runtimeConfig = {
@@ -109,11 +110,34 @@ describe('Codex app-server run configuration', () => {
 
     expect(params).toMatchObject({
       threadId: 'thread-1',
-      excludeTurns: false,
+      excludeTurns: true,
       cwd: '/tmp/worktree',
       sandbox: 'read-only',
       approvalPolicy: 'on-request',
     });
+  });
+
+  it('enables Plan collaboration mode only for structured workflow turns', () => {
+    const base = {
+      panelId: 'run-1',
+      sessionId: 'run-1',
+      worktreePath: '/tmp/worktree',
+      prompt: 'ship it',
+      model: 'gpt-5.5',
+    };
+
+    expect(buildCodexAppServerTurnOptions({ ...base, workflowTurn: true })).toEqual({
+      model: 'gpt-5.5',
+      collaborationMode: {
+        mode: 'plan',
+        settings: {
+          model: 'gpt-5.5',
+          reasoning_effort: null,
+          developer_instructions: null,
+        },
+      },
+    });
+    expect(buildCodexAppServerTurnOptions(base)).toEqual({ model: 'gpt-5.5' });
   });
 
   it('inherits the ChatGPT-authenticated CLI environment and adds run correlation', () => {

@@ -42,6 +42,7 @@ import {
   buildCodexAppServerEnvironment,
   buildCodexAppServerThreadResumeParams,
   buildCodexAppServerThreadStartParams,
+  buildCodexAppServerTurnOptions,
   type CodexAppServerMcpRuntimeConfig,
 } from './appServer/runConfig';
 import type {
@@ -524,9 +525,7 @@ export class CodexSdkManager extends AbstractCliManager {
       );
 
       await withTimeout(
-        turnSession.startTurn(options.prompt, {
-          model: resolveAgentModelAlias('codex', options.model),
-        }),
+        turnSession.startTurn(options.prompt, buildCodexAppServerTurnOptions(options)),
         APP_SERVER_REQUEST_TIMEOUT_MS,
         'Codex app-server turn start',
       );

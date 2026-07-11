@@ -6,6 +6,7 @@ import type {
   AppServerJsonValue,
   AppServerThreadResumeParams,
   AppServerThreadStartParams,
+  AppServerTurnStartParams,
 } from './protocol';
 
 export interface CodexAppServerMcpRuntimeConfig {
@@ -91,6 +92,27 @@ export function buildCodexAppServerThreadResumeParams(
   return {
     ...buildCodexAppServerThreadConfiguration(runId, options, runtimeConfig),
     threadId,
-    excludeTurns: false,
+    excludeTurns: true,
+  };
+}
+
+export function buildCodexAppServerTurnOptions(
+  options: ClaudeSpawnerOptions,
+): Pick<AppServerTurnStartParams, 'model' | 'collaborationMode'> {
+  const model = resolveAgentModelAlias('codex', options.model);
+  return {
+    ...(model ? { model } : {}),
+    ...(options.workflowTurn && model
+      ? {
+          collaborationMode: {
+            mode: 'plan' as const,
+            settings: {
+              model,
+              reasoning_effort: null,
+              developer_instructions: null,
+            },
+          },
+        }
+      : {}),
   };
 }

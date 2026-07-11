@@ -3038,6 +3038,26 @@ describe('RunExecutor.execute — stepEmitter lifecycle hook (TASK-765)', () => 
     );
     expect(stepEmitterWarn).toBeDefined();
   });
+
+  it('does not reset workflow step state when executing a nudge turn', async () => {
+    const run = makeWorkflowRunRow({ worktree_path: '/my/worktree', claude_session_id: 'thread-1' });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const stepEmitter = makeStepEmitter();
+    const executor = new TestableRunExecutor(
+      makeSpawner(), registry, makeSpyLogger(),
+      undefined, undefined, undefined, undefined, undefined,
+      stepEmitter,
+    );
+    executor.setPendingNudge(run.id, 'continue after approval');
+
+    await executor.execute(run.id);
+
+    expect(stepEmitter.emit).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------

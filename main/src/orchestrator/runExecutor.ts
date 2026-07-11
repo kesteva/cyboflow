@@ -189,6 +189,8 @@ export interface ClaudeSpawnerOptions {
   model?: string;
   /** Workflow step owning this concrete invocation; absent for run-level turns. */
   agentInvocationStepId?: string;
+  /** True for structured workflow execution; absent for normal session chat. */
+  workflowTurn?: boolean;
 }
 
 /**
@@ -709,13 +711,14 @@ export class RunExecutor {
     }
 
     try {
+      const turnKind = this.getWorkflowPromptTurnKind(runId);
       let prompt = await this.getPrompt(runId, workflow);
       const overrides = await this.buildOptionsOverrides(runId, run, workflow);
       const renderedPrompt = this.renderPromptForRun(
         run,
         prompt,
         overrides.systemPromptAppend,
-        this.getWorkflowPromptTurnKind(runId),
+        turnKind,
       );
       prompt = renderedPrompt.prompt;
       const renderedOverrides: Partial<ClaudeSpawnerOptions> = { ...overrides };
@@ -747,7 +750,7 @@ export class RunExecutor {
       await this.onLifecycleTransition(runId, 'pre_spawn');
       // Emit step 'running' after the run transitions to running status (write-then-emit
       // ordering mirrors stepTransitionBridge: lifecycle transition fires first, then step emit).
-      this.emitStep(runId, 'running');
+      if (turnKind === 'launch') this.emitStep(runId, 'running');
 
       this.logger.info('[RunExecutor] spawning agent process', {
         runId,
@@ -784,7 +787,7 @@ export class RunExecutor {
         // decision. The executor NEVER auto-completes a run.
         await this.onLifecycleTransition(runId, 'drained');
         // Emit step 'done' after the rest transition fires.
-        this.emitStep(runId, 'done');
+        if (turnKind === 'launch') this.emitStep(runId, 'done');
         // "Always allow messaging a running flow": if the user typed while this
         // turn was executing, deliver that buffered input as the NEXT turn instead
         // of leaving it parked. drainQueuedInputAtRest re-drives the run through
@@ -799,7 +802,7 @@ export class RunExecutor {
         this.pendingFailedMessage.set(runId, message);
         await this.onLifecycleTransition(runId, 'failed');
         // Emit step 'done' on failure path as well — the step ended, regardless of outcome.
-        this.emitStep(runId, 'done');
+        if (turnKind === 'launch') this.emitStep(runId, 'done');
         // Re-throw so the caller's catch (in runLauncher.ts) can log it.
         throw err;
       }
@@ -1842,6 +1845,7 @@ export class RunExecutor {
     const overrides: Partial<ClaudeSpawnerOptions> = {
       systemPromptAppend,
       agentPermissionMode: this.resolveLiveAgentPermissionMode(runId, run),
+      workflowTurn: true,
       // Per-run model pin (migration 037), read FRESH off the run row like
       // agentPermissionMode so it governs the next spawn. NULL/absent → undefined
       // → the spawner sets no SDK `model` (SDK default; byte-identical to before).

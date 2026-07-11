@@ -383,7 +383,7 @@ describe('CodexSdkManager app-server runtime', () => {
 
       expect(getClient().requests[1]).toMatchObject({
         method: 'thread/resume',
-        params: { threadId: 'codex-thread-1', excludeTurns: false },
+        params: { threadId: 'codex-thread-1', excludeTurns: true },
       });
       const invocationRow = db
         .prepare(

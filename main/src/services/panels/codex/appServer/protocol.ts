@@ -114,6 +114,14 @@ export interface AppServerTurnStartParams {
   model?: string | null;
   effort?: string | null;
   outputSchema?: AppServerJsonValue | null;
+  collaborationMode?: {
+    mode: 'plan' | 'default';
+    settings: {
+      model: string;
+      reasoning_effort: string | null;
+      developer_instructions: string | null;
+    };
+  } | null;
 }
 
 export interface AppServerTurnStartResponse {
