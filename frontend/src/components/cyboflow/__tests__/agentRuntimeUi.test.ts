@@ -17,6 +17,8 @@ describe('agentRuntimeUi compatibility', () => {
   it('allows Codex SDK but blocks Codex PTY for workflow launches', () => {
     expect(isWorkflowAgentRuntime('codex-sdk')).toBe(true);
     expect(isWorkflowRuntimeSupported('codex-sdk')).toBe(true);
+    expect(isWorkflowRuntimeSupported('codex-pty')).toBe(false);
+    expect(isWorkflowRuntimeSupported('not-a-runtime')).toBe(false);
     expect(workflowRuntimeForLaunch('codex-sdk')).toBe('codex-sdk');
     expect(workflowRuntimeForLaunch('codex-pty')).toBeNull();
   });

@@ -40,8 +40,8 @@ export const WORKFLOW_AGENT_RUNTIMES = [
   'codex-sdk',
 ] as const;
 
-export function isWorkflowRuntimeSupported(runtime: WorkflowAgentRuntime): boolean {
-  return WORKFLOW_AGENT_RUNTIMES.includes(runtime);
+export function isWorkflowRuntimeSupported(value: unknown): value is WorkflowAgentRuntime {
+  return typeof value === 'string' && (WORKFLOW_AGENT_RUNTIMES as readonly string[]).includes(value);
 }
 
 export function isAgentProvider(value: unknown): value is AgentProvider {
