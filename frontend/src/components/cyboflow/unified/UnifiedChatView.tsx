@@ -419,7 +419,7 @@ export function UnifiedChatView({
             <ChatTranscript
               messages={filteredMessages}
               settings={settings}
-              agentName="Claude"
+              agentName={name}
               isWaitingForResponse={isWaitingForResponse}
               liveTail={liveTail}
               collapsedMessages={collapsedMessages}

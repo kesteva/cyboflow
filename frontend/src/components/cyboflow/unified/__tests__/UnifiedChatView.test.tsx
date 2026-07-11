@@ -19,14 +19,16 @@ import type { UnifiedMessage } from '../../../../../../shared/types/unifiedMessa
 vi.mock('../../../chat/ChatTranscript', () => ({
   ChatTranscript: ({
     messages,
+    agentName,
     renderToolCallExtra,
     messagesEndRef,
   }: {
     messages: UnifiedMessage[];
+    agentName: string;
     renderToolCallExtra?: (toolCallId: string) => ReactNode;
     messagesEndRef?: RefObject<HTMLDivElement | null>;
   }) => (
-    <div data-testid="chat-transcript" data-count={messages.length}>
+    <div data-testid="chat-transcript" data-agent-name={agentName} data-count={messages.length}>
       ChatTranscript
       {renderToolCallExtra?.('tool-use-card')}
       <div ref={messagesEndRef} data-testid="messages-end" />
@@ -93,6 +95,20 @@ describe('UnifiedChatView — substrate branch', () => {
     expect(screen.getByTestId('chat-meta-strip')).toBeInTheDocument();
     // Even though an interactiveBody is supplied, the SDK transport ignores it.
     expect(screen.queryByTestId('interactive-body')).not.toBeInTheDocument();
+  });
+
+  it('passes the runtime-specific surface name to the transcript', () => {
+    render(
+      <UnifiedChatView
+        {...baseProps}
+        name="Codex"
+        transport="sdk"
+        mode="quick"
+        messages={[assistantMsg('a1', 'done')]}
+      />,
+    );
+
+    expect(screen.getByTestId('chat-transcript')).toHaveAttribute('data-agent-name', 'Codex');
   });
 
   it('interactive: renders the interactiveBody, drops transcript + rail + toggle, keeps bottomSlot', () => {

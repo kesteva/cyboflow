@@ -341,7 +341,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   return (
     <div className="relative flex-1 flex flex-col h-full bg-background">
       <UnifiedChatView
-        name={isInteractive ? (isCodexPtySession ? 'Codex' : 'Terminal') : 'Claude'}
+        name={isCodexPtySession || paneSession.agentRuntime === 'codex-sdk' ? 'Codex' : isInteractive ? 'Terminal' : 'Claude'}
         transport={isInteractive ? 'interactive' : 'sdk'}
         mode="quick"
         running={sessionRunning}

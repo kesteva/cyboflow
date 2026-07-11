@@ -138,7 +138,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
         // Agent panel first (unless the server eagerly created it — interactive
         // PTY sessions spawn during create-quick and return their panel id),
         // then Terminal.
-        if (claudePanelId === undefined && agentRuntime !== 'codex-pty') {
+        if (claudePanelId === undefined) {
           const claudePanel = await panelApi.createPanel({
             sessionId,
             type: 'claude',

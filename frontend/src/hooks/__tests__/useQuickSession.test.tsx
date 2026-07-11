@@ -286,6 +286,39 @@ describe('useQuickSession — server-created claude panel (claudePanelId)', () =
   });
 });
 
+describe('useQuickSession — Codex PTY fallback panel', () => {
+  it('creates a usable Codex panel when eager server-side panel creation failed', async () => {
+    const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
+
+    await act(async () => {
+      await result.current.start(
+        undefined,
+        'interactive',
+        undefined,
+        undefined,
+        false,
+        undefined,
+        undefined,
+        undefined,
+        'codex',
+        'codex-pty',
+      );
+    });
+
+    expect(mockCreatePanel).toHaveBeenNthCalledWith(1, {
+      sessionId: 'sess-001',
+      type: 'claude',
+      title: 'Codex',
+    });
+    expect(mockCreatePanel).toHaveBeenNthCalledWith(2, {
+      sessionId: 'sess-001',
+      type: 'terminal',
+      title: 'Terminal',
+      initialState: { cwd: '/tmp/wt-001' },
+    });
+  });
+});
+
 describe('useQuickSession — store interaction', () => {
   it('selects the session and the runId starts a stream subscription', async () => {
     const { result } = renderHook(() => useQuickSession({ projectId: 1 }));

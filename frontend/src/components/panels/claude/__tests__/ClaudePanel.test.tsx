@@ -132,15 +132,17 @@ vi.mock('../../../cyboflow/ResumeSessionPrompt', () => ({
 // terminal + resume overlay) and bottomSlot (approvals + composer + toast).
 vi.mock('../../../cyboflow/unified/UnifiedChatView', () => ({
   UnifiedChatView: ({
+    name,
     transport,
     interactiveBody,
     bottomSlot,
   }: {
+    name: string;
     transport: string;
     interactiveBody?: ReactNode;
     bottomSlot?: ReactNode;
   }) => (
-    <div data-testid="unified-chat-view" data-transport={transport}>
+    <div data-testid="unified-chat-view" data-name={name} data-transport={transport}>
       {interactiveBody}
       {bottomSlot}
     </div>
@@ -311,6 +313,17 @@ describe('ClaudePanel — interactive-PTY render swap', () => {
     expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'interactive');
     expect(screen.getByTestId('quick-session-composer')).toHaveAttribute('data-interactive', 'true');
     expect(mockGetResumeState).not.toHaveBeenCalled();
+  });
+
+  it('labels a Codex SDK quick session as Codex', () => {
+    renderWithProvider(makeSession({
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      runId: 'run-codex-sdk',
+    }));
+
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-name', 'Codex');
+    expect(screen.getByTestId('unified-chat-view')).toHaveAttribute('data-transport', 'sdk');
   });
 
   it('substrate undefined: renders the SDK surface + the SDK (non-interactive) composer', () => {
