@@ -441,7 +441,7 @@ describe('CodexSdkManager app-server runtime', () => {
     }
   });
 
-  it('interrupts an active turn before stopping app-server', async () => {
+  it('interrupts an active quick turn by run id when panel and run ids differ', async () => {
     const db = createDb();
     try {
       let markTurnStarted!: () => void;
@@ -465,8 +465,8 @@ describe('CodexSdkManager app-server runtime', () => {
       });
 
       const spawn = manager.spawnCliProcess({
-        panelId: 'run-1',
-        sessionId: 'run-1',
+        panelId: 'panel-quick-1',
+        sessionId: 'session-quick-1',
         runId: 'run-1',
         worktreePath: '/tmp/worktree',
         prompt: 'wait',

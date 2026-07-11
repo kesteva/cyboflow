@@ -159,6 +159,7 @@ function initializeParams(): AppServerInitializeParams {
 export class CodexSdkManager extends AbstractCliManager {
   private readonly activeRuns = new Map<string, ActiveCodexRun>();
   private readonly spawnKeysByPanelId = new Map<string, Set<string>>();
+  private readonly spawnKeysByRunId = new Map<string, Set<string>>();
   private readonly reservedSpawnKeys = new Set<string>();
   private cyboflowMcpRuntimeConfig: CodexMcpRuntimeConfig | null = null;
   private approvalRouterProvider: (() => ApprovalRouterPort) | null = null;
@@ -454,7 +455,8 @@ export class CodexSdkManager extends AbstractCliManager {
     };
     (this.processes as Map<string, StubCliProcess>).set(spawnKey, stub);
     this.activeRuns.set(spawnKey, activeRun);
-    this.recordSpawnKey(displayPanelId, spawnKey);
+    this.recordSpawnKey(this.spawnKeysByPanelId, displayPanelId, spawnKey);
+    this.recordSpawnKey(this.spawnKeysByRunId, runId, spawnKey);
 
     try {
       this.emitProjected(
@@ -558,7 +560,8 @@ export class CodexSdkManager extends AbstractCliManager {
       sink.dispose(runId);
       this.processes.delete(spawnKey);
       this.activeRuns.delete(spawnKey);
-      this.forgetSpawnKey(displayPanelId, spawnKey);
+      this.forgetSpawnKey(this.spawnKeysByPanelId, displayPanelId, spawnKey);
+      this.forgetSpawnKey(this.spawnKeysByRunId, runId, spawnKey);
       this.emit('exit', {
         panelId: displayPanelId,
         sessionId: options.sessionId,
@@ -568,8 +571,12 @@ export class CodexSdkManager extends AbstractCliManager {
     }
   }
 
-  override async killProcess(panelId: string): Promise<void> {
-    const keys = this.spawnKeysByPanelId.get(panelId) ?? new Set([panelId]);
+  override async killProcess(identity: string): Promise<void> {
+    const keys = new Set<string>([
+      ...(this.spawnKeysByPanelId.get(identity) ?? []),
+      ...(this.spawnKeysByRunId.get(identity) ?? []),
+    ]);
+    if (keys.size === 0) keys.add(identity);
     await Promise.all([...keys].map(async (spawnKey) => {
       await this.activeRuns.get(spawnKey)?.cancel();
     }));
@@ -692,16 +699,24 @@ export class CodexSdkManager extends AbstractCliManager {
     return resolveAgentModelAlias('codex', model) ?? 'codex-default';
   }
 
-  private recordSpawnKey(panelId: string, spawnKey: string): void {
-    const keys = this.spawnKeysByPanelId.get(panelId) ?? new Set<string>();
+  private recordSpawnKey(
+    index: Map<string, Set<string>>,
+    identity: string,
+    spawnKey: string,
+  ): void {
+    const keys = index.get(identity) ?? new Set<string>();
     keys.add(spawnKey);
-    this.spawnKeysByPanelId.set(panelId, keys);
+    index.set(identity, keys);
   }
 
-  private forgetSpawnKey(panelId: string, spawnKey: string): void {
-    const keys = this.spawnKeysByPanelId.get(panelId);
+  private forgetSpawnKey(
+    index: Map<string, Set<string>>,
+    identity: string,
+    spawnKey: string,
+  ): void {
+    const keys = index.get(identity);
     if (!keys) return;
     keys.delete(spawnKey);
-    if (keys.size === 0) this.spawnKeysByPanelId.delete(panelId);
+    if (keys.size === 0) index.delete(identity);
   }
 }
