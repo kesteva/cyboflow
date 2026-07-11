@@ -169,7 +169,7 @@ describe('AgentInvocationStore', () => {
     });
   });
 
-  it('does not rewind when the newest top-level invocation has no external id', () => {
+  it('falls back to the newest captured target when a newer invocation is incomplete', () => {
     const store = new AgentInvocationStore(dbAdapter(db));
     db.prepare("UPDATE workflow_runs SET claude_session_id = 'legacy-session' WHERE id = 'run-1'").run();
     store.createInvocation({
@@ -186,7 +186,11 @@ describe('AgentInvocationStore', () => {
       runtime: 'codex-sdk',
     });
 
-    expect(store.getLatestTopLevelResumeTarget('run-1')).toBeNull();
+    expect(store.getLatestTopLevelResumeTarget('run-1')).toEqual({
+      provider: 'claude',
+      runtime: 'claude-sdk',
+      externalSessionId: 'session-old',
+    });
   });
 
   it('falls back to a legacy id only for Claude runs with no top-level invocation', () => {

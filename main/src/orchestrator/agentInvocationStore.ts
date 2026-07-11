@@ -94,9 +94,9 @@ export class AgentInvocationStore {
   }
 
   /**
-   * Resolve the newest top-level invocation only. Step invocations never become
-   * a run-level resume target. A newest top-level row without an external id
-   * returns null rather than rewinding to an older invocation.
+   * Resolve the newest captured top-level invocation. Step invocations never
+   * become a run-level resume target, and incomplete startup rows cannot hide
+   * an older invocation whose provider session was captured successfully.
    *
    * The legacy workflow_runs.claude_session_id is considered only when no
    * top-level invocation exists, and only for a coherent Claude provider/runtime
@@ -111,7 +111,10 @@ export class AgentInvocationStore {
                   agent_runtime AS runtime,
                   external_session_id AS externalSessionId
              FROM agent_invocations
-            WHERE run_id = ? AND step_id IS NULL
+            WHERE run_id = ?
+              AND step_id IS NULL
+              AND external_session_id IS NOT NULL
+              AND trim(external_session_id) != ''
             ORDER BY id DESC
             LIMIT 1`,
         )
