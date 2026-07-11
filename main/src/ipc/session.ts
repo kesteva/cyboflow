@@ -816,19 +816,9 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       db.prepare(
         `UPDATE sessions
             SET substrate = ?,
-                agent_runtime = COALESCE(agent_runtime, ?)
+                agent_runtime = ?
           WHERE id = ?`,
       ).run(resolvedSessionSubstrate, resolvedSessionAgentRuntime, session.id);
-      if (useCodexSdk) {
-        db.prepare(
-          `UPDATE workflow_runs
-              SET agent_provider = 'codex',
-                  agent_runtime = 'codex-sdk',
-                  model = ?,
-                  updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?`,
-        ).run(requestedModel ?? null, runId);
-      }
       // Persist the per-session agent effort (migration 029) so the unified
       // chat composer can surface it as a read-only pill (set at session start;
       // mid-session change deferred). The only value is 'ultracode' (the

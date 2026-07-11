@@ -771,6 +771,7 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
   it('accepts codex-sdk for quick sessions, stamps the session and sentinel, and waits for first input', async () => {
     const {
       services,
+      createRunArgs,
       dbRunCalls,
       fakeCodexPtyManager,
       fakeCodexSdkManager,
@@ -797,8 +798,12 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     const sessionStamp = dbRunCalls.find((c) => /UPDATE\s+sessions\s+SET\s+substrate/.test(c.sql));
     expect(sessionStamp?.args).toEqual(['sdk', 'codex-sdk', 'sess-001']);
     expect(sessionStamp?.sql).not.toMatch(/agent_provider|agent_model/);
-    const runStamp = dbRunCalls.find((c) => /UPDATE\s+workflow_runs\s+SET\s+agent_provider = 'codex'/.test(c.sql));
-    expect(runStamp?.args).toEqual(['gpt-5.5', 'test-run-id-abc']);
+    expect(createRunArgs[0][4]).toEqual({
+      requestedModel: 'gpt-5.5',
+      requestedAgentProvider: 'codex',
+      requestedAgentRuntime: 'codex-sdk',
+    });
+    expect(dbRunCalls.some((c) => /UPDATE\s+workflow_runs\s+SET\s+agent_provider/.test(c.sql))).toBe(false);
     expect(fakeCodexSdkManager.spawnCliProcess).not.toHaveBeenCalled();
     expect(fakeCodexPtyManager.startPanel).not.toHaveBeenCalled();
     expect(fakeInteractiveCliManager.startPanel).not.toHaveBeenCalled();

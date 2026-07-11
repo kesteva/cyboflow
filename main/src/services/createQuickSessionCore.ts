@@ -20,7 +20,12 @@
 import type Database from 'better-sqlite3';
 import type { CliSubstrate } from '../../../shared/types/substrate';
 import type { PermissionMode } from '../../../shared/types/workflows';
-import type { AgentProvider, SessionAgentRuntime } from '../../../shared/types/agentRuntime';
+import {
+  isWorkflowRuntimeSupported,
+  type AgentProvider,
+  type SessionAgentRuntime,
+  type WorkflowAgentRuntime,
+} from '../../../shared/types/agentRuntime';
 import { transitionToRunning } from './cyboflow/transitions';
 import { assertTransitionAllowed } from './cyboflow/stateMachine';
 
@@ -68,6 +73,11 @@ export interface CreateQuickSessionCoreDeps {
       requestedSubstrate?: CliSubstrate,
       sessionId?: string,
       requestedPermissionMode?: PermissionMode,
+      opts?: {
+        requestedModel?: string;
+        requestedAgentProvider?: AgentProvider;
+        requestedAgentRuntime?: WorkflowAgentRuntime;
+      },
     ): { runId: string; substrate: CliSubstrate };
   };
   getDb(): Database.Database;
@@ -202,11 +212,21 @@ export async function createQuickSessionCore(
 
   // Wire the __quick__ sentinel run so ApprovalRouter/chat gating work.
   const sentinelWorkflowId = workflowRegistry.ensureQuickWorkflow(opts.projectId);
+  const sentinelAgentRuntime = isWorkflowRuntimeSupported(opts.agentRuntime)
+    ? opts.agentRuntime
+    : undefined;
   const { runId, substrate: resolvedSubstrate } = workflowRegistry.createRun(
     sentinelWorkflowId,
     opts.requestedSubstrate,
     session.id,
     opts.requestedAgentMode,
+    {
+      ...(sentinelAgentRuntime && opts.agentModel ? { requestedModel: opts.agentModel } : {}),
+      ...(sentinelAgentRuntime && opts.agentProvider
+        ? { requestedAgentProvider: opts.agentProvider }
+        : {}),
+      ...(sentinelAgentRuntime ? { requestedAgentRuntime: sentinelAgentRuntime } : {}),
+    },
   );
 
   const db = deps.getDb();
