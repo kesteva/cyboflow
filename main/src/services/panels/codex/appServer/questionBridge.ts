@@ -68,6 +68,9 @@ export class CodexAppServerQuestionBridge {
         }),
       ]);
       if (timeout !== undefined) clearTimeout(timeout);
+      if (result.kind === 'timeout') {
+        this.options.questionRouter.clearPendingForRun(this.options.runId);
+      }
       this.respondIfPending(
         key,
         result.kind === 'answer'

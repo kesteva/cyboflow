@@ -117,7 +117,7 @@ describe('CodexAppServerQuestionBridge', () => {
       await vi.advanceTimersByTimeAsync(50);
       await handling;
       expect(respond).toHaveBeenCalledWith({ answers: {} });
-      expect(fake.clearPendingForRun).not.toHaveBeenCalled();
+      expect(fake.clearPendingForRun).toHaveBeenCalledWith('run-1');
     } finally {
       vi.useRealTimers();
     }
