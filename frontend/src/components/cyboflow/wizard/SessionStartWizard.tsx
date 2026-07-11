@@ -92,7 +92,12 @@ import type { QuickSessionWorktreeMode } from '../../../../../shared/types/workt
 import { trackEvent } from '../../../utils/telemetry';
 import { CYBOFLOW_WORKFLOW_NAMES } from '../../../../../shared/types/workflows';
 import type { TelemetryFlow } from '../../../../../shared/types/telemetry';
-import { notifyQuickSessionCreated, notifyWorkflowRunStarted } from '../../../utils/onboarding';
+import {
+  notifyQuickSessionCreated,
+  notifyWorkflowRunStarted,
+  ONBOARDING_ANCHOR_ATTR,
+  ONBOARDING_ANCHORS,
+} from '../../../utils/onboarding';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -895,8 +900,12 @@ export default function SessionStartWizard(): React.JSX.Element {
 
             {/* Session permission — shown for BOTH workflow and quick launches; an
                 explicit choice writes the host session's agent_permission_mode (the
-                sole execution authority) for either launch kind. */}
-            <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
+                sole execution authority) for either launch kind. The wrapper divs
+                here and below carry the onboarding coachmark anchors (tour steps
+                5-7 point at these three controls). */}
+            <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.sessionPermission }}>
+              <AgentPermissionModeSelector value={permissionMode} onChange={setPermissionMode} />
+            </div>
 
             {/* Model picker — shown for ALL launch kinds. Quick + ultracode thread
                 it into useQuickSession (→ the claude panel / interactive eager
@@ -904,16 +913,18 @@ export default function SessionStartWizard(): React.JSX.Element {
                 workflow_runs.model (migration 037). Ultracode defaults to Fable
                 when available (seedDefaultModelFor). Fast mode (Opus-only premium
                 research preview) stays QUICK-only. */}
-            <ModelSelector
-              value={model}
-              onChange={(m) => {
-                modelTouchedRef.current = true;
-                setModel(m);
-                // Fast mode is Opus-only; drop it when leaving Opus.
-                if (!isOpusModel(m)) setFastMode(false);
-              }}
-              id="wizard-model"
-            />
+            <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.modelSelect }}>
+              <ModelSelector
+                value={model}
+                onChange={(m) => {
+                  modelTouchedRef.current = true;
+                  setModel(m);
+                  // Fast mode is Opus-only; drop it when leaving Opus.
+                  if (!isOpusModel(m)) setFastMode(false);
+                }}
+                id="wizard-model"
+              />
+            </div>
             {selection.kind === 'quick' && isOpusModel(model) && (
               <div
                 data-testid="wizard-fast-mode-row"
@@ -939,12 +950,14 @@ export default function SessionStartWizard(): React.JSX.Element {
                 sessions.substrate). Hidden for Ultracode, which always runs on
                 the interactive PTY substrate. */}
             {selection.kind !== 'ultracode' && (
-              <SubstrateSelector
-                value={substrate}
-                onChange={setSubstrate}
-                id="wizard-substrate"
-                caveatsTestId="wizard-substrate-caveats"
-              />
+              <div {...{ [ONBOARDING_ANCHOR_ATTR]: ONBOARDING_ANCHORS.substrateSelect }}>
+                <SubstrateSelector
+                  value={substrate}
+                  onChange={setSubstrate}
+                  id="wizard-substrate"
+                  caveatsTestId="wizard-substrate-caveats"
+                />
+              </div>
             )}
 
             {/* Per-run A/B variant selector (migration 048), WORKFLOW only — hidden

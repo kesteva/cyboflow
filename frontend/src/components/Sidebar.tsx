@@ -10,7 +10,7 @@ import { useConfigStore } from '../stores/configStore';
 import { useUpdater } from '../hooks/useUpdater';
 import { trackEvent } from '../utils/telemetry';
 import { useOnboardingStore } from '../stores/onboardingStore';
-import { ONBOARDING_ANCHOR_ATTR, ONBOARDING_ANCHORS } from '../utils/onboarding';
+import { ONBOARDING_ANCHOR_ATTR, ONBOARDING_ANCHORS, ONBOARDING_STEP_COUNT } from '../utils/onboarding';
 
 interface SidebarProps {
   onAboutClick: () => void;
@@ -234,7 +234,7 @@ export function Sidebar({
             <span className="min-w-0 flex-1">
               <span className="block text-[11.5px] font-bold leading-tight text-text-primary">Resume setup</span>
               <span className="block text-[10px] text-text-secondary">
-                Step {onboardingStep + 1} of 8
+                Step {onboardingStep + 1} of {ONBOARDING_STEP_COUNT}
               </span>
             </span>
             <span className="flex-shrink-0 text-interactive" aria-hidden="true">

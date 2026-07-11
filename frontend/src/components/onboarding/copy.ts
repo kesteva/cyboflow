@@ -5,7 +5,11 @@
  * README), with the two deliberate deviations noted at their call sites:
  *   - step 1 drops the "Max plan" tier claim (main/ cannot introspect billing;
  *     see shared/types/onboarding.ts).
- *   - step 7 adds the Verify Queue row (six rows, not the prototype's five).
+ *   - the rail-map step adds the Verify Queue row (six rows, not the
+ *     prototype's five).
+ * The wizard-Configure pointer steps (5-7) are a post-design addition with no
+ * packet counterpart; their copy lives in Coachmark.tsx alongside the other
+ * coach bodies.
  */
 
 /** Header/popover title per step (index === step). Step 0 uses the hero, not this. */
@@ -15,6 +19,9 @@ export const ONBOARDING_TITLES: ReadonlyArray<string> = [
   'Set your permission mode',
   'Add a project',
   'Start your first session',
+  'Session permission',
+  'Pick a model',
+  'Choose a substrate',
   'Run your first flow',
   'Watch it in Human review',
   'Find your way around',

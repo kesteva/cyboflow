@@ -212,9 +212,9 @@ export function QuickSessionCanvas({
   const { launch, isLaunching, error: launchError } = useLaunchWorkflow(projectId, {
     forceNew: isRawCheckout,
   });
-  // Tour step-5 accent on the /ship chip (design packet: rust inset bar +
+  // Tour step-8 accent on the /ship chip (design packet: rust inset bar +
   // "Start here" tag while the coachmark points at it).
-  const onboardingShipStep = useOnboardingStore((s) => s.status === 'active' && s.step === 5);
+  const onboardingShipStep = useOnboardingStore((s) => s.status === 'active' && s.step === 8);
 
   // Detected Claude Code dynamic workflows (the Workflow tool / `ultracode`)
   // launched by THIS session's agent — rendered prominently above the picker.

@@ -245,7 +245,7 @@ export function OnboardingGate(): React.JSX.Element | null {
         ? { label: 'Next →', disabled: false, onClick: next }
         : { label: 'Add project →', disabled: !pickedPath || busyCreate, onClick: () => void handleAddProject() };
       break;
-    case 7:
+    case 10:
       primary = { label: 'Finish →', disabled: false, onClick: next };
       break;
     default:
@@ -253,7 +253,8 @@ export function OnboardingGate(): React.JSX.Element | null {
   }
 
   // Arrow-key nav reads the live primary so ArrowRight honours step gates /
-  // config persistence; coach steps have no primary and next() no-ops on them.
+  // config persistence; do-steps have no rendered primary and next() no-ops on
+  // them, while pointer steps advance (mirroring their popover Next button).
   const primaryRef = useRef(primary);
   primaryRef.current = primary;
   useEffect(() => {
@@ -303,7 +304,7 @@ export function OnboardingGate(): React.JSX.Element | null {
             onBrowse={() => void handleBrowse()}
           />
         );
-      case 7:
+      case 10:
         return <RailMapStep />;
       default:
         return null;
@@ -332,6 +333,7 @@ export function OnboardingGate(): React.JSX.Element | null {
           onSkip={skip}
           onGoTo={goTo}
           onAnchorActioned={anchorActioned}
+          onNext={next}
         />
       )}
     </OnboardingOverlay>

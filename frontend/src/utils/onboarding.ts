@@ -36,18 +36,31 @@ export const ONBOARDING_ANCHOR_ATTR = 'data-onboarding';
 export const ONBOARDING_ANCHORS = {
   /** SessionStartWizard step-② Quick Session card (tour step 4). */
   quickSessionCard: 'quick-session-card',
-  /** QuickSessionCanvas "/ship" workflow chip (tour step 5). */
+  /** Wizard Configure — Session permission selector (tour step 5). */
+  sessionPermission: 'session-permission',
+  /** Wizard Configure — Model picker (tour step 6). */
+  modelSelect: 'model-select',
+  /** Wizard Configure — CLI substrate selector (tour step 7). */
+  substrateSelect: 'substrate-select',
+  /** QuickSessionCanvas "/ship" workflow chip (tour step 8). */
   shipChip: 'ship-chip',
-  /** Sidebar "Human review" rail item (tour step 6). */
+  /** Sidebar "Human review" rail item (tour step 9). */
   humanReview: 'human-review',
 } as const;
 
-export const ONBOARDING_STEP_COUNT = 8;
+export const ONBOARDING_STEP_COUNT = 11;
 
 /** Steps rendered as the centered modal card. */
-export const ONBOARDING_MODAL_STEPS: ReadonlyArray<number> = [0, 1, 2, 3, 7];
+export const ONBOARDING_MODAL_STEPS: ReadonlyArray<number> = [0, 1, 2, 3, 10];
 /** Steps rendered as an anchored coachmark over the live UI. */
-export const ONBOARDING_COACH_STEPS: ReadonlyArray<number> = [4, 5, 6];
+export const ONBOARDING_COACH_STEPS: ReadonlyArray<number> = [4, 5, 6, 7, 8, 9];
+/**
+ * The coach steps that are informational POINTERS (the wizard-Configure trio:
+ * permission / model / substrate). Unlike the advance-by-doing steps (4, 8, 9)
+ * they carry a Next button on the popover and advance via store.next();
+ * interacting with the anchored control never advances them.
+ */
+export const ONBOARDING_POINTER_STEPS: ReadonlyArray<number> = [5, 6, 7];
 
 /**
  * Real-action dispatch helpers — call these at the SUCCESS point of the

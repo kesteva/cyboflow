@@ -1,14 +1,16 @@
 import { create } from 'zustand';
 import type { ClaudeDetectionResult } from '../../../shared/types/onboarding';
 import type { PermissionMode } from '../../../shared/types/workflows';
-import { ONBOARDING_COACH_STEPS, ONBOARDING_STEP_COUNT } from '../utils/onboarding';
+import { ONBOARDING_COACH_STEPS, ONBOARDING_POINTER_STEPS, ONBOARDING_STEP_COUNT } from '../utils/onboarding';
 
 /**
- * onboardingStore — the 8-step first-run tour's state machine.
+ * onboardingStore — the 11-step first-run tour's state machine.
  *
  * Steps: 0 welcome · 1 connect Claude Code (the only gated step) · 2 permission
  * mode · 3 add project · 4 quick-session coachmark (wizard Quick Session card) ·
- * 5 /ship coachmark (session canvas chip) · 6 Human-review coachmark · 7 rail map.
+ * 5-7 wizard-Configure pointers (session permission / model / substrate) ·
+ * 8 /ship coachmark (session canvas chip) · 9 Human-review coachmark ·
+ * 10 rail map.
  *
  * The machine is PURE — all persistence (user_preferences JSON snapshot),
  * detection fetches, window-event subscriptions, keyboard handling, and
@@ -17,15 +19,21 @@ import { ONBOARDING_COACH_STEPS, ONBOARDING_STEP_COUNT } from '../utils/onboardi
  * transition here must stay synchronously testable.
  *
  * Advancement rules (the tour is completed by DOING, not clicking through):
- * - Modal steps (0,1,2,3,7) advance via next(); step 1 refuses until the
+ * - Modal steps (0,1,2,3,10) advance via next(); step 1 refuses until the
  *   credential probe says 'detected' AND the consent toggle is on; step 3
  *   normally advances via the real 'project-created' event (its primary
  *   button creates the project), falling back to next() when projects
  *   already exist (replay / resumed installs).
- * - Coach steps advance ONLY via the real action: clicking the highlighted
- *   target (anchorActioned) parks steps 4/5 in 'pending' while the real flow
- *   (wizard configure / idea modal) runs, and the matching realEvent lands
- *   the next step. Step 6 advances directly on its target click.
+ * - Pointer steps (5-7, the Configure trio) are informational: they advance
+ *   via next() (the popover's Next button); interacting with the anchored
+ *   control never advances them. Next on the LAST pointer (7) parks 'pending'
+ *   — the next tour beat (the /ship chip) only exists once the session
+ *   launches, and 'quick-session-created' fires from ANY of steps 4-7 (the
+ *   user may hit Start before Next-ing through every pointer), landing 8.
+ * - Do-steps advance ONLY via the real action: step 4's card click flips the
+ *   wizard to Configure where step 5's anchor mounts, so it advances directly;
+ *   step 8's /ship click parks 'pending' while the idea modal runs and
+ *   'workflow-run-started' lands 9; step 9 advances directly on its click.
  * - Dots/keyboard may only revisit steps already reached (maxVisitedStep),
  *   so neither can bypass the step-1 gate or the coach preconditions.
  */
@@ -44,18 +52,19 @@ export interface PersistedOnboarding {
 
 /**
  * Boot clamp for a restart mid-tour: coach steps whose real-world context is
- * gone resume at the nearest step that can rebuild it. Step 4 rebuilds its own
- * precondition (the gate reopens the wizard), step 5's session canvas is gone
- * after a restart so it re-runs step 4, and step 6's rail anchor always exists.
+ * gone resume at the nearest step that can rebuild it. Steps 5-7 anchor the
+ * wizard's Configure page and step 8 the session canvas — neither survives a
+ * restart — so they re-run step 4, which rebuilds its own precondition (the
+ * gate reopens the wizard). Step 9's rail anchor always exists.
  */
 export function clampResumeStep(step: number): number {
-  if (step === 5) return 4;
+  if (step >= 5 && step <= 8) return 4;
   return Math.min(Math.max(step, 0), ONBOARDING_STEP_COUNT - 1);
 }
 
 interface OnboardingState {
   status: OnboardingStatus;
-  /** Current step, 0..7 — meaningful whenever status !== 'idle'. */
+  /** Current step, 0..10 — meaningful whenever status !== 'idle'. */
   step: number;
   /** Highest step ever reached this run; dots/goTo may only jump ≤ this. */
   maxVisitedStep: number;
@@ -104,7 +113,9 @@ export function isNextGateBlocked(state: Pick<OnboardingState, 'step' | 'detecti
   return state.step === 1 && !(state.detection?.state === 'detected' && state.connected);
 }
 
-const isCoachStep = (step: number): boolean => ONBOARDING_COACH_STEPS.includes(step);
+/** Advance-by-doing coach steps (4, 8, 9) — coach steps that are NOT pointers. */
+const isDoStep = (step: number): boolean =>
+  ONBOARDING_COACH_STEPS.includes(step) && !ONBOARDING_POINTER_STEPS.includes(step);
 
 export const useOnboardingStore = create<OnboardingState>((set, get) => ({
   status: 'idle',
@@ -152,8 +163,16 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
   next: () => {
     const s = get();
     if (s.status !== 'active') return;
-    if (isCoachStep(s.step)) return; // coach steps advance by doing, never by next()
+    if (isDoStep(s.step)) return; // do-steps advance by doing, never by next()
     if (isNextGateBlocked(s)) return;
+    // Next on the last Configure pointer parks quiet: step 8's anchor (the
+    // /ship chip) only exists once the session launches, so the tour waits for
+    // 'quick-session-created' — unless the session already exists (revisiting
+    // via dots/Back), where a plain advance is safe.
+    if (s.step === 7 && s.maxVisitedStep < 8) {
+      set({ status: 'pending' });
+      return;
+    }
     if (s.step >= LAST_STEP) {
       set({ status: 'completed' });
       return;
@@ -202,14 +221,20 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
 
   anchorActioned: () => {
     const s = get();
-    if (s.status !== 'active' || !isCoachStep(s.step)) return;
-    if (s.step === 6) {
-      // Human review opens immediately on the click — straight to the rail map.
-      set({ step: 7, maxVisitedStep: Math.max(s.maxVisitedStep, 7) });
+    if (s.status !== 'active' || !isDoStep(s.step)) return;
+    if (s.step === 4) {
+      // The card click flips the wizard to Configure, where step 5's anchor
+      // (the permission selector) mounts — advance directly.
+      set({ step: 5, maxVisitedStep: Math.max(s.maxVisitedStep, 5) });
       return;
     }
-    // Steps 4/5: the click hands control to the real flow (wizard configure /
-    // idea modal); the overlay goes quiet until the matching realEvent lands.
+    if (s.step === 9) {
+      // Human review opens immediately on the click — straight to the rail map.
+      set({ step: 10, maxVisitedStep: Math.max(s.maxVisitedStep, 10) });
+      return;
+    }
+    // Step 8: the /ship click hands control to the idea modal; the overlay
+    // goes quiet until 'workflow-run-started' lands.
     set({ status: 'pending' });
   },
 
@@ -219,7 +244,9 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     const advanceTo = (step: number): void =>
       set({ status: 'active', step, maxVisitedStep: Math.max(s.maxVisitedStep, step) });
     if (kind === 'project-created' && s.step === 3) advanceTo(4);
-    else if (kind === 'quick-session-created' && s.step === 4) advanceTo(5);
-    else if (kind === 'workflow-run-started' && s.step === 5) advanceTo(6);
+    // The launch may fire from ANY Configure-page step — the user can hit
+    // Start quick session before Next-ing through every pointer.
+    else if (kind === 'quick-session-created' && s.step >= 4 && s.step <= 7) advanceTo(8);
+    else if (kind === 'workflow-run-started' && s.step === 8) advanceTo(9);
   },
 }));

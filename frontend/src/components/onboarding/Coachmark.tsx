@@ -4,13 +4,18 @@ import { ONBOARDING_TITLES } from './copy';
 import { OnboardingDots } from './OnboardingDots';
 
 /**
- * Coachmark — the anchored popover for the "try it" steps (4/5/6). Resolves its
+ * Coachmark — the anchored popover for every coach step (4-9). Resolves its
  * target exclusively by the `data-onboarding` attribute, tracks the target rect
  * on a rAF loop (robust to layout shifts / scroll), and draws a 4-rectangle
  * scrim that leaves a transparent hole over the target so the real element stays
- * clickable — no z-index mutation of the (cross-lane) target is required. A
- * capture-phase document click listener detects the real action on the target
- * and calls anchorActioned(); there is no Next button (advance-by-doing).
+ * clickable — no z-index mutation of the (cross-lane) target is required.
+ *
+ * Two flavors, per the spec's `pointer` flag:
+ * - "try it" do-steps (4/8/9): a capture-phase document click listener detects
+ *   the real action on the target and calls anchorActioned(); no Next button.
+ * - pointer steps (5-7, the wizard-Configure trio): informational — a Next
+ *   button advances via onNext(); interacting with the anchored control (e.g.
+ *   picking a permission option through the hole) never advances.
  *
  * If the anchor is absent (e.g. the wizard hasn't mounted the card yet) the
  * overlay renders nothing and retries next frame — the gate's step-4 wizard
@@ -23,6 +28,7 @@ interface CoachmarkProps {
   onSkip: () => void;
   onGoTo: (step: number) => void;
   onAnchorActioned: () => void;
+  onNext: () => void;
 }
 
 /**
@@ -36,6 +42,8 @@ type ArrowSide = 'left' | 'up' | 'right';
 interface CoachSpec {
   anchorId: string;
   arrow: ArrowSide;
+  /** Informational pointer: Next-advanced, anchor interaction never advances. */
+  pointer?: boolean;
   body: React.ReactNode;
 }
 
@@ -55,6 +63,40 @@ const COACH: Record<number, CoachSpec> = {
     ),
   },
   5: {
+    anchorId: ONBOARDING_ANCHORS.sessionPermission,
+    arrow: 'up',
+    pointer: true,
+    body: (
+      <>
+        How much this session's agent may do <b className="text-[var(--paper)]">without asking you</b>. It starts from
+        the default you picked earlier — change it here for this session only. Anything blocked lands in Human review.
+      </>
+    ),
+  },
+  6: {
+    anchorId: ONBOARDING_ANCHORS.modelSelect,
+    arrow: 'up',
+    pointer: true,
+    body: (
+      <>
+        The Claude model powering this session. <b className="text-[var(--paper)]">Opus</b> is the most capable
+        default; smaller models are faster and cheaper for lighter tasks.
+      </>
+    ),
+  },
+  7: {
+    anchorId: ONBOARDING_ANCHORS.substrateSelect,
+    arrow: 'up',
+    pointer: true,
+    body: (
+      <>
+        How the agent runs under the hood: the bundled <b className="text-[var(--paper)]">SDK</b> (default — nothing to
+        install) or your own Claude Code CLI in an interactive terminal. Keep SDK for now, then hit{' '}
+        <b className="text-[var(--paper)]">Start quick session</b> below.
+      </>
+    ),
+  },
+  8: {
     anchorId: ONBOARDING_ANCHORS.shipChip,
     arrow: 'up',
     body: (
@@ -64,7 +106,7 @@ const COACH: Record<number, CoachSpec> = {
       </>
     ),
   },
-  6: {
+  9: {
     anchorId: ONBOARDING_ANCHORS.humanReview,
     arrow: 'left',
     body: (
@@ -99,11 +141,12 @@ export function Coachmark({
   onSkip,
   onGoTo,
   onAnchorActioned,
+  onNext,
 }: CoachmarkProps): React.JSX.Element | null {
   const spec = COACH[step];
   const [rect, setRect] = useState<Rect | null>(null);
   const rectRef = useRef<Rect | null>(null);
-  // Anchor-lost fallback: a coach step can be re-entered (Back from step 6,
+  // Anchor-lost fallback: a coach step can be re-entered (Back from step 9,
   // dot navigation) after its target unmounted — e.g. the /ship chip disappears
   // once the run takes over the canvas. The tour must NEVER render nothing
   // while 'active' (all its controls live inside this component), so after a
@@ -137,9 +180,11 @@ export function Coachmark({
     return () => cancelAnimationFrame(raf);
   }, [spec]);
 
-  // Capture-phase detection of the real action on the target.
+  // Capture-phase detection of the real action on the target — do-steps only.
+  // Pointer steps leave the anchored control freely usable (picking a
+  // permission option / model must not advance the tour).
   useEffect(() => {
-    if (!spec) return;
+    if (!spec || spec.pointer) return;
     const onClick = (e: MouseEvent): void => {
       const el = document.querySelector(`[${ONBOARDING_ANCHOR_ATTR}="${spec.anchorId}"]`);
       if (el && e.target instanceof Node && el.contains(e.target)) onAnchorActioned();
@@ -154,7 +199,8 @@ export function Coachmark({
     <>
       <div className="px-[17px] pb-1 pt-[15px]">
         <div className="mb-1.5 text-[9px] font-bold uppercase tracking-[.16em] text-interactive">
-          Step {step + 1} / {ONBOARDING_STEP_COUNT} · try it
+          Step {step + 1} / {ONBOARDING_STEP_COUNT}
+          {!spec.pointer && ' · try it'}
         </div>
         <div className="mb-[7px] text-[15px] font-bold tracking-[-.01em]">{ONBOARDING_TITLES[step]}</div>
         <div className="text-[11px] leading-[1.55] text-[var(--paper)]/80">{spec.body}</div>
@@ -183,6 +229,15 @@ export function Coachmark({
         >
           Back
         </button>
+        {spec.pointer && (
+          <button
+            type="button"
+            onClick={onNext}
+            className="border border-transparent bg-[var(--terracotta)] px-2.5 py-[7px] text-[9.5px] font-bold uppercase tracking-[.12em] text-[var(--paper)] transition-opacity hover:opacity-90"
+          >
+            Next →
+          </button>
+        )}
       </div>
     </>
   );
