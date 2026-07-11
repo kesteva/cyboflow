@@ -2957,7 +2957,7 @@ function makeStepEmitter(): StepTransitionEmitterLike & { calls: Array<{ runId: 
 }
 
 describe('RunExecutor.execute — stepEmitter lifecycle hook (TASK-765)', () => {
-  it('(step-1) stepEmitter.emit is called with running at run start and done at run end (happy path)', async () => {
+  it('(step-1) emits only the initial running marker and preserves agent-reported completion state', async () => {
     const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });
     const registry: WorkflowRegistryLike = {
@@ -2976,13 +2976,11 @@ describe('RunExecutor.execute — stepEmitter lifecycle hook (TASK-765)', () => 
 
     await executor.execute(run.id);
 
-    // Should emit 'running' then 'done'
-    expect(stepEmitter.emit).toHaveBeenCalledTimes(2);
+    expect(stepEmitter.emit).toHaveBeenCalledTimes(1);
     expect(stepEmitter.calls[0]).toEqual({ runId: run.id, status: 'running' });
-    expect(stepEmitter.calls[1]).toEqual({ runId: run.id, status: 'done' });
   });
 
-  it('(step-2) stepEmitter.emit fires done on spawner failure path', async () => {
+  it('(step-2) does not synthesize done on the spawner failure path', async () => {
     const run = makeWorkflowRunRow({ worktree_path: '/my/worktree' });
     const workflow = makeWorkflowRow({ id: run.workflow_id });
     const registry: WorkflowRegistryLike = {
@@ -3001,10 +2999,8 @@ describe('RunExecutor.execute — stepEmitter lifecycle hook (TASK-765)', () => 
 
     await expect(executor.execute(run.id)).rejects.toThrow('sdk spawn failed');
 
-    // Should still emit 'running' then 'done' even on failure
-    expect(stepEmitter.emit).toHaveBeenCalledTimes(2);
+    expect(stepEmitter.emit).toHaveBeenCalledTimes(1);
     expect(stepEmitter.calls[0]).toEqual({ runId: run.id, status: 'running' });
-    expect(stepEmitter.calls[1]).toEqual({ runId: run.id, status: 'done' });
   });
 
   it('(step-3) a throwing stepEmitter does not crash execute() — fail-soft, warn logged', async () => {

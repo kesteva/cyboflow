@@ -784,8 +784,10 @@ export class RunExecutor {
         // RESTS in awaiting_review awaiting the user's Merge / PR / Dismiss
         // decision. The executor NEVER auto-completes a run.
         await this.onLifecycleTransition(runId, 'drained');
-        // Emit step 'done' after the rest transition fires.
-        if (turnKind === 'launch') this.emitStep(runId, 'done');
+        // Do not synthesize a run-level `done` transition here. Workflow agents
+        // report concrete step boundaries through cyboflow_report_step; emitting
+        // `done` for the initial step would overwrite the final MCP-reported
+        // current_step_id and make a finished Sprint appear to rewind to planning.
         // "Always allow messaging a running flow": if the user typed while this
         // turn was executing, deliver that buffered input as the NEXT turn instead
         // of leaving it parked. drainQueuedInputAtRest re-drives the run through
@@ -799,8 +801,6 @@ export class RunExecutor {
         const message = err instanceof Error ? err.message : String(err);
         this.pendingFailedMessage.set(runId, message);
         await this.onLifecycleTransition(runId, 'failed');
-        // Emit step 'done' on failure path as well — the step ended, regardless of outcome.
-        if (turnKind === 'launch') this.emitStep(runId, 'done');
         // Re-throw so the caller's catch (in runLauncher.ts) can log it.
         throw err;
       }
