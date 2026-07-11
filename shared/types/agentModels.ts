@@ -11,6 +11,15 @@ export const CLAUDE_MODEL_ALIASES = [
 
 export type ClaudeModelAlias = (typeof CLAUDE_MODEL_ALIASES)[number];
 
+/**
+ * Model pinned when a Codex launch requests automatic/default selection.
+ *
+ * Cyboflow bundles a fixed Codex runtime, so delegating to the account default
+ * can select a model that the bundled runtime does not support. Keep this value
+ * aligned with the concrete Codex model exposed by the launch UI.
+ */
+export const CODEX_COMPATIBLE_DEFAULT_MODEL = 'gpt-5.5';
+
 const CLAUDE_MODEL_ALIAS_SET = new Set<string>(CLAUDE_MODEL_ALIASES);
 
 export function isClaudeModelFamily(model: string): boolean {

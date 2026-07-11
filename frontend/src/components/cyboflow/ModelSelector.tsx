@@ -16,6 +16,7 @@
 import { MODEL_OPTIONS } from './unified/ModelPill';
 import { useModelAvailability } from '../../stores/modelAvailabilityStore';
 import type { AgentProvider, AgentRuntime } from '../../../../shared/types/agentRuntime';
+import { CODEX_COMPATIBLE_DEFAULT_MODEL } from '../../../../shared/types/agentModels';
 
 /** The quick-session default model — Opus, per product direction. */
 export const DEFAULT_QUICK_MODEL = 'opus';
@@ -46,7 +47,7 @@ const CODEX_MODEL_OPTIONS: ReadonlyArray<{
   description: string;
 }> = [
   { id: DEFAULT_CODEX_MODEL, label: 'Auto/default', description: 'Use the Codex runtime default' },
-  { id: 'gpt-5.5', label: 'GPT-5.5', description: 'Frontier Codex coding model' },
+  { id: CODEX_COMPATIBLE_DEFAULT_MODEL, label: 'GPT-5.5', description: 'Frontier Codex coding model' },
 ];
 
 interface ModelSelectorProps {

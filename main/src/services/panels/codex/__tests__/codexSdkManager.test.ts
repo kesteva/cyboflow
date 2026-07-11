@@ -215,7 +215,7 @@ describe('CodexSdkManager app-server runtime', () => {
     }
   });
 
-  it('starts a configured thread and persists provider-neutral events', async () => {
+  it('pins auto for the configured thread and turn and persists provider-neutral events', async () => {
     const db = createDb();
     try {
       const { manager, getClient } = makeManager(db, successfulHandler);
@@ -234,7 +234,7 @@ describe('CodexSdkManager app-server runtime', () => {
         prompt: 'ship it',
         systemPromptAppend: 'Report through Cyboflow.',
         agentPermissionMode: 'acceptEdits',
-        model: 'gpt-5.5',
+        model: 'auto',
         agentInvocationStepId: 'verify-step',
       } as Parameters<CodexSdkManager['spawnCliProcess']>[0] & { agentInvocationStepId: string });
 

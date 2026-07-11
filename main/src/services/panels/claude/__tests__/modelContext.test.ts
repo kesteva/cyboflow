@@ -114,16 +114,18 @@ describe('modelContext', () => {
       expect(resolveAgentModelAlias('claude', 'codex-experimental')).toBeUndefined();
     });
 
-    it('passes Codex model ids through while suppressing Claude models before a Codex spawn', () => {
+    it('passes Codex model ids through while replacing stale Claude models with the compatible default', () => {
       expect(resolveAgentModelAlias('codex', 'gpt-5.5')).toBe('gpt-5.5');
-      expect(resolveAgentModelAlias('codex', 'opus')).toBeUndefined();
-      expect(resolveAgentModelAlias('codex', 'claude-opus-4-8')).toBeUndefined();
+      expect(resolveAgentModelAlias('codex', 'opus')).toBe('gpt-5.5');
+      expect(resolveAgentModelAlias('codex', 'claude-opus-4-8')).toBe('gpt-5.5');
     });
 
-    it('treats auto/default/empty as no explicit model at the spawn seam', () => {
+    it('omits Claude auto while pinning Codex automatic selections to a compatible model', () => {
       expect(resolveAgentModelAlias('claude', 'auto')).toBeUndefined();
-      expect(resolveAgentModelAlias('codex', 'default')).toBeUndefined();
-      expect(resolveAgentModelAlias('codex', '   ')).toBeUndefined();
+      expect(resolveAgentModelAlias('codex', 'auto')).toBe('gpt-5.5');
+      expect(resolveAgentModelAlias('codex', 'default')).toBe('gpt-5.5');
+      expect(resolveAgentModelAlias('codex', '   ')).toBe('gpt-5.5');
+      expect(resolveAgentModelAlias('codex')).toBe('gpt-5.5');
     });
 
     it('keeps future/custom ids that do not belong to the other provider family', () => {
