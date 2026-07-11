@@ -118,6 +118,36 @@ describe('ensureSessionForLaunch', () => {
     expect(mockCreatePanel).toHaveBeenCalled();
   });
 
+  it('stamps a freshly-created flow host with its configured default agent', async () => {
+    await ensureSessionForLaunch(7, {
+      forceNew: true,
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      agentModel: 'gpt-5.5',
+    });
+
+    expect(mockCreateQuick).toHaveBeenCalledWith({
+      prompt: '',
+      projectId: 7,
+      worktreeMode: 'worktree',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      agentModel: 'gpt-5.5',
+    });
+  });
+
+  it('does not overwrite the default agent when reusing an existing session', async () => {
+    mockGetState.mockReturnValue({ selectedSessionId: 'sess-existing' });
+
+    await ensureSessionForLaunch(7, {
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      agentModel: 'gpt-5.5',
+    });
+
+    expect(mockCreateQuick).not.toHaveBeenCalled();
+  });
+
   it('does NOT reuse a BUSY selected session — creates a fresh session instead', async () => {
     mockGetState.mockReturnValue({ selectedSessionId: 'sess-busy' });
     // An active run already executes in the selected session → it is busy.

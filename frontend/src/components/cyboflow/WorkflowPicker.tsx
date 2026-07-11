@@ -222,7 +222,12 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
         // run runs in that session's worktree, and used to nest the run under
         // the session in the store (setActiveRun's parentSessionId). forceNew
         // bypasses reuse for the PTY add-workflow flow (separate session).
-        const sessionId = await ensureSessionForLaunch(projectId, { forceNew: forceNewSession });
+        const sessionId = await ensureSessionForLaunch(projectId, {
+          forceNew: forceNewSession,
+          agentProvider: providerForRuntime(workflowRuntime),
+          agentRuntime: workflowRuntime,
+          agentModel: model,
+        });
         const result = await trpc.cyboflow.runs.start.mutate({
           workflowId,
           projectId,
@@ -281,7 +286,12 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           throw new Error('Codex PTY is only available for quick sessions.');
         }
         const launchSubstrate = substrateForRuntime(workflowRuntime);
-        const sessionId = await ensureSessionForLaunch(projectId, { forceNew: forceNewSession });
+        const sessionId = await ensureSessionForLaunch(projectId, {
+          forceNew: forceNewSession,
+          agentProvider: providerForRuntime(workflowRuntime),
+          agentRuntime: workflowRuntime,
+          agentModel: model,
+        });
         const result = await trpc.cyboflow.runs.start.mutate({
           workflowId,
           projectId,

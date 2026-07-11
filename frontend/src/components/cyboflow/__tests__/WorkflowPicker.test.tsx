@@ -530,6 +530,9 @@ describe('WorkflowPicker — agent runtime selector (IDEA-013 / TASK-812)', () =
       projectId: 1,
       prompt: '',
       worktreeMode: 'worktree',
+      agentProvider: 'codex',
+      agentRuntime: 'codex-sdk',
+      agentModel: 'auto',
     });
     expect(mockRunStart).toHaveBeenCalledWith({
       workflowId: 'wf-1',
@@ -914,7 +917,14 @@ describe('WorkflowPicker — Phase 3 session-hosted launch', () => {
     await waitFor(() => {
       // worktreeMode is pinned — a flow-host session ignores the global in-place
       // default (migration 047).
-      expect(mockCreateQuick).toHaveBeenCalledWith({ prompt: '', projectId: 1, worktreeMode: 'worktree' });
+      expect(mockCreateQuick).toHaveBeenCalledWith({
+        prompt: '',
+        projectId: 1,
+        worktreeMode: 'worktree',
+        agentProvider: 'claude',
+        agentRuntime: 'claude-sdk',
+        agentModel: 'opus',
+      });
     }, { timeout: 5000 });
     await waitFor(() => {
       expect(panelApi.createPanel).toHaveBeenCalledWith({ sessionId: 'session-quick-001', type: 'claude' });

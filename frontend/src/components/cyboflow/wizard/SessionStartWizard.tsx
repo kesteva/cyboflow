@@ -563,7 +563,12 @@ export default function SessionStartWizard(): React.JSX.Element {
         // a session the run would take the legacy PARENTLESS path
         // (workflow_runs.session_id null), with nothing to bind the close-out
         // (Merge / PR / Dismiss) or the File Explorer / Diff to.
-        const sessionId = await ensureSessionForLaunch(selectedProjectId, { forceNew: true });
+        const sessionId = await ensureSessionForLaunch(selectedProjectId, {
+          forceNew: true,
+          agentProvider: providerForRuntime(workflowRuntime),
+          agentRuntime: workflowRuntime,
+          agentModel: model,
+        });
         // Resolve the launched flow's meta BEFORE the mutate so the seed gate can
         // read meta?.name — the triage-tray finding ids are only seeded into a
         // `compound` run.
@@ -649,7 +654,12 @@ export default function SessionStartWizard(): React.JSX.Element {
         }
         const launchSubstrate = substrateForRuntime(workflowRuntime);
         // forceNew: the wizard always starts a NEW session (see launchRun).
-        const sessionId = await ensureSessionForLaunch(selectedProjectId, { forceNew: true });
+        const sessionId = await ensureSessionForLaunch(selectedProjectId, {
+          forceNew: true,
+          agentProvider: providerForRuntime(workflowRuntime),
+          agentRuntime: workflowRuntime,
+          agentModel: model,
+        });
         const result: RunStartResult = await trpc.cyboflow.runs.start.mutate({
           workflowId,
           projectId: selectedProjectId,

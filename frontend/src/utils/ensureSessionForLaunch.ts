@@ -54,10 +54,18 @@ import { trackEvent } from './telemetry';
 import { useCyboflowStore } from '../stores/cyboflowStore';
 import { useActiveRunsStore } from '../stores/activeRunsStore';
 import { useSessionStore } from '../stores/sessionStore';
+import type {
+  AgentProvider,
+  SessionAgentRuntime,
+} from '../../../shared/types/agentRuntime';
 
 export interface EnsureSessionForLaunchOptions {
   /** Always create a fresh session, never reuse the current selection. */
   forceNew?: boolean;
+  /** Default chat agent stamped only when this helper creates a new host. */
+  agentProvider?: AgentProvider;
+  agentRuntime?: SessionAgentRuntime;
+  agentModel?: string;
 }
 
 /**
@@ -92,7 +100,14 @@ export async function ensureSessionForLaunch(
   // Otherwise create a fresh quick session for this launch. Pin the worktree mode
   // explicitly so a flow-host session ignores the global in-place default — a
   // workflow run always needs an isolated worktree.
-  const result = await API.sessions.createQuick({ prompt: '', projectId, worktreeMode: 'worktree' });
+  const result = await API.sessions.createQuick({
+    prompt: '',
+    projectId,
+    worktreeMode: 'worktree',
+    ...(opts.agentProvider ? { agentProvider: opts.agentProvider } : {}),
+    ...(opts.agentRuntime ? { agentRuntime: opts.agentRuntime } : {}),
+    ...(opts.agentModel ? { agentModel: opts.agentModel } : {}),
+  });
   if (!result.success || !result.data) {
     throw new Error(result.error ?? 'Failed to create session for launch');
   }

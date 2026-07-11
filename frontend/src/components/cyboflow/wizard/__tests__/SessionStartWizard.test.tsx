@@ -661,7 +661,12 @@ describe('SessionStartWizard — step ③ launch threading', () => {
       fireEvent.click(screen.getByTestId('wizard-cta'));
     });
 
-    expect(mockEnsureSession).toHaveBeenCalledWith(1, { forceNew: true });
+    expect(mockEnsureSession).toHaveBeenCalledWith(1, {
+      forceNew: true,
+      agentProvider: 'claude',
+      agentRuntime: 'claude-sdk',
+      agentModel: 'opus',
+    });
   });
 
   it('threads an explicit per-run substrate + permission override', async () => {
