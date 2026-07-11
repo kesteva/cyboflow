@@ -1156,17 +1156,19 @@ export const runsRouter = router({
    * stays terminal ('failed') — this never mutates it.
    *
    * Provenance is COPIED off the failed row so the caller does not re-thread it:
-   * workflow_id, substrate, provider/runtime, model pin, permission_mode_snapshot, and the seed params
-   * (task_id / seed_idea_id / seed_finding_ids, plus the sprint batch's task ids read
-   * back from sprint_batch_tasks). NO lineage column is added — no consumer needs a
-   * restarted_from link, so a schema change would be dead weight.
+   * workflow_id, substrate, provider/runtime, execution model, model pin, and the
+   * seed params (task_id / seed_idea_id / seed_finding_ids, plus the sprint batch's
+   * task ids read back from sprint_batch_tasks). The host session's live permission
+   * mode is deliberately re-read rather than copying permission_mode_snapshot. NO
+   * lineage column is added — no consumer needs a restarted_from link, so a schema
+   * change would be dead weight.
    *
-   * Contrast runs.reopen, which REVIVES the same row via --resume and REQUIRES a
-   * captured claude_session_id; restart instead starts a clean run that re-reads DB
-   * state, so it works even for a run that died before capturing a session.
+   * Contrast runs.reopen, which REVIVES the same row and REQUIRES a captured
+   * provider session/thread id; restart instead starts a clean run that re-reads
+   * DB state, so it works even for a run that died before capturing one.
    *
-   * Reuses the start deps (runLauncher + sessionManager); until wired it throws
-   * METHOD_NOT_SUPPORTED. Returns the new run's ids, or a typed no-op.
+   * Reuses the start deps (runLauncher + sessionManager). Returns the new run's
+   * ids, or a typed no-op.
    */
   restart: protectedProcedure
     .input(z.object({ runId: z.string().min(1) }))

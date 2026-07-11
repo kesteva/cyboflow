@@ -128,7 +128,7 @@ export interface Session {
    */
   substrate?: CliSubstrate;
   /**
-   * Provider/runtime backing the session's default chat agent (migrations 048-050).
+   * Provider/runtime backing the session's default chat agent (migrations 059-061).
    * `substrate` remains as a Claude compatibility projection while the app moves
    * to provider/runtime. Mirror of main/src/types/session.ts Session.
    */

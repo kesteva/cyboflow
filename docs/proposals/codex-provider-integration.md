@@ -833,6 +833,15 @@ Use `pnpm test:unit` as the code-change gate for implementation work.
 
 - Should model defaults be global per provider or per workflow?
 
+## Deferred Engineering Cleanup
+
+The Codex integration widened several established launch APIs, including
+`RunLauncher.launch`, quick-session creation, and their IPC callers. Converting
+those positional parameter lists to named options objects is worthwhile, but is
+deliberately deferred from the correctness pass: it touches every launch path and
+needs its own parity audit and focused contract tests. Until then, new parameters
+must remain trailing and every caller must be verified together.
+
 ## Recommendation
 
 Build Codex support as a provider/runtime expansion:
