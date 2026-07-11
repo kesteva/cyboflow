@@ -31,10 +31,6 @@ interface ResumeTargetRow {
   externalSessionId: string | null;
 }
 
-interface LegacyResumeTargetRow extends ResumeTargetRow {
-  provider: AgentProvider;
-}
-
 export type AgentInvocationIdFactory = () => string;
 
 export class AgentInvocationStore {
@@ -129,7 +125,7 @@ export class AgentInvocationStore {
       return this.toResumeTarget(invocation);
     }
 
-    let legacy: LegacyResumeTargetRow | undefined;
+    let legacy: ResumeTargetRow | undefined;
     try {
       legacy = this.db
         .prepare(
@@ -139,7 +135,7 @@ export class AgentInvocationStore {
              FROM workflow_runs
             WHERE id = ?`,
         )
-        .get(runId) as LegacyResumeTargetRow | undefined;
+        .get(runId) as ResumeTargetRow | undefined;
     } catch (error) {
       if (!(error instanceof Error) || !/no such column:\s*agent_(provider|runtime)/i.test(error.message)) {
         throw error;

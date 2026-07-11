@@ -35,7 +35,6 @@ import {
 } from '../../../../shared/types/agentRuntime';
 import { useForcedSubstrate } from '../../hooks/useForcedSubstrate';
 import {
-  quickSessionRuntimeForLaunch,
   workflowRuntimeForLaunch,
   type LaunchAgentRuntime,
 } from './agentRuntimeUi';
@@ -67,11 +66,8 @@ interface SubstrateSelectorProps {
 
 function isRuntimeDisabled(runtime: LaunchAgentRuntime, scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): boolean {
   if (scope === 'workflow') return workflowRuntimeForLaunch(runtime) === null;
-  if (scope === 'session') return quickSessionRuntimeForLaunch(runtime) === null;
-  return (
-    workflowRuntimeForLaunch(runtime) === null &&
-    quickSessionRuntimeForLaunch(runtime) === null
-  );
+  if (scope === 'session') return false;
+  return false;
 }
 
 function scopeHelp(scope: NonNullable<SubstrateSelectorProps['runtimeScope']>): string {

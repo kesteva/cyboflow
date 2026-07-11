@@ -384,10 +384,6 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
 
   const handleQuickSession = useCallback(() => {
     const sessionRuntime = quickSessionRuntimeForLaunch(agentRuntime);
-    if (sessionRuntime === null) {
-      setError('Codex SDK is not available in v1. Choose Codex PTY or a Claude runtime for Quick Session.');
-      return;
-    }
     void startQuickSession(
       permissionMode,
       substrateForRuntime(sessionRuntime),
@@ -404,7 +400,6 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
 
   const combinedError = error ?? quickError;
   const workflowRuntimeBlocked = workflowRuntimeForLaunch(agentRuntime) === null;
-  const quickRuntimeBlocked = quickSessionRuntimeForLaunch(agentRuntime) === null;
   const selectedSubstrate = substrateForRuntime(agentRuntime);
   const selectedProvider = providerForRuntime(agentRuntime);
 
@@ -543,14 +538,9 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
 
       <div className="mt-2 flex flex-col gap-2 border-t border-border-primary pt-3">
         <p className="text-xs text-text-secondary">Or start without a workflow:</p>
-        {quickRuntimeBlocked && (
-          <p className="text-xs text-text-tertiary">
-            Codex SDK is not available in v1. Pick Codex PTY or a Claude runtime for Quick Session.
-          </p>
-        )}
         <button
           onClick={handleQuickSession}
-          disabled={isQuickStarting || isStarting || quickRuntimeBlocked}
+          disabled={isQuickStarting || isStarting}
           className="rounded-button border border-interactive bg-bg-primary px-3 py-1.5 text-sm font-medium text-text-primary hover:bg-bg-secondary disabled:cursor-not-allowed disabled:opacity-50"
           data-testid="quick-session-button"
         >

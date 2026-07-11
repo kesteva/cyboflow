@@ -242,9 +242,6 @@ export default function SessionStartWizard(): React.JSX.Element {
     ) {
       setAgentRuntime(DEFAULT_SESSION_AGENT_RUNTIME);
     }
-    if (selection?.kind === 'quick' && quickSessionRuntimeForLaunch(agentRuntime) === null) {
-      setAgentRuntime(DEFAULT_SESSION_AGENT_RUNTIME);
-    }
   }, [selection?.kind, agentRuntime]);
   useEffect(() => {
     const effectiveRuntime: LaunchAgentRuntime =
@@ -702,10 +699,6 @@ export default function SessionStartWizard(): React.JSX.Element {
 
     if (selection.kind === 'quick') {
       const sessionRuntime = quickSessionRuntimeForLaunch(agentRuntime);
-      if (sessionRuntime === null) {
-        setLaunchError('Codex SDK is not available in v1. Choose Codex PTY or a Claude runtime for a quick session.');
-        return;
-      }
       // Fast mode is Opus-only; never request it for another model even if the
       // toggle was left on before the model was switched.
       //

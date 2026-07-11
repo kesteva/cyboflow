@@ -23,7 +23,7 @@ export function workflowRuntimeForLaunch(runtime: LaunchAgentRuntime): WorkflowA
   return isWorkflowRuntimeSupported(runtime) ? runtime : null;
 }
 
-export function quickSessionRuntimeForLaunch(runtime: LaunchAgentRuntime): SessionAgentRuntime | null {
+export function quickSessionRuntimeForLaunch(runtime: LaunchAgentRuntime): SessionAgentRuntime {
   return runtime;
 }
 
