@@ -12,7 +12,7 @@ export { TypedEventNarrowing } from './typedEventNarrowing';
 export { EventRouter } from './eventRouter';
 export { RawEventsSink } from './rawEventsSink';
 export { MessageProjection } from './messageProjection';
-export { deriveEventType } from './derivers';
+export { deriveEventType, derivePersistedEventType } from './derivers';
 export {
   agentStreamEventToClaudeStreamEvent,
   claudeStreamEventToAgentStreamEvent,

@@ -354,7 +354,7 @@ describe('RawEventsSink', () => {
 
     const rows = selectRows(db, RUN_ID);
     expect(rows).toHaveLength(1);
-    expect(rows[0].event_type).toBe('assistant');
+    expect(rows[0].event_type).toBe('agent_assistant');
     expect(JSON.parse(rows[0].payload_json)).toEqual(event);
   });
 });

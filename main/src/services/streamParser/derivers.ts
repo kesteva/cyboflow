@@ -39,3 +39,26 @@ export function deriveEventType(event: PersistableStreamEvent): string {
       return event.type;
   }
 }
+
+/**
+ * Derive the durable raw_events identity. Provider-neutral events use their
+ * own agent_* namespace so storage never implies that a Codex event came from
+ * Claude. Legacy Claude wire events retain their historical names.
+ */
+export function derivePersistedEventType(event: PersistableStreamEvent): string {
+  if (!('type' in event)) return 'unknown';
+  switch (event.type) {
+    case 'agent_session_info':
+      return 'agent_session_info';
+    case 'agent_init':
+      return 'agent_system';
+    case 'agent_message':
+      return event.role === 'assistant' ? 'agent_assistant' : 'agent_user';
+    case 'agent_result':
+      return 'agent_result';
+    case 'agent_unknown':
+      return 'agent_unknown';
+    default:
+      return deriveEventType(event);
+  }
+}

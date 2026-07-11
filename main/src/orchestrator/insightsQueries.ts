@@ -382,7 +382,7 @@ function scanRawEventRollups(
         `SELECT run_id AS runId, event_type AS eventType, payload_json AS payloadJson
          FROM raw_events
          WHERE run_id IN (${placeholders(ids.length)})
-           AND event_type IN ('assistant', 'result')
+           AND event_type IN ('assistant', 'result', 'agent_assistant', 'agent_result')
          ORDER BY run_id, id`,
       )
       .all(...ids) as RawEventUsageRow[];
@@ -399,7 +399,7 @@ function scanRawEventRollups(
       }
       if (!isRecord(payload)) continue;
 
-      if (row.eventType === 'assistant') {
+      if (row.eventType === 'assistant' || row.eventType === 'agent_assistant') {
         const message = payload.message;
         if (!isRecord(message)) continue;
         const usage = message.usage;
@@ -1181,7 +1181,7 @@ function buildTransitionStream(rows: readonly StepEventRow[]): StepStreamItem[] 
 function buildToolUseFallbackStream(rows: readonly StepEventRow[]): StepStreamItem[] {
   const items: StepStreamItem[] = [];
   for (const row of rows) {
-    if (row.eventType !== 'assistant') continue;
+    if (row.eventType !== 'assistant' && row.eventType !== 'agent_assistant') continue;
     let payload: unknown;
     try {
       payload = JSON.parse(row.payloadJson);
@@ -1257,7 +1257,7 @@ export function selectStepTokenBuckets(
         `SELECT run_id AS runId, id AS rowId, event_type AS eventType, payload_json AS payloadJson
          FROM raw_events
          WHERE run_id IN (${placeholders(ids.length)})
-           AND event_type IN ('assistant', 'step_transition')
+           AND event_type IN ('assistant', 'agent_assistant', 'step_transition')
          ORDER BY run_id, id`,
       )
       .all(...ids) as StepEventRow[];
@@ -2161,12 +2161,12 @@ export function selectDailyModelUsage(
     projectId === null
       ? `SELECT e.payload_json AS payloadJson, e.created_at AS createdAt
          FROM raw_events e
-         WHERE e.event_type = 'assistant'
+         WHERE e.event_type IN ('assistant', 'agent_assistant')
            AND e.created_at >= datetime('now', ?)`
       : `SELECT e.payload_json AS payloadJson, e.created_at AS createdAt
          FROM raw_events e
          JOIN workflow_runs r ON r.id = e.run_id
-         WHERE e.event_type = 'assistant'
+         WHERE e.event_type IN ('assistant', 'agent_assistant')
            AND e.created_at >= datetime('now', ?)
            AND r.project_id = ?`;
 

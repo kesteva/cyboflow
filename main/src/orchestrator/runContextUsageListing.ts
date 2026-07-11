@@ -86,7 +86,7 @@ export function selectRunContextUsage(db: DatabaseLike, runId: string): RunConte
     .prepare(
       `SELECT payload_json AS payloadJson
        FROM raw_events
-       WHERE run_id = ? AND event_type = 'assistant'
+       WHERE run_id = ? AND event_type IN ('assistant', 'agent_assistant')
        ORDER BY id DESC
        LIMIT ${ASSISTANT_SCAN_LIMIT}`,
     )
@@ -102,7 +102,7 @@ export function selectRunContextUsage(db: DatabaseLike, runId: string): RunConte
     .prepare(
       `SELECT payload_json AS payloadJson
        FROM raw_events
-       WHERE run_id = ? AND event_type = 'result'
+       WHERE run_id = ? AND event_type IN ('result', 'agent_result')
        ORDER BY id DESC
        LIMIT ${RESULT_SCAN_LIMIT}`,
     )

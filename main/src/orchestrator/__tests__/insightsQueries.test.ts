@@ -664,6 +664,34 @@ describe('selectRunUsageRollups', () => {
     expect(rollup.totalTokens).toBe(150);
   });
 
+  it('reads Codex usage from provider-neutral agent_result rows', () => {
+    seedWorkflow(db, { id: 'wf-1' });
+    seedRun(db, { id: 'r1', workflowId: 'wf-1' });
+    seedEvent(db, 'r1', 'agent_result', {
+      type: 'agent_result',
+      provider: 'codex',
+      runtime: 'codex-sdk',
+      subtype: 'success',
+      is_error: false,
+      num_turns: 1,
+      usage: {
+        input_tokens: 120,
+        output_tokens: 30,
+        cache_read_input_tokens: 40,
+      },
+    });
+
+    const [rollup] = selectRunUsageRollups(dbAdapter(db), ['r1']);
+    expect(rollup).toMatchObject({
+      inputTokens: 120,
+      outputTokens: 30,
+      cacheReadTokens: 40,
+      totalTokens: 150,
+      numTurns: 1,
+      assistantMessageCount: 1,
+    });
+  });
+
   it('skips malformed JSON rows silently', () => {
     seedWorkflow(db, { id: 'wf-1' });
     seedRun(db, { id: 'r1', workflowId: 'wf-1' });

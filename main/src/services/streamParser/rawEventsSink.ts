@@ -27,7 +27,7 @@ import type { EventRouter } from './eventRouter';
 import type { ILogger } from './types';
 import type { ClaudeStreamEvent } from '../../../../shared/types/claudeStream';
 
-import { deriveEventType } from './derivers';
+import { derivePersistedEventType } from './derivers';
 import type { PersistableStreamEvent } from './derivers';
 
 export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamEvent> {
@@ -106,7 +106,7 @@ export class RawEventsSink<TEvent extends PersistableStreamEvent = ClaudeStreamE
    */
   private handleEvent(runId: string, event: TEvent): void {
     try {
-      const eventType = deriveEventType(event);
+      const eventType = derivePersistedEventType(event);
       const payloadJson = JSON.stringify(event);
       const createdAt = new Date().toISOString();
       this.insertStmt.run(runId, eventType, payloadJson, createdAt);

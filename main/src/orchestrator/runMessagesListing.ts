@@ -45,6 +45,8 @@ interface ContentBlock {
 }
 
 interface MessagePayload {
+  id?: string;
+  content?: ContentBlock[];
   message?: {
     id?: string;
     content?: ContentBlock[];
@@ -63,7 +65,7 @@ function extractTextFromPayload(payloadJson: string): string | null {
     return null;
   }
 
-  const content = parsed?.message?.content;
+  const content = parsed.message?.content ?? parsed.content;
   if (!Array.isArray(content) || content.length === 0) {
     return null;
   }
@@ -87,7 +89,10 @@ function extractTextFromPayload(payloadJson: string): string | null {
 function extractMessageId(payloadJson: string, fallbackId: number): string {
   try {
     const parsed = JSON.parse(payloadJson) as MessagePayload;
-    if (typeof parsed?.message?.id === 'string' && parsed.message.id.length > 0) {
+    if (typeof parsed.id === 'string' && parsed.id.length > 0) {
+      return parsed.id;
+    }
+    if (typeof parsed.message?.id === 'string' && parsed.message.id.length > 0) {
       return parsed.message.id;
     }
   } catch {
@@ -129,8 +134,9 @@ export function selectRunMessages(db: DatabaseLike, runId: string): ChatMessage[
        re.created_at  AS createdAt
      FROM raw_events re
      WHERE re.run_id = ?
-       AND re.event_type IN ('assistant', 'user')
-       AND json_extract(re.payload_json, '$.message.content') IS NOT NULL
+       AND re.event_type IN ('assistant', 'user', 'agent_assistant', 'agent_user')
+       AND (json_extract(re.payload_json, '$.message.content') IS NOT NULL
+         OR json_extract(re.payload_json, '$.content') IS NOT NULL)
      ORDER BY re.created_at ASC, re.id ASC`,
   ).all(runId) as DbRawEventRow[];
 
@@ -146,7 +152,9 @@ export function selectRunMessages(db: DatabaseLike, runId: string): ChatMessage[
     messages.push({
       id: extractMessageId(row.payloadJson, row.id),
       runId: row.runId,
-      role: row.eventType as 'user' | 'assistant',
+      role: row.eventType === 'user' || row.eventType === 'agent_user'
+        ? 'user'
+        : 'assistant',
       text,
       createdAt: new Date(row.createdAt).toISOString(),
     });

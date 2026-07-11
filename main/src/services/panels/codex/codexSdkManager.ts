@@ -159,6 +159,7 @@ function initializeParams(): AppServerInitializeParams {
 export class CodexSdkManager extends AbstractCliManager {
   private readonly activeRuns = new Map<string, ActiveCodexRun>();
   private readonly spawnKeysByPanelId = new Map<string, Set<string>>();
+  private readonly reservedSpawnKeys = new Set<string>();
   private cyboflowMcpRuntimeConfig: CodexMcpRuntimeConfig | null = null;
   private approvalRouterProvider: (() => ApprovalRouterPort) | null = null;
   private questionRouterProvider: (() => QuestionRouterPort) | null = null;
@@ -289,12 +290,23 @@ export class CodexSdkManager extends AbstractCliManager {
 
   override async spawnCliProcess(options: ClaudeSpawnerOptions): Promise<void> {
     const spawnKey = options.spawnKey ?? options.panelId;
-    const displayPanelId = options.panelId;
-    const runId = options.runId ?? options.panelId;
-
-    if (this.processes.has(spawnKey)) {
+    if (this.processes.has(spawnKey) || this.reservedSpawnKeys.has(spawnKey)) {
       throw new Error(`Codex app-server process already running for spawn ${spawnKey}`);
     }
+    this.reservedSpawnKeys.add(spawnKey);
+    try {
+      await this.spawnTrackedProcess(options, spawnKey);
+    } finally {
+      this.reservedSpawnKeys.delete(spawnKey);
+    }
+  }
+
+  private async spawnTrackedProcess(
+    options: ClaudeSpawnerOptions,
+    spawnKey: string,
+  ): Promise<void> {
+    const displayPanelId = options.panelId;
+    const runId = options.runId ?? options.panelId;
 
     const runtimeConfig = this.requireMcpRuntimeConfig();
     const approvalRouter = this.requireApprovalRouter();
@@ -304,6 +316,9 @@ export class CodexSdkManager extends AbstractCliManager {
     const command = executable.executablePath;
     const abortController = new AbortController();
     const terminal = createDeferred<void>();
+    // App-server callbacks can reject before startup reaches the terminal await.
+    // Observe immediately while preserving rejection for the later await.
+    void terminal.promise.catch(() => undefined);
     const router = new EventRouter<AgentStreamEvent>();
     const sink = new RawEventsSink<AgentStreamEvent>(this.db, this.logger);
     const rawNotificationSink = new CodexRawNotificationSink(this.db, this.logger);

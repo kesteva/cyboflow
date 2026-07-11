@@ -175,6 +175,45 @@ function successfulHandler(method: string, _params: unknown, client: FakeAppServ
 }
 
 describe('CodexSdkManager app-server runtime', () => {
+  it('releases the spawn reservation after an early preflight failure', async () => {
+    const db = createDb();
+    try {
+      const manager = new CodexSdkManager(
+        {} as SessionManager,
+        undefined,
+        undefined,
+        db,
+        () => { throw new Error('client should not be created'); },
+        () => { throw new Error('broken executable resolution'); },
+      );
+      manager.setCyboflowMcpRuntimeConfig({
+        orchSocketPath: '/tmp/cyboflow-orch.sock',
+        bridgeScriptPath: '/app/cyboflowMcpServer.js',
+        nodeExecutablePath: '/usr/local/bin/node',
+      });
+      manager.setApprovalRouterProvider(() => ({
+        requestApproval: vi.fn(async () => ({ behavior: 'allow' as const })),
+        clearPendingForSource: vi.fn(),
+      }));
+      manager.setQuestionRouterProvider(() => ({
+        requestQuestion: vi.fn(async () => ({ answers: {} })),
+        clearPendingForRun: vi.fn(),
+      }));
+      const options = {
+        panelId: 'run-1',
+        sessionId: 'run-1',
+        runId: 'run-1',
+        worktreePath: '/tmp/worktree',
+        prompt: 'ship it',
+      };
+
+      await expect(manager.spawnCliProcess(options)).rejects.toThrow('broken executable resolution');
+      await expect(manager.spawnCliProcess(options)).rejects.toThrow('broken executable resolution');
+    } finally {
+      db.close();
+    }
+  });
+
   it('starts a configured thread and persists provider-neutral events', async () => {
     const db = createDb();
     try {
@@ -269,7 +308,12 @@ describe('CodexSdkManager app-server runtime', () => {
                    WHERE event_type != ?
                    ORDER BY id`)
         .all(CODEX_RAW_NOTIFICATION_EVENT_TYPE) as Array<{ eventType: string; payloadJson: string }>;
-      expect(rows.map((row) => row.eventType)).toEqual(['session_info', 'system', 'assistant', 'result']);
+      expect(rows.map((row) => row.eventType)).toEqual([
+        'agent_session_info',
+        'agent_system',
+        'agent_assistant',
+        'agent_result',
+      ]);
       expect(JSON.parse(rows[1].payloadJson)).toMatchObject({
         type: 'agent_init',
         provider: 'codex',
@@ -384,7 +428,7 @@ describe('CodexSdkManager app-server runtime', () => {
       })).rejects.toThrow('Codex failed');
 
       const resultRows = db
-        .prepare("SELECT payload_json AS payloadJson FROM raw_events WHERE event_type = 'result'")
+        .prepare("SELECT payload_json AS payloadJson FROM raw_events WHERE event_type = 'agent_result'")
         .all() as Array<{ payloadJson: string }>;
       expect(resultRows).toHaveLength(1);
       expect(JSON.parse(resultRows[0].payloadJson)).toMatchObject({
