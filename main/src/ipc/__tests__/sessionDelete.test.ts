@@ -46,6 +46,7 @@ vi.mock('../../services/database', () => ({
 
 import { registerSessionHandlers } from '../session';
 import type { AppServices } from '../types';
+import { panelManager } from '../../services/panelManager';
 
 type Handler = (...args: unknown[]) => Promise<unknown>;
 
@@ -66,6 +67,7 @@ interface DbRow {
   archived?: boolean;
   substrate?: string;
   chat_run_id?: string;
+  agent_runtime?: string;
   worktree_name?: string;
   base_branch?: string;
   project_id?: number;
@@ -117,6 +119,9 @@ function makeServices(
   };
 
   const killLiveSession = vi.fn(async () => {});
+  const stopCodexSdkPanel = vi.fn(async () => {});
+  const stopCodexPtyPanel = vi.fn(async () => {});
+  const stopClaudePanel = vi.fn(async () => {});
   const archiveSession = vi.fn(async () => {});
   const cancelHostedRuns = vi.fn(async () => {
     if (opts?.cancelThrows) throw new Error('cancel failed');
@@ -126,6 +131,10 @@ function makeServices(
     sessionManager: {
       archiveSession,
       addSessionOutput: vi.fn(),
+      addPanelOutput: vi.fn(),
+      emit: vi.fn(),
+      stopSession: vi.fn(),
+      updateSession: vi.fn(),
     },
     databaseService: {
       getSession: vi.fn(() => dbSession),
@@ -134,6 +143,9 @@ function makeServices(
     },
     worktreeManager: { removeWorktree, deleteBranch },
     killLiveSession,
+    claudeCodeManager: { stopPanel: stopClaudePanel, stopSession: vi.fn() },
+    codexSdkManager: { on: vi.fn(), stopPanel: stopCodexSdkPanel },
+    codexPtyManager: { on: vi.fn(), stopPanel: stopCodexPtyPanel },
     archiveProgressManager,
     cyboflow: { cancelHostedRuns },
     configManager: { isDemoMode: () => false },
@@ -142,6 +154,9 @@ function makeServices(
   return {
     services,
     killLiveSession,
+    stopCodexSdkPanel,
+    stopCodexPtyPanel,
+    stopClaudePanel,
     archiveSession,
     cancelHostedRuns,
     removeWorktree,
@@ -161,6 +176,7 @@ function register(services: AppServices) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  vi.mocked(panelManager.getPanelsForSession).mockReturnValue([]);
 });
 
 describe('sessions:delete — guard rails', () => {
@@ -226,6 +242,87 @@ describe('sessions:delete — interactive REPL kill ordering', () => {
 
     await invoke(handlers, 'sessions:delete', 's1');
     expect(made.killLiveSession).not.toHaveBeenCalled();
+  });
+
+  it('cancels a Codex SDK turn by its live panel before removing the worktree', async () => {
+    const made = makeServices({
+      id: 's1',
+      substrate: 'sdk',
+      agent_runtime: 'codex-sdk',
+      worktree_name: 'wt-s1',
+      project_id: 7,
+      is_main_repo: false,
+      name: 'sess',
+    });
+    vi.mocked(panelManager.getPanelsForSession).mockReturnValue([{
+      id: 'panel-codex',
+      sessionId: 's1',
+      type: 'claude',
+      title: 'Codex',
+      state: { isActive: true },
+      metadata: { createdAt: '', lastActiveAt: '', position: 0 },
+    }]);
+    const handlers = register(made.services);
+
+    await invoke(handlers, 'sessions:delete', 's1');
+
+    expect(made.stopCodexSdkPanel).toHaveBeenCalledWith('panel-codex');
+    expect(made.stopCodexSdkPanel.mock.invocationCallOrder[0]).toBeLessThan(
+      made.removeWorktree.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('stops a Codex PTY by its live panel before removing the worktree', async () => {
+    const made = makeServices({
+      id: 's1',
+      substrate: 'interactive',
+      agent_runtime: 'codex-pty',
+      worktree_name: 'wt-s1',
+      project_id: 7,
+      is_main_repo: false,
+      name: 'sess',
+    });
+    vi.mocked(panelManager.getPanelsForSession).mockReturnValue([{
+      id: 'panel-codex-pty',
+      sessionId: 's1',
+      type: 'claude',
+      title: 'Codex',
+      state: { isActive: true },
+      metadata: { createdAt: '', lastActiveAt: '', position: 0 },
+    }]);
+    const handlers = register(made.services);
+
+    await invoke(handlers, 'sessions:delete', 's1');
+
+    expect(made.stopCodexPtyPanel).toHaveBeenCalledWith('panel-codex-pty');
+    expect(made.stopCodexPtyPanel.mock.invocationCallOrder[0]).toBeLessThan(
+      made.removeWorktree.mock.invocationCallOrder[0],
+    );
+  });
+});
+
+describe('sessions:stop — runtime dispatch', () => {
+  it.each([
+    ['codex-sdk', 'panel-sdk'],
+    ['codex-pty', 'panel-pty'],
+  ] as const)('stops the live %s process before recording cancellation', async (agentRuntime, panelId) => {
+    const made = makeServices({ id: 's1', agent_runtime: agentRuntime, is_main_repo: true });
+    vi.mocked(panelManager.getPanelsForSession).mockReturnValue([{
+      id: panelId,
+      sessionId: 's1',
+      type: 'claude',
+      title: 'Codex',
+      state: { isActive: true },
+      metadata: { createdAt: '', lastActiveAt: '', position: 0 },
+    }]);
+    const handlers = register(made.services);
+
+    const result = await invoke(handlers, 'sessions:stop', 's1') as { success: boolean };
+
+    expect(result.success).toBe(true);
+    const stop = agentRuntime === 'codex-sdk' ? made.stopCodexSdkPanel : made.stopCodexPtyPanel;
+    expect(stop).toHaveBeenCalledWith(panelId);
+    expect(made.stopClaudePanel).not.toHaveBeenCalled();
   });
 });
 

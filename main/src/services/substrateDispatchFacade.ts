@@ -46,6 +46,11 @@ import { type CliSubstrate, DEFAULT_SUBSTRATE } from '../../../shared/types/subs
  */
 type ForwardHandler = (payload: unknown) => void;
 
+function isFailedExit(payload: unknown): boolean {
+  return typeof payload === 'object' && payload !== null &&
+    'exitCode' in payload && typeof payload.exitCode === 'number' && payload.exitCode !== 0;
+}
+
 /**
  * Bytes of interactive-PTY output retained per run for replay-on-attach
  * (IDEA-030 blank-xterm fix). Capped to the last N bytes so a long session does
@@ -225,8 +230,14 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
         this.emit('pty-output', payload);
       };
       const exitHandler: ForwardHandler = (payload) => {
-        this.clearPtyBacklog(payload);
+        // Keep a failed startup/runtime tail available for replay when the
+        // terminal mounts after the process has already exited. Successful
+        // close-out still drops the backlog normally.
+        if (!isFailedExit(payload)) {
+          this.clearPtyBacklog(payload);
+        }
         this.clearInteractivePanelMapping(payload);
+        this.emit('exit', payload);
       };
       manager.on('pty-output', ptyHandler);
       manager.on('exit', exitHandler);

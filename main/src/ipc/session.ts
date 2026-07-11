@@ -356,8 +356,19 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
     } catch (error) {
       console.error(`[IPC] Failed to update Codex SDK session status for ${payload.sessionId}:`, error);
     }
-    if (payload.exitCode === 0 && typeof payload.panelId === 'string') {
+    if (typeof payload.panelId === 'string') {
       flushCodexPanelInputQueueIfIdle(payload.panelId);
+    }
+  });
+
+  codexPtyManager?.on?.('exit', (payload: { panelId?: string; sessionId?: string; exitCode?: number }) => {
+    if (typeof payload.sessionId !== 'string') return;
+    const dbSession = databaseService.getSession(payload.sessionId);
+    if (dbSession?.agent_runtime !== 'codex-pty') return;
+    try {
+      sessionManager.updateSession(payload.sessionId, { status: payload.exitCode === 0 ? 'stopped' : 'error' });
+    } catch (error) {
+      console.error(`[IPC] Failed to update Codex PTY session status for ${payload.sessionId}:`, error);
     }
   });
 
@@ -818,7 +829,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             WHERE id = ?`,
         ).run(requestedModel ?? null, runId);
       }
-
       // Persist the per-session agent effort (migration 029) so the unified
       // chat composer can surface it as a read-only pill (set at session start;
       // mid-session change deferred). The only value is 'ultracode' (the
@@ -1086,7 +1096,16 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
       // runId to the live panelId and NO-OPs for the SDK substrate. Fail-soft:
       // a kill failure must never block the dismiss. Role-G: the live REPL gates on
       // the chat_run_id sentinel (the gate vehicle), not sessions.run_id.
-      if (dbSession.agent_runtime === 'codex-pty') {
+      if (dbSession.agent_runtime === 'codex-sdk') {
+        try {
+          const panelId = resolveClaudePanelId(sessionId);
+          if (panelId) {
+            await codexSdkManager.stopPanel(panelId);
+          }
+        } catch (err) {
+          console.warn(`[IPC:session] Failed to cancel live Codex SDK turn for dismissed session ${sessionId}:`, err);
+        }
+      } else if (dbSession.agent_runtime === 'codex-pty') {
         try {
           const panelId = resolveClaudePanelId(sessionId);
           if (panelId) {
@@ -2419,15 +2438,27 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
 
   ipcMain.handle('sessions:stop', async (_event, sessionId: string) => {
     try {
-      // Get Claude panels for this session and stop them
+      const dbSession = databaseService.getSession(sessionId);
+      if (!dbSession) {
+        return { success: false, error: 'Session not found' };
+      }
+
+      // Agent panels retain the legacy `claude` panel type. Dispatch by the
+      // session runtime so Stop reaches the process that actually owns them.
       const stopPanels = panelManager.getPanelsForSession(sessionId);
       const stopClaudePanels = stopPanels.filter(p => p.type === 'claude');
       
       if (stopClaudePanels.length > 0) {
         // Stop all Claude panels for this session
-        console.log(`[IPC] Stopping ${stopClaudePanels.length} Claude panel(s) for session ${sessionId}`);
+        console.log(`[IPC] Stopping ${stopClaudePanels.length} agent panel(s) for session ${sessionId}`);
         for (const claudePanel of stopClaudePanels) {
-          await claudeCodeManager.stopPanel(claudePanel.id);
+          if (dbSession.agent_runtime === 'codex-sdk') {
+            await codexSdkManager.stopPanel(claudePanel.id);
+          } else if (dbSession.agent_runtime === 'codex-pty') {
+            await codexPtyManager.stopPanel(claudePanel.id);
+          } else {
+            await claudeCodeManager.stopPanel(claudePanel.id);
+          }
         }
       } else {
         // Fallback to session-based stop
@@ -2463,7 +2494,6 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             };
 
             sessionManager.emit('session-output', payload);
-            sessionManager.emit('session-output-available', { sessionId, panelId: claudePanel.id });
           }
         } else {
           sessionManager.addSessionOutput(sessionId, {

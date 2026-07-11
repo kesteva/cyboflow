@@ -434,6 +434,7 @@ describe('sessions:create-quick handler - workflow_runs pipeline', () => {
       expect(sessionIdStamps).toHaveLength(0);
     }
   });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -1117,7 +1118,7 @@ describe('sessions:input handler - substrate routing', () => {
     expect(fakeClaudeCodeManager.sendInput).not.toHaveBeenCalled();
   });
 
-  it('drains Codex SDK queued input once at successful turn exit', async () => {
+  it.each([0, 1])('drains Codex SDK queued input once whenever turn exit %i leaves the panel idle', async (exitCode) => {
     const {
       handlers,
       fakeCodexSdkManager,
@@ -1131,7 +1132,7 @@ describe('sessions:input handler - substrate routing', () => {
     await invoke(handlers, 'panels:queue-input', 'panel-1', 'pending-a', 'first');
     await invoke(handlers, 'panels:queue-input', 'panel-1', 'pending-b', 'second');
     fakeCodexSdkManager.isPanelRunning.mockReturnValue(false);
-    emitCodex('exit', { panelId: 'panel-1', sessionId: SESSION_ID, exitCode: 0 });
+    emitCodex('exit', { panelId: 'panel-1', sessionId: SESSION_ID, exitCode });
     await vi.waitFor(() => expect(fakeCodexSdkManager.spawnCliProcess).toHaveBeenCalledTimes(1));
 
     expect(fakeCodexSdkManager.spawnCliProcess).toHaveBeenCalledWith(expect.objectContaining({

@@ -790,6 +790,39 @@ describe('SubstrateDispatchFacade — fan-in re-emits both managers events', () 
     expect(received[1]).toBe(interactiveSpawned);
   });
 
+  it("re-emits an additional PTY manager's exit and retains failed output for replay", () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const codexPty = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(
+      asManager(sdk),
+      asManager(interactive),
+      makeRegistry(run),
+      makeSpyLogger(),
+      [asManager(codexPty)],
+    );
+    const received: unknown[] = [];
+    facade.on('exit', (payload) => received.push(payload));
+
+    codexPty.emit('pty-output', {
+      panelId: 'panel-codex',
+      sessionId: 'session-codex',
+      runId: run.id,
+      data: 'Codex failed to start',
+    });
+    const failedExit = {
+      panelId: 'panel-codex',
+      sessionId: 'session-codex',
+      exitCode: 1,
+      signal: null,
+    };
+    codexPty.emit('exit', failedExit);
+
+    expect(received).toEqual([failedExit]);
+    expect(facade.getPtyBacklog(run.id)).toContain('Codex failed to start');
+  });
+
   it('dispose() unsubscribes from both managers so no further events are re-emitted', () => {
     const run = makeWorkflowRunRow();
     const registry = makeRegistry(run);

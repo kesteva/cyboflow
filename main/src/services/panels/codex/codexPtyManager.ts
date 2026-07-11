@@ -1,4 +1,4 @@
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type * as pty from '@homebridge/node-pty-prebuilt-multiarch';
 import type { ConversationMessage } from '../../../database/models';
@@ -71,7 +71,7 @@ export class CodexPtyManager extends AbstractCliManager {
     }
 
     try {
-      const version = execSync(`"${resolvedPath}" --version`, {
+      const version = execFileSync(resolvedPath, ['--version'], {
         encoding: 'utf8',
         timeout: 10_000,
       }).trim();
@@ -154,6 +154,21 @@ export class CodexPtyManager extends AbstractCliManager {
         () => super.spawnCliProcess({ ...options, runId }),
       );
     } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.emit('pty-output', {
+        panelId: options.panelId,
+        sessionId: options.sessionId,
+        runId,
+        type: 'pty',
+        data: `\r\n\x1b[31mCodex failed to start: ${message}\x1b[0m\r\n`,
+        timestamp: new Date(),
+      });
+      this.emit('exit', {
+        panelId: options.panelId,
+        sessionId: options.sessionId,
+        exitCode: 1,
+        signal: null,
+      });
       this.panelRunIds.delete(options.panelId);
       this.ptyBacklog.delete(runId);
       throw err;
