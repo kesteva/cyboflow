@@ -114,8 +114,8 @@ describe('isTerminalStepReached', () => {
     expect(isTerminalStepReached(ps)).toBe(false);
   });
 
-  it('is true with no step-transition data at all (no evidence of an open step)', () => {
-    expect(isTerminalStepReached(phaseState())).toBe(true);
+  it('is false with no step-transition data because completion is not yet confirmed', () => {
+    expect(isTerminalStepReached(phaseState())).toBe(false);
   });
 });
 
@@ -129,7 +129,7 @@ describe('resolveRunSummaryVariant', () => {
 
   it("→ 'complete' when end-eligible and not failed", () => {
     expect(resolveRunSummaryVariant('completed', true, idle)).toBe('complete');
-    expect(resolveRunSummaryVariant('awaiting_review', true, idle)).toBe('complete');
+    expect(resolveRunSummaryVariant('awaiting_review', true, idle)).toBeNull();
   });
 
   it("→ 'review' when running at the final human gate (not end-eligible)", () => {

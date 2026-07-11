@@ -86,11 +86,10 @@ export function isAtHumanReviewGate(
  *      'done' or 'skipped' — → true (getPhaseState force-marks all steps done
  *      for completed/canceled runs, so a self-terminated run also satisfies
  *      this; a surviving 'skipped' marker on a finished walk counts as settled).
- *   5. No step-transition data has been observed at all (currentStepId null and
- *      stepStates empty) → true. There's no positive evidence of an open,
- *      non-terminal step to withhold 'complete' over, so this falls back to
- *      trusting endEligible alone (the pre-fix behavior) rather than blocking a
- *      genuinely rested run on missing telemetry.
+ * Missing step-transition data is not evidence of completion. Keep the canvas
+ * visible until one of the positive terminal signals above arrives; otherwise a
+ * drained mid-flow Codex turn can flash a false completion card before its MCP
+ * step transition refresh reaches the renderer.
  *
  * Anything else — a known, non-last currentStepId, or concrete step states that
  * aren't all 'done' — is the regression case: false.
@@ -114,8 +113,6 @@ export function isTerminalStepReached(phaseState: UseWorkflowPhaseStateResult): 
   ) {
     return true;
   }
-
-  if (currentStepId === null && stepStates.length === 0) return true;
 
   return false;
 }
