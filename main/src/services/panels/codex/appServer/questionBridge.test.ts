@@ -79,11 +79,11 @@ describe('CodexAppServerQuestionBridge', () => {
       expect.any(Function),
     );
     expect(respond).toHaveBeenCalledWith({
-      answers: { 'codex-question-1': { answers: ['Staging', 'Production'] } },
+      answers: { 'codex-question-1': { answers: ['Staging, Production'] } },
     });
   });
 
-  it('auto-resolves safely without opening or clearing a run-wide router gate', async () => {
+  it('routes deadline-bound questions immediately and returns an answer before timeout', async () => {
     vi.useFakeTimers();
     try {
       const fake = router();
@@ -91,7 +91,29 @@ describe('CodexAppServerQuestionBridge', () => {
       const { request, respond } = dispatch(50);
       const handling = bridge.handleServerRequest(request);
 
-      expect(fake.requestQuestion).not.toHaveBeenCalled();
+      expect(fake.requestQuestion).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(0);
+      await handling;
+      expect(respond).toHaveBeenCalledWith({
+        answers: { 'codex-question-1': { answers: ['Staging, Production'] } },
+      });
+      expect(fake.clearPendingForRun).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns an empty answer when the deadline wins the routed user-response race', async () => {
+    vi.useFakeTimers();
+    try {
+      const fake = router();
+      fake.requestQuestion.mockImplementation(() => new Promise(() => undefined));
+      const bridge = new CodexAppServerQuestionBridge({ runId: 'run-1', questionRouter: fake.port });
+      const { request, respond } = dispatch(50);
+      const handling = bridge.handleServerRequest(request);
+
+      expect(fake.requestQuestion).toHaveBeenCalledOnce();
       await vi.advanceTimersByTimeAsync(50);
       await handling;
       expect(respond).toHaveBeenCalledWith({ answers: {} });
@@ -99,6 +121,19 @@ describe('CodexAppServerQuestionBridge', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('preserves commas and attachment blocks in a single free-text answer', async () => {
+    const value = 'Use retries, then fall back to cache\n\n<attachments>\n/tmp/notes.txt\n</attachments>';
+    const fake = router({ answers: { 'Choose a target': value } });
+    const bridge = new CodexAppServerQuestionBridge({ runId: 'run-1', questionRouter: fake.port });
+    const { request, respond } = dispatch();
+
+    await bridge.handleServerRequest(request);
+
+    expect(respond).toHaveBeenCalledWith({
+      answers: { 'codex-question-1': { answers: [value] } },
+    });
   });
 
   it('tears down only its RPC requests and never clears sibling questions run-wide', () => {

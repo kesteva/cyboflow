@@ -45,20 +45,35 @@ export class CodexAppServerQuestionBridge {
 
     const key = `${typeof request.id}:${String(request.id)}`;
     this.pending.set(key, request);
-    if (request.params.autoResolutionMs !== null) {
-      await new Promise<void>((resolve) => setTimeout(resolve, request.params.autoResolutionMs!));
-      this.respondIfPending(key, { answers: {} });
-      return;
-    }
 
     try {
-      const answer = await this.options.questionRouter.requestQuestion(
+      const answerPromise = this.options.questionRouter.requestQuestion(
         this.options.runId,
         request.params.itemId,
         request.params.questions.map(toQuestionPayload),
         () => undefined,
       );
-      this.respondIfPending(key, toCodexResponse(request.params.questions, answer));
+      const autoResolutionMs = request.params.autoResolutionMs;
+      if (autoResolutionMs === null) {
+        const answer = await answerPromise;
+        this.respondIfPending(key, toCodexResponse(request.params.questions, answer));
+        return;
+      }
+
+      let timeout: NodeJS.Timeout | undefined;
+      const result = await Promise.race([
+        answerPromise.then((answer) => ({ kind: 'answer' as const, answer })),
+        new Promise<{ kind: 'timeout' }>((resolve) => {
+          timeout = setTimeout(() => resolve({ kind: 'timeout' }), autoResolutionMs);
+        }),
+      ]);
+      if (timeout !== undefined) clearTimeout(timeout);
+      this.respondIfPending(
+        key,
+        result.kind === 'answer'
+          ? toCodexResponse(request.params.questions, result.answer)
+          : { answers: {} },
+      );
     } catch (cause) {
       this.respondIfPending(key, { answers: {} });
       this.reportError(new Error(
@@ -120,7 +135,7 @@ function toCodexResponse(
     const value = answer.answers[question.question];
     if (value === undefined) continue;
     answers[question.id] = {
-      answers: value.split(',').map((entry) => entry.trim()).filter(Boolean),
+      answers: [value],
     };
   }
   return { answers };
