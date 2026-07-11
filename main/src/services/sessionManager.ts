@@ -790,13 +790,18 @@ export class SessionManager extends EventEmitter {
     
     this.db.addPanelOutput(panelId, output.type, dataToStore);
 
-    // Panel-backed transcripts re-read persisted output on this event. Include
-    // both ids because session views key by sessionId while unified quick-panel
-    // views key by panelId.
-    this.emit('session-output-available', {
-      sessionId: panel?.sessionId ?? '',
-      panelId,
-    });
+    // Codex SDK quick sessions project app-server events directly into panel
+    // output and need a persisted-transcript refresh. Other panel runtimes
+    // already have their live output channel; broadcasting every PTY/Claude
+    // write here caused an app-wide refresh fanout on high-churn sessions.
+    const panelSessionId = panel?.sessionId;
+    const panelSession = panelSessionId ? this.db.getSession(panelSessionId) : undefined;
+    if (panelSession?.agent_runtime === 'codex-sdk') {
+      this.emit('session-output-available', {
+        sessionId: panelSessionId,
+        panelId,
+      });
+    }
 
     // Capture Claude's session ID from init/system messages for proper --resume handling
     try {

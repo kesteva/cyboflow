@@ -105,7 +105,7 @@ interface SessionManagerWithPrivate {
 
 describe('convertDbSessionToSession — run_id → runId mapping', () => {
   it('notifies panel transcript consumers after persisted panel output changes', () => {
-    const dbSession = makeDbSession();
+    const dbSession = makeDbSession({ agent_runtime: 'codex-sdk' });
     const db = makeDbMock(dbSession);
     db.getPanel.mockReturnValue({ id: 'panel-1', sessionId: dbSession.id, type: 'claude' });
     const mgr = new SessionManager(db as unknown as ConstructorParameters<typeof SessionManager>[0]);
@@ -120,6 +120,24 @@ describe('convertDbSessionToSession — run_id → runId mapping', () => {
 
     expect(db.addPanelOutput).toHaveBeenCalledOnce();
     expect(notices).toEqual([{ sessionId: dbSession.id, panelId: 'panel-1' }]);
+  });
+
+  it('does not broadcast transcript refreshes for non-Codex panel output', () => {
+    const dbSession = makeDbSession({ agent_runtime: 'claude-sdk' });
+    const db = makeDbMock(dbSession);
+    db.getPanel.mockReturnValue({ id: 'panel-1', sessionId: dbSession.id, type: 'claude' });
+    const mgr = new SessionManager(db as unknown as ConstructorParameters<typeof SessionManager>[0]);
+    const notice = vi.fn();
+    mgr.on('session-output-available', notice);
+
+    mgr.addPanelOutput('panel-1', {
+      type: 'stdout',
+      data: 'live Claude output',
+      timestamp: new Date('2026-07-10T12:00:00.000Z'),
+    });
+
+    expect(db.addPanelOutput).toHaveBeenCalledOnce();
+    expect(notice).not.toHaveBeenCalled();
   });
 
   it('copies run_id="flow-001" to runId="flow-001" (flow-owned session)', () => {
