@@ -749,10 +749,12 @@ export class RunExecutor {
       // ordering mirrors stepTransitionBridge: lifecycle transition fires first, then step emit).
       this.emitStep(runId, 'running');
 
-      this.logger.info('[RunExecutor] spawning Claude CLI process', {
+      this.logger.info('[RunExecutor] spawning agent process', {
         runId,
         panelId,
         worktreePath: run.worktree_path,
+        provider: run.agent_provider ?? 'claude',
+        runtime: run.agent_runtime ?? (run.substrate === 'interactive' ? 'claude-interactive' : 'claude-sdk'),
       });
 
       // Resume the SAME SDK conversation when EITHER a Piece-C nudge OR a Phase-4b

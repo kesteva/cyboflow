@@ -696,6 +696,32 @@ describe('RunExecutor.execute — happy path (panelId/sessionId alignment)', () 
     expect(opts.prompt).toBe('test prompt');
   });
 
+  it('(e1) logs a provider-neutral launch message with the Codex runtime identity', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/my/worktree',
+      agent_provider: 'codex',
+      agent_runtime: 'codex-sdk',
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const logger = makeSpyLogger();
+    const executor = new TestableRunExecutor(makeSpawner(), registry, logger);
+
+    await executor.execute(run.id);
+
+    expect(logger.info).toHaveBeenCalledWith('[RunExecutor] spawning agent process', {
+      runId: run.id,
+      panelId: run.id,
+      worktreePath: '/my/worktree',
+      provider: 'codex',
+      runtime: 'codex-sdk',
+    });
+    expect(logger.calls.some((call) => call.message.includes('Claude CLI'))).toBe(false);
+  });
+
   /**
    * Regression test: bridgeEvents must be called BEFORE spawnCliProcess so that
    * no SDK-initialization events are lost when the iterator starts.

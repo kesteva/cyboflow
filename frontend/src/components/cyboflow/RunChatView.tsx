@@ -74,6 +74,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
     return null;
   }, [runId, runsByProject]);
   const isInteractive = run?.substrate === 'interactive';
+  const agentName = run?.agent_provider === 'codex' ? 'Codex' : 'Claude';
   const running = run?.status === 'running' || run?.status === 'starting';
   const worktreePath = run?.worktree_path ?? null;
   const branchName = run?.branch_name ?? null;
@@ -233,7 +234,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // -------------------------------------------------------------------------
   return (
     <UnifiedChatView
-      name={isInteractive ? 'Terminal' : 'Claude'}
+      name={isInteractive ? 'Terminal' : agentName}
       transport={isInteractive ? 'interactive' : 'sdk'}
       mode="flow"
       running={running}

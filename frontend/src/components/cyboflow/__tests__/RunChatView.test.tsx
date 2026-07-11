@@ -152,6 +152,7 @@ import { useQuestionStore } from '../../../stores/questionStore';
 import { useCenterPaneStore } from '../../../stores/centerPaneStore';
 import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { CliSubstrate } from '../../../../../shared/types/substrate';
+import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
 
 // ---------------------------------------------------------------------------
 // Setup
@@ -231,7 +232,11 @@ function seedQuestion(runId: string): void {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeRunRow(id: string, substrate: CliSubstrate | undefined): ActiveRunRow {
+function makeRunRow(
+  id: string,
+  substrate: CliSubstrate | undefined,
+  agentProvider: AgentProvider = 'claude',
+): ActiveRunRow {
   return {
     id,
     workflow_id: 'wf-1',
@@ -246,13 +251,18 @@ function makeRunRow(id: string, substrate: CliSubstrate | undefined): ActiveRunR
     stuck_reason: null,
     permission_mode_snapshot: 'default',
     substrate,
+    agent_provider: agentProvider,
     workflowName: 'planner',
   };
 }
 
-function seedRun(id: string, substrate: CliSubstrate | undefined): void {
+function seedRun(
+  id: string,
+  substrate: CliSubstrate | undefined,
+  agentProvider: AgentProvider = 'claude',
+): void {
   act(() => {
-    useActiveRunsStore.setState({ runsByProject: { 7: [makeRunRow(id, substrate)] } });
+    useActiveRunsStore.setState({ runsByProject: { 7: [makeRunRow(id, substrate, agentProvider)] } });
   });
 }
 
@@ -292,6 +302,17 @@ describe('RunChatView — substrate branch', () => {
     // Composer + approvals stay mounted here too.
     expect(screen.getByTestId('chat-input')).toBeInTheDocument();
     expect(screen.getByTestId('pending-approvals-for-run')).toBeInTheDocument();
+  });
+
+  it('labels a Codex SDK workflow as Codex', async () => {
+    seedRun('run-codex', 'sdk', 'codex');
+
+    render(<RunChatView runId="run-codex" />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('chat-mode-identity')).toHaveTextContent('Codex');
+    });
+    expect(screen.getByTestId('chat-mode-identity')).not.toHaveTextContent('Claude');
   });
 
   it("undefined substrate falls back to the sdk surface (ChatTranscript + rail)", async () => {
