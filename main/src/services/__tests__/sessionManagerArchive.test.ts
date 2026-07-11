@@ -76,6 +76,7 @@ function makeDbMock(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     archiveSession: vi.fn().mockReturnValue(true),
     getPanel: vi.fn().mockReturnValue({ sessionId: 's1' }),
+    getSession: vi.fn().mockReturnValue({ agent_runtime: 'claude-sdk' }),
     getPanelOutputs: vi.fn().mockReturnValue([]),
     addPanelOutput: vi.fn(),
     updateSession: vi.fn(),
@@ -161,5 +162,18 @@ describe('SessionManager.addPanelOutput', () => {
     mgr.addPanelOutput('panel-db', { type: 'stdout', data: 'hello', timestamp: new Date() });
 
     expect(db.addPanelOutput).toHaveBeenCalledWith('panel-db', 'stdout', 'hello');
+  });
+
+  it('announces persisted transcript output only for Codex SDK sessions', () => {
+    const db = makeDbMock({
+      getSession: vi.fn().mockReturnValue({ agent_runtime: 'codex-sdk' }),
+    });
+    const mgr = makeManager(db);
+    const available = vi.fn();
+    mgr.on('session-output-available', available);
+
+    mgr.addPanelOutput('panel-codex', { type: 'stdout', data: 'hello', timestamp: new Date() });
+
+    expect(available).toHaveBeenCalledWith({ sessionId: 's1', panelId: 'panel-codex' });
   });
 });

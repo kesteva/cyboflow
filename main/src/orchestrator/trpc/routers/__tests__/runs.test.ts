@@ -1122,8 +1122,7 @@ describe('cyboflow.runs.start', () => {
 
 describe('cyboflow.runs.nudge', () => {
   it('forwards a delivered nudge: flips the run to running and returns { delivered: true }', async () => {
-    const db = createTestDb({ disableForeignKeys: true });
-    db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
+    const db = createTestDb({ disableForeignKeys: true, includeWorkflowRunTaskColumns: true });
     const { runId } = seedRun(db, { status: 'awaiting_review' });
     db.prepare('UPDATE workflow_runs SET claude_session_id = ? WHERE id = ?').run('sess-1', runId);
 
@@ -1150,8 +1149,7 @@ describe('cyboflow.runs.nudge', () => {
   });
 
   it('forwards a noOp result verbatim (idle guard: not_idle)', async () => {
-    const db = createTestDb({ disableForeignKeys: true });
-    db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
+    const db = createTestDb({ disableForeignKeys: true, includeWorkflowRunTaskColumns: true });
     const { runId } = seedRun(db, { status: 'running' });
 
     const execute = vi.fn<(id: string) => Promise<void>>().mockResolvedValue(undefined);
