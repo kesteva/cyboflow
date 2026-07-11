@@ -23,6 +23,56 @@ const path = require('path');
 const PACKAGE_JSON_PATH = path.join(__dirname, '..', 'package.json');
 const GENERATED_CONFIG_PATH = path.join(__dirname, '..', 'build', 'electron-builder.generated.json');
 
+const CLAUDE_NATIVE_SUFFIXES = [
+  'darwin-arm64', 'darwin-x64',
+  'linux-x64', 'linux-arm64', 'linux-x64-musl', 'linux-arm64-musl',
+  'win32-x64', 'win32-arm64',
+];
+const CODEX_NATIVE_SUFFIXES = [
+  'darwin-arm64', 'darwin-x64',
+  'linux-x64', 'linux-arm64',
+  'win32-x64', 'win32-arm64',
+];
+
+function getLeanPackagingPlan(targetArch) {
+  if (targetArch !== 'arm64' && targetArch !== 'x64') {
+    return null;
+  }
+
+  const targetSuffix = `darwin-${targetArch}`;
+  const codexTargetTriple = targetArch === 'arm64'
+    ? 'aarch64-apple-darwin'
+    : 'x86_64-apple-darwin';
+
+  return {
+    requiredBinaries: [
+      {
+        label: 'Claude Code',
+        packageName: `@anthropic-ai/claude-agent-sdk-${targetSuffix}`,
+        relativePath: path.join(
+          'node_modules', '@anthropic-ai', `claude-agent-sdk-${targetSuffix}`, 'claude'
+        ),
+      },
+      {
+        label: 'Codex',
+        packageName: `@openai/codex-${targetSuffix}`,
+        relativePath: path.join(
+          'node_modules', '@openai', `codex-${targetSuffix}`,
+          'vendor', codexTargetTriple, 'bin', 'codex'
+        ),
+      },
+    ],
+    exclusions: [
+      ...CLAUDE_NATIVE_SUFFIXES
+        .filter((suffix) => suffix !== targetSuffix)
+        .map((suffix) => `!node_modules/@anthropic-ai/claude-agent-sdk-${suffix}/**`),
+      ...CODEX_NATIVE_SUFFIXES
+        .filter((suffix) => suffix !== targetSuffix)
+        .map((suffix) => `!node_modules/@openai/codex-${suffix}/**`),
+    ],
+  };
+}
+
 function configureBuild() {
   console.log('Configuring build for current environment...');
 
@@ -88,45 +138,35 @@ function configureBuild() {
     config.publish = { ...(config.publish || {}), url: 'https://updates.cyboflow.com/dev' };
   }
 
-  // Lean per-arch packaging. The claude-agent-sdk ships its (~200 MB) native
-  // `claude` CLI as a per-platform/arch package (`…-darwin-arm64`,
-  // `…-darwin-x64`, `…-linux-*`, `…-win32-*`). electron-builder bundles
-  // node_modules wholesale, and a cross-arch dev box (or a `--force` install
-  // that materializes every optionalDependency — e.g. after an SDK bump) can
-  // have ALL of them present. A macOS DMG only ever needs the single
-  // `darwin-<targetArch>` binary; every other platform/arch package is
-  // dead weight (~230 MB each). When BUILD_ARCH names a single arch, exclude
-  // every foreign Claude binary and fail fast if the target arch's binary is
-  // absent (which would silently break the SDK substrate at runtime).
+  // Lean per-arch packaging. Both agent distributions ship their native CLIs
+  // as optional per-platform/arch packages. electron-builder bundles
+  // node_modules wholesale, and a cross-arch dev box (or a forced install that
+  // materializes every optionalDependency) can have all of them present. A
+  // macOS DMG needs only the matching darwin package for each agent. Exclude
+  // every foreign native package and fail fast if either target binary is
+  // absent, which would otherwise silently break that runtime after release.
   // BUILD_ARCH unset / 'universal' leaves files untouched.
   const targetArch = process.env.BUILD_ARCH;
-  if (targetArch === 'arm64' || targetArch === 'x64') {
-    const sdkBase = '@anthropic-ai/claude-agent-sdk';
-    const targetBinary = path.join(
-      __dirname, '..', 'node_modules', `${sdkBase}-darwin-${targetArch}`, 'claude'
-    );
-    if (!fs.existsSync(targetBinary)) {
+  const leanPackagingPlan = getLeanPackagingPlan(targetArch);
+  if (leanPackagingPlan) {
+    for (const required of leanPackagingPlan.requiredBinaries) {
+      const targetBinary = path.join(__dirname, '..', required.relativePath);
+      if (fs.existsSync(targetBinary)) continue;
       console.error(
-        `Error: the ${targetArch} Claude Code binary is missing ` +
-          `(${sdkBase}-darwin-${targetArch}/claude). A ${targetArch} build would ship ` +
-          `without it and break the SDK substrate at runtime. ` +
+        `Error: the ${targetArch} ${required.label} binary is missing ` +
+          `(${required.packageName}). A ${targetArch} build would ship without it ` +
+          `and break that agent runtime. ` +
           `Run "pnpm run install:darwin-cross" before a cross-arch build.`
       );
       process.exit(1);
     }
-    // Every per-platform Claude package except the one we're targeting.
-    const foreignPkgs = [
-      'darwin-arm64', 'darwin-x64',
-      'linux-x64', 'linux-arm64', 'linux-x64-musl', 'linux-arm64-musl',
-      'win32-x64', 'win32-arm64',
-    ].filter((suffix) => suffix !== `darwin-${targetArch}`);
     config.files = [
       ...(config.files || []),
-      ...foreignPkgs.map((suffix) => `!node_modules/${sdkBase}-${suffix}/**`),
+      ...leanPackagingPlan.exclusions,
     ];
     console.log(
-      `Lean packaging: keeping only ${sdkBase}-darwin-${targetArch}; ` +
-        `excluding ${foreignPkgs.length} foreign Claude binaries.`
+      `Lean packaging: keeping only darwin-${targetArch} agent binaries; ` +
+        `excluding ${leanPackagingPlan.exclusions.length} foreign native packages.`
     );
   }
 
@@ -146,4 +186,4 @@ if (require.main === module) {
   configureBuild();
 }
 
-module.exports = { configureBuild, GENERATED_CONFIG_PATH };
+module.exports = { configureBuild, getLeanPackagingPlan, GENERATED_CONFIG_PATH };

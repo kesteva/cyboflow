@@ -85,10 +85,11 @@ The full file should then export **8 vars**: 5 Apple
 
 macOS ships as **lean per-arch builds** — `arm64` and `x64` are built in
 *separate* electron-builder invocations so each DMG can exclude the other arch's
-~200 MB `claude` binary (see `scripts/configure-build.js`). A universal build is
-**not** used: `@electron/universal` chokes on the two identical per-arch `claude`
-Mach-Os. The trade-off is that the release is a few explicit steps rather than one
-`release:mac` command.
+native Claude and Codex packages (see `scripts/configure-build.js`). The build
+also excludes both agents' Linux and Windows packages if a forced install has
+materialized them. A universal build is **not** used: `@electron/universal`
+chokes on identical per-arch CLI Mach-Os. The trade-off is that the release is
+a few explicit steps rather than one `release:mac` command.
 
 1. **Prepare the release metadata** (both before building):
    - Bump `version` in `package.json` — and the `frontend` / `main` / `shared`
