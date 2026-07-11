@@ -41,6 +41,8 @@ describe('renderWorkflowPromptForRuntime', () => {
     expect(rendered.prompt).toContain('cyboflow_*');
     expect(rendered.prompt).toContain('cyboflow_report_step');
     expect(rendered.prompt).toContain('Human gates remain host-owned gates');
+    expect(rendered.prompt).toContain('cyboflow_request_user_input');
+    expect(rendered.prompt).toContain('This MCP call blocks until the human answers');
     expect(rendered.prompt).toContain('Cyboflow database remains the single source of truth');
   });
 

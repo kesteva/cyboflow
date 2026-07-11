@@ -189,8 +189,6 @@ export interface ClaudeSpawnerOptions {
   model?: string;
   /** Workflow step owning this concrete invocation; absent for run-level turns. */
   agentInvocationStepId?: string;
-  /** True for structured workflow execution; absent for normal session chat. */
-  workflowTurn?: boolean;
 }
 
 /**
@@ -1845,7 +1843,6 @@ export class RunExecutor {
     const overrides: Partial<ClaudeSpawnerOptions> = {
       systemPromptAppend,
       agentPermissionMode: this.resolveLiveAgentPermissionMode(runId, run),
-      workflowTurn: true,
       // Per-run model pin (migration 037), read FRESH off the run row like
       // agentPermissionMode so it governs the next spawn. NULL/absent → undefined
       // → the spawner sets no SDK `model` (SDK default; byte-identical to before).

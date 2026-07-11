@@ -98,21 +98,7 @@ export function buildCodexAppServerThreadResumeParams(
 
 export function buildCodexAppServerTurnOptions(
   options: ClaudeSpawnerOptions,
-): Pick<AppServerTurnStartParams, 'model' | 'collaborationMode'> {
+): Pick<AppServerTurnStartParams, 'model'> {
   const model = resolveAgentModelAlias('codex', options.model);
-  return {
-    ...(model ? { model } : {}),
-    ...(options.workflowTurn && model
-      ? {
-          collaborationMode: {
-            mode: 'plan' as const,
-            settings: {
-              model,
-              reasoning_effort: null,
-              developer_instructions: null,
-            },
-          },
-        }
-      : {}),
-  };
+  return model ? { model } : {};
 }

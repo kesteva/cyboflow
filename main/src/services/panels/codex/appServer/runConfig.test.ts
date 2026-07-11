@@ -117,7 +117,7 @@ describe('Codex app-server run configuration', () => {
     });
   });
 
-  it('enables Plan collaboration mode only for structured workflow turns', () => {
+  it('keeps workflow turns in normal execution mode while resolving the model', () => {
     const base = {
       panelId: 'run-1',
       sessionId: 'run-1',
@@ -126,17 +126,6 @@ describe('Codex app-server run configuration', () => {
       model: 'gpt-5.5',
     };
 
-    expect(buildCodexAppServerTurnOptions({ ...base, workflowTurn: true })).toEqual({
-      model: 'gpt-5.5',
-      collaborationMode: {
-        mode: 'plan',
-        settings: {
-          model: 'gpt-5.5',
-          reasoning_effort: null,
-          developer_instructions: null,
-        },
-      },
-    });
     expect(buildCodexAppServerTurnOptions(base)).toEqual({ model: 'gpt-5.5' });
   });
 

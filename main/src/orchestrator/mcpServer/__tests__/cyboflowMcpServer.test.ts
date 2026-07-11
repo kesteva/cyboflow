@@ -151,12 +151,45 @@ describe('cyboflowMcpServer ListTools', () => {
     expect(names).toEqual(
       expect.arrayContaining([
         'cyboflow_report_step',
+        'cyboflow_request_user_input',
         'cyboflow_create_task',
         'cyboflow_update_task',
         'cyboflow_set_task_stage',
         'cyboflow_report_finding',
       ]),
     );
+  });
+
+  it('declares the blocking host-owned question tool', async () => {
+    const tools = await listTools();
+    const questionTool = tools.find((tool) => tool.name === 'cyboflow_request_user_input');
+    expect(questionTool).toBeDefined();
+    expect(questionTool!.description).toContain('BLOCKS');
+    expect(questionTool!.inputSchema.required).toEqual(['questions']);
+    const questionsSchema = questionTool!.inputSchema.properties['questions'] as {
+      minItems?: number;
+      maxItems?: number;
+    };
+    expect(questionsSchema.minItems).toBe(1);
+    expect(questionsSchema.maxItems).toBe(4);
+  });
+
+  it('validates question payloads before dispatching them', async () => {
+    expect(await callTool('cyboflow_request_user_input', { questions: [] })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+    expect(await callTool('cyboflow_request_user_input', {
+      questions: [{ header: 'Approve', question: 'Proceed?', options: [{ label: 'Yes' }] }],
+    })).toMatchObject({ error: 'invalid_arguments' });
+
+    const valid = await callTool('cyboflow_request_user_input', {
+      questions: [{
+        header: 'Approve',
+        question: 'Proceed?',
+        options: [{ label: 'Yes' }, { label: 'No', description: 'Stop here.' }],
+      }],
+    });
+    expect(valid.error).toBe('[Cyboflow MCP] IPC client not connected');
   });
 
   it('cyboflow_report_finding requires title+body and declares the documented optional fields', async () => {

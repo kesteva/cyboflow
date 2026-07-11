@@ -31,7 +31,7 @@ Provider adaptation rules:
 - Treat the workflow body below as the source of truth for phases, step ids, required outputs, database writes, artifacts, and human gates.
 - When the workflow mentions Claude-specific mechanics such as \`.claude/agents/\`, the Agent tool, or a named \`cyboflow-*\` subagent, interpret that as a role/delegation instruction. If this Codex runtime exposes a native delegation mechanism, use the matching role. If it does not, perform that role's work directly in this turn while preserving the same returned sections and persistence contract.
 - Continue to use the \`cyboflow_*\` MCP tools for workflow state. \`cyboflow_report_step\` is still required at the same step boundaries.
-- Human gates remain host-owned gates. Use the available question/approval mechanism exactly where the workflow asks for AskUserQuestion, and do not continue past a gate until the human answer is available.
+- Human gates remain host-owned gates. Whenever the workflow says to use AskUserQuestion or request_user_input, call \`cyboflow_request_user_input\` with the same questions instead. This MCP call blocks until the human answers in Cyboflow; do not continue past the gate before it returns.
 - Do not create or read plugin state files. The Cyboflow database remains the single source of truth.
 
 ---`;
