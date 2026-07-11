@@ -2,7 +2,7 @@
 
 Date: 2026-07-08
 Updated: 2026-07-10
-Status: Runtime foundation, raw notifications, questions, and session follow-up landed; Codex workflow launch remains gated
+Status: Codex SDK quick sessions and workflow launch are wired through app-server; Codex PTY remains quick-session-only
 
 ## Summary
 
@@ -841,6 +841,11 @@ those positional parameter lists to named options objects is worthwhile, but is
 deliberately deferred from the correctness pass: it touches every launch path and
 needs its own parity audit and focused contract tests. Until then, new parameters
 must remain trailing and every caller must be verified together.
+
+The remaining duplicated JSON guards, request-key helpers, quick-session briefing
+composition, and launcher model-clamp effects are also refactoring work rather than
+provider behavior. Consolidate them separately with parity tests instead of mixing
+cross-cutting churn into lifecycle and approval fixes.
 
 ## Recommendation
 
