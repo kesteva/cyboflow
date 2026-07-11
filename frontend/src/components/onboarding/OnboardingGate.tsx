@@ -4,6 +4,7 @@ import { CLAUDE_DETECT_CHANNEL } from '../../../../shared/types/onboarding';
 import type { Project } from '../../types/project';
 import type { IPCResponse } from '../../utils/api';
 import { API } from '../../utils/api';
+import { useConfigStore } from '../../stores/configStore';
 import { useNavigationStore } from '../../stores/navigationStore';
 import {
   isNextGateBlocked,
@@ -177,7 +178,9 @@ export function OnboardingGate(): React.JSX.Element | null {
   const handleLocate = useCallback(async () => {
     const res = await API.dialog.openFile();
     if (res.success && typeof res.data === 'string' && res.data) {
-      await API.config.update({ claudeExecutablePath: res.data });
+      // Via the config STORE (not raw API.config.update) so the renderer's
+      // cached config refreshes too — consumers seed from the store.
+      await useConfigStore.getState().updateConfig({ claudeExecutablePath: res.data });
       setDetection(null); // re-arms runDetect
     }
   }, [setDetection]);
@@ -214,7 +217,10 @@ export function OnboardingGate(): React.JSX.Element | null {
     if (permNextInFlight.current) return;
     permNextInFlight.current = true;
     try {
-      await API.config.update({ defaultAgentPermissionMode: permMode });
+      // MUST go through the config store: updateConfig persists AND refetches
+      // the renderer's cached config, so downstream seeds (the wizard's
+      // useAgentPermissionMode) inherit the choice without an app restart.
+      await useConfigStore.getState().updateConfig({ defaultAgentPermissionMode: permMode });
     } catch {
       /* non-fatal — advance regardless; the pill can be changed in Settings */
     } finally {
