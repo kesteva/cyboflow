@@ -110,6 +110,7 @@ export type NudgeRunResult =
 interface NudgeRunRow {
   id: string;
   status: string;
+  execution_model: 'orchestrated' | 'programmatic' | null;
 }
 
 const TERMINAL_STATUSES = new Set<string>(TERMINAL_RUN_STATUSES);
@@ -163,7 +164,7 @@ export async function nudgeRunHandler(
   // Phase 1: guards + the running flip, serialized inside the per-run PQueue.
   const guardResult = await runQueues.getOrCreate(runId).add(async () => {
     const row = db
-      .prepare('SELECT id, status FROM workflow_runs WHERE id = ?')
+      .prepare('SELECT id, status, execution_model FROM workflow_runs WHERE id = ?')
       .get(runId) as NudgeRunRow | undefined;
 
     if (!row) {
@@ -181,7 +182,10 @@ export async function nudgeRunHandler(
     if (countPendingBlockingReviewItems(db, runId, opts.ignoreBlockingReviewItemId) > 0) {
       return { ok: false as const, reason: 'blocked' as const };
     }
-    if (!new AgentInvocationStore(db).getLatestTopLevelResumeTarget(runId)) {
+    if (
+      row.execution_model !== 'programmatic'
+      && !new AgentInvocationStore(db).getLatestTopLevelResumeTarget(runId)
+    ) {
       return { ok: false as const, reason: 'no_session' as const };
     }
 
