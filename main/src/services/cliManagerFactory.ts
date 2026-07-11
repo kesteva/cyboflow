@@ -519,11 +519,17 @@ export class CliManagerFactory {
         );
       }
       const db = dbCandidate as Database.Database;
+      const appVersion = typeof options?.appVersion === 'string'
+        ? options.appVersion
+        : 'development';
       return new CodexSdkManager(
         sessionManager as SessionManager,
         logger,
         configManager,
         db,
+        undefined,
+        undefined,
+        appVersion,
       );
     };
 

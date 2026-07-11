@@ -141,12 +141,12 @@ function defaultCodexAppServerClientFactory(
   return new CodexAppServerClient(options);
 }
 
-function initializeParams(): AppServerInitializeParams {
+function initializeParams(clientVersion: string): AppServerInitializeParams {
   return {
     clientInfo: {
       name: 'cyboflow',
       title: 'Cyboflow',
-      version: '0.1.20',
+      version: clientVersion,
     },
     capabilities: {
       experimentalApi: true,
@@ -173,6 +173,7 @@ export class CodexSdkManager extends AbstractCliManager {
     private readonly db: Database.Database,
     private readonly createAppServerClient: CodexAppServerClientFactory = defaultCodexAppServerClientFactory,
     private readonly resolveExecutable: CodexExecutableResolver = resolveCodexExecutablePath,
+    private readonly clientVersion: string = 'development',
   ) {
     super(sessionManager, logger, configManager);
     if (db == null) {
@@ -470,7 +471,7 @@ export class CodexSdkManager extends AbstractCliManager {
 
       client.start();
       initializeResponse = await withTimeout(
-        turnSession.initialize(initializeParams()),
+        turnSession.initialize(initializeParams(this.clientVersion)),
         APP_SERVER_REQUEST_TIMEOUT_MS,
         'Codex app-server initialization',
       );

@@ -735,6 +735,7 @@ async function initializeServices() {
     configManager,
     additionalOptions: {
       db: databaseService.getDb(),
+      appVersion: app.getVersion(),
     },
     skipValidation: true,
   });

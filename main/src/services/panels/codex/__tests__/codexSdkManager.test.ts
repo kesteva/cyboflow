@@ -93,6 +93,7 @@ function makeManager(
       version: '0.143.0',
       target: 'aarch64-apple-darwin',
     }),
+    '0.1.test',
   );
   manager.setCyboflowMcpRuntimeConfig({
     orchSocketPath: '/tmp/cyboflow-orch.sock',
@@ -238,6 +239,13 @@ describe('CodexSdkManager app-server runtime', () => {
       } as Parameters<CodexSdkManager['spawnCliProcess']>[0] & { agentInvocationStepId: string });
 
       const client = getClient();
+      expect(client.initialize).toHaveBeenCalledWith(expect.objectContaining({
+        clientInfo: {
+          name: 'cyboflow',
+          title: 'Cyboflow',
+          version: '0.1.test',
+        },
+      }));
       expect(client.start).toHaveBeenCalledOnce();
       expect(client.stop).toHaveBeenCalledOnce();
       expect(client.options).toMatchObject({
