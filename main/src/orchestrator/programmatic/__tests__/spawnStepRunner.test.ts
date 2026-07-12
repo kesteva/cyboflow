@@ -308,4 +308,21 @@ describe('SpawnStepRunner', () => {
     expect((calls[0][0] as ClaudeSpawnerOptions).prompt).not.toContain('TASK-002');
     expect((calls[1][0] as ClaudeSpawnerOptions).prompt).toContain('TASK-002: Added mid-run');
   });
+
+  it('RE-RESOLVES run-owned idea ids per step so a context-created idea scopes a later optional step', async () => {
+    const spawner = makeSpawner();
+    let ideaIds: readonly string[] = [];
+    const resolveIdeaIds = vi.fn<() => readonly string[]>(() => ideaIds);
+    const runner = new SpawnStepRunner(spawner, { ...opts, runOwnedIdeaIds: resolveIdeaIds });
+
+    await runner.runStep(step({ id: 'context', agent: 'context' }), ctx);
+    ideaIds = ['IDEA-raw-ship'];
+    await runner.runStep(step({ id: 'ui-prototype', agent: 'ui-prototype' }), ctx);
+
+    expect(resolveIdeaIds).toHaveBeenCalledTimes(2);
+    const calls = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls;
+    expect((calls[0][0] as ClaudeSpawnerOptions).prompt).not.toContain('## Run-owned idea scope');
+    expect((calls[1][0] as ClaudeSpawnerOptions).prompt).toContain('`IDEA-raw-ship`');
+    expect((calls[1][0] as ClaudeSpawnerOptions).prompt).not.toContain('cyboflow_list_tasks');
+  });
 });

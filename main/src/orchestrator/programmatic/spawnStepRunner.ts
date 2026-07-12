@@ -77,6 +77,13 @@ export interface SpawnStepRunnerOptions {
    */
   taskScope?: () => string | undefined;
   /**
+   * Per-step run-owned IDEA scope. Resolves the ids from the run's authoritative
+   * ownership projection (seed idea plus ideas created during this run). It is a
+   * thunk because Ship may create its idea during context, after this runner was
+   * constructed but before its optional design steps run.
+   */
+  runOwnedIdeaIds?: () => readonly string[];
+  /**
    * Provider/runtime prompt envelope for this run. Claude is identity; Codex gets
    * the compatibility adapter around each fresh per-step prompt.
    */
@@ -104,12 +111,17 @@ export class SpawnStepRunner implements StepRunner {
     // construction) so a lane added mid-run is grounded with its real title/body
     // on its first dispatch, exactly like userGuidance/agentPermissionMode.
     const taskScope = this.opts.taskScope?.();
+    // Re-resolve the run-owned idea ids per step. This prevents conditional Ship
+    // steps from inspecting unrelated project ideas and picks up ideas context
+    // creates mid-run.
+    const runOwnedIdeaIds = this.opts.runOwnedIdeaIds?.();
     const basePrompt = composeStepPrompt({
       step,
       workflowName: this.opts.workflowName,
       attempt: ctx.attempt,
       ...(ctx.item ? { item: ctx.item } : {}),
       ...(taskScope ? { taskScope } : {}),
+      ...(runOwnedIdeaIds && runOwnedIdeaIds.length > 0 ? { runOwnedIdeaIds } : {}),
       ...(userGuidance ? { userGuidance } : {}),
     });
     const { prompt } = renderWorkflowPromptForRuntime(

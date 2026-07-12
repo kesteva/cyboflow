@@ -245,9 +245,14 @@ describe('composeStepPrompt', () => {
       step: step({ id: 'ui-prototype', agent: 'ui-prototype' }),
       workflowName: 'ship',
       attempt: 1,
+      runOwnedIdeaIds: ['IDEA-run', 'IDEA-created'],
     });
     expect(out).toContain('## Conditional execution');
-    expect(out).toContain("cyboflow_list_tasks(task_type: 'idea')");
+    expect(out).toContain('## Run-owned idea scope');
+    expect(out).toContain('`IDEA-run`, `IDEA-created`');
+    expect(out).toContain('cyboflow_get_task');
+    expect(out).not.toContain('cyboflow_list_tasks');
+    expect(out).toContain('Do NOT enumerate project ideas or infer an active idea');
     expect(out).toContain('UI_PROTOTYPE: yes');
     expect(out).toContain('do not delegate, do not write prototype files, do not report an artifact');
   });
@@ -257,10 +262,11 @@ describe('composeStepPrompt', () => {
       step: step({ id: 'architecture', agent: 'architecture' }),
       workflowName: 'ship',
       attempt: 1,
+      runOwnedIdeaIds: ['IDEA-run'],
     });
     expect(out).toContain('## Conditional execution');
     expect(out).toContain('ARCH_DESIGN: yes');
-    expect(out).toContain('do not delegate, do not change the idea body');
+    expect(out).toContain('do not delegate, do not change an idea body');
   });
 
   it('composes the artifact addendum correctly with the fan-out item context variant', () => {

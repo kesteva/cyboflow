@@ -68,6 +68,12 @@ export interface ComposeStepPromptArgs {
    */
   taskScope?: string;
   /**
+   * Idea ids this run owns: its launch seed plus ideas it created during
+   * execution. Resolved live by the host for each fresh step turn, rather than
+   * asking the agent to infer an "active" idea from every project idea.
+   */
+  runOwnedIdeaIds?: readonly string[];
+  /**
    * Operator GUIDANCE for this step (RunDirectives live steering) — free-text the
    * operator added mid-run via the monitor to steer this step, appended as a tail
    * section when non-empty. Absent / empty ⇒ no guidance section (output
@@ -115,12 +121,15 @@ function artifactFollowUp(outputArtifact: NonNullable<WorkflowStep['outputArtifa
  * turn, so mirror that decision here before it can delegate or create an
  * artifact. Other optional steps have no equivalent persisted prerequisite.
  */
-function conditionalExecution(step: WorkflowStep): string {
+function conditionalExecution(step: WorkflowStep, hasRunOwnedIdeas: boolean): string {
+  const scope = hasRunOwnedIdeas
+    ? 'Read each id in the `## Run-owned idea scope` section directly with `cyboflow_get_task`. Do NOT enumerate project ideas or infer an active idea from other project ideas. Evaluate flags only on these run-owned ideas; when more than one is eligible, handle each eligible idea rather than choosing one.'
+    : 'This run has no owned idea yet. Skip this step cleanly: do not list project ideas, infer an active idea, delegate, or create an artifact.';
   switch (step.id) {
     case 'ui-prototype':
-      return `\n\n## Conditional execution\n\nBefore delegating, read the active idea's persisted spec with \`cyboflow_list_tasks(task_type: 'idea')\` and \`cyboflow_get_task\`. Run this step ONLY when that spec contains \`UI_PROTOTYPE: yes\`. When the flag is \`no\` or absent, skip this step cleanly: do not delegate, do not write prototype files, do not report an artifact, and end with a one-line skip summary.`;
+      return `\n\n## Conditional execution\n\n${scope} Run this step ONLY for scoped ideas whose persisted spec contains \`UI_PROTOTYPE: yes\`. When no scoped idea has that flag, skip this step cleanly: do not delegate, do not write prototype files, do not report an artifact, and end with a one-line skip summary.`;
     case 'architecture':
-      return `\n\n## Conditional execution\n\nBefore delegating, read the active idea's persisted spec with \`cyboflow_list_tasks(task_type: 'idea')\` and \`cyboflow_get_task\`. Run this step ONLY when that spec contains \`ARCH_DESIGN: yes\`. When the flag is \`no\` or absent, skip this step cleanly: do not delegate, do not change the idea body, and end with a one-line skip summary.`;
+      return `\n\n## Conditional execution\n\n${scope} Run this step ONLY for scoped ideas whose persisted spec contains \`ARCH_DESIGN: yes\`. When no scoped idea has that flag, skip this step cleanly: do not delegate, do not change an idea body, and end with a one-line skip summary.`;
     default:
       return '';
   }
@@ -140,8 +149,13 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
     args.taskScope !== undefined && args.taskScope.trim().length > 0
       ? `\n\n# Sprint tasks\n\n${args.taskScope.trim()}\n\nThese are the EXACT tasks in scope for this sprint — the cyboflow database is their source of truth. When this step needs the task set (e.g. dependency analysis or per-task work), use THIS list and pass it to your subagent; do NOT hunt for task files in the worktree to discover scope (cyboflow keeps no task files on disk, so you will find none and wrongly conclude there is nothing to do).`
       : '';
+  const runOwnedIdeaIds = [...new Set(args.runOwnedIdeaIds?.filter((id) => id.trim().length > 0) ?? [])];
+  const runOwnedIdeaScope =
+    runOwnedIdeaIds.length > 0
+      ? `\n\n## Run-owned idea scope\n\nThis run owns only these idea ids: ${runOwnedIdeaIds.map((id) => `\`${id}\``).join(', ')}. This scope is authoritative for idea-specific work; do not inspect or select unrelated project ideas.`
+      : '';
   const artifactNote = step.outputArtifact !== undefined ? artifactFollowUp(step.outputArtifact) : '';
-  const conditionalExecutionNote = conditionalExecution(step);
+  const conditionalExecutionNote = conditionalExecution(step, runOwnedIdeaIds.length > 0);
   // Compound review-queue discipline — applies to EVERY compound step, not just
   // the one that reports the artifact. The compounder surfaces below-bar
   // candidates in a `## Discarded` list; a step agent that faithfully "records
@@ -163,7 +177,7 @@ export function composeStepPrompt(args: ComposeStepPromptArgs): string {
 
   return `You are executing **one step** of the "${workflowName}" workflow in this git worktree.
 
-Step: **${step.name}** (id: \`${step.id}\`)${desc}${itemNote}${taskScope}
+Step: **${step.name}** (id: \`${step.id}\`)${desc}${itemNote}${taskScope}${runOwnedIdeaScope}
 
 Do ONLY this step:
 

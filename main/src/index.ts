@@ -139,6 +139,7 @@ import { McpConfigWriter } from './orchestrator/mcpConfigWriter';
 import { RunExecutor } from './orchestrator/runExecutor';
 import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReaderLike, FindingReaderLike, WorkflowPromptReaderLike } from './orchestrator/runExecutor';
 import { buildSeedTasksBlock } from './orchestrator/seedTasksBlock';
+import { listRunOwnedIdeaIds } from './orchestrator/runEntityOwnership';
 import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
 import { selectFindingForSeed } from './orchestrator/reviewItemListing';
 import { buildStepTransitionEvent, resolveRunLevelStepId } from './orchestrator/stepTransitionBridge';
@@ -1583,6 +1584,11 @@ async function initializeServices() {
       reviewItemProjectChannel,
       cyboflowLogger,
     ),
+    // Per-step idea scope for programmatic prompts. The ownership projection
+    // unions workflow_runs.seed_idea_id with ideas created by this run, so Ship's
+    // raw-prompt path picks up the idea its context step creates before optional
+    // design steps evaluate UI_PROTOTYPE / ARCH_DESIGN.
+    runOwnedIdeaIdsProvider: (runId) => listRunOwnedIdeaIds(cyboflowDb, runId),
     // Blocking-review-items checkpoint: parks a programmatic run at each step
     // boundary while a PENDING BLOCKING review_item exists (e.g. a blocking finding
     // the agent recorded), awaits it clearing on reviewItemChangeEvents, then
