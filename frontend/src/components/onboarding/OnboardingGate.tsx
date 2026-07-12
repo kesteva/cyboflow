@@ -12,7 +12,9 @@ import {
   type OnboardingRealEvent,
   type PersistedOnboarding,
 } from '../../stores/onboardingStore';
+import { onboardingTelemetryEvents } from '../../stores/onboardingTelemetry';
 import { ONBOARDING_EVENTS, ONBOARDING_MODAL_STEPS, ONBOARDING_PREF_KEY } from '../../utils/onboarding';
+import { trackEvent } from '../../utils/telemetry';
 import { OnboardingOverlay } from './OnboardingOverlay';
 import { OnboardingModalCard, type PrimaryAction } from './OnboardingModalCard';
 import { Coachmark } from './Coachmark';
@@ -81,6 +83,34 @@ export function OnboardingGate(): React.JSX.Element | null {
       if (state.status === prev.status && state.step === prev.step) return;
       const snapshot: PersistedOnboarding = { version: 1, status: state.status, step: state.step };
       void window.electron?.invoke('preferences:set', ONBOARDING_PREF_KEY, JSON.stringify(snapshot));
+    });
+  }, []);
+
+  // Emit onboarding usage telemetry off the same store transitions. Registered
+  // before hydration resolves so the pristine first-run 'started' is caught. The
+  // transition→event decision is a pure function (onboardingTelemetry); this shell
+  // just fires each result. Every step the user sees emits onboarding_step_viewed.
+  useEffect(() => {
+    return useOnboardingStore.subscribe((state, prev) => {
+      for (const ev of onboardingTelemetryEvents(prev, state)) {
+        switch (ev.name) {
+          case 'onboarding_started':
+            trackEvent('onboarding_started', ev.props);
+            break;
+          case 'onboarding_step_viewed':
+            trackEvent('onboarding_step_viewed', ev.props);
+            break;
+          case 'onboarding_skipped':
+            trackEvent('onboarding_skipped', ev.props);
+            break;
+          case 'onboarding_resumed':
+            trackEvent('onboarding_resumed', ev.props);
+            break;
+          case 'onboarding_completed':
+            trackEvent('onboarding_completed', ev.props);
+            break;
+        }
+      }
     });
   }, []);
 

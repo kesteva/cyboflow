@@ -18,7 +18,35 @@ export type TelemetryFlow = CyboflowWorkflowName | 'custom';
 /** Telemetry build environment (mirrors `main/src/services/telemetry/environment.ts`). */
 export type TelemetryEnvironment = 'local' | 'dev' | 'stable';
 
+/**
+ * First-run onboarding tour step slugs — a stable analytics label per step
+ * index, index-aligned with `ONBOARDING_STEP_NAMES` in
+ * `frontend/src/utils/onboarding.ts`. Used only by the `onboarding_*` events;
+ * NEVER for control flow.
+ */
+export type OnboardingStepName =
+  | 'welcome'
+  | 'connect'
+  | 'permission'
+  | 'add_project'
+  | 'quick_session'
+  | 'session_permission'
+  | 'model'
+  | 'substrate'
+  | 'ship'
+  | 'human_review'
+  | 'rail_map';
+
 export interface TelemetryEventMap {
+  // ── Onboarding — first-run tour funnel ──────────────────────────────────────
+  // Every step (modal + coachmark) emits `onboarding_step_viewed`; the lifecycle
+  // events bracket it (entry / abandon / resume-from-Sidebar / finish).
+  onboarding_started: { trigger: 'first_run' | 'replay' };
+  onboarding_step_viewed: { step: number; name: OnboardingStepName };
+  onboarding_skipped: { step: number; name: OnboardingStepName };
+  onboarding_resumed: { step: number };
+  onboarding_completed: { furthest_step: number };
+
   // ── Tier 1 — activation + the core run funnel ───────────────────────────────
   app_started: { environment: TelemetryEnvironment };
   project_created: { source?: 'wizard' | 'dialog' };

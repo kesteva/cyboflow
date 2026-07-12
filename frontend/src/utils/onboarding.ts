@@ -6,6 +6,8 @@
  * real-action dispatch sites never drift on key/event/anchor names.
  */
 
+import type { OnboardingStepName } from '../../../shared/types/telemetry';
+
 /**
  * Single user_preferences key holding the persisted tour snapshot as JSON
  * (see PersistedOnboarding in stores/onboardingStore.ts). Read/write via the
@@ -61,6 +63,30 @@ export const ONBOARDING_COACH_STEPS: ReadonlyArray<number> = [4, 5, 6, 7, 8, 9];
  * interacting with the anchored control never advances them.
  */
 export const ONBOARDING_POINTER_STEPS: ReadonlyArray<number> = [5, 6, 7];
+
+/**
+ * Stable analytics slug per step index (see telemetry `OnboardingStepName`),
+ * index-aligned with the tour's step order and ONBOARDING_STEP_COUNT. Used only
+ * for the `onboarding_*` usage events — never for control flow.
+ */
+export const ONBOARDING_STEP_NAMES: readonly OnboardingStepName[] = [
+  'welcome',
+  'connect',
+  'permission',
+  'add_project',
+  'quick_session',
+  'session_permission',
+  'model',
+  'substrate',
+  'ship',
+  'human_review',
+  'rail_map',
+];
+
+/** Step index → analytics slug; out-of-range indices fall back to 'welcome'. */
+export function onboardingStepName(step: number): OnboardingStepName {
+  return ONBOARDING_STEP_NAMES[step] ?? 'welcome';
+}
 
 /**
  * Real-action dispatch helpers — call these at the SUCCESS point of the
