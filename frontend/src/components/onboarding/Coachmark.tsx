@@ -79,7 +79,7 @@ const COACH: Record<number, CoachSpec> = {
     pointer: true,
     body: (
       <>
-        The Claude model powering this session. <b className="text-[var(--paper)]">Opus</b> is the most capable
+        The Claude model powering this session. <b className="text-[var(--paper)]">Opus</b> is a highly capable
         default; smaller models are faster and cheaper for lighter tasks.
       </>
     ),

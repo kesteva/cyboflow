@@ -40,8 +40,8 @@ export interface ModelOption {
 // it unavailable (see useModelAvailabilityStore / isModelOptionDisabled).
 export const MODEL_OPTIONS: ReadonlyArray<ModelOption> = [
   { id: 'fable', label: 'Fable 5', context: '1M', description: 'Frontier — most capable' },
-  { id: 'opus', label: 'Opus 4.8', context: '1M', description: 'Most capable' },
-  { id: 'opus-250k', label: 'Opus 4.8', context: '250K', description: 'Most capable' },
+  { id: 'opus', label: 'Opus 4.8', context: '1M', description: 'More capable' },
+  { id: 'opus-250k', label: 'Opus 4.8', context: '250K', description: 'More capable' },
   { id: 'sonnet', label: 'Sonnet 5', context: '1M', description: 'Balanced' },
   { id: 'haiku', label: 'Haiku 4.5', context: '200K', description: 'Fastest' },
   { id: 'auto', label: 'Auto', context: null, description: 'Let Claude pick the model' },
