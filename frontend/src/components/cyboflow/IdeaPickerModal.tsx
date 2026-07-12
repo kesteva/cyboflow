@@ -27,12 +27,30 @@ interface IdeaPickerModalProps {
   onClose: () => void;
   /** Called with the chosen (existing) or minted (free-text) idea id. */
   onPicked: (ideaId: string) => void;
+  /**
+   * Which tab opens first. Defaults to 'pick'. The onboarding /ship path passes
+   * 'new' — a first-run user has no backlog yet, so writing their first idea is
+   * the intended action.
+   */
+  defaultMode?: Mode;
+  /**
+   * Render the "what's an idea?" explainer callout above the picker. The
+   * onboarding path sets this so the first idea a user writes comes with context.
+   */
+  showIdeaExplainer?: boolean;
 }
 
 type Mode = 'pick' | 'new';
 
-export function IdeaPickerModal({ isOpen, projectId, onClose, onPicked }: IdeaPickerModalProps): React.JSX.Element {
-  const [mode, setMode] = useState<Mode>('pick');
+export function IdeaPickerModal({
+  isOpen,
+  projectId,
+  onClose,
+  onPicked,
+  defaultMode = 'pick',
+  showIdeaExplainer = false,
+}: IdeaPickerModalProps): React.JSX.Element {
+  const [mode, setMode] = useState<Mode>(defaultMode);
   const [ideas, setIdeas] = useState<BacklogTaskItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -78,7 +96,7 @@ export function IdeaPickerModal({ isOpen, projectId, onClose, onPicked }: IdeaPi
   }, [isOpen, projectId]);
 
   const reset = (): void => {
-    setMode('pick');
+    setMode(defaultMode);
     setTitle('');
     setBody('');
     setError(null);
@@ -127,6 +145,21 @@ export function IdeaPickerModal({ isOpen, projectId, onClose, onPicked }: IdeaPi
       <ModalHeader>Select an idea for the planner</ModalHeader>
       <ModalBody>
         <div className="flex flex-col gap-3">
+          {showIdeaExplainer && (
+            <div
+              className="rounded border-l-2 border-interactive bg-bg-secondary px-3 py-2.5 text-xs leading-relaxed text-text-secondary"
+              data-testid="idea-picker-explainer"
+            >
+              <p className="mb-1 text-[13px] font-semibold text-text-primary">What&rsquo;s an idea?</p>
+              <p>
+                Ideas are the first step of the build process in Cyboflow. They&rsquo;re meant to be captured the
+                moment you have an idea for something you want to do. They can be small (change the color of this
+                button) or large (build this new feature). They don&rsquo;t need to be detailed, but you can add as
+                much detail in the body as you want. Additional steps will extract more details from you as needed.
+              </p>
+            </div>
+          )}
+
           {/* Mode toggle */}
           <div className="flex gap-2" role="tablist" aria-label="Idea source">
             <button

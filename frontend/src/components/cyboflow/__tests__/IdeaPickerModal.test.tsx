@@ -108,6 +108,12 @@ async function renderOpen(onPicked = vi.fn(), onClose = vi.fn()) {
 }
 
 describe('IdeaPickerModal — pick existing', () => {
+  it('defaults to pick mode with no explainer (non-onboarding callers unchanged)', async () => {
+    await renderOpen();
+    expect(screen.getByTestId('idea-picker-mode-pick')).toHaveAttribute('aria-selected', 'true');
+    expect(screen.queryByTestId('idea-picker-explainer')).not.toBeInTheDocument();
+  });
+
   it('lists only open ideas and onPicked fires with the selected id (no create)', async () => {
     const { onPicked } = await renderOpen();
 
@@ -162,6 +168,23 @@ describe('IdeaPickerModal — new idea', () => {
       priority: 'P2',
     });
     expect(onPicked).toHaveBeenCalledWith('IDEA-NEW');
+  });
+
+  it('defaultMode="new" opens straight on the New idea form (onboarding path)', async () => {
+    render(
+      <IdeaPickerModal isOpen projectId={1} onClose={vi.fn()} onPicked={vi.fn()} defaultMode="new" showIdeaExplainer />,
+    );
+    // The New idea form is live without touching the toggle.
+    expect(await screen.findByLabelText('Idea title')).toBeInTheDocument();
+    expect(screen.getByTestId('idea-picker-mode-new')).toHaveAttribute('aria-selected', 'true');
+    // The what's-an-idea explainer is rendered.
+    expect(screen.getByTestId('idea-picker-explainer')).toHaveTextContent(
+      'Ideas are the first step of the build process in Cyboflow',
+    );
+    // Flush the async ideas query so its state update doesn't leak past the test.
+    await act(async () => {
+      await Promise.resolve();
+    });
   });
 
   it('surfaces a create error inline and does not call onPicked', async () => {

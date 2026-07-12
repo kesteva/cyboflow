@@ -215,6 +215,12 @@ export function QuickSessionCanvas({
   // Tour step-8 accent on the /ship chip (design packet: rust inset bar +
   // "Start here" tag while the coachmark points at it).
   const onboardingShipStep = useOnboardingStore((s) => s.status === 'active' && s.step === 8);
+  // The idea-picker opened DURING the tour's /ship step (clicking the chip parks
+  // 'pending', so accept either). First-run users have no backlog, so the picker
+  // opens on "New idea" with the what's-an-idea explainer.
+  const onboardingIdeaGate = useOnboardingStore(
+    (s) => s.hydrated && (s.status === 'active' || s.status === 'pending') && s.step === 8,
+  );
 
   // Detected Claude Code dynamic workflows (the Workflow tool / `ultracode`)
   // launched by THIS session's agent — rendered prominently above the picker.
@@ -807,6 +813,8 @@ export function QuickSessionCanvas({
           projectId={projectId}
           onClose={() => setPlannerIdForGate(null)}
           onPicked={handleIdeaPicked}
+          defaultMode={onboardingIdeaGate ? 'new' : 'pick'}
+          showIdeaExplainer={onboardingIdeaGate}
         />
       )}
 
