@@ -36,6 +36,8 @@ import { ONBOARDING_COACH_STEPS, ONBOARDING_POINTER_STEPS, ONBOARDING_STEP_COUNT
  *   'workflow-run-started' lands 9; step 9 advances directly on its click.
  * - Dots/keyboard may only revisit steps already reached (maxVisitedStep),
  *   so neither can bypass the step-1 gate or the coach preconditions.
+ * - forceNext() is the anchor-lost escape (see its interface doc): the only way
+ *   to move a do-step forward when its target has unmounted.
  */
 
 export type OnboardingStatus = 'idle' | 'active' | 'pending' | 'skipped' | 'completed';
@@ -88,6 +90,14 @@ interface OnboardingState {
   /** Start (or restart) the tour at step 0. */
   begin: (replay: boolean) => void;
   next: () => void;
+  /**
+   * Anchor-lost escape: force a plain step+1 advance, bypassing the
+   * advance-by-doing guard. Wired ONLY to the Coachmark's anchor-lost fallback —
+   * a do-step (4/8/9) whose target has unmounted (e.g. Back into step 4 after the
+   * wizard left the Quick Session card) has no other way forward, since next()
+   * no-ops on do-steps.
+   */
+  forceNext: () => void;
   back: () => void;
   /** Dot navigation — only to steps already visited. */
   goTo: (step: number) => void;
@@ -173,6 +183,18 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
       set({ status: 'pending' });
       return;
     }
+    if (s.step >= LAST_STEP) {
+      set({ status: 'completed' });
+      return;
+    }
+    const step = s.step + 1;
+    set({ step, maxVisitedStep: Math.max(s.maxVisitedStep, step) });
+  },
+
+  forceNext: () => {
+    const s = get();
+    if (s.status !== 'active') return;
+    if (isNextGateBlocked(s)) return; // defensive — coach steps are never the step-1 gate
     if (s.step >= LAST_STEP) {
       set({ status: 'completed' });
       return;

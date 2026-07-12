@@ -61,6 +61,7 @@ export function OnboardingGate(): React.JSX.Element | null {
 
   const hydrate = useOnboardingStore((s) => s.hydrate);
   const next = useOnboardingStore((s) => s.next);
+  const forceNext = useOnboardingStore((s) => s.forceNext);
   const back = useOnboardingStore((s) => s.back);
   const goTo = useOnboardingStore((s) => s.goTo);
   const skip = useOnboardingStore((s) => s.skip);
@@ -364,6 +365,7 @@ export function OnboardingGate(): React.JSX.Element | null {
           onGoTo={goTo}
           onAnchorActioned={anchorActioned}
           onNext={next}
+          onForward={forceNext}
         />
       )}
     </OnboardingOverlay>

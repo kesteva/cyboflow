@@ -206,6 +206,42 @@ describe('onboardingStore — Configure pointer steps (5-7)', () => {
   });
 });
 
+describe('onboardingStore — forceNext (anchor-lost escape)', () => {
+  beforeEach(reset);
+
+  it('force-advances a do-step that next() refuses (4 → 5)', () => {
+    useOnboardingStore.setState({ status: 'active', step: 4, maxVisitedStep: 4 });
+    s().next();
+    expect(s().step).toBe(4); // next() is a no-op on the do-step
+    s().forceNext();
+    expect(s().step).toBe(5);
+    expect(s().maxVisitedStep).toBe(5);
+  });
+
+  it('force-advances the later do-steps (8 → 9, 9 → 10)', () => {
+    useOnboardingStore.setState({ status: 'active', step: 8, maxVisitedStep: 8 });
+    s().forceNext();
+    expect(s().step).toBe(9);
+    useOnboardingStore.setState({ status: 'active', step: 9, maxVisitedStep: 9 });
+    s().forceNext();
+    expect(s().step).toBe(10);
+    expect(s().maxVisitedStep).toBe(10);
+  });
+
+  it('is a no-op unless active', () => {
+    useOnboardingStore.setState({ status: 'pending', step: 8, maxVisitedStep: 8 });
+    s().forceNext();
+    expect(s().step).toBe(8);
+    expect(s().status).toBe('pending');
+  });
+
+  it('completes from the last step', () => {
+    useOnboardingStore.setState({ status: 'active', step: 10, maxVisitedStep: 10 });
+    s().forceNext();
+    expect(s().status).toBe('completed');
+  });
+});
+
 describe('onboardingStore — goTo / skip / resume', () => {
   beforeEach(reset);
 

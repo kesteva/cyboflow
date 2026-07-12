@@ -29,6 +29,8 @@ interface CoachmarkProps {
   onGoTo: (step: number) => void;
   onAnchorActioned: () => void;
   onNext: () => void;
+  /** Anchor-lost escape: force-advance a do-step whose target has unmounted. */
+  onForward: () => void;
 }
 
 /**
@@ -142,6 +144,7 @@ export function Coachmark({
   onGoTo,
   onAnchorActioned,
   onNext,
+  onForward,
 }: CoachmarkProps): React.JSX.Element | null {
   const spec = COACH[step];
   const [rect, setRect] = useState<Rect | null>(null);
@@ -211,33 +214,49 @@ export function Coachmark({
           </div>
         )}
       </div>
-      <div className="flex items-center gap-2 px-[17px] pb-3.5 pt-[11px]">
-        <div className="flex flex-1 items-center">
-          <OnboardingDots step={step} maxVisitedStep={maxVisitedStep} onGoTo={onGoTo} />
-        </div>
-        <button
-          type="button"
-          onClick={onSkip}
-          className="border-none bg-transparent px-0.5 py-1.5 text-[9.5px] font-semibold uppercase tracking-[.1em] text-[var(--paper)]/55 transition-colors hover:text-[var(--paper)]"
-        >
-          Skip
-        </button>
-        <button
-          type="button"
-          onClick={onBack}
-          className="border border-[var(--paper)]/40 bg-transparent px-2.5 py-[7px] text-[9.5px] font-bold uppercase tracking-[.12em] text-[var(--paper)] transition-colors hover:border-[var(--paper)]"
-        >
-          Back
-        </button>
-        {spec.pointer && (
+      {/* Dots on their own row above the actions: an 11-step dot rail + Skip/Back
+          /Next does not fit one row in the 298px popover (the Next button on
+          pointer steps overflowed the card). Two rows scale to any step count;
+          both rows are centered so the dots and buttons stay visually aligned. */}
+      <div className="flex flex-col items-center gap-2.5 px-[17px] pb-3.5 pt-[11px]">
+        <OnboardingDots step={step} maxVisitedStep={maxVisitedStep} onGoTo={onGoTo} />
+        <div className="flex items-center justify-center gap-2">
           <button
             type="button"
-            onClick={onNext}
-            className="border border-transparent bg-[var(--terracotta)] px-2.5 py-[7px] text-[9.5px] font-bold uppercase tracking-[.12em] text-[var(--paper)] transition-opacity hover:opacity-90"
+            onClick={onSkip}
+            className="border-none bg-transparent px-0.5 py-1.5 text-[9.5px] font-semibold uppercase tracking-[.1em] text-[var(--paper)]/55 transition-colors hover:text-[var(--paper)]"
           >
-            Next →
+            Skip
           </button>
-        )}
+          <button
+            type="button"
+            onClick={onBack}
+            className="border border-[var(--paper)]/40 bg-transparent px-2.5 py-[7px] text-[9.5px] font-bold uppercase tracking-[.12em] text-[var(--paper)] transition-colors hover:border-[var(--paper)]"
+          >
+            Back
+          </button>
+          {/* Forward control. Anchored view: pointer steps advance via Next; do-steps
+              advance by doing (no button). Anchor-lost fallback (rect === null): a
+              Continue escape force-advances, the only forward path when a do-step's
+              target has unmounted. */}
+          {rect === null ? (
+            <button
+              type="button"
+              onClick={onForward}
+              className="border border-transparent bg-[var(--terracotta)] px-2.5 py-[7px] text-[9.5px] font-bold uppercase tracking-[.12em] text-[var(--paper)] transition-opacity hover:opacity-90"
+            >
+              Continue →
+            </button>
+          ) : spec.pointer ? (
+            <button
+              type="button"
+              onClick={onNext}
+              className="border border-transparent bg-[var(--terracotta)] px-2.5 py-[7px] text-[9.5px] font-bold uppercase tracking-[.12em] text-[var(--paper)] transition-opacity hover:opacity-90"
+            >
+              Next →
+            </button>
+          ) : null}
+        </div>
       </div>
     </>
   );
