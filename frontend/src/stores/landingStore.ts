@@ -117,6 +117,21 @@ export function collectPendingBlockingRunIds(
   return out;
 }
 
+/** Blocking findings must remain actionable even though advisory findings stay in Insights. */
+export function flattenPendingBlockingFindings(
+  byProject: Record<number, ReviewItem[]>,
+): ReviewItem[] {
+  const out: ReviewItem[] = [];
+  for (const list of Object.values(byProject)) {
+    for (const item of list) {
+      if (item.status === 'pending' && item.kind === 'finding' && item.blocking) {
+        out.push(item);
+      }
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -344,6 +359,12 @@ export function useAggregatedReviewItems(): ReviewItem[] {
 export function useAggregatedBlockingRunIds(): ReadonlySet<string> {
   const byProject = useLandingStore((s) => s.reviewItemsByProject);
   return useMemo(() => collectPendingBlockingRunIds(byProject), [byProject]);
+}
+
+/** Pending blocking findings across every project, for the global human-review inbox. */
+export function useAggregatedBlockingFindings(): ReviewItem[] {
+  const byProject = useLandingStore((s) => s.reviewItemsByProject);
+  return useMemo(() => flattenPendingBlockingFindings(byProject), [byProject]);
 }
 
 /**

@@ -19,6 +19,7 @@ import type { ReviewItem } from '../../../../shared/types/reviews';
 
 let mockRuns: ActiveRunRow[] = [];
 let mockReviewItems: ReviewItem[] = [];
+let mockBlockingFindings: ReviewItem[] = [];
 let mockBlockingRunIds: ReadonlySet<string> = new Set();
 
 vi.mock('../../stores/reviewQueueStore', () => ({
@@ -31,6 +32,7 @@ vi.mock('../../stores/reviewQueueSlice', () => ({
 }));
 
 vi.mock('../../stores/landingStore', () => ({
+  useAggregatedBlockingFindings: () => mockBlockingFindings,
   useAggregatedBlockingRunIds: () => mockBlockingRunIds,
   useAggregatedReviewItems: () => mockReviewItems,
   useAggregatedRuns: () => mockRuns,
@@ -105,6 +107,7 @@ describe('TypeGroupedQueue — Ready to review group', () => {
   beforeEach(() => {
     mockRuns = [];
     mockReviewItems = [];
+    mockBlockingFindings = [];
     mockBlockingRunIds = new Set();
   });
 
@@ -146,16 +149,22 @@ describe('TypeGroupedQueue — Ready to review group', () => {
     expect(within(group).getByText('2 pending')).toBeInTheDocument();
   });
 
-  it('hides a blocking finding from the visible queue and suppresses Ready to review', () => {
+  it('surfaces a blocking finding as actionable and suppresses Ready to review', () => {
     mockRuns = [makeRun({ id: 'run-finding', status: 'awaiting_review' })];
-    // The landing store intentionally drops this finding from mockReviewItems;
-    // its run ID arrives through the separate hidden-blocker selector.
+    mockBlockingFindings = [makeReviewItem({
+      id: 'finding-blocking',
+      run_id: 'run-finding',
+      kind: 'finding',
+      title: 'Fix the README',
+    })];
     mockBlockingRunIds = new Set(['run-finding']);
 
     render(<TypeGroupedQueue />);
 
     expect(screen.queryByTestId('queue-group-ready-to-review')).not.toBeInTheDocument();
-    expect(screen.getByText('No pending reviews')).toBeInTheDocument();
+    const group = screen.getByTestId('queue-group-blocking-finding');
+    expect(within(group).getByText('Blocking finding')).toBeInTheDocument();
+    expect(within(group).getByText('Fix the README')).toBeInTheDocument();
   });
 
   it('keeps a nonblocking finding hidden while showing the clean drain as Ready to review', () => {

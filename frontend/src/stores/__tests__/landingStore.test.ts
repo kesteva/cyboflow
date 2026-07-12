@@ -38,6 +38,7 @@ vi.mock('../../utils/api', () => ({
 
 import {
   collectPendingBlockingRunIds,
+  flattenPendingBlockingFindings,
   flattenPendingReviewItems,
   upsertReviewItem,
 } from '../landingStore';
@@ -203,5 +204,20 @@ describe('collectPendingBlockingRunIds', () => {
     };
 
     expect(collectPendingBlockingRunIds(byProject)).toEqual(new Set());
+  });
+});
+
+describe('flattenPendingBlockingFindings', () => {
+  it('returns only pending blocking findings across projects', () => {
+    const byProject: Record<number, ReviewItem[]> = {
+      1: [
+        makeItem({ id: 'blocking', kind: 'finding', blocking: true }),
+        makeItem({ id: 'advisory', kind: 'finding', blocking: false }),
+        makeItem({ id: 'decision', kind: 'decision', blocking: true }),
+      ],
+      2: [makeItem({ id: 'resolved', kind: 'finding', blocking: true, status: 'resolved' })],
+    };
+
+    expect(flattenPendingBlockingFindings(byProject).map((item) => item.id)).toEqual(['blocking']);
   });
 });

@@ -33,7 +33,11 @@ import { useReviewQueueStore } from './stores/reviewQueueStore';
 import { useReviewItemsSlice } from './stores/reviewItemsSlice';
 import { useBacklogStore } from './stores/backlogStore';
 import { useActiveRunsStore } from './stores/activeRunsStore';
-import { useLandingStore, useAggregatedReviewItems } from './stores/landingStore';
+import {
+  useAggregatedBlockingFindings,
+  useAggregatedReviewItems,
+  useLandingStore,
+} from './stores/landingStore';
 
 function App() {
   const [isAboutOpen, setIsAboutOpen] = useState(false);
@@ -58,7 +62,8 @@ function App() {
   // while the review pane showed the item.
   const pendingApprovalsCount = useReviewQueueStore((s) => s.queue.length);
   const aggregatedReviewItems = useAggregatedReviewItems();
-  const reviewQueueCount = pendingApprovalsCount + aggregatedReviewItems.length;
+  const aggregatedBlockingFindings = useAggregatedBlockingFindings();
+  const reviewQueueCount = pendingApprovalsCount + aggregatedReviewItems.length + aggregatedBlockingFindings.length;
   // Non-done, non-archived task count drives the backlog rail badge (mirrors the
   // review count). Cross-project by design — the board is the overall view now.
   // Experiment-arm tasks are EXCLUDED (experiment_id tag) so the badge matches the

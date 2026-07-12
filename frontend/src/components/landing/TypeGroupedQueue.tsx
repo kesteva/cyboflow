@@ -14,14 +14,15 @@
  *   4. IDLE SESSIONS (rust swatch)    — idle-quick-session items (kind === 'human_task'
  *      with source `idle-session:*`), split out of Human task and sorted oldest-idle
  *      first so the longest-quiet sessions sit at the top.
- *   5. READY TO REVIEW (green swatch) — clean-drained runs awaiting_review with
+ *   5. BLOCKING FINDING (red swatch)  — defects that parked a programmatic run;
+ *      rendered with the existing resolve-and-resume controls.
+ *   6. READY TO REVIEW (green swatch) — clean-drained runs awaiting_review with
  *      no blocking gate.
- *   6. NOTIFICATION  (neutral swatch) — informational FYIs (kind === 'notification');
+ *   7. NOTIFICATION  (neutral swatch) — informational FYIs (kind === 'notification');
  *      nothing is blocked, so this group renders LAST.
  *
- * Findings are intentionally DROPPED here — the landing aggregation
- * (useAggregatedReviewItems) only surfaces decision + human_task + notification,
- * and findings never count toward any group.
+ * Non-blocking findings remain in Insights. Blocking findings must be actionable
+ * here because resolving or dismissing them is what resumes the parked run.
  *
  * Cards are REUSED verbatim — this component owns only the grouping chrome and a
  * per-row "Open session →" affordance that switches the session workspace to the
@@ -37,6 +38,7 @@ import { IDLE_REVIEW_SOURCE_PREFIX, type ReviewItem } from '../../../../shared/t
 import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
 import {
+  useAggregatedBlockingFindings,
   useAggregatedBlockingRunIds,
   useAggregatedReviewItems,
   useAggregatedRuns,
@@ -294,6 +296,7 @@ export function TypeGroupedQueue(): React.JSX.Element {
 
   // Decision + human_task groups: the cross-project review_items inbox.
   const reviewItems = useAggregatedReviewItems();
+  const blockingFindingItems = useAggregatedBlockingFindings();
   const landingBlockingRunIds = useAggregatedBlockingRunIds();
   const decisionItems = React.useMemo(
     () => reviewItems.filter((it) => it.kind === 'decision'),
@@ -334,6 +337,7 @@ export function TypeGroupedQueue(): React.JSX.Element {
     decisionItems.length > 0 ||
     humanTaskItems.length > 0 ||
     idleItems.length > 0 ||
+    blockingFindingItems.length > 0 ||
     readyToReviewRuns.length > 0 ||
     notificationItems.length > 0;
 
@@ -405,6 +409,20 @@ export function TypeGroupedQueue(): React.JSX.Element {
             descriptor="Quick sessions gone quiet — reopen or wrap up (oldest first)"
           />
           {idleItems.map((it) => (
+            <ReviewItemRow key={it.id} item={it} />
+          ))}
+        </section>
+      )}
+
+      {blockingFindingItems.length > 0 && (
+        <section data-testid="queue-group-blocking-finding">
+          <GroupHeader
+            swatchClass="bg-status-error"
+            name="Blocking finding"
+            count={blockingFindingItems.length}
+            descriptor="Resolve or dismiss to resume the workflow"
+          />
+          {blockingFindingItems.map((it) => (
             <ReviewItemRow key={it.id} item={it} />
           ))}
         </section>
