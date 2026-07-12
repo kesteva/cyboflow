@@ -417,7 +417,14 @@ describe('CodexSdkManager app-server runtime', () => {
               turn: {
                 id: 'turn-1',
                 status: 'failed',
-                error: { message: 'Codex failed', codexErrorInfo: null, additionalDetails: null },
+                error: {
+                  message: 'Unhandled error. (usageLimitExceeded)',
+                  codexErrorInfo: {
+                    code: 'usageLimitExceeded',
+                    message: 'You have reached your usage limit.',
+                  },
+                  additionalDetails: 'Resets at 2026-07-12T00:00:00Z',
+                },
               },
             },
           }), 0);
@@ -433,7 +440,7 @@ describe('CodexSdkManager app-server runtime', () => {
         runId: 'run-1',
         worktreePath: '/tmp/worktree',
         prompt: 'fail it',
-      })).rejects.toThrow('Codex failed');
+      })).rejects.toThrow('usageLimitExceeded');
 
       const resultRows = db
         .prepare("SELECT payload_json AS payloadJson FROM raw_events WHERE event_type = 'agent_result'")
@@ -442,8 +449,9 @@ describe('CodexSdkManager app-server runtime', () => {
       expect(JSON.parse(resultRows[0].payloadJson)).toMatchObject({
         subtype: 'error_during_execution',
         is_error: true,
-        result: 'Codex failed',
+        result: expect.stringContaining('usageLimitExceeded'),
       });
+      expect(JSON.parse(resultRows[0].payloadJson).result).toContain('You have reached your usage limit.');
     } finally {
       db.close();
     }

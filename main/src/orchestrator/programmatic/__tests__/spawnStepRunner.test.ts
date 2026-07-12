@@ -109,6 +109,19 @@ describe('SpawnStepRunner', () => {
     expect(result.error).toBe('turn aborted');
   });
 
+  it('stamps a preserved Codex usage-limit failure as systemic', async () => {
+    const error = [
+      'Unhandled error. (usageLimitExceeded)',
+      'Codex provider error: {"code":"usageLimitExceeded","message":"You have reached your usage limit."}',
+    ].join('\n');
+    const spawner = makeSpawner(() => Promise.reject(new Error(error)));
+    const runner = new SpawnStepRunner(spawner, opts);
+
+    const result = await runner.runStep(step({ id: 'sprint-verify' }), ctx);
+
+    expect(result).toEqual({ status: 'failed', error, systemic: true });
+  });
+
   it('omits agentPermissionMode from the spawn when none is bound', async () => {
     const spawner = makeSpawner();
     const noMode = { panelId: 'r', sessionId: 'r', runId: 'r', worktreePath: '/wt', workflowName: 'planner' };

@@ -141,6 +141,22 @@ function rawTurnError(
   };
 }
 
+/**
+ * Preserve the provider payload alongside its human-facing wrapper. App-server
+ * commonly reports a generic "Unhandled error" message while the actionable
+ * usage/auth/rate-limit code and message live in codexErrorInfo.
+ */
+function formatTurnError(error: TurnSessionError): string {
+  const details = [error.message];
+  if (error.codexErrorInfo !== null) {
+    details.push(`Codex provider error: ${JSON.stringify(error.codexErrorInfo)}`);
+  }
+  if (error.additionalDetails !== null && error.additionalDetails !== error.message) {
+    details.push(`Codex provider details: ${error.additionalDetails}`);
+  }
+  return details.join('\n');
+}
+
 function rawCompletedItem(
   event: Extract<TurnSessionEvent, { type: 'item.completed' }>,
   item: Extract<TurnSessionItem, { type: 'raw' }>,
@@ -270,7 +286,7 @@ function projectTurnError(
       threadId: event.threadId,
       durationMs: context.durationMs,
       isError: true,
-      result: event.error.message,
+      result: formatTurnError(event.error),
       usage: context.usage,
     }),
   ];
@@ -286,7 +302,7 @@ function projectFailedTurn(
     threadId,
     durationMs,
     isError: true,
-    result: error.message,
+    result: formatTurnError(error),
     usage,
   });
 }

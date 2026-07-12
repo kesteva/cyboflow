@@ -369,16 +369,19 @@ describe('projectTurnSessionEvent', () => {
     }]);
   });
 
-  it('projects non-retryable errors and completed, interrupted, or failed turns', () => {
+  it('preserves provider error context in non-retryable and failed turns', () => {
     const nonRetryable: TurnSessionEvent = {
       type: 'turn.error',
       threadId: 'thread-1',
       turnId: 'turn-1',
       willRetry: false,
       error: {
-        message: 'request failed',
-        codexErrorInfo: null,
-        additionalDetails: null,
+        message: 'Unhandled error. (usageLimitExceeded)',
+        codexErrorInfo: {
+          code: 'usageLimitExceeded',
+          message: 'You have reached your usage limit.',
+        },
+        additionalDetails: 'Resets at 2026-07-12T00:00:00Z',
       },
     };
     const nonRetryableProjection = project(nonRetryable);
@@ -397,7 +400,11 @@ describe('projectTurnSessionEvent', () => {
         is_error: true,
         duration_ms: 1_234,
         num_turns: 1,
-        result: 'request failed',
+        result: [
+          'Unhandled error. (usageLimitExceeded)',
+          'Codex provider error: {"code":"usageLimitExceeded","message":"You have reached your usage limit."}',
+          'Codex provider details: Resets at 2026-07-12T00:00:00Z',
+        ].join('\n'),
         external_session_id: 'thread-1',
       },
     ]);
@@ -442,7 +449,7 @@ describe('projectTurnSessionEvent', () => {
       turnId: 'turn-3',
       error: {
         message: 'terminal failure',
-        codexErrorInfo: { kind: 'other' },
+        codexErrorInfo: { kind: 'other', message: 'provider explanation' },
         additionalDetails: 'details',
       },
     })).toEqual([{
@@ -453,7 +460,11 @@ describe('projectTurnSessionEvent', () => {
       is_error: true,
       duration_ms: 1_234,
       num_turns: 1,
-      result: 'terminal failure',
+      result: [
+        'terminal failure',
+        'Codex provider error: {"kind":"other","message":"provider explanation"}',
+        'Codex provider details: details',
+      ].join('\n'),
       external_session_id: 'thread-1',
     }]);
 
