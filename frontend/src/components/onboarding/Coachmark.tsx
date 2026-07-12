@@ -115,7 +115,6 @@ const COACH: Record<number, CoachSpec> = {
       <>
         Open the <b className="text-[var(--paper)]">Human review</b> queue to watch /ship run. Approvals and decisions
         collect here — blocking items pause the run until you decide.
-        <span className="mt-2 block text-[var(--paper)]/60">j/k move · y approve · n reject</span>
       </>
     ),
   },
