@@ -106,15 +106,47 @@ export class OrchSocketServer implements PermissionServerLike {
     const server = net.createServer((socket) => this.onConnection(socket));
     this.server = server;
 
-    server.on('error', (err: Error) => {
-      this.logger.error('[Cyboflow Orch IPC] server error', { error: err.message });
-    });
-
-    await new Promise<void>((resolve) => {
-      server.listen(this.socketPath, () => {
+    // Bind, recovering ONCE from EADDRINUSE. The pre-bind unlink above is a
+    // synchronous check against an async listen(), so a socket file that
+    // (re)appears in that window — or a path an overlapping process still holds
+    // mid-teardown — throws EADDRINUSE at bind time. The previous log-only error
+    // handler left the server dead and this promise unresolved forever, so the
+    // MCP subprocess (a pure client) hit ECONNREFUSED and exhausted its restart
+    // budget: a permanent outbound-MCP outage until app restart. Now: unlink and
+    // retry once, then reject so the caller sees a real fatal instead of a hang.
+    await new Promise<void>((resolve, reject) => {
+      let retriedAddrInUse = false;
+      const onListening = (): void => {
+        server.removeListener('error', onError);
+        // Runtime errors after a successful bind must be logged, not crash boot.
+        server.on('error', (err: Error) => {
+          this.logger.error('[Cyboflow Orch IPC] server error', { error: err.message });
+        });
         this.logger.info('[Cyboflow Orch IPC] listening', { socketPath: this.socketPath });
         resolve();
-      });
+      };
+      const onError = (err: NodeJS.ErrnoException): void => {
+        if (err.code === 'EADDRINUSE' && !retriedAddrInUse) {
+          retriedAddrInUse = true;
+          this.logger.warn('[Cyboflow Orch IPC] EADDRINUSE — unlinking stale socket and retrying once', {
+            socketPath: this.socketPath,
+          });
+          try {
+            fs.rmSync(this.socketPath, { force: true });
+          } catch {
+            /* best-effort — the retry surfaces any genuine failure */
+          }
+          server.listen(this.socketPath);
+          return;
+        }
+        server.removeListener('listening', onListening);
+        this.server = null;
+        this.logger.error('[Cyboflow Orch IPC] server error', { error: err.message });
+        reject(err);
+      };
+      server.once('listening', onListening);
+      server.on('error', onError);
+      server.listen(this.socketPath);
     });
   }
 

@@ -36,6 +36,16 @@ import type { PermissionServerLike } from '../../stuckDetector';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
 import { createTestDb, seedRun, seedApproval } from '../../__test_fixtures__/orchestratorTestDb';
 
+// The EADDRINUSE-recovery test needs one real bind failure, which the pre-bind
+// unlink in start() otherwise prevents. Wrap only fs.existsSync so that test can
+// suppress the pre-bind check for a single call; every other fs call (here and in
+// start()) keeps real behavior, and better-sqlite3 uses native I/O rather than
+// this module, so the DB fixtures and the rest of the suite are unaffected.
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return { ...actual, existsSync: vi.fn(actual.existsSync) };
+});
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -348,6 +358,38 @@ describe('OrchSocketServer', () => {
 
     // Reset so afterEach's stop() is a no-op (already stopped).
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  // -------------------------------------------------------------------------
+  // 6. start() recovers from EADDRINUSE (path in use at bind time)
+  // -------------------------------------------------------------------------
+
+  it('recovers from EADDRINUSE by unlinking the in-use socket and retrying once', async () => {
+    // A leftover file occupies the socket path AND the pre-bind unlink is
+    // suppressed for the first check, so listen() actually throws EADDRINUSE
+    // (binding a unix socket fails when any file already occupies the path) —
+    // reproducing the real bug's check→bind race deterministically. The server's
+    // recovery unlinks it and retries.
+    fs.writeFileSync(socketPath, 'stale');
+    vi.mocked(fs.existsSync).mockReturnValueOnce(false);
+
+    server = new OrchSocketServer(socketPath, dbAdapter(db), logger);
+    await server.start(); // must recover (unlink + retry), not hang
+
+    const warnedEaddr = logger.warn.mock.calls.some(
+      (call) => typeof call[0] === 'string' && call[0].includes('EADDRINUSE'),
+    );
+    expect(warnedEaddr).toBe(true);
+
+    // The retried server is the live listener: a real client round-trips.
+    const { client, waitForLines } = connectClient(socketPath);
+    openClients.push(client);
+    await waitForConnect(client);
+    client.write(
+      JSON.stringify({ type: 'mcp-list-pending-approvals', requestId: 'req-eaddr', runId: 'run-a' }) + '\n',
+    );
+    const lines = await waitForLines(1);
+    expect(parse(lines[0]).ok).toBe(true);
   });
 
   // -------------------------------------------------------------------------

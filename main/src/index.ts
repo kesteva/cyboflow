@@ -1241,7 +1241,12 @@ async function initializeServices() {
     cyboflowDb,
     cyboflowLogger,
   );
-  void orchSocketServer.start().catch((err) => {
+  // Keep the start promise so the MCP subprocess (below) can be gated on the
+  // socket actually listening — it is a pure client and dies with ECONNREFUSED if
+  // it connects before the bind completes. The dedicated .catch here keeps a bind
+  // failure from surfacing as an unhandled rejection before that gate attaches.
+  const orchSocketReady = orchSocketServer.start();
+  orchSocketReady.catch((err) => {
     cyboflowLogger.error(
       `[Cyboflow Orch IPC] socket server start failed: ${err instanceof Error ? err.message : String(err)}`,
     );
@@ -1919,12 +1924,17 @@ async function initializeServices() {
   // is needed.
   orchestratorHealth = new OrchestratorHealth(mcpServerLifecycle);
 
-  // Start the MCP server subprocess fire-and-forget; on failure record the error
-  // on the health surface (callable now that orchestratorHealth exists) and log it.
-  void mcpServerLifecycle.start().catch((err) => {
-    orchestratorHealth.setMcpError(err instanceof Error ? err.message : String(err));
-    cyboflowLogger.error(`[Cyboflow MCP] lifecycle start failed: ${String(err)}`);
-  });
+  // Start the MCP server subprocess only AFTER the orch socket is listening — it
+  // is a pure client (net.createConnection) that would otherwise race the bind,
+  // hit ECONNREFUSED, and burn its 2-restart budget before the socket comes up.
+  // On failure (including a fatal orch-socket bind) record the error on the health
+  // surface (callable now that orchestratorHealth exists) and log it.
+  void orchSocketReady
+    .then(() => mcpServerLifecycle.start())
+    .catch((err) => {
+      orchestratorHealth.setMcpError(err instanceof Error ? err.message : String(err));
+      cyboflowLogger.error(`[Cyboflow MCP] lifecycle start failed: ${String(err)}`);
+    });
 
   const services: AppServices = {
     app,
