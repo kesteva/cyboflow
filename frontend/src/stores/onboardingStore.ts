@@ -104,6 +104,14 @@ interface OnboardingState {
   skip: () => void;
   /** Skipped/pending → active at the current (clamped) step. */
   resume: () => void;
+  /**
+   * Permanent dismiss from the Sidebar "Resume setup" card: skipped/pending →
+   * completed. Unlike skip() (which leaves the resume affordance standing),
+   * dismiss() closes the tour for good — the completed snapshot persists, so it
+   * never reappears on future boots. Recoverable only via Settings → Replay
+   * walkthrough (restart()).
+   */
+  dismiss: () => void;
   finish: () => void;
   /** Settings → Replay walkthrough. */
   restart: () => void;
@@ -240,6 +248,14 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
       return;
     }
     set({ status: 'active', step: s.step });
+  },
+
+  dismiss: () => {
+    const s = get();
+    if (s.status !== 'skipped' && s.status !== 'pending') return;
+    // Keep the step so the persisted snapshot + telemetry record where the user
+    // walked away; completed short-circuits hydrate regardless of step.
+    set({ status: 'completed' });
   },
 
   finish: () => set({ status: 'completed' }),

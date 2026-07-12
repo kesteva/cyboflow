@@ -288,6 +288,25 @@ describe('onboardingStore — goTo / skip / resume', () => {
     expect(s().step).toBe(4);
   });
 
+  it('dismiss permanently completes the tour from skipped or pending', () => {
+    for (const status of ['skipped', 'pending'] as const) {
+      reset();
+      useOnboardingStore.setState({ status, step: 6, maxVisitedStep: 6 });
+      s().dismiss();
+      expect(s().status).toBe('completed');
+      expect(s().step).toBe(6); // step kept for the persisted snapshot + telemetry
+    }
+  });
+
+  it('dismiss is a no-op unless skipped/pending (never from an active tour)', () => {
+    for (const status of ['active', 'idle', 'completed'] as const) {
+      reset();
+      useOnboardingStore.setState({ status, step: 4, maxVisitedStep: 4 });
+      s().dismiss();
+      expect(s().status).toBe(status);
+    }
+  });
+
   it('begin resets detection + consent for a clean replay', () => {
     useOnboardingStore.setState({ status: 'skipped', step: 9, detection: DETECTED, connected: true, permMode: 'dontAsk' });
     s().begin(true);

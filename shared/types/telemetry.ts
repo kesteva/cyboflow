@@ -40,11 +40,14 @@ export type OnboardingStepName =
 export interface TelemetryEventMap {
   // ── Onboarding — first-run tour funnel ──────────────────────────────────────
   // Every step (modal + coachmark) emits `onboarding_step_viewed`; the lifecycle
-  // events bracket it (entry / abandon / resume-from-Sidebar / finish).
+  // events bracket it (entry / abandon / resume-from-Sidebar / finish / dismiss).
+  // `onboarding_skipped` is a soft abandon (the Sidebar Resume card persists);
+  // `onboarding_dismissed` is the hard one — the user cleared that card for good.
   onboarding_started: { trigger: 'first_run' | 'replay' };
   onboarding_step_viewed: { step: number; name: OnboardingStepName };
   onboarding_skipped: { step: number; name: OnboardingStepName };
   onboarding_resumed: { step: number };
+  onboarding_dismissed: { step: number; name: OnboardingStepName };
   onboarding_completed: { furthest_step: number };
 
   // ── Tier 1 — activation + the core run funnel ───────────────────────────────

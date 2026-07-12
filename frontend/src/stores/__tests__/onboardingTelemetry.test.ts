@@ -140,6 +140,22 @@ describe('onboardingTelemetry — lifecycle', () => {
     expect(events).toEqual([{ name: 'onboarding_completed', props: { furthest_step: 10 } }]);
   });
 
+  it('a Sidebar dismiss (skipped → completed) is a dismiss, not a completion', () => {
+    const events = onboardingTelemetryEvents(
+      slice({ status: 'skipped', step: 6, maxVisitedStep: 6 }),
+      slice({ status: 'completed', step: 6, maxVisitedStep: 6 }),
+    );
+    expect(events).toEqual([{ name: 'onboarding_dismissed', props: { step: 6, name: 'model' } }]);
+  });
+
+  it('a dismiss from a parked coach step (pending → completed) reads as a dismiss too', () => {
+    const events = onboardingTelemetryEvents(
+      slice({ status: 'pending', step: 8, maxVisitedStep: 8 }),
+      slice({ status: 'completed', step: 8, maxVisitedStep: 8 }),
+    );
+    expect(events).toEqual([{ name: 'onboarding_dismissed', props: { step: 8, name: 'ship' } }]);
+  });
+
   it('an idle target (never expected post-boot) emits nothing', () => {
     expect(onboardingTelemetryEvents(slice(), slice({ status: 'idle' }))).toEqual([]);
   });

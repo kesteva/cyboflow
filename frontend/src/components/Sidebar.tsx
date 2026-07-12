@@ -216,31 +216,51 @@ export function Sidebar({
         </div>
 
         {/* Resume setup — only when the first-run tour was skipped/parked
-            (hydrated gate avoids a boot-time flash before the store resolves). */}
+            (hydrated gate avoids a boot-time flash before the store resolves).
+            The card resumes the tour; the trailing × permanently dismisses it
+            (persisted completed → never reappears; recoverable via Settings →
+            Replay walkthrough). */}
         {showResumeSetup && (
-          <button
-            type="button"
-            onClick={() => useOnboardingStore.getState().resume()}
-            data-testid="onboarding-resume-setup"
-            className="mx-2 mt-2 flex items-center gap-2.5 border bg-surface-primary px-3 py-2.5 text-left transition-colors hover:bg-surface-hover"
+          <div
+            className="mx-2 mt-2 flex items-stretch border bg-surface-primary"
             style={{ borderWidth: '1.4px', borderColor: 'var(--color-interactive-primary)' }}
           >
-            <span
-              className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center border text-interactive"
-              style={{ borderWidth: '1.4px', borderColor: 'var(--color-interactive-primary)' }}
+            <button
+              type="button"
+              onClick={() => useOnboardingStore.getState().resume()}
+              data-testid="onboarding-resume-setup"
+              className="flex min-w-0 flex-1 items-center gap-2.5 px-3 py-2.5 text-left transition-colors hover:bg-surface-hover"
             >
-              ▸
-            </span>
-            <span className="min-w-0 flex-1">
-              <span className="block text-[11.5px] font-bold leading-tight text-text-primary">Resume setup</span>
-              <span className="block text-[10px] text-text-secondary">
-                Step {onboardingStep + 1} of {ONBOARDING_STEP_COUNT}
+              <span
+                className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center border text-interactive"
+                style={{ borderWidth: '1.4px', borderColor: 'var(--color-interactive-primary)' }}
+              >
+                ▸
               </span>
-            </span>
-            <span className="flex-shrink-0 text-interactive" aria-hidden="true">
-              →
-            </span>
-          </button>
+              <span className="min-w-0 flex-1">
+                <span className="block text-[11.5px] font-bold leading-tight text-text-primary">Resume setup</span>
+                <span className="block text-[10px] text-text-secondary">
+                  Step {onboardingStep + 1} of {ONBOARDING_STEP_COUNT}
+                </span>
+              </span>
+              <span className="flex-shrink-0 text-interactive" aria-hidden="true">
+                →
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => useOnboardingStore.getState().dismiss()}
+              data-testid="onboarding-dismiss-setup"
+              aria-label="Dismiss setup"
+              title="Dismiss — don't show this again"
+              className="flex w-7 flex-shrink-0 items-center justify-center border-l text-text-tertiary transition-colors hover:bg-surface-hover hover:text-text-primary"
+              style={{ borderColor: 'var(--color-interactive-primary)' }}
+            >
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" aria-hidden="true">
+                <path d="M3 3l6 6M9 3l-6 6" />
+              </svg>
+            </button>
+          </div>
         )}
 
         {/* Human review — primary rail item; opens the full-width review pane */}

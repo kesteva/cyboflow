@@ -35,6 +35,7 @@ export type OnboardingTelemetryEvent =
   | { name: 'onboarding_step_viewed'; props: TelemetryEventMap['onboarding_step_viewed'] }
   | { name: 'onboarding_skipped'; props: TelemetryEventMap['onboarding_skipped'] }
   | { name: 'onboarding_resumed'; props: TelemetryEventMap['onboarding_resumed'] }
+  | { name: 'onboarding_dismissed'; props: TelemetryEventMap['onboarding_dismissed'] }
   | { name: 'onboarding_completed'; props: TelemetryEventMap['onboarding_completed'] };
 
 function stepViewed(step: number): OnboardingTelemetryEvent {
@@ -79,7 +80,13 @@ export function onboardingTelemetryEvents(
       return [{ name: 'onboarding_skipped', props: { step: next.step, name: onboardingStepName(next.step) } }];
     }
     if (next.status === 'completed') {
-      return [{ name: 'onboarding_completed', props: { furthest_step: next.maxVisitedStep } }];
+      // A real completion only ever lands from 'active' (next()/forceNext at the
+      // last step). A completed target from 'skipped'/'pending' is the Sidebar
+      // "Resume setup" card's permanent dismiss — a distinct funnel signal.
+      if (prev.status === 'active') {
+        return [{ name: 'onboarding_completed', props: { furthest_step: next.maxVisitedStep } }];
+      }
+      return [{ name: 'onboarding_dismissed', props: { step: next.step, name: onboardingStepName(next.step) } }];
     }
     // active → pending (parking for a real action) is silent.
     return [];

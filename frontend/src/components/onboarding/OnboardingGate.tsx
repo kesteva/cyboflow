@@ -107,6 +107,9 @@ export function OnboardingGate(): React.JSX.Element | null {
           case 'onboarding_resumed':
             trackEvent('onboarding_resumed', ev.props);
             break;
+          case 'onboarding_dismissed':
+            trackEvent('onboarding_dismissed', ev.props);
+            break;
           case 'onboarding_completed':
             trackEvent('onboarding_completed', ev.props);
             break;
