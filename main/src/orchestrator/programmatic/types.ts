@@ -190,6 +190,15 @@ export interface FanOutDriver {
    */
   dependencies?(runId: string, over: string): Map<string, string[]>;
   /**
+   * Resolve each item's expected file paths from the task-file substrate. The
+   * controller uses this to keep overlapping tasks out of the same concurrent
+   * wave while retaining parallelism for disjoint tasks. OPTIONAL: absent (or an
+   * empty map) preserves the dependency-only scheduler. Like `dependencies`, a
+   * production implementation may query the DB and a throw is contained by the
+   * controller, which then schedules without file-conflict serialization.
+   */
+  expectedFiles?(runId: string, over: string): Map<string, string[]>;
+  /**
    * Drive a lane's status/step for ONE item. Fail-soft — MUST never throw (the
    * controller does not wrap this); the production driver swallows lane-store
    * errors and logs. `allowedStepIds` is the fanOut step's inner-id vocabulary,
@@ -200,9 +209,18 @@ export interface FanOutDriver {
     itemId: string;
     status?: SprintBatchTaskStatus;
     currentStepId?: string | null;
+    /**
+     * 1-based lane attempt written when a failed inner step loops back. The
+     * first pass remains 0 in the persisted lane row; re-delegates record 2 then
+     * 3, matching the Ship fan-out contract.
+     */
+    attempt?: number;
     allowedStepIds: readonly string[];
   }): void;
 }
+
+/** Ship's per-lane loopback contract: initial pass plus at most two re-delegates. */
+export const FAN_OUT_LANE_ATTEMPT_CAP = 3;
 
 /**
  * The outcome of awaiting an async visual merge-gate verdict for ONE lane

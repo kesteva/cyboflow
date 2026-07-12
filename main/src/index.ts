@@ -1801,7 +1801,25 @@ async function initializeServices() {
           }
           return map;
         },
-        driveLane: ({ runId: rid, itemId, status, currentStepId, allowedStepIds }) => {
+        // Same task-file rows the task editor persists are the concurrency source
+        // of truth. This deliberately does not inspect task prompt/body text.
+        expectedFiles: (_runId, over) => {
+          const map = new Map<string, string[]>();
+          if (over !== 'tasks') return map;
+          const taskIds = sprintLaneStore.listLanes(batchId).map((lane) => lane.taskId);
+          if (taskIds.length === 0) return map;
+          const placeholders = taskIds.map(() => '?').join(',');
+          const rows = rawDb
+            .prepare(`SELECT task_id, file_path FROM task_files WHERE task_id IN (${placeholders})`)
+            .all(...taskIds) as Array<{ task_id: string; file_path: string }>;
+          for (const row of rows) {
+            const files = map.get(row.task_id) ?? [];
+            files.push(row.file_path);
+            map.set(row.task_id, files);
+          }
+          return map;
+        },
+        driveLane: ({ runId: rid, itemId, status, currentStepId, attempt, allowedStepIds }) => {
           try {
             sprintLaneStore.updateLane({
               runId: rid,
@@ -1810,6 +1828,7 @@ async function initializeServices() {
               allowedStepIds,
               ...(status !== undefined ? { status } : {}),
               ...(currentStepId !== undefined ? { currentStepId } : {}),
+              ...(attempt !== undefined ? { attempt } : {}),
             });
           } catch (err) {
             cyboflowLogger.debug('[fanOutDriver] driveLane skipped (fail-soft)', {

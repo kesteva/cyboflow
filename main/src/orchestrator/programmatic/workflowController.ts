@@ -40,6 +40,7 @@ import type {
   StepRunner,
   SupervisorEvent,
 } from './types';
+import { FAN_OUT_LANE_ATTEMPT_CAP } from './types';
 import { createRunDirectives, type RunDirectives } from './runDirectives';
 
 /**
@@ -568,10 +569,11 @@ export class WorkflowController {
    * Scheduling is DAG-aware (2026-06-22): a task is dispatched only once all of its
    * in-scope blocking prerequisites have integrated (via `host.fanOut.dependencies`);
    * a task whose prerequisite failed is marked failed (blocked). When the driver
-   * exposes no dependencies this degrades to flat cap-sized waves. Still a v1
-   * simplification on two axes: NO same-file serialization within a wave, and inner
-   * `loopback` is parsed/validated upstream but NOT re-driven here (both reserved for
-   * a future revision).
+   * exposes no dependencies this degrades to flat cap-sized waves. Expected task
+   * files (when the driver exposes them) additionally serialize overlapping ready
+   * items into later waves without reducing concurrency for disjoint items.
+   * Required inner-step failures honor a declared inner `loopback`, re-driving the
+   * lane through Ship's bounded three-attempt contract.
    *
    * Systemic failures: an inner step failing with `systemic === true` (env-level:
    * usage/rate limit, overload, auth) is NOT that lane's defect — it does NOT fail
@@ -605,17 +607,17 @@ export class WorkflowController {
 
     /**
      * Walk ONE item through the inner chain. Fail-soft per inner step:
-     *  - required inner failure (or abort) → mark the lane (failed) + stop;
+     *  - required inner failure with a declared, in-chain loopback → re-drive its
+     *    target through attempt 3; otherwise mark the lane (failed) + stop;
      *  - optional inner failure → skip that inner step, continue the lane;
      *  - SYSTEMIC inner failure (env-level) → do NOT fail/skip the lane; capture the
      *    error and return 'systemic' so the wave loop parks the whole fan-out;
      *  - all inner steps ok → mark the lane 'integrated'.
      * Returns 'aborted' when the signal fired mid-walk so the wave can short out.
      */
-    // The inner index the visual merge-gate loops a lane back to on a FAIL (the
-    // re-implement target); -1 when this chain has no `implement` step (a custom
-    // fan-out) — then a loopback cannot be honored and the lane is failed instead.
-    const implementIndex = inner.findIndex((s) => s.id === SPRINT_IMPLEMENT_STEP);
+    /** Resolve a declared inner-chain loopback target; invalid data fails the lane. */
+    const loopbackIndex = (innerStep: (typeof inner)[number]): number =>
+      innerStep.loopback === undefined ? -1 : inner.findIndex((candidate) => candidate.id === innerStep.loopback);
     // The park step is NOT an inner-chain id, so the lane-store vocabulary must be
     // widened to accept it when the controller parks at the merge-gate.
     const parkAllowedStepIds: readonly string[] = [...allowedStepIds, AWAITING_VERIFY_STEP];
@@ -634,6 +636,9 @@ export class WorkflowController {
       // run under the bumped attempt — parity with the orchestrated re-delegate.
       let laneAttempt = 1;
       let visualLoopbacks = 0;
+      // Set when a loopback lands on a target. The target's lane write carries the
+      // bumped attempt in the SAME transition that moves it back to that step.
+      let loopbackAttemptStepIndex: number | undefined;
 
       for (let k = 0; k < inner.length; k++) {
         if (signal?.aborted) return 'aborted';
@@ -648,7 +653,15 @@ export class WorkflowController {
           );
           continue;
         }
-        driver.driveLane({ runId, itemId, currentStepId: innerStep.id, allowedStepIds });
+        const writeAttempt = loopbackAttemptStepIndex === k ? laneAttempt : undefined;
+        driver.driveLane({
+          runId,
+          itemId,
+          currentStepId: innerStep.id,
+          allowedStepIds,
+          ...(writeAttempt !== undefined ? { attempt: writeAttempt } : {}),
+        });
+        loopbackAttemptStepIndex = undefined;
 
         // Synthesize a minimal WorkflowStep for the inner step + thread item
         // context so the spawner scopes the agent to THIS item.
@@ -685,8 +698,22 @@ export class WorkflowController {
             this.host.log?.('warn', `fan-out item '${itemId}': optional step '${innerStep.id}' failed; skipping`);
             continue;
           }
+          const targetIndex = loopbackIndex(innerStep);
+          if (targetIndex >= 0 && laneAttempt < FAN_OUT_LANE_ATTEMPT_CAP) {
+            laneAttempt += 1;
+            loopbackAttemptStepIndex = targetIndex;
+            this.host.log?.(
+              'info',
+              `fan-out item '${itemId}': step '${innerStep.id}' failed; looping back to '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
+            );
+            k = targetIndex - 1; // The loop's k++ lands on the target next.
+            continue;
+          }
           driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
-          this.host.log?.('warn', `fan-out item '${itemId}': step '${innerStep.id}' failed; lane failed`);
+          this.host.log?.(
+            'warn',
+            `fan-out item '${itemId}': step '${innerStep.id}' failed; lane failed${targetIndex >= 0 ? ' (attempt cap reached)' : ''}`,
+          );
           return 'failed';
         }
 
@@ -717,16 +744,32 @@ export class WorkflowController {
           }
           if (outcome.kind === 'loopback') {
             visualLoopbacks += 1;
-            if (implementIndex < 0 || visualLoopbacks > MAX_VISUAL_LOOPBACKS) {
-              // No implement step to loop back to, or the backstop bound was hit
-              // (the merge-gate's 3× cap should mark the lane failed before this).
+            // The visual merge-gate historically loops to `implement` even in a
+            // custom chain that predates explicit inner loopback data. Prefer a
+            // declared target, but retain that compatibility fallback here only.
+            const declaredTargetIndex = loopbackIndex(innerStep);
+            const targetIndex = declaredTargetIndex >= 0
+              ? declaredTargetIndex
+              : inner.findIndex((candidate) => candidate.id === SPRINT_IMPLEMENT_STEP);
+            if (
+              targetIndex < 0 ||
+              visualLoopbacks > MAX_VISUAL_LOOPBACKS ||
+              outcome.attempt <= laneAttempt ||
+              outcome.attempt > FAN_OUT_LANE_ATTEMPT_CAP
+            ) {
+              // No declared target, an invalid attempt, or the backstop bound was
+              // hit (the merge-gate's own 3x cap should fail the lane first).
               driver.driveLane({ runId, itemId, status: 'failed', allowedStepIds });
               this.host.log?.('warn', `fan-out item '${itemId}': visual merge-gate loopback exhausted; lane failed`);
               return 'failed';
             }
             laneAttempt = outcome.attempt;
-            this.host.log?.('info', `fan-out item '${itemId}': visual merge-gate FAIL → re-implement (attempt ${laneAttempt})`);
-            k = implementIndex - 1; // the loop's k++ lands on implementIndex next.
+            loopbackAttemptStepIndex = targetIndex;
+            this.host.log?.(
+              'info',
+              `fan-out item '${itemId}': visual merge-gate FAIL → '${inner[targetIndex].id}' (attempt ${laneAttempt})`,
+            );
+            k = targetIndex - 1; // The loop's k++ lands on the target next.
             continue;
           }
           // 'advance' → fall through; the loop ends and the lane integrates below.
@@ -760,6 +803,19 @@ export class WorkflowController {
     for (const itemId of items) {
       prereqs.set(itemId, (rawDeps?.get(itemId) ?? []).filter((p) => inScope.has(p) && p !== itemId));
     }
+
+    const readExpectedFiles = (): Map<string, string[]> | undefined => {
+      try {
+        return driver.expectedFiles?.(runId, fanOut.over);
+      } catch (err) {
+        this.host.log?.(
+          'warn',
+          `fan-out expectedFiles('${fanOut.over}') threw; running without file-conflict serialization: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return undefined;
+      }
+    };
+    let expectedFiles = readExpectedFiles();
 
     const integrated = new Set<string>();
     const failed = new Set<string>();
@@ -824,6 +880,11 @@ export class WorkflowController {
           for (const id of appeared) {
             prereqs.set(id, (freshDeps?.get(id) ?? []).filter((p) => inScope.has(p) && p !== id));
           }
+          // Added lanes need the same file-conflict constraint as the original
+          // batch. Refresh the task-file map only when the item set grows; static
+          // batches retain the initial DB read.
+          const freshExpectedFiles = readExpectedFiles();
+          if (freshExpectedFiles !== undefined) expectedFiles = freshExpectedFiles;
         }
         // Rebuild the working set: keep only not-yet-settled lanes, in resolve
         // order (a removed queued lane is simply absent from `fresh`; a settled
@@ -856,14 +917,21 @@ export class WorkflowController {
         break;
       }
 
-      // Dispatch ONE cap-sized wave of ready tasks concurrently, then re-evaluate
-      // (tasks unblocked by this wave's integrations join the next wave). The cap
-      // is PER-STEP (effectiveMaxConcurrency honors `fanOut.maxConcurrency` when
-      // the step declares one, else the SPRINT_BATCH_CAP default) — a cap of 1
-      // naturally serializes items one at a time since readiness is re-evaluated
-      // after each wave settles, so no structural change is needed for the
-      // serial case.
-      const wave = ready.slice(0, effectiveMaxConcurrency(fanOut));
+      // Dispatch ONE cap-sized, file-conflict-free wave, then re-evaluate (tasks
+      // unblocked by this wave's integrations join the next wave). Ready order is
+      // preserved: an overlapping task is deferred while later disjoint tasks can
+      // still fill the current wave, preserving useful concurrency in the shared
+      // worktree. No expected-file data means every ready task remains eligible.
+      const wave: string[] = [];
+      const waveFiles = new Set<string>();
+      const cap = effectiveMaxConcurrency(fanOut);
+      for (const itemId of ready) {
+        if (wave.length >= cap) break;
+        const files = expectedFiles?.get(itemId) ?? [];
+        if (files.some((filePath) => waveFiles.has(filePath))) continue;
+        wave.push(itemId);
+        for (const filePath of files) waveFiles.add(filePath);
+      }
       const outcomes = await Promise.all(wave.map((itemId) => driveItem(itemId)));
       if (outcomes.includes('aborted') || signal?.aborted) return { terminal: true, incompleteCount };
       // Settle each lane. A 'systemic' lane is NEITHER integrated NOR failed: it
