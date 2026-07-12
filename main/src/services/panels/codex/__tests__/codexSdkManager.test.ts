@@ -1,6 +1,10 @@
 import Database from 'better-sqlite3';
 import { describe, expect, it, vi } from 'vitest';
 import type { SessionManager } from '../../../sessionManager';
+import { SpawnStepRunner } from '../../../../orchestrator/programmatic/spawnStepRunner';
+import { WorkflowController } from '../../../../orchestrator/programmatic/workflowController';
+import type { ControllerHost } from '../../../../orchestrator/programmatic/types';
+import type { WorkflowDefinition } from '../../../../../../shared/types/workflows';
 import type {
   AppServerNotification,
   CodexAppServerClientOptions,
@@ -176,6 +180,82 @@ function successfulHandler(method: string, _params: unknown, client: FakeAppServ
 }
 
 describe('CodexSdkManager app-server runtime', () => {
+  it('routes a projected usage-limit failure through the programmatic systemic pause', async () => {
+    const db = createDb();
+    try {
+      const { manager } = makeManager(db, (method, _params, client) => {
+        if (method === 'account/read') {
+          return {
+            account: { type: 'chatgpt', email: null, planType: 'plus' },
+            requiresOpenaiAuth: true,
+          };
+        }
+        if (method === 'thread/start') return { thread: { id: 'codex-thread-1' } };
+        if (method === 'turn/start') {
+          setTimeout(() => client.notify({
+            method: 'turn/completed',
+            params: {
+              threadId: 'codex-thread-1',
+              turn: {
+                id: 'turn-1',
+                status: 'failed',
+                error: {
+                  message: 'Unhandled error. (usageLimitExceeded)',
+                  codexErrorInfo: {
+                    code: 'usageLimitExceeded',
+                    message: 'You have reached your usage limit.',
+                  },
+                  additionalDetails: 'Resets at 2026-07-12T00:00:00Z',
+                },
+              },
+            },
+          }), 0);
+          return { turn: { id: 'turn-1' } };
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      });
+      manager.on('error', () => undefined);
+
+      const runner = new SpawnStepRunner({
+        spawnCliProcess: manager.spawnCliProcess.bind(manager),
+        abort: manager.killProcess.bind(manager),
+      }, {
+        panelId: 'run-1',
+        sessionId: 'run-1',
+        runId: 'run-1',
+        worktreePath: '/tmp/worktree',
+        workflowName: 'planner',
+      });
+      const awaitSystemicPause = vi.fn<NonNullable<ControllerHost['awaitSystemicPause']>>(async () => 'canceled');
+      const host: ControllerHost = {
+        reportStep: vi.fn(),
+        requestHumanGate: async () => 'approve',
+        awaitSystemicPause,
+      };
+      const definition: WorkflowDefinition = {
+        id: 'codex-systemic',
+        phases: [{
+          id: 'run',
+          label: 'Run',
+          color: '#3b6dd6',
+          steps: [{ id: 'codex-step', name: 'Codex step', agent: 'executor', mcps: [], retries: 0 }],
+        }],
+      };
+
+      const result = await new WorkflowController(runner, host).run('run-1', definition);
+
+      expect(result).toMatchObject({ outcome: 'canceled', failedStepId: 'codex-step' });
+      expect(awaitSystemicPause).toHaveBeenCalledTimes(1);
+      const [pausedStep, pausedContext, pausedError] = awaitSystemicPause.mock.calls[0];
+      expect(pausedStep.id).toBe('codex-step');
+      expect(pausedContext.attempt).toBe(1);
+      expect(pausedError).toContain('usageLimitExceeded');
+      expect(pausedError).toContain('You have reached your usage limit.');
+    } finally {
+      db.close();
+    }
+  });
+
   it('releases the spawn reservation after an early preflight failure', async () => {
     const db = createDb();
     try {

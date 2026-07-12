@@ -47,10 +47,12 @@ interface SystemicPattern {
 const SYSTEMIC_PATTERNS: SystemicPattern[] = [
   {
     // "Claude AI usage limit reached|1751234567" (epoch-suffixed subscription
-    // limit), the bare "usage limit reached" / "reached your usage limit"
-    // phrasing, and Codex's `usageLimitExceeded` provider code.
+    // limit), "reached/hit your usage limit" phrasing, and Codex's
+    // `usageLimitExceeded` provider code. The terminal condition is required:
+    // incidental configuration prose such as "no usage limit configured" must
+    // not park a run.
     name: 'usage-limit-reached',
-    pattern: /usage[\s_-]*limit(?:[\s_-]*(?:reached|hit|exceeded|exhausted))?|reached (?:your|the) usage[\s_-]*limit/i,
+    pattern: /usage[\s_-]*limit[\s_-]*(?:reached|hit|exceeded|exhausted)|(?:reached|hit)(?: (?:your|the))? usage[\s_-]*limit/i,
   },
   {
     // "5-hour limit reached ∙ resets 2:20pm", 7-day/weekly/session variants,

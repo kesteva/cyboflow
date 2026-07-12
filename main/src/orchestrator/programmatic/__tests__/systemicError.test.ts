@@ -5,6 +5,7 @@ describe('isSystemicStepError', () => {
   const positives: Array<[string, string]> = [
     ['epoch-suffixed usage limit', 'Claude AI usage limit reached|1751234567'],
     ["you've reached your usage limit", "You've reached your usage limit"],
+    ["you've hit your usage limit", "You've hit your usage limit"],
     ['bare usage limit reached', 'usage limit reached'],
     ['Codex usage-limit provider code', 'Unhandled error. (usageLimitExceeded)'],
     ['5-hour window limit reached with reset clock', '5-hour limit reached ∙ resets 2:20pm'],
@@ -53,6 +54,9 @@ describe('isSystemicStepError', () => {
     ['undefined', undefined],
     ['empty string', ''],
     ['generic terminal fallback literal', 'The agent session ended with an error.'],
+    ['bare usage limit configuration label', 'usage limit'],
+    ['usage limitation configuration label', 'usage limitation'],
+    ['no usage limit configured', 'no usage limit configured'],
     ['ordinary tool/build failure', 'Command failed: eslint . --max-warnings=0'],
     ['model not found (availability, not systemic)', 'model not found: claude-fable-5'],
     ['model 404', 'Request failed with status code 404: model not available'],
@@ -78,6 +82,9 @@ describe('classifyErrorPattern', () => {
   const cases: Array<[string, string | undefined, string]> = [
     // Systemic patterns win first — the label is the SystemicPattern.name.
     ['usage limit', 'Claude AI usage limit reached|1751234567', 'usage-limit-reached'],
+    ['bare usage-limit configuration label', 'usage limit', 'other'],
+    ['usage limitation configuration label', 'usage limitation', 'other'],
+    ['no usage limit configured', 'no usage limit configured', 'other'],
     ['rate limit', 'rate_limit_error: too many requests', 'rate-limit'],
     ['http 429', 'Request failed with status code 429', 'http-429'],
     ['overloaded', 'overloaded_error: the server is overloaded', 'overloaded'],
