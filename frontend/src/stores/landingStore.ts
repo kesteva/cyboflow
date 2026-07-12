@@ -97,6 +97,26 @@ export function flattenPendingReviewItems(
   return out;
 }
 
+/**
+ * Collect pending run IDs gated by any blocking review item, including findings.
+ * The landing queue deliberately hides findings from its visible groups, but a
+ * blocking finding still parks its run at `awaiting_review` and must suppress
+ * the clean-drain Ready-to-review group.
+ */
+export function collectPendingBlockingRunIds(
+  byProject: Record<number, ReviewItem[]>,
+): Set<string> {
+  const out = new Set<string>();
+  for (const list of Object.values(byProject)) {
+    for (const item of list) {
+      if (item.status === 'pending' && item.blocking && item.run_id !== null) {
+        out.add(item.run_id);
+      }
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
@@ -314,6 +334,16 @@ export const useProjectsCount = (): number => useLandingStore((s) => s.projects.
 export function useAggregatedReviewItems(): ReviewItem[] {
   const byProject = useLandingStore((s) => s.reviewItemsByProject);
   return useMemo(() => flattenPendingReviewItems(byProject), [byProject]);
+}
+
+/**
+ * Pending blocking run IDs across the raw review-item buckets. This remains
+ * separate from `useAggregatedReviewItems()` so findings stay out of visible
+ * landing groups while still affecting Ready-to-review classification.
+ */
+export function useAggregatedBlockingRunIds(): ReadonlySet<string> {
+  const byProject = useLandingStore((s) => s.reviewItemsByProject);
+  return useMemo(() => collectPendingBlockingRunIds(byProject), [byProject]);
 }
 
 /**

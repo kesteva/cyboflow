@@ -19,6 +19,7 @@ import type { ReviewItem } from '../../../../shared/types/reviews';
 
 let mockRuns: ActiveRunRow[] = [];
 let mockReviewItems: ReviewItem[] = [];
+let mockBlockingRunIds: ReadonlySet<string> = new Set();
 
 vi.mock('../../stores/reviewQueueStore', () => ({
   useReviewQueueView: () => ({ blocking: [], normal: [] }),
@@ -30,6 +31,7 @@ vi.mock('../../stores/reviewQueueSlice', () => ({
 }));
 
 vi.mock('../../stores/landingStore', () => ({
+  useAggregatedBlockingRunIds: () => mockBlockingRunIds,
   useAggregatedReviewItems: () => mockReviewItems,
   useAggregatedRuns: () => mockRuns,
   useRunProjectMap: () => ({}),
@@ -103,6 +105,7 @@ describe('TypeGroupedQueue — Ready to review group', () => {
   beforeEach(() => {
     mockRuns = [];
     mockReviewItems = [];
+    mockBlockingRunIds = new Set();
   });
 
   it('renders an awaiting_review run under the ready-to-review group', () => {
@@ -141,6 +144,28 @@ describe('TypeGroupedQueue — Ready to review group', () => {
 
     const group = screen.getByTestId('queue-group-ready-to-review');
     expect(within(group).getByText('2 pending')).toBeInTheDocument();
+  });
+
+  it('hides a blocking finding from the visible queue and suppresses Ready to review', () => {
+    mockRuns = [makeRun({ id: 'run-finding', status: 'awaiting_review' })];
+    // The landing store intentionally drops this finding from mockReviewItems;
+    // its run ID arrives through the separate hidden-blocker selector.
+    mockBlockingRunIds = new Set(['run-finding']);
+
+    render(<TypeGroupedQueue />);
+
+    expect(screen.queryByTestId('queue-group-ready-to-review')).not.toBeInTheDocument();
+    expect(screen.getByText('No pending reviews')).toBeInTheDocument();
+  });
+
+  it('keeps a nonblocking finding hidden while showing the clean drain as Ready to review', () => {
+    mockRuns = [makeRun({ id: 'run-finding', status: 'awaiting_review' })];
+
+    render(<TypeGroupedQueue />);
+
+    const group = screen.getByTestId('queue-group-ready-to-review');
+    expect(within(group).getByText('1 pending')).toBeInTheDocument();
+    expect(screen.queryByTestId('review-item')).not.toBeInTheDocument();
   });
 
   it.each(['approve-idea', 'approve-design', 'approve-plan'])(

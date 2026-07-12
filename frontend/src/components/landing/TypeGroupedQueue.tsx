@@ -37,6 +37,7 @@ import { IDLE_REVIEW_SOURCE_PREFIX, type ReviewItem } from '../../../../shared/t
 import type { WorkflowRunStatus } from '../../../../shared/types/cyboflow';
 import type { ActiveRunRow } from '../../stores/activeRunsStore';
 import {
+  useAggregatedBlockingRunIds,
   useAggregatedReviewItems,
   useAggregatedRuns,
   useRunProjectMap,
@@ -68,8 +69,9 @@ export function selectReadyToReviewRuns(
   runs: ActiveRunRow[],
   reviewItems: ReviewItem[],
   permissionItems: QueueItem[],
+  landingBlockingRunIds: ReadonlySet<string> = new Set(),
 ): ActiveRunRow[] {
-  const blockedRunIds = new Set<string>();
+  const blockedRunIds = new Set(landingBlockingRunIds);
 
   for (const item of permissionItems) blockedRunIds.add(itemRunId(item));
   for (const item of reviewItems) {
@@ -276,6 +278,8 @@ function ReadyToReviewRow({ run }: { run: ActiveRunRow }): React.JSX.Element {
  *   - useReviewQueueView()      (approval/permission path) + useReviewQueueSlice
  *     (per-run status map) from the approval stores.
  *   - useAggregatedReviewItems() + useRunProjectMap() from the landingStore.
+ *     useAggregatedBlockingRunIds() supplies hidden blocking findings for the
+ *     Ready-to-review classification without rendering them as queue items.
  *   - useCyboflowStore / useNavigationStore (imperatively, on click) to open a
  *     run as the session workspace.
  */
@@ -290,6 +294,7 @@ export function TypeGroupedQueue(): React.JSX.Element {
 
   // Decision + human_task groups: the cross-project review_items inbox.
   const reviewItems = useAggregatedReviewItems();
+  const landingBlockingRunIds = useAggregatedBlockingRunIds();
   const decisionItems = React.useMemo(
     () => reviewItems.filter((it) => it.kind === 'decision'),
     [reviewItems],
@@ -320,8 +325,8 @@ export function TypeGroupedQueue(): React.JSX.Element {
   // same status but are kept in their blocking decision/permission group.
   const runs = useAggregatedRuns();
   const readyToReviewRuns = React.useMemo(
-    () => selectReadyToReviewRuns(runs, reviewItems, permissionItems),
-    [runs, reviewItems, permissionItems],
+    () => selectReadyToReviewRuns(runs, reviewItems, permissionItems, landingBlockingRunIds),
+    [runs, reviewItems, permissionItems, landingBlockingRunIds],
   );
 
   const hasAny =
