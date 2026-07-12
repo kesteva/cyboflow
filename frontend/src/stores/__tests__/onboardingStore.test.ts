@@ -264,11 +264,28 @@ describe('onboardingStore — goTo / skip / resume', () => {
     expect(s().step).toBe(2);
   });
 
-  it('resume from a live coach pending step returns to the SAME step (only hydrate clamps)', () => {
+  it('resume from a live coach pending step returns to the SAME step (steps 8-9 keep place)', () => {
     useOnboardingStore.setState({ status: 'pending', step: 8, maxVisitedStep: 8 });
     s().resume();
     expect(s().status).toBe('active');
     expect(s().step).toBe(8);
+  });
+
+  it('resume from a Configure pointer (5-7) clamps to step 4 to rebuild the wizard', () => {
+    for (const step of [5, 6, 7]) {
+      reset();
+      useOnboardingStore.setState({ status: 'skipped', step, maxVisitedStep: 7 });
+      s().resume();
+      expect(s().status).toBe('active');
+      expect(s().step).toBe(4);
+      expect(s().maxVisitedStep).toBe(4); // reset so dots can't jump back onto missing anchors
+    }
+  });
+
+  it('resume clamps a Configure pointer from pending too', () => {
+    useOnboardingStore.setState({ status: 'pending', step: 6, maxVisitedStep: 6 });
+    s().resume();
+    expect(s().step).toBe(4);
   });
 
   it('begin resets detection + consent for a clean replay', () => {

@@ -68,7 +68,10 @@ export function onboardingTelemetryEvents(
       if (next.replay && next.step === 0 && next.maxVisitedStep === 0) {
         return [{ name: 'onboarding_started', props: { trigger: 'replay' } }, stepViewed(0)];
       }
-      // realEvent advancing out of 'pending' moves the step; a Sidebar resume keeps it.
+      // 'skipped' → active is always the Sidebar resume — log it as a resume even
+      // when it clamps the step back to 4. 'pending' → active is a realEvent
+      // advance when the step moved, else a resume in place.
+      if (prev.status === 'skipped') return [{ name: 'onboarding_resumed', props: { step: next.step } }];
       if (stepChanged) return [stepViewed(next.step)];
       return [{ name: 'onboarding_resumed', props: { step: next.step } }];
     }

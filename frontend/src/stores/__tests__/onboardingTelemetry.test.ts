@@ -100,6 +100,14 @@ describe('onboardingTelemetry — lifecycle', () => {
     expect(events).toEqual([{ name: 'onboarding_resumed', props: { step: 3 } }]);
   });
 
+  it('a clamping resume (skipped → active, 5 → 4) still emits resumed, not a step view', () => {
+    const events = onboardingTelemetryEvents(
+      slice({ status: 'skipped', step: 5, maxVisitedStep: 7 }),
+      slice({ status: 'active', step: 4, maxVisitedStep: 4 }),
+    );
+    expect(events).toEqual([{ name: 'onboarding_resumed', props: { step: 4 } }]);
+  });
+
   it('a realEvent out of pending (pending → active, 7 → 8) reads as a view, not a resume', () => {
     const events = onboardingTelemetryEvents(
       slice({ status: 'pending', step: 7, maxVisitedStep: 7 }),

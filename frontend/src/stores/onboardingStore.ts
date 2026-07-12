@@ -225,11 +225,20 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
   resume: () => {
     const s = get();
     if (s.status !== 'skipped' && s.status !== 'pending') return;
-    // No clamp here: the boot path already clamps in hydrate(), and a live
-    // same-session resume (e.g. /ship idea modal dismissed while 'pending')
-    // should return to the step it parked on — its anchor is usually still
-    // mounted, and the Coachmark's anchor-lost fallback covers the case where
-    // it is not.
+    // The Sidebar "Resume setup" button is the only caller, so a resume is a
+    // COLD re-entry after the user skipped/parked and moved on. The wizard-
+    // Configure pointer steps (5-7) anchor the session-start screen, which is
+    // the first thing gone once the wizard closes — resuming onto a vanished
+    // anchor renders a disconnected, floating coachmark. Rebuild like the boot
+    // path: fall back to step 4 (its precondition reopens the wizard) and reset
+    // maxVisited so dots can't jump straight back onto the still-missing
+    // anchors. Steps 8-9 keep their step (the /ship coachmark's Continue escape
+    // and the always-present rail anchor cover a missing target), and modal
+    // steps never disconnect.
+    if (s.step >= 5 && s.step <= 7) {
+      set({ status: 'active', step: 4, maxVisitedStep: 4 });
+      return;
+    }
     set({ status: 'active', step: s.step });
   },
 
