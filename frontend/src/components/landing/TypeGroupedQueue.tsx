@@ -6,14 +6,16 @@
  *   1. PERMISSION    (amber swatch)   — real-time PreToolUse/approval gates. These
  *      come from the APPROVAL path (useReviewQueueView blocking+normal), rendered
  *      via the existing PendingApprovalCard. All approvals are permission-kind.
- *   2. DECISION      (rust swatch)    — approve-idea / approve-plan gates from the
- *      review_items inbox (kind === 'decision'), rendered via ReviewItemCard.
+ *   2. DECISION      (rust swatch)    — approve-idea / approve-design /
+ *      approve-plan gates from the review_items inbox (kind === 'decision'),
+ *      rendered via ReviewItemCard.
  *   3. HUMAN TASK    (blue swatch)    — free-form action items (kind === 'human_task'),
  *      EXCLUDING idle-session items, rendered via ReviewItemCard.
  *   4. IDLE SESSIONS (rust swatch)    — idle-quick-session items (kind === 'human_task'
  *      with source `idle-session:*`), split out of Human task and sorted oldest-idle
  *      first so the longest-quiet sessions sit at the top.
- *   5. READY TO REVIEW (green swatch) — runs drained to awaiting_review.
+ *   5. READY TO REVIEW (green swatch) — clean-drained runs awaiting_review with
+ *      no blocking gate.
  *   6. NOTIFICATION  (neutral swatch) — informational FYIs (kind === 'notification');
  *      nothing is blocked, so this group renders LAST.
  *
@@ -53,6 +55,30 @@ function itemId(item: QueueItem): string {
 
 function itemRunId(item: QueueItem): string {
   return item.kind === 'single' ? item.approval.runId : item.runId;
+}
+
+/**
+ * Select runs that are genuinely ready for post-workflow review.
+ *
+ * `awaiting_review` is also used while a programmatic workflow is parked at an
+ * intermediate human gate. Those runs already have a blocking decision (or
+ * permission) in the queue and must not be duplicated as finished work.
+ */
+export function selectReadyToReviewRuns(
+  runs: ActiveRunRow[],
+  reviewItems: ReviewItem[],
+  permissionItems: QueueItem[],
+): ActiveRunRow[] {
+  const blockedRunIds = new Set<string>();
+
+  for (const item of permissionItems) blockedRunIds.add(itemRunId(item));
+  for (const item of reviewItems) {
+    if (item.blocking && item.run_id !== null) blockedRunIds.add(item.run_id);
+  }
+
+  return runs.filter(
+    (run) => run.status === 'awaiting_review' && !blockedRunIds.has(run.id),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -189,12 +215,12 @@ function ReviewItemRow({ item }: { item: ReviewItem }): React.JSX.Element {
 const ELAPSED_TICK_MS = 30_000;
 
 /**
- * A single run that has drained to `awaiting_review` — finished work waiting for
- * the user to merge or dismiss. Unlike the permission/decision/human_task rows no
- * agent is halted, so the card is a calm "ready" state (steady green dot, no
- * pulse) rather than a blocked one. Elapsed is measured from `updated_at` (when
- * the run transitioned to awaiting_review) via a per-row ~30s clock, matching the
- * ActiveAgentCard pattern so the count stays deterministic/testable.
+ * A single clean-drained run — finished work waiting for the user to merge or
+ * dismiss. Unlike the permission/decision/human_task rows no agent is halted, so
+ * the card is a calm "ready" state (steady green dot, no pulse) rather than a
+ * blocked one. Elapsed is measured from `updated_at` (when the run transitioned
+ * to awaiting_review) via a per-row ~30s clock, matching the ActiveAgentCard
+ * pattern so the count stays deterministic/testable.
  */
 function ReadyToReviewRow({ run }: { run: ActiveRunRow }): React.JSX.Element {
   const [nowMs, setNowMs] = React.useState<number>(() => Date.now());
@@ -289,13 +315,13 @@ export function TypeGroupedQueue(): React.JSX.Element {
     [reviewItems],
   );
 
-  // Ready-to-review group: runs that have drained to `awaiting_review` — finished
-  // work waiting for the user to merge or dismiss. A clean drain mints no
-  // review_item, so this is the ONLY landing surface that catches such runs.
+  // Ready-to-review group: clean drains to `awaiting_review` — finished work
+  // waiting for the user to merge or dismiss. Intermediate human gates use the
+  // same status but are kept in their blocking decision/permission group.
   const runs = useAggregatedRuns();
   const readyToReviewRuns = React.useMemo(
-    () => runs.filter((run) => run.status === 'awaiting_review'),
-    [runs],
+    () => selectReadyToReviewRuns(runs, reviewItems, permissionItems),
+    [runs, reviewItems, permissionItems],
   );
 
   const hasAny =
