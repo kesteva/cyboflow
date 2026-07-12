@@ -26,7 +26,9 @@ describe('renderWorkflowPromptForRuntime', () => {
 
     expect(rendered.prompt).toContain('# Runtime adapter: Codex');
     expect(rendered.prompt).toContain('same Cyboflow workflow semantics');
-    expect(rendered.prompt).toContain('If this Codex runtime exposes a native delegation mechanism');
+    expect(rendered.prompt).toContain('never pass a `cyboflow-*` name as `agent_type`');
+    expect(rendered.prompt).toContain('built-in `worker`');
+    expect(rendered.prompt).toContain('built-in `explorer`');
     expect(rendered.prompt.endsWith(BASE_PROMPT.prompt)).toBe(true);
     expect(rendered.systemPromptAppend).toBe(BASE_PROMPT.systemPromptAppend);
   });

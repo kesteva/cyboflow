@@ -63,14 +63,14 @@ describe('composeStepPrompt', () => {
   // fallback, disk-state probing, collapsing real edges to "none"). 2026-06-22.
   // -------------------------------------------------------------------------
 
-  it('pins delegation to the installed subagent and forbids the general-purpose fallback', () => {
+  it('pins Claude delegation to the installed role and forbids the general-purpose fallback', () => {
     const out = composeStepPrompt({
       step: step({ id: 'analyze-dependencies', name: 'Analyze deps', agent: 'dependency-analyzer' }),
       workflowName: 'sprint',
       attempt: 1,
     });
     expect(out).toContain('cyboflow-dependency-analyzer');
-    expect(out).toContain('EXACT `subagent_type`');
+    expect(out).toContain('On the Claude runtime, use the Task tool with that EXACT `subagent_type`');
     expect(out).toContain('do NOT fall back to `general-purpose`');
   });
 
@@ -79,6 +79,13 @@ describe('composeStepPrompt', () => {
     expect(out).toContain('recording EVERY item the subagent returns');
     expect(out).toContain('cyboflow_add_task_dependency');
     expect(out).toContain('never collapse a non-empty result to "none"');
+  });
+
+  it('requires an atomic commit only for repository file changes, never DB-only or analysis work', () => {
+    const out = composeStepPrompt({ step: step({ id: 'context', agent: 'context' }), workflowName: 'ship', attempt: 1 });
+    expect(out).toContain('If this step changes repository files, make ONE git commit');
+    expect(out).toContain('For DB-only, analysis, review, or artifact-reporting work, do not make a git commit');
+    expect(out).toContain('Never create an empty commit');
   });
 
   it('declares the database canonical and forbids deciding scope/status from disk state', () => {
@@ -231,6 +238,29 @@ describe('composeStepPrompt', () => {
       attempt: 1,
     });
     expect(out).not.toContain('## Artifact to report');
+  });
+
+  it('gates a UI prototype on the persisted UI_PROTOTYPE flag before delegating', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'ui-prototype', agent: 'ui-prototype' }),
+      workflowName: 'ship',
+      attempt: 1,
+    });
+    expect(out).toContain('## Conditional execution');
+    expect(out).toContain("cyboflow_list_tasks(task_type: 'idea')");
+    expect(out).toContain('UI_PROTOTYPE: yes');
+    expect(out).toContain('do not delegate, do not write prototype files, do not report an artifact');
+  });
+
+  it('gates architecture on the persisted ARCH_DESIGN flag before delegating', () => {
+    const out = composeStepPrompt({
+      step: step({ id: 'architecture', agent: 'architecture' }),
+      workflowName: 'ship',
+      attempt: 1,
+    });
+    expect(out).toContain('## Conditional execution');
+    expect(out).toContain('ARCH_DESIGN: yes');
+    expect(out).toContain('do not delegate, do not change the idea body');
   });
 
   it('composes the artifact addendum correctly with the fan-out item context variant', () => {
