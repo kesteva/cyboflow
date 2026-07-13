@@ -6,10 +6,19 @@
  *   - after the yield the generator PARKS (does not complete) until close();
  *   - close() releases the gate so the generator completes (done: true);
  *   - close() is idempotent (safe from the result / finally / abort paths).
+ *
+ * Plus the MID-TURN operator-steering push (live-steer plumbing): the single-shot
+ * input is now pushable so a running step agent can be steered without respawn.
+ * Covered:
+ *   - a mid-stream push yields the pushed message (in FIFO order) after the initial;
+ *   - `{ steering: true }` stamps priority 'now'; a plain push omits priority;
+ *   - push after close() returns false (the message would never be delivered);
+ *   - a push queued just before close() still drains before the generator returns;
+ *   - the persistent variant's push accepts the same steering opt.
  */
 import { describe, it, expect } from 'vitest';
 import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
-import { createStreamingPromptInput } from '../streamingPromptInput';
+import { createStreamingPromptInput, createPersistentPromptInput } from '../streamingPromptInput';
 
 /** A pending-state probe: has `promise` settled by the next microtask flush? */
 async function isPending(promise: Promise<unknown>): Promise<boolean> {
@@ -65,5 +74,77 @@ describe('createStreamingPromptInput', () => {
     }).not.toThrow();
     const settled = await stream.next();
     expect(settled.done).toBe(true);
+  });
+});
+
+describe('createStreamingPromptInput — mid-turn steering push', () => {
+  it('a mid-stream push yields the pushed message after the initial (FIFO order)', async () => {
+    const { stream, push } = createStreamingPromptInput('initial');
+    const first = await stream.next();
+    expect((first.value as SDKUserMessage).message.content).toBe('initial');
+
+    // Two pushes while the generator is parked — delivered in FIFO order.
+    expect(push('steer one')).toBe(true);
+    expect(push('steer two')).toBe(true);
+
+    const second = await stream.next();
+    expect(second.done).toBe(false);
+    expect((second.value as SDKUserMessage).message.content).toBe('steer one');
+    const third = await stream.next();
+    expect((third.value as SDKUserMessage).message.content).toBe('steer two');
+  });
+
+  it("push({ steering: true }) stamps priority 'now'; a plain push omits priority", async () => {
+    const { stream, push } = createStreamingPromptInput('initial');
+    await stream.next(); // consume the initial message
+
+    push('plain follow');
+    push('steer now', { steering: true });
+
+    const plain = (await stream.next()).value as SDKUserMessage;
+    expect(plain.message.content).toBe('plain follow');
+    expect(plain.priority).toBeUndefined();
+
+    const steered = (await stream.next()).value as SDKUserMessage;
+    expect(steered.message.content).toBe('steer now');
+    expect(steered.priority).toBe('now');
+  });
+
+  it('push after close() returns false and enqueues nothing', async () => {
+    const { stream, push, close } = createStreamingPromptInput('initial');
+    await stream.next();
+    close();
+    expect(push('too late')).toBe(false);
+    // The rejected push added nothing, so the generator still terminates cleanly.
+    const settled = await stream.next();
+    expect(settled.done).toBe(true);
+  });
+
+  it('a push queued just before close() still drains before the generator returns', async () => {
+    const { stream, push, close } = createStreamingPromptInput('initial');
+    await stream.next();
+    // Push then immediately close: the queued push must still be yielded (the loop
+    // drains the queue before honoring the closed flag), and only THEN completes.
+    expect(push('pending steer')).toBe(true);
+    close();
+
+    const drained = await stream.next();
+    expect(drained.done).toBe(false);
+    expect((drained.value as SDKUserMessage).message.content).toBe('pending steer');
+
+    const settled = await stream.next();
+    expect(settled.done).toBe(true);
+  });
+});
+
+describe('createPersistentPromptInput — steering opt parity', () => {
+  it("a persistent push with { steering: true } also stamps priority 'now'", async () => {
+    const { stream, push } = createPersistentPromptInput('initial');
+    await stream.next(); // consume the initial message
+
+    expect(push('steer', { steering: true })).toBe(true);
+    const steered = (await stream.next()).value as SDKUserMessage;
+    expect(steered.message.content).toBe('steer');
+    expect(steered.priority).toBe('now');
   });
 });

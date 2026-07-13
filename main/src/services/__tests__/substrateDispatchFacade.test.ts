@@ -73,6 +73,17 @@ class EndSessionCapableSpyManager extends SpyManager {
   endSession = vi.fn<(panelId: string) => Promise<void>>().mockResolvedValue(undefined);
 }
 
+/**
+ * SpyManager variant that ALSO exposes the live-steer seam
+ * (`listLiveSpawnKeys` + `injectSteering`, ClaudeCodeManager-only). Used to
+ * assert the facade delegates monitor steering to the SDK manager; the base
+ * SpyManager (no such methods) covers the feature-detection empty-result branch.
+ */
+class SteeringCapableSpyManager extends SpyManager {
+  listLiveSpawnKeys = vi.fn<(runId: string) => string[]>().mockReturnValue([]);
+  injectSteering = vi.fn<(spawnKey: string, text: string) => boolean>().mockReturnValue(true);
+}
+
 /** Build a SpyManager cast to AbstractCliManager at the construction boundary. */
 function makeSpyManager(): SpyManager {
   return new SpyManager();
@@ -1050,5 +1061,102 @@ describe('RunExecutor-over-facade — interactive-branch clean drain drives iden
     expect(restAwaitingReview).toHaveBeenCalledOnce();
     expect(sdk.spawnCliProcess).toHaveBeenCalledOnce();
     expect(interactive.spawnCliProcess).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// live-steer seam (monitor operator guidance) — listLiveSpawnKeys / injectSteering
+//
+// Programmatic runs (the only ones the monitor steers) are SDK-substrate ONLY, so
+// the facade delegates both methods to the SDK manager and is a strict empty-result
+// no-op ([] / false) for the interactive substrate. The SDK manager exposes the seam
+// (feature-detected via isSteeringCapable, no `any`); a manager lacking it also
+// yields the empty result.
+// ---------------------------------------------------------------------------
+
+describe('SubstrateDispatchFacade — live-steer dispatch (listLiveSpawnKeys / injectSteering)', () => {
+  it('listLiveSpawnKeys delegates to the SDK manager and returns its spawnKeys', () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const registry = makeRegistry(run);
+    const sdk = new SteeringCapableSpyManager();
+    sdk.listLiveSpawnKeys.mockReturnValue([`${run.id}:item-1`, `${run.id}:item-2`]);
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    const keys = facade.listLiveSpawnKeys(run.id);
+
+    expect(keys).toEqual([`${run.id}:item-1`, `${run.id}:item-2`]);
+    expect(sdk.listLiveSpawnKeys).toHaveBeenCalledOnce();
+    expect(sdk.listLiveSpawnKeys).toHaveBeenCalledWith(run.id);
+  });
+
+  it('injectSteering delegates to the SDK manager with the spawnKey (NOT the runId) and forwards its verdict', () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const registry = makeRegistry(run);
+    const sdk = new SteeringCapableSpyManager();
+    sdk.injectSteering.mockReturnValue(true);
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    const spawnKey = `${run.id}:item-1`;
+    const ok = facade.injectSteering(spawnKey, run.id, 'focus on the failing test');
+
+    expect(ok).toBe(true);
+    // The runId is used only to resolve the substrate; the SDK manager keys on the spawnKey.
+    expect(sdk.injectSteering).toHaveBeenCalledWith(spawnKey, 'focus on the failing test');
+  });
+
+  it('injectSteering forwards a refusal (false) from the SDK manager verbatim', () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const registry = makeRegistry(run);
+    const sdk = new SteeringCapableSpyManager();
+    sdk.injectSteering.mockReturnValue(false); // e.g. turn not in flight / closing
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    expect(facade.injectSteering(`${run.id}:item-1`, run.id, 'too late')).toBe(false);
+  });
+
+  it('both methods are a strict empty-result NO-OP for the interactive substrate (never steered)', () => {
+    const run = makeWorkflowRunRow({ substrate: 'interactive' });
+    const registry = makeRegistry(run);
+    // Even if the interactive manager somehow had the seam, the facade must not
+    // reach it for an interactive run — use a steering-capable spy to prove it.
+    const sdk = new SteeringCapableSpyManager();
+    const interactive = new SteeringCapableSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    expect(facade.listLiveSpawnKeys(run.id)).toEqual([]);
+    expect(facade.injectSteering(`${run.id}:item-1`, run.id, 'ignored')).toBe(false);
+
+    expect(interactive.listLiveSpawnKeys).not.toHaveBeenCalled();
+    expect(interactive.injectSteering).not.toHaveBeenCalled();
+    expect(sdk.listLiveSpawnKeys).not.toHaveBeenCalled();
+    expect(sdk.injectSteering).not.toHaveBeenCalled();
+  });
+
+  it('both methods yield the empty result when the resolved SDK manager lacks the seam (feature-detect)', () => {
+    const run = makeWorkflowRunRow({ substrate: 'sdk' });
+    const registry = makeRegistry(run);
+    // Base SpyManager has neither method — the isSteeringCapable guard must no-op.
+    const sdk = makeSpyManager();
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    expect(facade.listLiveSpawnKeys(run.id)).toEqual([]);
+    expect(facade.injectSteering(`${run.id}:item-1`, run.id, 'noop')).toBe(false);
+  });
+
+  it('resolves the substrate for the empty legacy/undefined floor to the SDK manager', () => {
+    const run = makeWorkflowRunRow({ substrate: undefined });
+    const registry = makeRegistry(run);
+    const sdk = new SteeringCapableSpyManager();
+    sdk.listLiveSpawnKeys.mockReturnValue([run.id]);
+    const interactive = makeSpyManager();
+    const facade = new SubstrateDispatchFacade(asManager(sdk), asManager(interactive), registry, makeSpyLogger());
+
+    // undefined substrate → DEFAULT_SUBSTRATE ('sdk'), so the SDK seam is reached.
+    expect(facade.listLiveSpawnKeys(run.id)).toEqual([run.id]);
+    expect(sdk.listLiveSpawnKeys).toHaveBeenCalledWith(run.id);
   });
 });

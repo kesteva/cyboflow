@@ -11,12 +11,18 @@ import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
  * (`routeAskUserQuestion`) never runs. Driving `query()` with an
  * `AsyncIterable<SDKUserMessage>` keeps stdin open, which restores the gate.
  *
- * TWO variants share the same stdin-keepalive mechanism but differ in lifetime:
+ * TWO variants share the SAME drain-then-park engine (createPushablePromptInput)
+ * but differ in how the DRIVER treats the input's lifetime:
  *
  *   - {@link createStreamingPromptInput} — SINGLE-SHOT. Yields the prompt once,
  *     then parks until {@link StreamingPromptInput.close}. Used for the lane-spawn
  *     path (programmatic fan-out), where every turn is a fresh single-item query()
- *     that tears the subprocess down at turn end.
+ *     that tears the subprocess down at turn end. It is now ALSO pushable
+ *     ({@link StreamingPromptInput.push}) so an operator can interject a MID-TURN
+ *     steering message into a running step agent — a `priority: 'now'` user message
+ *     the CLI's steering queue delivers at the agent's next loop boundary within
+ *     the CURRENT turn. This does NOT make the single-shot input multi-turn: it
+ *     still closes at the turn's result event (the driver's shouldClose branch).
  *   - {@link createPersistentPromptInput} — MULTI-TURN (warm sessions). Yields the
  *     initial prompt, then loops: each {@link PersistentPromptInput.push} feeds a
  *     new user message into the SAME live `query()` (a new cyboflow turn) without
@@ -29,10 +35,21 @@ import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
  */
 export interface StreamingPromptInput {
   /**
-   * The single-use `AsyncIterable` to hand to `query({ prompt })`. Yields one
-   * `SDKUserMessage` carrying the prompt text, then blocks until {@link close}.
+   * The `AsyncIterable` to hand to `query({ prompt })`. Yields one `SDKUserMessage`
+   * carrying the prompt text, then parks until {@link close} — servicing any
+   * {@link push}ed steering message in between.
    */
   readonly stream: AsyncGenerator<SDKUserMessage, void>;
+  /**
+   * Interject an ADDITIONAL user message into the still-open turn. Returns `true`
+   * when accepted; `false` once {@link close} has been called (push-after-close —
+   * the message would never be delivered). This exists for MID-TURN operator
+   * steering: pass `{ steering: true }` to stamp `priority: 'now'` so the running
+   * agent sees the message at its next loop boundary. Ordering is FIFO; a push
+   * while the generator is parked wakes it. Because the single-shot input still
+   * closes at the turn's result event, a push is only meaningful DURING the turn.
+   */
+  push(text: string, opts?: { steering?: boolean }): boolean;
   /**
    * Release the input gate so the generator returns (stdin closes → CLI exits).
    * Idempotent — safe to call from the result-event, loop-exit, and abort paths.
@@ -57,9 +74,10 @@ export interface PersistentPromptInput {
    * message was accepted; `false` once {@link close} has been called (the input is
    * closing / closed — the caller must NOT commit a turn, since the message will
    * never be delivered). Ordering is preserved (FIFO); a push while the generator
-   * is parked wakes it.
+   * is parked wakes it. Pass `{ steering: true }` to stamp `priority: 'now'` for a
+   * mid-turn interjection (the operator-steer path) rather than a fresh turn.
    */
-  push(text: string): boolean;
+  push(text: string, opts?: { steering?: boolean }): boolean;
   /**
    * End the generator (stdin closes → CLI exits → the driving `for await`
    * drains). Idempotent — safe from the idle-TTL, process-death, and abort paths.
@@ -67,50 +85,47 @@ export interface PersistentPromptInput {
   close(): void;
 }
 
-/** Build the SDKUserMessage the SDK expects for a plain-text user turn. */
-function buildUserMessage(text: string): SDKUserMessage {
+/**
+ * Build the SDKUserMessage the SDK expects for a plain-text user turn.
+ *
+ * `opts.steering` stamps `priority: 'now'` — the CLI's steering-queue priority
+ * that interjects the message into the CURRENT in-flight turn at the agent's next
+ * loop boundary (the same engine as typing while Claude works in the interactive
+ * REPL). A normal turn omits `priority`, so its serialized bytes are unchanged.
+ */
+function buildUserMessage(text: string, opts?: { steering?: boolean }): SDKUserMessage {
   return {
     type: 'user',
     message: { role: 'user', content: text },
     parent_tool_use_id: null,
     session_id: '',
+    // Spread nothing on the normal path so the message stays byte-identical to the
+    // pre-steering shape; only a steering push adds the priority discriminator.
+    ...(opts?.steering ? { priority: 'now' as const } : {}),
   };
 }
 
-/**
- * Build a {@link StreamingPromptInput} carrying `text` as the turn's initial —
- * and only — user message. The message content is byte-identical to `text`.
- */
-export function createStreamingPromptInput(text: string): StreamingPromptInput {
-  // Resolved by close(); parks the generator after the initial yield. Assigned
-  // synchronously inside the Promise executor, so it is defined before return.
-  let releaseGate: () => void = () => {};
-  const gate = new Promise<void>((resolve) => {
-    releaseGate = resolve;
-  });
-
-  async function* generate(): AsyncGenerator<SDKUserMessage, void> {
-    yield buildUserMessage(text);
-    // Park so the SDK keeps stdin open to service can_use_tool control
-    // roundtrips. Promise resolution is idempotent, so a redundant close() no-ops.
-    await gate;
-  }
-
-  return {
-    stream: generate(),
-    close: () => releaseGate(),
-  };
+/** A queued push: the text plus its (optional) steering flag, carried FIFO. */
+interface PendingPush {
+  text: string;
+  opts?: { steering?: boolean };
 }
 
 /**
- * Build a {@link PersistentPromptInput} whose generator yields `initialText`, then
- * stays open across turns: each {@link PersistentPromptInput.push} enqueues a new
- * user message the generator yields (in FIFO order) as the next turn's input, and
- * {@link PersistentPromptInput.close} ends it. This keeps ONE `query()`/claude
- * subprocess alive for a warm session's whole lifetime.
+ * Shared drain-then-park engine for BOTH prompt-input variants. The generator
+ * yields `initialText`, then loops: drain the FIFO queue, and when it is empty
+ * either return (closed) or park on a wake promise. The single-shot and
+ * persistent variants are the SAME mechanism — they differ only in how the
+ * DRIVER treats the input's lifetime (single-shot closes it at the turn's result
+ * event; persistent keeps it open across turns). Factoring it here keeps the one
+ * interleaving-safety argument (below) in a single place so the two cannot drift.
  */
-export function createPersistentPromptInput(initialText: string): PersistentPromptInput {
-  const pending: string[] = [];
+function createPushablePromptInput(initialText: string): {
+  stream: AsyncGenerator<SDKUserMessage, void>;
+  push: (text: string, opts?: { steering?: boolean }) => boolean;
+  close: () => void;
+} {
+  const pending: PendingPush[] = [];
   let closed = false;
   // Resolves the generator's park so it re-checks the queue / closed flag. Null
   // while the generator is not parked; set only around the awaited promise.
@@ -130,7 +145,7 @@ export function createPersistentPromptInput(initialText: string): PersistentProm
     while (true) {
       const next = pending.shift();
       if (next !== undefined) {
-        yield buildUserMessage(next);
+        yield buildUserMessage(next.text, next.opts);
         continue;
       }
       if (closed) return;
@@ -142,15 +157,39 @@ export function createPersistentPromptInput(initialText: string): PersistentProm
 
   return {
     stream: generate(),
-    push: (text: string): boolean => {
+    push: (text: string, opts?: { steering?: boolean }): boolean => {
       if (closed) return false;
-      pending.push(text);
+      pending.push({ text, opts });
       notify();
       return true;
     },
-    close: () => {
+    close: (): void => {
       closed = true;
       notify();
     },
   };
+}
+
+/**
+ * Build a {@link StreamingPromptInput} carrying `text` as the turn's initial user
+ * message. The message content is byte-identical to `text`. The input parks after
+ * that initial yield (keeping stdin open for can_use_tool roundtrips) and closes
+ * on {@link StreamingPromptInput.close}. It is also PUSHABLE — a mid-turn
+ * {@link StreamingPromptInput.push} interjects a steering message into the live
+ * turn — but it remains conceptually single-shot: the driver closes it at the
+ * turn's result event, so it never spans turns the way the persistent variant does.
+ */
+export function createStreamingPromptInput(text: string): StreamingPromptInput {
+  return createPushablePromptInput(text);
+}
+
+/**
+ * Build a {@link PersistentPromptInput} whose generator yields `initialText`, then
+ * stays open across turns: each {@link PersistentPromptInput.push} enqueues a new
+ * user message the generator yields (in FIFO order) as the next turn's input, and
+ * {@link PersistentPromptInput.close} ends it. This keeps ONE `query()`/claude
+ * subprocess alive for a warm session's whole lifetime.
+ */
+export function createPersistentPromptInput(initialText: string): PersistentPromptInput {
+  return createPushablePromptInput(initialText);
 }

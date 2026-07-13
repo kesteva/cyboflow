@@ -89,6 +89,26 @@ function isEndSessionCapable(mgr: AbstractCliManager): mgr is AbstractCliManager
   return typeof (mgr as Partial<EndSessionCapable>).endSession === 'function';
 }
 
+/**
+ * Narrow capability interface for the SDK manager's LIVE-STEER seam (monitor
+ * operator guidance into a running step agent). `AbstractCliManager` does NOT
+ * declare these — they are ClaudeCodeManager-specific (the SDK query() drive loop
+ * owns the steerable input; the interactive manager has no per-turn SDK queue).
+ * The facade feature-detects this shape (no `any`) and returns the empty result
+ * ([] / false) when it is absent, so the seam is harmless during early boot or if
+ * a future non-steering CLI substrate resolves here.
+ */
+interface SteeringCapable {
+  listLiveSpawnKeys(runId: string): string[];
+  injectSteering(spawnKey: string, text: string): boolean;
+}
+
+/** Type guard: does this manager expose the live-steer seam (listLiveSpawnKeys + injectSteering)? */
+function isSteeringCapable(mgr: AbstractCliManager): mgr is AbstractCliManager & SteeringCapable {
+  const m = mgr as Partial<SteeringCapable>;
+  return typeof m.listLiveSpawnKeys === 'function' && typeof m.injectSteering === 'function';
+}
+
 export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawnerLike {
   /**
    * Records which manager spawned each panel, keyed by panelId. abort() looks up
@@ -326,6 +346,50 @@ export class SubstrateDispatchFacade extends EventEmitter implements ClaudeSpawn
       cols,
       rows,
     });
+  }
+
+  /**
+   * List the run's spawnKeys with a LIVE, steerable SDK turn (monitor live-steer).
+   *
+   * Takes the RUN id and resolves the substrate via resolveManager() so dispatch
+   * stays in ONE place. Programmatic runs — the only ones the monitor steers — are
+   * SDK-substrate ONLY, so the interactive manager never owns a steerable turn:
+   * it returns [] here. For the SDK manager this delegates to its live-steer seam
+   * (feature-detected via isSteeringCapable, no `any`); a manager without the seam
+   * (early boot / a future CLI substrate) also returns []. The delegate reports
+   * each spawnKey (one per fan-out lane, or the single spawnKey === runId on a
+   * non-fan-out run) whose turn is in flight and not tearing down.
+   */
+  listLiveSpawnKeys(runId: string): string[] {
+    const mgr = this.resolveManager(runId);
+    if (mgr === this.interactiveManager) {
+      // Interactive substrate has no per-turn SDK steering queue — nothing steerable.
+      return [];
+    }
+    return isSteeringCapable(mgr) ? mgr.listLiveSpawnKeys(runId) : [];
+  }
+
+  /**
+   * Interject an operator steering message into the turn a single spawn is running
+   * (monitor live-steer). Returns `true` only when the delegate actually pushed the
+   * message into the live turn.
+   *
+   * The runId is threaded SEPARATELY from the spawnKey (a fan-out lane's spawnKey is
+   * `${runId}:${itemId}`, not the runId) solely to resolve the substrate via
+   * resolveManager() — the SDK manager's injectSteering keys on the spawnKey. The
+   * interactive manager is a strict NO-OP (`false`): programmatic runs never resolve
+   * the interactive substrate, and it has no SDK steering queue to push into. For the
+   * SDK manager this delegates through the isSteeringCapable guard (no `any`);
+   * absent the seam it also returns `false`. Delivery is the SDK steering queue
+   * (priority 'now') — see ClaudeCodeManager.injectSteering.
+   */
+  injectSteering(spawnKey: string, runId: string, text: string): boolean {
+    const mgr = this.resolveManager(runId);
+    if (mgr === this.interactiveManager) {
+      // Interactive substrate has no SDK steering queue — never steerable.
+      return false;
+    }
+    return isSteeringCapable(mgr) ? mgr.injectSteering(spawnKey, text) : false;
   }
 
   /**

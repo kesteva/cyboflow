@@ -47,7 +47,7 @@ import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { WorkflowBundleWriter } from './workflowBundleWriter';
 import { installWorkflowBundle } from './workflowBundleInstall';
 import { createStreamingPromptInput, createPersistentPromptInput } from './streamingPromptInput';
-import type { PersistentPromptInput } from './streamingPromptInput';
+import type { PersistentPromptInput, StreamingPromptInput } from './streamingPromptInput';
 import { withLock } from '../../../utils/mutex';
 import { enhancePromptForStructuredCommit } from '../../../utils/promptEnhancer';
 import { EventRouter, RawEventsSink, TypedEventNarrowing } from '../../streamParser';
@@ -649,6 +649,27 @@ interface ClaudeSdkRun {
   closing: boolean;
   /** Warm persistence; null for lane spawns (single-shot, never parks). */
   warm: WarmSession | null;
+  /**
+   * The CURRENT turn's live prompt input — the exact object driving this turn's
+   * `query()` (a single-shot {@link StreamingPromptInput} on a lane spawn, or the
+   * warm {@link PersistentPromptInput} on a non-lane run). It is the push target
+   * for {@link injectSteering}: an operator steering message is interjected into
+   * the turn in flight by pushing here with `{ steering: true }`. Set in the drive
+   * loop where the input is created (both warm and lane paths) and cleared in that
+   * loop's finally; null between turns / after teardown so a steer never pushes
+   * into a stale input. For a warm run this equals `warm.input`, which is why
+   * {@link injectSteering} falls back to it when `liveInput` is momentarily null.
+   */
+  liveInput: StreamingPromptInput | PersistentPromptInput | null;
+  /**
+   * True once an operator steering message was successfully pushed into THIS turn
+   * (see {@link injectSteering}). It gates the zombie-turn teardown defense: a
+   * steered turn CLOSES its input (never parks warm) and the driver aborts the
+   * query after the result so the CLI can never dequeue an unconsumed steering
+   * message as a phantom follow-on turn. {@link finishTurn} resets it to false at
+   * each turn boundary (the driver stashes it just before, for the abort check).
+   */
+  steeredThisTurn: boolean;
 }
 
 /** Stub CliProcess shape that satisfies AbstractCliManager's processes map. */
@@ -1242,6 +1263,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
         turnInFlight: true,
         turnCount: 0,
         closing: false,
+        // Set by runSdkQuery's drive loop once the turn's prompt input is created
+        // (both warm and lane paths); null until then and cleared each loop exit.
+        liveInput: null,
+        steeredThisTurn: false,
         warm: warmEnabled
           ? {
               input: createPersistentPromptInput(finalPrompt),
@@ -1499,6 +1524,11 @@ export class ClaudeCodeManager extends AbstractCliManager {
         // a SINGLE-SHOT input that closes at the result event (today's behavior),
         // tearing the subprocess down at turn end.
         const promptInput = run.warm ? run.warm.input : createStreamingPromptInput(prompt);
+        // Publish THIS turn's input as the live steer target (both warm and lane
+        // paths) so injectSteering can push an operator message into the running
+        // turn. Cleared in this loop's finally so a steer never races a torn-down
+        // or model-fallback-replaced input.
+        run.liveInput = promptInput;
         const closeInputOnAbort = (): void => promptInput.close();
         abortController.signal.addEventListener('abort', closeInputOnAbort, { once: true });
         try {
@@ -1653,11 +1683,20 @@ export class ClaudeCodeManager extends AbstractCliManager {
             }
             if (isResultEvent(event)) {
               const aborted = abortController.signal.aborted;
+              // Stash the steered flag BEFORE finishTurn (which resets it): a turn
+              // that received a mid-turn operator steering message must close +
+              // abort below so an unconsumed steering message can never be dequeued
+              // as a zombie follow-on turn.
+              const steeredThisTurn = run.steeredThisTurn;
               // A warm session PARKS between turns; everything else (lane / kill-
-              // switch / terminal error / abort) closes the input so the loop drains
-              // to process death. A parked warm session keeps the loop alive, waiting
-              // on the persistent input's next push.
-              const shouldClose = run.warm === null || warmSdkDisabled() || terminalError !== null || aborted;
+              // switch / terminal error / abort / a steered turn) closes the input so
+              // the loop drains to process death. A parked warm session keeps the loop
+              // alive, waiting on the persistent input's next push. Including
+              // steeredThisTurn here means a steered WARM run closes instead of
+              // parking — programmatic step turns (the only steer target) never get
+              // warm REUSE anyway, so this costs nothing.
+              const shouldClose =
+                run.warm === null || warmSdkDisabled() || terminalError !== null || aborted || steeredThisTurn;
               // Mark the record CLOSING before finishTurn — finishTurn fires the
               // quick-input drain (setImmediate → continuePanel → spawnCliProcess),
               // which must find `closing` true and cold-respawn rather than push into
@@ -1674,6 +1713,16 @@ export class ClaudeCodeManager extends AbstractCliManager {
               gateRecoveryDetector = makeGateDetector();
               if (shouldClose) {
                 promptInput.close();
+                // Zombie-turn guard: a steering message pushed with priority 'now'
+                // lands in the CLI's steering queue; one that RACED the turn's end
+                // (pushed after the agent's last loop boundary) would otherwise be
+                // dequeued as a phantom follow-on turn once the input's next pull
+                // arrives. Aborting the query after close() guarantees the CLI can
+                // never consume it. Safe post-result: finishTurn already fired this
+                // turn's per-turn 'exit' and resolved its promise, so the turn is
+                // done; the catch treats an aborted signal as a clean exit, and the
+                // process-death boundary skips the already-settled turn.
+                if (steeredThisTurn) abortController.abort();
               } else {
                 this.armWarmIdleTimer(run, spawnKey);
               }
@@ -1688,6 +1737,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
           // CLI's stdin. Idempotent with the result-event and abort closes.
           promptInput.close();
           abortController.signal.removeEventListener('abort', closeInputOnAbort);
+          // Drop the live steer target so injectSteering can no longer push into
+          // this closed input. On a model-fallback `continue retry` the next loop
+          // iteration re-publishes the fresh input; on process death it stays null.
+          if (run.liveInput === promptInput) run.liveInput = null;
         }
       }
     } catch (err) {
@@ -1812,6 +1865,10 @@ export class ClaudeCodeManager extends AbstractCliManager {
     run.turnInFlight = false;
     run.currentTurn = null;
     run.turnCount++;
+    // This turn is over: clear the steer flag so the next turn starts un-steered.
+    // The driver stashes the pre-reset value just before this call for its abort
+    // decision, so resetting here does not lose the zombie-turn guard.
+    run.steeredThisTurn = false;
 
     // Per-turn 'exit' — events.ts keys the whole quick-session status lifecycle,
     // auto-context, context meter and git refresh on this.
@@ -3094,6 +3151,64 @@ export class ClaudeCodeManager extends AbstractCliManager {
         this.processes.delete(spawnKey);
       })
     );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Live-steer seam (monitor operator guidance into a running step agent)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * List the run's spawnKeys whose SDK turn is CURRENTLY steerable — i.e. a turn
+   * is in flight (`turnInFlight`), no teardown has begun (`!closing`), AND a live
+   * pushable input is published (the EXACT predicate {@link injectSteering}
+   * enforces, so a reported key never refuses the immediately-following push —
+   * modulo the inherent race with the turn ending). The monitor uses this to
+   * resolve which lane(s) of a programmatic run can accept a live-steer message
+   * right now (a fan-out run has one spawnKey per lane; a non-fan-out run has the
+   * single spawnKey === runId). Reads spawnKeysByRunId — the same registry killRun
+   * snapshots — so a spawn that has already settled (its record deleted /
+   * `closing`) is never reported as steerable. Returns [] for an unknown runId or
+   * a run with no live turn.
+   */
+  listLiveSpawnKeys(runId: string): string[] {
+    const keySet = this.spawnKeysByRunId.get(runId);
+    if (keySet === undefined) return [];
+    const live: string[] = [];
+    for (const spawnKey of keySet) {
+      const run = this.sdkRuns.get(spawnKey);
+      if (run && run.turnInFlight && !run.closing && (run.liveInput ?? run.warm?.input) != null) {
+        live.push(spawnKey);
+      }
+    }
+    return live;
+  }
+
+  /**
+   * Interject an operator steering message into the turn a single spawn is running
+   * RIGHT NOW. Returns `false` (refusing the push) unless the spawn exists, has a
+   * turn in flight, and is not tearing down (`turnInFlight && !closing`) — the same
+   * steerability contract {@link listLiveSpawnKeys} reports.
+   *
+   * Delivery is the SDK's steering queue: the message is pushed with
+   * `priority: 'now'`, so the CLI hands it to the running agent at its NEXT
+   * agent-loop boundary within the CURRENT turn (the same engine as typing while
+   * Claude works in the interactive REPL) — it is NOT a fresh turn. We push into
+   * the turn's live prompt input (`liveInput`, set by the drive loop for both warm
+   * and lane paths), falling back to `warm.input` for the brief window where
+   * `liveInput` is momentarily null (e.g. a model-fallback input swap) but the warm
+   * input is the live one. On a successful push we set `steeredThisTurn` so the
+   * driver's teardown defense closes the input and aborts the query at this turn's
+   * result event — a steering message that RACED the turn's end can then never be
+   * dequeued by the CLI as a zombie follow-on turn.
+   */
+  injectSteering(spawnKey: string, text: string): boolean {
+    const run = this.sdkRuns.get(spawnKey);
+    if (!run || !run.turnInFlight || run.closing) return false;
+    const input = run.liveInput ?? run.warm?.input ?? null;
+    if (input === null) return false;
+    const pushed = input.push(text, { steering: true });
+    if (pushed) run.steeredThisTurn = true;
+    return pushed;
   }
 
   /**
