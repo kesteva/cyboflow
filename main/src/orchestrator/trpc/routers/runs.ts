@@ -1422,6 +1422,127 @@ export const runsRouter = router({
     }),
 
   /**
+   * Return a too-large idea to the backlog instead of launching a separate
+   * planner — the second half of the size-guard CTA pair (IDEA-009 / Decision 8),
+   * mirroring launchSeparatePlanner as stamp-then-resolve. The planner's size
+   * guard parks a too-large idea behind a BLOCKING `decision` review item
+   * (soft-linked entity_type='idea', run_id=<parent planner>). Rather than plan it
+   * now, the human sends the idea back to the board stamped `scope='large'` (a
+   * durable "this one is big — plan it deliberately later" hint) and resolves the
+   * guard so the parent planner proceeds with the remaining ideas.
+   *
+   * Ordering (stamp-then-resolve, mirroring Decision 8's create-then-resolve):
+   * validate (nothing written on a hard error) → stamp scope='large' via the
+   * TaskChangeRouter chokepoint → resolve the guard via the ReviewItemRouter
+   * chokepoint. A stamp failure rethrows as a TRPCError with the guard UNTOUCHED. A
+   * resolve failure AFTER a successful stamp surfaces the error but does NOT unwind
+   * the stamp: scope='large' on a large idea is correct standalone board state, so a
+   * retried resolve simply re-stamps the (idempotent) scope and completes — an
+   * orphaned stamp is harmless, an orphaned resolve (guard cleared, idea un-stamped)
+   * is not, which is exactly why the resolve runs last.
+   *
+   * Blocking-unblock: the resolve routes through the ReviewItemRouter chokepoint,
+   * whose post-commit 'resolved' emit wakes the parked ReviewQueueHumanGate. The
+   * `return-to-backlog:<ideaId>` resolution trips none of parseGateVerdict's
+   * reject/revise/retry substrings, so the guard resolves as approve-to-proceed and
+   * the parent planner resumes with the remaining ideas. Writes only ever touch the
+   * idea's `scope` + the guard's status — seed_idea_ids / decomposed_at /
+   * archived_at are left alone.
+   */
+  returnIdeaToBacklog: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.number().int().positive(),
+        reviewItemId: z.string().min(1),
+      }),
+    )
+    .mutation(async ({ ctx, input }): Promise<{ reviewItemId: string; ideaId: string }> => {
+      if (!ctx.db) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
+      }
+
+      // (1) Validate the guard item + idea link (stamp-then-resolve, step 1) —
+      // mirrors launchSeparatePlanner's narrow SELECT: exists in-project, pending,
+      // soft-linked to an idea. All hard errors, so a malformed request never stamps
+      // anything; the stamp + resolve WRITEs below go through the chokepoints.
+      const item = ctx.db
+        .prepare(
+          `SELECT status, entity_type AS entityType, entity_id AS entityId
+             FROM review_items WHERE id = ? AND project_id = ?`,
+        )
+        .get(input.reviewItemId, input.projectId) as
+        | { status: string; entityType: string | null; entityId: string | null }
+        | undefined;
+      if (!item) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: `Review item ${input.reviewItemId} not found in project ${input.projectId}`,
+        });
+      }
+      if (item.status !== 'pending') {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: `Review item ${input.reviewItemId} is already '${item.status}' — cannot return its idea to the backlog`,
+        });
+      }
+      if (item.entityType !== 'idea' || !item.entityId) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: `Review item ${input.reviewItemId} has no linked idea to return`,
+        });
+      }
+      // Pin the validated idea id as a narrowed local — the applyChange call below is
+      // after the null-guard, and property narrowing on item.entityId (string | null)
+      // can lapse across intervening statements.
+      const ideaId: string = item.entityId;
+
+      // (2) Stamp scope='large' through the TaskChangeRouter chokepoint — the ONLY
+      // sanctioned entity write (mints the entity_event + version bump + broadcast a
+      // raw UPDATE would silently skip). A failure here leaves the guard pending
+      // (rethrown as a TRPCError below).
+      try {
+        await TaskChangeRouter.getInstance().applyChange(input.projectId, {
+          actor: 'user',
+          entityType: 'idea',
+          taskId: ideaId,
+          fields: { scope: 'large' },
+        });
+      } catch (err) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: `Failed to stamp scope='large' on idea ${ideaId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        });
+      }
+
+      // (3) Resolve the guard LAST through the ReviewItemRouter chokepoint (post-commit
+      // 'resolved' emit → the parked ReviewQueueHumanGate resumes the parent planner).
+      // A failure AFTER a successful stamp surfaces here but does NOT unwind the stamp:
+      // scope='large' on a large idea is correct standalone state (a retried resolve just
+      // re-stamps the idempotent scope), whereas an orphaned resolve is not — hence
+      // resolve-last.
+      try {
+        await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
+          op: 'resolve',
+          actor: 'user',
+          reviewItemId: input.reviewItemId,
+          resolution: `return-to-backlog:${ideaId}`,
+        });
+      } catch (err) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: `Stamped scope='large' on idea ${ideaId} but failed to resolve guard ${input.reviewItemId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        });
+      }
+
+      // (4) Return the resolved guard + returned idea.
+      return { reviewItemId: input.reviewItemId, ideaId };
+    }),
+
+  /**
    * Git-neutral Cancel of a running workflow run (session<->run restructure,
    * Phase 4a). Stops the live agent on BOTH substrates (via the
    * SubstrateDispatchFacade kill seam injected as cancelRunDeps.stopLiveRun) and
