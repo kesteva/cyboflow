@@ -44,6 +44,7 @@ import type {
   BacklogTaskItem,
   Board,
   BoardStage,
+  EntityCategory,
   FlowOverlay,
   IdeaAttachment,
   TaskDependencyRef,
@@ -115,6 +116,8 @@ interface TaskDbRow {
   summary: string | null;
   body: string | null;
   priority: 'P0' | 'P1' | 'P2';
+  /** Entity classification (migration 059); NOT NULL DEFAULT 'feature' on every table. */
+  category: EntityCategory;
   repo: string | null;
   parent_epic_id: string | null;
   originating_idea_id: string | null;
@@ -143,7 +146,7 @@ interface TaskDbRow {
  * column ORDER is fixed and shared by every branch (SQLite unions positionally).
  */
 const UNION_COLUMNS =
-  'id, project_id, type, ref, title, summary, body, priority, repo, parent_epic_id, originating_idea_id, scope, board_id, stage_id, archived_at, decomposed_at, approved_at, experiment_id, sort_order, version, created_at, updated_at';
+  'id, project_id, type, ref, title, summary, body, priority, category, repo, parent_epic_id, originating_idea_id, scope, board_id, stage_id, archived_at, decomposed_at, approved_at, experiment_id, sort_order, version, created_at, updated_at';
 
 /**
  * UNION_COLUMNS prefixed with a subquery alias for joined outer SELECTs — the
@@ -167,17 +170,17 @@ type EntityUnionFilter = '' | 'WHERE project_id = ?' | 'WHERE id = ?';
 function entityUnionSql(filter: EntityUnionFilter): string {
   const where = filter === '' ? '' : ` ${filter}`;
   return `
-    SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, repo,
+    SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, category, repo,
            NULL AS parent_epic_id, NULL AS originating_idea_id, scope,
            board_id, stage_id, archived_at, decomposed_at, NULL AS approved_at, experiment_id, sort_order, version, created_at, updated_at
       FROM ideas${where}
     UNION ALL
-    SELECT id, project_id, 'epic' AS type, ref, title, summary, body, priority, repo,
+    SELECT id, project_id, 'epic' AS type, ref, title, summary, body, priority, category, repo,
            NULL AS parent_epic_id, originating_idea_id, NULL AS scope,
            board_id, stage_id, archived_at, NULL AS decomposed_at, approved_at, experiment_id, sort_order, version, created_at, updated_at
       FROM epics${where}
     UNION ALL
-    SELECT id, project_id, 'task' AS type, ref, title, summary, body, priority, repo,
+    SELECT id, project_id, 'task' AS type, ref, title, summary, body, priority, category, repo,
            parent_epic_id, originating_idea_id, NULL AS scope,
            board_id, stage_id, archived_at, NULL AS decomposed_at, approved_at, experiment_id, sort_order, version, created_at, updated_at
       FROM tasks${where}`;
@@ -484,6 +487,7 @@ function projectTaskItem(db: DatabaseLike, row: TaskDbRow): BacklogTaskItem {
     summary: row.summary,
     body: row.body,
     priority: row.priority,
+    category: row.category,
     repo: row.repo,
     parent_epic_id: row.parent_epic_id,
     originating_idea_id: row.originating_idea_id,
@@ -535,7 +539,7 @@ export function selectTaskById(db: DatabaseLike, taskId: string): BacklogTaskIte
     // Children are always tasks (only `tasks` carries parent_epic_id).
     const childRows = db
       .prepare(
-        `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.repo,
+        `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.category, t.repo,
                 t.parent_epic_id, t.originating_idea_id, NULL AS scope,
                 t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.experiment_id, t.sort_order, t.version, t.created_at, t.updated_at,
                 COALESCE(bs.position, 0) AS stage_position
@@ -588,7 +592,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
     .prepare(
       `SELECT ${aliasedUnionColumns('e')}, COALESCE(bs.position, 0) AS stage_position
          FROM (
-           SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, repo,
+           SELECT id, project_id, 'idea' AS type, ref, title, summary, body, priority, category, repo,
                   NULL AS parent_epic_id, NULL AS originating_idea_id, scope,
                   board_id, stage_id, archived_at, decomposed_at, NULL AS approved_at, experiment_id, sort_order, version, created_at, updated_at
              FROM ideas WHERE id = ?
@@ -603,7 +607,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
   // Epics decomposed from this idea (ASC by created_at, ref tiebreak).
   const epicRows = db
     .prepare(
-      `SELECT e.id, e.project_id, 'epic' AS type, e.ref, e.title, e.summary, e.body, e.priority, e.repo,
+      `SELECT e.id, e.project_id, 'epic' AS type, e.ref, e.title, e.summary, e.body, e.priority, e.category, e.repo,
               NULL AS parent_epic_id, e.originating_idea_id, NULL AS scope,
               e.board_id, e.stage_id, e.archived_at, NULL AS decomposed_at, e.approved_at, e.experiment_id, e.sort_order, e.version, e.created_at, e.updated_at,
               COALESCE(bs.position, 0) AS stage_position
@@ -621,7 +625,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
     // selectTaskById's epic-children pass.
     const taskRows = db
       .prepare(
-        `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.repo,
+        `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.category, t.repo,
                 t.parent_epic_id, t.originating_idea_id, NULL AS scope,
                 t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.experiment_id, t.sort_order, t.version, t.created_at, t.updated_at,
                 COALESCE(bs.position, 0) AS stage_position
@@ -652,7 +656,7 @@ export function selectIdeaDecomposition(db: DatabaseLike, ideaId: string): Backl
   // idea.children by type (epics get cards, direct tasks get a task grid).
   const directTaskRows = db
     .prepare(
-      `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.repo,
+      `SELECT t.id, t.project_id, 'task' AS type, t.ref, t.title, t.summary, t.body, t.priority, t.category, t.repo,
               t.parent_epic_id, t.originating_idea_id, NULL AS scope,
               t.board_id, t.stage_id, t.archived_at, NULL AS decomposed_at, t.approved_at, t.experiment_id, t.sort_order, t.version, t.created_at, t.updated_at,
               COALESCE(bs.position, 0) AS stage_position

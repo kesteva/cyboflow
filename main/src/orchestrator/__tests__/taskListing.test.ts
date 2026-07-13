@@ -62,6 +62,10 @@ function buildDb(): Database.Database {
   db.exec('ALTER TABLE tasks ADD COLUMN experiment_id TEXT');
   // Migration 057 adds the manual rank; the UNION projects sort_order unconditionally.
   db.exec(readFileSync(join(migDir, '057_entity_sort_order.sql'), 'utf-8'));
+  // Migration 059 adds the entity `category` classification (feature|bug|chore,
+  // NOT NULL DEFAULT 'feature'); the UNION now selects it bare (not NULL AS ...)
+  // on every branch, so every fixture row needs the column.
+  db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
   return db;
 }
 
@@ -136,6 +140,33 @@ describe('taskListing — 3-table UNION', () => {
     expect(child.body).toBe('task body');
     expect(child.parent_epic_id).toBe(epicId);
     expect(child.originating_idea_id).toBe(ideaId);
+  });
+
+  it('selectProjectBacklog and selectTaskById project category (migration 059) on the page-load read path', () => {
+    const db = buildDb();
+    const { ideaId, epicId, taskId } = seedFixture(db);
+    // seedFixture's INSERTs don't specify category, so every row falls back to
+    // the column's DEFAULT 'feature' — proving the bare (non-NULL-AS) UNION
+    // select surfaces the default, not just an explicitly-written value.
+    db.prepare(`UPDATE tasks SET category = 'bug' WHERE id = ?`).run(taskId);
+
+    const backlog = selectProjectBacklog(dbAdapter(db), 1);
+    const idea = backlog.find((t) => t.id === ideaId)!;
+    const epic = backlog.find((t) => t.id === epicId)!;
+    const task = epic.children!.find((c) => c.id === taskId)!;
+    expect(idea.category).toBe('feature');
+    expect(epic.category).toBe('feature');
+    expect(task.category).toBe('bug');
+
+    // Same read path exercised via selectTaskById (single-row projection).
+    expect(selectTaskById(dbAdapter(db), taskId)!.category).toBe('bug');
+    expect(selectTaskById(dbAdapter(db), ideaId)!.category).toBe('feature');
+
+    // selectTaskById's epic-children lookup is a SEPARATE hand-written SELECT
+    // (not entityUnionSql) — it must project category too, not just inherit it
+    // by accident from the shared UNION column list used elsewhere.
+    const epicViaSelectTaskById = selectTaskById(dbAdapter(db), epicId)!;
+    expect(epicViaSelectTaskById.children![0].category).toBe('bug');
   });
 
   it('selectProjectBacklog(null) merges entities from EVERY project into one list', () => {
@@ -346,6 +377,34 @@ describe('taskListing — 3-table UNION', () => {
     expect(children.map((c) => c.id)).toEqual(['tsk_d1', 'tsk_d2']);
     expect(children.every((c) => c.type === 'task')).toBe(true);
     expect(idea.childCount).toBe(2);
+  });
+
+  it('selectIdeaDecomposition projects category (migration 059) on its hand-written nested epic/task/direct-task queries', () => {
+    const db = buildDb();
+    // selectIdeaDecomposition's epic rows, an epic's task rows, and the
+    // direct-task-under-idea rows are each a SEPARATE hand-written SELECT (not
+    // entityUnionSql) — none is exercised for `category` elsewhere, so a typo
+    // in any one of those three SELECT lists would silently read back
+    // undefined without this test catching it.
+    const { ideaId, epicId, taskId } = seedFixture(db);
+    db.prepare(`UPDATE epics SET category = 'chore' WHERE id = ?`).run(epicId);
+    db.prepare(`UPDATE tasks SET category = 'bug' WHERE id = ?`).run(taskId);
+    // A task decomposed DIRECTLY under the idea (no epic) — its own
+    // hand-written SELECT branch (directTaskRows).
+    db.prepare(
+      `INSERT INTO tasks (id, project_id, ref, title, body, board_id, stage_id, parent_epic_id, originating_idea_id, category, created_at)
+       VALUES ('tsk_direct', 1, 'TASK-777', 'Direct', 'b', 'board-1-default', ?, NULL, ?, 'chore', '2026-01-01T00:00:07.000Z')`,
+    ).run(stageId(5), ideaId);
+
+    const decomp = selectIdeaDecomposition(dbAdapter(db), ideaId)!;
+    expect(decomp.category).toBe('feature');
+
+    const epic = decomp.children!.find((c) => c.id === epicId)!;
+    expect(epic.category).toBe('chore');
+    expect(epic.children![0].category).toBe('bug');
+
+    const direct = decomp.children!.find((c) => c.id === 'tsk_direct')!;
+    expect(direct.category).toBe('chore');
   });
 
   it('selectIdeaDecomposition handles an idea with no epics and rejects non-idea ids', () => {
