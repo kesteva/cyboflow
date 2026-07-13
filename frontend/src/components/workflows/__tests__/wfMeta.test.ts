@@ -29,11 +29,12 @@ describe('wfMeta', () => {
     });
   });
 
-  it('compound: 1 phase, 4 steps, 1 human gate, 0 loops', () => {
+  it('compound: 1 phase, 5 steps, 2 human gates, 0 loops', () => {
+    // load-sprint, extract, approve-learnings (human), write-back, human-review (human).
     expect(wfMeta(WORKFLOW_DEFINITIONS.compound)).toEqual({
       phases: 1,
-      steps: 4,
-      human: 1,
+      steps: 5,
+      human: 2,
       loops: 0,
     });
   });
