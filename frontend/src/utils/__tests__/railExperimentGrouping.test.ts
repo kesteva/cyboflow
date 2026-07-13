@@ -164,6 +164,35 @@ describe('groupRailExperiments', () => {
     expect(ungroupedSessions).toHaveLength(0);
   });
 
+  it('running: neither arm session visible → group STILL renders with empty arms (stays reachable to decide)', () => {
+    // Both arm sessions have been merged/dismissed/archived, but the experiment
+    // itself is still 'running' — it must not be stranded off the rail.
+    const sessions = [mkSession('other')];
+    const exp = mkExperiment({ status: 'running' });
+    const { groups, ungroupedSessions } = groupRailExperiments(sessions, [exp], summariesById(mkSummary()));
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].experiment.id).toBe('exp-1');
+    expect(groups[0].arms).toEqual([]);
+    // Nothing claimed from the empty-arms group → the unrelated session passes through.
+    expect(ungroupedSessions.map((s) => s.id)).toEqual(['other']);
+  });
+
+  it('grading: neither arm session visible → group STILL renders with empty arms', () => {
+    const sessions: Session[] = [];
+    const exp = mkExperiment({ status: 'grading' });
+    const { groups, ungroupedSessions } = groupRailExperiments(
+      sessions,
+      [exp],
+      summariesById(mkSummary({ status: 'grading' })),
+    );
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].experiment.status).toBe('grading');
+    expect(groups[0].arms).toEqual([]);
+    expect(ungroupedSessions).toHaveLength(0);
+  });
+
   it('missing summary: falls back to A/B labels (baseline still resolves)', () => {
     const sessions = [mkSession('sess-a'), mkSession('sess-b')];
     const exp = mkExperiment({

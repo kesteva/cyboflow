@@ -8,12 +8,19 @@
  * and this branchy claim/visibility logic is unit-testable in isolation.
  *
  * Grouping rules (unit-tested in ./__tests__/railExperimentGrouping.test.ts):
- *  - running | grading  → group visible; BOTH arm sessions move into it, each arm
- *    present iff its session is in the visible list. A group with neither arm
- *    session visible is dropped (nothing to show / claim).
+ *  - running | grading  → group ALWAYS visible; BOTH arm sessions move into it,
+ *    each arm present iff its session is in the visible list. An UNDECIDED
+ *    experiment must stay reachable from the rail even once both arm sessions
+ *    have been merged/dismissed/archived — otherwise the human loses the decide
+ *    CTAs (promote/rerun/switch-to-randomized) and the experiment is stranded.
+ *    So the group is still pushed with `arms: []` in that case; the parent row
+ *    (click → open comparison view, status pill) renders purely from
+ *    `experiment`/`summary` and does not depend on `arms` being non-empty.
  *  - decided            → group visible IFF the WINNER arm's session is still in
  *    the visible list; the group then contains ONLY that winner arm. Once the
- *    winner session is merged/dismissed (archived → absent) the group is GONE.
+ *    winner session is merged/dismissed (archived → absent) the group is GONE —
+ *    a decided experiment already has its verdict recorded, so nothing is
+ *    stranded by letting the group disappear.
  *    A discard-both decision (winner_arm null) never renders a group.
  *  - abandoned          → never a group.
  * Sessions claimed by a visible group are removed from `ungroupedSessions`;
@@ -126,12 +133,14 @@ export function groupRailExperiments(
     }
 
     // running | grading — both arm rows, each present iff its session is visible.
+    // The group is kept even when NEITHER arm session is visible: the experiment
+    // is still undecided, so its parent row must stay reachable for the human to
+    // decide it (promote/rerun/switch-to-randomized live behind the comparison view).
     const arms: RailExperimentArm[] = [];
     const aSession = experiment.session_a_id ? sessionById.get(experiment.session_a_id) : undefined;
     const bSession = experiment.session_b_id ? sessionById.get(experiment.session_b_id) : undefined;
     if (aSession) arms.push(buildArm('A', aSession, experiment, summary));
     if (bSession) arms.push(buildArm('B', bSession, experiment, summary));
-    if (arms.length === 0) continue; // neither arm visible → nothing to group
     for (const a of arms) claimed.add(a.session.id);
     groups.push({ experiment, summary, arms });
   }

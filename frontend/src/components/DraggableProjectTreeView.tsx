@@ -1375,8 +1375,11 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                                 </span>
                               </div>
 
-                              {/* Arm rows (indented inside the group). */}
-                              {expanded && (
+                              {/* Arm rows (indented inside the group). Omitted when
+                                  no arm session is visible (both merged/dismissed while
+                                  the experiment is still undecided) — the parent row
+                                  alone keeps the decide CTAs reachable. */}
+                              {expanded && group.arms.length > 0 && (
                                 <div className="border-t border-border-primary/60">
                                   {group.arms.map((armRow) => {
                                     const armRun = armRow.runId
