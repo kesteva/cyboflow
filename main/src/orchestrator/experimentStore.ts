@@ -253,38 +253,78 @@ function readRunStatus(db: DatabaseLike, runId: string | null): string | null {
   }
 }
 
+/** Source prefix a programmatic human gate stamps on its `decision` review_item. */
+const HUMAN_GATE_SOURCE_PREFIX = 'gate:human-step:';
 /**
- * True when a run parked at `awaiting_review` still has an OPEN tool-approval gate
- * (a pending `approvals` row). This discriminates the two `awaiting_review` entry
- * points (see transitions.ts): a MID-FLOW approval gate INSERTs a pending approvals
- * row — the human's approve/deny can still produce more work, so the run is NOT done
- * — whereas the plain end-of-flow REST inserts none (the agent drained; work is
- * stable). Defensive over a missing `approvals` table (minimal test schemas) → false.
+ * Human-gate step ids that END the run (the "run-completion" gates). An arm resting
+ * at one of these has DRAINED its work and is awaiting the human's final merge/finish
+ * decision — grading SHOULD proceed (this is the "both branches reached final work
+ * state" moment, mirroring eval Path A's `human-review` trigger). Every OTHER
+ * `gate:human-step` gate (approve-plan / approve-idea / approve-design /
+ * approve-learnings) is a MID-RUN pause that RESUMES the run, so a pending one means
+ * the arm is not done. 'human-review' = sprint/ship/compound terminal; 'decompose' =
+ * planner's run-completion gate.
  */
-function hasOpenApprovalGate(db: DatabaseLike, runId: string): boolean {
+const TERMINAL_HUMAN_GATE_STEPS = new Set<string>(['human-review', 'decompose']);
+
+/**
+ * True when a run parked at `awaiting_review` still has an OPEN MID-RUN gate — one
+ * whose resolution RESUMES the run to `running`, so more work (a changed diff) can
+ * still land. Two kinds, both of which re-park the run at awaiting_review until cleared:
+ *   1. a tool-approval (canUseTool) gate — a pending `approvals` row; and
+ *   2. a MID-RUN human gate (approve-plan/idea/design/learnings) — a pending blocking
+ *      `decision` review_item whose `gate:human-step:<step>` source is NOT a terminal
+ *      run-completion gate ({@link TERMINAL_HUMAN_GATE_STEPS}).
+ * A pending decision item for a TERMINAL gate is deliberately NOT counted: that is the
+ * legitimate end-of-flow rest where grading must fire. This discriminates the two
+ * `awaiting_review` entry points (see transitions.ts): a mid-run gate means the run is
+ * NOT done; the plain end-of-flow REST (or a terminal gate) means the agent drained and
+ * the work is stable. Defensive over missing `approvals` / `review_items` tables
+ * (minimal test schemas) → false.
+ */
+function hasOpenMidRunGate(db: DatabaseLike, runId: string): boolean {
   try {
-    const row = db
+    const approval = db
       .prepare(`SELECT 1 FROM approvals WHERE status = 'pending' AND run_id = ? LIMIT 1`)
       .get(runId);
-    return row !== undefined;
+    if (approval !== undefined) return true;
   } catch {
-    return false;
+    // No approvals table (minimal schema) — fall through to the human-gate probe.
   }
+  try {
+    const rows = db
+      .prepare(
+        `SELECT source FROM review_items
+          WHERE run_id = ? AND kind = 'decision' AND status = 'pending' AND blocking = 1
+            AND source LIKE ?`,
+      )
+      .all(runId, `${HUMAN_GATE_SOURCE_PREFIX}%`) as Array<{ source?: unknown }>;
+    for (const r of rows) {
+      if (typeof r.source !== 'string') continue;
+      const step = r.source.slice(HUMAN_GATE_SOURCE_PREFIX.length);
+      if (!TERMINAL_HUMAN_GATE_STEPS.has(step)) return true;
+    }
+  } catch {
+    // No review_items table (minimal schema) — treat as no open human gate.
+  }
+  return false;
 }
 
 /**
  * Gate-aware "settled for experiment grading". An arm is ready to grade only when it
- * is settled ({@link isExperimentArmSettled}) AND not paused at an open approval gate.
- * A run resting at `awaiting_review` behind a pending gate is NOT finished: treating
- * it as settled would flip the experiment to `grading` and snapshot a premature
- * verdict (e.g. an empty-diff "Both arms produced no changes" tie) while the arm is
- * really mid-flight and will resume to `running` once the gate is cleared. Used by
- * both readiness deciders — reconcileExperimentStatus and the pairwise snapshot gate —
- * so the two never drift.
+ * is settled ({@link isExperimentArmSettled}) AND not paused at an open MID-RUN gate.
+ * A run resting at `awaiting_review` behind a pending mid-run gate (tool-approval OR a
+ * mid-run human gate like approve-plan) is NOT finished: treating it as settled would
+ * flip the experiment to `grading` and snapshot a premature verdict (e.g. an empty-diff
+ * "Both arms produced no changes" tie) while the arm is really mid-flight and will
+ * resume to `running` once the gate is cleared. A TERMINAL human gate (human-review /
+ * decompose) does NOT block — that is the final work-complete rest where grading is
+ * meant to fire. Used by both readiness deciders — reconcileExperimentStatus and the
+ * pairwise snapshot gate — so the two never drift.
  */
 export function isArmSettledForGrading(db: DatabaseLike, runId: string, status: string): boolean {
   if (!isExperimentArmSettled(status)) return false;
-  if (status === 'awaiting_review' && hasOpenApprovalGate(db, runId)) return false;
+  if (status === 'awaiting_review' && hasOpenMidRunGate(db, runId)) return false;
   return true;
 }
 

@@ -164,6 +164,72 @@ describe('experimentStore', () => {
     expect(getExperiment(db, exp.id)?.status).toBe('grading');
   });
 
+  it('reconcile: an awaiting_review arm behind a MID-RUN human gate (approve-plan) does NOT grade; a TERMINAL gate does', () => {
+    const raw = buildDb();
+    // review_items row that a programmatic human gate co-writes (kind=decision,
+    // blocking=1, source=gate:human-step:<step>). No approvals table here — the
+    // human gate is a decision item, NOT a tool-approval row.
+    raw.exec(
+      `CREATE TABLE review_items (id TEXT PRIMARY KEY, run_id TEXT, kind TEXT, status TEXT, blocking INTEGER, source TEXT);`,
+    );
+    const db = dbAdapter(raw);
+    seedRun(raw, 'runA', 'awaiting_review');
+    seedRun(raw, 'runB', 'awaiting_review');
+    const exp = insertExperiment(db, {
+      projectId: 1, workflowId: 'ship', baseBranch: 'main', baseSha: 's', variantAId: 'a', variantBId: 'b',
+    });
+    setExperimentRuns(db, exp.id, { runAId: 'runA', runBId: 'runB' });
+
+    const openGate = (id: string, runId: string, step: string): void => {
+      raw
+        .prepare(
+          `INSERT INTO review_items (id, run_id, kind, status, blocking, source) VALUES (?, ?, 'decision', 'pending', 1, ?)`,
+        )
+        .run(id, runId, `gate:human-step:${step}`);
+    };
+
+    // Both arms parked at the MID-RUN approve-plan gate (BEFORE materialize/implement) —
+    // resting at awaiting_review but will resume to running once answered. Must NOT grade.
+    openGate('g1', 'runA', 'approve-plan');
+    openGate('g2', 'runB', 'approve-plan');
+    expect(reconcileExperimentStatus(db, exp.id)).toEqual({ changed: false, status: 'running' });
+
+    // One arm answered its plan gate and later drained to the TERMINAL human-review gate;
+    // the other is still mid-run at approve-plan → still not gradable.
+    raw.prepare("UPDATE review_items SET status = 'resolved' WHERE id = 'g1'").run();
+    openGate('g3', 'runA', 'human-review');
+    expect(reconcileExperimentStatus(db, exp.id)).toEqual({ changed: false, status: 'running' });
+
+    // Both arms now rest at their TERMINAL gate (work complete, awaiting the merge
+    // decision) — this is the "both branches reached final work state" moment: GRADE.
+    raw.prepare("UPDATE review_items SET status = 'resolved' WHERE id = 'g2'").run();
+    openGate('g4', 'runB', 'human-review');
+    const out = reconcileExperimentStatus(db, exp.id);
+    expect(out).toEqual({ changed: true, status: 'grading', halfCreated: false });
+    expect(getExperiment(db, exp.id)?.status).toBe('grading');
+  });
+
+  it('reconcile: planner arms resting at the TERMINAL decompose gate DO grade', () => {
+    const raw = buildDb();
+    raw.exec(
+      `CREATE TABLE review_items (id TEXT PRIMARY KEY, run_id TEXT, kind TEXT, status TEXT, blocking INTEGER, source TEXT);`,
+    );
+    const db = dbAdapter(raw);
+    seedRun(raw, 'runA', 'awaiting_review');
+    seedRun(raw, 'runB', 'awaiting_review');
+    const exp = insertExperiment(db, {
+      projectId: 1, workflowId: 'planner', baseBranch: 'main', baseSha: 's', variantAId: 'a', variantBId: 'b',
+    });
+    setExperimentRuns(db, exp.id, { runAId: 'runA', runBId: 'runB' });
+    // 'decompose' is planner's run-completion gate — treated as terminal, so grading fires.
+    raw
+      .prepare(
+        `INSERT INTO review_items (id, run_id, kind, status, blocking, source) VALUES ('d1', 'runA', 'decision', 'pending', 1, 'gate:human-step:decompose'), ('d2', 'runB', 'decision', 'pending', 1, 'gate:human-step:decompose')`,
+      )
+      .run();
+    expect(reconcileExperimentStatus(db, exp.id)).toEqual({ changed: true, status: 'grading', halfCreated: false });
+  });
+
   it('reconcile: half-created (a run id NULL) → abandoned', () => {
     const raw = buildDb();
     const db = dbAdapter(raw);
