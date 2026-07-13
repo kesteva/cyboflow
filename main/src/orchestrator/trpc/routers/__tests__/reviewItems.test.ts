@@ -39,6 +39,7 @@ import { TaskChangeRouter } from '../../../taskChangeRouter';
 import { HumanStepManager } from '../../../humanStepManager';
 import { QuestionRouter } from '../../../questionRouter';
 import type { DatabaseLike } from '../../../types';
+import { parseIdeaVerdictMap, RESOLUTION_PREFIX_IDEA_VERDICTS } from '../../../../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
 // Test DB: projects + 006 + 011 + 014 + 015 + 016 + 024.
@@ -833,6 +834,93 @@ describe('cyboflow.reviewItems.resolve — programmatic human-gate outcome', () 
       resolution: string;
     };
     expect(row.resolution).toBe('approve');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// IDEA-009 — approve-ideas BATCH gate resolved by a per-idea verdict map
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.reviewItems.resolve — approve-ideas verdict fold', () => {
+  /** Seed a parked (awaiting_review) run + a blocking approve-ideas batch gate. */
+  function seedApproveIdeasGate(
+    db: Database.Database,
+    opts: { runId: string; reviewItemId: string; ideaRefs: string[] },
+  ): void {
+    db.prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name) VALUES ('wf-planner', 1, 'planner')`).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, branch_name, status, policy_json)
+       VALUES (?, 'wf-planner', 1, '/w/ai', 'b/ai', 'awaiting_review', '{}')`,
+    ).run(opts.runId);
+    const now = new Date().toISOString();
+    const payload = JSON.stringify({ kind: 'decision', gate: 'approve-ideas', ideaRefs: opts.ideaRefs });
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, entity_type, entity_id, kind, status, blocking,
+          title, body, severity, source, payload_json, created_at, updated_at, resolved_by, resolution)
+       VALUES (?, 1, ?, NULL, NULL, 'decision', 'pending', 1, 'Approve ideas', NULL, NULL,
+               'gate:human-step:approve-ideas', ?, ?, ?, NULL, NULL)`,
+    ).run(opts.reviewItemId, opts.runId, payload, now, now);
+  }
+
+  it('folds a mixed verdict map into resolution, resolves the gate, and resumes the run', async () => {
+    const { caller, db } = buildCaller();
+    seedApproveIdeasGate(db, { runId: 'run-ai', reviewItemId: 'rvw_ai', ideaRefs: ['IDEA-1', 'IDEA-2', 'IDEA-3'] });
+
+    const res = await caller.cyboflow.reviewItems.resolve({
+      projectId: 1,
+      reviewItemId: 'rvw_ai',
+      verdicts: { 'IDEA-1': 'approve', 'IDEA-2': 'deny', 'IDEA-3': 'approve' },
+    });
+
+    expect(res.resumed).toBe(true);
+    const row = db
+      .prepare('SELECT status, resolution FROM review_items WHERE id = ?')
+      .get('rvw_ai') as { status: string; resolution: string };
+    expect(row.status).toBe('resolved');
+    expect(row.resolution.startsWith(RESOLUTION_PREFIX_IDEA_VERDICTS)).toBe(true);
+    // The per-idea decisions are recorded durably + round-trip out of the resolution.
+    expect(parseIdeaVerdictMap(row.resolution)).toEqual({
+      'IDEA-1': 'approve',
+      'IDEA-2': 'deny',
+      'IDEA-3': 'approve',
+    });
+    const run = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-ai') as { status: string };
+    expect(run.status).toBe('running'); // aggregate-unblock resumed it
+  });
+
+  it('rejects a malformed map (unknown ref) with BAD_REQUEST and leaves the gate pending', async () => {
+    const { caller, db } = buildCaller();
+    seedApproveIdeasGate(db, { runId: 'run-bad', reviewItemId: 'rvw_bad', ideaRefs: ['IDEA-1', 'IDEA-2'] });
+
+    await expect(
+      caller.cyboflow.reviewItems.resolve({
+        projectId: 1,
+        reviewItemId: 'rvw_bad',
+        verdicts: { 'IDEA-1': 'approve', 'IDEA-9': 'deny' },
+      }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+
+    const row = db.prepare('SELECT status, resolution FROM review_items WHERE id = ?').get('rvw_bad') as {
+      status: string;
+      resolution: string | null;
+    };
+    expect(row.status).toBe('pending'); // nothing recorded
+    expect(row.resolution).toBeNull();
+    const run = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-bad') as { status: string };
+    expect(run.status).toBe('awaiting_review'); // not resumed
+  });
+
+  it('rejects an empty verdict map (BAD_REQUEST) and leaves the gate pending', async () => {
+    const { caller, db } = buildCaller();
+    seedApproveIdeasGate(db, { runId: 'run-empty', reviewItemId: 'rvw_empty', ideaRefs: ['IDEA-1'] });
+
+    await expect(
+      caller.cyboflow.reviewItems.resolve({ projectId: 1, reviewItemId: 'rvw_empty', verdicts: {} }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+
+    const row = db.prepare('SELECT status FROM review_items WHERE id = ?').get('rvw_empty') as { status: string };
+    expect(row.status).toBe('pending');
   });
 });
 

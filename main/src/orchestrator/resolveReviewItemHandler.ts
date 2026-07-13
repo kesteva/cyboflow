@@ -53,6 +53,11 @@
  */
 import type { DatabaseLike, LoggerLike } from './types';
 import { ReviewItemError, type ReviewItemErrorCode } from './reviewItemRouter';
+import {
+  isIdeaVerdict,
+  serializeIdeaVerdictMap,
+  type IdeaVerdictMap,
+} from '../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
 // Programmatic human-gate constants (moved here from reviewItems.ts — this is now
@@ -64,6 +69,8 @@ import { ReviewItemError, type ReviewItemErrorCode } from './reviewItemRouter';
 const HUMAN_GATE_SOURCE_PREFIX = 'gate:human-step:';
 /** The plan-review gate whose Approve REVEALS the run's pending draft entities. */
 const APPROVE_PLAN_STEP_ID = 'approve-plan';
+/** The multi-idea BATCH gate resolved by a per-idea verdict map (IDEA-009). */
+const APPROVE_IDEAS_STEP_ID = 'approve-ideas';
 
 /**
  * The step id encoded in a `gate:human-step:<stepId>` source, or null when the source
@@ -76,6 +83,85 @@ export function humanGateStepId(kind: string | undefined, source: string | null 
   if (kind !== 'decision' || typeof source !== 'string') return null;
   if (!source.startsWith(HUMAN_GATE_SOURCE_PREFIX)) return null;
   return source.slice(HUMAN_GATE_SOURCE_PREFIX.length) || null;
+}
+
+// ---------------------------------------------------------------------------
+// Approve-ideas batch gate — per-idea verdict fold (IDEA-009)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the batch idea refs off an approve-ideas gate's `payload_json` (the
+ * DecisionPayload.ideaRefs the planner stashes when it mints the gate). Returns
+ * an empty array when the payload is absent/unparseable or carries no ref list —
+ * the fold then refuses the resolve (a gate with no batch to validate against
+ * cannot accept a verdict map).
+ */
+export function parseApproveIdeasRefs(payloadJson: string | null | undefined): string[] {
+  if (typeof payloadJson !== 'string' || payloadJson.length === 0) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    return [];
+  }
+  if (typeof parsed !== 'object' || parsed === null) return [];
+  const refs = (parsed as { ideaRefs?: unknown }).ideaRefs;
+  if (!Array.isArray(refs)) return [];
+  return refs.filter((r): r is string => typeof r === 'string' && r.length > 0);
+}
+
+/**
+ * Fold an approve-ideas gate's per-idea verdict map into the stored `resolution`
+ * string the resumed planner reads. The batch gate is all-or-nothing, so this
+ * validates the WHOLE map against the gate's batch refs before serializing:
+ *   - the gate must carry a non-empty batch ref list (`ideaRefs`);
+ *   - the map must be non-empty;
+ *   - every verdict value must be 'approve' | 'deny';
+ *   - every ref MUST belong to the batch (no stray/unknown refs);
+ *   - every batch ref MUST have a verdict (complete coverage).
+ * Any violation throws ReviewItemError('invalid_payload'); the caller runs this
+ * BEFORE the single atomic resolve, so a rejected map leaves the gate pending
+ * and records nothing. The serialized note spells denials 'deny' (never
+ * 'reject') so it resolves the gate as approve-to-proceed while carrying the
+ * per-idea decisions (see serializeIdeaVerdictMap).
+ */
+export function foldIdeaVerdicts(ideaRefs: string[], verdicts: Record<string, string>): string {
+  if (ideaRefs.length === 0) {
+    throw new ReviewItemError(
+      'invalid_payload',
+      'approve-ideas gate carries no batch idea refs to validate the verdict map against',
+    );
+  }
+  const submittedRefs = Object.keys(verdicts);
+  if (submittedRefs.length === 0) {
+    throw new ReviewItemError('invalid_payload', 'approve-ideas verdict map is empty');
+  }
+  const batch = new Set(ideaRefs);
+  const validated: IdeaVerdictMap = {};
+  for (const [ref, verdict] of Object.entries(verdicts)) {
+    if (!batch.has(ref)) {
+      throw new ReviewItemError(
+        'invalid_payload',
+        `approve-ideas verdict references idea '${ref}' which is not in this batch gate`,
+      );
+    }
+    if (!isIdeaVerdict(verdict)) {
+      throw new ReviewItemError(
+        'invalid_payload',
+        `approve-ideas verdict for '${ref}' must be 'approve' or 'deny' (got '${verdict}')`,
+      );
+    }
+    validated[ref] = verdict;
+  }
+  for (const ref of ideaRefs) {
+    if (!(ref in validated)) {
+      throw new ReviewItemError(
+        'invalid_payload',
+        `approve-ideas verdict map is missing a decision for batch idea '${ref}'`,
+      );
+    }
+  }
+  return serializeIdeaVerdictMap(validated);
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +213,14 @@ export interface ResolveReviewItemInput {
   resolution?: string | null;
   /** Explicit gate verdict for a `gate:human-step:*` decision item (drives verdict + approve-plan reveal/decline). */
   outcome?: 'approve' | 'reject';
+  /**
+   * Per-idea verdict map for an approve-ideas BATCH gate (the "Submit decisions"
+   * payload). ONLY consumed when the item is a `gate:human-step:approve-ideas`
+   * decision — it is validated against the gate's batch payload and folded into
+   * the stored resolution (overriding `outcome`/`resolution`). Ignored for every
+   * other gate/item, so scalar resolutions stay byte-for-byte unaffected.
+   */
+  verdicts?: IdeaVerdictMap;
 }
 
 /**
@@ -177,18 +271,33 @@ export async function resolveReviewItem(
   // (the resolve changes none of them) so we know whether to apply aggregate-unblock
   // and whether an explicit outcome drives gate side effects.
   const before = db
-    .prepare('SELECT run_id AS runId, blocking, kind, source FROM review_items WHERE id = ? AND project_id = ?')
+    .prepare(
+      'SELECT run_id AS runId, blocking, kind, source, payload_json AS payloadJson FROM review_items WHERE id = ? AND project_id = ?',
+    )
     .get(input.reviewItemId, input.projectId) as
-    | { runId?: string | null; blocking?: number; kind?: string; source?: string | null }
+    | { runId?: string | null; blocking?: number; kind?: string; source?: string | null; payloadJson?: string | null }
     | undefined;
 
   const gateStepId = humanGateStepId(before?.kind, before?.source);
   // The stored resolution the WorkflowController parses into its verdict. An explicit
   // outcome wins over free text (deterministic verdict); otherwise the caller's
-  // free-text resolution passes through unchanged.
-  const resolution = input.outcome !== undefined ? input.outcome : input.resolution;
+  // free-text resolution passes through unchanged. An approve-ideas verdict map
+  // overrides both below (inside the try, so a malformed map surfaces as a refusal).
+  let resolution = input.outcome !== undefined ? input.outcome : input.resolution;
 
   try {
+    // Approve-ideas BATCH gate: a submitted per-idea verdict map is validated
+    // against the gate's batch payload and folded into the stored resolution the
+    // resumed planner reads. All-or-nothing — foldIdeaVerdicts throws
+    // ReviewItemError('invalid_payload') on a malformed map (empty / unknown ref /
+    // bad value / incomplete coverage), which the catch below maps to a refusal
+    // BEFORE the single atomic resolve runs, so the gate stays pending and nothing
+    // is recorded. Only the "Submit decisions" surface passes `verdicts`; every
+    // scalar gate leaves it undefined and is byte-for-byte unaffected.
+    if (input.verdicts !== undefined && gateStepId === APPROVE_IDEAS_STEP_ID) {
+      resolution = foldIdeaVerdicts(parseApproveIdeasRefs(before?.payloadJson), input.verdicts);
+    }
+
     // Approve-plan side effects run BEFORE the resolve so they beat the controller
     // (the chokepoint's post-commit 'resolved' emit is what makes it advance). Both
     // are fail-soft + idempotent, so awaiting them here can never strand the resolve.

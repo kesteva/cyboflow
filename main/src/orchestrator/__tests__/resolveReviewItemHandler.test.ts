@@ -20,9 +20,16 @@ import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import { ReviewItemError } from '../reviewItemRouter';
 import {
   resolveReviewItem,
+  parseApproveIdeasRefs,
   type ResolveReviewItemDeps,
   type ResolveReviewItemInput,
 } from '../resolveReviewItemHandler';
+import {
+  parseIdeaVerdictMap,
+  serializeIdeaVerdictMap,
+  RESOLUTION_PREFIX_IDEA_VERDICTS,
+  type IdeaVerdictMap,
+} from '../../../../shared/types/reviews';
 
 // ---------------------------------------------------------------------------
 // Minimal DB — only the two tables the handler READS from.
@@ -38,7 +45,9 @@ function buildDb(): Database.Database {
       kind TEXT NOT NULL,
       source TEXT,
       blocking INTEGER NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'pending'
+      status TEXT NOT NULL DEFAULT 'pending',
+      payload_json TEXT,
+      resolution TEXT
     );
     CREATE TABLE workflow_runs (
       id TEXT PRIMARY KEY,
@@ -55,6 +64,7 @@ interface SeedItemOpts {
   blocking?: boolean;
   runId?: string | null;
   runStatus?: string;
+  payloadJson?: string | null;
 }
 
 /** Seed one review_items row (+ its bound run, when runId given) into the fake DB. */
@@ -66,9 +76,16 @@ function seedItem(db: Database.Database, opts: SeedItemOpts): void {
     );
   }
   db.prepare(
-    `INSERT INTO review_items (id, project_id, run_id, kind, source, blocking, status)
-     VALUES (?, 1, ?, ?, ?, ?, 'pending')`,
-  ).run(opts.id, opts.runId ?? null, opts.kind, opts.source ?? null, opts.blocking ? 1 : 0);
+    `INSERT INTO review_items (id, project_id, run_id, kind, source, blocking, status, payload_json)
+     VALUES (?, 1, ?, ?, ?, ?, 'pending', ?)`,
+  ).run(
+    opts.id,
+    opts.runId ?? null,
+    opts.kind,
+    opts.source ?? null,
+    opts.blocking ? 1 : 0,
+    opts.payloadJson ?? null,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +328,189 @@ describe('resolveReviewItem — drained-rest strand guard', () => {
 
     expect(deps.maybeResumeRun).toHaveBeenCalledWith('run-ref');
     expect(result).toMatchObject({ ok: true, resumed: false, runStatus: 'running' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Approve-ideas BATCH gate — per-idea verdict fold (IDEA-009)
+// ---------------------------------------------------------------------------
+
+/** Seed a parked approve-ideas gate carrying `ideaRefs` in its decision payload. */
+function seedApproveIdeasGate(
+  db: Database.Database,
+  opts: { id: string; runId: string; ideaRefs: string[] },
+): void {
+  seedItem(db, {
+    id: opts.id,
+    kind: 'decision',
+    source: 'gate:human-step:approve-ideas',
+    blocking: true,
+    runId: opts.runId,
+    payloadJson: JSON.stringify({ kind: 'decision', gate: 'approve-ideas', ideaRefs: opts.ideaRefs }),
+  });
+}
+
+/** The resolution string the handler passed to the resolve chokepoint spy. */
+function resolvedWith(deps: SpiedDeps): string | null | undefined {
+  const call = deps.applyReviewItemResolve.mock.calls[0];
+  return call?.[1]?.resolution;
+}
+
+function itemStatus(db: Database.Database, id: string): string {
+  return (db.prepare('SELECT status FROM review_items WHERE id = ?').get(id) as { status: string }).status;
+}
+
+describe('resolveReviewItem — approve-ideas verdict fold', () => {
+  it('folds a mixed map (2 approve / 1 deny) into the resolution, resolves once, resumes', async () => {
+    const db = buildDb();
+    seedApproveIdeasGate(db, { id: 'rvw_ai', runId: 'run-ai', ideaRefs: ['IDEA-1', 'IDEA-2', 'IDEA-3'] });
+    const deps = makeDeps(db);
+    const verdicts: IdeaVerdictMap = { 'IDEA-1': 'approve', 'IDEA-2': 'deny', 'IDEA-3': 'approve' };
+
+    const result = await resolveReviewItem(baseInput({ reviewItemId: 'rvw_ai', verdicts }), deps);
+
+    // Resolved exactly once, with the serialized verdict map as the resolution.
+    expect(deps.applyReviewItemResolve).toHaveBeenCalledTimes(1);
+    const resolution = resolvedWith(deps);
+    expect(resolution).toEqual(expect.stringContaining(RESOLUTION_PREFIX_IDEA_VERDICTS));
+    // The map round-trips out of the resolution the resumed planner reads.
+    expect(parseIdeaVerdictMap(resolution)).toEqual(verdicts);
+    // Not a reject/reveal path — no draft promote/delete side effects.
+    expect(deps.promotePendingDraftsForRun).not.toHaveBeenCalled();
+    expect(deps.deleteRunCreatedEntities).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ ok: true, resumed: true, gateStepId: 'approve-ideas' });
+    expect(runStatus(db, 'run-ai')).toBe('running'); // aggregate-unblock resumed it
+    expect(itemStatus(db, 'rvw_ai')).toBe('resolved');
+  });
+
+  it('an all-deny map still resolves the batch gate (denied ideas just stay on the backlog)', async () => {
+    const db = buildDb();
+    seedApproveIdeasGate(db, { id: 'rvw_all_deny', runId: 'run-ad', ideaRefs: ['IDEA-1', 'IDEA-2'] });
+    const deps = makeDeps(db);
+    const verdicts: IdeaVerdictMap = { 'IDEA-1': 'deny', 'IDEA-2': 'deny' };
+
+    const result = await resolveReviewItem(baseInput({ reviewItemId: 'rvw_all_deny', verdicts }), deps);
+
+    // 'deny' (never 'reject') keeps parseGateVerdict on the approve-to-proceed path.
+    expect(parseIdeaVerdictMap(resolvedWith(deps))).toEqual(verdicts);
+    expect(result).toMatchObject({ ok: true, resumed: true });
+    expect(runStatus(db, 'run-ad')).toBe('running');
+  });
+
+  const malformedMaps: Array<[string, Record<string, string>]> = [
+    ['unknown ref', { 'IDEA-1': 'approve', 'IDEA-2': 'approve', 'IDEA-99': 'deny' }],
+    ['bad value', { 'IDEA-1': 'approve', 'IDEA-2': 'maybe' }],
+    ['empty map', {}],
+    ['incomplete coverage', { 'IDEA-1': 'approve' }],
+  ];
+  it.each(malformedMaps)('rejects a malformed map (%s) → invalid_payload, gate stays pending', async (_label, badMap) => {
+    const db = buildDb();
+    seedApproveIdeasGate(db, { id: 'rvw_bad', runId: 'run-bad', ideaRefs: ['IDEA-1', 'IDEA-2'] });
+    const deps = makeDeps(db);
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_bad', verdicts: badMap as IdeaVerdictMap }),
+      deps,
+    );
+
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_payload' });
+    expect(deps.applyReviewItemResolve).not.toHaveBeenCalled(); // never reached the resolve
+    expect(itemStatus(db, 'rvw_bad')).toBe('pending'); // gate untouched
+    expect(runStatus(db, 'run-bad')).toBe('awaiting_review');
+  });
+
+  it('rejects a verdict map on a gate whose payload carries no batch ideaRefs', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_norefs',
+      kind: 'decision',
+      source: 'gate:human-step:approve-ideas',
+      blocking: true,
+      runId: 'run-norefs',
+      payloadJson: JSON.stringify({ kind: 'decision', gate: 'approve-ideas' }),
+    });
+    const deps = makeDeps(db);
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_norefs', verdicts: { 'IDEA-1': 'approve' } }),
+      deps,
+    );
+
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_payload' });
+    expect(deps.applyReviewItemResolve).not.toHaveBeenCalled();
+    expect(itemStatus(db, 'rvw_norefs')).toBe('pending');
+  });
+
+  it('mid-fold resolve failure leaves the gate unresolved (all-or-nothing)', async () => {
+    const db = buildDb();
+    seedApproveIdeasGate(db, { id: 'rvw_boom', runId: 'run-boom', ideaRefs: ['IDEA-1'] });
+    const deps = makeDeps(db);
+    // The atomic resolve write throws AFTER a valid fold — nothing must persist.
+    deps.applyReviewItemResolve.mockRejectedValueOnce(new Error('db locked mid-fold'));
+
+    await expect(
+      resolveReviewItem(baseInput({ reviewItemId: 'rvw_boom', verdicts: { 'IDEA-1': 'approve' } }), deps),
+    ).rejects.toThrow('db locked mid-fold');
+
+    expect(itemStatus(db, 'rvw_boom')).toBe('pending'); // gate stays pending
+    expect(deps.maybeResumeRun).not.toHaveBeenCalled(); // no resume on a failed fold
+  });
+
+  it('ignores `verdicts` for a NON-approve-ideas gate (scalar path unaffected)', async () => {
+    const db = buildDb();
+    seedItem(db, {
+      id: 'rvw_plan',
+      kind: 'decision',
+      source: 'gate:human-step:approve-plan',
+      blocking: true,
+      runId: 'run-plan',
+    });
+    const deps = makeDeps(db);
+
+    // A stray verdict map on an approve-plan gate must be ignored — the scalar
+    // outcome drives the resolution byte-for-byte as before.
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_plan', outcome: 'approve', verdicts: { 'IDEA-1': 'approve' } }),
+      deps,
+    );
+
+    expect(resolvedWith(deps)).toBe('approve'); // NOT a serialized verdict map
+    expect(deps.promotePendingDraftsForRun).toHaveBeenCalledWith('run-plan'); // approve-plan reveal ran
+    expect(result).toMatchObject({ ok: true, gateStepId: 'approve-plan', outcome: 'approve' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shared serialize/parse helpers (round-trip + payload ref parse)
+// ---------------------------------------------------------------------------
+
+describe('IdeaVerdictMap serialize/parse + parseApproveIdeasRefs', () => {
+  it('serialize → parse round-trips a verdict map', () => {
+    const map: IdeaVerdictMap = { 'IDEA-1': 'approve', 'IDEA-2': 'deny' };
+    expect(parseIdeaVerdictMap(serializeIdeaVerdictMap(map))).toEqual(map);
+  });
+
+  it('parseIdeaVerdictMap returns null for a non-verdict resolution and drops garbage entries', () => {
+    expect(parseIdeaVerdictMap('approve')).toBeNull();
+    expect(parseIdeaVerdictMap(null)).toBeNull();
+    expect(parseIdeaVerdictMap(`${RESOLUTION_PREFIX_IDEA_VERDICTS}not-json`)).toBeNull();
+    // A verdict-prefixed object with only garbage values parses to null.
+    expect(parseIdeaVerdictMap(`${RESOLUTION_PREFIX_IDEA_VERDICTS}{"IDEA-1":"maybe"}`)).toBeNull();
+    // Mixed: valid entries kept, garbage dropped.
+    expect(parseIdeaVerdictMap(`${RESOLUTION_PREFIX_IDEA_VERDICTS}{"IDEA-1":"deny","IDEA-2":7}`)).toEqual({
+      'IDEA-1': 'deny',
+    });
+  });
+
+  it('parseApproveIdeasRefs lifts a clean string ref list, else empty', () => {
+    expect(parseApproveIdeasRefs(JSON.stringify({ ideaRefs: ['IDEA-1', 'IDEA-2'] }))).toEqual(['IDEA-1', 'IDEA-2']);
+    expect(parseApproveIdeasRefs(JSON.stringify({ ideaRefs: ['IDEA-1', 3, '', 'IDEA-2'] }))).toEqual([
+      'IDEA-1',
+      'IDEA-2',
+    ]);
+    expect(parseApproveIdeasRefs(null)).toEqual([]);
+    expect(parseApproveIdeasRefs('not-json')).toEqual([]);
+    expect(parseApproveIdeasRefs(JSON.stringify({ gate: 'approve-ideas' }))).toEqual([]);
   });
 });
 

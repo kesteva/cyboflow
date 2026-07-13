@@ -179,9 +179,22 @@ export interface PermissionPayload {
  */
 export interface DecisionPayload {
   kind: 'decision';
-  gate: 'approve-idea' | 'approve-plan' | 'ask-user-question-recovery' | 'experiment-comparison';
+  gate:
+    | 'approve-idea'
+    | 'approve-ideas'
+    | 'approve-plan'
+    | 'ask-user-question-recovery'
+    | 'experiment-comparison';
   /** Optional summary the gate wants the human to confirm. */
   summary?: string;
+  /**
+   * Only for `gate: 'approve-ideas'`: the batch's idea display refs (e.g.
+   * ['IDEA-014', 'IDEA-015']) the ONE blocking gate covers. The submitted
+   * per-idea verdict map ({@link IdeaVerdictMap}) is validated against these refs
+   * when the gate resolves — every ref must be decided, and no verdict may
+   * reference a ref outside this list. Omitted for the scalar approve-* gates.
+   */
+  ideaRefs?: string[];
   /**
    * Only for `gate: 'ask-user-question-recovery'`: the original AskUserQuestion
    * payload the SDK gate failed to surface, so the review UI can re-offer the
@@ -330,6 +343,67 @@ export function parseResolutionKind(resolution: string | null): ResolutionKind |
   if (resolution.startsWith(RESOLUTION_PREFIX_FIXED)) return 'fixed';
   if (resolution.startsWith(RESOLUTION_PREFIX_TRIAGED)) return 'triaged';
   return 'other';
+}
+
+// ---------------------------------------------------------------------------
+// Approve-ideas batch gate — per-idea verdict map
+// ---------------------------------------------------------------------------
+
+/** One human decision for a single idea at an approve-ideas batch gate. */
+export type IdeaVerdict = 'approve' | 'deny';
+
+/** True when `v` is a valid {@link IdeaVerdict}. */
+export function isIdeaVerdict(v: unknown): v is IdeaVerdict {
+  return v === 'approve' || v === 'deny';
+}
+
+/**
+ * The per-idea verdicts a human submits at an approve-ideas BATCH gate, keyed by
+ * the idea's display ref (e.g. 'IDEA-014'). The gate is ONE blocking review item
+ * for the whole batch; resolving it folds the whole map atomically. A denied idea
+ * simply STAYS on the backlog — retirement lineage is handled separately, never
+ * here. Serialized into the review item's `resolution` via
+ * {@link serializeIdeaVerdictMap} so the resumed planner reads which refs were
+ * approved vs denied.
+ */
+export type IdeaVerdictMap = Record<string, IdeaVerdict>;
+
+/**
+ * Resolution-note prefix carrying a serialized {@link IdeaVerdictMap} for an
+ * approve-ideas gate. Deliberately spells a rejected idea 'deny' (never
+ * 'reject') so the serialized note can NEVER trip {@link parseGateVerdict}'s
+ * 'reject' substring sniff — the batch gate still resolves as an
+ * approve-to-proceed while the map records the per-idea decisions.
+ */
+export const RESOLUTION_PREFIX_IDEA_VERDICTS = 'idea-verdicts:';
+
+/** Serialize a verdict map into the `resolution` note the resumed planner reads. */
+export function serializeIdeaVerdictMap(map: IdeaVerdictMap): string {
+  return `${RESOLUTION_PREFIX_IDEA_VERDICTS}${JSON.stringify(map)}`;
+}
+
+/**
+ * Parse a serialized {@link IdeaVerdictMap} back out of a `resolution` note.
+ * Returns null when the note carries no verdict-map prefix or the payload is not
+ * a JSON object; non-approve/deny entries are dropped defensively, and an
+ * all-garbage payload yields null.
+ */
+export function parseIdeaVerdictMap(resolution: string | null | undefined): IdeaVerdictMap | null {
+  if (typeof resolution !== 'string' || !resolution.startsWith(RESOLUTION_PREFIX_IDEA_VERDICTS)) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(resolution.slice(RESOLUTION_PREFIX_IDEA_VERDICTS.length));
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+  const map: IdeaVerdictMap = {};
+  for (const [ref, verdict] of Object.entries(parsed as Record<string, unknown>)) {
+    if (isIdeaVerdict(verdict)) map[ref] = verdict;
+  }
+  return Object.keys(map).length > 0 ? map : null;
 }
 
 // ---------------------------------------------------------------------------

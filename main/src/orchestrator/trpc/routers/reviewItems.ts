@@ -432,6 +432,14 @@ export const reviewItemsRouter = router({
    *     the run is NOT auto-resumed (the controller owns the terminal 'rejected').
    * For a non-approve-plan gate (approve-idea / approve-design) the outcome only
    * threads the verdict — no reveal, no draft delete.
+   *
+   * APPROVE-IDEAS BATCH GATE (`verdicts`): a `gate:human-step:approve-ideas`
+   * decision item covers a whole batch of ideas at once. The optional `verdicts`
+   * map (idea ref -> 'approve' | 'deny') is the "Submit decisions" payload; the
+   * shared handler validates it against the gate's batch payload and folds it
+   * atomically into the stored resolution, so the resumed planner reads which
+   * refs were approved vs denied. A malformed map (unknown ref / bad value /
+   * incomplete) is rejected (BAD_REQUEST) and leaves the gate pending.
    */
   resolve: protectedProcedure
     .input(
@@ -446,6 +454,14 @@ export const reviewItemsRouter = router({
          * decline. Meaningless (but harmless) for non-gate items.
          */
         outcome: z.enum(['approve', 'reject']).optional(),
+        /**
+         * Per-idea verdict map for an approve-ideas BATCH gate — the "Submit
+         * decisions" payload, keyed by idea display ref. ONLY consumed for a
+         * `gate:human-step:approve-ideas` decision item: the shared handler
+         * validates it against the gate's batch payload and folds it atomically
+         * into the stored resolution. Ignored (harmless) for every other item.
+         */
+        verdicts: z.record(z.string().min(1), z.enum(['approve', 'deny'])).optional(),
       }),
     )
     .mutation(
