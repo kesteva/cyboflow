@@ -3,6 +3,7 @@
  *   - TypeTag      (idea | epic | task)
  *   - PriorityTag  (P0 | P1 | P2)
  *   - CategoryTag  (feature | bug | chore — migration 059)
+ *   - ScopeTag     (S = small, L = large — idea scope hint; hidden when unset)
  *   - ArchivedChip (neutral "Archived" — archive-in-place items, only visible
  *                  while the header Archived toggle is on)
  *   - ProjectChip  (project name — cross-project "All projects" view only)
@@ -19,7 +20,7 @@
  * the `motion-reduce:` Tailwind variant (drops the pulse animation).
  */
 import { User, Bug, Sparkles, Wrench } from 'lucide-react';
-import type { EntityCategory, FlowOverlay, Priority, TaskType } from '../../../../shared/types/tasks';
+import type { EntityCategory, FlowOverlay, IdeaScope, Priority, TaskType } from '../../../../shared/types/tasks';
 
 const TYPE_LABEL: Record<TaskType, string> = {
   idea: 'Idea',
@@ -83,6 +84,29 @@ export function CategoryTag({ category }: { category: EntityCategory }): React.J
     >
       <Icon className="h-2.5 w-2.5" strokeWidth={2.5} />
       {CATEGORY_LABEL[category]}
+    </span>
+  );
+}
+
+const SCOPE_LABEL: Record<IdeaScope, string> = {
+  small: 'S',
+  large: 'L',
+};
+
+const SCOPE_CLASS: Record<IdeaScope, string> = {
+  small: 'border-status-success/40 bg-status-success/10 text-status-success',
+  large: 'border-status-warning/40 bg-status-warning/10 text-status-warning',
+};
+
+/** Compact S/L scope badge — only rendered by callers when `scope` is set. */
+export function ScopeTag({ scope }: { scope: IdeaScope }): React.JSX.Element {
+  return (
+    <span
+      className={`eyebrow rounded-[3px] border px-1.5 py-px ${SCOPE_CLASS[scope]}`}
+      title={`Scope: ${scope}`}
+      data-testid="scope-tag"
+    >
+      {SCOPE_LABEL[scope]}
     </span>
   );
 }

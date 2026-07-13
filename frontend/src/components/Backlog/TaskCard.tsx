@@ -27,7 +27,17 @@ import { ChevronDown, ChevronRight, Play, Loader2, Pencil, Lightbulb } from 'luc
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 import { trpc } from '../../trpc/client';
 import { useBacklogStore } from '../../stores/backlogStore';
-import { TypeTag, PriorityTag, CategoryTag, ArchivedChip, ProjectChip, FlowMarker, ReviewMarker, DoneFlag } from './markers';
+import {
+  TypeTag,
+  PriorityTag,
+  CategoryTag,
+  ScopeTag,
+  ArchivedChip,
+  ProjectChip,
+  FlowMarker,
+  ReviewMarker,
+  DoneFlag,
+} from './markers';
 import { compactAgo, isArchived } from './backlogSelectors';
 import { CardActionsMenu, type ReorderDirection } from './CardActionsMenu';
 import { IdeaDetailEditor } from '../IdeaDetailEditor';
@@ -254,6 +264,7 @@ export function TaskBody({
         {archived && <ArchivedChip />}
         <PriorityTag priority={task.priority} />
         <CategoryTag category={task.category} />
+        {task.scope !== null && <ScopeTag scope={task.scope} />}
         <span className="ml-auto font-mono text-[10px] text-text-tertiary">{task.ref}</span>
       </div>
 
