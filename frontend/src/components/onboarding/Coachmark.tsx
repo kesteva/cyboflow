@@ -59,12 +59,23 @@ const COACH: Record<number, CoachSpec> = {
     arrow: 'right',
     body: (
       <>
-        Spin up a <b className="text-[var(--paper)]">quick session</b> — an ad-hoc Claude Code chat in its own worktree.
+        Spin up a <b className="text-[var(--paper)]">quick session</b> — an ad-hoc agent chat in its own worktree.
         Pick the <b className="text-[var(--paper)]">Quick Session</b> card to begin.
       </>
     ),
   },
   5: {
+    anchorId: ONBOARDING_ANCHORS.substrateSelect,
+    arrow: 'up',
+    pointer: true,
+    body: (
+      <>
+        Choose the provider and how it runs. Claude and Codex both support structured SDK sessions; interactive PTY
+        mode is available for quick sessions. Runtime comes first because it determines which models are available.
+      </>
+    ),
+  },
+  6: {
     anchorId: ONBOARDING_ANCHORS.sessionPermission,
     arrow: 'up',
     pointer: true,
@@ -75,25 +86,14 @@ const COACH: Record<number, CoachSpec> = {
       </>
     ),
   },
-  6: {
+  7: {
     anchorId: ONBOARDING_ANCHORS.modelSelect,
     arrow: 'up',
     pointer: true,
     body: (
       <>
-        The Claude model powering this session. <b className="text-[var(--paper)]">Opus</b> is a highly capable
-        default; smaller models are faster and cheaper for lighter tasks.
-      </>
-    ),
-  },
-  7: {
-    anchorId: ONBOARDING_ANCHORS.substrateSelect,
-    arrow: 'up',
-    pointer: true,
-    body: (
-      <>
-        How the agent runs under the hood: the bundled <b className="text-[var(--paper)]">SDK</b> (default — nothing to
-        install) or your own Claude Code CLI in an interactive terminal. Keep SDK for now, then hit{' '}
+        Pick a model from the family supported by the runtime above. The session remembers this as its default; a
+        workflow can temporarily take over with its own provider and model setup. Then hit{' '}
         <b className="text-[var(--paper)]">Start quick session</b> below.
       </>
     ),

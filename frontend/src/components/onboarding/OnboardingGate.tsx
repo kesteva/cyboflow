@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { ClaudeDetectionResult } from '../../../../shared/types/onboarding';
-import { CLAUDE_DETECT_CHANNEL } from '../../../../shared/types/onboarding';
+import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../../shared/types/onboarding';
+import { CLAUDE_DETECT_CHANNEL, CODEX_DETECT_CHANNEL } from '../../../../shared/types/onboarding';
 import type { Project } from '../../types/project';
 import type { IPCResponse } from '../../utils/api';
 import { API } from '../../utils/api';
@@ -43,6 +43,12 @@ const MISSING_DETECTION: ClaudeDetectionResult = {
   state: 'missing',
 };
 
+const UNAVAILABLE_CODEX_DETECTION: CodexDetectionResult = {
+  runtime: { found: false, path: null, version: null },
+  account: { found: false, email: null, planType: null },
+  state: 'unavailable',
+};
+
 /** Trailing path segment, tolerant of either separator + trailing slashes. */
 function basename(p: string): string {
   const trimmed = p.replace(/[/\\]+$/, '');
@@ -57,6 +63,8 @@ export function OnboardingGate(): React.JSX.Element | null {
   const maxVisitedStep = useOnboardingStore((s) => s.maxVisitedStep);
   const detection = useOnboardingStore((s) => s.detection);
   const connected = useOnboardingStore((s) => s.connected);
+  const codexDetection = useOnboardingStore((s) => s.codexDetection);
+  const codexConnected = useOnboardingStore((s) => s.codexConnected);
   const permMode = useOnboardingStore((s) => s.permMode);
 
   const hydrate = useOnboardingStore((s) => s.hydrate);
@@ -67,6 +75,8 @@ export function OnboardingGate(): React.JSX.Element | null {
   const skip = useOnboardingStore((s) => s.skip);
   const setDetection = useOnboardingStore((s) => s.setDetection);
   const setConnected = useOnboardingStore((s) => s.setConnected);
+  const setCodexDetection = useOnboardingStore((s) => s.setCodexDetection);
+  const setCodexConnected = useOnboardingStore((s) => s.setCodexConnected);
   const setPermMode = useOnboardingStore((s) => s.setPermMode);
   const anchorActioned = useOnboardingStore((s) => s.anchorActioned);
   const realEvent = useOnboardingStore((s) => s.realEvent);
@@ -175,25 +185,41 @@ export function OnboardingGate(): React.JSX.Element | null {
     };
   }, [realEvent]);
 
-  // The step-1 credential probe. Re-runs whenever detection is cleared (Check
-  // again / after locating a binary). Any failure degrades to 'missing'.
+  // The step-1 provider probes. Re-run together on Check again; each failure
+  // degrades independently so one provider never hides a usable sibling.
   const runDetect = useCallback(async () => {
     setChecking(true);
-    try {
-      const res = (await window.electron?.invoke(CLAUDE_DETECT_CHANNEL)) as
-        | IPCResponse<ClaudeDetectionResult>
-        | undefined;
-      setDetection(res?.success && res.data ? res.data : MISSING_DETECTION);
-    } catch {
-      setDetection(MISSING_DETECTION);
-    } finally {
-      setChecking(false);
-    }
-  }, [setDetection]);
+    const [claudeResponse, codexResponse] = await Promise.all([
+      window.electron?.invoke(CLAUDE_DETECT_CHANNEL).catch(() => undefined) as
+        | Promise<IPCResponse<ClaudeDetectionResult> | undefined>
+        | undefined,
+      window.electron?.invoke(CODEX_DETECT_CHANNEL).catch(() => undefined) as
+        | Promise<IPCResponse<CodexDetectionResult> | undefined>
+        | undefined,
+    ]);
+    setDetection(
+      claudeResponse?.success && claudeResponse.data
+        ? claudeResponse.data
+        : MISSING_DETECTION,
+    );
+    setCodexDetection(
+      codexResponse?.success && codexResponse.data
+        ? codexResponse.data
+        : UNAVAILABLE_CODEX_DETECTION,
+    );
+    setChecking(false);
+  }, [setCodexDetection, setDetection]);
 
   useEffect(() => {
-    if (status === 'active' && step === 1 && detection === null && !checking) void runDetect();
-  }, [status, step, detection, checking, runDetect]);
+    if (
+      status === 'active'
+      && step === 1
+      && (detection === null || codexDetection === null)
+      && !checking
+    ) {
+      void runDetect();
+    }
+  }, [status, step, detection, codexDetection, checking, runDetect]);
 
   // Step-4 precondition: the Quick Session card lives in the wizard, so ensure it
   // is the center surface before the coachmark tries to anchor.
@@ -264,12 +290,18 @@ export function OnboardingGate(): React.JSX.Element | null {
   }, [permMode, next]);
 
   const hasProject = projects.length > 0;
-  const gateBlocked = isNextGateBlocked({ step, detection, connected });
+  const gateBlocked = isNextGateBlocked({
+    step,
+    detection,
+    connected,
+    codexDetection,
+    codexConnected,
+  });
 
   let primary: PrimaryAction;
   switch (step) {
     case 1:
-      primary = { label: 'Continue →', disabled: gateBlocked, title: 'Connect Claude Code to continue', onClick: next };
+      primary = { label: 'Continue →', disabled: gateBlocked, title: 'Connect Claude or Codex to continue', onClick: next };
       break;
     case 2:
       primary = { label: 'Next →', disabled: false, onClick: () => void handlePermNext() };
@@ -317,10 +349,13 @@ export function OnboardingGate(): React.JSX.Element | null {
       case 1:
         return (
           <ConnectStep
-            detection={detection}
-            connected={connected}
+            claudeDetection={detection}
+            claudeConnected={connected}
+            codexDetection={codexDetection}
+            codexConnected={codexConnected}
             checking={checking}
-            onToggleConnect={() => setConnected(!connected)}
+            onToggleClaude={() => setConnected(!connected)}
+            onToggleCodex={() => setCodexConnected(!codexConnected)}
             onRecheck={() => void runDetect()}
             onLocate={() => void handleLocate()}
             onInstall={handleInstall}

@@ -1,14 +1,14 @@
 import { create } from 'zustand';
-import type { ClaudeDetectionResult } from '../../../shared/types/onboarding';
+import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
 import type { PermissionMode } from '../../../shared/types/workflows';
 import { ONBOARDING_COACH_STEPS, ONBOARDING_POINTER_STEPS, ONBOARDING_STEP_COUNT } from '../utils/onboarding';
 
 /**
  * onboardingStore — the 11-step first-run tour's state machine.
  *
- * Steps: 0 welcome · 1 connect Claude Code (the only gated step) · 2 permission
+ * Steps: 0 welcome · 1 connect an agent provider (the only gated step) · 2 permission
  * mode · 3 add project · 4 quick-session coachmark (wizard Quick Session card) ·
- * 5-7 wizard-Configure pointers (session permission / model / substrate) ·
+ * 5-7 wizard-Configure pointers (runtime / session permission / model) ·
  * 8 /ship coachmark (session canvas chip) · 9 Human-review coachmark ·
  * 10 rail map.
  *
@@ -20,7 +20,7 @@ import { ONBOARDING_COACH_STEPS, ONBOARDING_POINTER_STEPS, ONBOARDING_STEP_COUNT
  *
  * Advancement rules (the tour is completed by DOING, not clicking through):
  * - Modal steps (0,1,2,3,10) advance via next(); step 1 refuses until the
- *   credential probe says 'detected' AND the consent toggle is on; step 3
+ *   Claude or Codex probe says 'detected' AND its consent toggle is on; step 3
  *   normally advances via the real 'project-created' event (its primary
  *   button creates the project), falling back to next() when projects
  *   already exist (replay / resumed installs).
@@ -76,6 +76,10 @@ interface OnboardingState {
   detection: ClaudeDetectionResult | null;
   /** Step-1 consent toggle ("use this install for every session"). */
   connected: boolean;
+  /** Latest codex:detect result; null = probe not yet run. */
+  codexDetection: CodexDetectionResult | null;
+  /** Step-1 consent toggle for the ChatGPT-authenticated Codex runtime. */
+  codexConnected: boolean;
   /** Step-2 selection; 'auto' preselected per design, persisted to config on step-2 next(). */
   permMode: PermissionMode;
   /** Boot gate resolved — render nothing until true (no-flash rule, docs/CODE-PATTERNS.md). */
@@ -117,6 +121,8 @@ interface OnboardingState {
   restart: () => void;
   setDetection: (result: ClaudeDetectionResult | null) => void;
   setConnected: (connected: boolean) => void;
+  setCodexDetection: (result: CodexDetectionResult | null) => void;
+  setCodexConnected: (connected: boolean) => void;
   setPermMode: (mode: PermissionMode) => void;
   /** The user clicked the highlighted coachmark target (capture-phase listener). */
   anchorActioned: () => void;
@@ -127,8 +133,16 @@ interface OnboardingState {
 const LAST_STEP = ONBOARDING_STEP_COUNT - 1;
 
 /** Step 1 refuses to advance until the probe is green and consent is given. */
-export function isNextGateBlocked(state: Pick<OnboardingState, 'step' | 'detection' | 'connected'>): boolean {
-  return state.step === 1 && !(state.detection?.state === 'detected' && state.connected);
+export function isNextGateBlocked(
+  state: Pick<
+    OnboardingState,
+    'step' | 'detection' | 'connected' | 'codexDetection' | 'codexConnected'
+  >,
+): boolean {
+  if (state.step !== 1) return false;
+  const claudeReady = state.detection?.state === 'detected' && state.connected;
+  const codexReady = state.codexDetection?.state === 'detected' && state.codexConnected;
+  return !claudeReady && !codexReady;
 }
 
 /** Advance-by-doing coach steps (4, 8, 9) — coach steps that are NOT pointers. */
@@ -142,6 +156,8 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
   replay: false,
   detection: null,
   connected: false,
+  codexDetection: null,
+  codexConnected: false,
   permMode: 'auto',
   hydrated: false,
 
@@ -174,6 +190,8 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     replay,
     connected: false,
     detection: null,
+    codexConnected: false,
+    codexDetection: null,
     permMode: 'auto',
     hydrated: true,
   }),
@@ -264,6 +282,8 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
 
   setDetection: (detection) => set({ detection }),
   setConnected: (connected) => set({ connected }),
+  setCodexDetection: (codexDetection) => set({ codexDetection }),
+  setCodexConnected: (codexConnected) => set({ codexConnected }),
   setPermMode: (permMode) => set({ permMode }),
 
   anchorActioned: () => {
@@ -271,7 +291,7 @@ export const useOnboardingStore = create<OnboardingState>((set, get) => ({
     if (s.status !== 'active' || !isDoStep(s.step)) return;
     if (s.step === 4) {
       // The card click flips the wizard to Configure, where step 5's anchor
-      // (the permission selector) mounts — advance directly.
+      // (the runtime selector) mounts — advance directly.
       set({ step: 5, maxVisitedStep: Math.max(s.maxVisitedStep, 5) });
       return;
     }
