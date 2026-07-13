@@ -6,6 +6,70 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.22] — 2026-07-13
+
+### Added
+
+- **First-run onboarding tour.** A guided first-launch experience replacing the
+  old Welcome modal and review-queue onboarding card: an overlay modal carousel
+  followed by advance-by-doing coachmarks anchored to real UI, including
+  Configure-page pointer steps (permission / model / substrate) and an idea
+  picker that defaults to New with an explainer. The tour is resumable and
+  replayable, persists progress, and emits Aptabase usage events at each step. A
+  new `claude:detect` IPC probes the local `claude` binary (login + credential
+  markers under the enhanced shell PATH) so setup can revive a missing install,
+  and the detected main branch is persisted at project create. The Resume setup
+  card can now be permanently dismissed.
+- **Idle sessions in the review queue.** Completed-but-unviewed interactive quick
+  (PTY) sessions are now surfaced into the review queue as blocking human tasks
+  by an `IdleSessionDetector`, with a dedicated **Idle sessions** review-queue
+  section (oldest-idle first, Open-only, no triage CTAs). Gated by a new
+  **Settings → Idle Session Review** toggle + threshold. Keyed on `chat_run_id`
+  with episode idempotency, and no longer marks a session viewed on a panel
+  remount.
+- **Workflow-scoped agent configs.** A workflow can now carry per-agent model +
+  config overrides in its `spec_json` (no migration): the AGENT tab gains a model
+  select and a "copy this agent into the workflow" action in the inspector,
+  editor stage cards show an effective-model row + a custom marker, and the
+  configs layer into the run agent overlay at launch.
+- **Warm SDK sessions.** An SDK conversation now reuses **one persistent
+  subprocess across turns** instead of spawning a fresh `query()` per turn,
+  cutting multi-turn latency; a fingerprint change respawns and a TTL reaps idle
+  sessions (kill switch `CYBOFLOW_DISABLE_WARM_SDK=1`). Paired with **live-tail**
+  progressive rendering for both SDK run chat and quick-session panels (IPC delta
+  buffer) and multi-turn persistent streaming prompt input.
+- **Failure-seam telemetry.** A new `emitSeamError` Sentry sink with an
+  `errorClass` classifier wired into twelve failure seams — SDK / interactive
+  session-error origins, run terminal-outcome, boot-recovery, and the
+  step / gate / monitor / verify seams. Raw error text is stripped from all seam
+  messages before they reach Sentry.
+
+### Changed
+
+- **Fan-out driven by one spec chokepoint.** A step's `fanOut` spec now drives
+  **both** the editor UI and the orchestrated prompt plane from a single source:
+  the editor toggle is reworked to serial / parallel with a `maxConcurrency`
+  input, fan-out instructions and lane vocabulary are derived from the workflow
+  spec (unioned across all fan-out chains), and the Agents pane gains
+  `fanOut.inner` awareness. Ship's execute-tasks step carries a fan-out block with
+  live `batchId` driver resolution.
+- **Model labelling.** Opus is relabelled "More capable" now that Fable 5 leads
+  the roster.
+
+### Fixed
+
+- Fan-out edge cases from adversarial review: invalid concurrency caps are clamped
+  in `effectiveMaxConcurrency`, and ship step prompts are re-grounded with task
+  scope after a mid-run batch stamp.
+- The orchestrator socket recovers from `EADDRINUSE` and the MCP server is gated
+  on it actually listening; hosted runs/workflow runs are cancelled for
+  worktree-less sessions on project deletion.
+- SDK no-op gaps closed across the session/run close-out kill seams; the
+  warm-close-reason diagnostics map is hard-capped.
+- Coachmark polish: popover flips to the anchor's left when the right lacks room,
+  footer overflow fixed, and a permission choice now reaches the setup wizard
+  without a restart.
+
 ## [0.1.21] — 2026-07-10
 
 ### Added
