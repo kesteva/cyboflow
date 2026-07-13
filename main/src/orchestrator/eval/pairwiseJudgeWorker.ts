@@ -20,8 +20,9 @@
  * Guards (cross-slice contract): maybeSnapshotAndEnqueue AND the decision-review-
  * item mint are gated on experiments.status IN ('running','grading') — a decided/
  * abandoned experiment never re-snapshots, re-judges, or re-mints. Pairwise
- * readiness uses the shared `isExperimentArmSettled` predicate (the same one
- * reconcileExperimentStatus uses).
+ * readiness uses the shared gate-aware `isArmSettledForGrading` predicate (the same
+ * one reconcileExperimentStatus uses) — an arm behind an open approval gate is not yet
+ * gradable.
  *
  * Impurity lives HERE (SDK via the injected judge, DB writes, review-item
  * chokepoint); pairwiseScoring.ts stays pure. Every electron-touching
@@ -39,7 +40,7 @@ import type {
   PairwisePreference,
   PairwiseSample,
 } from '../../../../shared/types/experiments';
-import { isExperimentArmSettled } from '../../../../shared/types/experiments';
+import { isArmSettledForGrading } from '../experimentStore';
 import type { PairwiseJudgeClient } from './pairwiseJudge';
 import { computePairwisePromptHash } from './pairwiseJudge';
 import { aggregatePairwise } from './pairwiseScoring';
@@ -202,9 +203,15 @@ export class PairwiseJudgeWorker {
     const armB = arms.find((a) => a.experiment_arm === 'B');
     if (!armA || !armB) return 'not_ready';
 
-    // Both arms must be settled (shared predicate). The trigger re-fires when the
-    // second arm finishes.
-    if (!isExperimentArmSettled(armA.status) || !isExperimentArmSettled(armB.status)) {
+    // Both arms must be settled AND clear of any open approval gate (shared, gate-aware
+    // predicate — the same one reconcileExperimentStatus uses). An arm resting at
+    // `awaiting_review` behind a pending gate is NOT done; snapshotting it would freeze a
+    // premature verdict while the arm is really mid-flight. The trigger re-fires when the
+    // second arm finishes (and again when a gate clears and the arm next rests/drains).
+    if (
+      !isArmSettledForGrading(this.db, armA.id, armA.status) ||
+      !isArmSettledForGrading(this.db, armB.id, armB.status)
+    ) {
       return 'not_ready';
     }
 

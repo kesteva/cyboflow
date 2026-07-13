@@ -135,6 +135,35 @@ describe('experimentStore', () => {
     expect(getExperiment(db, exp.id)?.status).toBe('grading');
   });
 
+  it('reconcile: an awaiting_review arm behind an OPEN approval gate does NOT flip to grading', () => {
+    const raw = buildDb();
+    raw.exec(`CREATE TABLE approvals (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, status TEXT NOT NULL);`);
+    const db = dbAdapter(raw);
+    seedRun(raw, 'runA', 'awaiting_review');
+    seedRun(raw, 'runB', 'awaiting_review');
+    const exp = insertExperiment(db, {
+      projectId: 1, workflowId: 'wf', baseBranch: 'main', baseSha: 's', variantAId: 'a', variantBId: 'b',
+    });
+    setExperimentRuns(db, exp.id, { runAId: 'runA', runBId: 'runB' });
+
+    // Both arms are paused at a MID-FLOW tool-approval gate (pending approvals row) —
+    // resting at awaiting_review but NOT done: approve/deny can still change the diff.
+    raw.prepare('INSERT INTO approvals (id, run_id, status) VALUES (?, ?, ?)').run('ap1', 'runA', 'pending');
+    raw.prepare('INSERT INTO approvals (id, run_id, status) VALUES (?, ?, ?)').run('ap2', 'runB', 'pending');
+    expect(reconcileExperimentStatus(db, exp.id)).toEqual({ changed: false, status: 'running' });
+    expect(getExperiment(db, exp.id)?.status).toBe('running');
+
+    // One gate cleared, the other still open -> still not gradable.
+    raw.prepare('UPDATE approvals SET status = ? WHERE run_id = ?').run('approved', 'runA');
+    expect(reconcileExperimentStatus(db, exp.id)).toEqual({ changed: false, status: 'running' });
+
+    // Both gates cleared (approvals decided) -> the plain end-of-flow rest now grades.
+    raw.prepare('UPDATE approvals SET status = ? WHERE run_id = ?').run('approved', 'runB');
+    const out = reconcileExperimentStatus(db, exp.id);
+    expect(out).toEqual({ changed: true, status: 'grading', halfCreated: false });
+    expect(getExperiment(db, exp.id)?.status).toBe('grading');
+  });
+
   it('reconcile: half-created (a run id NULL) → abandoned', () => {
     const raw = buildDb();
     const db = dbAdapter(raw);

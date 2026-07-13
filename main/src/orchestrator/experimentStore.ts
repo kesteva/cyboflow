@@ -253,6 +253,41 @@ function readRunStatus(db: DatabaseLike, runId: string | null): string | null {
   }
 }
 
+/**
+ * True when a run parked at `awaiting_review` still has an OPEN tool-approval gate
+ * (a pending `approvals` row). This discriminates the two `awaiting_review` entry
+ * points (see transitions.ts): a MID-FLOW approval gate INSERTs a pending approvals
+ * row — the human's approve/deny can still produce more work, so the run is NOT done
+ * — whereas the plain end-of-flow REST inserts none (the agent drained; work is
+ * stable). Defensive over a missing `approvals` table (minimal test schemas) → false.
+ */
+function hasOpenApprovalGate(db: DatabaseLike, runId: string): boolean {
+  try {
+    const row = db
+      .prepare(`SELECT 1 FROM approvals WHERE status = 'pending' AND run_id = ? LIMIT 1`)
+      .get(runId);
+    return row !== undefined;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Gate-aware "settled for experiment grading". An arm is ready to grade only when it
+ * is settled ({@link isExperimentArmSettled}) AND not paused at an open approval gate.
+ * A run resting at `awaiting_review` behind a pending gate is NOT finished: treating
+ * it as settled would flip the experiment to `grading` and snapshot a premature
+ * verdict (e.g. an empty-diff "Both arms produced no changes" tie) while the arm is
+ * really mid-flight and will resume to `running` once the gate is cleared. Used by
+ * both readiness deciders — reconcileExperimentStatus and the pairwise snapshot gate —
+ * so the two never drift.
+ */
+export function isArmSettledForGrading(db: DatabaseLike, runId: string, status: string): boolean {
+  if (!isExperimentArmSettled(status)) return false;
+  if (status === 'awaiting_review' && hasOpenApprovalGate(db, runId)) return false;
+  return true;
+}
+
 /** Outcome of a reconcile pass (returned so callers can log / drive the clone sweep). */
 export type ReconcileOutcome =
   | { changed: false; status: ExperimentStatus }
@@ -291,7 +326,12 @@ export function reconcileExperimentStatus(db: DatabaseLike, experimentId: string
 
   const statusA = readRunStatus(db, exp.run_a_id);
   const statusB = readRunStatus(db, exp.run_b_id);
-  if (statusA !== null && statusB !== null && isExperimentArmSettled(statusA) && isExperimentArmSettled(statusB)) {
+  if (
+    statusA !== null &&
+    statusB !== null &&
+    isArmSettledForGrading(db, exp.run_a_id, statusA) &&
+    isArmSettledForGrading(db, exp.run_b_id, statusB)
+  ) {
     updateExperimentStatus(db, experimentId, 'grading');
     return { changed: true, status: 'grading', halfCreated: false };
   }

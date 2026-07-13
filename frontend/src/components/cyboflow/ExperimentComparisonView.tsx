@@ -101,11 +101,19 @@ function armVariantId(exp: ExperimentRow, arm: ExperimentArm): string {
  * the comparison: 'verdict ready' once the pairwise judge has produced a complete
  * comparison but the human has not yet decided, else 'grading…' while it runs.
  */
-function experimentStatusPill(status: ExperimentStatus, comparisonStatus: ComparisonStatus | 'absent'): string {
+function experimentStatusPill(
+  status: ExperimentStatus,
+  comparisonStatus: ComparisonStatus | 'absent',
+  bothArmsSettled: boolean,
+): string {
   switch (status) {
     case 'running':
       return 'running';
     case 'grading':
+      // Guard against a stale 'grading' stamp: an arm can resume past a transient
+      // approval gate and be executing again. Until BOTH arms are settled it is not
+      // actually being graded — never claim 'verdict ready' over a live arm.
+      if (!bothArmsSettled) return 'running';
       return comparisonStatus === 'complete' ? 'verdict ready' : 'grading…';
     case 'decided':
       return 'decided';
@@ -286,7 +294,10 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
   const expSettled = exp !== null && isExperimentSettled(exp.status);
   // The mid-run "live arms" view stands in for the verdict layout while there is
   // no pairwise verdict yet AND at least one arm is still executing. Once both
-  // arms settle (grading) or a verdict lands, the full verdict layout renders.
+  // arms settle (grading) or a verdict lands, the full verdict layout renders — with
+  // its decide CTAs disabled and a "waiting" hint until both arms settle. (The header
+  // pill, gated on bothSettled below, is what stops a stale verdict row from claiming
+  // "verdict ready" over an arm that resumed past a transient approval gate.)
   const showRunningState = payload !== null && payload.verdict === null && (!armASettled || !armBSettled);
   const canDecide = exp !== null && payload !== null && !expSettled && bothSettled;
   const canRerunComparison = exp !== null && (exp.status === 'running' || exp.status === 'grading');
@@ -515,7 +526,7 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
     { variantId: exp.variant_a_id, label: payload.armA.variantLabel },
     { variantId: exp.variant_b_id, label: payload.armB.variantLabel },
   );
-  const pillLabel = experimentStatusPill(exp.status, payload.comparisonStatus);
+  const pillLabel = experimentStatusPill(exp.status, payload.comparisonStatus, bothSettled);
 
   const header = (
     <div className="flex flex-shrink-0 items-center justify-between gap-3 border-b border-border-primary bg-bg-secondary px-7 py-4">

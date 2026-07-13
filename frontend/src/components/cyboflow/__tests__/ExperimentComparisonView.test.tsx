@@ -562,6 +562,22 @@ describe('ExperimentComparisonView', () => {
     expect(screen.getByTestId('experiment-status-pill')).toHaveTextContent('verdict ready');
   });
 
+  it('does NOT claim "verdict ready" while a grading experiment still has an unsettled (resumed) arm', async () => {
+    // Regression: a stale 'complete' comparison + a 'grading' stamp can coexist with an
+    // arm that resumed past a transient approval gate (status back to 'running'). The
+    // header pill must reflect the live arm, not falsely announce a ready verdict.
+    getQuery.mockResolvedValue(makeExp({ status: 'grading' }));
+    getComparisonQuery.mockResolvedValue(
+      makePayload({ armB: makeArm({ runId: 'run-b', arm: 'B', variantLabel: 'variant-b', status: 'running' }) }),
+    );
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    const pill = await screen.findByTestId('experiment-status-pill');
+    expect(pill).toHaveTextContent('running');
+    expect(pill).not.toHaveTextContent('verdict ready');
+  });
+
   it('AC3: a decided experiment renders NO Cancel button', async () => {
     getQuery.mockResolvedValue(makeExp({ status: 'decided', winner_arm: 'A', winner_run_id: 'run-a' }));
     getComparisonQuery.mockResolvedValue(makePayload());

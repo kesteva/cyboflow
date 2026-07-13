@@ -128,6 +128,22 @@ describe('maybeSnapshotAndEnqueue — readiness + guards', () => {
     expect(raw.prepare('SELECT COUNT(*) AS n FROM experiment_comparisons').get()).toEqual({ n: 0 });
   });
 
+  it("returns 'not_ready' when an awaiting_review arm has an OPEN approval gate", async () => {
+    const raw = buildDb();
+    raw.exec(`CREATE TABLE approvals (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, status TEXT NOT NULL);`);
+    const id = seedExperiment(raw, { armAStatus: 'awaiting_review', armBStatus: 'awaiting_review' });
+    // Arm A is parked at a mid-flow tool-approval gate (pending row) — NOT done: it can
+    // resume to 'running'. No premature "no changes" snapshot must be taken.
+    raw.prepare('INSERT INTO approvals (id, run_id, status) VALUES (?, ?, ?)').run('ap1', 'run-a', 'pending');
+    const { worker } = makeWorker(raw);
+    expect(await worker.maybeSnapshotAndEnqueue(id)).toBe('not_ready');
+    expect(raw.prepare('SELECT COUNT(*) AS n FROM experiment_comparisons').get()).toEqual({ n: 0 });
+
+    // Gate cleared (approval decided) → both arms are genuinely rested → snapshot proceeds.
+    raw.prepare('UPDATE approvals SET status = ? WHERE run_id = ?').run('approved', 'run-a');
+    expect(await worker.maybeSnapshotAndEnqueue(id)).toBe('enqueued');
+  });
+
   it("returns 'not_ready' for a decided/abandoned experiment (status guard)", async () => {
     const raw = buildDb();
     const id = seedExperiment(raw, {
