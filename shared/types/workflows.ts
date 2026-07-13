@@ -106,6 +106,10 @@ export interface WorkflowRunRow {
    *  and read by the terminal-seam close-out to clear selected on un-resolved
    *  findings. Mirrors seed_idea_id (017). */
   seed_finding_ids?: string | null;
+  /** Selected idea ids seeded into a planner run at launch (IDEA-009 "Planner should
+   *  accept multiple ideas"), JSON-encoded string array (migration 060). NULL for
+   *  runs launched with a single idea / non-planner runs. Mirrors seed_finding_ids (034). */
+  seed_idea_ids?: string | null;
   /** sha256 hex of the workflow's spec_json frozen at run creation (computeSpecHash; migration 026). Lets Insights bucket runs by the exact workflow revision they executed even after the workflow's spec_json is edited. NULL for historic runs / runs created before 026. */
   spec_hash?: string | null;
   /**

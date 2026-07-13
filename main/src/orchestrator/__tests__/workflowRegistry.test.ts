@@ -140,6 +140,10 @@ describe('WorkflowRegistry', () => {
     // getRunById now SELECTs workflow_runs.seed_finding_ids (compound triage seed,
     // migration 032); layer the additive ALTER on top so the projection resolves.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
+    // getRunById now SELECTs workflow_runs.seed_idea_ids (IDEA-009 multi-idea
+    // planner seed, migration 060); layer the additive ALTER on top so the
+    // projection resolves. Mirrors seed_finding_ids above.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_ids TEXT');
     // createRun stamps workflow_runs.model (per-run model pin, migration 037) and
     // getRunById projects it; the column is provided by the
     // includeWorkflowRunTaskColumns block above (folded in alongside
@@ -1479,6 +1483,43 @@ describe('WorkflowRegistry', () => {
         expect(first!.substrate).toBe('sdk');
         expect(second!.substrate).toBe('sdk');
         expect(first!.substrate).toBe(second!.substrate);
+      });
+    });
+
+    // ───── seed_idea_ids read-back (IDEA-009 "Planner should accept multiple ideas") ─────
+
+    it('projects seed_idea_ids as null on a freshly created run', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'seed-idea-ids-null.md', '---\n---\n');
+        registry.seed(1, [{ name: 'planner', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
+
+        const run = registry.getRunById(runId);
+        expect(run).not.toBeNull();
+        expect(run!.seed_idea_ids ?? null).toBeNull();
+      });
+    });
+
+    it('reads back seed_idea_ids as the raw JSON string when written directly (launcher-style post-create UPDATE)', async () => {
+      await withTempDir('workflow-registry-test-', async (tmpDir) => {
+        const path = writeTempMd(tmpDir, 'seed-idea-ids-written.md', '---\n---\n');
+        registry.seed(1, [{ name: 'planner', path }]);
+
+        interface IdRow { id: string }
+        const { id: workflowId } = db.prepare('SELECT id FROM workflows WHERE name = ?').get('planner') as IdRow;
+        const { runId } = registry.createRun(workflowId, undefined, TEST_SESSION_ID);
+
+        // Mirrors the launcher-style post-create UPDATE runLauncher.ts uses for
+        // seed_finding_ids — getRunById does no JSON.parse itself; it must hand
+        // the raw string straight back to the caller.
+        db.prepare('UPDATE workflow_runs SET seed_idea_ids = ? WHERE id = ?').run('["ide_a","ide_b"]', runId);
+
+        const run = registry.getRunById(runId);
+        expect(run).not.toBeNull();
+        expect(run!.seed_idea_ids).toBe('["ide_a","ide_b"]');
       });
     });
   });
