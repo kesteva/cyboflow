@@ -253,6 +253,26 @@ export interface RecommendationsArtifactPayload {
   [key: string]: unknown;
 }
 
+/**
+ * Parsed `payload_json` shape of an `approve-ideas` artifact — the human-facing
+ * half of the approve-ideas BATCH gate (IDEA-009). The planner reports this
+ * artifact via the `cyboflow_report_artifact` MCP tool's `payload_json` when it
+ * opens a `gate:human-step:approve-ideas` decision review item; `ideas` are the
+ * batch's rows the template renders one Approve/Deny control per. The template
+ * validates the submitted verdict map against the gate's `DecisionPayload.
+ * ideaRefs` at submit time (every ref decided, none outside the batch) — the
+ * server (reviewItems.resolve) re-validates authoritatively, so this payload is
+ * a display/UX convenience only, never a trust boundary.
+ */
+export interface ApproveIdeasArtifactPayload {
+  ideas: Array<{
+    ref: string;
+    title: string;
+    scope?: string | null;
+    summary?: string | null;
+  }>;
+}
+
 export type ArtifactChangeAction = 'created' | 'updated' | 'committed' | 'deleted';
 
 /** Emitted on the per-project channel after an artifact write commits. */

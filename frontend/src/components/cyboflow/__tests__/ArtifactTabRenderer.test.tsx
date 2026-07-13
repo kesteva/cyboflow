@@ -19,6 +19,7 @@ import { useArtifactData, type ArtifactData } from '../../../hooks/useArtifactDa
 import { useArtifactImages, type UseArtifactImages } from '../../../hooks/useArtifactImages';
 import type { Artifact, ArtifactType } from '../../../../../shared/types/artifacts';
 import type { BacklogTaskItem } from '../../../../../shared/types/tasks';
+import type { ReviewItem } from '../../../../../shared/types/reviews';
 
 // --- mocks -----------------------------------------------------------------
 
@@ -41,6 +42,7 @@ vi.mock('../../MarkdownPreview', () => ({
 
 const commitMutate = vi.fn().mockResolvedValue({ artifactId: 'art-1' });
 const acceptBaselineMutate = vi.fn().mockResolvedValue({ baselineKey: 'IDEA-018' });
+const reviewItemsResolveMutate = vi.fn().mockResolvedValue({ reviewItemId: 'rvw_gate', resumed: true });
 vi.mock('../../../trpc/client', () => ({
   trpc: {
     cyboflow: {
@@ -48,9 +50,30 @@ vi.mock('../../../trpc/client', () => ({
         commit: { mutate: (...args: unknown[]) => commitMutate(...args) },
         acceptAsBaseline: { mutate: (...args: unknown[]) => acceptBaselineMutate(...args) },
       },
+      reviewItems: {
+        resolve: { mutate: (...args: unknown[]) => reviewItemsResolveMutate(...args) },
+      },
     },
   },
 }));
+
+// approve-ideas reads the already-wired project-scoped review_items inbox
+// directly from the store (no new subscription) — mock it the same way
+// RunPendingInputStrip.test.tsx does: a selector fn over a module-level array
+// plus a spy-backed getState().init().
+let mockReviewItems: ReviewItem[] = [];
+const mockReviewInit = vi.fn();
+const mockReviewRelease = vi.fn();
+mockReviewInit.mockImplementation(() => mockReviewRelease);
+vi.mock('../../../stores/reviewItemsSlice', () => ({
+  useReviewItemsSlice: Object.assign(
+    (selector: (s: { items: ReviewItem[] }) => unknown) => selector({ items: mockReviewItems }),
+    { getState: () => ({ init: mockReviewInit }) },
+  ),
+}));
+function setReviewItems(items: ReviewItem[]): void {
+  mockReviewItems = items;
+}
 
 // --- fixtures --------------------------------------------------------------
 
@@ -120,6 +143,9 @@ describe('ArtifactTabRenderer', () => {
     setImages({ images: {}, loading: false, error: null });
     commitMutate.mockClear();
     acceptBaselineMutate.mockClear();
+    reviewItemsResolveMutate.mockClear();
+    setReviewItems([]);
+    mockReviewInit.mockClear();
   });
 
   // --- idea-spec -----------------------------------------------------------
@@ -708,5 +734,146 @@ describe('ArtifactTabRenderer', () => {
       expect(screen.getByTestId(c.testid)).toBeInTheDocument();
       unmount();
     }
+  });
+
+  // --- approve-ideas ---------------------------------------------------------
+
+  const APPROVE_IDEAS_PAYLOAD = JSON.stringify({
+    ideas: [
+      { ref: 'IDEA-014', title: 'Ship the widget', scope: 'small', summary: 'A small widget.' },
+      { ref: 'IDEA-015', title: 'Rework the gadget' },
+    ],
+  });
+
+  function makeGateItem(overrides: Partial<ReviewItem> = {}): ReviewItem {
+    return {
+      id: 'rvw_gate',
+      project_id: 1,
+      run_id: 'run-1',
+      entity_type: null,
+      entity_id: null,
+      kind: 'decision',
+      status: 'pending',
+      blocking: true,
+      title: 'Approve ideas',
+      body: null,
+      severity: null,
+      priority: null,
+      staged_at: null,
+      selected: false,
+      source: 'gate:human-step:approve-ideas',
+      payload: { kind: 'decision', gate: 'approve-ideas', ideaRefs: ['IDEA-014', 'IDEA-015'] },
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+      resolved_by: null,
+      resolution: null,
+      ...overrides,
+    };
+  }
+
+  function renderApproveIdeas(payloadJson: string | null = APPROVE_IDEAS_PAYLOAD): void {
+    render(
+      <ArtifactTabRenderer
+        artifact={makeArtifact({ atype: 'approve-ideas', mode: 'template', payloadJson })}
+        {...PROPS}
+      />,
+    );
+  }
+
+  it('renders the approve-ideas rows with the amber eyebrow', () => {
+    setReviewItems([makeGateItem()]);
+    renderApproveIdeas();
+
+    expect(screen.getByTestId('artifact-approve-ideas')).toBeInTheDocument();
+    const eyebrow = screen.getByTestId('artifact-eyebrow');
+    expect(eyebrow).toHaveTextContent('Artifact · approve ideas');
+    expect(eyebrow).toHaveStyle({ color: '#b8860b' });
+    expect(screen.getAllByTestId('approve-ideas-row')).toHaveLength(2);
+    expect(screen.getByText('Ship the widget')).toBeInTheDocument();
+  });
+
+  it('toggles each idea row independently and updates the footer counts', () => {
+    setReviewItems([makeGateItem()]);
+    renderApproveIdeas();
+
+    expect(screen.getByTestId('approve-ideas-counts')).toHaveTextContent('0 approved · 0 denied · 2 undecided');
+
+    fireEvent.click(screen.getByTestId('approve-ideas-approve-IDEA-014'));
+    expect(screen.getByTestId('approve-ideas-approve-IDEA-014')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('approve-ideas-deny-IDEA-015')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('approve-ideas-counts')).toHaveTextContent('1 approved · 0 denied · 1 undecided');
+
+    fireEvent.click(screen.getByTestId('approve-ideas-deny-IDEA-015'));
+    // The other row's verdict is untouched by this click.
+    expect(screen.getByTestId('approve-ideas-approve-IDEA-014')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('approve-ideas-deny-IDEA-015')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('approve-ideas-counts')).toHaveTextContent('1 approved · 1 denied · 0 undecided');
+  });
+
+  it('disables Submit while any row is undecided, enables it once every row is decided', () => {
+    setReviewItems([makeGateItem()]);
+    renderApproveIdeas();
+
+    const submit = screen.getByTestId('approve-ideas-submit');
+    expect(submit).toBeDisabled();
+
+    fireEvent.click(screen.getByTestId('approve-ideas-approve-IDEA-014'));
+    expect(submit).toBeDisabled();
+
+    fireEvent.click(screen.getByTestId('approve-ideas-deny-IDEA-015'));
+    expect(submit).not.toBeDisabled();
+  });
+
+  it('Submit fires exactly one resolve call carrying the complete verdict map', async () => {
+    setReviewItems([makeGateItem()]);
+    renderApproveIdeas();
+
+    fireEvent.click(screen.getByTestId('approve-ideas-approve-IDEA-014'));
+    fireEvent.click(screen.getByTestId('approve-ideas-deny-IDEA-015'));
+    fireEvent.click(screen.getByTestId('approve-ideas-submit'));
+
+    await waitFor(() =>
+      expect(reviewItemsResolveMutate).toHaveBeenCalledWith({
+        projectId: 1,
+        reviewItemId: 'rvw_gate',
+        verdicts: { 'IDEA-014': 'approve', 'IDEA-015': 'deny' },
+      }),
+    );
+    expect(reviewItemsResolveMutate).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders read-only rows + a note when the batch has ideas but no pending gate for this run', () => {
+    setReviewItems([]); // no gate item at all
+    renderApproveIdeas();
+
+    expect(screen.getByTestId('approve-ideas-no-gate-note')).toHaveTextContent(
+      'No pending approval gate for this run.',
+    );
+    expect(screen.queryByTestId('approve-ideas-footer')).not.toBeInTheDocument();
+
+    const approveBtn = screen.getByTestId('approve-ideas-approve-IDEA-014');
+    expect(approveBtn).toBeDisabled();
+    fireEvent.click(approveBtn);
+    expect(approveBtn).toHaveAttribute('aria-pressed', 'false');
+    expect(reviewItemsResolveMutate).not.toHaveBeenCalled();
+  });
+
+  it('treats a gate item for a DIFFERENT run as no pending gate (read-only)', () => {
+    setReviewItems([makeGateItem({ run_id: 'run-other' })]);
+    renderApproveIdeas();
+    expect(screen.getByTestId('approve-ideas-no-gate-note')).toBeInTheDocument();
+  });
+
+  it('shows the empty state for a malformed payload, without throwing', () => {
+    setReviewItems([makeGateItem()]);
+    expect(() => renderApproveIdeas('not json')).not.toThrow();
+    expect(screen.getByTestId('artifact-approve-ideas-empty')).toHaveTextContent('No ideas to review.');
+    expect(screen.queryByTestId('approve-ideas-row')).not.toBeInTheDocument();
+  });
+
+  it('shows the empty state for a null payload', () => {
+    setReviewItems([makeGateItem()]);
+    renderApproveIdeas(null);
+    expect(screen.getByTestId('artifact-approve-ideas-empty')).toHaveTextContent('No ideas to review.');
   });
 });

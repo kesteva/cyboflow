@@ -24,6 +24,7 @@
 import { useCallback, useState } from 'react';
 import { trpc } from '../trpc/client';
 import { acceptedResolution } from '../../../shared/types/reviews';
+import type { IdeaVerdictMap } from '../../../shared/types/reviews';
 
 export interface ReviewItemActionsState {
   /** Review item id whose mutation is currently in flight (or null when idle). */
@@ -39,11 +40,15 @@ export interface ReviewItemActionsState {
    * + reveals the run's drafts (approve-plan) and resumes; 'reject' tears down the
    * rejected drafts and lets the controller end the run 'rejected' (no resume).
    * Omit it for non-gate resolves (findings / human tasks).
+   *
+   * `verdicts` is the "Submit decisions" payload for an approve-ideas BATCH gate
+   * — a per-idea verdict map keyed by display ref. Ignored (harmless) by the
+   * server for every other item; omit it for non-batch resolves.
    */
   resolve: (
     projectId: number,
     reviewItemId: string,
-    opts?: { resolution?: string; outcome?: 'approve' | 'reject' },
+    opts?: { resolution?: string; outcome?: 'approve' | 'reject'; verdicts?: IdeaVerdictMap },
   ) => Promise<{ resumed: boolean } | null>;
   /**
    * Accept a finding whose proposedTarget is a manual ('docs' | 'prompt') edit:
@@ -83,7 +88,7 @@ export function useReviewItemActions(): ReviewItemActionsState {
     async (
       projectId: number,
       reviewItemId: string,
-      opts?: { resolution?: string; outcome?: 'approve' | 'reject' },
+      opts?: { resolution?: string; outcome?: 'approve' | 'reject'; verdicts?: IdeaVerdictMap },
     ): Promise<{ resumed: boolean } | null> => {
       setError(null);
       setPendingItemId(reviewItemId);
@@ -93,6 +98,7 @@ export function useReviewItemActions(): ReviewItemActionsState {
           reviewItemId,
           ...(opts?.resolution !== undefined ? { resolution: opts.resolution } : {}),
           ...(opts?.outcome !== undefined ? { outcome: opts.outcome } : {}),
+          ...(opts?.verdicts !== undefined ? { verdicts: opts.verdicts } : {}),
         });
         return { resumed: result.resumed };
       } catch (err: unknown) {
