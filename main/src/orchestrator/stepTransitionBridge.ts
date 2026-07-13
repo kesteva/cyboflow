@@ -81,6 +81,34 @@ export function resolveInitialStepId(workflowName: string): string | null {
   return null;
 }
 
+/**
+ * Resolve the step id for a RUN-LEVEL lifecycle step emit (the coarse run-start /
+ * drain transitions fired by RunExecutor.emitStep, distinct from the fine-grained
+ * per-step `cyboflow_report_step` path).
+ *
+ * For a genuinely FRESH run (`currentStepId === null`) this stamps the workflow's
+ * INITIAL step so only step 1 shows "running". But `execute()` is ALSO re-driven
+ * MID-FLIGHT — a programmatic→orchestrated handover (`handoverRunHandler`), a
+ * resume, a nudge, or a reopen — and in those cases `current_step_id` is already
+ * advanced past step 1. Falling back to the initial step there would reset the
+ * pointer BACKWARD and snap the flow-tracking timeline to the first stage (the
+ * "handover shows the run on the first stage" bug). So an already-set
+ * `currentStepId` is PRESERVED verbatim; only a null pointer falls back to the
+ * initial step.
+ *
+ * Returns null when no step can be resolved (a fresh run whose workflow has no
+ * known initial step — a custom/unknown flow); the caller then skips the emit.
+ *
+ * @param currentStepId - The run's persisted `workflow_runs.current_step_id`.
+ * @param workflowName  - The `workflows.name` value from the database row.
+ */
+export function resolveRunLevelStepId(
+  currentStepId: string | null,
+  workflowName: string,
+): string | null {
+  return currentStepId ?? resolveInitialStepId(workflowName);
+}
+
 // ---------------------------------------------------------------------------
 // stepId validation (dynamic step-id model)
 // ---------------------------------------------------------------------------

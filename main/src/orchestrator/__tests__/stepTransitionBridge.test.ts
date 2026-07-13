@@ -22,6 +22,7 @@ import type { DatabaseLike } from '../types';
 import {
   buildStepTransitionEvent,
   resolveInitialStepId,
+  resolveRunLevelStepId,
 } from '../stepTransitionBridge';
 import type { WorkflowStepTransitionEvent, WorkflowDefinition } from '../../../../shared/types/workflows';
 import { stepTransitionEvents } from '../trpc/routers/events';
@@ -137,6 +138,35 @@ describe('resolveInitialStepId', () => {
     expect(resolveInitialStepId('planner')).toBe('context');
     expect(resolveInitialStepId('sprint')).toBe('analyze-dependencies');
     expect(resolveInitialStepId('compound')).toBe('load-sprint');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolveRunLevelStepId — preserve an advanced pointer on re-drive (handover bug)
+// ---------------------------------------------------------------------------
+
+describe('resolveRunLevelStepId', () => {
+  it('falls back to the workflow initial step when current_step_id is null (fresh run)', () => {
+    expect(resolveRunLevelStepId(null, 'planner')).toBe('context');
+    expect(resolveRunLevelStepId(null, 'sprint')).toBe('analyze-dependencies');
+    expect(resolveRunLevelStepId(null, 'compound')).toBe('load-sprint');
+  });
+
+  it('PRESERVES an already-set current_step_id (re-drive: handover / resume / nudge / reopen)', () => {
+    // A programmatic run handed over mid-flight at a later step must NOT be reset
+    // back to the initial step by the run-level emit — that is the "handover shows
+    // the run on the first stage" regression.
+    expect(resolveRunLevelStepId('code-review', 'sprint')).toBe('code-review');
+    expect(resolveRunLevelStepId('decompose', 'planner')).toBe('decompose');
+  });
+
+  it('preserves current_step_id even when the workflow name is unknown/custom', () => {
+    expect(resolveRunLevelStepId('some-step', 'custom-flow')).toBe('some-step');
+  });
+
+  it('returns null for a fresh run of an unknown/custom workflow (caller skips emit)', () => {
+    expect(resolveRunLevelStepId(null, 'custom-flow')).toBeNull();
+    expect(resolveRunLevelStepId(null, '')).toBeNull();
   });
 });
 

@@ -137,7 +137,7 @@ import type { LifecycleTransitionsLike, StepTransitionEmitterLike, IdeaBodyReade
 import { buildSeedTasksBlock } from './orchestrator/seedTasksBlock';
 import { selectTaskById, selectIdeaAttachments } from './orchestrator/taskListing';
 import { selectFindingForSeed } from './orchestrator/reviewItemListing';
-import { buildStepTransitionEvent, resolveInitialStepId } from './orchestrator/stepTransitionBridge';
+import { buildStepTransitionEvent, resolveRunLevelStepId } from './orchestrator/stepTransitionBridge';
 import {
   transitionToRunning,
   transitionRunningToAwaitingReview,
@@ -1423,20 +1423,24 @@ async function initializeServices() {
   };
 
   // StepTransitionEmitterLike adapter — delegates to buildStepTransitionEvent() +
-  // resolveInitialStepId() while keeping RunExecutor free of bridge imports.
-  // If resolveInitialStepId returns null (unknown workflow name), no DB write
-  // and no emit occurs.
+  // resolveRunLevelStepId() while keeping RunExecutor free of bridge imports.
+  // If resolveRunLevelStepId returns null (fresh run of an unknown workflow),
+  // no DB write and no emit occurs.
   const stepTransitionEmitter: StepTransitionEmitterLike = {
     emit: (runId: string, status: 'pending' | 'running' | 'done') => {
-      // Resolve the workflow name to get the step id.
+      // Resolve the workflow name AND the run's current step pointer. A FRESH run
+      // has current_step_id === null and stamps the workflow's initial step; a
+      // re-driven run (programmatic→orchestrated handover, resume, nudge, reopen)
+      // already has an advanced pointer that resolveRunLevelStepId PRESERVES so the
+      // flow-tracking timeline is not reset back to the first stage.
       const runRow = rawDb.prepare(
-        `SELECT w.name AS workflowName
+        `SELECT w.name AS workflowName, r.current_step_id AS currentStepId
          FROM workflow_runs r
          JOIN workflows w ON w.id = r.workflow_id
          WHERE r.id = ?`,
-      ).get(runId) as { workflowName: string } | undefined;
+      ).get(runId) as { workflowName: string; currentStepId: string | null } | undefined;
       if (!runRow) return;
-      const stepId = resolveInitialStepId(runRow.workflowName);
+      const stepId = resolveRunLevelStepId(runRow.currentStepId, runRow.workflowName);
       if (!stepId) return;
       buildStepTransitionEvent(runId, stepId, status, cyboflowDb, cyboflowLogger);
     },
