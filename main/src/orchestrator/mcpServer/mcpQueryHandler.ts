@@ -89,7 +89,7 @@ import { resolveRunFanOutInner } from '../laneChainResolution';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import { runStatusEvents } from '../trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../../shared/types/cyboflow';
-import type { BacklogTaskItem, Priority, TaskType } from '../../../../shared/types/tasks';
+import type { BacklogTaskItem, EntityCategory, Priority, TaskType } from '../../../../shared/types/tasks';
 import type { ExperimentArm } from '../../../../shared/types/experiments';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import type {
@@ -125,6 +125,8 @@ export type McpQueryMessage =
       /** Full markdown body — the canonical rich detail (idea spec / task description + ACs). */
       body?: string;
       priority?: Priority;
+      /** Entity category — feature/bug/chore (migration 059). */
+      category?: EntityCategory;
       repo?: string;
       parentEpicId?: string;
       boardId?: string;
@@ -142,6 +144,8 @@ export type McpQueryMessage =
       /** Full markdown body — the canonical rich detail (idea spec / task description + ACs). */
       body?: string;
       priority?: Priority;
+      /** Entity category — feature/bug/chore (migration 059). */
+      category?: EntityCategory;
       repo?: string;
       parentEpicId?: string;
       expectedVersion?: number;
@@ -962,6 +966,7 @@ export class McpQueryHandler {
       summary: msg.summary,
       body: msg.body,
       priority: msg.priority,
+      category: msg.category,
       repo: msg.repo,
       parentEpicId: msg.parentEpicId ?? null,
       boardId: msg.boardId,
@@ -1029,6 +1034,7 @@ export class McpQueryHandler {
         summary: msg.summary,
         body: msg.body,
         priority: msg.priority,
+        category: msg.category,
         repo: msg.repo,
       },
       ...(msg.parentEpicId !== undefined ? { parentEpicId: msg.parentEpicId } : {}),
@@ -1213,6 +1219,7 @@ export class McpQueryHandler {
       title: item.title,
       summary: item.summary,
       priority: item.priority,
+      category: item.category,
       stage_id: item.stage_id,
       stage_position: item.stage_position,
       parent_epic_id: item.parent_epic_id,
@@ -1249,6 +1256,7 @@ export class McpQueryHandler {
       summary: item.summary,
       body: item.body,
       priority: item.priority,
+      category: item.category,
       repo: item.repo,
       parent_epic_id: item.parent_epic_id,
       originating_idea_id: item.originating_idea_id,

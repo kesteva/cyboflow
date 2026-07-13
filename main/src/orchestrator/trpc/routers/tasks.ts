@@ -88,6 +88,7 @@ function rethrowAsTRPCError(err: unknown): never {
 
 const taskTypeSchema = z.enum(['idea', 'epic', 'task']);
 const prioritySchema = z.enum(['P0', 'P1', 'P2']);
+const categorySchema = z.enum(['feature', 'bug', 'chore']);
 const scopeSchema = z.enum(['small', 'large']);
 
 /**
@@ -220,6 +221,8 @@ export const tasksRouter = router({
         /** Single markdown body column (present on every entity). Lets the planner free-text path seed the injectable idea body. */
         body: z.string().nullable().optional(),
         priority: prioritySchema.optional(),
+        /** Entity category — feature/bug/chore (migration 059); create-time attribute, unlike scope. */
+        category: categorySchema.optional(),
         repo: z.string().nullable().optional(),
         /** Image attachments — only meaningful on type='idea' (chokepoint ignores it otherwise). */
         attachments: z.array(attachmentSchema).nullable().optional(),
@@ -237,6 +240,7 @@ export const tasksRouter = router({
           summary: input.summary,
           body: input.body,
           priority: input.priority,
+          category: input.category,
           repo: input.repo,
           attachments: input.attachments,
           parentEpicId: input.parentEpicId,
@@ -267,6 +271,8 @@ export const tasksRouter = router({
         /** Single markdown body column (present on every entity). */
         body: z.string().nullable().optional(),
         priority: prioritySchema.optional(),
+        /** Entity category — feature/bug/chore (migration 059). */
+        category: categorySchema.optional(),
         repo: z.string().nullable().optional(),
         /** Idea size hint — only meaningful on type='idea' (chokepoint ignores it otherwise). */
         scope: scopeSchema.nullable().optional(),
@@ -288,6 +294,7 @@ export const tasksRouter = router({
             ...(input.summary !== undefined ? { summary: input.summary } : {}),
             ...(input.body !== undefined ? { body: input.body } : {}),
             ...(input.priority !== undefined ? { priority: input.priority } : {}),
+            ...(input.category !== undefined ? { category: input.category } : {}),
             ...(input.repo !== undefined ? { repo: input.repo } : {}),
             ...(input.scope !== undefined ? { scope: input.scope } : {}),
             ...(input.attachments !== undefined ? { attachments: input.attachments } : {}),

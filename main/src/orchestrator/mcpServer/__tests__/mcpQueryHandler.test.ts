@@ -1617,6 +1617,20 @@ describe('McpQueryHandler', () => {
         expect(response.ok).toBe(false);
         expect(response.error).toBe('run_not_found');
       });
+
+      it('surfaces category in the compact projection (TASK-054, defaults to "feature")', async () => {
+        listSeedRun(listDb, 'run-list-cat');
+        const idea = await createEntity('run-list-cat', 'Feature idea');
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-list-tasks', requestId: 'lt-cat', runId: 'run-list-cat' },
+          socket,
+        );
+        const data = parseLastWrite(writes).data as { tasks: Array<Record<string, unknown>> };
+        const item = data.tasks.find((t) => t['id'] === idea.id)!;
+        expect(item['category']).toBe('feature');
+      });
     });
 
     describe('mcp-get-task', () => {
@@ -1664,6 +1678,49 @@ describe('McpQueryHandler', () => {
         expect(response.ok).toBe(true);
         const data = response.data as { task: Record<string, unknown> };
         expect(data.task['id']).toBe(created.id);
+      });
+
+      it('round-trips category (TASK-054): an MCP-created "bug" is readable, and an MCP-updated "chore" is readable', async () => {
+        listSeedRun(listDb, 'run-get-cat');
+        const created = makeSocketDouble();
+        await listHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId: 'ct-cat',
+            runId: 'run-get-cat',
+            title: 'Bug idea',
+            category: 'bug',
+          },
+          created.socket,
+        );
+        const { task_id: taskId } = parseLastWrite(created.writes).data as { task_id: string };
+
+        const afterCreate = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-cat-1', runId: 'run-get-cat', taskId },
+          afterCreate.socket,
+        );
+        const dataAfterCreate = parseLastWrite(afterCreate.writes).data as { task: Record<string, unknown> };
+        expect(dataAfterCreate.task['category']).toBe('bug');
+
+        await listHandler.handleMessage(
+          {
+            type: 'mcp-update-task',
+            requestId: 'ut-cat',
+            runId: 'run-get-cat',
+            taskId,
+            category: 'chore',
+          },
+          makeSocketDouble().socket,
+        );
+
+        const afterUpdate = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-cat-2', runId: 'run-get-cat', taskId },
+          afterUpdate.socket,
+        );
+        const dataAfterUpdate = parseLastWrite(afterUpdate.writes).data as { task: Record<string, unknown> };
+        expect(dataAfterUpdate.task['category']).toBe('chore');
       });
 
       it('returns "not_found" for a ref that does not exist', async () => {

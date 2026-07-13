@@ -187,6 +187,70 @@ describe('cyboflow.tasks router (nullable scope, archive, delete, global subscri
   });
 
   // -------------------------------------------------------------------------
+  // category (TASK-054) — create accepts it, update accepts + round-trips it
+  // -------------------------------------------------------------------------
+
+  it('create accepts category, update forwards a new category; both are readable (mirrors priority)', async () => {
+    const db = buildDb();
+    const caller = buildCaller(db);
+
+    const { taskId } = await caller.cyboflow.tasks.create({
+      projectId: 1,
+      title: 'A bug report',
+      category: 'bug',
+    });
+
+    const created = await caller.cyboflow.tasks.get({ taskId });
+    expect(created?.category).toBe('bug');
+
+    await caller.cyboflow.tasks.update({ projectId: 1, taskId, category: 'chore' });
+
+    const updated = await caller.cyboflow.tasks.get({ taskId });
+    expect(updated?.category).toBe('chore');
+  });
+
+  it('create without category defaults to "feature" (chokepoint default)', async () => {
+    const db = buildDb();
+    const caller = buildCaller(db);
+
+    const { taskId } = await caller.cyboflow.tasks.create({ projectId: 1, title: 'Plain feature' });
+    const created = await caller.cyboflow.tasks.get({ taskId });
+    expect(created?.category).toBe('feature');
+  });
+
+  it('create/update reject an out-of-enum category as a zod BAD_REQUEST — not a raw DB CHECK-constraint error, and no row is written', async () => {
+    const db = buildDb();
+    const caller = buildCaller(db);
+
+    // create: input validation must fire before the chokepoint ever touches the
+    // DB — assert both the TRPCError shape (BAD_REQUEST, the zod-parse code) and
+    // that no task row was inserted (a CHECK-constraint failure would instead
+    // surface as an INTERNAL_SERVER_ERROR after a failed/partial write attempt).
+    const countBefore = (
+      db.prepare(`SELECT COUNT(*) as n FROM tasks`).get() as { n: number }
+    ).n;
+    await expect(
+      caller.cyboflow.tasks.create({ projectId: 1, title: 'Bad category', category: 'security' as never }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    await expect(
+      caller.cyboflow.tasks.create({ projectId: 1, title: 'Bad category', category: 'security' as never }),
+    ).rejects.toBeInstanceOf(TRPCError);
+    const countAfter = (
+      db.prepare(`SELECT COUNT(*) as n FROM tasks`).get() as { n: number }
+    ).n;
+    expect(countAfter).toBe(countBefore);
+
+    // update: same BAD_REQUEST shape, and the existing row's category is left
+    // untouched by the rejected mutation.
+    const { taskId } = await caller.cyboflow.tasks.create({ projectId: 1, title: 'To update' });
+    await expect(
+      caller.cyboflow.tasks.update({ projectId: 1, taskId, category: 'security' as never }),
+    ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+    const unchanged = await caller.cyboflow.tasks.get({ taskId });
+    expect(unchanged?.category).toBe('feature');
+  });
+
+  // -------------------------------------------------------------------------
   // archive — forwards the archived flag to the chokepoint
   // -------------------------------------------------------------------------
 

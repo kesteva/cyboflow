@@ -666,3 +666,38 @@ describe('cyboflowMcpServer create/update task body param', () => {
     expect(updated['error']).not.toBe('invalid_arguments');
   });
 });
+
+// ---------------------------------------------------------------------------
+// cyboflow_create_task / cyboflow_update_task — the category param (TASK-054,
+// mirrors priority: migration 059 feature|bug|chore enum on every entity).
+// ---------------------------------------------------------------------------
+
+describe('cyboflowMcpServer create/update task category param', () => {
+  it('declares an optional feature|bug|chore enum on both create_task and update_task', async () => {
+    const tools = await listTools();
+    const create = tools.find((t) => t.name === 'cyboflow_create_task');
+    const update = tools.find((t) => t.name === 'cyboflow_update_task');
+    expect(create!.inputSchema.properties['category'].enum).toEqual(['feature', 'bug', 'chore']);
+    expect(update!.inputSchema.properties['category'].enum).toEqual(['feature', 'bug', 'chore']);
+    // category is OPTIONAL — only title (create) / task_id (update) are required.
+    expect(create!.inputSchema.required).toEqual(['title']);
+    expect(update!.inputSchema.required).toEqual(['task_id']);
+  });
+
+  it('rejects an out-of-enum category with invalid_arguments (create + update)', async () => {
+    expect(await callTool('cyboflow_create_task', { title: 'T', category: 'security' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+    expect(await callTool('cyboflow_update_task', { task_id: 'tsk_a', category: 'security' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+  });
+
+  it('passes validation with a valid category and reaches dispatch (mocked connection error)', async () => {
+    const created = await callTool('cyboflow_create_task', { title: 'A bug', category: 'bug' });
+    expect(created['error']).not.toBe('invalid_arguments');
+
+    const updated = await callTool('cyboflow_update_task', { task_id: 'tsk_a', category: 'chore' });
+    expect(updated['error']).not.toBe('invalid_arguments');
+  });
+});

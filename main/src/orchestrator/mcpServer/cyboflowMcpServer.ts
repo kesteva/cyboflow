@@ -199,6 +199,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             summary: { type: 'string', description: 'Optional SHORT one-line descriptor shown on the board card (keep it to a sentence). For the rich spec / acceptance criteria, use body.' },
             body: { type: 'string', description: 'Optional full markdown body — the canonical rich detail (the idea spec, the task description + acceptance criteria, file/dependency hints). This is what the entity artifact renders, so prefer it for anything multi-line; leave summary as the short caption.' },
             priority: { type: 'string', enum: ['P0', 'P1', 'P2'], description: "Optional priority; defaults to 'P2'" },
+            category: { type: 'string', enum: ['feature', 'bug', 'chore'], description: "Optional entity category; defaults to 'feature'" },
             repo: { type: 'string', description: 'Optional repo identifier' },
             parent_epic_id: { type: 'string', description: 'Optional parent epic id' },
             board_id: { type: 'string', description: 'Optional board id; defaults to the project default board' },
@@ -219,6 +220,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             summary: { type: 'string', description: 'Optional new SHORT one-line descriptor shown on the board card. For the rich spec / acceptance criteria, use body.' },
             body: { type: 'string', description: 'Optional new full markdown body — the canonical rich detail rendered in the entity artifact (idea spec, task description + acceptance criteria). Prefer it over summary for anything multi-line.' },
             priority: { type: 'string', enum: ['P0', 'P1', 'P2'], description: 'Optional new priority' },
+            category: { type: 'string', enum: ['feature', 'bug', 'chore'], description: 'Optional new entity category' },
             repo: { type: 'string', description: 'Optional new repo identifier' },
             parent_epic_id: { type: 'string', description: 'Optional parent epic id (re-parent)' },
             expected_version: { type: 'number', description: 'Optional expected version for optimistic concurrency' },
@@ -601,12 +603,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         summary?: unknown;
         body?: unknown;
         priority?: unknown;
+        category?: unknown;
         repo?: unknown;
         parent_epic_id?: unknown;
         board_id?: unknown;
         initial_stage_id?: unknown;
       };
-      const { title, task_type, summary, body, priority, repo, parent_epic_id, board_id, initial_stage_id } = args;
+      const { title, task_type, summary, body, priority, category, repo, parent_epic_id, board_id, initial_stage_id } = args;
       if (typeof title !== 'string' || title.length === 0) {
         return {
           content: [
@@ -657,6 +660,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
+      if (category !== undefined && category !== 'feature' && category !== 'bug' && category !== 'chore') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "category: 'feature' | 'bug' | 'chore' (optional)" }),
+            },
+          ],
+        };
+      }
       if (repo !== undefined && typeof repo !== 'string') {
         return {
           content: [
@@ -702,6 +715,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (summary !== undefined) queryParams['summary'] = summary;
       if (body !== undefined) queryParams['body'] = body;
       if (priority !== undefined) queryParams['priority'] = priority;
+      if (category !== undefined) queryParams['category'] = category;
       if (repo !== undefined) queryParams['repo'] = repo;
       if (parent_epic_id !== undefined) queryParams['parentEpicId'] = parent_epic_id;
       if (board_id !== undefined) queryParams['boardId'] = board_id;
@@ -716,11 +730,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         summary?: unknown;
         body?: unknown;
         priority?: unknown;
+        category?: unknown;
         repo?: unknown;
         parent_epic_id?: unknown;
         expected_version?: unknown;
       };
-      const { task_id, title, summary, body, priority, repo, parent_epic_id, expected_version } = args;
+      const { task_id, title, summary, body, priority, category, repo, parent_epic_id, expected_version } = args;
       if (typeof task_id !== 'string' || task_id.length === 0) {
         return {
           content: [
@@ -771,6 +786,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
+      if (category !== undefined && category !== 'feature' && category !== 'bug' && category !== 'chore') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "category: 'feature' | 'bug' | 'chore' (optional)" }),
+            },
+          ],
+        };
+      }
       if (repo !== undefined && typeof repo !== 'string') {
         return {
           content: [
@@ -806,6 +831,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (summary !== undefined) queryParams['summary'] = summary;
       if (body !== undefined) queryParams['body'] = body;
       if (priority !== undefined) queryParams['priority'] = priority;
+      if (category !== undefined) queryParams['category'] = category;
       if (repo !== undefined) queryParams['repo'] = repo;
       if (parent_epic_id !== undefined) queryParams['parentEpicId'] = parent_epic_id;
       if (expected_version !== undefined) queryParams['expectedVersion'] = expected_version;
