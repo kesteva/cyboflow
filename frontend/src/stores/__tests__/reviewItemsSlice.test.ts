@@ -369,6 +369,37 @@ describe('useReviewItemsSlice.init — multi-consumer refcount', () => {
     expect(subscribeState.unsubscribe).toHaveBeenCalledTimes(1);
   });
 
+  it('a release outstanding from BEFORE a subscription onError is a no-op afterwards (cannot tear down the re-subscribed feed)', async () => {
+    const init = useReviewItemsSlice.getState().init;
+    // Consumer mounts and holds a release.
+    const staleRelease = init(1);
+    await flush();
+    expect(subscribeState.calls).toBe(1);
+
+    // The subscription errors out from under the consumer: the wiring is torn
+    // down and its generation bumped, so `staleRelease` now belongs to a dead
+    // wiring. (onError itself unsubscribes the dead sub — clear that count so the
+    // assertions below measure only release-driven teardowns.)
+    subscribeState.onError?.(new Error('sub died'));
+    expect(useReviewItemsSlice.getState().connectionStatus).toBe('disconnected');
+    subscribeState.unsubscribe.mockClear();
+
+    // A fresh consumer re-wires the SAME project (e.g. the strip remounts).
+    listQuery.mockResolvedValue([]);
+    const liveRelease = init(1);
+    await flush();
+    expect(subscribeState.calls).toBe(2);
+
+    // The stale pre-error release must NOT decrement the new wiring's refcount
+    // or tear down the live subscription.
+    staleRelease();
+    expect(subscribeState.unsubscribe).not.toHaveBeenCalled();
+
+    // The live consumer releasing is the one that tears the new feed down.
+    liveRelease();
+    expect(subscribeState.unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
   it('a project change still force-rewires while consumers are mounted, and a stale release is a no-op', async () => {
     const init = useReviewItemsSlice.getState().init;
     const releaseP1 = init(1);
