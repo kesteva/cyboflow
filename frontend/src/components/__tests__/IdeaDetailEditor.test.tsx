@@ -63,6 +63,7 @@ function makeIdea(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     summary: 'Original summary',
     body: '# Original body',
     priority: 'P2',
+    category: 'feature',
     repo: null,
     parent_epic_id: null,
     originating_idea_id: null,

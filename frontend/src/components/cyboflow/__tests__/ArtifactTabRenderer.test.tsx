@@ -84,6 +84,7 @@ function makeIdea(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     summary: 'Move files + artifacts into center tabs.',
     body: '# Problem\n\nThe center column stacks.',
     priority: 'P1',
+    category: 'feature',
     repo: null,
     parent_epic_id: null,
     originating_idea_id: null,

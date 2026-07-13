@@ -19,7 +19,7 @@ import { IdeaAttachmentStrip } from '../cyboflow/IdeaAttachmentStrip';
 import { useIdeaAttachments } from '../../hooks/useIdeaAttachments';
 import { trpc } from '../../trpc/client';
 import { useBacklogStore } from '../../stores/backlogStore';
-import type { IdeaAttachment, Priority, TaskType } from '../../../../shared/types/tasks';
+import type { EntityCategory, IdeaAttachment, Priority, TaskType } from '../../../../shared/types/tasks';
 
 /** Empty seed for the attachment hook (stable reference). */
 const NO_ATTACHMENTS: IdeaAttachment[] = [];
@@ -39,6 +39,7 @@ interface NewTaskDialogProps {
 
 const TYPES: TaskType[] = ['idea', 'epic', 'task'];
 const PRIORITIES: Priority[] = ['P0', 'P1', 'P2'];
+const CATEGORIES: EntityCategory[] = ['feature', 'bug', 'chore'];
 
 export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTaskDialogProps): React.JSX.Element {
   const projects = useBacklogStore((s) => s.projects);
@@ -48,6 +49,7 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
   const [title, setTitle] = useState('');
   const [summary, setSummary] = useState('');
   const [priority, setPriority] = useState<Priority>('P2');
+  const [category, setCategory] = useState<EntityCategory>('feature');
   // null = "track the default" — the board's project filter, then the pane's
   // projectId prop, then the first known project. An explicit user pick pins
   // the override; reset() drops back to tracking.
@@ -67,6 +69,7 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
     setTitle('');
     setSummary('');
     setPriority('P2');
+    setCategory('feature');
     setProjectOverride(null);
     setError(null);
     attachmentsCtl.reset();
@@ -90,6 +93,7 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
         // Attachments are ideas-only; the chokepoint ignores them otherwise.
         ...(type === 'idea' ? { attachments: attachmentsCtl.attachments } : {}),
         priority,
+        category,
       });
       onCreated?.(result.taskId);
       reset();
@@ -193,6 +197,22 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
               {PRIORITIES.map((p) => (
                 <option key={p} value={p}>
                   {p}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
+            Category
+            <select
+              value={category}
+              onChange={(e) => setCategory(e.target.value as EntityCategory)}
+              className="rounded-input border border-border-primary bg-input-bg px-2 py-1.5 text-sm text-input-text"
+              aria-label="Task category"
+            >
+              {CATEGORIES.map((c) => (
+                <option key={c} value={c}>
+                  {c.charAt(0).toUpperCase() + c.slice(1)}
                 </option>
               ))}
             </select>

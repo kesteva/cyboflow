@@ -2,6 +2,7 @@
  * Small presentational marks rendered on backlog cards / list rows:
  *   - TypeTag      (idea | epic | task)
  *   - PriorityTag  (P0 | P1 | P2)
+ *   - CategoryTag  (feature | bug | chore — migration 059)
  *   - ArchivedChip (neutral "Archived" — archive-in-place items, only visible
  *                  while the header Archived toggle is on)
  *   - ProjectChip  (project name — cross-project "All projects" view only)
@@ -17,8 +18,8 @@
  * The breathing-glow on an in-flight card honours prefers-reduced-motion via
  * the `motion-reduce:` Tailwind variant (drops the pulse animation).
  */
-import { User } from 'lucide-react';
-import type { FlowOverlay, Priority, TaskType } from '../../../../shared/types/tasks';
+import { User, Bug, Sparkles, Wrench } from 'lucide-react';
+import type { EntityCategory, FlowOverlay, Priority, TaskType } from '../../../../shared/types/tasks';
 
 const TYPE_LABEL: Record<TaskType, string> = {
   idea: 'Idea',
@@ -48,6 +49,40 @@ export function PriorityTag({ priority }: { priority: Priority }): React.JSX.Ele
       title={`Priority ${priority}`}
     >
       {priority}
+    </span>
+  );
+}
+
+const CATEGORY_LABEL: Record<EntityCategory, string> = {
+  feature: 'Feature',
+  bug: 'Bug',
+  chore: 'Chore',
+};
+
+const CATEGORY_ICON: Record<EntityCategory, typeof Bug> = {
+  feature: Sparkles,
+  bug: Bug,
+  chore: Wrench,
+};
+
+const CATEGORY_CLASS: Record<EntityCategory, string> = {
+  // bug = attention-grabbing error-red token; chore/feature stay neutral so the
+  // priority tag remains the primary urgency signal.
+  bug: 'border-status-error/40 bg-status-error/10 text-status-error',
+  chore: 'border-border-primary bg-bg-tertiary text-text-tertiary',
+  feature: 'border-border-primary bg-bg-tertiary text-text-secondary',
+};
+
+export function CategoryTag({ category }: { category: EntityCategory }): React.JSX.Element {
+  const Icon = CATEGORY_ICON[category];
+  return (
+    <span
+      className={`eyebrow inline-flex items-center gap-1 rounded-[3px] border px-1.5 py-px ${CATEGORY_CLASS[category]}`}
+      title={`Category: ${CATEGORY_LABEL[category]}`}
+      data-testid="category-tag"
+    >
+      <Icon className="h-2.5 w-2.5" strokeWidth={2.5} />
+      {CATEGORY_LABEL[category]}
     </span>
   );
 }

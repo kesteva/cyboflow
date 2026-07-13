@@ -87,6 +87,16 @@ describe('NewTaskDialog — create', () => {
     expect(mockCreate.mock.calls[0][0]).toMatchObject({ projectId: 3, title: 'do the thing', type: 'idea' });
   });
 
+  it('defaults the category to feature and sends a re-picked category on create', async () => {
+    render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} onCreated={vi.fn()} />);
+    expect((screen.getByLabelText('Task category') as HTMLSelectElement).value).toBe('feature');
+    fireEvent.change(screen.getByLabelText('Task category'), { target: { value: 'bug' } });
+    fireEvent.change(screen.getByLabelText('Task title'), { target: { value: 'squash it' } });
+    fireEvent.click(screen.getByTestId('new-task-submit'));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
+    expect(mockCreate.mock.calls[0][0]).toMatchObject({ category: 'bug', title: 'squash it' });
+  });
+
   it('calls onCreated with the new id on success', async () => {
     const onCreated = vi.fn();
     render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} onCreated={onCreated} />);

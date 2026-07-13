@@ -20,11 +20,22 @@
  * close, body-scroll lock). The inline hexes mirror the warm-paper palette used
  * across ArtifactTabRenderer (STORIES accent, hairlines, font sizes); the M7
  * polish pass tokenizes them.
+ *
+ * The category chip in the header doubles as an inline edit control (a plain
+ * `<select>`, no separate save step) — it saves through `cyboflow.tasks.update`
+ * on change, the same chokepoint path as {@link EpicDetailEditor} /
+ * {@link IdeaDetailEditor}'s form fields. `expectedVersion` guards against a
+ * stale concurrent edit; on success the local `active` entity is patched with
+ * the new category + bumped version so the chip reflects the save without
+ * waiting on a store round-trip.
  */
 import { useEffect, useState, type ReactElement } from 'react';
 import { Modal } from '../ui/Modal';
 import { MarkdownPreview } from '../MarkdownPreview';
-import type { BacklogTaskItem } from '../../../../shared/types/tasks';
+import { trpc } from '../../trpc/client';
+import type { BacklogTaskItem, EntityCategory } from '../../../../shared/types/tasks';
+
+const CATEGORIES: EntityCategory[] = ['feature', 'bug', 'chore'];
 
 const HAIRLINE = 'var(--color-border-primary)';
 const SOFT = 'var(--color-border-tertiary)';
@@ -47,8 +58,29 @@ export function TaskDetailModal({ task, onClose }: TaskDetailModalProps): ReactE
   useEffect(() => {
     setActive(task);
   }, [task]);
+  const [savingCategory, setSavingCategory] = useState(false);
+  const [categoryError, setCategoryError] = useState<string | null>(null);
 
   if (!task || !active) return null;
+
+  const handleCategoryChange = async (next: EntityCategory): Promise<void> => {
+    if (next === active.category || savingCategory) return;
+    setSavingCategory(true);
+    setCategoryError(null);
+    try {
+      await trpc.cyboflow.tasks.update.mutate({
+        projectId: active.project_id,
+        taskId: active.id,
+        category: next,
+        expectedVersion: active.version,
+      });
+      setActive({ ...active, category: next, version: active.version + 1 });
+    } catch (err: unknown) {
+      setCategoryError(err instanceof Error ? err.message : 'Failed to save category');
+    } finally {
+      setSavingCategory(false);
+    }
+  };
 
   const body = active.body?.trim() ?? '';
   // A decomposed idea is OFF the board but stays navigable: list its spawned
@@ -105,7 +137,34 @@ export function TaskDetailModal({ task, onClose }: TaskDetailModalProps): ReactE
                 {active.priority}
               </span>
             )}
+            <select
+              value={active.category}
+              onChange={(e) => void handleCategoryChange(e.target.value as EntityCategory)}
+              disabled={savingCategory}
+              data-testid="task-detail-category"
+              aria-label="Task category"
+              style={{
+                fontSize: '9px',
+                fontWeight: 700,
+                color: FAINT,
+                border: `1px solid ${SOFT}`,
+                borderRadius: 2,
+                padding: '1px 4px',
+                background: 'var(--color-bg-primary)',
+              }}
+            >
+              {CATEGORIES.map((c) => (
+                <option key={c} value={c}>
+                  {c.charAt(0).toUpperCase() + c.slice(1)}
+                </option>
+              ))}
+            </select>
           </div>
+          {categoryError && (
+            <p role="alert" style={{ fontSize: '10px', color: 'var(--color-status-error)', margin: '0 0 6px' }}>
+              {categoryError}
+            </p>
+          )}
           <h2
             data-testid="task-detail-title"
             style={{ fontSize: '18px', fontWeight: 700, lineHeight: 1.3, color: INK, margin: 0 }}

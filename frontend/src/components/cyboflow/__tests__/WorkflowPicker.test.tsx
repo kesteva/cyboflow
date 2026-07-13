@@ -662,7 +662,7 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
     mockTasksList.mockResolvedValue([
       {
         id: 'IDEA-9', project_id: 1, type: 'idea', ref: 'IDEA-9', title: 'Seed idea', summary: null,
-        body: 'prose', priority: 'P2', repo: null, parent_epic_id: null, originating_idea_id: null,
+        body: 'prose', priority: 'P2', category: 'feature', repo: null, parent_epic_id: null, originating_idea_id: null,
         scope: null, board_id: 'b', stage_id: 'idea', archived_at: null, decomposed_at: null, approved_at: null, sort_order: null, stage_position: 1,
         version: 1, inFlow: [], awaitingReview: false, isDone: false, created_at: '', updated_at: '',
       },
@@ -827,7 +827,7 @@ describe('WorkflowPicker — Ship idea-selection gate (feat/ship-workflow)', () 
     mockTasksList.mockResolvedValue([
       {
         id: 'IDEA-9', project_id: 1, type: 'idea', ref: 'IDEA-9', title: 'Seed idea', summary: null,
-        body: 'prose', priority: 'P2', repo: null, parent_epic_id: null, originating_idea_id: null,
+        body: 'prose', priority: 'P2', category: 'feature', repo: null, parent_epic_id: null, originating_idea_id: null,
         scope: null, board_id: 'b', stage_id: 'idea', archived_at: null, decomposed_at: null, approved_at: null, sort_order: null, stage_position: 1,
         version: 1, inFlow: [], awaitingReview: false, isDone: false, created_at: '', updated_at: '',
       },
@@ -875,7 +875,7 @@ describe('WorkflowPicker — Sprint parallel-batch gate (feat/parallel-sprint)',
     mockTasksList.mockResolvedValue([
       {
         id: 'TASK-1', project_id: 1, type: 'task', ref: 'TASK-1', title: 'Do a thing', summary: null,
-        body: null, priority: 'P2', repo: null, parent_epic_id: null, originating_idea_id: null,
+        body: null, priority: 'P2', category: 'feature', repo: null, parent_epic_id: null, originating_idea_id: null,
         scope: null, board_id: 'b', stage_id: 'ready', archived_at: null, decomposed_at: null, approved_at: '2026-01-01T00:00:00.000Z', sort_order: null, version: 1,
         stage_position: 6, inFlow: [], awaitingReview: false,
         isDone: false, readyToWork: true, created_at: '', updated_at: '',

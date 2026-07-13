@@ -81,6 +81,7 @@ function item(id: string, stagePosition: number): BacklogTaskItem {
     summary: null,
     body: null,
     priority: 'P1',
+    category: 'feature',
     repo: null,
     parent_epic_id: null,
     originating_idea_id: null,

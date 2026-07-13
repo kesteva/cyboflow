@@ -148,6 +148,7 @@ function task(overrides: Partial<BacklogTaskItem> & { id: string; stage_id: stri
     summary: overrides.summary ?? null,
     body: overrides.body ?? null,
     priority: overrides.priority ?? 'P2',
+    category: overrides.category ?? 'feature',
     repo: overrides.repo ?? null,
     parent_epic_id: overrides.parent_epic_id ?? null,
     originating_idea_id: overrides.originating_idea_id ?? null,
@@ -389,6 +390,18 @@ describe('BacklogPane', () => {
     render(<BacklogPane projectId={1} />);
     expect(screen.getByTestId('review-marker')).toBeInTheDocument();
     expect(screen.getByTestId('done-flag')).toBeInTheDocument();
+  });
+
+  it('renders the CategoryTag with the per-category label on each card', () => {
+    mockTasks = [
+      task({ id: 'b1', stage_id: 's-ready', title: 'Fix the bug', category: 'bug' }),
+      task({ id: 'c1', stage_id: 's-ready', title: 'Sweep the chore', category: 'chore' }),
+    ];
+    render(<BacklogPane projectId={1} />);
+    const bugCard = screen.getByText('Fix the bug').closest('[data-archived]') as HTMLElement;
+    expect(within(bugCard).getByTestId('category-tag')).toHaveTextContent('Bug');
+    const choreCard = screen.getByText('Sweep the chore').closest('[data-archived]') as HTMLElement;
+    expect(within(choreCard).getByTestId('category-tag')).toHaveTextContent('Chore');
   });
 
   it('expands an epic to reveal its children', () => {

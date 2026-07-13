@@ -3,20 +3,31 @@
  *
  * Asserts: closed when task is null; renders ref/title/priority/summary + the
  * full markdown body via MarkdownPreview; graceful "No additional detail" state
- * for an empty body; Escape + close-button forward onClose.
+ * for an empty body; Escape + close-button forward onClose; the inline category
+ * select saves through `cyboflow.tasks.update` (optimistic local patch on
+ * success, error surfaced on failure).
  *
  * react-markdown is ESM-heavy in jsdom, so MarkdownPreview is stubbed to a plain
  * div that echoes its content (mirrors ArtifactTabRenderer.test.tsx).
  */
 import '@testing-library/jest-dom';
-import { render, screen, fireEvent } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { TaskDetailModal } from '../TaskDetailModal';
 import type { BacklogTaskItem } from '../../../../../shared/types/tasks';
 
 vi.mock('../../MarkdownPreview', () => ({
   MarkdownPreview: ({ content }: { content: string }) => <div data-testid="md-preview">{content}</div>,
 }));
+
+const { mockUpdate } = vi.hoisted(() => ({ mockUpdate: vi.fn() }));
+vi.mock('../../../trpc/client', () => ({
+  trpc: { cyboflow: { tasks: { update: { mutate: mockUpdate } } } },
+}));
+
+beforeEach(() => {
+  mockUpdate.mockReset().mockResolvedValue({ version: 2 });
+});
 
 function makeTask(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
   return {
@@ -28,6 +39,7 @@ function makeTask(overrides: Partial<BacklogTaskItem> = {}): BacklogTaskItem {
     summary: 'Tab strip across the top.',
     body: '## Acceptance\n\nRender a horizontal tab strip.',
     priority: 'P0',
+    category: 'feature',
     repo: null,
     parent_epic_id: 'EPIC-1',
     originating_idea_id: 'IDEA-018',
@@ -128,5 +140,46 @@ describe('TaskDetailModal', () => {
     fireEvent.click(screen.getByTestId('task-detail-back'));
     expect(screen.getByTestId('task-detail-title')).toHaveTextContent('Tab strip idea');
     expect(screen.getByTestId('task-detail-children')).toBeInTheDocument();
+  });
+
+  describe('category edit', () => {
+    it('saves the new category through cyboflow.tasks.update and patches the chip optimistically', async () => {
+      render(<TaskDetailModal task={makeTask({ category: 'feature' })} onClose={vi.fn()} />);
+      const select = screen.getByTestId('task-detail-category') as HTMLSelectElement;
+      expect(select.value).toBe('feature');
+
+      fireEvent.change(select, { target: { value: 'bug' } });
+
+      await waitFor(() => expect(mockUpdate).toHaveBeenCalledTimes(1));
+      expect(mockUpdate).toHaveBeenCalledWith({
+        projectId: 1,
+        taskId: 'TASK-1',
+        category: 'bug',
+        expectedVersion: 1,
+      });
+      // Optimistic local patch — the select reflects the new value without a
+      // store round-trip.
+      await waitFor(() => expect(select.value).toBe('bug'));
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+
+    it('is a no-op when re-selecting the current category (no mutation call)', () => {
+      render(<TaskDetailModal task={makeTask({ category: 'feature' })} onClose={vi.fn()} />);
+      fireEvent.change(screen.getByTestId('task-detail-category'), { target: { value: 'feature' } });
+      expect(mockUpdate).not.toHaveBeenCalled();
+    });
+
+    it('surfaces categoryError and leaves the select reverted when the update rejects', async () => {
+      mockUpdate.mockRejectedValue(new Error('stale version'));
+      render(<TaskDetailModal task={makeTask({ category: 'feature' })} onClose={vi.fn()} />);
+      const select = screen.getByTestId('task-detail-category') as HTMLSelectElement;
+
+      fireEvent.change(select, { target: { value: 'chore' } });
+
+      expect(await screen.findByRole('alert')).toHaveTextContent('stale version');
+      // The optimistic patch never applied on failure — the select stays on
+      // the last-saved category.
+      expect(select.value).toBe('feature');
+    });
   });
 });
