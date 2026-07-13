@@ -195,6 +195,10 @@ describe('composeStepPrompt', () => {
     });
     expect(loadSprint).toContain('## Compound review-queue discipline');
     expect(loadSprint).toContain('NEVER file a discarded candidate');
+    // New model: BOTH gates are workflow steps; the terminal one is human-review,
+    // and the flow emits NO decision review items (no batched write-back decision).
+    expect(loadSprint).toContain('human-review');
+    expect(loadSprint).toContain('emits NO `decision` review items anywhere');
     expect(loadSprint).not.toContain('## Artifact to report'); // no outputArtifact
 
     // A non-compound step never gets the guard.

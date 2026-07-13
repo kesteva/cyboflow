@@ -112,7 +112,6 @@ describe('buildBuiltInWorkflows', () => {
     expect(body, 'compound creates backlog tasks via cyboflow_create_task').toMatch(
       /cyboflow_create_task/,
     );
-    expect(body, 'compound proposes doc edits as blocking decision items').toMatch(/decision/);
     expect(body, "compound must never emit kind:'finding' (a finding is its input)").toMatch(
       /finding is Compound's input/i,
     );
@@ -130,13 +129,17 @@ describe('buildBuiltInWorkflows', () => {
     );
 
     // Write-back APPLIES approved doc edits in-place (not per-edit decisions) and
-    // opens exactly ONE batched final-review gate over the applied changes.
+    // emits NO review items — the terminal human-review step is the merge gate.
     expect(body, 'write-back applies approved doc edits in-place').toMatch(
       /apply the approved CLAUDE\.md \/ CODE-PATTERNS\.md edit \*\*in-place/,
     );
-    expect(body, 'write-back opens ONE batched final-review gate').toMatch(/final-review gate/);
-    expect(body, 'final-review gate is a single batched decision, never per-edit').toMatch(
-      /NEVER emit a decision per edit|NEVER a `decision` per doc edit/,
+    // Whitespace-normalized so multi-word phrases match regardless of line wrapping.
+    const flat = body.replace(/\s+/g, ' ');
+    expect(flat, 'the final gate is the terminal human-review "merge in changes" step').toMatch(
+      /merge in changes/i,
+    );
+    expect(flat, 'compound emits NO decision review items anywhere').toMatch(
+      /emits \*\*NO\*\* `decision` review items anywhere/,
     );
 
     // Seeded runs have no discovery, so the doc omits the Discarded section rather
@@ -201,17 +204,29 @@ describe('buildBuiltInWorkflows', () => {
     expect(writeBack!.desc ?? '', "write-back desc forbids kind:'finding'").toMatch(
       /NEVER kind:'finding'/,
     );
-    // Write-back applies every approved item in-place and opens ONE batched
-    // final-review decision — never a decision per edit.
+    // Write-back applies every approved item in-place, commits, and emits NO review
+    // items — the terminal human-review step is the only final gate.
     expect(writeBack!.desc ?? '', 'write-back applies approved items in-place').toMatch(
       /Apply EVERY approved item in-place/,
     );
-    expect(writeBack!.desc ?? '', 'write-back opens ONE batched final-review decision').toMatch(
-      /ONE batched blocking cyboflow_report_finding decision — the final-review gate/,
+    expect(writeBack!.desc ?? '', 'write-back emits no review items').toMatch(
+      /Emits NO review items/,
     );
     expect(writeBack!.desc ?? '', 'write-back never files a decision per edit').toMatch(
       /NEVER a decision per edit/,
     );
+
+    // The terminal human-review step is the "merge in changes" gate — modelled on
+    // sprint/ship's human-review, but eval-exempt (snapshotRunForEval skips compound).
+    const humanReview = steps.find((s) => s.id === 'human-review');
+    expect(humanReview, 'compound has a terminal human-review step').toBeDefined();
+    expect(humanReview!.agent, 'human-review is a human gate').toBe('human');
+    expect(humanReview!.human, 'human-review is a human: true gate').toBe(true);
+    expect(humanReview!.desc ?? '', 'human-review is the merge-in-changes gate').toMatch(
+      /merge in changes/i,
+    );
+    // human-review must be the LAST step (the terminal merge gate).
+    expect(steps[steps.length - 1]!.id, 'human-review is the terminal step').toBe('human-review');
   });
 
   it('ship is planner (idea → epics → tasks) concatenated with sprint to integration', () => {

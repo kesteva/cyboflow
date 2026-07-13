@@ -13,8 +13,13 @@
  * Opt-in: default ON for built-in flows (isCyboflowWorkflowName); OFF for quick
  * sessions (they run under the __quick__ sentinel workflow, never a cyboflow name)
  * and custom/edited flows (checked on the WORKFLOW NAME, not the step id, since a
- * custom flow could carry a step literally named 'human-review'). In practice only
- * sprint + ship reach this trigger (planner/compound have no human-review step).
+ * custom flow could carry a step literally named 'human-review'). Sprint + ship
+ * reach this trigger; planner has no human-review step. COMPOUND now DOES carry a
+ * terminal 'human-review' step (its "merge in changes" gate), but it is EXPLICITLY
+ * EXEMPT here: compound mines already-merged work and its write-back diff (doc edits
+ * + quick fixes) is not rubric-eval material, so it is skipped by name even though
+ * it is a cyboflow built-in — preserving the long-standing "planner/compound never
+ * auto-eval" contract now that compound has the step.
  *
  * Re-fire dedup: the composite PK (run_id, rubric_version) + INSERT OR IGNORE means
  * a request-changes loop or interactive resume re-reporting human-review does NOT
@@ -149,6 +154,16 @@ export async function snapshotRunForEval(
 
   if (!run) {
     logger?.warn('[eval] snapshot skipped — no workflow_runs row', { runId });
+    return 'skipped';
+  }
+
+  // Compound is eval-exempt by name: it carries a terminal 'human-review' step (its
+  // "merge in changes" gate) that fires this trigger on BOTH planes (the programmatic
+  // human gate and the orchestrated cyboflow_report_step both emit the transition),
+  // but its diff mines already-merged work and is not rubric material. Skip it here —
+  // the single chokepoint covering path A (human-review step-begin) AND the terminal
+  // A/B subscriber — so a compound run never auto-grades regardless of caller.
+  if (run.workflowName === 'compound') {
     return 'skipped';
   }
 

@@ -787,12 +787,18 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
 
   // compound — mine recently merged runs for durable learnings and fold the
   // approved ones back as PROPOSED IMPROVEMENTS in three buckets: quick (an
-  // in-place fix), doc (a gated cyboflow_report_finding 'decision'), and task
-  // (cyboflow_create_task). It NEVER emits 'finding' items — a finding is
-  // Compound's input, not its output. The 'extract' step also publishes a
-  // 'compound-recommendations' artifact (the summary doc the human reads at the
-  // gate). Single 'Compound' phase; the approve-learnings human gate sits
-  // between the draft and the write-back so nothing lands without sign-off.
+  // in-place fix), doc (a CLAUDE.md/CODE-PATTERNS.md edit applied in-place at
+  // write-back), and task (cyboflow_create_task). It NEVER emits 'finding' items
+  // — a finding is Compound's input, not its output. The 'extract' step publishes
+  // a 'compound-recommendations' artifact (the summary doc the human reads at the
+  // approve-learnings gate). FIVE steps in a single 'Compound' phase with exactly
+  // TWO human gates: approve-learnings (approve the PLAN) sits between extract and
+  // write-back, and a terminal 'human-review' step is the final "merge in changes"
+  // gate over the applied diff — modelled on sprint/ship's human-review, EXCEPT it
+  // is eval-exempt (snapshotRunForEval skips 'compound' by name, so the
+  // human-review trigger never rubric-grades a compound diff). write-back applies
+  // every approved change in-place + commits and emits NO review items; the
+  // human-review step is the only final gate. No per-edit or per-drop decisions.
   compound: {
     id: 'compound',
     phases: [
@@ -833,7 +839,16 @@ export const WORKFLOW_DEFINITIONS: Readonly<Record<CyboflowWorkflowName, Workflo
             agent: 'compounder',
             mcps: ['filesystem'],
             retries: 0,
-            desc: "Apply EVERY approved item in-place (quick fixes AND approved CLAUDE.md/CODE-PATTERNS.md doc edits) + create approved tasks + commit, then emit exactly ONE batched blocking cyboflow_report_finding decision — the final-review gate — listing all applied changes for final approval. NEVER a decision per edit, NEVER per discarded candidate, NEVER kind:'finding'.",
+            desc: "Apply EVERY approved item in-place (quick fixes AND approved CLAUDE.md/CODE-PATTERNS.md doc edits) + create approved tasks + commit + post a concise summary of what was applied. Emits NO review items — the terminal human-review step is the final gate. NEVER a decision per edit, NEVER per discarded candidate, NEVER kind:'finding'.",
+          },
+          {
+            id: 'human-review',
+            name: 'Human review',
+            agent: 'human',
+            mcps: [],
+            retries: 0,
+            human: true,
+            desc: 'Final "merge in changes" gate over the applied compound diff — review the committed quick fixes + doc edits and the recommendations doc, then approve to make the branch mergeable or reject to leave it unadopted. Same as a sprint/ship human-review, but does not trigger an eval.',
           },
         ],
       },

@@ -1184,10 +1184,12 @@ async function initializeServices() {
   // Trigger seam (zero-touch): subscribe to the SHARED step-transition emitter and
   // snapshot on the sprint-review => human-review boundary. The flow prompts report
   // each step as it BEGINS (status='running'), so "human-review begins" is
-  // observable EXACTLY ONCE as stepId==='human-review' && status==='running'. Only
-  // sprint + ship carry that step; the snapshot re-checks isCyboflowWorkflowName so
-  // custom flows with a same-named step default OFF. Fire-and-forget +
-  // error-swallowed inside snapshot() — this can never affect the run.
+  // observable EXACTLY ONCE as stepId==='human-review' && status==='running'.
+  // Sprint + ship carry that step; compound also carries a terminal 'human-review'
+  // step but snapshotRunForEval EXEMPTS 'compound' by name (its merge-gate diff is
+  // not rubric material), so it self-excludes downstream. The snapshot re-checks
+  // isCyboflowWorkflowName so custom flows with a same-named step default OFF.
+  // Fire-and-forget + error-swallowed inside snapshot() — this can never affect the run.
   stepTransitionEvents.on('transition', (event: WorkflowStepTransitionEvent) => {
     if (event.stepId === 'human-review' && event.status === 'running') {
       void EvalWorker.getInstance().snapshot(event.runId);
@@ -1215,12 +1217,13 @@ async function initializeServices() {
       },
       // Path A (the human-review step-transition subscriber above) owns the rubric
       // snapshot for any run whose resolved definition carries a 'human-review'
-      // step (built-in sprint/ship). Deferring to it here avoids the two
-      // non-serialized snapshot() calls racing snapshotRunForEval's INSERT OR
-      // IGNORE (which would flip human_influenced=1 on the loser). Planner/compound/
-      // custom runs — which path A never covers — resolve to no such step, so this
-      // returns false and the terminal auto-eval still fires. Fail-soft: any
-      // resolution error is treated as "not owned" (eval may fire).
+      // step (built-in sprint/ship, and now compound). Deferring to it here avoids
+      // the two non-serialized snapshot() calls racing snapshotRunForEval's INSERT
+      // OR IGNORE (which would flip human_influenced=1 on the loser). Compound
+      // resolves to a human-review step too, so it defers here — harmless because
+      // snapshotRunForEval exempts 'compound' by name, so neither path ever grades
+      // it. Planner/custom runs with no such step return false and still terminal-
+      // eval. Fail-soft: any resolution error is treated as "not owned" (eval may fire).
       stepTransitionOwnsEval: (runId) => {
         try {
           const frozen = resolveRunFrozenSpec(cyboflowDb, runId);

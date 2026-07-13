@@ -122,6 +122,32 @@ describe('snapshotRunForEval', () => {
     expect(db.runs.length).toBe(0); // no insert
   });
 
+  it('skips COMPOUND by name even though it is a built-in with a human-review step', async () => {
+    // Compound now carries a terminal human-review step (its "merge in changes"
+    // gate), which fires this trigger — but its write-back diff mines already-merged
+    // work and is NOT rubric material, so it is exempt by name. Tagged or not, global
+    // ON, per-run ON: it must still skip (the exemption is unconditional).
+    const db = new FakeDb(
+      (sql) => {
+        if (sql.includes('FROM workflow_runs r'))
+          return runRow({
+            workflowName: 'compound',
+            eval_enabled: 1,
+            experiment_id: 'exp-1',
+            variant_id: 'var-1',
+          });
+        return undefined;
+      },
+      () => ({ changes: 0, lastInsertRowid: 0 }),
+    );
+    const deps = makeDeps(db, { isEvalEnabled: () => true });
+    const outcome = await snapshotRunForEval('run-c', deps);
+    expect(outcome).toBe('skipped');
+    expect(deps.gitDiff).not.toHaveBeenCalled(); // no diff capture
+    expect(deps.enqueue).not.toHaveBeenCalled();
+    expect(db.runs.length).toBe(0); // no insert
+  });
+
   // ── Eval on/off resolution matrix (migration 044) ────────────────────────
 
   it('global OFF + per-run NULL → skips, writes NO row, does not enqueue', async () => {
