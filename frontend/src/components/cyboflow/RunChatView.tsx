@@ -9,7 +9,7 @@
  * run-specific wiring:
  *   - the interactive-substrate body (the live PTY xterm, InteractiveTerminalView),
  *   - the `AskUserQuestionCard`, injected at its tool_use position when the
- *     transcript has a matching anchor and pinned above the composer otherwise,
+ *     transcript has a matching anchor and appended to the transcript otherwise,
  *     plus its artifact "open in pane" affordances,
  *   - the bottom region: the per-run `PendingApprovalsForRun` strip, the
  *     permission-change confirmation toast, and the run composer (`ChatInput`).
@@ -218,7 +218,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
   // while app-server exposes a different provider tool-call id. The provider
   // call also remains in-progress until the human answers, so there may be no
   // completed transcript tool row to anchor against at all. Keep those live
-  // questions pinned above the composer; Claude questions with matching
+  // questions at the scrollable transcript tail; Claude questions with matching
   // tool_use ids remain inline at their transcript position.
   const transcriptToolCallIds = useMemo(() => {
     const ids = new Set<string>();
@@ -234,6 +234,24 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
       (question) => question.runId === runId && !transcriptToolCallIds.has(question.toolUseId),
     ),
     [questionQueue, runId, transcriptToolCallIds],
+  );
+  const unanchoredQuestionSlot = useMemo(
+    () => unanchoredQuestions.length > 0 ? (
+      <div
+        className="overflow-hidden border border-border-primary bg-bg-secondary"
+        data-testid="run-chat-unanchored-questions"
+      >
+        {unanchoredQuestions.map((question) => (
+          <AskUserQuestionCard
+            key={question.id}
+            item={question}
+            onOpenArtifact={onOpenArtifact}
+            openArtifactLabel={primaryArtifact?.label}
+          />
+        ))}
+      </div>
+    ) : undefined,
+    [unanchoredQuestions, onOpenArtifact, primaryArtifact],
   );
 
   // -------------------------------------------------------------------------
@@ -265,6 +283,7 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
       loadError={loadError}
       isWaitingForResponse={running}
       liveTail={liveTail}
+      transcriptEndSlot={unanchoredQuestionSlot}
       folderLabel={folderLabel}
       folderTitle={worktreePath}
       branchName={branchName}
@@ -285,23 +304,6 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
       bottomSlot={
         <>
           <PendingApprovalsForRun runId={runId} />
-
-          {unanchoredQuestions.length > 0 && (
-            <div
-              className="flex-shrink-0 overflow-y-auto border-t border-border-primary bg-bg-secondary"
-              style={{ maxHeight: '40vh' }}
-              data-testid="run-chat-unanchored-questions"
-            >
-              {unanchoredQuestions.map((question) => (
-                <AskUserQuestionCard
-                  key={question.id}
-                  item={question}
-                  onOpenArtifact={onOpenArtifact}
-                  openArtifactLabel={primaryArtifact?.label}
-                />
-              ))}
-            </div>
-          )}
 
           {/* Permission-change confirmation — copy supplied by ChatInput's pill
               (SDK runs apply the change on the next message). */}

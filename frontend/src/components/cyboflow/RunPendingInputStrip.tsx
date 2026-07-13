@@ -24,8 +24,8 @@
  *      review item for that run is dropped from the render — suppression is by
  *      RUN, not by toolUseId.
  *   2. The CHAT card — `RunChatView` renders an AskUserQuestionCard at the
- *      question's tool_use position when one exists, or pins it above the
- *      composer when provider and host ids cannot be correlated.
+ *      question's tool_use position when one exists, or appends it to the
+ *      transcript when provider and host ids cannot be correlated.
  *   3. THIS strip's own AskUserQuestionCard — the guaranteed-visible fallback
  *      for every NON-chat tab (and a collapsed dock).
  *
@@ -88,7 +88,7 @@ export function RunPendingInputStrip({
   );
 
   // Live question cards THIS strip renders. When the chat surface is visible it
-  // renders every question either inline or in its pinned fallback, so the strip
+  // renders every question either inline or in its transcript-tail fallback, so the strip
   // stands down — one interactive surface per live question.
   const stripQuestions = chatSurfaceVisible ? [] : liveQuestions;
 

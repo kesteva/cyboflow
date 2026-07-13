@@ -96,9 +96,11 @@ vi.mock('../../chat/ChatTranscript', () => ({
   ChatTranscript: ({
     messages,
     renderToolCallExtra,
+    transcriptEndSlot,
   }: {
     messages: UnifiedMessage[];
     renderToolCallExtra?: (toolCallId: string) => ReactNode;
+    transcriptEndSlot?: ReactNode;
   }) => (
     <div data-testid="chat-transcript">
       ChatTranscript
@@ -109,6 +111,7 @@ vi.mock('../../chat/ChatTranscript', () => ({
           </Fragment>
         ) : null,
       )}
+      {transcriptEndSlot}
     </div>
   ),
 }));
@@ -461,7 +464,7 @@ describe('RunChatView — data flow', () => {
 // ---------------------------------------------------------------------------
 
 describe('RunChatView — question-card artifact wiring', () => {
-  it('pins a Codex question above the composer when no transcript tool id matches', async () => {
+  it('appends a Codex question to the transcript when no tool id matches', async () => {
     seedRun('run-codex-question', 'sdk', 'codex');
     seedQuestion('run-codex-question', 'req-2-host-id', false);
 
@@ -470,6 +473,7 @@ describe('RunChatView — question-card artifact wiring', () => {
     const fallback = await screen.findByTestId('run-chat-unanchored-questions');
     expect(fallback).toHaveTextContent('Approve?');
     expect(fallback.querySelectorAll('[data-question-id="q-1"]')).toHaveLength(1);
+    expect(screen.getByTestId('chat-transcript')).toContainElement(fallback);
   });
 
   it('passes onOpenArtifact when an artifact exists; "View in pane" opens a center-pane tab', async () => {

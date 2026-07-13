@@ -195,6 +195,12 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   // activeSession can point at a different / lagging session than this panel.
   const paneSession = substrateSession ?? activeSession;
   const isInteractive = interactiveRunId !== null;
+  const agentName =
+    isCodexPtySession || paneSession?.agentRuntime === 'codex-sdk'
+      ? 'Codex'
+      : isInteractive
+        ? 'Terminal'
+        : 'Claude';
 
   // SDK structured transcript source (panel-scoped). Disabled on the interactive
   // substrate, whose live xterm owns the conversation surface.
@@ -223,7 +229,7 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   );
   const liveTail =
     liveTailState.activeBlocks.length > 0 ? (
-      <LiveTail blocks={liveTailState.activeBlocks} agentName="Claude" />
+      <LiveTail blocks={liveTailState.activeBlocks} agentName={agentName} />
     ) : undefined;
 
   if (!activeSession || !paneSession) {
@@ -239,12 +245,16 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   }
 
   const sessionRunning = paneSession.status === 'running';
+  const hasSendingPending = pendingSends?.some((entry) => entry.status === 'sending') ?? false;
+  const sessionWorking = sessionRunning || liveTailState.isGenerating || hasSendingPending;
   // Working indicator parity with the prior RichOutputView: show it while the
-  // agent is producing (running) OR when the session is waiting and the last
-  // turn was the user's (the agent is about to respond).
+  // agent is producing, as soon as an SDK send is dispatched, OR when the
+  // session is waiting and the last turn was the user's. The optimistic-send
+  // edge matters for Codex because app-server startup can precede the durable
+  // session status update and first projected event.
   const lastMessage = messages.length > 0 ? messages[messages.length - 1] : undefined;
   const isWaitingForResponse =
-    sessionRunning || (paneSession.status === 'waiting' && lastMessage?.role === 'user');
+    sessionWorking || (paneSession.status === 'waiting' && lastMessage?.role === 'user');
   const worktreePath = paneSession.worktreePath ?? null;
   const folderLabel =
     worktreePath !== null ? worktreePath.split('/').filter(Boolean).pop() ?? null : null;
@@ -341,10 +351,10 @@ export const ClaudePanel: React.FC<AIPanelProps> = React.memo(({ panel, isActive
   return (
     <div className="relative flex-1 flex flex-col h-full bg-background">
       <UnifiedChatView
-        name={isCodexPtySession || paneSession.agentRuntime === 'codex-sdk' ? 'Codex' : isInteractive ? 'Terminal' : 'Claude'}
+        name={agentName}
         transport={isInteractive ? 'interactive' : 'sdk'}
         mode="quick"
-        running={sessionRunning}
+        running={sessionWorking}
         messages={messages}
         loadError={loadError}
         isWaitingForResponse={isWaitingForResponse}

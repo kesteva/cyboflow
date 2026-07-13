@@ -78,7 +78,9 @@ function makeDbMock(overrides: Partial<Record<string, unknown>> = {}) {
     getPanel: vi.fn().mockReturnValue({ sessionId: 's1' }),
     getSession: vi.fn().mockReturnValue({ agent_runtime: 'claude-sdk' }),
     getPanelOutputs: vi.fn().mockReturnValue([]),
+    getPanelConversationMessages: vi.fn().mockReturnValue([]),
     addPanelOutput: vi.fn(),
+    addPanelConversationMessage: vi.fn(),
     updateSession: vi.fn(),
     updatePanelPromptMarkerCompletion: vi.fn(),
     getActiveProject: vi.fn().mockReturnValue(null),
@@ -175,5 +177,25 @@ describe('SessionManager.addPanelOutput', () => {
     mgr.addPanelOutput('panel-codex', { type: 'stdout', data: 'hello', timestamp: new Date() });
 
     expect(available).toHaveBeenCalledWith({ sessionId: 's1', panelId: 'panel-codex' });
+  });
+
+  it('does not duplicate a provider-echoed user turn already persisted by IPC', () => {
+    const db = makeDbMock({
+      getPanelConversationMessages: vi.fn().mockReturnValue([
+        { message_type: 'user', content: 'same prompt' },
+      ]),
+    });
+    const mgr = makeManager(db);
+
+    mgr.addPanelOutput('panel-codex', {
+      type: 'json',
+      data: {
+        type: 'user',
+        message: { role: 'user', content: [{ type: 'text', text: 'same prompt' }] },
+      },
+      timestamp: new Date(),
+    });
+
+    expect(db.addPanelConversationMessage).not.toHaveBeenCalled();
   });
 });

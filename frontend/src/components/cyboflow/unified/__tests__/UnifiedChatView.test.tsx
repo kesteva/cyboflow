@@ -21,16 +21,19 @@ vi.mock('../../../chat/ChatTranscript', () => ({
     messages,
     agentName,
     renderToolCallExtra,
+    transcriptEndSlot,
     messagesEndRef,
   }: {
     messages: UnifiedMessage[];
     agentName: string;
     renderToolCallExtra?: (toolCallId: string) => ReactNode;
+    transcriptEndSlot?: ReactNode;
     messagesEndRef?: RefObject<HTMLDivElement | null>;
   }) => (
     <div data-testid="chat-transcript" data-agent-name={agentName} data-count={messages.length}>
       ChatTranscript
       {renderToolCallExtra?.('tool-use-card')}
+      {transcriptEndSlot}
       <div ref={messagesEndRef} data-testid="messages-end" />
     </div>
   ),
@@ -158,6 +161,22 @@ describe('UnifiedChatView — substrate branch', () => {
       />,
     );
     expect(screen.getByTestId('extra')).toHaveTextContent('extra:tool-use-card');
+  });
+
+  it('keeps transcript-end content inside the scrollable transcript', () => {
+    render(
+      <UnifiedChatView
+        {...baseProps}
+        transport="sdk"
+        mode="flow"
+        messages={[assistantMsg('a1', 'question follows')]}
+        transcriptEndSlot={<div data-testid="transcript-end-slot">question card</div>}
+      />,
+    );
+
+    expect(screen.getByTestId('chat-transcript')).toContainElement(
+      screen.getByTestId('transcript-end-slot'),
+    );
   });
 
   it('derives prompt markers from user turns', () => {

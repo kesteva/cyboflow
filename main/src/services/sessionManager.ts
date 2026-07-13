@@ -879,15 +879,16 @@ export class SessionManager extends EventEmitter {
       }
       
       if (promptText) {
-        // Get current output count to use as index for prompt markers
-        const outputs = this.db.getPanelOutputs(panelId);
-        // Note: Panel-based prompt markers would need addPanelPromptMarker method
-        // For now, we rely on the explicit addPanelConversationMessage calls in IPC handlers
-        // this.db.addPanelPromptMarker(panelId, promptText, outputs.length - 1);
-        
-        // Add to panel conversation messages for continuation support
-        // Use the sessionManager method instead of db method directly to ensure event emission
-        this.addPanelConversationMessage(panelId, 'user', promptText);
+        // SDKs echo the submitted top-level user turn. IPC already persists the
+        // turn before dispatch so the transcript can update during provider
+        // startup; do not insert the provider echo a second time. A genuinely
+        // repeated prompt still persists because the completed assistant turn
+        // sits between the two user rows.
+        const conversation = this.db.getPanelConversationMessages(panelId);
+        const latest = conversation[conversation.length - 1];
+        if (latest?.message_type !== 'user' || latest.content !== promptText) {
+          this.addPanelConversationMessage(panelId, 'user', promptText);
+        }
       }
     }
 
