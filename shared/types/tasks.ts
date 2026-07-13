@@ -30,6 +30,9 @@ export type IdeaScope = 'small' | 'large';
 
 export type Priority = 'P0' | 'P1' | 'P2';
 
+/** Entity classification (migration 059), mirroring `Priority`'s shape. */
+export type EntityCategory = 'feature' | 'bug' | 'chore';
+
 /**
  * One user-attached image on an idea (migration 028). The image BYTES live on
  * disk (CYBOFLOW_DIR/artifacts/ideas/<ideaId>/<file>, written by the
@@ -120,6 +123,8 @@ export interface BacklogTaskItem {
   /** Single markdown body. Present on every entity; null when unset. */
   body: string | null;
   priority: Priority;
+  /** Entity classification (migration 059). */
+  category: EntityCategory;
   repo: string | null;
   /** Lineage: only ever set on type='task' (FK->epics). */
   parent_epic_id: string | null;

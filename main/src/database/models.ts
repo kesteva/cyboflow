@@ -295,6 +295,7 @@ export interface IdeaRow {
   body: string | null;
   scope: 'small' | 'large' | null;
   priority: 'P0' | 'P1' | 'P2';
+  category: 'feature' | 'bug' | 'chore'; // 059 ALTER appends
   repo: string | null;
   board_id: string;
   stage_id: string;
@@ -318,6 +319,7 @@ export interface EpicRow {
   summary: string | null;
   body: string | null;
   priority: 'P0' | 'P1' | 'P2';
+  category: 'feature' | 'bug' | 'chore'; // 059 ALTER appends
   repo: string | null;
   board_id: string;
   stage_id: string;
@@ -343,6 +345,7 @@ export interface TaskRow {
   summary: string | null;
   body: string | null;
   priority: 'P0' | 'P1' | 'P2';
+  category: 'feature' | 'bug' | 'chore'; // 059 ALTER appends
   repo: string | null;
   board_id: string;
   stage_id: string;
