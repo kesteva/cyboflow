@@ -53,6 +53,12 @@ interface SidebarProps {
   onToggleVerifyQueue?: () => void;
 }
 
+// Shared className for the circular icon "pill" that fronts each primary rail
+// item (Task backlog / Insights / Workflows / Verify Queue). Hoisted so the one
+// string is the single source of truth instead of being repeated per item.
+const pillClass =
+  'flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full bg-interactive text-text-on-interactive';
+
 export function Sidebar({
   onAboutClick,
   onPromptHistoryClick,
@@ -313,7 +319,7 @@ export function Sidebar({
           }`}
           style={backlogActive ? { boxShadow: 'inset 3px 0 0 var(--color-interactive-primary)' } : undefined}
         >
-          <span className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full bg-interactive text-text-on-interactive">
+          <span className={pillClass}>
             <Kanban className="h-3 w-3" strokeWidth={2} />
           </span>
           <span className="min-w-0 flex-1">
@@ -344,7 +350,7 @@ export function Sidebar({
           }`}
           style={insightsActive ? { boxShadow: 'inset 3px 0 0 var(--color-interactive-primary)' } : undefined}
         >
-          <span className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full bg-interactive text-text-on-interactive">
+          <span className={pillClass}>
             <Activity className="h-3 w-3" strokeWidth={2} />
           </span>
           <span className="min-w-0 flex-1">
@@ -374,7 +380,7 @@ export function Sidebar({
           }`}
           style={workflowsActive ? { boxShadow: 'inset 3px 0 0 var(--color-interactive-primary)' } : undefined}
         >
-          <span className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full bg-interactive text-text-on-interactive">
+          <span className={pillClass}>
             <Workflow className="h-3 w-3" strokeWidth={2} />
           </span>
           <span className="min-w-0 flex-1">
@@ -398,7 +404,7 @@ export function Sidebar({
           }`}
           style={verifyQueueActive ? { boxShadow: 'inset 3px 0 0 var(--color-interactive-primary)' } : undefined}
         >
-          <span className="flex h-[22px] w-[22px] flex-shrink-0 items-center justify-center rounded-full bg-interactive text-text-on-interactive">
+          <span className={pillClass}>
             <ScanEye className="h-3 w-3" strokeWidth={2} />
           </span>
           <span className="min-w-0 flex-1">

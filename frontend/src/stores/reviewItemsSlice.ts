@@ -113,14 +113,14 @@ export function pendingReviewItemsForRun(
     .filter(
       (it) => it.run_id === runId && it.status === 'pending' && it.kind !== 'finding',
     )
-    .map((it, index) => ({ it, index }))
+    // Array.prototype.sort is spec-stable (ES2019+), so equal-blocking items
+    // keep their input relative order without a manual index tie-breaker.
     .sort((a, b) => {
-      if (a.it.blocking !== b.it.blocking) {
-        return a.it.blocking ? -1 : 1;
+      if (a.blocking !== b.blocking) {
+        return a.blocking ? -1 : 1;
       }
-      return a.index - b.index;
-    })
-    .map(({ it }) => it);
+      return 0;
+    });
 }
 
 // ---------------------------------------------------------------------------

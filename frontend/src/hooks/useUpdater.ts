@@ -31,6 +31,12 @@ export interface Updater {
  * and the About dialog so the state machine lives in one place.
  */
 export function useUpdater(): Updater {
+  // Intentionally per-instance (accepted, not a shared store): each consumer
+  // (Sidebar, UpdateSettings) runs its own state machine, kept eventually
+  // consistent via the 'updater:event' broadcast below. The discrete check()
+  // verdict is deliberately instance-local. A shared Zustand store isn't
+  // justified for two low-frequency consumers whose only shared signal is that
+  // event stream.
   const [state, setState] = useState<UpdateUiState>({ status: 'idle' });
 
   // Stream the async download lifecycle; the discrete check verdict is settled
