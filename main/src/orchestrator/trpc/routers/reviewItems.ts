@@ -42,7 +42,17 @@ import {
 import { TaskChangeRouter, TaskChangeError } from '../../taskChangeRouter';
 import { HumanStepManager } from '../../humanStepManager';
 import { QuestionRouter } from '../../questionRouter';
-import { resolveReviewItem } from '../../resolveReviewItemHandler';
+import {
+  resolveReviewItem,
+  isApproveIdeasGate,
+  humanGateStepId,
+  parseApproveIdeasRefs,
+  foldIdeaVerdicts,
+  renderApproveIdeasDecisions,
+  type ResolveReviewItemDeps,
+  type ResolveReviewItemInput,
+} from '../../resolveReviewItemHandler';
+import type { NudgeRunResult } from '../../nudgeRunHandler';
 import { eventToAsyncIterable } from './events';
 import { TERMINAL_RUN_STATUSES_SQL_IN } from '../../../../../shared/types/cyboflow';
 
@@ -129,6 +139,49 @@ export function _resetReviewItemsRunProbeForTesting(): void {
  */
 export function resumeWouldStrandEndedWalk(runId: string): boolean {
   return reviewItemsRunProbe !== null && !reviewItemsRunProbe.hasActiveExecution(runId);
+}
+
+// ---------------------------------------------------------------------------
+// Approve-ideas verdict-delivery nudge dep (IDEA-009 / TASK-035B)
+//
+// The default ORCHESTRATED planner mints its approve-ideas batch gate via
+// cyboflow_report_finding (source 'agent:<label>'), then its SDK conversation
+// DRAINS to a REST — nothing carries the human's verdict map into the parked
+// conversation, and the resumed planner cannot read review items via MCP. So a
+// verdict resolve on an AGENT-minted gate must DELIVER the rendered decisions as
+// the run's next turn (nudge/--resume), then resolve — mirroring
+// answerRecoveryGate's nudge-first / resolve-on-delivered ordering.
+//
+// A settable dep — NOT an import of RunExecutor/nudgeRunHandler's runtime — so
+// this module keeps the standalone-typecheck invariant. Wired at boot
+// (main/src/index.ts) to wrap nudgeRunHandler with {db, runQueues, runExecutor}.
+// Left UNSET in tests/legacy boot; a verdicts resolve that reaches the delivery
+// path before wiring throws METHOD_NOT_SUPPORTED (mirrors runs.ts's dep-bag idiom).
+// ---------------------------------------------------------------------------
+
+/** Verdict-delivery nudge: resume `runId` with `text`, ignoring the gate's own blocking row. */
+export interface ResolveVerdictNudgeDeps {
+  nudge: (
+    runId: string,
+    text: string,
+    opts: { ignoreBlockingReviewItemId: string },
+  ) => Promise<NudgeRunResult>;
+}
+
+let resolveVerdictNudgeDeps: ResolveVerdictNudgeDeps | null = null;
+
+/**
+ * Wire the verdict-delivery nudge dep at boot (composition root). Idempotent —
+ * may be called again to replace it; tests install a fake per case and clear it
+ * via {@link _resetResolveVerdictNudgeDepsForTesting}.
+ */
+export function setResolveVerdictNudgeDeps(deps: ResolveVerdictNudgeDeps): void {
+  resolveVerdictNudgeDeps = deps;
+}
+
+/** Test-only: clear the wired verdict-delivery nudge dep (unset/legacy state). */
+export function _resetResolveVerdictNudgeDepsForTesting(): void {
+  resolveVerdictNudgeDeps = null;
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +314,102 @@ function assertNotRecoveryGate(db: DatabaseLike, reviewItemId: string, projectId
       message:
         'invalid_status: this is a recovery gate — answer it via the recovery answer path so the run is actually resumed; it cannot be cleared through generic triage',
     });
+  }
+}
+
+/**
+ * The concrete-singleton dep bag the resolve paths hand to the shared
+ * resolveReviewItem core. Factored so the scalar path and the verdict-delivery
+ * path wire the IDENTICAL collaborators + probe-backed strand guard.
+ */
+function buildResolveDeps(db: DatabaseLike): ResolveReviewItemDeps {
+  return {
+    db,
+    applyReviewItemResolve: (projectId, args) =>
+      ReviewItemRouter.getInstance().applyReviewItem(projectId, {
+        op: 'resolve',
+        actor: args.actor,
+        reviewItemId: args.reviewItemId,
+        ...(args.resolution !== undefined ? { resolution: args.resolution } : {}),
+      }),
+    promotePendingDraftsForRun: (runId) => QuestionRouter.getInstance().promotePendingDraftsForRun(runId),
+    deleteRunCreatedEntities: (projectId, runId) =>
+      TaskChangeRouter.getInstance().deleteRunCreatedEntities(projectId, runId),
+    maybeResumeRun: (runId) => HumanStepManager.getInstance().maybeResumeRun(runId),
+    wouldStrandEndedWalk: resumeWouldStrandEndedWalk,
+  };
+}
+
+/**
+ * AGENT-minted approve-ideas gate resolved by a per-idea verdict map: DELIVER the
+ * decisions to the parked planner as its next turn, THEN resolve.
+ *
+ * ORDER IS LOAD-BEARING (mirrors answerRecoveryGate): fold-validate EAGERLY so a
+ * malformed map rejects (BAD_REQUEST) BEFORE any nudge — the gate stays pending
+ * and the planner is never handed a bad block. Then nudge FIRST (ignoring this
+ * gate's own blocking row, which would otherwise block its own resume) and resolve
+ * ONLY on a confirmed `delivered`. A refused resume throws CONFLICT and records
+ * NOTHING, so the card/artifact can retry once the run is idle. On delivered the
+ * SHARED resolveReviewItem runs exactly as the scalar path (it re-validates + folds
+ * deterministically); its aggregate-unblock resume is a no-op here because the
+ * strand guard sees the run has re-rested with no live walk after the nudge.
+ */
+async function deliverApproveIdeasVerdicts(
+  db: DatabaseLike,
+  input: ResolveReviewItemInput,
+  runId: string | null,
+  payloadJson: string | null,
+): Promise<{ reviewItemId: string; resumed: boolean; runStatus?: string }> {
+  if (!resolveVerdictNudgeDeps) {
+    throw new TRPCError({
+      code: 'METHOD_NOT_SUPPORTED',
+      message: 'approve-ideas verdict-delivery deps not wired yet. Call setResolveVerdictNudgeDeps() at boot.',
+    });
+  }
+  if (!runId) {
+    throw new TRPCError({
+      code: 'PRECONDITION_FAILED',
+      message: 'invalid_status: this approve-ideas gate has no run to deliver the decisions to',
+    });
+  }
+  const verdicts = input.verdicts ?? {};
+
+  // EAGER validate: foldIdeaVerdicts throws ReviewItemError('invalid_payload') on
+  // any violation (empty / unknown ref / bad value / incomplete). Reject BEFORE
+  // the nudge so the gate is untouched and no bad block reaches the planner.
+  const refs = parseApproveIdeasRefs(payloadJson);
+  try {
+    foldIdeaVerdicts(refs, verdicts);
+  } catch (err) {
+    rethrowAsTRPCError(err);
+  }
+  const delivered = renderApproveIdeasDecisions(refs, verdicts);
+
+  const nudge = await resolveVerdictNudgeDeps.nudge(runId, delivered, {
+    ignoreBlockingReviewItemId: input.reviewItemId,
+  });
+  if (!('delivered' in nudge && nudge.delivered)) {
+    const reason = 'noOp' in nudge ? nudge.reason : 'unknown';
+    throw new TRPCError({
+      code: 'CONFLICT',
+      message: `invalid_status: the run could not be resumed to deliver the approve-ideas decisions (${reason}); the decisions were NOT recorded — retry once the run is idle`,
+    });
+  }
+
+  // Delivered → resolve through the SHARED core (verdicts still passed; it
+  // re-validates + folds deterministically into the stored resolution).
+  try {
+    const result = await resolveReviewItem(input, buildResolveDeps(db));
+    if (!result.ok) {
+      rethrowAsTRPCError(new ReviewItemError(result.reason, result.message));
+    }
+    return {
+      reviewItemId: result.reviewItemId,
+      resumed: result.resumed,
+      ...(result.runStatus !== undefined ? { runStatus: result.runStatus } : {}),
+    };
+  } catch (err) {
+    rethrowAsTRPCError(err);
   }
 }
 
@@ -433,13 +582,18 @@ export const reviewItemsRouter = router({
    * For a non-approve-plan gate (approve-idea / approve-design) the outcome only
    * threads the verdict — no reveal, no draft delete.
    *
-   * APPROVE-IDEAS BATCH GATE (`verdicts`): a `gate:human-step:approve-ideas`
-   * decision item covers a whole batch of ideas at once. The optional `verdicts`
-   * map (idea ref -> 'approve' | 'deny') is the "Submit decisions" payload; the
-   * shared handler validates it against the gate's batch payload and folds it
-   * atomically into the stored resolution, so the resumed planner reads which
-   * refs were approved vs denied. A malformed map (unknown ref / bad value /
-   * incomplete) is rejected (BAD_REQUEST) and leaves the gate pending.
+   * APPROVE-IDEAS BATCH GATE (`verdicts`): an approve-ideas decision item covers a
+   * whole batch of ideas at once, minted by EITHER the programmatic runner
+   * (source 'gate:human-step:approve-ideas') OR the default ORCHESTRATED planner
+   * (source 'agent:<label>', gate discoverable only via payload). The optional
+   * `verdicts` map (idea ref -> 'approve' | 'deny') is the "Submit decisions"
+   * payload; both mint paths fold it against the gate's batch payload atomically
+   * into the stored resolution, so the resumed planner reads which refs were
+   * approved vs denied. A malformed map (unknown ref / bad value / incomplete) is
+   * rejected (BAD_REQUEST) and leaves the gate pending. For the AGENT-minted gate
+   * the resumed planner cannot read review items via MCP, so the decisions are
+   * DELIVERED as the run's next turn (nudge-first / resolve-on-delivered) — a
+   * refused resume throws CONFLICT and records nothing so the card can retry.
    */
   resolve: protectedProcedure
     .input(
@@ -478,27 +632,37 @@ export const reviewItemsRouter = router({
         assertNotOpenQuestionGate(db, input.reviewItemId, input.projectId);
         assertNotRecoveryGate(db, input.reviewItemId, input.projectId);
 
+        // AGENT-minted approve-ideas batch gate + a submitted verdict map: the
+        // default ORCHESTRATED planner parks its SDK conversation at a drained REST
+        // after minting the gate (source 'agent:<label>', NOT 'gate:human-step:*'),
+        // so nothing carries the verdicts into it. DELIVER the rendered decisions as
+        // the run's next turn, THEN resolve (nudge-first / resolve-on-delivered). The
+        // programmatic 'gate:human-step:approve-ideas' path is UNAFFECTED: its parked
+        // WorkflowController walk consumes the folded verdict on resolve via the
+        // shared core below (a nudge there would fight the live walk).
+        if (input.verdicts !== undefined) {
+          const gateRow = db
+            .prepare(
+              'SELECT run_id AS runId, kind, source, payload_json AS payloadJson FROM review_items WHERE id = ? AND project_id = ?',
+            )
+            .get(input.reviewItemId, input.projectId) as
+            | { runId?: string | null; kind?: string; source?: string | null; payloadJson?: string | null }
+            | undefined;
+          if (
+            gateRow &&
+            isApproveIdeasGate(gateRow.kind, gateRow.source, gateRow.payloadJson) &&
+            humanGateStepId(gateRow.kind, gateRow.source) === null
+          ) {
+            return deliverApproveIdeasVerdicts(db, input, gateRow.runId ?? null, gateRow.payloadJson ?? null);
+          }
+        }
+
         try {
           // Delegate to the SHARED gate-resolution core (also driven by the monitor's
           // resolveReviewItem action) so the Q1 reveal (approve-plan promote/decline)
           // and the drained-rest strand guard have ONE implementation. The wrapper
           // only wires the concrete singletons + the probe-backed strand guard.
-          const result = await resolveReviewItem(input, {
-            db,
-            applyReviewItemResolve: (projectId, args) =>
-              ReviewItemRouter.getInstance().applyReviewItem(projectId, {
-                op: 'resolve',
-                actor: args.actor,
-                reviewItemId: args.reviewItemId,
-                ...(args.resolution !== undefined ? { resolution: args.resolution } : {}),
-              }),
-            promotePendingDraftsForRun: (runId) =>
-              QuestionRouter.getInstance().promotePendingDraftsForRun(runId),
-            deleteRunCreatedEntities: (projectId, runId) =>
-              TaskChangeRouter.getInstance().deleteRunCreatedEntities(projectId, runId),
-            maybeResumeRun: (runId) => HumanStepManager.getInstance().maybeResumeRun(runId),
-            wouldStrandEndedWalk: resumeWouldStrandEndedWalk,
-          });
+          const result = await resolveReviewItem(input, buildResolveDeps(db));
 
           if (!result.ok) {
             // Rebuild the SAME TRPCError the mutation threw today from the chokepoint's

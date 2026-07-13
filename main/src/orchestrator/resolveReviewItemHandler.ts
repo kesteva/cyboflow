@@ -85,6 +85,48 @@ export function humanGateStepId(kind: string | undefined, source: string | null 
   return source.slice(HUMAN_GATE_SOURCE_PREFIX.length) || null;
 }
 
+/**
+ * Fail-soft: the `gate` discriminant stashed on a decision item's `payload_json`
+ * (DecisionPayload.gate), or null when the payload is absent/unparseable or
+ * carries no gate string. This is the ONLY place the default ORCHESTRATED
+ * planner's approve-ideas gate is discoverable — it mints the gate via
+ * cyboflow_report_finding, which stamps source 'agent:<label>' (NOT the
+ * programmatic 'gate:human-step:*'), so humanGateStepId returns null for it.
+ */
+function parseDecisionGate(payloadJson: string | null | undefined): string | null {
+  if (typeof payloadJson !== 'string' || payloadJson.length === 0) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payloadJson);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const gate = (parsed as { gate?: unknown }).gate;
+  return typeof gate === 'string' ? gate : null;
+}
+
+/**
+ * True when a review item is an approve-ideas BATCH gate, recognized by EITHER
+ * mint path so both fold an identical per-idea verdict map:
+ *   - the programmatic runner's ReviewQueueHumanGate stamps source
+ *     'gate:human-step:approve-ideas' (humanGateStepId === 'approve-ideas'); OR
+ *   - the default ORCHESTRATED planner mints it via cyboflow_report_finding, whose
+ *     source is 'agent:<label>' — so the discriminant lives ONLY in the payload
+ *     ({ kind:'decision', gate:'approve-ideas' }).
+ * Keying on the union of source AND payload (not the source string alone) is what
+ * lets the fold fire for the default planner.
+ */
+export function isApproveIdeasGate(
+  kind: string | undefined,
+  source: string | null | undefined,
+  payloadJson: string | null | undefined,
+): boolean {
+  if (kind !== 'decision') return false;
+  if (humanGateStepId(kind, source) === APPROVE_IDEAS_STEP_ID) return true;
+  return parseDecisionGate(payloadJson) === APPROVE_IDEAS_STEP_ID;
+}
+
 // ---------------------------------------------------------------------------
 // Approve-ideas batch gate — per-idea verdict fold (IDEA-009)
 // ---------------------------------------------------------------------------
@@ -162,6 +204,31 @@ export function foldIdeaVerdicts(ideaRefs: string[], verdicts: Record<string, st
     }
   }
   return serializeIdeaVerdictMap(validated);
+}
+
+/**
+ * The heading the delivered decisions block MUST lead with — a CONTRACT with the
+ * planner prompt (planner.md instructs the resumed agent to act on a
+ * '# Approve-ideas decisions' block). Keep this byte-identical on both sides.
+ */
+export const APPROVE_IDEAS_DECISIONS_HEADING = '# Approve-ideas decisions';
+
+/**
+ * Render the human's per-idea verdicts into the turn text delivered to the parked
+ * ORCHESTRATED planner. Its SDK conversation cannot read review items via MCP, so
+ * the resolve DELIVERS the decisions as the run's next turn. One line per batch
+ * ref in BATCH ORDER (`- IDEA-014: approve`) under the heading contract, then the
+ * proceed-instruction the planner keys on. The caller has already validated the
+ * map covers `ideaRefs` exactly (via {@link foldIdeaVerdicts}) before rendering.
+ */
+export function renderApproveIdeasDecisions(ideaRefs: string[], verdicts: Record<string, string>): string {
+  const lines = ideaRefs.map((ref) => `- ${ref}: ${verdicts[ref]}`);
+  return [
+    APPROVE_IDEAS_DECISIONS_HEADING,
+    ...lines,
+    '',
+    'Proceed with the APPROVED ideas only; denied ideas stay on the backlog untouched.',
+  ].join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -288,13 +355,16 @@ export async function resolveReviewItem(
   try {
     // Approve-ideas BATCH gate: a submitted per-idea verdict map is validated
     // against the gate's batch payload and folded into the stored resolution the
-    // resumed planner reads. All-or-nothing — foldIdeaVerdicts throws
-    // ReviewItemError('invalid_payload') on a malformed map (empty / unknown ref /
-    // bad value / incomplete coverage), which the catch below maps to a refusal
-    // BEFORE the single atomic resolve runs, so the gate stays pending and nothing
-    // is recorded. Only the "Submit decisions" surface passes `verdicts`; every
-    // scalar gate leaves it undefined and is byte-for-byte unaffected.
-    if (input.verdicts !== undefined && gateStepId === APPROVE_IDEAS_STEP_ID) {
+    // resumed planner reads. Recognized via isApproveIdeasGate (source OR payload)
+    // so BOTH mint paths fold identically — the programmatic runner's
+    // 'gate:human-step:approve-ideas' source AND the default ORCHESTRATED planner's
+    // 'agent:<label>' source (whose gate lives only in the payload). All-or-nothing —
+    // foldIdeaVerdicts throws ReviewItemError('invalid_payload') on a malformed map
+    // (empty / unknown ref / bad value / incomplete coverage), which the catch below
+    // maps to a refusal BEFORE the single atomic resolve runs, so the gate stays
+    // pending and nothing is recorded. Only the "Submit decisions" surface passes
+    // `verdicts`; every scalar gate leaves it undefined and is byte-for-byte unaffected.
+    if (input.verdicts !== undefined && isApproveIdeasGate(before?.kind, before?.source, before?.payloadJson)) {
       resolution = foldIdeaVerdicts(parseApproveIdeasRefs(before?.payloadJson), input.verdicts);
     }
 

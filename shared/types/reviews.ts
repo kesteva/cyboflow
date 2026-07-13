@@ -183,10 +183,20 @@ export interface DecisionPayload {
     | 'approve-idea'
     | 'approve-ideas'
     | 'approve-plan'
+    | 'idea-size-guard'
     | 'ask-user-question-recovery'
     | 'experiment-comparison';
   /** Optional summary the gate wants the human to confirm. */
   summary?: string;
+  /**
+   * Only for `gate: 'idea-size-guard'`: the display ref of the ONE idea the
+   * big-idea guard flagged as too large to run as a single idea (minted
+   * agent-side). Unlike the approve-ideas batch, this guard is resolved by its
+   * own dedicated split/keep mutations, NEVER by an {@link IdeaVerdictMap} — the
+   * ref is carried only so the review-queue card can route the human to the
+   * flagged idea. Omitted for every other gate.
+   */
+  ideaRef?: string;
   /**
    * Only for `gate: 'approve-ideas'`: the batch's idea display refs (e.g.
    * ['IDEA-014', 'IDEA-015']) the ONE blocking gate covers. The submitted

@@ -1148,7 +1148,12 @@ function ApproveIdeasBody({ artifact, projectId }: { artifact: Artifact; project
           it.run_id === artifact.runId &&
           it.kind === 'decision' &&
           it.status === 'pending' &&
-          it.source === GATE_SOURCE_APPROVE_IDEAS,
+          // Recognize BOTH mint paths: the programmatic runner stamps the
+          // 'gate:human-step:approve-ideas' source, while the default ORCHESTRATED
+          // planner mints via cyboflow_report_finding (source 'agent:<label>'), so
+          // its gate is only discoverable via the parsed payload discriminant.
+          (it.source === GATE_SOURCE_APPROVE_IDEAS ||
+            (it.payload !== null && it.payload.kind === 'decision' && it.payload.gate === 'approve-ideas')),
       ) ?? null,
     [items, artifact.runId],
   );

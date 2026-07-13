@@ -85,6 +85,7 @@ import type {
 import { setHealthProvider } from './orchestrator/trpc/routers/health';
 import {
   setReviewItemsRunProbe,
+  setResolveVerdictNudgeDeps,
   resumeWouldStrandEndedWalk,
 } from './orchestrator/trpc/routers/reviewItems';
 import { setMonitorRehydrator } from './orchestrator/trpc/routers/monitor';
@@ -3059,6 +3060,18 @@ app.whenReady().then(async () => {
       logger: loggerLike,
     });
     console.log('[Main] runs.nudge deps wired');
+
+    // Approve-ideas verdict delivery (IDEA-009 / TASK-035B): the default
+    // ORCHESTRATED planner parks its SDK conversation at a drained REST after
+    // minting the approve-ideas gate via cyboflow_report_finding, so a submitted
+    // per-idea verdict map must be DELIVERED as the run's next turn (it cannot read
+    // review items via MCP). Wrap nudgeRunHandler with the SAME {db, runQueues,
+    // runExecutor} the nudge mutation uses so the resume re-drives the same warm
+    // executor; reviewItems.resolve nudges FIRST and resolves only on delivery.
+    setResolveVerdictNudgeDeps({
+      nudge: (runId, text, opts) => nudgeRunHandler(runId, text, { db, runQueues, runExecutor, logger: loggerLike }, opts),
+    });
+    console.log('[Main] reviewItems approve-ideas verdict-delivery deps wired');
 
     // "Always allow messaging a running flow": the composer can send while an SDK
     // run is EXECUTING; the text is buffered on the SAME module-scoped RunExecutor

@@ -335,15 +335,20 @@ describe('resolveReviewItem — drained-rest strand guard', () => {
 // Approve-ideas BATCH gate — per-idea verdict fold (IDEA-009)
 // ---------------------------------------------------------------------------
 
-/** Seed a parked approve-ideas gate carrying `ideaRefs` in its decision payload. */
+/**
+ * Seed a parked approve-ideas gate carrying `ideaRefs` in its decision payload.
+ * `source` defaults to the programmatic runner's 'gate:human-step:approve-ideas';
+ * pass an 'agent:*' source to seed the default ORCHESTRATED planner's mint, which
+ * is discoverable ONLY via the payload gate discriminant.
+ */
 function seedApproveIdeasGate(
   db: Database.Database,
-  opts: { id: string; runId: string; ideaRefs: string[] },
+  opts: { id: string; runId: string; ideaRefs: string[]; source?: string },
 ): void {
   seedItem(db, {
     id: opts.id,
     kind: 'decision',
-    source: 'gate:human-step:approve-ideas',
+    source: opts.source ?? 'gate:human-step:approve-ideas',
     blocking: true,
     runId: opts.runId,
     payloadJson: JSON.stringify({ kind: 'decision', gate: 'approve-ideas', ideaRefs: opts.ideaRefs }),
@@ -477,6 +482,48 @@ describe('resolveReviewItem — approve-ideas verdict fold', () => {
     expect(resolvedWith(deps)).toBe('approve'); // NOT a serialized verdict map
     expect(deps.promotePendingDraftsForRun).toHaveBeenCalledWith('run-plan'); // approve-plan reveal ran
     expect(result).toMatchObject({ ok: true, gateStepId: 'approve-plan', outcome: 'approve' });
+  });
+
+  it('folds an AGENT-minted gate (source agent:planner, payload-keyed) identically', async () => {
+    const db = buildDb();
+    // Default ORCHESTRATED planner mint: source is 'agent:planner', so the gate is
+    // recognized ONLY via the payload's gate discriminant (humanGateStepId is null).
+    seedApproveIdeasGate(db, {
+      id: 'rvw_agent',
+      runId: 'run-agent',
+      ideaRefs: ['IDEA-1', 'IDEA-2'],
+      source: 'agent:planner',
+    });
+    const deps = makeDeps(db);
+    const verdicts: IdeaVerdictMap = { 'IDEA-1': 'approve', 'IDEA-2': 'deny' };
+
+    const result = await resolveReviewItem(baseInput({ reviewItemId: 'rvw_agent', verdicts }), deps);
+
+    expect(deps.applyReviewItemResolve).toHaveBeenCalledTimes(1);
+    expect(parseIdeaVerdictMap(resolvedWith(deps))).toEqual(verdicts);
+    // gateStepId is null for an agent-minted item (source is not 'gate:human-step:*').
+    expect(result).toMatchObject({ ok: true, resumed: true, gateStepId: null });
+    expect(itemStatus(db, 'rvw_agent')).toBe('resolved');
+  });
+
+  it('rejects a malformed map on an AGENT-minted gate (invalid_payload, gate pending)', async () => {
+    const db = buildDb();
+    seedApproveIdeasGate(db, {
+      id: 'rvw_agent_bad',
+      runId: 'run-agent-bad',
+      ideaRefs: ['IDEA-1', 'IDEA-2'],
+      source: 'agent:planner',
+    });
+    const deps = makeDeps(db);
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_agent_bad', verdicts: { 'IDEA-1': 'approve' } }), // incomplete coverage
+      deps,
+    );
+
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_payload' });
+    expect(deps.applyReviewItemResolve).not.toHaveBeenCalled();
+    expect(itemStatus(db, 'rvw_agent_bad')).toBe('pending');
   });
 });
 

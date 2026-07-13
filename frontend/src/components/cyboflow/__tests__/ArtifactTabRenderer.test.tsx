@@ -864,6 +864,29 @@ describe('ArtifactTabRenderer', () => {
     expect(screen.getByTestId('approve-ideas-no-gate-note')).toBeInTheDocument();
   });
 
+  it('finds the gate via the payload discriminant when the source is agent-minted', async () => {
+    // Default ORCHESTRATED planner mints via cyboflow_report_finding, so the source
+    // is 'agent:planner' (NOT 'gate:human-step:approve-ideas'); the gate is
+    // recognized only via payload.gate — the footer must still render + Submit works.
+    setReviewItems([makeGateItem({ source: 'agent:planner' })]);
+    renderApproveIdeas();
+
+    expect(screen.queryByTestId('approve-ideas-no-gate-note')).not.toBeInTheDocument();
+    expect(screen.getByTestId('approve-ideas-footer')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('approve-ideas-approve-IDEA-014'));
+    fireEvent.click(screen.getByTestId('approve-ideas-deny-IDEA-015'));
+    fireEvent.click(screen.getByTestId('approve-ideas-submit'));
+
+    await waitFor(() =>
+      expect(reviewItemsResolveMutate).toHaveBeenCalledWith({
+        projectId: 1,
+        reviewItemId: 'rvw_gate',
+        verdicts: { 'IDEA-014': 'approve', 'IDEA-015': 'deny' },
+      }),
+    );
+  });
+
   it('shows the empty state for a malformed payload, without throwing', () => {
     setReviewItems([makeGateItem()]);
     expect(() => renderApproveIdeas('not json')).not.toThrow();

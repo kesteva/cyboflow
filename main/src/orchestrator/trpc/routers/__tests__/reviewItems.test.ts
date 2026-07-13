@@ -30,8 +30,12 @@ import { appRouter } from '../../router';
 import {
   setReviewItemsRunProbe,
   _resetReviewItemsRunProbeForTesting,
+  setResolveVerdictNudgeDeps,
+  _resetResolveVerdictNudgeDepsForTesting,
   type ReviewItemsRunProbe,
+  type ResolveVerdictNudgeDeps,
 } from '../reviewItems';
+import type { NudgeRunResult } from '../../../nudgeRunHandler';
 import { createContext } from '../../context';
 import { dbAdapter } from '../../../__test_fixtures__/dbAdapter';
 import { ReviewItemRouter } from '../../../reviewItemRouter';
@@ -106,6 +110,7 @@ afterEach(() => {
   HumanStepManager._resetForTesting();
   QuestionRouter._resetForTesting();
   _resetReviewItemsRunProbeForTesting();
+  _resetResolveVerdictNudgeDepsForTesting();
 });
 
 /** A fake run-execution probe reporting a fixed hasActiveExecution verdict. */
@@ -920,6 +925,151 @@ describe('cyboflow.reviewItems.resolve — approve-ideas verdict fold', () => {
     ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
 
     const row = db.prepare('SELECT status FROM review_items WHERE id = ?').get('rvw_empty') as { status: string };
+    expect(row.status).toBe('pending');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK-035B — AGENT-minted approve-ideas gate (default ORCHESTRATED planner):
+// the SDK conversation is parked at a drained REST, so a verdict resolve must
+// DELIVER the rendered decisions as the run's next turn (nudge), then resolve.
+// ---------------------------------------------------------------------------
+
+describe('cyboflow.reviewItems.resolve — approve-ideas verdict delivery (agent-minted)', () => {
+  /** Seed a parked run + a blocking AGENT-minted approve-ideas gate (payload-keyed). */
+  function seedAgentGate(
+    db: Database.Database,
+    opts: { runId: string; reviewItemId: string; ideaRefs: string[]; source?: string },
+  ): void {
+    db.prepare(`INSERT OR IGNORE INTO workflows (id, project_id, name) VALUES ('wf-planner', 1, 'planner')`).run();
+    db.prepare(
+      `INSERT INTO workflow_runs (id, workflow_id, project_id, worktree_path, branch_name, status, policy_json)
+       VALUES (?, 'wf-planner', 1, '/w/ag', 'b/ag', 'awaiting_review', '{}')`,
+    ).run(opts.runId);
+    const now = new Date().toISOString();
+    const payload = JSON.stringify({ kind: 'decision', gate: 'approve-ideas', ideaRefs: opts.ideaRefs });
+    db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, entity_type, entity_id, kind, status, blocking,
+          title, body, severity, source, payload_json, created_at, updated_at, resolved_by, resolution)
+       VALUES (?, 1, ?, NULL, NULL, 'decision', 'pending', 1, 'Approve ideas', NULL, NULL, ?, ?, ?, ?, NULL, NULL)`,
+    ).run(opts.reviewItemId, opts.runId, opts.source ?? 'agent:planner', payload, now, now);
+  }
+
+  /** Install a fake verdict-delivery nudge returning `result`, and return the spy (inferred Mock type so `.mock` stays visible). */
+  function wireNudge(result: NudgeRunResult) {
+    const nudge = vi.fn<ResolveVerdictNudgeDeps['nudge']>().mockResolvedValue(result);
+    setResolveVerdictNudgeDeps({ nudge });
+    return nudge;
+  }
+
+  it('delivers the rendered decisions block, then resolves the gate on delivered', async () => {
+    const { caller, db } = buildCaller();
+    seedAgentGate(db, { runId: 'run-agent', reviewItemId: 'rvw_agent', ideaRefs: ['IDEA-1', 'IDEA-2'] });
+    const nudge = wireNudge({ delivered: true });
+
+    const res = await caller.cyboflow.reviewItems.resolve({
+      projectId: 1,
+      reviewItemId: 'rvw_agent',
+      verdicts: { 'IDEA-1': 'approve', 'IDEA-2': 'deny' },
+    });
+
+    // Nudge FIRST, ignoring the gate's own blocking row so it does not block its resume.
+    expect(nudge).toHaveBeenCalledTimes(1);
+    expect(nudge).toHaveBeenCalledWith(
+      'run-agent',
+      expect.stringContaining('# Approve-ideas decisions'),
+      { ignoreBlockingReviewItemId: 'rvw_agent' },
+    );
+    const deliveredText = nudge.mock.calls[0][1];
+    expect(deliveredText).toContain('- IDEA-1: approve');
+    expect(deliveredText).toContain('- IDEA-2: deny');
+    expect(deliveredText).toContain('Proceed with the APPROVED ideas only');
+
+    // Only AFTER delivery is the gate resolved, carrying the per-idea verdicts.
+    const row = db.prepare('SELECT status, resolution FROM review_items WHERE id = ?').get('rvw_agent') as {
+      status: string;
+      resolution: string;
+    };
+    expect(row.status).toBe('resolved');
+    expect(row.resolution.startsWith(RESOLUTION_PREFIX_IDEA_VERDICTS)).toBe(true);
+    expect(parseIdeaVerdictMap(row.resolution)).toEqual({ 'IDEA-1': 'approve', 'IDEA-2': 'deny' });
+    expect(res.reviewItemId).toBe('rvw_agent');
+  });
+
+  it('refused resume leaves the gate PENDING and throws CONFLICT (decisions not recorded)', async () => {
+    const { caller, db } = buildCaller();
+    seedAgentGate(db, { runId: 'run-ref', reviewItemId: 'rvw_ref', ideaRefs: ['IDEA-1'] });
+    wireNudge({ noOp: true, reason: 'not_idle' });
+
+    await expect(
+      caller.cyboflow.reviewItems.resolve({
+        projectId: 1,
+        reviewItemId: 'rvw_ref',
+        verdicts: { 'IDEA-1': 'approve' },
+      }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'CONFLICT');
+
+    const row = db.prepare('SELECT status, resolution FROM review_items WHERE id = ?').get('rvw_ref') as {
+      status: string;
+      resolution: string | null;
+    };
+    expect(row.status).toBe('pending'); // gate untouched
+    expect(row.resolution).toBeNull();
+  });
+
+  it('rejects a malformed map BEFORE nudging (BAD_REQUEST, nudge never called)', async () => {
+    const { caller, db } = buildCaller();
+    seedAgentGate(db, { runId: 'run-bad', reviewItemId: 'rvw_agbad', ideaRefs: ['IDEA-1', 'IDEA-2'] });
+    const nudge = wireNudge({ delivered: true });
+
+    await expect(
+      caller.cyboflow.reviewItems.resolve({
+        projectId: 1,
+        reviewItemId: 'rvw_agbad',
+        verdicts: { 'IDEA-1': 'approve' }, // incomplete coverage
+      }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+
+    expect(nudge).not.toHaveBeenCalled(); // eager fold rejected before any delivery
+    const row = db.prepare('SELECT status FROM review_items WHERE id = ?').get('rvw_agbad') as { status: string };
+    expect(row.status).toBe('pending');
+  });
+
+  it('a SCALAR resolve (no verdicts) never consults the nudge deps', async () => {
+    const { caller, db } = buildCaller();
+    const nudge = wireNudge({ delivered: true });
+    const created = await ReviewItemRouter.getInstance().applyReviewItem(1, {
+      op: 'create',
+      actor: 'agent:executor',
+      kind: 'finding',
+      title: 'A finding',
+      blocking: false,
+    });
+
+    await caller.cyboflow.reviewItems.resolve({ projectId: 1, reviewItemId: created.reviewItemId });
+
+    expect(nudge).not.toHaveBeenCalled();
+    const row = db.prepare('SELECT status FROM review_items WHERE id = ?').get(created.reviewItemId) as {
+      status: string;
+    };
+    expect(row.status).toBe('resolved');
+  });
+
+  it('a verdicts resolve before nudge-dep wiring throws METHOD_NOT_SUPPORTED', async () => {
+    const { caller, db } = buildCaller();
+    seedAgentGate(db, { runId: 'run-unwired', reviewItemId: 'rvw_unwired', ideaRefs: ['IDEA-1'] });
+    // Deliberately do NOT wire the nudge dep (afterEach cleared it).
+
+    await expect(
+      caller.cyboflow.reviewItems.resolve({
+        projectId: 1,
+        reviewItemId: 'rvw_unwired',
+        verdicts: { 'IDEA-1': 'approve' },
+      }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'METHOD_NOT_SUPPORTED');
+
+    const row = db.prepare('SELECT status FROM review_items WHERE id = ?').get('rvw_unwired') as { status: string };
     expect(row.status).toBe('pending');
   });
 });
