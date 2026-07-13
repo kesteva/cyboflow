@@ -48,7 +48,24 @@ The tRPC contract is `cyboflow.monitor`
 (`isActive` / `send` / `stepResults`); `send` delegates to `MonitorSession.converse`
 (inject the human turn → answer over the whole history → inject the reply), and the
 turns surface via the run's normal stream → `raw_events` → `runs.listUnifiedMessages`
-live-refresh. The monitor stays reachable while the run RESTS (the registry entry +
+live-refresh. `converse` can also attach at most ONE host-executed action per reply
+(11 kinds): the single-turn `retry_step`, the suggest-first one-way
+`switch_to_orchestrated`, and nine host-staged confirm-gated steering kinds — task
+mutations (`add_task`/`remove_task`/`edit_task`), step control (`skip_step`/
+`unskip_step`/`steer_step`), the whole-run `rewind_to_step`, and review-queue
+actions (`resolve_review_item`/`file_note`). Two of these reach INTO live
+execution: `rewind_to_step` (`rewindRunHandler.ts` — the 5th sanctioned terminal
+revive: aborts a live walk sole-writer-style, purges `step_results` at/after the
+target via `StepResultStore.deleteForSteps`, sweeps orphaned gate items, and
+re-drives from the target through the crash-safe resume machinery; a
+fully-integrated fan-out target is refused `fanout_settled`, and one strictly
+after the target stays settled via the completed-set) and `steer_step`, which —
+besides storing next-spawn guidance in `RunDirectives` — delivers LIVE to agents
+currently running the step via the SDK steering queue
+(`ClaudeCodeManager.injectSteering`: a `priority:'now'` push into the turn's open
+streaming input, with a result-boundary abort guard so a steer racing the turn's
+end can never spawn a zombie follow-on turn; optional `taskRef` narrows to one
+sprint lane, live-only). The monitor stays reachable while the run RESTS (the registry entry +
 inject plumbing outlive the walk; they are disposed at terminal close-out —
 merge / createPr / dismiss), so the user can chat with it at `awaiting_review`.
 Remaining designed-only: per-step structured `outputFormat` + host-side router
