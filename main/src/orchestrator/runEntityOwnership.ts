@@ -54,6 +54,50 @@ function entityIdsCreatedByRun(
 }
 
 /**
+ * The distinct idea ids that at least one of the run's CREATED child entities (an
+ * epic or task) points back at through its `originating_idea_id` lineage column.
+ * These are the ideas the run actually DECOMPOSED. A run-created child whose
+ * originating_idea_id is NULL (TaskChangeRouter's auto-stamp leaves it NULL when a
+ * multi-seed agent omits it) attributes to NO idea and contributes nothing.
+ * Fail-soft per the file header: a missing entity_events / epics / tasks table, a
+ * missing originating_idea_id column, or any thrown query contributes nothing —
+ * never a throw.
+ */
+function runCreatedChildLineageIdeaIds(db: DatabaseLike, runId: string): Set<string> {
+  const ideaIds = new Set<string>();
+
+  // Each SELECT is wrapped in its OWN try/catch so a missing epics table can't
+  // abort the tasks read (and vice versa) — both degrade to "no lineage".
+  const collect = (sql: string): void => {
+    try {
+      const rows = db.prepare(sql).all(runId) as Array<{ ideaId: unknown }>;
+      for (const row of rows) {
+        if (typeof row.ideaId === 'string' && row.ideaId.length > 0) ideaIds.add(row.ideaId);
+      }
+    } catch {
+      // Missing table/column or thrown query — contributes nothing.
+    }
+  };
+
+  collect(
+    `SELECT DISTINCT e.originating_idea_id AS ideaId
+       FROM entity_events ev
+       JOIN epics e ON e.id = ev.entity_id
+      WHERE ev.entity_type = 'epic' AND ev.kind = 'created' AND ev.run_id = ?
+        AND e.originating_idea_id IS NOT NULL`,
+  );
+  collect(
+    `SELECT DISTINCT t.originating_idea_id AS ideaId
+       FROM entity_events ev
+       JOIN tasks t ON t.id = ev.entity_id
+      WHERE ev.entity_type = 'task' AND ev.kind = 'created' AND ev.run_id = ?
+        AND t.originating_idea_id IS NOT NULL`,
+  );
+
+  return ideaIds;
+}
+
+/**
  * The idea ids a run owns: its seed ideas (`seed_idea_id` UNION the
  * `seed_idea_ids` JSON array, migration 060) UNION the ideas it created during
  * the run, de-duped. Fail-soft — see file header contract.
@@ -105,6 +149,29 @@ export function listRunOwnedIdeaIds(db: DatabaseLike, runId: string): string[] {
   }
 
   return [...ownedIds];
+}
+
+/**
+ * The idea ids a run actually DECOMPOSED: the subset of {@link listRunOwnedIdeaIds}
+ * for which at least one of the run's created child entities (an epic or task
+ * carrying `originating_idea_id` lineage) points back at the idea. An owned idea
+ * with NO such child stays — it was seeded but never decomposed, so it must not
+ * retire off the board.
+ *
+ * Fail-CLOSED read (Decision 10 of IDEA-009): in a multi-idea planner run only
+ * genuinely-decomposed ideas retire via decomposed_at; retiring every seeded idea
+ * wholesale (what iterating listRunOwnedIdeaIds does) is the bug this prevents.
+ * TaskChangeRouter's auto-stamp leaves originating_idea_id NULL when a multi-seed
+ * agent omits it, so a NULL-lineage child attributes to NO idea — an idea appears
+ * here ONLY when some child EXPLICITLY carries its id. Fail-soft — see file header
+ * contract.
+ *
+ * @param db    Narrow DatabaseLike interface.
+ * @param runId The workflow_runs.id whose decomposed ideas to resolve.
+ */
+export function listRunDecomposedIdeaIds(db: DatabaseLike, runId: string): string[] {
+  const lineageIdeaIds = runCreatedChildLineageIdeaIds(db, runId);
+  return listRunOwnedIdeaIds(db, runId).filter((ideaId) => lineageIdeaIds.has(ideaId));
 }
 
 /**

@@ -7,6 +7,10 @@
  *    3, de-duped (a duplicate 'created' event for one id appears once).
  *  - listRunCreatedTaskIds: returns only the run-created tasks (not ideas, not
  *    other runs' tasks, not non-'created' kinds).
+ *  - listRunDecomposedIdeaIds: retires only owned ideas with a run-created child
+ *    (task or epic) carrying their originating_idea_id lineage; a childless seed
+ *    idea, a NULL-lineage child, and another run's child all attribute nothing;
+ *    missing epics/tasks tables fail closed to [].
  *  - Fail-soft: a DB whose workflow_runs lacks seed_idea_id, and a DB with no
  *    entity_events table, both yield [] without throwing.
  *
@@ -15,7 +19,11 @@
  */
 import { describe, it, expect } from 'vitest';
 import Database from 'better-sqlite3';
-import { listRunOwnedIdeaIds, listRunCreatedTaskIds } from '../runEntityOwnership';
+import {
+  listRunOwnedIdeaIds,
+  listRunCreatedTaskIds,
+  listRunDecomposedIdeaIds,
+} from '../runEntityOwnership';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 
 // ---------------------------------------------------------------------------
@@ -61,6 +69,35 @@ function buildDbWithSeedIds(): Database.Database {
 
 function setSeedIdeaIds(db: Database.Database, id: string, seedIdeaIds: string | null): void {
   db.prepare('UPDATE workflow_runs SET seed_idea_ids = ? WHERE id = ?').run(seedIdeaIds, id);
+}
+
+/**
+ * A buildDbWithSeedIds() variant that additionally carries minimal epics + tasks
+ * tables (id + the originating_idea_id lineage column), so lineage-aware reads
+ * that JOIN entity_events to those child tables can resolve.
+ */
+function buildDbWithLineage(): Database.Database {
+  const db = buildDbWithSeedIds();
+  db.exec(`
+    CREATE TABLE epics (
+      id                  TEXT PRIMARY KEY,
+      originating_idea_id TEXT
+    );
+    CREATE TABLE tasks (
+      id                  TEXT PRIMARY KEY,
+      originating_idea_id TEXT
+    );
+  `);
+  return db;
+}
+
+function insertChild(
+  db: Database.Database,
+  table: 'epics' | 'tasks',
+  id: string,
+  originatingIdeaId: string | null,
+): void {
+  db.prepare(`INSERT INTO ${table} (id, originating_idea_id) VALUES (?, ?)`).run(id, originatingIdeaId);
 }
 
 let seqCounter = 0;
@@ -204,6 +241,63 @@ describe('runEntityOwnership.listRunCreatedTaskIds', () => {
     insertRun(db, 'run-empty', 'ide_seed');
 
     expect(listRunCreatedTaskIds(dbAdapter(db), 'run-empty')).toEqual([]);
+  });
+});
+
+describe('runEntityOwnership.listRunDecomposedIdeaIds', () => {
+  it('retires only owned ideas with a run-created task carrying their lineage', () => {
+    const db = buildDbWithLineage();
+    insertRun(db, 'run-multi', 'ide_a');
+    setSeedIdeaIds(db, 'run-multi', JSON.stringify(['ide_a', 'ide_b']));
+    // A run-created task carrying originating_idea_id = ide_a decomposes ide_a;
+    // ide_b was seeded but has no run-created child → it stays on the board.
+    insertEvent(db, { entityType: 'task', entityId: 'tsk_1', kind: 'created', runId: 'run-multi' });
+    insertChild(db, 'tasks', 'tsk_1', 'ide_a');
+
+    expect(listRunDecomposedIdeaIds(dbAdapter(db), 'run-multi')).toEqual(['ide_a']);
+  });
+
+  it('counts a run-created epic child lineage too', () => {
+    const db = buildDbWithLineage();
+    insertRun(db, 'run-epic', 'ide_c');
+    insertEvent(db, { entityType: 'epic', entityId: 'epc_1', kind: 'created', runId: 'run-epic' });
+    insertChild(db, 'epics', 'epc_1', 'ide_c');
+
+    expect(listRunDecomposedIdeaIds(dbAdapter(db), 'run-epic')).toEqual(['ide_c']);
+  });
+
+  it('a seed-only idea with no run-created children retires nothing', () => {
+    const db = buildDbWithLineage();
+    insertRun(db, 'run-childless', 'ide_d');
+
+    expect(listRunDecomposedIdeaIds(dbAdapter(db), 'run-childless')).toEqual([]);
+  });
+
+  it('fail-CLOSED: a run-created child with NULL originating_idea_id attributes to no idea', () => {
+    const db = buildDbWithLineage();
+    insertRun(db, 'run-nulllineage', 'ide_e');
+    insertEvent(db, { entityType: 'task', entityId: 'tsk_null', kind: 'created', runId: 'run-nulllineage' });
+    insertChild(db, 'tasks', 'tsk_null', null);
+
+    expect(listRunDecomposedIdeaIds(dbAdapter(db), 'run-nulllineage')).toEqual([]);
+  });
+
+  it('does not retire an idea decomposed only by ANOTHER run', () => {
+    const db = buildDbWithLineage();
+    insertRun(db, 'run-x', 'ide_f');
+    // A child carrying ide_f lineage, but created by a DIFFERENT run.
+    insertEvent(db, { entityType: 'task', entityId: 'tsk_other', kind: 'created', runId: 'run-other' });
+    insertChild(db, 'tasks', 'tsk_other', 'ide_f');
+
+    expect(listRunDecomposedIdeaIds(dbAdapter(db), 'run-x')).toEqual([]);
+  });
+
+  it('fail-soft: missing epics/tasks tables yield [] (no throw) even with owned ideas', () => {
+    const db = buildDbWithSeedIds(); // no epics/tasks tables
+    insertRun(db, 'run-notables', 'ide_g');
+
+    expect(() => listRunDecomposedIdeaIds(dbAdapter(db), 'run-notables')).not.toThrow();
+    expect(listRunDecomposedIdeaIds(dbAdapter(db), 'run-notables')).toEqual([]);
   });
 });
 

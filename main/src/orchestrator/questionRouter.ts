@@ -56,7 +56,11 @@ import { emitSeamError } from './telemetrySink';
 import { runStatusEvents } from './trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../shared/types/cyboflow';
 import { TaskChangeRouter } from './taskChangeRouter';
-import { listRunOwnedIdeaIds, listRunCreatedTaskIds, listRunCreatedEpicIds } from './runEntityOwnership';
+import {
+  listRunDecomposedIdeaIds,
+  listRunCreatedTaskIds,
+  listRunCreatedEpicIds,
+} from './runEntityOwnership';
 
 export type { QuestionRequest, QuestionAnswer, QuestionPayload };
 
@@ -823,18 +827,21 @@ export class QuestionRouter extends EventEmitter {
         }
       }
 
-      // F8: the plan is approved — the run's owned idea(s) are now decomposed into
+      // F8: the plan is approved — the run's DECOMPOSED idea(s) are now realized in
       // the revealed plan (its epics + tasks carry the flow), so retire them OFF the
       // board HERE (stamp decomposed_at) rather than only at a later gate. Previously
       // idea retirement was exclusively gate-driven (planner's final decompose gate /
       // ship's approve-plan), so a planner run interrupted after plan approval but
       // before its decompose gate stranded the seed idea on the board forever next to
-      // its revealed children. Owned = seed_idea_id UNION run-created ideas
-      // (listRunOwnedIdeaIds, the same resolver finalizePlannerRun uses). Idempotent
-      // (retireIdeaToDecomposed no-ops once decomposed_at is stamped, so the later
-      // decompose gate / ship materialize re-assert harmlessly) + failure-isolated
-      // per-idea — the reveal already happened; retirement must never undo it or throw.
-      for (const ideaId of listRunOwnedIdeaIds(this.db, runId)) {
+      // its revealed children. Retire only the genuinely-decomposed subset
+      // (listRunDecomposedIdeaIds, the same resolver finalizePlannerRun uses): an
+      // owned idea with >=1 run-created child carrying its originating_idea_id
+      // lineage. In a multi-idea planner run a seeded-but-childless idea stays on the
+      // board. Idempotent (retireIdeaToDecomposed no-ops once decomposed_at is
+      // stamped, so the later decompose gate / ship materialize re-assert harmlessly)
+      // + failure-isolated per-idea — the reveal already happened; retirement must
+      // never undo it or throw.
+      for (const ideaId of listRunDecomposedIdeaIds(this.db, runId)) {
         await router.retireIdeaToDecomposed(projectId, ideaId).catch(() => {
           /* per-idea best-effort */
         });
@@ -867,8 +874,8 @@ export class QuestionRouter extends EventEmitter {
   }
 
   /**
-   * Ship: retire the run's owned idea(s) to the terminal Decomposed stage when the
-   * just-answered gate is `approve-plan` and the human chose Approve — i.e. the
+   * Ship: retire the run's DECOMPOSED idea(s) to the terminal Decomposed stage when
+   * the just-answered gate is `approve-plan` and the human chose Approve — i.e. the
    * moment the tasks are approved. The ship workflow concatenates planner → sprint
    * and DROPS planner's separate terminal decompose/Archive gate, so without this
    * the seed idea lingers in its planning stage forever: a ship run interrupted any
@@ -914,7 +921,10 @@ export class QuestionRouter extends EventEmitter {
 
       const projectId = typeof run.projectId === 'number' ? run.projectId : Number(run.projectId);
       const router = TaskChangeRouter.getInstance();
-      for (const ideaId of listRunOwnedIdeaIds(this.db, runId)) {
+      // Only the genuinely-decomposed subset retires (listRunDecomposedIdeaIds): an
+      // owned idea with >=1 run-created child carrying its originating_idea_id
+      // lineage. A seeded-but-childless idea in a multi-idea ship run stays.
+      for (const ideaId of listRunDecomposedIdeaIds(this.db, runId)) {
         await router.retireIdeaToDecomposed(projectId, ideaId).catch(() => {
           /* per-idea best-effort */
         });
@@ -984,10 +994,12 @@ export class QuestionRouter extends EventEmitter {
   /**
    * FIX-STAGE-MODEL (decompose): the planner's separate FINAL gate, answered at
    * the `decompose` step. The gate offers two options:
-   *  - "Archive & finish": the run's owned ideas (listRunOwnedIdeaIds — seed idea
-   *    UNION run-created ideas) are retired OFF the board by stamping
-   *    `decomposed_at` (TaskChangeRouter.retireIdeaToDecomposed — the idea keeps
-   *    its stage), then the run completes.
+   *  - "Archive & finish": the run's DECOMPOSED ideas (listRunDecomposedIdeaIds —
+   *    the owned ideas with >=1 run-created child carrying originating_idea_id
+   *    lineage; a seeded-but-childless idea in a multi-idea run is NOT retired) are
+   *    retired OFF the board by stamping `decomposed_at`
+   *    (TaskChangeRouter.retireIdeaToDecomposed — the idea keeps its stage), then the
+   *    run completes.
    *  - "Keep ideas & finish": the ideas stay on the board; the run completes.
    *
    * In BOTH cases the run then COMPLETES — respond() has already flipped the run
@@ -1034,7 +1046,7 @@ export class QuestionRouter extends EventEmitter {
 
       if (this.isArchiveAnswer(answer)) {
         const router = TaskChangeRouter.getInstance();
-        for (const ideaId of listRunOwnedIdeaIds(this.db, runId)) {
+        for (const ideaId of listRunDecomposedIdeaIds(this.db, runId)) {
           await router.retireIdeaToDecomposed(projectId, ideaId).catch(() => {
             /* per-idea best-effort */
           });

@@ -68,7 +68,7 @@ import type { PermissionMode, WorkflowDefinition, WorkflowRow } from '../../../.
 import { workflowDefinitionSchema } from '../workflowDefinitionSchema';
 import { buildStepTransitionEvent } from '../stepTransitionBridge';
 import { handleEntityWrite } from '../autoMintArtifacts';
-import { listRunOwnedIdeaIds, listRunCreatedTaskIds } from '../runEntityOwnership';
+import { listRunDecomposedIdeaIds, listRunCreatedTaskIds } from '../runEntityOwnership';
 import { ApprovalRouter, RunNotRunningError } from '../approvalRouter';
 import type { ApprovalDecision } from '../../../../shared/types/approval';
 import { isToolAllowed, loadMergedPermissionRules } from '../permissionRules';
@@ -2066,17 +2066,19 @@ export class McpQueryHandler {
   }
 
   /**
-   * Retire every idea the run owns (seed idea UNION run-created ideas, via
-   * listRunOwnedIdeaIds) to the Decomposed terminal stage. The ship handoff
-   * seam's follow-on — see handleCreateSprintBatch. Best-effort: each retire is
-   * idempotent (a no-op when the idea is already at Decomposed) and individually
-   * guarded so one failure can't starve the rest, and the whole pass is swallowed
-   * so it can never invalidate the already-committed batch.
+   * Retire every idea the run actually DECOMPOSED (via listRunDecomposedIdeaIds —
+   * an owned idea with >=1 run-created child carrying its originating_idea_id
+   * lineage; a seeded-but-childless idea in a multi-idea run is left on the board)
+   * to the Decomposed terminal stage. The ship handoff seam's follow-on — see
+   * handleCreateSprintBatch. Best-effort: each retire is idempotent (a no-op when
+   * the idea is already at Decomposed) and individually guarded so one failure
+   * can't starve the rest, and the whole pass is swallowed so it can never
+   * invalidate the already-committed batch.
    */
   private async retireRunOwnedIdeas(projectId: number, runId: string): Promise<void> {
     try {
       const router = TaskChangeRouter.getInstance();
-      for (const ideaId of listRunOwnedIdeaIds(this.db, runId)) {
+      for (const ideaId of listRunDecomposedIdeaIds(this.db, runId)) {
         await router.retireIdeaToDecomposed(projectId, ideaId).catch(() => {
           /* per-idea best-effort */
         });

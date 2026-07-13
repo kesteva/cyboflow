@@ -1488,11 +1488,12 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
   }
 
   /**
-   * Seed an idea + N tasks attributed to the run, deliberately WITHOUT
-   * originatingIdeaId on the tasks — this mirrors the real MCP `create_task`
-   * path (which threads only parentEpicId), so the chokepoint's FIX-STAGE-MODEL B
-   * auto-retire does NOT pre-empt the gate. The idea is left in its planning stage
-   * and linked to the run only via the created-event ownership projection.
+   * Seed an idea + N tasks attributed to the run, each task carrying
+   * originatingIdeaId = the idea so the run has run-created children with lineage —
+   * this is what makes the idea "decomposed" for the fail-closed retire read
+   * (listRunDecomposedIdeaIds). Idea retirement is exclusively gate-driven (the
+   * first child no longer auto-retires), so the idea stays in its planning stage,
+   * decomposed_at unstamped, until a gate answer fires the retire.
    */
   async function seedOwnedIdea(
     db: Database.Database,
@@ -1501,9 +1502,15 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
     taskCount: number,
   ): Promise<{ ideaId: string; taskIds: string[] }> {
     const idea = await taskRouter.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Ship idea' });
+    await taskRouter._queueForProject(1).onIdle();
     const taskIds: string[] = [];
     for (let i = 0; i < taskCount; i++) {
-      const t = await taskRouter.applyChange(1, { actor: 'user', entityType: 'task', title: `Ship task ${i}` });
+      const t = await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: `Ship task ${i}`,
+        originatingIdeaId: idea.taskId,
+      });
       taskIds.push(t.taskId);
     }
     await taskRouter._queueForProject(1).onIdle();
@@ -1743,15 +1750,32 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     taskChangeEvents.removeAllListeners();
   });
 
-  /** Seed an idea via the chokepoint and attribute it to the run. Returns the idea id. */
+  /**
+   * Seed an idea via the chokepoint and attribute it to the run. Returns the idea
+   * id. By default (`withChild` unset/true) it also attributes a run-created task
+   * carrying originatingIdeaId = the idea, so the idea reads as DECOMPOSED for the
+   * fail-closed retire read (listRunDecomposedIdeaIds). Pass `{ withChild: false }`
+   * for a seeded-but-childless idea that must NOT retire.
+   */
   async function seedOwnedIdea(
     db: Database.Database,
     taskRouter: TaskChangeRouter,
     runId: string,
+    opts: { withChild?: boolean } = {},
   ): Promise<string> {
     const idea = await taskRouter.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Owned idea' });
     await taskRouter._queueForProject(1).onIdle();
     markCreatedByRun(db, 'idea', idea.taskId, runId);
+    if (opts.withChild !== false) {
+      const child = await taskRouter.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'Decomp task',
+        originatingIdeaId: idea.taskId,
+      });
+      await taskRouter._queueForProject(1).onIdle();
+      markCreatedByRun(db, 'task', child.taskId, runId);
+    }
     return idea.taskId;
   }
 
@@ -1810,6 +1834,33 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
     expect(ev.kind).toBe('decomposed');
 
     // The run is completed.
+    expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-d') as { status: string }).status).toBe(
+      'completed',
+    );
+  });
+
+  it('Archive on decompose (multi-idea run) retires only the DECOMPOSED idea, not a childless owned one', async () => {
+    const db = buildDb();
+    const adapter = dbAdapter(db);
+    const taskRouter = TaskChangeRouter.initialize(adapter);
+    const router = QuestionRouter.initialize(adapter);
+
+    seedPlannerRun(db, { runId: 'run-d', currentStepId: 'decompose' });
+    // Both ideas are owned by the run (created-event attribution), but only the
+    // first got a run-created child carrying its originating_idea_id lineage.
+    const ideaDecomposed = await seedOwnedIdea(db, taskRouter, 'run-d');
+    const ideaChildless = await seedOwnedIdea(db, taskRouter, 'run-d', { withChild: false });
+    for (const id of [ideaDecomposed, ideaChildless]) {
+      expect(decomposedAt(db, id)).toBeNull();
+    }
+
+    await answerDecomposeGate(db, router, 'run-d', 'Archive & finish');
+
+    // Fail-closed: only the genuinely-decomposed idea is stamped; the childless
+    // owned idea stays on the board (decomposed_at NULL).
+    expect(decomposedAt(db, ideaDecomposed)).not.toBeNull();
+    expect(decomposedAt(db, ideaChildless)).toBeNull();
+    // The run still completes.
     expect((db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-d') as { status: string }).status).toBe(
       'completed',
     );
