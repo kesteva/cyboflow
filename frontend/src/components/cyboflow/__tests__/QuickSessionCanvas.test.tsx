@@ -41,11 +41,28 @@ vi.mock('../../../trpc/client', () => ({
 }));
 
 vi.mock('../IdeaPickerModal', () => ({
-  IdeaPickerModal: (props: { isOpen: boolean; onPicked: (ids: string[]) => void }) =>
+  IdeaPickerModal: (props: {
+    isOpen: boolean;
+    onPicked: (ids: string[], opts?: { separateIdeaIds: string[] }) => void;
+  }) =>
     props.isOpen ? (
-      <button data-testid="mock-pick-idea" onClick={() => props.onPicked(['idea-x'])}>
-        pick idea
-      </button>
+      <>
+        <button data-testid="mock-pick-idea" onClick={() => props.onPicked(['idea-x'])}>
+          pick idea
+        </button>
+        <button
+          data-testid="mock-pick-idea-batch"
+          onClick={() => props.onPicked(['idea-x', 'idea-y'])}
+        >
+          pick idea batch
+        </button>
+        <button
+          data-testid="mock-pick-idea-with-separate"
+          onClick={() => props.onPicked(['idea-x'], { separateIdeaIds: ['idea-z'] })}
+        >
+          pick idea plus separate
+        </button>
+      </>
     ) : null,
 }));
 
@@ -188,6 +205,25 @@ describe('QuickSessionCanvas', () => {
     // Pick an idea → launch with the chosen ideaId.
     fireEvent.click(screen.getByTestId('mock-pick-idea'));
     expect(mockLaunch).toHaveBeenCalledWith('wf-planner', { ideaId: 'idea-x' });
+  });
+
+  it('threads a multi-select planner batch as ideaIds (IDEA-009)', async () => {
+    renderCanvas();
+    await waitFor(() => screen.getByTestId('quick-session-launch-planner'));
+    fireEvent.click(screen.getByTestId('quick-session-launch-planner'));
+    fireEvent.click(screen.getByTestId('mock-pick-idea-batch'));
+    expect(mockLaunch).toHaveBeenCalledOnce();
+    expect(mockLaunch).toHaveBeenCalledWith('wf-planner', { ideaIds: ['idea-x', 'idea-y'] });
+  });
+
+  it('fires one additional single-idea launch per "Plan separately" pick, after the batch launch', async () => {
+    renderCanvas();
+    await waitFor(() => screen.getByTestId('quick-session-launch-planner'));
+    fireEvent.click(screen.getByTestId('quick-session-launch-planner'));
+    fireEvent.click(screen.getByTestId('mock-pick-idea-with-separate'));
+    await waitFor(() => expect(mockLaunch).toHaveBeenCalledTimes(2));
+    expect(mockLaunch).toHaveBeenNthCalledWith(1, 'wf-planner', { ideaId: 'idea-x' });
+    expect(mockLaunch).toHaveBeenNthCalledWith(2, 'wf-planner', { ideaId: 'idea-z' });
   });
 
   it('opens the full picker via Browse all', async () => {

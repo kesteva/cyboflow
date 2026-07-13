@@ -353,10 +353,28 @@ export function QuickSessionCanvas({
   );
 
   const handleIdeaPicked = useCallback(
-    (ideaIds: string[]) => {
+    (ideaIds: string[], opts?: { separateIdeaIds: string[] }) => {
       const id = plannerIdForGate;
       setPlannerIdForGate(null);
-      if (id !== null) void launch(id, { ideaId: ideaIds[0] });
+      if (id === null) return;
+      void (async () => {
+        // A 1-element batch and a single-idea launch are behaviorally identical
+        // downstream, but the singular `ideaId` path is the well-trodden one —
+        // normalize down to it rather than sending a 1-element `ideaIds` array.
+        if (ideaIds.length === 1) {
+          await launch(id, { ideaId: ideaIds[0] });
+        } else if (ideaIds.length > 1) {
+          await launch(id, { ideaIds });
+        }
+        // "Plan separately" picks (planner multi-select only, IDEA-009): fire
+        // one additional single-idea planner launch per peeled idea,
+        // sequentially, after the batch launch. Safe here — useLaunchWorkflow's
+        // in-flight latch resets unconditionally in its `finally`, and this
+        // fast lane never navigates away.
+        for (const sepId of opts?.separateIdeaIds ?? []) {
+          await launch(id, { ideaId: sepId });
+        }
+      })();
     },
     [plannerIdForGate, launch],
   );
@@ -815,6 +833,9 @@ export function QuickSessionCanvas({
           onPicked={handleIdeaPicked}
           defaultMode={onboardingIdeaGate ? 'new' : 'pick'}
           showIdeaExplainer={onboardingIdeaGate}
+          // Multi-select batch (IDEA-009) is a Planner-only affordance — Ship
+          // stays single-select (it consumes exactly one idea per run).
+          multi={workflows.find((w) => w.id === plannerIdForGate)?.name === 'planner'}
         />
       )}
 

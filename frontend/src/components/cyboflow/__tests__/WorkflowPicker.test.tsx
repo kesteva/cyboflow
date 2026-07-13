@@ -657,8 +657,9 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
     expect(mockRunStart).not.toHaveBeenCalled();
   });
 
-  it('threads the picked idea id into runs.start.mutate', async () => {
-    // An open idea in the backlog so the picker's select renders.
+  it('threads a single picked idea id as ideaId (multi-select mode normalizes a 1-element batch)', async () => {
+    // Planner opens the picker in MULTI mode (IDEA-009) — one open idea in the
+    // backlog renders as a single checkbox row, not the legacy <select>.
     mockTasksList.mockResolvedValue([
       {
         id: 'IDEA-9', project_id: 1, type: 'idea', ref: 'IDEA-9', title: 'Seed idea', summary: null,
@@ -675,8 +676,10 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
       fireEvent.click(startRunBtn);
     });
 
-    // Pick the idea and confirm.
-    await screen.findByLabelText('Select idea');
+    // Check the single idea and confirm.
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('idea-check-IDEA-9'));
+    });
     await act(async () => {
       fireEvent.click(screen.getByTestId('idea-picker-submit'));
     });
@@ -691,6 +694,96 @@ describe('WorkflowPicker — Planner idea-selection gate (migration 017)', () =>
       model: 'opus',
       ideaId: 'IDEA-9',
     });
+  });
+
+  it('threads multiple picked idea ids into runs.start.mutate as ideaIds (multi-select batch)', async () => {
+    mockTasksList.mockResolvedValue([
+      {
+        id: 'IDEA-9', project_id: 1, type: 'idea', ref: 'IDEA-9', title: 'First idea', summary: null,
+        body: null, priority: 'P2', repo: null, parent_epic_id: null, originating_idea_id: null,
+        scope: null, board_id: 'b', stage_id: 'idea', archived_at: null, decomposed_at: null, approved_at: null, sort_order: null, stage_position: 1,
+        version: 1, inFlow: [], awaitingReview: false, isDone: false, created_at: '', updated_at: '',
+      },
+      {
+        id: 'IDEA-10', project_id: 1, type: 'idea', ref: 'IDEA-10', title: 'Second idea', summary: null,
+        body: null, priority: 'P2', repo: null, parent_epic_id: null, originating_idea_id: null,
+        scope: null, board_id: 'b', stage_id: 'idea', archived_at: null, decomposed_at: null, approved_at: null, sort_order: null, stage_position: 1,
+        version: 1, inFlow: [], awaitingReview: false, isDone: false, created_at: '', updated_at: '',
+      },
+    ]);
+
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('idea-check-IDEA-9'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-check-IDEA-10'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-picker-submit'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    expect(mockRunStart).toHaveBeenCalledWith({
+      workflowId: 'wf-planner',
+      projectId: 1,
+      substrate: 'sdk',
+      sessionId: 'session-quick-001',
+      permissionMode: 'default',
+      model: 'opus',
+      ideaIds: ['IDEA-9', 'IDEA-10'],
+    });
+  });
+
+  it('fires one additional single-idea launch per "Plan separately" pick, after the batch launch', async () => {
+    mockTasksList.mockResolvedValue([
+      {
+        id: 'IDEA-9', project_id: 1, type: 'idea', ref: 'IDEA-9', title: 'Small idea', summary: null,
+        body: null, priority: 'P2', repo: null, parent_epic_id: null, originating_idea_id: null,
+        scope: null, board_id: 'b', stage_id: 'idea', archived_at: null, decomposed_at: null, approved_at: null, sort_order: null, stage_position: 1,
+        version: 1, inFlow: [], awaitingReview: false, isDone: false, created_at: '', updated_at: '',
+      },
+      {
+        id: 'IDEA-10', project_id: 1, type: 'idea', ref: 'IDEA-10', title: 'Big idea', summary: null,
+        body: null, priority: 'P2', repo: null, parent_epic_id: null, originating_idea_id: null,
+        scope: 'large', board_id: 'b', stage_id: 'idea', archived_at: null, decomposed_at: null, approved_at: null, sort_order: null, stage_position: 1,
+        version: 1, inFlow: [], awaitingReview: false, isDone: false, created_at: '', updated_at: '',
+      },
+    ]);
+
+    render(<WorkflowPicker projectId={1} />);
+
+    const startRunBtn = await findEnabledStartRun();
+    await act(async () => {
+      fireEvent.click(startRunBtn);
+    });
+
+    await act(async () => {
+      fireEvent.click(await screen.findByTestId('idea-check-IDEA-9'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-check-IDEA-10'));
+    });
+    // Checking the large idea alongside another now shows its "Plan separately"
+    // split — peel it off into its own single-idea launch.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('plan-separately-IDEA-10'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-picker-submit'));
+    });
+
+    // The batch launch (remaining 1-element selection normalizes to ideaId)
+    // fires first, then the peeled-off idea's own single-idea launch.
+    await waitFor(() => expect(mockRunStart).toHaveBeenCalledTimes(2));
+    expect(mockRunStart).toHaveBeenNthCalledWith(1, expect.objectContaining({ ideaId: 'IDEA-9' }));
+    expect(mockRunStart).toHaveBeenNthCalledWith(2, expect.objectContaining({ ideaId: 'IDEA-10' }));
   });
 });
 

@@ -92,6 +92,19 @@ describe('useLaunchWorkflow', () => {
     );
   });
 
+  it('threads seed.ideaIds into the mutation when provided (Planner multi-select batch)', async () => {
+    const { result } = renderHook(() => useLaunchWorkflow(7));
+    await act(async () => {
+      await result.current.launch('wf-planner', { ideaIds: ['idea-1', 'idea-2'] });
+    });
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.objectContaining({ workflowId: 'wf-planner', ideaIds: ['idea-1', 'idea-2'] }),
+    );
+    expect(mockStartMutate).toHaveBeenCalledWith(
+      expect.not.objectContaining({ ideaId: expect.anything() }),
+    );
+  });
+
   it('threads seed.taskIds into the mutation when provided (Sprint batch gate)', async () => {
     const { result } = renderHook(() => useLaunchWorkflow(7));
     await act(async () => {

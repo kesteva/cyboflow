@@ -100,16 +100,27 @@ vi.mock('../../TaskBatchPickerModal', () => ({
   ),
 }));
 
-// IdeaPickerModal — stubbed to a button that reports a fixed idea id, so the
-// wizard's idea-gate WIRING (open → onPicked → runs.start({ ideaId }) →
-// goToSession) is tested in isolation. Shared by the Planner AND Ship flows
-// (both IDEA-seeded). The modal's own internals are covered by its test file.
+// IdeaPickerModal — stubbed to buttons that report a fixed idea id / batch, so
+// the wizard's idea-gate WIRING (open → onPicked → runs.start({ ideaId /
+// ideaIds }) → goToSession) is tested in isolation. Shared by the Planner AND
+// Ship flows (both IDEA-seeded, only Planner gets `multi`). The modal's own
+// internals are covered by its test file. `mockIdeaPickerMulti` records the
+// `multi` prop each render receives so the Planner-only gating is assertable.
+const mockIdeaPickerMulti = vi.hoisted(() => vi.fn());
 vi.mock('../../IdeaPickerModal', () => ({
-  IdeaPickerModal: ({ onPicked }: { onPicked: (ids: string[]) => void }) => (
-    <button data-testid="mock-idea-pick" onClick={() => onPicked(['IDEA-7'])}>
-      pick idea
-    </button>
-  ),
+  IdeaPickerModal: ({ onPicked, multi }: { onPicked: (ids: string[], opts?: { separateIdeaIds: string[] }) => void; multi?: boolean }) => {
+    mockIdeaPickerMulti(multi);
+    return (
+      <>
+        <button data-testid="mock-idea-pick" onClick={() => onPicked(['IDEA-7'])}>
+          pick idea
+        </button>
+        <button data-testid="mock-idea-pick-batch" onClick={() => onPicked(['IDEA-7', 'IDEA-8'])}>
+          pick idea batch
+        </button>
+      </>
+    );
+  },
 }));
 
 // modelAvailabilityStore — controllable Fable availability (default: usable,
@@ -173,6 +184,16 @@ const SPRINT_WORKFLOW_ROW: WorkflowRow = {
   id: 'wf-1',
   project_id: 1,
   name: 'sprint',
+  workflow_path: null,
+  spec_json: '{}',
+  permission_mode: 'default',
+  created_at: '',
+};
+/** The Planner built-in row (idea-gated, multi-select-eligible — IDEA-009). */
+const PLANNER_WORKFLOW_ROW: WorkflowRow = {
+  id: 'wf-1',
+  project_id: 1,
+  name: 'planner',
   workflow_path: null,
   spec_json: '{}',
   permission_mode: 'default',
@@ -868,6 +889,67 @@ describe('SessionStartWizard — Sprint batch gate', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Planner idea gate, multi-select batch (IDEA-009) — Planner is the ONLY flow
+// that opens the idea picker in `multi` mode; a single pick still normalizes
+// to the singular `ideaId`, while a 2+ pick threads `ideaIds`.
+// ---------------------------------------------------------------------------
+describe('SessionStartWizard — Planner idea gate, multi-select batch', () => {
+  beforeEach(() => {
+    mockIdeaPickerMulti.mockClear();
+    mockWorkflowsList.mockResolvedValue([PLANNER_WORKFLOW_ROW]);
+  });
+
+  it('opens the idea picker in multi mode', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+
+    expect(screen.getByTestId('mock-idea-pick')).toBeInTheDocument();
+    expect(mockIdeaPickerMulti).toHaveBeenLastCalledWith(true);
+    expect(mockRunStart).not.toHaveBeenCalled();
+  });
+
+  it('normalizes a single pick to the singular ideaId', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('mock-idea-pick'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    const startArg = mockRunStart.mock.calls[0][0];
+    expect(startArg).toEqual(expect.objectContaining({ workflowId: 'wf-1', ideaId: 'IDEA-7' }));
+    expect(startArg).not.toHaveProperty('ideaIds');
+  });
+
+  it('threads a 2+ pick as ideaIds', async () => {
+    await renderLockedWizard();
+    await selectWorkflowAndConfigure();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('wizard-cta'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('mock-idea-pick-batch'));
+    });
+
+    expect(mockRunStart).toHaveBeenCalledOnce();
+    const startArg = mockRunStart.mock.calls[0][0];
+    expect(startArg).toEqual(
+      expect.objectContaining({ workflowId: 'wf-1', ideaIds: ['IDEA-7', 'IDEA-8'] }),
+    );
+    expect(startArg).not.toHaveProperty('ideaId');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Ship idea gate (feat/ship-workflow) — Ship runs planner ⊕ sprint in one
 // continuous run and is IDEA-seeded like the planner: the CTA opens the idea
 // picker (NOT the sprint task-batch picker), and a pick fires runs.start with the
@@ -876,10 +958,11 @@ describe('SessionStartWizard — Sprint batch gate', () => {
 // ---------------------------------------------------------------------------
 describe('SessionStartWizard — Ship idea gate', () => {
   beforeEach(() => {
+    mockIdeaPickerMulti.mockClear();
     mockWorkflowsList.mockResolvedValue([SHIP_WORKFLOW_ROW]);
   });
 
-  it('opens the idea picker (NOT the batch picker) when Ship is launched', async () => {
+  it('opens the idea picker (NOT the batch picker) when Ship is launched, single-select (NOT multi)', async () => {
     await renderLockedWizard();
     await selectWorkflowAndConfigure();
 
@@ -888,9 +971,11 @@ describe('SessionStartWizard — Ship idea gate', () => {
     });
 
     // The idea picker is shown — NOT the sprint batch picker — and no run has
-    // launched yet (the gate is freely cancellable).
+    // launched yet (the gate is freely cancellable). Multi-select (IDEA-009) is
+    // Planner-only — Ship stays single-select.
     expect(screen.getByTestId('mock-idea-pick')).toBeInTheDocument();
     expect(screen.queryByTestId('mock-batch-pick')).toBeNull();
+    expect(mockIdeaPickerMulti).toHaveBeenLastCalledWith(false);
     expect(mockRunStart).not.toHaveBeenCalled();
   });
 

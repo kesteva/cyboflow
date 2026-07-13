@@ -512,7 +512,7 @@ export default function SessionStartWizard(): React.JSX.Element {
 
   // ── Launch ───────────────────────────────────────────────────────────────
   const launchRun = useCallback(
-    async (workflowId: string, ideaId?: string): Promise<void> => {
+    async (workflowId: string, ideaSeed?: { ideaId?: string; ideaIds?: string[] }): Promise<void> => {
       if (startInFlightRef.current) return;
       if (selectedProjectId === null) return;
       startInFlightRef.current = true;
@@ -552,7 +552,11 @@ export default function SessionStartWizard(): React.JSX.Element {
           // field (the resolver ladder decides); an explicit choice is the
           // highest-precedence rung of resolveExecutionModel.
           ...(executionModelOverride !== 'inherit' ? { executionModel: executionModelOverride } : {}),
-          ...(ideaId !== undefined ? { ideaId } : {}),
+          ...(ideaSeed?.ideaIds !== undefined
+            ? { ideaIds: ideaSeed.ideaIds }
+            : ideaSeed?.ideaId !== undefined
+              ? { ideaId: ideaSeed.ideaId }
+              : {}),
           ...(selectedFindingIds?.length && meta?.name === 'compound'
             ? { findingIds: selectedFindingIds }
             : {}),
@@ -712,10 +716,23 @@ export default function SessionStartWizard(): React.JSX.Element {
   }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, substrate, model, fastMode, disabledMcpServers, enabledPlugins, pluginBaseline, worktreeModeOverride]);
 
   const handleIdeaPicked = useCallback(
+    // `opts.separateIdeaIds` ("Plan separately", IDEA-009) is deliberately NOT
+    // threaded here: a successful launchRun navigates away (goToSession) and its
+    // in-flight latch is only reset on failure, so firing N+1 sequential
+    // launches from this surface is unsafe (unlike WorkflowPicker /
+    // QuickSessionCanvas, which never navigate away). Only the batch/single
+    // launch fires; peeled-off ideas are left unlaunched.
     (ideaIds: string[]) => {
       setIdeaPickerOpen(false);
       if (pendingWorkflowId === null) return;
-      void launchRun(pendingWorkflowId, ideaIds[0]);
+      // A 1-element batch and a single-idea launch are behaviorally identical
+      // downstream, but the singular `ideaId` path is the well-trodden one —
+      // normalize down to it rather than sending a 1-element `ideaIds` array.
+      if (ideaIds.length === 1) {
+        void launchRun(pendingWorkflowId, { ideaId: ideaIds[0] });
+      } else if (ideaIds.length > 1) {
+        void launchRun(pendingWorkflowId, { ideaIds });
+      }
     },
     [pendingWorkflowId, launchRun],
   );
@@ -1326,6 +1343,9 @@ export default function SessionStartWizard(): React.JSX.Element {
           projectId={selectedProjectId}
           onClose={() => setIdeaPickerOpen(false)}
           onPicked={handleIdeaPicked}
+          // Multi-select batch (IDEA-009) is a Planner-only affordance — Ship
+          // stays single-select (it consumes exactly one idea per run).
+          multi={workflowMetas.find((m) => m.id === pendingWorkflowId)?.name === 'planner'}
         />
       )}
 

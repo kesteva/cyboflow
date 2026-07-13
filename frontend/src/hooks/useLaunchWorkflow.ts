@@ -13,7 +13,8 @@
  * (DEFAULT_SUBSTRATE + the global Agent-Permission-Mode), since the canvas is a
  * fast lane; the full WorkflowPicker ("Browse all") still offers per-run control.
  *
- * `seed.ideaId` threads the Planner's pre-launch seed idea (migration 017);
+ * `seed.ideaId` threads the Planner's single-select pre-launch seed idea
+ * (migration 017); `seed.ideaIds` threads its multi-select batch (IDEA-009);
  * `seed.taskIds` threads the Sprint's pre-launch task batch. The canvas opens
  * the matching picker (IdeaPickerModal / TaskBatchPickerModal) first and MUST
  * pass the corresponding seed; other workflows launch seedless.
@@ -29,9 +30,14 @@ import { DEFAULT_WORKFLOW_MODEL } from '../components/cyboflow/ModelSelector';
 import { trackEvent } from '../utils/telemetry';
 import { notifyWorkflowRunStarted } from '../utils/onboarding';
 
-/** Pre-launch seed — at most one of ideaId (planner) / taskIds (sprint). */
+/**
+ * Pre-launch seed — at most one of ideaId (planner, single-select) / ideaIds
+ * (planner, multi-select batch, IDEA-009 — a 1-element batch should be
+ * normalized to the singular `ideaId` by the caller) / taskIds (sprint).
+ */
 export interface LaunchSeed {
   ideaId?: string;
+  ideaIds?: string[];
   taskIds?: string[];
 }
 
@@ -97,11 +103,13 @@ export function useLaunchWorkflow(
           model: DEFAULT_WORKFLOW_MODEL,
         };
         const result = await trpc.cyboflow.runs.start.mutate(
-          seed?.ideaId !== undefined
-            ? { ...base, ideaId: seed.ideaId }
-            : seed?.taskIds !== undefined
-              ? { ...base, taskIds: seed.taskIds }
-              : base,
+          seed?.ideaIds !== undefined
+            ? { ...base, ideaIds: seed.ideaIds }
+            : seed?.ideaId !== undefined
+              ? { ...base, ideaId: seed.ideaId }
+              : seed?.taskIds !== undefined
+                ? { ...base, taskIds: seed.taskIds }
+                : base,
         );
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
         trackEvent('workflow_run_started', {

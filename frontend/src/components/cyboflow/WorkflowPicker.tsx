@@ -185,13 +185,15 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   };
 
   /**
-   * Fire the actual runs.start mutation. `ideaId` is the Planner's pre-launch
-   * seed idea (migration 017) — undefined for Sprint (and any free Planner
-   * launch). The synchronous in-flight latch flips HERE (at the real mutate),
-   * NOT on modal open, so opening the picker is freely cancellable.
+   * Fire the actual runs.start mutation. `ideaSeed.ideaId` is the Planner's
+   * single-select pre-launch seed idea (migration 017); `ideaSeed.ideaIds` is
+   * its multi-select batch (IDEA-009) — mutually exclusive, both undefined for
+   * Sprint (and any free Planner launch). The synchronous in-flight latch flips
+   * HERE (at the real mutate), NOT on modal open, so opening the picker is
+   * freely cancellable.
    */
   const launchRun = useCallback(
-    async (workflowId: string, ideaId?: string): Promise<void> => {
+    async (workflowId: string, ideaSeed?: { ideaId?: string; ideaIds?: string[] }): Promise<void> => {
       if (startInFlightRef.current) return;
       startInFlightRef.current = true;
       setError(null);
@@ -210,7 +212,11 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           sessionId,
           permissionMode,
           model,
-          ...(ideaId !== undefined ? { ideaId } : {}),
+          ...(ideaSeed?.ideaIds !== undefined
+            ? { ideaIds: ideaSeed.ideaIds }
+            : ideaSeed?.ideaId !== undefined
+              ? { ideaId: ideaSeed.ideaId }
+              : {}),
           ...variantSelectionToStartInput(variantSelection),
         });
         useCyboflowStore.getState().setActiveRun(result.runId, sessionId);
@@ -314,10 +320,27 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   );
 
   const handleIdeaPicked = useCallback(
-    (ideaIds: string[]): void => {
+    (ideaIds: string[], opts?: { separateIdeaIds: string[] }): void => {
       setIdeaPickerOpen(false);
       if (selectedId === null) return;
-      void launchRun(selectedId, ideaIds[0]);
+      const workflowId = selectedId;
+      void (async () => {
+        // A 1-element batch and a single-idea launch are behaviorally identical
+        // downstream, but the singular `ideaId` path is the well-trodden one —
+        // normalize down to it rather than sending a 1-element `ideaIds` array.
+        if (ideaIds.length === 1) {
+          await launchRun(workflowId, { ideaId: ideaIds[0] });
+        } else if (ideaIds.length > 1) {
+          await launchRun(workflowId, { ideaIds });
+        }
+        // "Plan separately" picks (planner multi-select only, IDEA-009): fire one
+        // additional single-idea planner launch per peeled idea, sequentially,
+        // after the batch launch. Safe here — launchRun's in-flight latch resets
+        // unconditionally in its `finally`, and this surface never navigates away.
+        for (const id of opts?.separateIdeaIds ?? []) {
+          await launchRun(workflowId, { ideaId: id });
+        }
+      })();
     },
     [selectedId, launchRun],
   );
@@ -430,6 +453,9 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
           projectId={projectId}
           onClose={() => setIdeaPickerOpen(false)}
           onPicked={handleIdeaPicked}
+          // Multi-select batch (IDEA-009) is a Planner-only affordance — Ship
+          // stays single-select (it consumes exactly one idea per run).
+          multi={workflows.find((wf) => wf.id === selectedId)?.name === 'planner'}
         />
       )}
 
