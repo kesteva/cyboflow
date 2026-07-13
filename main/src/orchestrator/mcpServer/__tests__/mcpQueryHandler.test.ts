@@ -926,6 +926,94 @@ describe('McpQueryHandler', () => {
           .get(data.task_id) as { scope: string | null };
         expect(row.scope).toBeNull();
       });
+
+      it('resolves originating_idea_id supplied as a display ref (IDEA-001) to the opaque idea id', async () => {
+        seedTaskRun(taskDb, { runId: 'run-1', currentStepId: 'plan', stepsSnapshot: { plan: 'planner' } });
+
+        const { socket: ideaSocket, writes: ideaWrites } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ct-origin-seed', runId: 'run-1', title: 'Seed idea' },
+          ideaSocket,
+        );
+        const idea = parseLastWrite(ideaWrites).data as { task_id: string; ref: string };
+        expect(idea.ref).toBe('IDEA-001');
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId: 'ct-origin-ref',
+            runId: 'run-1',
+            title: 'A task',
+            taskType: 'task',
+            originatingIdeaId: idea.ref,
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { task_id: string };
+
+        const row = taskDb
+          .prepare('SELECT originating_idea_id FROM tasks WHERE id = ?')
+          .get(data.task_id) as { originating_idea_id: string | null };
+        expect(row.originating_idea_id).toBe(idea.task_id);
+      });
+
+      it('accepts originating_idea_id supplied as the opaque idea id unchanged', async () => {
+        seedTaskRun(taskDb, { runId: 'run-1', currentStepId: 'plan', stepsSnapshot: { plan: 'planner' } });
+
+        const { socket: ideaSocket, writes: ideaWrites } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ct-origin-seed2', runId: 'run-1', title: 'Seed idea' },
+          ideaSocket,
+        );
+        const idea = parseLastWrite(ideaWrites).data as { task_id: string; ref: string };
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId: 'ct-origin-id',
+            runId: 'run-1',
+            title: 'An epic',
+            taskType: 'epic',
+            originatingIdeaId: idea.task_id,
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { task_id: string };
+
+        const row = taskDb
+          .prepare('SELECT originating_idea_id FROM epics WHERE id = ?')
+          .get(data.task_id) as { originating_idea_id: string | null };
+        expect(row.originating_idea_id).toBe(idea.task_id);
+      });
+
+      it('ignores originating_idea_id supplied on an idea create instead of rejecting it', async () => {
+        seedTaskRun(taskDb, { runId: 'run-1', currentStepId: 'plan', stepsSnapshot: { plan: 'planner' } });
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId: 'ct-origin-idea',
+            runId: 'run-1',
+            title: 'A plain idea',
+            originatingIdeaId: 'ide_does_not_exist',
+          },
+          socket,
+        );
+
+        // Would be invalid_lineage if the field reached the chokepoint — instead
+        // it is dropped before the TaskChange is built (mirrors scope-on-epic).
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+      });
     });
 
     // -----------------------------------------------------------------------

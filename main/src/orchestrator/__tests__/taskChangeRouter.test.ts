@@ -32,7 +32,7 @@
  *    active-run guard over the cascade, leaf deletes leave siblings/parents
  *    intact, best-effort review_items dismissal (failures swallowed).
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -119,6 +119,46 @@ function eventCount(db: Database.Database, type: string, id: string): number {
       .prepare('SELECT COUNT(*) AS n FROM entity_events WHERE entity_type = ? AND entity_id = ?')
       .get(type, id) as { n: number }
   ).n;
+}
+
+/**
+ * buildDb() variant carrying workflow_runs.seed_idea_id (migration 017) +
+ * seed_idea_ids (migration 060) — neither is part of buildDb()'s base migration
+ * chain, so the DECOMP-LINKAGE auto-stamp tests ALTER them in directly (mirrors
+ * runEntityOwnership.test.ts's buildDbWithSeedIds). Guarded against a
+ * double-ALTER in case a future shared fixture already carries one column.
+ */
+function buildDbWithSeedIdeaColumns(): Database.Database {
+  const db = buildDb();
+  try {
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_id TEXT;');
+  } catch {
+    // column already present — no-op.
+  }
+  try {
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_ids TEXT;');
+  } catch {
+    // column already present — no-op.
+  }
+  return db;
+}
+
+/** Seed a workflows + workflow_runs row carrying seed_idea_id / seed_idea_ids. */
+function seedRunWithSeedIdeas(
+  db: Database.Database,
+  opts: { runId: string; seedIdeaId?: string | null; seedIdeaIds?: string[] | null },
+): void {
+  db.prepare(
+    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'planner', '{}')`,
+  ).run();
+  db.prepare(
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, seed_idea_id, seed_idea_ids)
+     VALUES (?, 'wf-1', 1, 'running', 'default', ?, ?)`,
+  ).run(
+    opts.runId,
+    opts.seedIdeaId ?? null,
+    opts.seedIdeaIds !== undefined && opts.seedIdeaIds !== null ? JSON.stringify(opts.seedIdeaIds) : null,
+  );
 }
 
 describe('TaskChangeRouter (3-table entity model)', () => {
@@ -613,6 +653,81 @@ describe('TaskChangeRouter (3-table entity model)', () => {
           )
           .run(stageId(4), task.taskId),
       ).toThrow(/FOREIGN KEY/i);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // DECOMP-LINKAGE auto-stamp + multi-seed fail-closed guard (TASK-029)
+  // -------------------------------------------------------------------------
+
+  describe('DECOMP-LINKAGE auto-stamp: multi-seed fail-closed guard', () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it('single-seed run (seed_idea_ids has exactly 1 entry) auto-stamps originating_idea_id as before', async () => {
+      const db = buildDbWithSeedIdeaColumns();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Seed idea' });
+      seedRunWithSeedIdeas(db, { runId: 'run-single', seedIdeaId: idea.taskId, seedIdeaIds: [idea.taskId] });
+
+      const task = await router.applyChange(1, {
+        actor: 'agent:planner',
+        runId: 'run-single',
+        entityType: 'task',
+        title: 'Decomposed task',
+      });
+
+      const row = db
+        .prepare('SELECT originating_idea_id FROM tasks WHERE id = ?')
+        .get(task.taskId) as { originating_idea_id: string | null };
+      expect(row.originating_idea_id).toBe(idea.taskId);
+    });
+
+    it('multi-seed run (seed_idea_ids has >1 entries) + omitted originating_idea_id leaves lineage NULL and warns', async () => {
+      const db = buildDbWithSeedIdeaColumns();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      seedRunWithSeedIdeas(db, { runId: 'run-multi', seedIdeaId: 'ide_a', seedIdeaIds: ['ide_a', 'ide_b'] });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const task = await router.applyChange(1, {
+        actor: 'agent:planner',
+        runId: 'run-multi',
+        entityType: 'task',
+        title: 'Ambiguous task',
+      });
+
+      const row = db
+        .prepare('SELECT originating_idea_id FROM tasks WHERE id = ?')
+        .get(task.taskId) as { originating_idea_id: string | null };
+      expect(row.originating_idea_id).toBeNull();
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy.mock.calls[0]?.[0]).toContain('run-multi');
+    });
+
+    it('corrupt seed_idea_ids JSON degrades to the legacy single-seed stamp', async () => {
+      const db = buildDbWithSeedIdeaColumns();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const idea = await router.applyChange(1, { actor: 'user', entityType: 'idea', title: 'Seed idea' });
+      db.prepare(
+        `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'planner', '{}')`,
+      ).run();
+      db.prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, seed_idea_id, seed_idea_ids)
+         VALUES ('run-corrupt', 'wf-1', 1, 'running', 'default', ?, ?)`,
+      ).run(idea.taskId, 'not-json{{{');
+
+      const task = await router.applyChange(1, {
+        actor: 'agent:planner',
+        runId: 'run-corrupt',
+        entityType: 'task',
+        title: 'Legacy-stamped task',
+      });
+
+      const row = db
+        .prepare('SELECT originating_idea_id FROM tasks WHERE id = ?')
+        .get(task.taskId) as { originating_idea_id: string | null };
+      expect(row.originating_idea_id).toBe(idea.taskId);
     });
   });
 

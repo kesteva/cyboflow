@@ -970,31 +970,60 @@ export class TaskChangeRouter {
       // path); only when seed_idea_id is present. Fail-soft: a missing column on
       // an older DB / missing run row degrades to NULL (the prior behaviour).
       if (originatingIdeaId === null && type === 'task' && change.runId) {
+        // MULTI-SEED FAIL-CLOSED (migration 060, IDEA-009 TASK-029): a run
+        // seeded with MORE THAN ONE idea (workflow_runs.seed_idea_ids, a JSON
+        // string array) cannot have its lineage safely guessed — stamping any
+        // single one of several seed ideas would silently mis-attribute the
+        // task. Parse seed_idea_ids in its OWN try/catch (mirrors
+        // listRunOwnedIdeaIds): a missing column (pre-060 DB), NULL, or corrupt
+        // JSON all degrade to "legacy" (0/1 parsed ids), which falls through to
+        // the single-seed stamp below UNCHANGED.
+        let seedIdeaIdCount = 0;
         try {
-          const run = this.db
-            .prepare('SELECT seed_idea_id AS seedIdeaId FROM workflow_runs WHERE id = ?')
-            .get(change.runId) as { seedIdeaId?: unknown } | undefined;
-          if (run && typeof run.seedIdeaId === 'string' && run.seedIdeaId.length > 0) {
-            originatingIdeaId = run.seedIdeaId;
-          }
-          // Raw-prompt planner: no seed_idea_id because the idea was CREATED
-          // during the run. Fall back to the most-recent idea this run created
-          // (entity_events). The planner-one-idea model means a run owns a single
-          // idea, so the latest 'created' idea is the decomposition's parent.
-          if (originatingIdeaId === null) {
-            const created = this.db
-              .prepare(
-                `SELECT entity_id AS ideaId FROM entity_events
-                  WHERE entity_type = 'idea' AND kind = 'created' AND run_id = ?
-                  ORDER BY seq DESC LIMIT 1`,
-              )
-              .get(change.runId) as { ideaId?: unknown } | undefined;
-            if (created && typeof created.ideaId === 'string' && created.ideaId.length > 0) {
-              originatingIdeaId = created.ideaId;
+          const seedIdsRow = this.db
+            .prepare('SELECT seed_idea_ids AS seedIdeaIds FROM workflow_runs WHERE id = ?')
+            .get(change.runId) as { seedIdeaIds?: unknown } | undefined;
+          if (typeof seedIdsRow?.seedIdeaIds === 'string' && seedIdsRow.seedIdeaIds.length > 0) {
+            const parsed: unknown = JSON.parse(seedIdsRow.seedIdeaIds);
+            if (Array.isArray(parsed)) {
+              seedIdeaIdCount = parsed.filter((id) => typeof id === 'string' && id.length > 0).length;
             }
           }
         } catch {
-          // pre-017 DB / missing entity_events — leave NULL (no regression).
+          // pre-060 DB (no seed_idea_ids column) / corrupt JSON — treat as legacy.
+        }
+
+        if (seedIdeaIdCount > 1) {
+          console.warn(
+            `[TaskChangeRouter] run ${change.runId} was seeded with ${seedIdeaIdCount} ideas and the create call omitted originating_idea_id — leaving lineage NULL instead of guessing`,
+          );
+        } else {
+          try {
+            const run = this.db
+              .prepare('SELECT seed_idea_id AS seedIdeaId FROM workflow_runs WHERE id = ?')
+              .get(change.runId) as { seedIdeaId?: unknown } | undefined;
+            if (run && typeof run.seedIdeaId === 'string' && run.seedIdeaId.length > 0) {
+              originatingIdeaId = run.seedIdeaId;
+            }
+            // Raw-prompt planner: no seed_idea_id because the idea was CREATED
+            // during the run. Fall back to the most-recent idea this run created
+            // (entity_events). The planner-one-idea model means a run owns a single
+            // idea, so the latest 'created' idea is the decomposition's parent.
+            if (originatingIdeaId === null) {
+              const created = this.db
+                .prepare(
+                  `SELECT entity_id AS ideaId FROM entity_events
+                    WHERE entity_type = 'idea' AND kind = 'created' AND run_id = ?
+                    ORDER BY seq DESC LIMIT 1`,
+                )
+                .get(change.runId) as { ideaId?: unknown } | undefined;
+              if (created && typeof created.ideaId === 'string' && created.ideaId.length > 0) {
+                originatingIdeaId = created.ideaId;
+              }
+            }
+          } catch {
+            // pre-017 DB / missing entity_events — leave NULL (no regression).
+          }
         }
       }
       if (parentEpicId !== null) {

@@ -143,6 +143,12 @@ export type McpQueryMessage =
       initialStageId?: string;
       /** Idea size hint — only meaningful for taskType='idea' (ignored on epic/task entities). */
       scope?: IdeaScope;
+      /**
+       * Project-scoped idea ref-or-id this epic/task originates from — only
+       * meaningful for taskType='epic'|'task' (ignored on idea creates, mirroring
+       * how scope is dropped on epic/task creates rather than rejected).
+       */
+      originatingIdeaId?: string;
     }
   | {
       type: 'mcp-update-task';
@@ -1180,6 +1186,20 @@ export class McpQueryHandler {
       return;
     }
 
+    // originating_idea_id is only meaningful for epic/task creates (ideas carry
+    // no lineage — describe('idea').hasOriginatingIdea is false); an idea
+    // create silently drops a supplied value here rather than letting the
+    // chokepoint reject it with invalid_lineage, mirroring how scope is
+    // dropped on epic/task creates (desc.hasScope gating in TaskChangeRouter)
+    // instead of throwing. When applicable, resolve ref-or-id via the same
+    // resolveBacklogRef helper used elsewhere in this file (get_task,
+    // create_sprint_batch) — an opaque id has no matching `ref` row so it
+    // round-trips unchanged.
+    const originatingIdeaId: string | null =
+      msg.originatingIdeaId !== undefined && msg.taskType !== undefined && msg.taskType !== 'idea'
+        ? (resolveBacklogRef(this.db, ctx.projectId, msg.originatingIdeaId) ?? msg.originatingIdeaId)
+        : null;
+
     const change: TaskChange = {
       actor: ctx.actor,
       runId: msg.runId,
@@ -1194,6 +1214,7 @@ export class McpQueryHandler {
       boardId: msg.boardId,
       initialStageId: msg.initialStageId,
       scope: msg.scope,
+      originatingIdeaId,
     };
 
     try {

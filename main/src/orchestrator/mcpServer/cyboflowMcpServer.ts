@@ -205,6 +205,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             board_id: { type: 'string', description: 'Optional board id; defaults to the project default board' },
             initial_stage_id: { type: 'string', description: "Optional initial stage id; defaults to the board's first idea stage" },
             scope: { type: 'string', enum: ['small', 'large'], description: "Optional idea size hint; only meaningful for task_type='idea' (ignored on epic/task entities)" },
+            originating_idea_id: {
+              type: 'string',
+              description:
+                "Optional project-scoped idea ref-or-id (e.g. 'IDEA-009' or its opaque id) this epic/task originates from — only meaningful for task_type='epic'|'task' (ignored on idea creates). REQUIRED practice on a multi-idea planner run: an epic/task created without this on a run seeded with more than one idea is left with lineage NULL rather than guessed.",
+            },
           },
           required: ['title'],
         },
@@ -803,8 +808,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         board_id?: unknown;
         initial_stage_id?: unknown;
         scope?: unknown;
+        originating_idea_id?: unknown;
       };
-      const { title, task_type, summary, body, priority, category, repo, parent_epic_id, board_id, initial_stage_id, scope } = args;
+      const { title, task_type, summary, body, priority, category, repo, parent_epic_id, board_id, initial_stage_id, scope, originating_idea_id } = args;
       if (typeof title !== 'string' || title.length === 0) {
         return {
           content: [
@@ -915,6 +921,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
+      if (originating_idea_id !== undefined && typeof originating_idea_id !== 'string') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: 'originating_idea_id: string (optional)' }),
+            },
+          ],
+        };
+      }
       const queryParams: Record<string, unknown> = { title };
       if (task_type !== undefined) queryParams['taskType'] = task_type;
       if (summary !== undefined) queryParams['summary'] = summary;
@@ -926,6 +942,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (board_id !== undefined) queryParams['boardId'] = board_id;
       if (initial_stage_id !== undefined) queryParams['initialStageId'] = initial_stage_id;
       if (scope !== undefined) queryParams['scope'] = scope;
+      if (originating_idea_id !== undefined) queryParams['originatingIdeaId'] = originating_idea_id;
       return executeMcpQuery('mcp-create-task', queryParams);
     }
 
