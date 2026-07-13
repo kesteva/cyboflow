@@ -73,6 +73,29 @@ describe('bootstrapArmSessionPanels', () => {
     expect(mockCreatePanel).not.toHaveBeenCalledWith({ sessionId: 'sess-arm-a', type: 'claude' });
   });
 
+  it('existing terminal panel: skips the Terminal, still creates the missing Claude (idempotent)', async () => {
+    mockLoadPanelsForSession.mockResolvedValue([{ id: 'panel-term-1', type: 'terminal' }]);
+
+    await bootstrapArmSessionPanels('sess-arm-a');
+
+    expect(mockCreatePanel).toHaveBeenCalledTimes(1);
+    expect(mockCreatePanel).toHaveBeenCalledWith({ sessionId: 'sess-arm-a', type: 'claude' });
+    expect(mockCreatePanel).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'terminal' }),
+    );
+  });
+
+  it('both panels already exist: full no-op (repeat bootstrap on an opened winner arm)', async () => {
+    mockLoadPanelsForSession.mockResolvedValue([
+      { id: 'panel-claude-1', type: 'claude' },
+      { id: 'panel-term-1', type: 'terminal' },
+    ]);
+
+    await bootstrapArmSessionPanels('sess-arm-a');
+
+    expect(mockCreatePanel).not.toHaveBeenCalled();
+  });
+
   it('throws when API.sessions.get fails', async () => {
     mockGet.mockResolvedValue({ success: false, error: 'session vanished' });
 

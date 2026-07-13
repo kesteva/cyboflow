@@ -280,6 +280,9 @@ describe('ExperimentComparisonView', () => {
     await waitFor(() =>
       expect(decideMutate).toHaveBeenCalledWith({ experimentId: 'exp_1', winnerRunId: 'run-a' }),
     );
+    // The winner arm session (arm A → session_a_id) is bootstrapped so it hosts a
+    // Claude agent for post-experiment continuation (rebase-before-merge).
+    await waitFor(() => expect(bootstrapArmSessionPanels).toHaveBeenCalledWith('sess-a'));
     // View stays open: the changes summary renders and the promote CTAs enable.
     expect(await screen.findByTestId('experiment-changes-decision-summary')).toHaveTextContent(
       "Accepted arm A's changes",
@@ -304,6 +307,9 @@ describe('ExperimentComparisonView', () => {
     await waitFor(() =>
       expect(decideMutate).toHaveBeenCalledWith({ experimentId: 'exp_1', winnerRunId: null }),
     );
+    // Discard-both dismisses BOTH sessions — there is no surviving winner to host
+    // an agent, so no panel bootstrap runs.
+    expect(bootstrapArmSessionPanels).not.toHaveBeenCalled();
   });
 
   it('gates "Re-run comparison" on the experiment status (running|grading only)', async () => {

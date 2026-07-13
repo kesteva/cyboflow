@@ -325,6 +325,34 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
       // closed the view, stranding the user before the variant-outcome decision.
       const fresh = await trpc.cyboflow.experiments.get.query({ experimentId });
       setExp(fresh);
+
+      // Bootstrap the WINNER arm session's renderer panels so it hosts a Claude
+      // agent for post-experiment continuation (e.g. rebasing the branch before
+      // merge). Arm sessions are born headless — createArmSession creates no
+      // panels — and decide keeps the winner session (dismissing only the loser),
+      // so a winner the user never explicitly opened would otherwise rest with no
+      // agent, forcing a manual `claude` in a raw terminal. Idempotent, so an arm
+      // already opened via handleOpenArmSession is unaffected. Fail-soft: the
+      // decision is already recorded server-side, so a bootstrap failure must not
+      // surface as a decide error.
+      if (winnerRunId !== null && payload !== null) {
+        const winnerSessionId =
+          winnerRunId === payload.armA.runId
+            ? (fresh ?? exp)?.session_a_id ?? null
+            : winnerRunId === payload.armB.runId
+              ? (fresh ?? exp)?.session_b_id ?? null
+              : null;
+        if (winnerSessionId !== null) {
+          try {
+            await bootstrapArmSessionPanels(winnerSessionId);
+          } catch (bootstrapErr: unknown) {
+            console.warn(
+              '[ExperimentComparisonView] winner arm panel bootstrap failed (decision already recorded):',
+              bootstrapErr,
+            );
+          }
+        }
+      }
     } catch (err: unknown) {
       setActionError(err instanceof Error ? err.message : 'Failed to record the decision');
     } finally {
