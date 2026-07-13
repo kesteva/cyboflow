@@ -37,14 +37,43 @@ export interface TranscriptTailSourceOptions {
   worktreePath: string;
   /** Override the `~/.claude/projects` root (tests inject a temp dir). */
   projectsRoot?: string;
-  /** Bound on the spawn -> first-`.jsonl` discovery race. */
+  /**
+   * SOFT bound on the spawn -> first-`.jsonl` discovery race. When it elapses the
+   * firstLine promise REJECTS (so the awaiting spawn proceeds) but discovery is
+   * NOT abandoned — a low-frequency background poll stays alive for
+   * `lateDiscoveryWindowMs` so a slow-but-successful `claude` launch still binds.
+   */
   discoveryTimeoutMs: number;
+  /**
+   * How long the background poll keeps trying AFTER the soft timeout before a
+   * true give-up (defaults to {@link DEFAULT_LATE_DISCOVERY_WINDOW_MS}). Injectable
+   * so tests can exercise the give-up path without a real 2-minute wait.
+   */
+  lateDiscoveryWindowMs?: number;
   /** REQUIRED structural logger (CLAUDE.md optional-logger rule). */
   logger: StructuralLogger;
+  /**
+   * Optional: invoked when a transcript binds AFTER the soft discovery timeout
+   * (late recovery). Lets the manager re-persist the recovered session id so a
+   * slow-launched session stays cleanly resumable.
+   */
+  onLateBind?: (sessionUuid: string) => void;
+  /**
+   * Optional: invoked when late discovery TRULY gives up — the extended window
+   * elapsed with no transcript ever appearing. This (not the soft timeout) is the
+   * genuinely-actionable failure the manager reports as a seam error.
+   */
+  onGiveUp?: () => void;
 }
 
 /** Poll cadence for the fs.watch fallback and the tail loop (ms). */
 const POLL_INTERVAL_MS = 50;
+
+/** Low-frequency cadence for the post-timeout background discovery poll (ms). */
+const LATE_POLL_INTERVAL_MS = 500;
+
+/** Default extended discovery window after the soft timeout (ms). */
+const DEFAULT_LATE_DISCOVERY_WINDOW_MS = 120_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -55,7 +84,10 @@ export class TranscriptTailSource implements TranscriptSource {
   private readonly projectsRoot: string;
   private readonly keyDir: string;
   private readonly discoveryTimeoutMs: number;
+  private readonly lateDiscoveryWindowMs: number;
   private readonly logger: StructuralLogger;
+  private readonly onLateBind: ((sessionUuid: string) => void) | undefined;
+  private readonly onGiveUp: (() => void) | undefined;
 
   private onLine: OnLineCallback | undefined;
   private onTurnEnd: OnTurnEndCallback | undefined;
@@ -69,11 +101,20 @@ export class TranscriptTailSource implements TranscriptSource {
   private tailInterval: ReturnType<typeof setInterval> | undefined;
   private discoveryTimer: ReturnType<typeof setTimeout> | undefined;
 
+  /** Post-timeout background discovery handles (late-recovery poll). */
+  private lateDiscoveryInterval: ReturnType<typeof setInterval> | undefined;
+  private lateDiscoveryDeadline: ReturnType<typeof setTimeout> | undefined;
+
   /** Discovery promise plumbing for waitForFirstLine. */
   private firstLinePromise: Promise<void> | undefined;
   private resolveFirstLine: (() => void) | undefined;
   private rejectFirstLine: ((err: Error) => void) | undefined;
   private settled = false;
+
+  /** The soft timeout fired: a subsequent bind is a LATE recovery. */
+  private softTimedOut = false;
+  /** Discovery is permanently abandoned (true give-up or stop()). */
+  private discoveryGaveUp = false;
 
   /** Bound-file tail state. */
   private boundPath: string | undefined;
@@ -90,7 +131,11 @@ export class TranscriptTailSource implements TranscriptSource {
       opts.projectsRoot ?? path.join(os.homedir(), '.claude', 'projects');
     this.keyDir = path.join(this.projectsRoot, encodeCwd(this.worktreePath));
     this.discoveryTimeoutMs = opts.discoveryTimeoutMs;
+    this.lateDiscoveryWindowMs =
+      opts.lateDiscoveryWindowMs ?? DEFAULT_LATE_DISCOVERY_WINDOW_MS;
     this.logger = opts.logger;
+    this.onLateBind = opts.onLateBind;
+    this.onGiveUp = opts.onGiveUp;
   }
 
   /** The discovered session UUID (the bound file basename sans `.jsonl`). */
@@ -154,6 +199,7 @@ export class TranscriptTailSource implements TranscriptSource {
 
   stop(): void {
     this.stopped = true;
+    this.discoveryGaveUp = true; // make any pending late-discovery timer inert
     this.clearDiscovery();
     if (this.tailInterval !== undefined) {
       clearInterval(this.tailInterval);
@@ -181,7 +227,11 @@ export class TranscriptTailSource implements TranscriptSource {
    * line matches the worktree abs path — never by mtime alone.
    */
   private tryDiscover(): void {
-    if (this.bound || this.stopped || this.settled) return;
+    // NOTE: `settled` is intentionally NOT a guard here — after the soft timeout
+    // settles the firstLine promise (reject), the background poll must still be
+    // able to bind a late-appearing transcript. `discoveryGaveUp` (true give-up
+    // or stop()) is the terminal guard instead.
+    if (this.bound || this.stopped || this.discoveryGaveUp) return;
 
     const current = this.listJsonlBasenames();
     const candidates: string[] = [];
@@ -262,11 +312,21 @@ export class TranscriptTailSource implements TranscriptSource {
       this.inode = undefined;
     }
     this.clearDiscovery();
+    // Captured BEFORE settle(true): if the soft timeout already fired, this bind
+    // is a LATE recovery — the firstLine promise was already rejected and the
+    // spawn moved on, so we notify the manager to re-attach downstream state.
+    const late = this.softTimedOut;
     this.logger.verbose?.(
       `[Cyboflow Transcript] bound session ${this.sessionUuid} (${this.boundPath})`,
     );
-    this.settle(true);
+    this.settle(true); // no-op if the soft timeout already settled(false)
     this.startTail();
+    if (late) {
+      this.logger.warn(
+        `[Cyboflow Transcript] late-bound session ${this.sessionUuid} after discovery timeout — structured pipeline recovered`,
+      );
+      if (this.sessionUuid !== undefined) this.onLateBind?.(this.sessionUuid);
+    }
   }
 
   /**
@@ -306,16 +366,59 @@ export class TranscriptTailSource implements TranscriptSource {
     return true;
   }
 
+  /**
+   * SOFT timeout: the spawn->first-line race exceeded `discoveryTimeoutMs`. This
+   * is NON-fatal and no longer a hard give-up — a slow-but-successful `claude`
+   * launch (slow network / MCP bootstrap) may still write its transcript shortly.
+   * We reject the firstLine promise (so the awaiting spawn proceeds) and then
+   * DOWNSHIFT the fast 50ms poller to a low-frequency background poll: if the
+   * transcript appears within `lateDiscoveryWindowMs`, bindFile attaches the
+   * structured pipeline mid-session and fires `onLateBind`. Only a TRUE give-up
+   * (the window elapses with no file) is surfaced as a seam-worthy failure.
+   */
   private onDiscoveryTimeout(): void {
     if (this.settled || this.bound) return;
-    this.logger.error(
-      `[Cyboflow Transcript] discovery timeout after ${this.discoveryTimeoutMs}ms — no new *.jsonl appeared in ${this.keyDir}`,
+    this.softTimedOut = true;
+    this.logger.warn(
+      `[Cyboflow Transcript] discovery timeout after ${this.discoveryTimeoutMs}ms in ${this.keyDir} — keeping a background poll alive for ${this.lateDiscoveryWindowMs}ms in case claude is still bootstrapping`,
     );
-    this.clearDiscovery();
+    this.clearFastDiscovery();
     this.settle(false);
+    this.startLateDiscovery();
+  }
+
+  /** Downshift to a low-frequency background poll bounded by the extended window. */
+  private startLateDiscovery(): void {
+    if (this.stopped || this.bound || this.discoveryGaveUp) return;
+    this.lateDiscoveryInterval = setInterval(() => {
+      this.tryDiscover();
+    }, LATE_POLL_INTERVAL_MS);
+    this.lateDiscoveryDeadline = setTimeout(() => {
+      this.giveUpDiscovery();
+    }, this.lateDiscoveryWindowMs);
+  }
+
+  /**
+   * TRUE give-up: the extended window elapsed with no transcript ever appearing.
+   * This is the genuinely-actionable failure (claude never engaged the prompt),
+   * so it logs at error and fires `onGiveUp` for the manager to report as a seam.
+   */
+  private giveUpDiscovery(): void {
+    if (this.bound || this.stopped || this.discoveryGaveUp) return;
+    this.discoveryGaveUp = true;
+    this.clearLateDiscovery();
+    this.logger.error(
+      `[Cyboflow Transcript] discovery gave up after ${this.discoveryTimeoutMs + this.lateDiscoveryWindowMs}ms — no new *.jsonl ever appeared in ${this.keyDir}; session runs without the structured pipeline`,
+    );
+    this.onGiveUp?.();
   }
 
   private clearDiscovery(): void {
+    this.clearFastDiscovery();
+    this.clearLateDiscovery();
+  }
+
+  private clearFastDiscovery(): void {
     if (this.watcher !== undefined) {
       try {
         this.watcher.close();
@@ -331,6 +434,17 @@ export class TranscriptTailSource implements TranscriptSource {
     if (this.discoveryTimer !== undefined) {
       clearTimeout(this.discoveryTimer);
       this.discoveryTimer = undefined;
+    }
+  }
+
+  private clearLateDiscovery(): void {
+    if (this.lateDiscoveryInterval !== undefined) {
+      clearInterval(this.lateDiscoveryInterval);
+      this.lateDiscoveryInterval = undefined;
+    }
+    if (this.lateDiscoveryDeadline !== undefined) {
+      clearTimeout(this.lateDiscoveryDeadline);
+      this.lateDiscoveryDeadline = undefined;
     }
   }
 

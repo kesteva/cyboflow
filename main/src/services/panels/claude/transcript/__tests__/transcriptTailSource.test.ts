@@ -119,19 +119,79 @@ describe('TranscriptTailSource', () => {
     expect(src.getSessionUuid()).toBe(newUuid);
   });
 
-  it('rejects with a loud diagnostic when no transcript appears (discovery timeout)', async () => {
+  it('soft timeout: rejects firstLine with a loud diagnostic but does NOT give up (warn, not error)', async () => {
     const logger = makeSpyLogger();
+    const onGiveUp = vi.fn();
     const src = trackedSource({
       worktreePath: WORKTREE,
       projectsRoot: tmpRoot,
       discoveryTimeoutMs: 80,
+      // Long extended window so the soft timeout does NOT roll into a give-up here.
+      lateDiscoveryWindowMs: 5000,
       logger,
+      onGiveUp,
     });
 
     await src.start(() => undefined);
 
     await expect(src.waitForFirstLine(80)).rejects.toThrow(/discovery timeout/i);
+    // Soft timeout is recoverable: warn locally, NOT error, and NOT a give-up.
+    expect(logger.warn).toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(onGiveUp).not.toHaveBeenCalled();
+  });
+
+  it('late recovery: a transcript appearing AFTER the soft timeout still binds + fires onLateBind', async () => {
+    const logger = makeSpyLogger();
+    const onLateBind = vi.fn();
+    const received: unknown[] = [];
+    const src = trackedSource({
+      worktreePath: WORKTREE,
+      projectsRoot: tmpRoot,
+      discoveryTimeoutMs: 80,
+      lateDiscoveryWindowMs: 5000,
+      logger,
+      onLateBind,
+    });
+
+    await src.start((obj) => received.push(obj));
+
+    // The soft timeout fires first (no file yet) — the firstLine promise rejects.
+    await expect(src.waitForFirstLine(80)).rejects.toThrow(/discovery timeout/i);
+
+    // Now the slow claude launch finally writes its transcript — the background
+    // poll must still discover + bind it and attach the structured pipeline.
+    const lateUuid = 'aaaabbbb-cccc-dddd-eeee-ffff00001111';
+    fs.writeFileSync(path.join(keyDir, `${lateUuid}.jsonl`), assistantTextLine('late') + '\n');
+
+    await waitFor(() => received.length >= 1);
+    expect(src.getSessionUuid()).toBe(lateUuid);
+    expect(onLateBind).toHaveBeenCalledWith(lateUuid);
+    const e0 = received[0] as { message: { content: Array<{ text: string }> } };
+    expect(e0.message.content[0].text).toBe('late');
+  });
+
+  it('true give-up: the extended window elapsing with no transcript fires onGiveUp (error)', async () => {
+    const logger = makeSpyLogger();
+    const onGiveUp = vi.fn();
+    const onLateBind = vi.fn();
+    const src = trackedSource({
+      worktreePath: WORKTREE,
+      projectsRoot: tmpRoot,
+      discoveryTimeoutMs: 40,
+      lateDiscoveryWindowMs: 60,
+      logger,
+      onGiveUp,
+      onLateBind,
+    });
+
+    await src.start(() => undefined);
+    await expect(src.waitForFirstLine(40)).rejects.toThrow(/discovery timeout/i);
+
+    // After the soft timeout (40ms) + extended window (60ms), give up for real.
+    await waitFor(() => onGiveUp.mock.calls.length >= 1);
     expect(logger.error).toHaveBeenCalled();
+    expect(onLateBind).not.toHaveBeenCalled();
   });
 
   it('tails incrementally: split line reassembled, malformed line skipped, in order', async () => {

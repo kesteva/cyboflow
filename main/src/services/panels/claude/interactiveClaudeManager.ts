@@ -222,8 +222,17 @@ interface InteractiveRun {
   reject: (err: Error) => void;
 }
 
-/** Discovery bound on the spawn -> first-`.jsonl` race (ms). */
-const DISCOVERY_TIMEOUT_MS = 15_000;
+/**
+ * SOFT bound on the spawn -> first-`.jsonl` race (ms). Raised from 15s: the
+ * interactive substrate has NO warm-session path, so every first turn pays the
+ * full `claude` cold-start (binary + MCP server load + API/auth handshake) — a
+ * slow network or heavy machine occasionally pushes that past 15s, tripping a
+ * FALSE discovery timeout on a launch that would have succeeded. 45s tolerates
+ * that latency tail; the timeout only bounds the FAILURE wait (a successful bind
+ * resolves the instant the file appears), and the TranscriptTailSource keeps a
+ * background poll alive past it for late recovery.
+ */
+const DISCOVERY_TIMEOUT_MS = 45_000;
 
 /**
  * Transcript-drain settle window (ms). Exists ONLY to prevent tail truncation
@@ -1122,7 +1131,28 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     // Start the TranscriptTailSource (TASK-807). Each normalized line flows
     // narrow -> router.emitForRun(runId) -> emit('output', ...) field-identical
     // to the SDK envelope. The logger is PASSED (CLAUDE.md optional-logger rule).
-    const tailSource = this.createTranscriptSource(worktreePath);
+    const tailSource = this.createTranscriptSource(worktreePath, {
+      // Late recovery: the transcript appeared AFTER the soft discovery timeout,
+      // so the structured pipeline has now attached mid-session. Re-persist the
+      // recovered session id (the initial persistDiscoveredSessionId ran with no
+      // uuid) so the slow-launched session stays cleanly resumable.
+      onLateBind: (uuid) => this.persistLateBoundSessionId(sessionId, uuid),
+      // True give-up: no transcript ever appeared within the extended window —
+      // the genuinely-actionable "claude never engaged the prompt" failure. This
+      // (NOT the recoverable soft timeout) is what we surface to Sentry.
+      onGiveUp: () =>
+        captureSeamError(
+          'interactive-transcript-discovery-timeout',
+          new Error(
+            `[Cyboflow Transcript] discovery gave up — no transcript appeared for panel ${panelId} after the soft timeout + extended window`,
+          ),
+          {
+            substrate: 'interactive',
+            timeoutMs: String(DISCOVERY_TIMEOUT_MS),
+            outcome: 'gave-up',
+          },
+        ),
+    });
     this.tailSources.set(panelId, tailSource);
 
     const onLine = (normalizedLine: unknown): void => {
@@ -1179,15 +1209,15 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       await tailSource.waitForFirstLine(DISCOVERY_TIMEOUT_MS);
     } catch (discoveryErr) {
       const message = discoveryErr instanceof Error ? discoveryErr.message : String(discoveryErr);
-      this.logger?.error(`[InteractiveClaudeManager] transcript discovery failed for panel ${panelId}: ${message}`);
-      // Non-fatal to the session, but this IS the "spawned claude never engaged
-      // the prompt" symptom (session appears hung for DISCOVERY_TIMEOUT_MS,
-      // then no structured pipeline) — report it, since nothing downstream
-      // throws for it.
-      captureSeamError('interactive-transcript-discovery-timeout', discoveryErr, {
-        substrate: 'interactive',
-        timeoutMs: String(DISCOVERY_TIMEOUT_MS),
-      });
+      // SOFT timeout only: non-fatal AND now recoverable. The TranscriptTailSource
+      // keeps a background poll alive past this point, so a slow-but-successful
+      // claude launch still binds late and attaches the structured pipeline
+      // (onLateBind re-persists the session id). The seam error is reported by the
+      // source's onGiveUp ONLY if the extended window elapses with no transcript
+      // at all — so we do NOT report here; we just log locally that we're waiting.
+      this.logger?.warn(
+        `[InteractiveClaudeManager] transcript discovery slow for panel ${panelId} (${message}); background discovery continues — structured pipeline will attach if it appears`,
+      );
     }
 
     // single-writer-per-substrate: the interactive substrate writes
@@ -1281,7 +1311,13 @@ export class InteractiveClaudeManager extends AbstractCliManager {
    * source with zero PTY/FS coupling. Production constructs a real
    * TranscriptTailSource with the logger PASSED (CLAUDE.md optional-logger rule).
    */
-  protected createTranscriptSource(worktreePath: string): TranscriptSource {
+  protected createTranscriptSource(
+    worktreePath: string,
+    callbacks?: {
+      onLateBind?: (sessionUuid: string) => void;
+      onGiveUp?: () => void;
+    },
+  ): TranscriptSource {
     if (this.logger === undefined) {
       throw new Error('[InteractiveClaudeManager] logger is required for TranscriptTailSource');
     }
@@ -1289,6 +1325,8 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       worktreePath,
       discoveryTimeoutMs: DISCOVERY_TIMEOUT_MS,
       logger: this.logger,
+      onLateBind: callbacks?.onLateBind,
+      onGiveUp: callbacks?.onGiveUp,
     });
   }
 
@@ -1504,6 +1542,27 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       this.logger?.verbose(`[InteractiveClaudeManager] persisted claude_session_id=${uuid} for session ${sessionId} (from transcript filename)`);
     } catch (err) {
       this.logger?.warn(`[InteractiveClaudeManager] failed to persist claude_session_id for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * Persist claude_session_id after a LATE transcript bind — the transcript
+   * appeared after the soft discovery timeout, so persistDiscoveredSessionId
+   * already ran (with no uuid) and the structured pipeline has now attached
+   * mid-session. Mirrors the DB-level write in persistDiscoveredSessionId;
+   * idempotent (no fork → same id) and fail-soft. Called from the tail source's
+   * onLateBind callback on a background timer, so it must never throw.
+   */
+  private persistLateBoundSessionId(sessionId: string, uuid: string): void {
+    try {
+      this.sessionManager.db.updateSession(sessionId, { claude_session_id: uuid });
+      this.logger?.warn(
+        `[InteractiveClaudeManager] recovered structured pipeline via late transcript bind for session ${sessionId}; persisted claude_session_id=${uuid}`,
+      );
+    } catch (err) {
+      this.logger?.warn(
+        `[InteractiveClaudeManager] late-bind claude_session_id persist failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
