@@ -1,0 +1,32 @@
+-- Migration 061: multi-idea planner seed — seed_idea_ids on workflow_runs.
+--
+-- workflow_runs:
+--   seed_idea_ids  JSON string array of ALL idea ids seeded into a planner run
+--               at launch (IDEA-009: "Planner should accept multiple ideas").
+--               Mirrors seed_finding_ids (034) / seed_idea_id (017) / batch_id
+--               (022) — soft link, no FK. Planner-only; NULL = single-idea run
+--               (the pre-existing seed_idea_id column is the sole source of
+--               truth for those). When a run IS seeded with multiple ideas,
+--               seed_idea_id stays DUAL-WRITTEN with the first element of
+--               seed_idea_ids, so every single-idea reader of seed_idea_id
+--               (existing UI, queries, etc.) keeps working unchanged.
+--               workflow_runs has NO write chokepoint; the seed is a post-create
+--               UPDATE, the sanctioned pattern (see runLauncher SET seed_idea_id
+--               / SET batch_id).
+--
+-- Idempotency: SQLite ADD COLUMN is NOT IF-NOT-EXISTS. Re-applying outside the
+-- production ledger throws "duplicate column name: seed_idea_ids"; the runner's
+-- transaction wrapper rolls the file back. Proven behavior (024/034).
+-- schema.sql is intentionally NOT edited: workflow_runs' prior ALTER columns
+-- (seed_idea_id/batch_id/substrate/seed_finding_ids) are likewise absent from
+-- schema.sql, so parity stays green with zero schema edits.
+--
+-- NOTE: No explicit BEGIN/COMMIT here — runFileBasedMigrations() in database.ts
+-- wraps every file in a this.transaction(...) call, so an inner BEGIN would nest.
+--
+-- MIGRATION-NUMBER NOTE: originally authored as 060; renumbered to 061 at rebase
+-- time after 060_compound_recommendations_atype landed on main. If this number
+-- collides again, renumber to the next free number and update the test chain +
+-- test filename in one pass (see the collision notes on 049-054).
+
+ALTER TABLE workflow_runs ADD COLUMN seed_idea_ids TEXT;
