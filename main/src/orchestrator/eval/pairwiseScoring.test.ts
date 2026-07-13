@@ -3,7 +3,11 @@
  * Exhaustive over the majority/tie/confidence/representative-rationale contract.
  */
 import { describe, it, expect } from 'vitest';
-import { aggregatePairwise } from './pairwiseScoring';
+import {
+  aggregatePairwise,
+  relabelSolutionsToArms,
+  displayRationaleForVerdict,
+} from './pairwiseScoring';
 import type { PairwiseSample, PairwisePreference } from '../../../../shared/types/experiments';
 
 let seq = 0;
@@ -16,6 +20,16 @@ function sample(preference: PairwisePreference, confidence: number, rationale = 
     confidence,
     rationale,
   };
+}
+
+/** Like `sample` but pins `positionAFirst` (which arm was shown as "Solution 1"). */
+function orientedSample(
+  preference: PairwisePreference,
+  confidence: number,
+  positionAFirst: boolean,
+  rationale: string,
+): PairwiseSample {
+  return { ...sample(preference, confidence, rationale), positionAFirst };
 }
 
 describe('aggregatePairwise', () => {
@@ -95,5 +109,80 @@ describe('aggregatePairwise', () => {
     const samples = [sample('A', 0.7), sample('tie', 0.2)];
     const v = aggregatePairwise(samples);
     expect(v.perSample).toEqual(samples);
+  });
+});
+
+describe('relabelSolutionsToArms', () => {
+  it('positionAFirst: Solution 1 => Arm A, Solution 2 => Arm B', () => {
+    expect(relabelSolutionsToArms('Solution 1 beats Solution 2.', true)).toBe(
+      'Arm A beats Arm B.',
+    );
+  });
+
+  it('!positionAFirst: labels are flipped (Solution 2 => Arm A)', () => {
+    expect(relabelSolutionsToArms('Solution 2 beats Solution 1.', false)).toBe(
+      'Arm A beats Arm B.',
+    );
+  });
+
+  it('rewrites possessives and is case-insensitive', () => {
+    expect(relabelSolutionsToArms("solution 2's rigor outweighs Solution 1.", false)).toBe(
+      "Arm A's rigor outweighs Arm B.",
+    );
+  });
+
+  it('is idempotent on already-relabeled text', () => {
+    expect(relabelSolutionsToArms('Arm A beats Arm B.', true)).toBe('Arm A beats Arm B.');
+  });
+
+  it('leaves unrelated "solution" prose untouched', () => {
+    expect(relabelSolutionsToArms('The solution is elegant.', true)).toBe(
+      'The solution is elegant.',
+    );
+  });
+});
+
+describe('displayRationaleForVerdict', () => {
+  it('relabels using the winning-side source sample when A won but prose says "Solution 2"', () => {
+    // The judge preferred Arm A in a sample where Arm A was shown SECOND (positionAFirst=false),
+    // so its prose praises "Solution 2" — the exact contradiction the fix targets.
+    const perSample = [
+      orientedSample('A', 0.9, false, "Solution 2's completeness wins over Solution 1."),
+      orientedSample('A', 0.4, true, 'weak-A'),
+    ];
+    const out = displayRationaleForVerdict(
+      "Solution 2's completeness wins over Solution 1.",
+      perSample,
+      'A',
+    );
+    expect(out).toBe("Arm A's completeness wins over Arm B.");
+  });
+
+  it('prefers a winning-side sample over a losing-side one with identical text', () => {
+    const shared = 'Solution 1 is better.';
+    const perSample = [
+      orientedSample('B', 0.8, true, shared), // losing side; Solution 1 = Arm A here
+      orientedSample('A', 0.9, false, shared), // winning side; Solution 1 = Arm B here
+    ];
+    // Winning-side source has positionAFirst=false => Solution 1 = Arm B.
+    expect(displayRationaleForVerdict(shared, perSample, 'A')).toBe('Arm B is better.');
+  });
+
+  it('tie verdict resolves the source from the whole ballot', () => {
+    const perSample = [orientedSample('tie', 0.3, false, 'Solution 1 and Solution 2 are equivalent.')];
+    expect(displayRationaleForVerdict('Solution 1 and Solution 2 are equivalent.', perSample, 'tie')).toBe(
+      'Arm B and Arm A are equivalent.',
+    );
+  });
+
+  it('leaves text untouched when no source sample matches (legacy/empty ballot)', () => {
+    expect(displayRationaleForVerdict('Solution 2 wins.', [], 'A')).toBe('Solution 2 wins.');
+    expect(
+      displayRationaleForVerdict('Solution 2 wins.', [orientedSample('A', 0.9, true, 'other')], 'A'),
+    ).toBe('Solution 2 wins.');
+  });
+
+  it('empty rationale short-circuits', () => {
+    expect(displayRationaleForVerdict('', [orientedSample('A', 0.9, true, 'x')], 'A')).toBe('');
   });
 });

@@ -75,3 +75,44 @@ function highestConfidenceRationale(pool: PairwiseSample[]): string {
   }
   return best?.rationale ?? '';
 }
+
+/**
+ * Rewrite the neutral per-sample "Solution 1/2" labels in a rationale to STABLE arm
+ * identity ("Arm A"/"Arm B"). The judge grades each sample under position-randomized
+ * neutral labels (`positionAFirst`), so the raw prose says "Solution 2" for whichever
+ * arm happened to land in position 2 in THAT sample — which reads as a contradiction
+ * next to the de-randomized "Prefers A" badge. Given the orientation of the sample the
+ * text came from, this maps the labels back to the arm the reader actually sees:
+ *
+ *   positionAFirst true  => Solution 1 = Arm A, Solution 2 = Arm B.
+ *   positionAFirst false => Solution 1 = Arm B, Solution 2 = Arm A.
+ *
+ * Idempotent on already-relabeled text (only "Solution 1|2" tokens match).
+ */
+export function relabelSolutionsToArms(rationale: string, positionAFirst: boolean): string {
+  const armFor = (digit: string): 'A' | 'B' =>
+    digit === '1' ? (positionAFirst ? 'A' : 'B') : positionAFirst ? 'B' : 'A';
+  return rationale.replace(/\bSolution\s+([12])\b/gi, (_full, digit: string) => `Arm ${armFor(digit)}`);
+}
+
+/**
+ * The DISPLAY rationale for a stored verdict: the representative rationale with its
+ * "Solution 1/2" labels rewritten to arm identity via {@link relabelSolutionsToArms}.
+ * Recovers the source sample's `positionAFirst` by matching the stored text back to a
+ * per-sample rationale (preferring the winning side, mirroring how aggregatePairwise
+ * picked it). Leaves the text untouched when no source sample is identifiable (empty
+ * ballot / legacy row / already relabeled) — a no-mapping fallback, never a mislabel.
+ */
+export function displayRationaleForVerdict(
+  rationale: string,
+  perSample: PairwiseSample[],
+  preference: PairwisePreference,
+): string {
+  if (rationale === '' || perSample.length === 0) return rationale;
+  const winningSide =
+    preference === 'tie' ? [] : perSample.filter((s) => s.preference === preference);
+  const source =
+    winningSide.find((s) => s.rationale === rationale) ??
+    perSample.find((s) => s.rationale === rationale);
+  return source ? relabelSolutionsToArms(rationale, source.positionAFirst) : rationale;
+}

@@ -51,6 +51,7 @@ import {
   isBaselineArm,
   BASELINE_VARIANT_SENTINEL,
 } from '../../../../../shared/types/experiments';
+import { displayRationaleForVerdict } from '../../eval/pairwiseScoring';
 import {
   insertExperiment,
   getExperiment,
@@ -1688,7 +1689,9 @@ function buildVerdict(row: ExperimentComparisonRow | null): PairwiseVerdict | nu
   return {
     preference: row.preference,
     confidence: row.confidence ?? 0,
-    rationale: row.rationale ?? '',
+    // Rewrite the representative rationale's position-randomized "Solution 1/2"
+    // labels to stable arm identity so the prose agrees with the "Prefers A" badge.
+    rationale: displayRationaleForVerdict(row.rationale ?? '', perSample, row.preference),
     aCount: row.a_count,
     bCount: row.b_count,
     tieCount: row.tie_count,
