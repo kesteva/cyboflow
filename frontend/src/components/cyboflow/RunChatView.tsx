@@ -8,9 +8,9 @@
  * surface a quick session renders (ClaudePanel). This file owns only the
  * run-specific wiring:
  *   - the interactive-substrate body (the live PTY xterm, InteractiveTerminalView),
- *   - the inline `AskUserQuestionCard` injected at its tool_use position (via
- *     UnifiedChatView's `renderToolCallExtra` hook) + its artifact "open in pane"
- *     affordances,
+ *   - the `AskUserQuestionCard`, injected at its tool_use position when the
+ *     transcript has a matching anchor and pinned above the composer otherwise,
+ *     plus its artifact "open in pane" affordances,
  *   - the bottom region: the per-run `PendingApprovalsForRun` strip, the
  *     permission-change confirmation toast, and the run composer (`ChatInput`).
  *
@@ -214,6 +214,28 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
     [questionQueue, onOpenArtifact, primaryArtifact],
   );
 
+  // Codex request_user_input uses a host request id for the Question record,
+  // while app-server exposes a different provider tool-call id. The provider
+  // call also remains in-progress until the human answers, so there may be no
+  // completed transcript tool row to anchor against at all. Keep those live
+  // questions pinned above the composer; Claude questions with matching
+  // tool_use ids remain inline at their transcript position.
+  const transcriptToolCallIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const message of messages) {
+      for (const segment of message.segments) {
+        if (segment.type === 'tool_call') ids.add(segment.tool.id);
+      }
+    }
+    return ids;
+  }, [messages]);
+  const unanchoredQuestions = useMemo(
+    () => questionQueue.filter(
+      (question) => question.runId === runId && !transcriptToolCallIds.has(question.toolUseId),
+    ),
+    [questionQueue, runId, transcriptToolCallIds],
+  );
+
   // -------------------------------------------------------------------------
   // Placeholder branches (no active run)
   // -------------------------------------------------------------------------
@@ -263,6 +285,23 @@ export function RunChatView({ runId }: { runId: string | null }): ReactElement {
       bottomSlot={
         <>
           <PendingApprovalsForRun runId={runId} />
+
+          {unanchoredQuestions.length > 0 && (
+            <div
+              className="flex-shrink-0 overflow-y-auto border-t border-border-primary bg-bg-secondary"
+              style={{ maxHeight: '40vh' }}
+              data-testid="run-chat-unanchored-questions"
+            >
+              {unanchoredQuestions.map((question) => (
+                <AskUserQuestionCard
+                  key={question.id}
+                  item={question}
+                  onOpenArtifact={onOpenArtifact}
+                  openArtifactLabel={primaryArtifact?.label}
+                />
+              ))}
+            </div>
+          )}
 
           {/* Permission-change confirmation — copy supplied by ChatInput's pill
               (SDK runs apply the change on the next message). */}

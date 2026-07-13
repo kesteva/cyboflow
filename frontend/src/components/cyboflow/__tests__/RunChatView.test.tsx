@@ -23,7 +23,7 @@
 import '@testing-library/jest-dom';
 import { render, screen, act, waitFor, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { ReactNode } from 'react';
+import { Fragment, type ReactNode } from 'react';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
 
 // ---------------------------------------------------------------------------
@@ -90,18 +90,25 @@ vi.mock('../InteractiveTerminalView', () => ({
   ),
 }));
 
-// The ChatTranscript stub invokes `renderToolCallExtra` with a fixed tool id so
-// the inline AskUserQuestionCard injection (and its artifact wiring) is exercised
-// without depending on the real transcript's projection internals.
+// The ChatTranscript stub invokes `renderToolCallExtra` for the tool calls in
+// its supplied messages, matching the real transcript's injection behavior.
 vi.mock('../../chat/ChatTranscript', () => ({
   ChatTranscript: ({
+    messages,
     renderToolCallExtra,
   }: {
+    messages: UnifiedMessage[];
     renderToolCallExtra?: (toolCallId: string) => ReactNode;
   }) => (
     <div data-testid="chat-transcript">
       ChatTranscript
-      {renderToolCallExtra?.('tool-use-card')}
+      {messages.flatMap((message) => message.segments).map((segment, index) =>
+        segment.type === 'tool_call' ? (
+          <Fragment key={`${segment.tool.id}-${index}`}>
+            {renderToolCallExtra?.(segment.tool.id)}
+          </Fragment>
+        ) : null,
+      )}
     </div>
   ),
 }));
@@ -198,8 +205,27 @@ function makeArtifact(overrides: Partial<Artifact> = {}): Artifact {
   };
 }
 
-/** Seed a pending question whose toolUseId matches the ChatTranscript stub's id. */
-function seedQuestion(runId: string): void {
+function toolCallMessage(toolUseId: string): UnifiedMessage {
+  return {
+    id: 'tool-message',
+    role: 'assistant',
+    timestamp: '2026-01-01T00:00:00.000Z',
+    segments: [{
+      type: 'tool_call',
+      tool: {
+        id: toolUseId,
+        name: 'AskUserQuestion',
+        status: 'pending',
+      },
+    }],
+  };
+}
+
+/** Seed a pending question and, by default, its matching transcript anchor. */
+function seedQuestion(runId: string, toolUseId = 'tool-use-card', anchored = true): void {
+  mockListUnifiedMessages.mockImplementation(async () => (
+    anchored ? [toolCallMessage(toolUseId)] : []
+  ));
   act(() => {
     useQuestionStore.setState({
       queue: [
@@ -207,7 +233,7 @@ function seedQuestion(runId: string): void {
           id: 'q-1',
           runId,
           workflowName: 'planner',
-          toolUseId: 'tool-use-card',
+          toolUseId,
           status: 'pending',
           createdAt: '2026-01-01T00:00:00.000Z',
           answeredAt: null,
@@ -435,6 +461,17 @@ describe('RunChatView — data flow', () => {
 // ---------------------------------------------------------------------------
 
 describe('RunChatView — question-card artifact wiring', () => {
+  it('pins a Codex question above the composer when no transcript tool id matches', async () => {
+    seedRun('run-codex-question', 'sdk', 'codex');
+    seedQuestion('run-codex-question', 'req-2-host-id', false);
+
+    render(<RunChatView runId="run-codex-question" />);
+
+    const fallback = await screen.findByTestId('run-chat-unanchored-questions');
+    expect(fallback).toHaveTextContent('Approve?');
+    expect(fallback.querySelectorAll('[data-question-id="q-1"]')).toHaveLength(1);
+  });
+
   it('passes onOpenArtifact when an artifact exists; "View in pane" opens a center-pane tab', async () => {
     mockArtifactsList.mockImplementation(async () => [makeArtifact({ id: 'art-1', atype: 'idea-spec', label: 'IDEA-001 Spec' })]);
     seedRun('run-art', 'sdk');
@@ -448,6 +485,7 @@ describe('RunChatView — question-card artifact wiring', () => {
     // The injected card surfaces the "open in pane" affordances (per-option +
     // below-prompt link) once the artifact list resolves.
     const belowLink = await screen.findByRole('button', { name: /View IDEA-001 Spec in pane/i });
+    expect(screen.queryByTestId('run-chat-unanchored-questions')).toBeNull();
     expect(screen.queryByText('Show preview')).not.toBeInTheDocument();
 
     // Clicking the below-prompt link opens an idea-spec center-pane tab keyed by
@@ -492,7 +530,10 @@ describe('RunChatView — question-card artifact wiring', () => {
     render(<RunChatView runId="run-art" />);
 
     // No artifact → card keeps the inline "Show preview" toggle, no "in pane" CTAs.
-    expect(await screen.findByText('Show preview')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.queryByTestId('run-chat-unanchored-questions')).toBeNull();
+    });
+    expect(screen.getByText('Show preview')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /in pane/i })).not.toBeInTheDocument();
   });
 });

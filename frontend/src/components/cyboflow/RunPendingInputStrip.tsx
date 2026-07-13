@@ -23,9 +23,9 @@
  *      run has ANY live questionStore Question, every `source === 'question'`
  *      review item for that run is dropped from the render — suppression is by
  *      RUN, not by toolUseId.
- *   2. The CHAT-TRANSCRIPT inline card — `RunChatView.renderToolCallExtra`
- *      renders an AskUserQuestionCard at the question's tool_use position, but
- *      only when the Chat tab is the visible bottom-dock surface.
+ *   2. The CHAT card — `RunChatView` renders an AskUserQuestionCard at the
+ *      question's tool_use position when one exists, or pins it above the
+ *      composer when provider and host ids cannot be correlated.
  *   3. THIS strip's own AskUserQuestionCard — the guaranteed-visible fallback
  *      for every NON-chat tab (and a collapsed dock).
  *
@@ -87,9 +87,9 @@ export function RunPendingInputStrip({
     [questionQueue, runId],
   );
 
-  // Live question cards THIS strip renders. When the chat transcript is the
-  // visible surface it already renders them inline, so the strip stands down —
-  // one interactive surface per live question (surface #2 vs #3, see docstring).
+  // Live question cards THIS strip renders. When the chat surface is visible it
+  // renders every question either inline or in its pinned fallback, so the strip
+  // stands down — one interactive surface per live question.
   const stripQuestions = chatSurfaceVisible ? [] : liveQuestions;
 
   const pendingItems = useMemo(() => {
