@@ -1256,6 +1256,172 @@ export const runsRouter = router({
     }),
 
   /**
+   * Launch a dedicated single-idea planner for a too-large idea parked behind the
+   * planner's size guard, then resolve that guard (IDEA-009 / Decision 8 —
+   * create-then-resolve, atomic). The "Launch a separate planner" CTA's server half.
+   *
+   * The planner's size guard parks a too-large idea behind a BLOCKING `decision`
+   * review item (source `gate:human-step:<guard step id>`, soft-linked
+   * entity_type='idea', run_id=<parent planner run>). This mutation mints a NEW
+   * planner run scoped to JUST that idea: the linked idea rides the POSITIONAL
+   * ideaId — a single-idea seed, so workflow_runs.seed_idea_ids stays NULL and
+   * launchOptions.ideaIds (the multi-idea path) is deliberately NOT used — and the
+   * child inherits the parent run's substrate + model + session host. It resolves
+   * the guard ONLY AFTER the launch confirms, with a durable
+   * `separate-planner:<childRunId>` resolution (a stable prefix a later card/
+   * return-to-backlog task discriminates on).
+   *
+   * Ordering (create-then-resolve): validate (nothing launched on a hard error) →
+   * launch → resolve. A launch failure rethrows as a TRPCError with the guard
+   * UNTOUCHED. A resolve failure AFTER a successful launch surfaces the error but
+   * does NOT unwind the launch: duplicate-launch-on-retry is the accepted failure
+   * mode; an orphaned resolution (guard cleared with no child run) is not — which
+   * is exactly why the resolve runs last.
+   *
+   * Blocking-unblock: the resolve routes through the ReviewItemRouter chokepoint,
+   * whose post-commit 'resolved' emit is what the programmatic ReviewQueueHumanGate
+   * that parked the run listens for — it owns its own maybeResumeRun and wakes the
+   * walk with parseGateVerdict('separate-planner:…') === 'approve', so the parent
+   * planner resumes and proceeds with the remaining ideas. No trailing
+   * maybeResumeRun is threaded here (mirrors answerRecoveryGate's raw applyReviewItem).
+   *
+   * Reuses the start deps (runLauncher + sessionManager); until wired it throws
+   * METHOD_NOT_SUPPORTED.
+   */
+  launchSeparatePlanner: protectedProcedure
+    .input(
+      z.object({
+        projectId: z.number().int().positive(),
+        reviewItemId: z.string().min(1),
+      }),
+    )
+    .mutation(async ({ ctx, input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
+      if (!startRunDeps) {
+        throw new TRPCError({
+          code: 'METHOD_NOT_SUPPORTED',
+          message: 'start dependencies not wired yet. Call setStartRunDeps() at boot.',
+        });
+      }
+      if (!ctx.db) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: 'db not wired into tRPC context' });
+      }
+
+      // (1) Validate the guard item + parent run + idea link. All hard errors, so a
+      // malformed request never launches anything (create-then-resolve, step 1). The
+      // READ is a narrow SELECT; the resolve WRITE below goes through the chokepoint.
+      const item = ctx.db
+        .prepare(
+          `SELECT run_id AS runId, status, entity_type AS entityType, entity_id AS entityId
+             FROM review_items WHERE id = ? AND project_id = ?`,
+        )
+        .get(input.reviewItemId, input.projectId) as
+        | { runId: string | null; status: string; entityType: string | null; entityId: string | null }
+        | undefined;
+      if (!item) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: `Review item ${input.reviewItemId} not found in project ${input.projectId}`,
+        });
+      }
+      if (item.status !== 'pending') {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: `Review item ${input.reviewItemId} is already '${item.status}' — cannot launch a separate planner`,
+        });
+      }
+      if (item.entityType !== 'idea' || !item.entityId) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: `Review item ${input.reviewItemId} has no linked idea to plan`,
+        });
+      }
+      if (!item.runId) {
+        throw new TRPCError({
+          code: 'PRECONDITION_FAILED',
+          message: `Review item ${input.reviewItemId} has no parent run to inherit substrate/model/session from`,
+        });
+      }
+      // Pin the validated idea id + parent run id as narrowed locals — the launch
+      // call below is after intervening DB reads, and property narrowing on
+      // item.entityId (string | null) can lapse into the launcher's string-only ideaId.
+      const ideaId: string = item.entityId;
+      const run = ctx.db
+        .prepare(`SELECT workflow_id, project_id, substrate, model, session_id FROM workflow_runs WHERE id = ?`)
+        .get(item.runId) as
+        | {
+            workflow_id: string;
+            project_id: number;
+            substrate: CliSubstrate | null;
+            model: string | null;
+            session_id: string | null;
+          }
+        | undefined;
+      if (!run) {
+        throw new TRPCError({ code: 'PRECONDITION_FAILED', message: `Parent run ${item.runId} not found` });
+      }
+      const project = startRunDeps.sessionManager.getProjectById(run.project_id);
+      if (!project) {
+        throw new TRPCError({ code: 'NOT_FOUND', message: `Project ${run.project_id} not found` });
+      }
+
+      // (2) Launch the dedicated single-idea planner (create-then-resolve, step 2).
+      // The linked idea rides the POSITIONAL ideaId (5th arg) — a single-idea seed,
+      // so seed_idea_ids stays NULL; substrate (3rd), session host (6th), and model
+      // (13th) inherit from the parent run. The trailing launchOptions is OMITTED so
+      // NO ideaIds multi-idea seed is written. A launch failure leaves the guard
+      // pending (rethrown as a TRPCError below).
+      let child: Awaited<ReturnType<RunLauncherLike['launch']>>;
+      try {
+        child = await startRunDeps.runLauncher.launch(
+          run.workflow_id,
+          project.path,
+          run.substrate ?? undefined,
+          undefined,
+          ideaId,
+          run.session_id ?? undefined,
+          undefined,
+          undefined,
+          undefined,
+          run.project_id,
+          undefined,
+          undefined,
+          run.model ?? undefined,
+        );
+      } catch (err) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: `Failed to launch a separate planner for idea ${ideaId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        });
+      }
+
+      // (3) Resolve the guard LAST, recording the child run durably. Through the
+      // ReviewItemRouter chokepoint (post-commit 'resolved' emit → the parked run's
+      // ReviewQueueHumanGate resumes it). A failure AFTER a successful launch surfaces
+      // here but does NOT unwind the launch — duplicate-launch-on-retry is accepted;
+      // an orphaned resolution is not (hence resolve-last).
+      try {
+        await ReviewItemRouter.getInstance().applyReviewItem(input.projectId, {
+          op: 'resolve',
+          actor: 'user',
+          reviewItemId: input.reviewItemId,
+          resolution: `separate-planner:${child.runId}`,
+        });
+      } catch (err) {
+        throw new TRPCError({
+          code: 'INTERNAL_SERVER_ERROR',
+          message: `Launched separate planner ${child.runId} but failed to resolve guard ${input.reviewItemId}: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        });
+      }
+
+      // (4) Return whatever the launch produced.
+      return { runId: child.runId, worktreePath: child.worktreePath, branchName: child.branchName };
+    }),
+
+  /**
    * Git-neutral Cancel of a running workflow run (session<->run restructure,
    * Phase 4a). Stops the live agent on BOTH substrates (via the
    * SubstrateDispatchFacade kill seam injected as cancelRunDeps.stopLiveRun) and
