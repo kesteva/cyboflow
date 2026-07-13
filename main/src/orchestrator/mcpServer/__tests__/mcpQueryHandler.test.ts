@@ -874,6 +874,58 @@ describe('McpQueryHandler', () => {
         expect(row.body).toBe(specBody);
         expect(row.summary).toBe('One-line caption');
       });
+
+      it('persists scope on the created idea', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId: 'ct-scope',
+            runId: 'run-1',
+            title: 'Scoped idea',
+            scope: 'small',
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { task_id: string };
+
+        const row = taskDb
+          .prepare('SELECT scope FROM ideas WHERE id = ?')
+          .get(data.task_id) as { scope: string | null };
+        expect(row.scope).toBe('small');
+      });
+
+      it('leaves scope NULL when omitted on create', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ct-noscope', runId: 'run-1', title: 'Unscoped idea' },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { task_id: string };
+
+        const row = taskDb
+          .prepare('SELECT scope FROM ideas WHERE id = ?')
+          .get(data.task_id) as { scope: string | null };
+        expect(row.scope).toBeNull();
+      });
     });
 
     // -----------------------------------------------------------------------
@@ -1081,6 +1133,82 @@ describe('McpQueryHandler', () => {
         expect(row.body).toBe(specBody);
         expect(row.summary).toBe('Short caption');
         expect(row.version).toBe(2);
+      });
+
+      it('persists scope on update', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        const created = makeSocketDouble();
+        await taskHandler.handleMessage(
+          { type: 'mcp-create-task', requestId: 'ct-seed-scope', runId: 'run-1', title: 'Grows up' },
+          created.socket,
+        );
+        const taskId = (parseLastWrite(created.writes).data as { task_id: string }).task_id;
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-update-task',
+            requestId: 'ut-scope',
+            runId: 'run-1',
+            taskId,
+            scope: 'large',
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+
+        const row = taskDb
+          .prepare('SELECT scope FROM ideas WHERE id = ?')
+          .get(taskId) as { scope: string | null };
+        expect(row.scope).toBe('large');
+      });
+
+      it('leaves scope untouched when omitted on update', async () => {
+        seedTaskRun(taskDb, {
+          runId: 'run-1',
+          currentStepId: 'plan',
+          stepsSnapshot: { plan: 'planner' },
+        });
+
+        const created = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-create-task',
+            requestId: 'ct-seed-scope2',
+            runId: 'run-1',
+            title: 'Stays scoped',
+            scope: 'small',
+          },
+          created.socket,
+        );
+        const taskId = (parseLastWrite(created.writes).data as { task_id: string }).task_id;
+
+        const { socket, writes } = makeSocketDouble();
+        await taskHandler.handleMessage(
+          {
+            type: 'mcp-update-task',
+            requestId: 'ut-noscope',
+            runId: 'run-1',
+            taskId,
+            title: 'Renamed only',
+          },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+
+        const row = taskDb
+          .prepare('SELECT scope FROM ideas WHERE id = ?')
+          .get(taskId) as { scope: string | null };
+        expect(row.scope).toBe('small');
       });
     });
 

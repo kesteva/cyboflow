@@ -204,6 +204,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             parent_epic_id: { type: 'string', description: 'Optional parent epic id' },
             board_id: { type: 'string', description: 'Optional board id; defaults to the project default board' },
             initial_stage_id: { type: 'string', description: "Optional initial stage id; defaults to the board's first idea stage" },
+            scope: { type: 'string', enum: ['small', 'large'], description: "Optional idea size hint; only meaningful for task_type='idea' (ignored on epic/task entities)" },
           },
           required: ['title'],
         },
@@ -224,6 +225,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             repo: { type: 'string', description: 'Optional new repo identifier' },
             parent_epic_id: { type: 'string', description: 'Optional parent epic id (re-parent)' },
             expected_version: { type: 'number', description: 'Optional expected version for optimistic concurrency' },
+            scope: { type: 'string', enum: ['small', 'large'], description: "Optional idea size hint; only meaningful for idea entities (ignored on epic/task entities)" },
           },
           required: ['task_id'],
         },
@@ -800,8 +802,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         parent_epic_id?: unknown;
         board_id?: unknown;
         initial_stage_id?: unknown;
+        scope?: unknown;
       };
-      const { title, task_type, summary, body, priority, category, repo, parent_epic_id, board_id, initial_stage_id } = args;
+      const { title, task_type, summary, body, priority, category, repo, parent_epic_id, board_id, initial_stage_id, scope } = args;
       if (typeof title !== 'string' || title.length === 0) {
         return {
           content: [
@@ -902,6 +905,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
+      if (scope !== undefined && scope !== 'small' && scope !== 'large') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "scope: 'small' | 'large' (optional)" }),
+            },
+          ],
+        };
+      }
       const queryParams: Record<string, unknown> = { title };
       if (task_type !== undefined) queryParams['taskType'] = task_type;
       if (summary !== undefined) queryParams['summary'] = summary;
@@ -912,6 +925,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (parent_epic_id !== undefined) queryParams['parentEpicId'] = parent_epic_id;
       if (board_id !== undefined) queryParams['boardId'] = board_id;
       if (initial_stage_id !== undefined) queryParams['initialStageId'] = initial_stage_id;
+      if (scope !== undefined) queryParams['scope'] = scope;
       return executeMcpQuery('mcp-create-task', queryParams);
     }
 
@@ -926,8 +940,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         repo?: unknown;
         parent_epic_id?: unknown;
         expected_version?: unknown;
+        scope?: unknown;
       };
-      const { task_id, title, summary, body, priority, category, repo, parent_epic_id, expected_version } = args;
+      const { task_id, title, summary, body, priority, category, repo, parent_epic_id, expected_version, scope } = args;
       if (typeof task_id !== 'string' || task_id.length === 0) {
         return {
           content: [
@@ -1018,6 +1033,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ],
         };
       }
+      if (scope !== undefined && scope !== 'small' && scope !== 'large') {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ error: 'invalid_arguments', expected: "scope: 'small' | 'large' (optional)" }),
+            },
+          ],
+        };
+      }
       const queryParams: Record<string, unknown> = { taskId: task_id };
       if (title !== undefined) queryParams['title'] = title;
       if (summary !== undefined) queryParams['summary'] = summary;
@@ -1027,6 +1052,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       if (repo !== undefined) queryParams['repo'] = repo;
       if (parent_epic_id !== undefined) queryParams['parentEpicId'] = parent_epic_id;
       if (expected_version !== undefined) queryParams['expectedVersion'] = expected_version;
+      if (scope !== undefined) queryParams['scope'] = scope;
       return executeMcpQuery('mcp-update-task', queryParams);
     }
 

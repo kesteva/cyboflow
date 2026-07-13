@@ -701,3 +701,33 @@ describe('cyboflowMcpServer create/update task category param', () => {
     expect(updated['error']).not.toBe('invalid_arguments');
   });
 });
+
+describe('cyboflowMcpServer create/update task scope param', () => {
+  it("declares an optional scope enum ['small', 'large'] on both create_task and update_task", async () => {
+    const tools = await listTools();
+    const create = tools.find((t) => t.name === 'cyboflow_create_task');
+    const update = tools.find((t) => t.name === 'cyboflow_update_task');
+    expect(create!.inputSchema.properties['scope'].enum).toEqual(['small', 'large']);
+    expect(update!.inputSchema.properties['scope'].enum).toEqual(['small', 'large']);
+    // scope is OPTIONAL — only title (create) / task_id (update) are required.
+    expect(create!.inputSchema.required).toEqual(['title']);
+    expect(update!.inputSchema.required).toEqual(['task_id']);
+  });
+
+  it('rejects an out-of-enum scope with invalid_arguments (create + update)', async () => {
+    expect(await callTool('cyboflow_create_task', { title: 'T', scope: 'medium' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+    expect(await callTool('cyboflow_update_task', { task_id: 'tsk_a', scope: 'medium' })).toMatchObject({
+      error: 'invalid_arguments',
+    });
+  });
+
+  it('passes validation when scope is a valid enum value and reaches dispatch (mocked connection error)', async () => {
+    const created = await callTool('cyboflow_create_task', { title: 'Small idea', scope: 'small' });
+    expect(created['error']).not.toBe('invalid_arguments');
+
+    const updated = await callTool('cyboflow_update_task', { task_id: 'tsk_a', scope: 'large' });
+    expect(updated['error']).not.toBe('invalid_arguments');
+  });
+});

@@ -99,7 +99,7 @@ import { resolveRunFanOutInner } from '../laneChainResolution';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import { runStatusEvents } from '../trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../../shared/types/cyboflow';
-import type { BacklogTaskItem, EntityCategory, IdeaAttachment, Priority, TaskType } from '../../../../shared/types/tasks';
+import type { BacklogTaskItem, EntityCategory, IdeaAttachment, IdeaScope, Priority, TaskType } from '../../../../shared/types/tasks';
 import type { ExperimentArm, WorkflowVariantRow, WorkflowVariantStatus } from '../../../../shared/types/experiments';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import type {
@@ -141,6 +141,8 @@ export type McpQueryMessage =
       parentEpicId?: string;
       boardId?: string;
       initialStageId?: string;
+      /** Idea size hint — only meaningful for taskType='idea' (ignored on epic/task entities). */
+      scope?: IdeaScope;
     }
   | {
       type: 'mcp-update-task';
@@ -159,6 +161,8 @@ export type McpQueryMessage =
       repo?: string;
       parentEpicId?: string;
       expectedVersion?: number;
+      /** Idea size hint — only meaningful for idea entities (ignored on epic/task entities). */
+      scope?: IdeaScope;
     }
   | {
       type: 'mcp-set-task-stage';
@@ -1189,6 +1193,7 @@ export class McpQueryHandler {
       parentEpicId: msg.parentEpicId ?? null,
       boardId: msg.boardId,
       initialStageId: msg.initialStageId,
+      scope: msg.scope,
     };
 
     try {
@@ -1254,6 +1259,7 @@ export class McpQueryHandler {
         priority: msg.priority,
         category: msg.category,
         repo: msg.repo,
+        scope: msg.scope,
       },
       ...(msg.parentEpicId !== undefined ? { parentEpicId: msg.parentEpicId } : {}),
       expectedVersion: msg.expectedVersion,
