@@ -317,7 +317,7 @@ export interface RunLauncherLike {
    * workflow_runs.model and resolved to a concrete snapshot at the spawn seam; when
    * omitted the run pins no model and falls through to the SDK default.
    */
-  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean }): Promise<{
+  launch(workflowId: string, projectPath: string, substrate?: CliSubstrate, taskId?: string, ideaId?: string, sessionId?: string, requestedPermissionMode?: PermissionMode, baseBranch?: string, seedTaskIds?: string[], projectId?: number, requestedExecutionModel?: ExecutionModel, findingIds?: string[], requestedModel?: string, requestedEvalEnabled?: boolean, requestedVerifyEnabled?: boolean, launchOptions?: { requestedVariantId?: string; experiment?: { experimentId: string; arm: ExperimentArm }; baseline?: boolean; ideaIds?: string[] }): Promise<{
     runId: string;
     worktreePath: string;
     branchName: string;
