@@ -1185,7 +1185,14 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                 projectExperiments?.summariesById ?? {},
               );
               const folderCount = project.folders?.length ?? 0;
-              const hasChildren = sessionCount > 0 || runCount > 0 || folderCount > 0;
+              // railGroups counts too: a running/grading experiment whose two arm
+              // sessions were both merged/dismissed leaves a group with `arms: []`
+              // but the decide CTAs (comparison/cancel) still live inside it. Without
+              // this, the exact stranded case (that group as a project's ONLY child)
+              // fails hasChildren, hides the chevron AND the `isExpanded && hasChildren`
+              // block, and strands the experiment undecided.
+              const hasChildren =
+                sessionCount > 0 || runCount > 0 || folderCount > 0 || railGroups.length > 0;
               const isDraggingOver = dragState.overType === 'project' && dragState.overProjectId === project.id;
               const isActiveProject = activeProjectId === project.id;
 

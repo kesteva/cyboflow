@@ -24,6 +24,9 @@ import type { Session } from '../../types/session';
 // ---------------------------------------------------------------------------
 
 let mockSessions: Session[] = [];
+// Per-project A/B experiment payload injected into the rail via useRailExperiments.
+// Default empty so every existing test sees no experiment groups.
+let mockRailByProject: Record<number, import('../../hooks/useRailExperiments').RailExperimentData> = {};
 const mockSetActiveRun = vi.fn();
 const mockSetActiveQuickSession = vi.fn();
 const mockNavigateToSessions = vi.fn();
@@ -205,6 +208,10 @@ vi.mock('../../stores/activeRunsStore', () => {
   };
 });
 
+vi.mock('../../hooks/useRailExperiments', () => ({
+  useRailExperiments: () => ({ byProject: mockRailByProject, refetch: vi.fn() }),
+}));
+
 // ---------------------------------------------------------------------------
 // window.electronAPI stub factory
 // ---------------------------------------------------------------------------
@@ -248,6 +255,7 @@ beforeEach(() => {
   mockSetActiveProjectId.mockReset();
   mockCloseHumanReview.mockReset();
   mockRunsByProject = {};
+  mockRailByProject = {};
   // Default: project 1 pre-expanded
   Object.defineProperty(window, 'electronAPI', {
     writable: true,
@@ -695,5 +703,64 @@ describe('DraggableProjectTreeView — empty saved expansion', () => {
     // project 1 (absent from the saved set) stays collapsed → its session is not
     // rendered.
     expect(screen.queryByText('collapsed-session')).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stranded experiment group — the exact case Issue 2 targets: a running
+// experiment whose BOTH arm sessions were merged/dismissed (absent from the
+// session list) and that is the project's ONLY child. hasChildren must count
+// the rail group so the parent row (decide CTAs) stays reachable.
+// ---------------------------------------------------------------------------
+
+describe('DraggableProjectTreeView — stranded experiment group renders', () => {
+  function makeRunningExperiment(): import('../../../../shared/types/experiments').ExperimentRow {
+    return {
+      id: 'exp-stranded',
+      project_id: 1,
+      workflow_id: 'ship',
+      kind: 'side_by_side',
+      base_branch: 'main',
+      base_sha: 'sha',
+      variant_a_id: null,
+      variant_b_id: 'var-b',
+      run_a_id: 'run-a',
+      run_b_id: 'run-b',
+      // Both arm sessions are GONE (merged/dismissed) — not in mockSessions.
+      session_a_id: 'gone-a',
+      session_b_id: 'gone-b',
+      seed_idea_id: null,
+      seed_idea_clone_a_id: null,
+      seed_idea_clone_b_id: null,
+      status: 'running',
+      winner_run_id: null,
+      winner_arm: null,
+      merge_sha: null,
+      decided_at: null,
+      rerun_of_experiment_id: null,
+      promoted_variant_id: null,
+      promoted_arm: null,
+      promoted_at: null,
+      created_at: '2026-01-01 12:00:00',
+      updated_at: '2026-01-01 12:00:00',
+    };
+  }
+
+  it('shows the running experiment parent row even when it is the project ONLY child', async () => {
+    // No sessions, no runs, no folders — before the fix hasChildren would be false
+    // and the whole `isExpanded && hasChildren` block (which hosts the group) would
+    // never render, stranding the experiment with no way to reach its decide CTAs.
+    mockSessions = [];
+    mockRailByProject = {
+      1: { experiments: [makeRunningExperiment()], summariesById: {} },
+    };
+
+    await renderExpanded();
+
+    // The parent row's status pill carries a distinctive title — its presence
+    // proves the stranded group surfaced.
+    await waitFor(() => {
+      expect(screen.getByTitle('Experiment running')).toBeInTheDocument();
+    });
   });
 });
