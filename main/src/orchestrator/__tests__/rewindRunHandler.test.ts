@@ -208,9 +208,14 @@ describe('rewindRunHandler — failed-run rewind', () => {
     expect(result).toEqual({ delivered: true, stepId: 'step-b', abortedLiveWalk: false, fanOutKeptSettled: false });
     // Purged the target-and-after slice.
     expect(deleteStepResults).toHaveBeenCalledWith(runId, ['step-b', 'step-c']);
-    // Revive landed.
-    const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
+    // Revive landed — including the DURABLE resume pointer (current_step_id =
+    // target): boot recovery resumes programmatic orphans from current_step_id,
+    // so a crash after the flip must not leave it pointing at the OLD later step.
+    const row = db
+      .prepare('SELECT status, current_step_id AS currentStepId FROM workflow_runs WHERE id = ?')
+      .get(runId) as { status: string; currentStepId: string | null };
     expect(row.status).toBe('starting');
+    expect(row.currentStepId).toBe('step-b');
     expect(deps.emitRunStatusChanged).toHaveBeenCalledWith(runId, 'starting');
     // Resume anchor + ONLY the strictly-earlier done row (step-a); target excluded.
     expect(executor.setPendingResumeStep).toHaveBeenCalledWith(runId, 'step-b');
@@ -556,6 +561,72 @@ describe('rewindRunHandler — fan-out carve-out', () => {
     db.close();
   });
 
+  it('kept-settled fanOut with NO done row yet → settled marker materialized + still in the completed set', async () => {
+    // The race Codex's review flagged: rewind aborts the walk after the last lane
+    // integrated but BEFORE the controller recorded the outer 'fan' step result.
+    // Zero lanes are re-dispatchable, so 'fan' is kept settled — but there is no
+    // 'done' row to keep. The handler must (a) materialize the settled-marker row
+    // and (b) still seed 'fan' into the completed set, or the re-driven walk
+    // re-enters the fan-out with zero items (the degenerate single-agent turn).
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedProgrammaticRun(db, {
+      status: 'failed',
+      specJson: FANOUT_SPEC,
+      currentStepId: 'fan',
+      batchId: 'batch-1',
+    });
+    const executor = makeFakeExecutor();
+    const countRedispatchableLanes = vi.fn<(batchId: string) => number>().mockReturnValue(0);
+    // ONLY 'prep' has a persisted row — the outer 'fan' result was never recorded.
+    const listStepResults = () => [{ stepId: 'prep', outcome: 'done' }];
+    const recordStepResult = vi.fn<(r: { runId: string; stepId: string }) => void>();
+    const deps = {
+      ...makeDeps(dbAdapter(db), executor, { runQueues, countRedispatchableLanes, listStepResults }),
+      recordStepResult,
+    };
+
+    const result = await rewindRunHandler(runId, 'prep', deps);
+
+    expect(result).toMatchObject({ delivered: true, stepId: 'prep', fanOutKeptSettled: true });
+    // The settled marker: the 'done' row the aborted walk would have written.
+    expect(recordStepResult).toHaveBeenCalledWith({
+      runId,
+      stepId: 'fan',
+      phaseId: 'p2',
+      outcome: 'done',
+      attempts: 1,
+      summary: 'materialized at rewind: every sprint lane already integrated',
+    });
+    // 'fan' joins the completed skip set even though listStepResults never
+    // surfaced a row for it ('prep' is the target, so it is excluded).
+    expect(executor.setPendingCompletedSteps).toHaveBeenCalledWith(runId, ['fan']);
+    await waitForRedrive(runQueues, runId);
+    db.close();
+  });
+
+  it('kept-settled fanOut with NO done row and NO recordStepResult seam → completed set still covers it', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedProgrammaticRun(db, {
+      status: 'failed',
+      specJson: FANOUT_SPEC,
+      currentStepId: 'fan',
+      batchId: 'batch-1',
+    });
+    const executor = makeFakeExecutor();
+    const countRedispatchableLanes = vi.fn<(batchId: string) => number>().mockReturnValue(0);
+    const listStepResults = () => [{ stepId: 'prep', outcome: 'done' }];
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues, countRedispatchableLanes, listStepResults });
+
+    const result = await rewindRunHandler(runId, 'prep', deps);
+
+    expect(result).toMatchObject({ delivered: true, fanOutKeptSettled: true });
+    expect(executor.setPendingCompletedSteps).toHaveBeenCalledWith(runId, ['fan']);
+    await waitForRedrive(runQueues, runId);
+    db.close();
+  });
+
   it('target IS a fanOut step with re-dispatchable lanes → delivered; target purged and lanes reset', async () => {
     const db = makeDb();
     const runQueues = new RunQueueRegistry();
@@ -682,6 +753,73 @@ describe('rewindRunHandler — guarded-revive race', () => {
     // Row untouched by the revive.
     const row = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string };
     expect(row.status).toBe('completed');
+    db.close();
+  });
+
+  it('a raced revive ROLLS BACK the step_results purge (single crash-atomic transaction)', async () => {
+    // Same race shape, but with a REAL step_results table and a real DELETE going
+    // through the same connection — the purge runs inside the mutation
+    // transaction, so the raced (0-row) revive must roll it back: a refused
+    // rewind leaves NO partial state (previously the purge committed first and a
+    // race left a failed/completed run with its downstream rows already gone).
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedProgrammaticRun(db, { status: 'completed', currentStepId: 'step-c' });
+    db.exec(`
+      CREATE TABLE step_results (
+        run_id TEXT NOT NULL, step_id TEXT NOT NULL, phase_id TEXT, outcome TEXT NOT NULL,
+        attempts INTEGER NOT NULL, summary TEXT, error TEXT, updated_at TEXT,
+        PRIMARY KEY (run_id, step_id)
+      );
+    `);
+    db.prepare("INSERT INTO step_results (run_id, step_id, outcome, attempts) VALUES (?, 'step-b', 'done', 1)").run(runId);
+    db.prepare("INSERT INTO step_results (run_id, step_id, outcome, attempts) VALUES (?, 'step-c', 'failed', 1)").run(runId);
+
+    const real = dbAdapter(db);
+    const adapter: DatabaseLike = {
+      prepare: (sql: string): PreparedStatement => {
+        const stmt = real.prepare(sql);
+        // Fake ONLY the handler's guard SELECT to observe a rewindable status
+        // while the row is actually 'completed' (so the guarded UPDATE races).
+        if (sql.includes('execution_model') && sql.includes('batch_id') && sql.trimStart().startsWith('SELECT')) {
+          return {
+            run: (...params: unknown[]) => stmt.run(...params),
+            get: () => ({
+              status: 'failed',
+              execution_model: 'programmatic',
+              current_step_id: 'step-c',
+              batch_id: null,
+            }),
+            all: (...params: unknown[]) => stmt.all(...params),
+          };
+        }
+        return stmt;
+      },
+      transaction: real.transaction.bind(real),
+    };
+
+    const executor = makeFakeExecutor();
+    const deps = makeDeps(adapter, executor, {
+      runQueues,
+      // REAL delete through the SAME connection, so the transaction governs it.
+      deleteStepResults: vi
+        .fn<(runId: string, stepIds: readonly string[]) => number>()
+        .mockImplementation((rid, stepIds) => {
+          const placeholders = stepIds.map(() => '?').join(', ');
+          const { changes } = db
+            .prepare(`DELETE FROM step_results WHERE run_id = ? AND step_id IN (${placeholders})`)
+            .run(rid, ...stepIds);
+          return changes;
+        }),
+    });
+    const result = await rewindRunHandler(runId, 'step-b', deps);
+
+    expect(result).toEqual({ noOp: true, reason: 'race' });
+    // The purge was rolled back with the raced revive — both rows survive.
+    const rows = db
+      .prepare('SELECT step_id AS stepId FROM step_results WHERE run_id = ? ORDER BY step_id')
+      .all(runId) as Array<{ stepId: string }>;
+    expect(rows.map((r) => r.stepId)).toEqual(['step-b', 'step-c']);
     db.close();
   });
 });

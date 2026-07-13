@@ -82,9 +82,18 @@
  *     runs once the aborted walk's execute() finally/teardownRun RELEASES the
  *     queue — that queue release IS the "wait for the walk to drain"
  *     synchronization primitive; there is no other teardown seam.
- *   - Phase 1 (belt-and-braces re-guards + the purge computation + batch
- *     reopen/lane reset + the guarded revive UPDATE + the pending-gate sweep)
- *     runs INSIDE the per-run PQueue (which the abort above has now released).
+ *   - Phase 1 (belt-and-braces re-guards + the purge computation + ONE
+ *     crash-atomic mutation transaction [lane reset + batch reopen + settled
+ *     markers + step_results purge + the guarded revive UPDATE] + the
+ *     pending-gate sweep) runs INSIDE the per-run PQueue (which the abort above
+ *     has now released). The single transaction is deliberate: split writes left
+ *     a crash window with purged rows but an un-flipped status, or a flipped
+ *     status whose current_step_id still pointed at the OLD later step — boot
+ *     recovery's resume pointer — silently skipping the requested target. The
+ *     revive therefore also stamps current_step_id = target, making the durable
+ *     triple (status='starting', current_step_id=target, purged rows) fully
+ *     self-consistent for boot recovery; Phase 2's in-memory resume maps are
+ *     only the fast path.
  *   - Phase 2 (setPendingResumeStep/setPendingCompletedSteps + emit +
  *     fire-and-forget re-drive) runs OUTSIDE the held queue — execute() re-enters
  *     the SAME run queue, so calling it from inside the guard would self-deadlock
@@ -125,7 +134,11 @@
  *   - 0 re-dispatchable, fanOut steps strictly AFTER the target → those steps are
  *     EXCLUDED from the purge, keeping their 'done' rows, and threaded into the
  *     Phase-2 completed set so the re-driven walk SKIPS them via the
- *     completed-set instead of degrading to the zero-item single-agent turn.
+ *     completed-set instead of degrading to the zero-item single-agent turn. A
+ *     kept step with NO 'done' row yet (walk aborted after the last lane
+ *     integrated but before the outer result was recorded) gets a SETTLED MARKER
+ *     row materialized inside the mutation transaction (recordStepResult) so the
+ *     skip survives a crash; the Phase-2 set unions keptFanOutIds regardless.
  *   - >0 re-dispatchable (or the count seam absent) → resetFailedLanes(batchId)
  *     re-queues failed lanes and every fanOut step in the slice is purged and
  *     genuinely re-runs (re-dispatching the non-integrated lanes).
@@ -212,6 +225,25 @@ export interface RewindRunDeps {
    * docblock. Returns the number of rows deleted.
    */
   deleteStepResults: (runId: string, stepIds: readonly string[]) => number;
+  /**
+   * Materialize a 'done' step_results row (StepResultStore.record at the
+   * composition root). Used ONLY for the fan-out carve-out's SETTLED MARKER: a
+   * kept-settled fan-out step may have NO persisted 'done' row (the rewind aborted
+   * the walk after the last lane integrated but BEFORE the controller recorded the
+   * outer step result) — without a durable row, a crash between the revive and the
+   * re-drive would make boot recovery re-enter the settled fan-out with zero items
+   * and degrade to the single-agent turn. Writing the row the aborted walk would
+   * have written closes that window. Optional — absent, the in-memory completed
+   * set still covers the non-crash path.
+   */
+  recordStepResult?: (r: {
+    runId: string;
+    stepId: string;
+    phaseId?: string;
+    outcome: 'done';
+    attempts: number;
+    summary?: string;
+  }) => void;
   /**
    * Re-queue systemically/hard-failed sprint lanes so a re-driven fan-out step
    * re-dispatches them (SprintLaneStore.resetFailedLanes at the composition root).
@@ -348,6 +380,7 @@ export async function rewindRunHandler(
     emitRunStatusChanged,
     listStepResults,
     deleteStepResults,
+    recordStepResult,
     resetFailedLanes,
     countRedispatchableLanes,
     reopenBatch,
@@ -437,9 +470,13 @@ export async function rewindRunHandler(
     }
 
     // Re-derive flat/targetIdx defensively from the FROZEN spec (immutable per
-    // run, but the re-read keeps Phase 1 self-contained).
+    // run, but the re-read keeps Phase 1 self-contained). Phase ids ride along
+    // for the settled-marker rows below.
     const def = resolveFrozenDefinition(db, runId);
-    const flatSteps = def ? def.phases.flatMap((phase) => phase.steps) : [];
+    const flatEntries = def
+      ? def.phases.flatMap((phase) => phase.steps.map((step) => ({ step, phaseId: phase.id })))
+      : [];
+    const flatSteps = flatEntries.map((entry) => entry.step);
     const tIdx = flatSteps.findIndex((step) => step.id === stepId);
     if (tIdx < 0) {
       return { ok: false, reason: 'unknown_step' };
@@ -460,6 +497,7 @@ export async function rewindRunHandler(
     // AFTER the target are kept settled so the re-driven walk SKIPS them via the
     // completed-set. When lanes ARE re-dispatchable (or the count seam is
     // absent), re-queue failed lanes and purge the fanOut steps like any others.
+    let shouldResetLanes = false;
     if (row.batch_id) {
       const batchId = row.batch_id;
       const fanOutStepsInPurge = purgeSlice.filter((step) => step.fanOut);
@@ -474,56 +512,126 @@ export async function rewindRunHandler(
           const keptSet = new Set(keptFanOutIds);
           purgeIds = purgeIds.filter((id) => !keptSet.has(id));
           fanOutKeptSettled = true;
-          logger?.info('[rewindRun] kept fully-integrated fan-out step(s) settled across rewind', {
-            runId,
-            batchId,
-            keptFanOutIds,
-          });
         } else if (resetFailedLanes) {
-          const requeued = resetFailedLanes(batchId);
-          logger?.info('[rewindRun] reset failed fan-out lanes for rewind', { runId, batchId, requeued });
+          // Deferred into the atomic mutation transaction below.
+          shouldResetLanes = true;
         }
       }
     }
 
-    // (b) Un-terminal the batch UNCONDITIONALLY for any run carrying a batch_id
-    // (the batch may sit terminal-'failed' regardless of which step is targeted —
-    // same reasoning as retryRunHandler). Without this the completion close-out's
-    // markBatchTerminal('completed') would be a guaranteed no-op.
-    if (row.batch_id && reopenBatch) {
-      const reopened = reopenBatch(row.batch_id);
-      logger?.info('[rewindRun] reopened batch for rewind', { runId, batchId: row.batch_id, reopened });
+    // SETTLED MARKERS: a kept fan-out id may have NO persisted 'done' row (the
+    // rewind aborted the walk after the last lane integrated but BEFORE the
+    // controller recorded the outer step result). Without a durable row, both the
+    // Phase-2 skip set (crash path: boot recovery re-derives it from step_results)
+    // and any later resume would re-enter the settled fan-out with zero items —
+    // the degenerate single-agent turn. Materialize the row the aborted walk
+    // would have written, inside the transaction below.
+    let settledMarkers: Array<{ stepId: string; phaseId: string }> = [];
+    if (keptFanOutIds.length > 0) {
+      const doneIds = new Set(
+        listStepResults(runId)
+          .filter((result) => result.outcome === 'done')
+          .map((result) => result.stepId),
+      );
+      const keptSet = new Set(keptFanOutIds);
+      settledMarkers = flatEntries
+        .filter((entry) => keptSet.has(entry.step.id) && !doneIds.has(entry.step.id))
+        .map((entry) => ({ stepId: entry.step.id, phaseId: entry.phaseId }));
     }
 
-    // (c) Purge the stale downstream step_results (see StepResultStore.deleteForSteps).
-    const deleted = deleteStepResults(runId, purgeIds);
+    // ── SINGLE CRASH-ATOMIC MUTATION TRANSACTION ────────────────────────────
+    // Lane reset + batch reopen + settled markers + the step_results purge + the
+    // guarded revive commit (or roll back) TOGETHER. Split across separate writes
+    // (the original shape) a crash mid-window left partial state — most critically
+    // purged rows + un-flipped status, or a flipped status with current_step_id
+    // still pointing at the OLD later step, which boot recovery uses as the resume
+    // pointer and would silently skip the requested target. The revive also stamps
+    // current_step_id = target for exactly that reason: post-crash, the durable
+    // (status='starting', current_step_id=target, purged rows) triple makes boot
+    // recovery re-drive from the target with the correct skip set — the in-memory
+    // pendingResumeStep map in Phase 2 is only the fast path.
+    //
+    // The guarded revive is the 5th sanctioned state-machine bypass (see header).
+    // outcome=NULL matters: backfillTerminalOutcomes stamps outcome='failed' on
+    // failed rows and every later outcome write is guarded outcome IS NULL. The
+    // WHERE asserts the full rewindable status set (post-abort the row is still in
+    // it) so a concurrent transition OUT of the set loses as a race — 0 rows
+    // changed throws the sentinel, ROLLING BACK every mutation above it (the race
+    // refusal path mutates nothing).
+    const raceSentinel = new Error('rewind-revive-race');
+    let requeuedLanes = 0;
+    let reopenedBatch = 0;
+    let deleted = 0;
+    const applyRewind = db.transaction(() => {
+      if (shouldResetLanes && resetFailedLanes && row.batch_id) {
+        requeuedLanes = resetFailedLanes(row.batch_id);
+      }
+      // Un-terminal the batch UNCONDITIONALLY for any run carrying a batch_id
+      // (the batch may sit terminal-'failed' regardless of which step is targeted —
+      // same reasoning as retryRunHandler). Without this the completion close-out's
+      // markBatchTerminal('completed') would be a guaranteed no-op.
+      if (row.batch_id && reopenBatch) {
+        reopenedBatch = reopenBatch(row.batch_id);
+      }
+      if (recordStepResult) {
+        for (const marker of settledMarkers) {
+          recordStepResult({
+            runId,
+            stepId: marker.stepId,
+            phaseId: marker.phaseId,
+            outcome: 'done',
+            attempts: 1,
+            summary: 'materialized at rewind: every sprint lane already integrated',
+          });
+        }
+      }
+      deleted = deleteStepResults(runId, purgeIds);
+      const { changes } = db
+        .prepare(
+          `UPDATE workflow_runs
+              SET status = 'starting', current_step_id = ?, error_message = NULL,
+                  ended_at = NULL, outcome = NULL, updated_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status IN ('running', 'awaiting_review', 'failed', 'paused')`,
+        )
+        .run(stepId, runId) as { changes: number };
+      if (changes === 0) throw raceSentinel;
+    });
+    try {
+      applyRewind();
+    } catch (err) {
+      if (err === raceSentinel) {
+        return { ok: false, reason: 'race' };
+      }
+      throw err;
+    }
+    if (fanOutKeptSettled) {
+      logger?.info('[rewindRun] kept fully-integrated fan-out step(s) settled across rewind', {
+        runId,
+        batchId: row.batch_id,
+        keptFanOutIds,
+        materialized: settledMarkers.map((marker) => marker.stepId),
+      });
+    }
+    if (shouldResetLanes) {
+      logger?.info('[rewindRun] reset failed fan-out lanes for rewind', {
+        runId,
+        batchId: row.batch_id,
+        requeued: requeuedLanes,
+      });
+    }
+    if (row.batch_id && reopenBatch) {
+      logger?.info('[rewindRun] reopened batch for rewind', {
+        runId,
+        batchId: row.batch_id,
+        reopened: reopenedBatch,
+      });
+    }
     logger?.info('[rewindRun] purged downstream step results', {
       runId,
       stepId,
       purged: purgeIds,
       deleted,
     });
-
-    // (d) Guarded revive (the 5th sanctioned state-machine bypass — see header).
-    // outcome=NULL matters: backfillTerminalOutcomes stamps outcome='failed' on
-    // failed rows and every later outcome write is guarded outcome IS NULL. The
-    // WHERE asserts the full rewindable status set (post-abort the row is still in
-    // it) so a concurrent transition OUT of the set loses as a race — the sole race
-    // guard (no updated_at snapshot; see header deviation).
-    const flip = db.transaction(() => {
-      return db
-        .prepare(
-          `UPDATE workflow_runs
-              SET status = 'starting', error_message = NULL, ended_at = NULL,
-                  outcome = NULL, updated_at = CURRENT_TIMESTAMP
-            WHERE id = ? AND status IN ('running', 'awaiting_review', 'failed', 'paused')`,
-        )
-        .run(runId) as { changes: number };
-    });
-    const { changes } = flip();
-    if (changes === 0) {
-      return { ok: false, reason: 'race' };
-    }
 
     // (e) Gate sweep (fail-soft, AFTER the revive lands). Dismiss the pending gate
     // items whose walk died — the re-driven walk re-mints its gates. RunDirectives
@@ -565,11 +673,17 @@ export async function rewindRunHandler(
   // zero-item step). The target itself is ALWAYS excluded — it must re-run.
   const keptSet = new Set(guardResult.keptFanOutIds);
   const completed = [
-    ...new Set(
-      listStepResults(runId)
+    ...new Set([
+      ...listStepResults(runId)
         .filter((result) => result.outcome === 'done')
         .map((result) => result.stepId),
-    ),
+      // Belt-and-braces: the kept-settled fan-out ids join the skip set even when
+      // no persisted 'done' row exists (the settled-marker seam is optional and
+      // the walk may have been aborted before the outer result was recorded) —
+      // otherwise the re-driven walk re-enters the settled fan-out with zero
+      // items and degrades to the single-agent turn.
+      ...guardResult.keptFanOutIds,
+    ]),
   ].filter((id) => {
     if (id === stepId) return false;
     if (keptSet.has(id)) return true;

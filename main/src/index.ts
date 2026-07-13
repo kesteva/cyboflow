@@ -2875,6 +2875,7 @@ app.whenReady().then(async () => {
       listStepResults: (runId) => StepResultStore.tryGetInstance()?.listForRun(runId) ?? [],
       deleteStepResults: (runId, stepIds) =>
         StepResultStore.tryGetInstance()?.deleteForSteps(runId, stepIds) ?? 0,
+      recordStepResult: (r) => StepResultStore.tryGetInstance()?.record(r),
       resetFailedLanes: (batchId) => SprintLaneStore.getInstance().resetFailedLanes(batchId),
       countRedispatchableLanes: (batchId) =>
         SprintLaneStore.getInstance()
