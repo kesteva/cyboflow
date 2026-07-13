@@ -77,6 +77,10 @@ function buildDb(): Database.Database {
   }
   // Migration 057: the read-side UNION projects sort_order unconditionally.
   db.exec(readFileSync(join(migDir, '057_entity_sort_order.sql'), 'utf-8'));
+  // Migration 059: category (feature|bug|chore) is now an unconditional column
+  // in the chokepoint's INSERT/SELECT (mirrors priority) — every curated buildDb
+  // must carry it or the router's `no such column: category` on create.
+  db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
   return db;
 }
 
@@ -113,6 +117,7 @@ function fakeItem(taskId: string, projectId: number): BacklogTaskItem {
     summary: null,
     body: null,
     priority: 'P2',
+    category: 'feature',
     repo: null,
     parent_epic_id: null,
     originating_idea_id: null,

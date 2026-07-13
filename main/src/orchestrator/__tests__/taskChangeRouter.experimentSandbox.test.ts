@@ -45,6 +45,9 @@ function buildDb(): Database.Database {
     db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_arm TEXT;`);
     db.exec(`ALTER TABLE ${t} ADD COLUMN caused_by_run_id TEXT;`);
   }
+  // Migration 059: category (feature|bug|chore) — an unconditional column in
+  // insertEntity/readEntity now (mirrors priority), so every create needs it.
+  db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
   return db;
 }
 

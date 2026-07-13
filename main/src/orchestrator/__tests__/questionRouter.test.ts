@@ -886,6 +886,9 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
       db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
       db.exec(`ALTER TABLE ${t} ADD COLUMN caused_by_run_id TEXT;`);
     }
+    // Migration 059: category (feature|bug|chore) — an unconditional column in
+    // insertEntity/readEntity now (mirrors priority), so every create needs it.
+    db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
     return db;
   }
 
@@ -1432,6 +1435,9 @@ describe('QuestionRouter approve-plan retires a SHIP run\'s idea to Decomposed',
       db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
       db.exec(`ALTER TABLE ${t} ADD COLUMN caused_by_run_id TEXT;`);
     }
+    // Migration 059: category (feature|bug|chore) — an unconditional column in
+    // insertEntity/readEntity now (mirrors priority), so every create needs it.
+    db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
     return db;
   }
 
@@ -1659,6 +1665,9 @@ describe('QuestionRouter decompose gate finalizes the planner run (FIX-STAGE-MOD
       db.exec(`ALTER TABLE ${t} ADD COLUMN experiment_id TEXT;`);
       db.exec(`ALTER TABLE ${t} ADD COLUMN caused_by_run_id TEXT;`);
     }
+    // Migration 059: category (feature|bug|chore) — an unconditional column in
+    // insertEntity/readEntity now (mirrors priority), so every create needs it.
+    db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
     return db;
   }
 

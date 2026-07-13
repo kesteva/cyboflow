@@ -660,6 +660,9 @@ describe('McpQueryHandler', () => {
       taskDb.exec(readFileSync(join(migDir, '042_collapse_board.sql'), 'utf-8'));
       // Migration 057: the read-side UNION projects sort_order unconditionally.
       taskDb.exec(readFileSync(join(migDir, '057_entity_sort_order.sql'), 'utf-8'));
+      // Migration 059: category (feature|bug|chore) — an unconditional column in
+      // insertEntity/readEntity now (mirrors priority), so every create needs it.
+      taskDb.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
       return taskDb;
     }
 
@@ -1441,6 +1444,9 @@ describe('McpQueryHandler', () => {
       db.exec('ALTER TABLE tasks ADD COLUMN experiment_arm TEXT');
       // Migration 057: the read-side UNION projects sort_order unconditionally.
       db.exec(readFileSync(join(migDir, '057_entity_sort_order.sql'), 'utf-8'));
+      // Migration 059: category (feature|bug|chore) — an unconditional column in
+      // insertEntity/readEntity now (mirrors priority), so every create needs it.
+      db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
       return db;
     }
 

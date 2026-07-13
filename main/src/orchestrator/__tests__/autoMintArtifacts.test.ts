@@ -93,6 +93,9 @@ function buildDb(): Database.Database {
   // test DB doesn't create. ArtifactRouter's emitChange resolves this column on
   // every write, so it must exist even though these tests don't assert on it.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
+  // Migration 059: category (feature|bug|chore) — an unconditional column in
+  // insertEntity/readEntity now (mirrors priority), so every create needs it.
+  db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
   return db;
 }
 

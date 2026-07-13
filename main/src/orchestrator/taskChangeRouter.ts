@@ -42,6 +42,7 @@ import { ReviewItemRouter } from './reviewItemRouter';
 import type { DatabaseLike } from './types';
 import type {
   BacklogTaskItem,
+  EntityCategory,
   FlowOverlay,
   IdeaAttachment,
   IdeaScope,
@@ -161,6 +162,8 @@ export interface TaskFieldChanges {
   summary?: string | null;
   body?: string | null;
   priority?: Priority;
+  /** Entity category — feature/bug/chore (migration 059). */
+  category?: EntityCategory;
   repo?: string | null;
   /** Idea size hint — only valid on type='idea'. */
   scope?: IdeaScope | null;
@@ -289,6 +292,8 @@ export interface TaskChange {
   body?: string | null;
   /** Initial priority for the create path. Defaults to 'P2'. */
   priority?: Priority;
+  /** Initial category for the create path (migration 059). Defaults to 'feature'. */
+  category?: EntityCategory;
   /** Initial repo for the create path. */
   repo?: string | null;
   /** Initial scope for the create path (ideas only). */
@@ -322,6 +327,7 @@ interface EntityDbRow {
   body: string | null;
   scope: IdeaScope | null;
   priority: Priority;
+  category: EntityCategory;
   repo: string | null;
   archived_at: string | null;
   /** Retire stamp (ideas-only, migration 042); NULL on epics/tasks + when on-board. */
@@ -1005,6 +1011,7 @@ export class TaskChangeRouter {
       const summary = change.summary ?? change.fields?.summary ?? null;
       const body = change.body ?? change.fields?.body ?? null;
       const priority: Priority = change.priority ?? change.fields?.priority ?? 'P2';
+      const category: EntityCategory = change.category ?? change.fields?.category ?? 'feature';
       const repo = change.repo ?? change.fields?.repo ?? null;
       const scope = desc.hasScope ? (change.scope ?? change.fields?.scope ?? null) : null;
       // Attachments (ideas-only): serialize the array to JSON for the column; a
@@ -1047,6 +1054,7 @@ export class TaskChangeRouter {
         summary,
         body,
         priority,
+        category,
         repo,
         boardId,
         stageId,
@@ -1091,6 +1099,7 @@ export class TaskChangeRouter {
       summary: string | null;
       body: string | null;
       priority: Priority;
+      category: EntityCategory;
       repo: string | null;
       boardId: string;
       stageId: string;
@@ -1108,8 +1117,8 @@ export class TaskChangeRouter {
       now: string;
     },
   ): void {
-    const cols = ['id', 'project_id', 'ref', 'title', 'summary', 'body', 'priority', 'repo', 'board_id', 'stage_id'];
-    const vals: unknown[] = [v.id, v.projectId, v.ref, v.title, v.summary, v.body, v.priority, v.repo, v.boardId, v.stageId];
+    const cols = ['id', 'project_id', 'ref', 'title', 'summary', 'body', 'priority', 'category', 'repo', 'board_id', 'stage_id'];
+    const vals: unknown[] = [v.id, v.projectId, v.ref, v.title, v.summary, v.body, v.priority, v.category, v.repo, v.boardId, v.stageId];
 
     if (desc.hasScope) {
       cols.push('scope');
@@ -1614,6 +1623,11 @@ export class TaskChangeRouter {
           params.push(f.priority);
           deltas.push({ field: 'priority', from: current.priority, to: f.priority });
         }
+        if (f.category !== undefined && f.category !== current.category) {
+          sets.push('category = ?');
+          params.push(f.category);
+          deltas.push({ field: 'category', from: current.category, to: f.category });
+        }
         if (f.sortOrder !== undefined && f.sortOrder !== current.sort_order) {
           sets.push('sort_order = ?');
           params.push(f.sortOrder);
@@ -2106,7 +2120,7 @@ export class TaskChangeRouter {
       : 'NULL AS sort_order';
     const row = this.db
       .prepare(
-        `SELECT id, project_id, ref, title, summary, body, priority, repo, board_id, stage_id, archived_at,
+        `SELECT id, project_id, ref, title, summary, body, priority, category, repo, board_id, stage_id, archived_at,
                 ${decomposedAt}, ${approvedAt}, ${experimentId}, ${experimentArm}, ${causedByRunId}, ${sortOrder}, version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
            FROM ${desc.table} WHERE id = ? AND project_id = ?`,
       )
@@ -2503,6 +2517,7 @@ export class TaskChangeRouter {
       summary: row.summary,
       body: row.body,
       priority: row.priority,
+      category: row.category,
       repo: row.repo,
       parent_epic_id: row.parent_epic_id,
       originating_idea_id: row.originating_idea_id,

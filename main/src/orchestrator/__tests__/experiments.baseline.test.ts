@@ -79,6 +79,9 @@ function buildDb(): Database.Database {
     decided_at TEXT, rerun_of_experiment_id TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);`);
   db.prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf', 1, 'planner', '{}')`).run();
+  // Migration 059: category (feature|bug|chore) — an unconditional column in
+  // insertEntity/readEntity now (mirrors priority), so every create needs it.
+  db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
   return db;
 }
 

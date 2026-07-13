@@ -45,7 +45,7 @@ import {
 import { ReviewItemRouter } from '../reviewItemRouter';
 import { dbAdapter } from '../__test_fixtures__/dbAdapter';
 import type { DatabaseLike } from '../types';
-import type { TaskChangedEvent } from '../../../../shared/types/tasks';
+import type { EntityCategory, TaskChangedEvent } from '../../../../shared/types/tasks';
 
 // ---------------------------------------------------------------------------
 // Test DB builder: projects + 006 + 011 + 014 + 015 + 016 + 024, default board seeded.
@@ -89,6 +89,9 @@ function buildDb(): Database.Database {
   db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
   // Migration 057: manual rank column the sortOrder field-delta writes.
   db.exec(readFileSync(join(migDir, '057_entity_sort_order.sql'), 'utf-8'));
+  // Migration 059: category (feature|bug|chore) — an unconditional column in
+  // insertEntity/readEntity now (mirrors priority), so every create needs it.
+  db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
   return db;
 }
 
@@ -416,6 +419,99 @@ describe('TaskChangeRouter (3-table entity model)', () => {
 
       expect(events).toHaveLength(1);
       expect(events[0].task?.sort_order).toBe(7.25);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // category (feature|bug|chore, migration 059) — mirrors priority
+  // -------------------------------------------------------------------------
+
+  describe('category (feature|bug|chore, migration 059)', () => {
+    it('create without category defaults to \'feature\'', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      const task = db.prepare('SELECT category FROM tasks WHERE id = ?').get(taskId) as { category: string };
+      expect(task.category).toBe('feature');
+    });
+
+    it('create with category: \'bug\' persists it', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, {
+        actor: 'user',
+        entityType: 'task',
+        title: 'T',
+        category: 'bug',
+      });
+      const task = db.prepare('SELECT category FROM tasks WHERE id = ?').get(taskId) as { category: string };
+      expect(task.category).toBe('bug');
+    });
+
+    it('update to \'chore\' writes a delta and round-trips on the emitted BacklogTaskItem', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+
+      const events: TaskChangedEvent[] = [];
+      taskChangeEvents.on(taskProjectChannel(1), (e: TaskChangedEvent) => events.push(e));
+
+      await router.applyChange(1, { actor: 'user', taskId, fields: { category: 'chore' } });
+
+      const task = db.prepare('SELECT category, version FROM tasks WHERE id = ?').get(taskId) as {
+        category: string;
+        version: number;
+      };
+      expect(task.category).toBe('chore');
+      expect(task.version).toBe(2);
+
+      const lastEvent = db
+        .prepare(
+          "SELECT changes_json FROM entity_events WHERE entity_type = 'task' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
+        )
+        .get(taskId) as { changes_json: string };
+      const deltas = JSON.parse(lastEvent.changes_json) as Array<{ field: string; from: unknown; to: unknown }>;
+      expect(deltas).toEqual([{ field: 'category', from: 'feature', to: 'chore' }]);
+
+      expect(events).toHaveLength(1);
+      expect(events[0].task?.category).toBe('chore');
+    });
+
+    it('an out-of-domain category is NOT router-validated — it bubbles up as the raw CHECK-constraint error, mirroring priority', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+
+      // Create: no application-level domain check exists for category (same as
+      // priority) — the SQLite CHECK constraint added by migration 059 is the
+      // only guard, so an invalid value throws a raw DB error rather than a
+      // TaskChangeError.
+      await expect(
+        router.applyChange(1, {
+          actor: 'user',
+          entityType: 'task',
+          title: 'T',
+          category: 'urgent' as unknown as EntityCategory,
+        }),
+      ).rejects.toThrow(/CHECK constraint failed/i);
+
+      // Update path: same story — the field-update delta path has no domain
+      // check either, so it also relies on the CHECK constraint.
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T2' });
+      await expect(
+        router.applyChange(1, {
+          actor: 'user',
+          taskId,
+          fields: { category: 'urgent' as unknown as EntityCategory },
+        }),
+      ).rejects.toThrow(/CHECK constraint failed/i);
+
+      // Nothing was persisted by the rejected update.
+      const task = db.prepare('SELECT category, version FROM tasks WHERE id = ?').get(taskId) as {
+        category: string;
+        version: number;
+      };
+      expect(task.category).toBe('feature');
+      expect(task.version).toBe(1);
     });
   });
 

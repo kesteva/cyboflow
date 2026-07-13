@@ -119,6 +119,9 @@ function buildDb(): Database.Database {
   // A sprint workflow so the task-seeded experiment path (migration 051) can resolve
   // workflow.name === 'sprint'.
   db.prepare(`INSERT INTO workflows (id, project_id, name, spec_json) VALUES ('wf-sprint', 1, 'sprint', '{}')`).run();
+  // Migration 059: category (feature|bug|chore) — an unconditional column in
+  // insertEntity/readEntity now (mirrors priority), so every create needs it.
+  db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
   return db;
 }
 

@@ -86,6 +86,9 @@ function buildBatchDb(): Database.Database {
   // The handler reads workflow_runs.substrate defensively; seed the column so we
   // can exercise both the 'sdk' default (NULL) and 'interactive' cap branches.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN substrate TEXT');
+  // Migration 059: category (feature|bug|chore) — an unconditional column in
+  // insertEntity/readEntity now (mirrors priority), so every create needs it.
+  db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
   return db;
 }
 

@@ -73,6 +73,9 @@ function buildDb(): Database.Database {
   // just the column the requireMergedSession merge-gate join needs (mirrors the
   // workflowRegistry fixture's seed_finding_ids ALTER).
   db.exec(`ALTER TABLE workflow_runs ADD COLUMN session_id TEXT`);
+  // Migration 059: category (feature|bug|chore) — an unconditional column in
+  // insertEntity/readEntity now (mirrors priority), so every create needs it.
+  db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
   return db;
 }
 
