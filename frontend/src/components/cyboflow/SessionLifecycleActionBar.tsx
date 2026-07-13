@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { GitMerge, ExternalLink, Trash2 } from 'lucide-react';
 import { useLifecycleTarget } from '../../hooks/useLifecycleTarget';
 import { trpc } from '../../trpc/client';
@@ -31,6 +31,14 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
   // the Dismiss trigger itself; null = no guard shown.
   const [armGuard, setArmGuard] = useState<ArmGuardState | null>(null);
   const [checkingArm, setCheckingArm] = useState(false);
+  // Latest selected-session id, read INSIDE the async guard's continuation so a
+  // selection change during the (async) arm-check window aborts the action
+  // rather than firing it against whatever session is selected when the read
+  // resolves. The close-out dialogs (SessionMergeDialog etc.) bind to the
+  // CURRENT lifecycle target, so proceeding after a drift would act on the wrong
+  // session — see runGuardedAction.
+  const targetSessionIdRef = useRef<string | undefined>(target?.session.id);
+  targetSessionIdRef.current = target?.session.id;
   if (!target) return null;
 
   // Merge / Create-PR accept the session's artifact. They are offered only once
@@ -54,10 +62,21 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
   // -randomized) reachable only from the comparison view. So we prompt instead.
   // On ANY read failure (or a session with no project) we fall through to the
   // normal action: the action must never be BLOCKED by a failed guard read.
-  const runGuardedAction = (action: GuardedAction, proceed: () => void) => {
+  const runGuardedAction = (action: GuardedAction, rawProceed: () => void) => {
     const projectId = session.projectId;
+    // The close-out dialog opened by rawProceed reads the CURRENT lifecycle
+    // target, not this click's session. The synchronous no-guard path below
+    // fires before any selection change is possible, so it uses rawProceed
+    // directly. Every DEFERRED path (after the async arm-check, or after the
+    // guard dialog is confirmed) instead goes through this drift guard: if the
+    // selection changed while we waited, abort silently — acting would merge/PR/
+    // dismiss the wrong session. The user simply re-clicks on the intended one.
+    const clickedSessionId = session.id;
+    const proceed = () => {
+      if (targetSessionIdRef.current === clickedSessionId) rawProceed();
+    };
     if (projectId === undefined) {
-      proceed();
+      rawProceed();
       return;
     }
     // Initiate the read inside a synchronous try/catch: an unavailable/unwired
@@ -67,7 +86,9 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
     try {
       queryPromise = trpc.cyboflow.experiments.listForProject.query({ projectId });
     } catch {
-      proceed();
+      // Synchronous failure — same tick as the click, no drift possible; fire the
+      // raw action unconditionally (the "never block on a failed read" contract).
+      rawProceed();
       return;
     }
     setCheckingArm(true);
