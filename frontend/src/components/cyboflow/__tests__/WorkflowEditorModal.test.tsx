@@ -891,7 +891,7 @@ describe('WorkflowEditorModal — fan-out editing', () => {
     await waitFor(() => expect(idInput).toHaveValue('item'));
   });
 
-  it('inner-row loopback picker excludes self, targets siblings, and labels loopback reserved', async () => {
+  it('inner-row loopback picker excludes self, targets siblings, and notes loopback execution scope', async () => {
     await renderEditMode();
 
     fireEvent.click(screen.getByTestId('inspector-toggle-fanout'));
@@ -902,8 +902,8 @@ describe('WorkflowEditorModal — fan-out editing', () => {
     fireEvent.click(screen.getByTestId('editor-fanout-inner-card-context-1'));
     const loopback = screen.getByTestId('inspector-fanout-inner-loopback-select') as HTMLSelectElement;
     expect(Array.from(loopback.options).map((option) => option.value)).toEqual(['', 'item']);
-    expect(screen.getByTestId('inspector-fanout-inner-loopback-reserved')).toHaveTextContent(
-      'Reserved - not yet executed for lanes',
+    expect(screen.getByTestId('inspector-fanout-inner-loopback-note')).toHaveTextContent(
+      'Re-delegates this step on orchestrated lanes',
     );
 
     fireEvent.change(loopback, { target: { value: 'item' } });

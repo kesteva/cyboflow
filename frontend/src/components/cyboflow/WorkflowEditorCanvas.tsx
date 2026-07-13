@@ -647,7 +647,7 @@ function StepNode({
                       <span style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
                         <span>INR</span>
                         {inner.optional === true && <span style={{ background: 'rgba(255,255,255,0.24)', padding: '0 4px' }}>OPT</span>}
-                        {inner.loopback && <span style={{ background: 'rgba(255,255,255,0.24)', padding: '0 4px' }}>⟲ RESERVED</span>}
+                        {inner.loopback && <span style={{ background: 'rgba(255,255,255,0.24)', padding: '0 4px' }}>⟲ LOOPBACK</span>}
                       </span>
                       <span style={{ opacity: 0.65 }}>{String(innerIndex + 1).padStart(2, '0')}</span>
                     </div>

@@ -395,7 +395,7 @@ function InnerFanOutInspector({
           />
 
           <div>
-            <label style={labelStyle} htmlFor="insp-inner-loopback">loopback (reserved)</label>
+            <label style={labelStyle} htmlFor="insp-inner-loopback">loopback</label>
             <select
               id="insp-inner-loopback"
               value={inner.loopback ?? ''}
@@ -420,9 +420,9 @@ function InnerFanOutInspector({
             </select>
             <p
               style={{ marginTop: 6, fontSize: 9.5, color: 'var(--color-text-tertiary)' }}
-              data-testid="inspector-fanout-inner-loopback-reserved"
+              data-testid="inspector-fanout-inner-loopback-note"
             >
-              Reserved - not yet executed for lanes.
+              Re-delegates this step on orchestrated lanes. Programmatic runs honor it only for visual-verify.
             </p>
           </div>
         </div>
