@@ -30,6 +30,8 @@ const {
   mockApprovalApprove,
   mockApprovalReject,
   mockAnswerRecovery,
+  mockLaunchSeparatePlanner,
+  mockReturnIdeaToBacklog,
 } = vi.hoisted(() => ({
   mockResolve: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_1', resumed: true }),
   mockDismiss: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_1' }),
@@ -37,6 +39,10 @@ const {
   mockApprovalApprove: vi.fn().mockResolvedValue(undefined),
   mockApprovalReject: vi.fn().mockResolvedValue(undefined),
   mockAnswerRecovery: vi.fn().mockResolvedValue({ resolved: true, nudge: { delivered: true } }),
+  mockLaunchSeparatePlanner: vi
+    .fn()
+    .mockResolvedValue({ runId: 'run_child', worktreePath: '/tmp/wt', branchName: 'quick-child' }),
+  mockReturnIdeaToBacklog: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_1', ideaId: 'idea_1' }),
 }));
 
 vi.mock('../../../trpc/client', () => ({
@@ -53,6 +59,8 @@ vi.mock('../../../trpc/client', () => ({
       },
       runs: {
         answerRecoveryGate: { mutate: mockAnswerRecovery },
+        launchSeparatePlanner: { mutate: mockLaunchSeparatePlanner },
+        returnIdeaToBacklog: { mutate: mockReturnIdeaToBacklog },
       },
     },
   },
@@ -88,8 +96,8 @@ function makeItem(
     payload,
     created_at: '2026-01-01T00:00:00.000Z',
     updated_at: '2026-01-01T00:00:00.000Z',
-    resolved_by: null,
-    resolution: null,
+    resolved_by: overrides.resolved_by ?? null,
+    resolution: overrides.resolution ?? null,
   };
 }
 
@@ -100,6 +108,8 @@ beforeEach(() => {
   mockApprovalApprove.mockClear();
   mockApprovalReject.mockClear();
   mockAnswerRecovery.mockClear();
+  mockLaunchSeparatePlanner.mockClear();
+  mockReturnIdeaToBacklog.mockClear();
 });
 
 describe('ReviewItemCard', () => {
@@ -451,5 +461,98 @@ describe('ReviewItemCard', () => {
     render(<ReviewItemCard item={item} />);
     expect(screen.queryByTestId('decision-view-comparison')).not.toBeInTheDocument();
     expect(screen.getByTestId('decision-resolve')).toBeInTheDocument();
+  });
+
+  // -- IDEA-009 idea-size guard ------------------------------------------
+
+  function makeGuardItem(overrides: Partial<ReviewItem> = {}): ReviewItem {
+    return makeItem(
+      'decision',
+      { id: 'rvw_guard', blocking: true, entity_type: 'idea', entity_id: 'idea_1', ...overrides },
+      { kind: 'decision', gate: 'idea-size-guard', ideaRef: 'IDEA-042' },
+    );
+  }
+
+  it('a pending idea-size-guard renders both CTAs + the idea ref, not the generic resolve/dismiss', () => {
+    render(<ReviewItemCard item={makeGuardItem()} />);
+    expect(screen.getByTestId('guard-idea-ref')).toHaveTextContent('IDEA-042');
+    expect(screen.getByTestId('guard-launch-separate')).toBeInTheDocument();
+    expect(screen.getByTestId('guard-return-backlog')).toBeInTheDocument();
+    expect(screen.queryByTestId('decision-resolve')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('decision-reject')).not.toBeInTheDocument();
+  });
+
+  it('clicking Launch a separate planner calls launchSeparatePlanner exactly once with {projectId, reviewItemId}', async () => {
+    const onResolved = vi.fn();
+    render(<ReviewItemCard item={makeGuardItem()} onResolved={onResolved} />);
+    fireEvent.click(screen.getByTestId('guard-launch-separate'));
+    await waitFor(() =>
+      expect(mockLaunchSeparatePlanner).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_guard' }),
+    );
+    expect(mockLaunchSeparatePlanner).toHaveBeenCalledTimes(1);
+    expect(mockReturnIdeaToBacklog).not.toHaveBeenCalled();
+    expect(mockResolve).not.toHaveBeenCalled();
+    await waitFor(() => expect(onResolved).toHaveBeenCalledTimes(1));
+  });
+
+  it('clicking Return to backlog calls returnIdeaToBacklog exactly once with {projectId, reviewItemId}', async () => {
+    const onResolved = vi.fn();
+    render(<ReviewItemCard item={makeGuardItem()} onResolved={onResolved} />);
+    fireEvent.click(screen.getByTestId('guard-return-backlog'));
+    await waitFor(() =>
+      expect(mockReturnIdeaToBacklog).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_guard' }),
+    );
+    expect(mockReturnIdeaToBacklog).toHaveBeenCalledTimes(1);
+    expect(mockLaunchSeparatePlanner).not.toHaveBeenCalled();
+    expect(mockDismiss).not.toHaveBeenCalled();
+    await waitFor(() => expect(onResolved).toHaveBeenCalledTimes(1));
+  });
+
+  it('surfaces a launchSeparatePlanner error via the hook error idiom (already-resolved guard) and keeps the card actionable', async () => {
+    mockLaunchSeparatePlanner.mockRejectedValueOnce(new Error("Review item rvw_guard is already 'resolved'"));
+    const onResolved = vi.fn();
+    render(<ReviewItemCard item={makeGuardItem()} onResolved={onResolved} />);
+    fireEvent.click(screen.getByTestId('guard-launch-separate'));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('already'));
+    expect(onResolved).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a returnIdeaToBacklog error via the hook error idiom (already-resolved guard)', async () => {
+    mockReturnIdeaToBacklog.mockRejectedValueOnce(new Error("Review item rvw_guard is already 'resolved'"));
+    const onResolved = vi.fn();
+    render(<ReviewItemCard item={makeGuardItem()} onResolved={onResolved} />);
+    fireEvent.click(screen.getByTestId('guard-return-backlog'));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('already'));
+    expect(onResolved).not.toHaveBeenCalled();
+  });
+
+  it('a resolved guard shows the separate-planner path, not the CTAs', () => {
+    const item = makeGuardItem({ status: 'resolved', resolution: 'separate-planner:run_child' });
+    render(<ReviewItemCard item={item} />);
+    expect(screen.getByTestId('guard-resolved')).toHaveTextContent('Launched a separate planner');
+    expect(screen.queryByTestId('guard-launch-separate')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('guard-return-backlog')).not.toBeInTheDocument();
+  });
+
+  it('a resolved guard shows the return-to-backlog path, not the CTAs', () => {
+    const item = makeGuardItem({ status: 'resolved', resolution: 'return-to-backlog:idea_1' });
+    render(<ReviewItemCard item={item} />);
+    expect(screen.getByTestId('guard-resolved')).toHaveTextContent('Returned to the backlog');
+    expect(screen.queryByTestId('guard-launch-separate')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('guard-return-backlog')).not.toBeInTheDocument();
+  });
+
+  it('a guard payload missing ideaRef still activates the guard branch, falling back to the entity link', () => {
+    const item = makeItem(
+      'decision',
+      { id: 'rvw_guard', blocking: true, entity_type: 'idea', entity_id: 'idea_77' },
+      { kind: 'decision', gate: 'idea-size-guard' },
+    );
+    render(<ReviewItemCard item={item} />);
+    expect(screen.getByTestId('guard-idea-ref')).toHaveTextContent('idea_77');
+    expect(screen.getByTestId('guard-launch-separate')).toBeInTheDocument();
+    expect(screen.getByTestId('guard-return-backlog')).toBeInTheDocument();
+    expect(screen.queryByTestId('decision-resolve')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('decision-reject')).not.toBeInTheDocument();
   });
 });

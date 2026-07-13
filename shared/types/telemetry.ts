@@ -76,8 +76,16 @@ export interface TelemetryEventMap {
     kind: 'finding' | 'permission' | 'decision' | 'human_task' | 'notification';
     // 'approve' / 'reject' are the explicit programmatic human-gate verdicts
     // (reviewItems.resolve `outcome`); 'resolve'/'dismiss'/'promote_to_task' are
-    // the generic triage actions.
-    action: 'resolve' | 'dismiss' | 'promote_to_task' | 'approve' | 'reject';
+    // the generic triage actions; 'launch_separate_planner'/'return_idea_to_backlog'
+    // are the big-idea guard's two CTAs (IDEA-009).
+    action:
+      | 'resolve'
+      | 'dismiss'
+      | 'promote_to_task'
+      | 'approve'
+      | 'reject'
+      | 'launch_separate_planner'
+      | 'return_idea_to_backlog';
     blocking?: boolean;
   };
   approval_decided: { decision: 'approve' | 'reject'; scope: 'single' | 'rest_of_run' };

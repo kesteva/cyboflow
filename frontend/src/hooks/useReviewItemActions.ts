@@ -1,17 +1,27 @@
 /**
  * useReviewItemActions — triage mutations for the unified review_items inbox.
  *
- * Exposes the three triage operations that funnel through the ReviewItemRouter
+ * Exposes the triage operations that funnel through the ReviewItemRouter
  * chokepoint (and, for promote, the TaskChangeRouter chokepoint too):
- *   - resolve        : mark an item resolved. For a BLOCKING, run-bound item the
- *                      backend applies aggregate-unblock and AUTO-RESUMES the run
- *                      once no other blocking item remains — surfaced here via the
- *                      `resumed` flag returned to the caller. This is how a
- *                      DECISION item (approve-idea / approve-plan gate) advances
- *                      the flow: resolving it resumes the paused run.
- *   - dismiss        : mark an item dismissed (cruft).
- *   - promoteToTask  : mint a real task from the item (two chokepoints) and
- *                      resolve the item, recording the minted task id.
+ *   - resolve                : mark an item resolved. For a BLOCKING, run-bound
+ *                              item the backend applies aggregate-unblock and
+ *                              AUTO-RESUMES the run once no other blocking item
+ *                              remains — surfaced here via the `resumed` flag
+ *                              returned to the caller. This is how a DECISION
+ *                              item (approve-idea / approve-plan gate) advances
+ *                              the flow: resolving it resumes the paused run.
+ *   - dismiss                : mark an item dismissed (cruft).
+ *   - promoteToTask          : mint a real task from the item (two chokepoints)
+ *                              and resolve the item, recording the minted task id.
+ *   - launchSeparatePlanner  : the `gate:'idea-size-guard'` CTA — launch a
+ *                              dedicated single-idea planner for the flagged idea
+ *                              and resolve the guard (runs.launchSeparatePlanner,
+ *                              create-then-resolve). Not routed through `resolve`
+ *                              — the guard is resolved server-side as part of the
+ *                              same mutation.
+ *   - returnIdeaToBacklog    : the guard's other CTA — stamp the flagged idea
+ *                              `scope='large'` and resolve the guard
+ *                              (runs.returnIdeaToBacklog, stamp-then-resolve).
  *
  * The hook owns NO validation — that lives entirely in the chokepoints. It
  * tracks an in-flight item id (so a card can disable its buttons) and the last
@@ -74,6 +84,28 @@ export interface ReviewItemActionsState {
     reviewItemId: string,
     overrides?: { title?: string; body?: string | null },
   ) => Promise<{ taskId: string } | null>;
+  /**
+   * Launch a dedicated single-idea planner for the idea flagged by a
+   * `gate:'idea-size-guard'` decision item, resolving the guard as part of the
+   * same server-side mutation (create-then-resolve). Returns the new run's
+   * `{ runId, worktreePath, branchName }` on success, or null on error — an
+   * already-resolved guard hard-errors server-side (surfaced via `error`).
+   */
+  launchSeparatePlanner: (
+    projectId: number,
+    reviewItemId: string,
+  ) => Promise<{ runId: string; worktreePath: string; branchName: string } | null>;
+  /**
+   * Send the idea flagged by a `gate:'idea-size-guard'` decision item back to
+   * the backlog (stamped `scope='large'`), resolving the guard as part of the
+   * same server-side mutation (stamp-then-resolve). Returns `{ reviewItemId,
+   * ideaId }` on success, or null on error — an already-resolved guard
+   * hard-errors server-side (surfaced via `error`).
+   */
+  returnIdeaToBacklog: (
+    projectId: number,
+    reviewItemId: string,
+  ) => Promise<{ reviewItemId: string; ideaId: string } | null>;
 }
 
 function messageOf(err: unknown, fallback: string): string {
@@ -168,5 +200,49 @@ export function useReviewItemActions(): ReviewItemActionsState {
     [],
   );
 
-  return { pendingItemId, error, resolve, acceptFinding, dismiss, promoteToTask };
+  const launchSeparatePlanner = useCallback(
+    async (
+      projectId: number,
+      reviewItemId: string,
+    ): Promise<{ runId: string; worktreePath: string; branchName: string } | null> => {
+      setError(null);
+      setPendingItemId(reviewItemId);
+      try {
+        return await trpc.cyboflow.runs.launchSeparatePlanner.mutate({ projectId, reviewItemId });
+      } catch (err: unknown) {
+        setError(messageOf(err, 'Failed to launch a separate planner'));
+        return null;
+      } finally {
+        setPendingItemId(null);
+      }
+    },
+    [],
+  );
+
+  const returnIdeaToBacklog = useCallback(
+    async (projectId: number, reviewItemId: string): Promise<{ reviewItemId: string; ideaId: string } | null> => {
+      setError(null);
+      setPendingItemId(reviewItemId);
+      try {
+        return await trpc.cyboflow.runs.returnIdeaToBacklog.mutate({ projectId, reviewItemId });
+      } catch (err: unknown) {
+        setError(messageOf(err, 'Failed to return the idea to the backlog'));
+        return null;
+      } finally {
+        setPendingItemId(null);
+      }
+    },
+    [],
+  );
+
+  return {
+    pendingItemId,
+    error,
+    resolve,
+    acceptFinding,
+    dismiss,
+    promoteToTask,
+    launchSeparatePlanner,
+    returnIdeaToBacklog,
+  };
 }

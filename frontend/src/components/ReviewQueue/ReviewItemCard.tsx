@@ -17,7 +17,12 @@
  *   - decision     — an approve-idea / approve-plan gate (blocking). Resolving it
  *                    via reviewItems.resolve triggers aggregate-unblock → the
  *                    paused run auto-resumes (FLOW ADVANCEMENT). Surfaces "Approve"
- *                    (resolve) / "Reject" (dismiss).
+ *                    (resolve) / "Reject" (dismiss). A `gate:'idea-size-guard'`
+ *                    decision (IDEA-009: a too-large idea parked mid-batch)
+ *                    surfaces its own pair instead: "Launch a separate planner"
+ *                    (runs.launchSeparatePlanner) / "Return to backlog"
+ *                    (runs.returnIdeaToBacklog) — both resolve the guard
+ *                    server-side, never the generic resolve/dismiss.
  *   - human_task   — a free-form action item (blocking per-item). Triage:
  *                    Resolve / Dismiss / Promote to task.
  *   - notification — an informational FYI (e.g. a dynamic workflow finished /
@@ -182,8 +187,67 @@ function experimentComparisonId(item: ReviewItem): string | null {
   return p.experimentId;
 }
 
+/**
+ * IDEA-009: true for a `gate:'idea-size-guard'` decision item — the planner's
+ * size guard parks a too-large idea mid-batch behind this gate. The
+ * discriminant is INDEPENDENT of whether `payload.ideaRef` is present (it is
+ * optional in {@link DecisionPayload}) — the guard branch must still activate
+ * off the soft entity link alone, see {@link ideaSizeGuardRef}. Parsed
+ * defensively so a malformed/foreign payload behaves exactly like no payload
+ * (legacy resolve/dismiss actions), mirroring {@link experimentComparisonId}.
+ */
+function isIdeaSizeGuard(item: ReviewItem): boolean {
+  if (item.kind !== 'decision') return false;
+  const payload = item.payload;
+  return Boolean(payload && payload.kind === 'decision' && payload.gate === 'idea-size-guard');
+}
+
+/**
+ * IDEA-009: the flagged idea's display ref for a `gate:'idea-size-guard'`
+ * decision item, or null for every other decision. Prefers `payload.ideaRef`;
+ * falls back to the item's soft entity link (`entity_type === 'idea'` →
+ * `entity_id`) when the payload omits it; falls back to a generic label so the
+ * guard branch still renders (never a plain string 'null') when neither is
+ * present.
+ */
+function ideaSizeGuardRef(item: ReviewItem): string | null {
+  if (!isIdeaSizeGuard(item)) return null;
+  const payload = item.payload;
+  if (payload && payload.kind === 'decision' && typeof payload.ideaRef === 'string') {
+    return payload.ideaRef;
+  }
+  if (item.entity_type === 'idea' && item.entity_id !== null) {
+    return item.entity_id;
+  }
+  return 'this idea';
+}
+
+/**
+ * Which of the idea-size guard's two realized choices a RESOLVED item's
+ * `resolution` note recorded — keyed on the stable prefix each server mutation
+ * writes (runs.ts `launchSeparatePlanner` → `separate-planner:<runId>`,
+ * `returnIdeaToBacklog` → `return-to-backlog:<ideaId>`). Null for a still-pending
+ * item or an unrecognized resolution, so the card falls back to a generic
+ * "Resolved" label rather than guessing.
+ */
+function guardResolutionPath(resolution: string | null): 'separate-planner' | 'return-to-backlog' | null {
+  if (resolution === null) return null;
+  if (resolution.startsWith('separate-planner:')) return 'separate-planner';
+  if (resolution.startsWith('return-to-backlog:')) return 'return-to-backlog';
+  return null;
+}
+
 export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewItemCardProps): React.ReactElement {
-  const { pendingItemId, error, resolve, acceptFinding, dismiss, promoteToTask } = useReviewItemActions();
+  const {
+    pendingItemId,
+    error,
+    resolve,
+    acceptFinding,
+    dismiss,
+    promoteToTask,
+    launchSeparatePlanner,
+    returnIdeaToBacklog,
+  } = useReviewItemActions();
   const [approvalBusy, setApprovalBusy] = React.useState(false);
   // Set when a recovery-gate resume was REFUSED — the gate stays open and this
   // explains why, so the answer is never silently lost.
@@ -261,6 +325,30 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
   const handleViewComparison = (): void => {
     if (comparisonExperimentId === null) return;
     useNavigationStore.getState().openExperimentComparison(comparisonExperimentId);
+  };
+
+  // IDEA-009 idea-size guard: launch a dedicated single-idea planner for the
+  // flagged idea. The server resolves the guard as part of the same mutation
+  // (create-then-resolve) — no separate resolve() call here.
+  const handleGuardLaunchSeparatePlanner = (): void => {
+    void launchSeparatePlanner(item.project_id, item.id).then((r) => {
+      if (r !== null) {
+        trackEvent('review_item_resolved', { kind: item.kind, action: 'launch_separate_planner', blocking: item.blocking });
+        onResolved?.();
+      }
+    });
+  };
+
+  // IDEA-009 idea-size guard: send the flagged idea back to the backlog
+  // (stamped scope='large'). The server resolves the guard as part of the same
+  // mutation (stamp-then-resolve) — no separate resolve() call here.
+  const handleGuardReturnToBacklog = (): void => {
+    void returnIdeaToBacklog(item.project_id, item.id).then((r) => {
+      if (r !== null) {
+        trackEvent('review_item_resolved', { kind: item.kind, action: 'return_idea_to_backlog', blocking: item.blocking });
+        onResolved?.();
+      }
+    });
   };
 
   // A question-sourced decision can only be settled by ANSWERING the question
@@ -407,6 +495,51 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
             >
               View comparison →
             </Button>
+          );
+        }
+        // IDEA-009 idea-size guard: a too-large idea parked mid-batch. Resolved
+        // (status !== 'pending') shows which of the two realized choices was
+        // taken, keyed on the resolution's stable prefix — never re-offer the
+        // buttons, since both server mutations hard-error on an already-resolved
+        // guard rather than silently no-op.
+        if (isIdeaSizeGuard(item)) {
+          const guardIdeaRef = ideaSizeGuardRef(item);
+          if (item.status !== 'pending') {
+            const taken = guardResolutionPath(item.resolution);
+            return (
+              <span className="text-xs text-text-tertiary" data-testid="guard-resolved">
+                {taken === 'separate-planner'
+                  ? 'Launched a separate planner'
+                  : taken === 'return-to-backlog'
+                    ? 'Returned to the backlog'
+                    : 'Resolved'}
+              </span>
+            );
+          }
+          return (
+            <>
+              <span className="text-xs text-text-secondary" data-testid="guard-idea-ref">
+                {guardIdeaRef}
+              </span>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={busy}
+                onClick={handleGuardLaunchSeparatePlanner}
+                data-testid="guard-launch-separate"
+              >
+                Launch a separate planner
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={busy}
+                onClick={handleGuardReturnToBacklog}
+                data-testid="guard-return-backlog"
+              >
+                Return to backlog
+              </Button>
+            </>
           );
         }
         // A question-sourced decision is an OPEN AskUserQuestion: the run is
@@ -563,7 +696,11 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
         <div className="flex gap-2 mt-3 flex-wrap">{actions()}</div>
       )}
 
-      {error && pendingItemId === item.id && (
+      {/* `useReviewItemActions` is instantiated once PER CARD, so `error` is
+          already scoped to this item — the mutation's `finally` resets
+          `pendingItemId` to null in the same tick `error` is set, so gating on
+          `pendingItemId === item.id` here was dead code (never true). */}
+      {error && (
         <p className="mt-2 text-xs text-status-error" role="alert">
           {error}
         </p>

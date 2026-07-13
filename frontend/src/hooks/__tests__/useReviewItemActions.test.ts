@@ -15,10 +15,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 
-const { mockResolve, mockDismiss, mockPromote } = vi.hoisted(() => ({
+const { mockResolve, mockDismiss, mockPromote, mockLaunchSeparatePlanner, mockReturnIdeaToBacklog } = vi.hoisted(() => ({
   mockResolve: vi.fn(),
   mockDismiss: vi.fn(),
   mockPromote: vi.fn(),
+  mockLaunchSeparatePlanner: vi.fn(),
+  mockReturnIdeaToBacklog: vi.fn(),
 }));
 
 vi.mock('../../trpc/client', () => ({
@@ -28,6 +30,10 @@ vi.mock('../../trpc/client', () => ({
         resolve: { mutate: mockResolve },
         dismiss: { mutate: mockDismiss },
         promoteToTask: { mutate: mockPromote },
+      },
+      runs: {
+        launchSeparatePlanner: { mutate: mockLaunchSeparatePlanner },
+        returnIdeaToBacklog: { mutate: mockReturnIdeaToBacklog },
       },
     },
   },
@@ -39,6 +45,8 @@ beforeEach(() => {
   mockResolve.mockReset();
   mockDismiss.mockReset();
   mockPromote.mockReset();
+  mockLaunchSeparatePlanner.mockReset();
+  mockReturnIdeaToBacklog.mockReset();
 });
 
 describe('useReviewItemActions', () => {
@@ -178,5 +186,63 @@ describe('useReviewItemActions', () => {
 
     expect(res).toBeNull();
     expect(result.current.error).toContain('invalid_entity');
+  });
+
+  it('launchSeparatePlanner forwards the input and returns the new run', async () => {
+    mockLaunchSeparatePlanner.mockResolvedValue({
+      runId: 'run_child',
+      worktreePath: '/tmp/wt',
+      branchName: 'quick-child',
+    });
+    const { result } = renderHook(() => useReviewItemActions());
+
+    let res: { runId: string; worktreePath: string; branchName: string } | null = null;
+    await act(async () => {
+      res = await result.current.launchSeparatePlanner(4, 'rvw_guard');
+    });
+
+    expect(mockLaunchSeparatePlanner).toHaveBeenCalledWith({ projectId: 4, reviewItemId: 'rvw_guard' });
+    expect(res).toEqual({ runId: 'run_child', worktreePath: '/tmp/wt', branchName: 'quick-child' });
+    expect(result.current.pendingItemId).toBeNull();
+    expect(result.current.error).toBeNull();
+  });
+
+  it('sets error and returns null when launchSeparatePlanner rejects (already-resolved guard)', async () => {
+    mockLaunchSeparatePlanner.mockRejectedValue(new Error("Review item rvw_guard is already 'resolved'"));
+    const { result } = renderHook(() => useReviewItemActions());
+
+    let res: { runId: string; worktreePath: string; branchName: string } | null = { runId: 'x', worktreePath: 'x', branchName: 'x' };
+    await act(async () => {
+      res = await result.current.launchSeparatePlanner(4, 'rvw_guard');
+    });
+
+    expect(res).toBeNull();
+    expect(result.current.error).toContain('already');
+  });
+
+  it('returnIdeaToBacklog forwards the input and returns the resolved ids', async () => {
+    mockReturnIdeaToBacklog.mockResolvedValue({ reviewItemId: 'rvw_guard', ideaId: 'idea_9' });
+    const { result } = renderHook(() => useReviewItemActions());
+
+    let res: { reviewItemId: string; ideaId: string } | null = null;
+    await act(async () => {
+      res = await result.current.returnIdeaToBacklog(4, 'rvw_guard');
+    });
+
+    expect(mockReturnIdeaToBacklog).toHaveBeenCalledWith({ projectId: 4, reviewItemId: 'rvw_guard' });
+    expect(res).toEqual({ reviewItemId: 'rvw_guard', ideaId: 'idea_9' });
+  });
+
+  it('sets error and returns null when returnIdeaToBacklog rejects (already-resolved guard)', async () => {
+    mockReturnIdeaToBacklog.mockRejectedValue(new Error("Review item rvw_guard is already 'resolved'"));
+    const { result } = renderHook(() => useReviewItemActions());
+
+    let res: { reviewItemId: string; ideaId: string } | null = { reviewItemId: 'x', ideaId: 'x' };
+    await act(async () => {
+      res = await result.current.returnIdeaToBacklog(4, 'rvw_guard');
+    });
+
+    expect(res).toBeNull();
+    expect(result.current.error).toContain('already');
   });
 });
