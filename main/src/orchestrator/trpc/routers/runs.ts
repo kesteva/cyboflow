@@ -974,13 +974,27 @@ export const runsRouter = router({
         // uninitialized store (tests) simply skips the pre-check — createForRun
         // remains the authoritative gate.
         let eligibleIds: string[] | null = null;
+        let taggedIds: string[] = [];
         try {
-          eligibleIds = SprintLaneStore.getInstance().filterEligibleTaskIds(
-            input.projectId,
-            input.taskIds,
-          );
+          const store = SprintLaneStore.getInstance();
+          // Reject a NORMAL sprint selection that names a hidden experiment-arm
+          // task. Arm tasks are approved_at-stamped (so the arm's own materialize
+          // accepts them) and thus pass filterEligibleTaskIds, but they are
+          // board-hidden by the experiment_id TAG and must never seed a foreign,
+          // non-experiment sprint. The UI batch picker already excludes tagged
+          // rows; this closes the direct-taskIds server boundary too. (Arm launch
+          // and arm materialize bypass this pre-check entirely.)
+          taggedIds = store.findExperimentTaggedTaskIds(input.projectId, input.taskIds);
+          eligibleIds = store.filterEligibleTaskIds(input.projectId, input.taskIds);
         } catch {
           eligibleIds = null;
+          taggedIds = [];
+        }
+        if (taggedIds.length > 0) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: `selection includes ${taggedIds.length} experiment-arm task(s): ${taggedIds.join(', ')} — these belong to a live A/B experiment and cannot seed a normal sprint. Decide the experiment first, or remove them from the selection.`,
+          });
         }
         if (eligibleIds !== null) {
           if (eligibleIds.length === 0) {

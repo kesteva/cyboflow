@@ -325,6 +325,52 @@ describe('SprintLaneStore', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // findExperimentTaggedTaskIds — the runs.start launch-boundary scope
+  // ---------------------------------------------------------------------------
+
+  describe('findExperimentTaggedTaskIds', () => {
+    let rdb: Database.Database;
+    let rstore: SprintLaneStore;
+
+    beforeEach(() => {
+      rdb = buildReadyLaneDb();
+      rstore = SprintLaneStore.initialize(dbAdapter(rdb));
+    });
+
+    afterEach(() => {
+      rdb.close();
+    });
+
+    it('returns ONLY the experiment-tagged ids (approved tagged clones must still be caught)', () => {
+      // Migration 049 adds tasks.experiment_id; the lane fixture stops at 025, so
+      // add it here to exercise the real detection query.
+      rdb.exec('ALTER TABLE tasks ADD COLUMN experiment_id TEXT');
+      seedReadyTask(rdb, 'tsk_normal', 'TASK-001', 'Normal', { approved: true });
+      seedReadyTask(rdb, 'tsk_arm', 'TASK-002', 'Arm clone', { approved: true });
+      // Tag one row — an approved arm clone is sprint-ELIGIBLE (approved_at set) but
+      // must be flagged so a foreign runs.start selection is rejected.
+      rdb.prepare("UPDATE tasks SET experiment_id = 'exp-1' WHERE id = 'tsk_arm'").run();
+
+      expect(rstore.findExperimentTaggedTaskIds(1, ['tsk_normal', 'tsk_arm'])).toEqual(['tsk_arm']);
+      // The tagged clone is ALSO eligible by the sprint filter — proving the tag,
+      // not approval, is what stops the foreign launch.
+      expect(rstore.filterEligibleTaskIds(1, ['tsk_normal', 'tsk_arm'])).toEqual([
+        'tsk_normal',
+        'tsk_arm',
+      ]);
+    });
+
+    it('degrades to EMPTY (no rejections) on a pre-049 schema lacking experiment_id', () => {
+      seedReadyTask(rdb, 'tsk_a', 'TASK-001', 'A', { approved: true });
+      expect(rstore.findExperimentTaggedTaskIds(1, ['tsk_a'])).toEqual([]);
+    });
+
+    it('returns [] for an empty selection', () => {
+      expect(rstore.findExperimentTaggedTaskIds(1, [])).toEqual([]);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // listLanes
   // ---------------------------------------------------------------------------
 

@@ -357,6 +357,48 @@ export class SprintLaneStore {
     }
   }
 
+  /**
+   * Return the subset of `taskIds` that are experiment-arm tasks (experiment_id
+   * IS NOT NULL). Used ONLY by the runs.start launch boundary to REJECT a normal
+   * (non-experiment) sprint selection that names a hidden arm task.
+   *
+   * WHY this is a SEPARATE query and NOT folded into filterEligibleTaskIds:
+   * experiment-arm tasks are now approved_at-stamped (they must be, so the arm's
+   * OWN materialize — createForRun, which shares filterEligibleTaskIds — accepts
+   * its tagged clones). Board visibility is gated on the experiment_id TAG, not
+   * approved_at. So a tagged+approved task IS sprint-eligible by that filter; the
+   * only thing that must stop a FOREIGN launch from executing it is this
+   * boundary check. The arm's own launch (runLauncher.launch) and materialize
+   * (cyboflow_create_sprint_batch → run-scoped intersect) never route through the
+   * runs.start pre-check, so scoping here does not affect them. Degrades to
+   * EMPTY (no rejections) on a pre-049 schema lacking experiment_id.
+   */
+  findExperimentTaggedTaskIds(projectId: number, taskIds: string[]): string[] {
+    const unique = [...new Set(taskIds)];
+    if (unique.length === 0) return [];
+    try {
+      const placeholders = unique.map(() => '?').join(', ');
+      const rows = this.db
+        .prepare(
+          `SELECT id FROM tasks
+            WHERE project_id = ?
+              AND id IN (${placeholders})
+              AND experiment_id IS NOT NULL`,
+        )
+        .all(projectId, ...unique) as Array<{ id: string }>;
+      const tagged = new Set(rows.map((r) => r.id));
+      return unique.filter((id) => tagged.has(id));
+    } catch (err) {
+      if (err instanceof Error && /no such column/i.test(err.message)) {
+        this.logger?.debug('[SprintLaneStore] experiment-tag scope skipped (pre-049 schema)', {
+          error: err.message,
+        });
+        return [];
+      }
+      throw err;
+    }
+  }
+
   // --------------------------------------------------------------------------
   // addLane / removeLane — mid-run lane roster edits (monitor steering)
   // --------------------------------------------------------------------------
