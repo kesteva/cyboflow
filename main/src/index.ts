@@ -52,6 +52,7 @@ import {
   type MonitorSession,
 } from './orchestrator/programmatic/monitor';
 import { retryRunHandler, type RetryRunDeps } from './orchestrator/retryRunHandler';
+import { rewindRunHandler, type RewindRunDeps } from './orchestrator/rewindRunHandler';
 import { makeSdkStructuredQuery, makeSdkTextQuery } from './orchestrator/programmatic/monitorQuery';
 import { StepResultStore } from './orchestrator/stepResultStore';
 import { DynamicWorkflowTracker } from './orchestrator/dynamicWorkflows';
@@ -231,12 +232,13 @@ let monitorRetryStep: ((runId: string, stepId?: string) => Promise<MonitorAction
 let monitorSwitchToOrchestrated:
   | ((runId: string, reason: string) => Promise<MonitorActionResult>)
   | null = null;
-// Monitor-actuation seam (the 8 NON-STOPPING steering actions: add/remove/edit
-// task, skip/unskip/steer step, resolve review item, file note). Same
-// late-binding pattern as the two above — bound in the tRPC dep-wiring block
-// where db / runExecutor / the routers are all live. Grouped into one holder
-// object (rather than 8 separate module vars) since they share a wiring site.
-// Null until wired → each action reports "not available yet" instead of acting.
+// Monitor-actuation seam (the 9 confirm-gated steering actions: add/remove/edit
+// task, skip/unskip/steer step, the whole-run rewind, resolve review item, file
+// note). Same late-binding pattern as the two above — bound in the tRPC
+// dep-wiring block where db / runExecutor / the routers are all live. Grouped
+// into one holder object (rather than 9 separate module vars) since they share a
+// wiring site. Null until wired → each action reports "not available yet"
+// instead of acting.
 interface MonitorSteeringActions {
   addTask(runId: string, input: { title: string; body?: string; priority?: string }): Promise<MonitorActionResult>;
   removeTask(runId: string, input: { taskRef: string }): Promise<MonitorActionResult>;
@@ -246,7 +248,11 @@ interface MonitorSteeringActions {
   ): Promise<MonitorActionResult>;
   skipStep(runId: string, input: { stepId: string }): Promise<MonitorActionResult>;
   unskipStep(runId: string, input: { stepId: string }): Promise<MonitorActionResult>;
-  steerStep(runId: string, input: { stepId: string; guidance: string }): Promise<MonitorActionResult>;
+  steerStep(
+    runId: string,
+    input: { stepId: string; guidance: string; taskRef?: string },
+  ): Promise<MonitorActionResult>;
+  rewindToStep(runId: string, input: { stepId: string }): Promise<MonitorActionResult>;
   resolveReviewItem(
     runId: string,
     input: { reviewItemId: string; outcome?: 'approve' | 'reject'; resolution?: string },
@@ -1682,7 +1688,7 @@ async function initializeServices() {
                     ok: false,
                     message: 'Handover is not wired yet — try again in a moment.',
                   }),
-            // The 8 non-stopping steering actions, all delegating to the single
+            // The 9 confirm-gated steering actions, all delegating to the single
             // late-bound monitorSteeringActions holder (wired in the dep-wiring
             // block). Each threads the session's own runId.
             addTask: (input) =>
@@ -1708,6 +1714,10 @@ async function initializeServices() {
             steerStep: (input) =>
               monitorSteeringActions
                 ? monitorSteeringActions.steerStep(ctx.runId, input)
+                : Promise.resolve(STEERING_NOT_WIRED),
+            rewindToStep: (input) =>
+              monitorSteeringActions
+                ? monitorSteeringActions.rewindToStep(ctx.runId, input)
                 : Promise.resolve(STEERING_NOT_WIRED),
             resolveReviewItem: (input) =>
               monitorSteeringActions
@@ -2744,7 +2754,14 @@ app.whenReady().then(async () => {
 
     // Validate a stepId belongs to a programmatic run's effective workflow
     // definition — so skip/unskip/steer give "unknown step" feedback instead of
-    // silently stashing a directive the controller will never honor.
+    // silently stashing a directive the controller will never honor. Fan-out
+    // INNER step ids (e.g. a sprint lane's 'implement' / 'code-review') count:
+    // the controller consults the skip set per inner step (driveItem's loop) and
+    // the guidance thunk keys on the synthesized inner step id, so directives on
+    // them ARE honored — only the OUTER phase steps used to pass this gate,
+    // which wrongly refused the monitor exactly the lane steps live steering
+    // targets most. (Rewind validates separately against OUTER steps only — the
+    // walk's resume machinery is outer-step-indexed.)
     const validateRunStep = (
       runId: string,
       stepId: string,
@@ -2762,9 +2779,117 @@ app.whenReady().then(async () => {
         return { ok: false, message: 'Only programmatic runs support step control.' };
       const def = resolveWorkflowDefinition(row.workflowName, row.specJson);
       if (!def) return { ok: false, message: "This run's workflow definition could not be resolved." };
-      const exists = def.phases.some((p) => p.steps.some((s) => s.id === stepId));
+      const exists = def.phases.some((p) =>
+        p.steps.some(
+          (s) => s.id === stepId || (s.fanOut?.inner.some((inner) => inner.id === stepId) ?? false),
+        ),
+      );
       if (!exists) return { ok: false, message: `Step '${stepId}' isn't part of this workflow.` };
       return { ok: true };
+    };
+
+    // LIVE delivery for steer_step: when the steered step is executing RIGHT NOW,
+    // interject the guidance into the running agent turn(s) via the SDK steering
+    // queue (SubstrateDispatchFacade.injectSteering — a priority-'now' push into
+    // the turn's live prompt input; the agent folds it in at its next loop
+    // boundary). Which spawns count as "running this step":
+    //   - the run-level agent (spawnKey === runId) when workflow_runs.
+    //     current_step_id matches the steered step;
+    //   - each RUNNING sprint lane whose lane pointer (sprint_batch_tasks.
+    //     current_step_id) matches — fan-out lanes run INNER steps under spawnKey
+    //     `${runId}:${taskId}`, and `taskRef` narrows delivery to ONE lane.
+    // Fail-soft: any error → 0 delivered (the stored next-spawn guidance is the
+    // durable path); returns how many live agents actually accepted the push.
+    const deliverLiveGuidance = (
+      runId: string,
+      stepId: string,
+      guidance: string,
+      taskRef?: string,
+    ): number => {
+      try {
+        const live = new Set(substrateFacade.listLiveSpawnKeys(runId));
+        if (live.size === 0) return 0;
+        const row = db
+          .prepare(
+            `SELECT current_step_id AS currentStepId, batch_id AS batchId, project_id AS projectId
+               FROM workflow_runs WHERE id = ?`,
+          )
+          .get(runId) as
+          | { currentStepId: string | null; batchId: string | null; projectId: number | null }
+          | undefined;
+        if (!row) return 0;
+        const targets: string[] = [];
+        if (row.batchId) {
+          let laneRows = db
+            .prepare(
+              `SELECT task_id AS taskId FROM sprint_batch_tasks
+                 WHERE batch_id = ? AND status = 'running' AND current_step_id = ?`,
+            )
+            .all(row.batchId, stepId) as Array<{ taskId: string }>;
+          if (taskRef !== undefined) {
+            // Ref-or-id resolution (mirrors taskMutationHandler.resolveTaskId):
+            // an opaque id matches directly; a display ref resolves project-scoped.
+            const resolved = db
+              .prepare('SELECT id FROM tasks WHERE id = ? OR (project_id = ? AND ref = ?)')
+              .get(taskRef, row.projectId, taskRef) as { id: string } | undefined;
+            laneRows = resolved ? laneRows.filter((lane) => lane.taskId === resolved.id) : [];
+          }
+          targets.push(...laneRows.map((lane) => `${runId}:${lane.taskId}`));
+        }
+        // The run-level (non-lane) agent — only when the operator did NOT narrow
+        // to a lane (taskRef targets lanes exclusively).
+        if (taskRef === undefined && row.currentStepId === stepId) {
+          targets.push(runId);
+        }
+        const text = `## Operator guidance (live)\n\nThe operator sent this guidance for the step you are executing RIGHT NOW — fold it into your current work:\n\n${guidance}`;
+        let delivered = 0;
+        for (const spawnKey of targets) {
+          if (live.has(spawnKey) && substrateFacade.injectSteering(spawnKey, runId, text)) {
+            delivered += 1;
+          }
+        }
+        return delivered;
+      } catch (err) {
+        loggerLike.warn('[Main] steer_step live delivery failed (fail-soft)', {
+          runId,
+          stepId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return 0;
+      }
+    };
+
+    // Rewind deps bag (monitor rewind_to_step): the SAME db / runQueues /
+    // runExecutor / runStatusEvents as the retry bag, plus the abort seam
+    // (substrateFacade.abort — pause/handover's stopLiveRun), the step_results
+    // purge primitive, the fan-out lane counters, and the pending-gate sweep.
+    // countRedispatchableLanes counts non-'integrated' lanes — exactly what a
+    // re-entered fanOut step would dispatch after resetFailedLanes re-queues the
+    // failed ones (the production driver's resolveItems filters integrated+failed;
+    // failed lanes count here because the handler resets them before re-driving).
+    const rewindRunDepsBag: RewindRunDeps = {
+      db,
+      runQueues,
+      runExecutor,
+      stopLiveRun: (runId) => substrateFacade.abort(runId),
+      emitRunStatusChanged: (runId, status) => runStatusEvents.emit('changed', { runId, status }),
+      listStepResults: (runId) => StepResultStore.tryGetInstance()?.listForRun(runId) ?? [],
+      deleteStepResults: (runId, stepIds) =>
+        StepResultStore.tryGetInstance()?.deleteForSteps(runId, stepIds) ?? 0,
+      resetFailedLanes: (batchId) => SprintLaneStore.getInstance().resetFailedLanes(batchId),
+      countRedispatchableLanes: (batchId) =>
+        SprintLaneStore.getInstance()
+          .listLanes(batchId)
+          .filter((lane) => lane.status !== 'integrated').length,
+      reopenBatch: (batchId) => SprintLaneStore.getInstance().reopenBatch(batchId),
+      clearPendingGateItems: (runId) => HumanStepManager.getInstance().clearPendingForRun(runId),
+      clearPendingApprovalsForRun: (runId) => {
+        ApprovalRouter.getInstance().clearPendingForRun(runId);
+      },
+      clearPendingQuestionsForRun: (runId) => {
+        QuestionRouter.getInstance().clearPendingForRun(runId);
+      },
+      logger: loggerLike,
     };
 
     monitorSteeringActions = {
@@ -2789,11 +2914,64 @@ app.whenReady().then(async () => {
       steerStep: async (runId, input) => {
         const v = validateRunStep(runId, input.stepId);
         if (!v.ok) return { ok: false, message: v.message };
+        // taskRef narrows to ONE sprint lane's RUNNING agent — a live-only
+        // delivery (RunDirectives.stepGuidance is keyed by stepId alone, so a
+        // stored per-lane steer would leak to every lane's next spawn of that
+        // step; refusing the store keeps the narrowing honest).
+        if (input.taskRef !== undefined) {
+          const delivered = deliverLiveGuidance(runId, input.stepId, input.guidance, input.taskRef);
+          if (delivered > 0) {
+            return {
+              ok: true,
+              message: `Delivered your guidance live to ${input.taskRef}'s agent on step '${input.stepId}'. (Live-only: it is not stored for future spawns — steer without taskRef for that.)`,
+            };
+          }
+          return {
+            ok: false,
+            message: `${input.taskRef}'s agent isn't currently mid-flight on step '${input.stepId}', so there was nothing to steer live. Steer without taskRef to store guidance for every future spawn of the step.`,
+          };
+        }
+        // Durable path FIRST: the guidance rides RunDirectives and is composed
+        // into every FUTURE spawn of this step (including retries after a live
+        // delivery — deliberate reinforcement, not duplication).
         runExecutor.setStepGuidance(runId, input.stepId, input.guidance);
+        // Live path: when the step is executing right now, ALSO interject the
+        // guidance mid-turn via the SDK steering queue.
+        const delivered = deliverLiveGuidance(runId, input.stepId, input.guidance);
+        const stored = `Added your guidance to step '${input.stepId}' — it'll be included whenever that step (re)spawns.`;
         return {
           ok: true,
-          message: `Added your guidance to step '${input.stepId}' — it'll be included when that step runs (no effect if it has already run).`,
+          message:
+            delivered > 0
+              ? `${stored} Also delivered it live to ${delivered} agent${delivered === 1 ? '' : 's'} running that step right now.`
+              : `${stored} No agent is mid-flight on that step right now, so it first lands at the next spawn.`,
         };
+      },
+      rewindToStep: async (runId, input) => {
+        const result = await rewindRunHandler(runId, input.stepId, rewindRunDepsBag);
+        if ('delivered' in result) {
+          const abortNote = result.abortedLiveWalk ? ' Stopped the in-flight work first.' : '';
+          const keptNote = result.fanOutKeptSettled
+            ? ' Already-integrated sprint work stays settled — only the surrounding steps re-run.'
+            : '';
+          return {
+            ok: true,
+            message: `Rewound the run to step '${result.stepId}' — re-running from there now.${abortNote}${keptNote}`,
+          };
+        }
+        const messages: Record<string, string> = {
+          not_found: 'Run not found.',
+          not_programmatic: 'Only programmatic runs can be rewound.',
+          not_rewindable:
+            "The run isn't in a rewindable state — it must be running, resting, failed, or paused.",
+          unknown_step: `Step '${input.stepId}' is not one of this workflow's timeline steps — rewind targets the run's own steps, not a sprint task's inner steps.`,
+          target_not_prior:
+            "That step is ahead of the run's current position — rewind only goes backward. To jump forward, skip the steps in between instead.",
+          fanout_settled:
+            'Every sprint task in this run is already integrated — nothing would re-run at that fan-out step. Rewind to an earlier step instead, or add a task first.',
+          race: 'The run changed state mid-rewind — try again.',
+        };
+        return { ok: false, message: messages[result.reason] ?? `Rewind refused (${result.reason}).` };
       },
       resolveReviewItem: async (runId, input) => {
         const projectId = runProjectId(runId);
