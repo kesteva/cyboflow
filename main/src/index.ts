@@ -2787,6 +2787,19 @@ app.whenReady().then(async () => {
       return { ok: true };
     };
 
+    // Is `stepId` an OUTER fan-out step of the run's (FROZEN) definition? Such a
+    // step never spawns its own agent while lanes exist (the controller walks the
+    // synthesized INNER chain instead), and its durable RunDirectives guidance is
+    // never re-read — so steer_step treats it as a LIVE-ONLY broadcast to the
+    // running sprint lanes (see the steerStep binding below).
+    const isOuterFanOutStep = (runId: string, stepId: string): boolean => {
+      const frozen = resolveRunFrozenSpec(db, runId);
+      const def = frozen ? resolveWorkflowDefinition(frozen.workflowName, frozen.specJson) : null;
+      return def
+        ? def.phases.some((p) => p.steps.some((s) => s.id === stepId && s.fanOut !== undefined))
+        : false;
+    };
+
     // LIVE delivery for steer_step: when the steered step is executing RIGHT NOW,
     // interject the guidance into the running agent turn(s) via the SDK steering
     // queue (SubstrateDispatchFacade.injectSteering — a priority-'now' push into
@@ -2796,7 +2809,10 @@ app.whenReady().then(async () => {
     //     current_step_id matches the steered step;
     //   - each RUNNING sprint lane whose lane pointer (sprint_batch_tasks.
     //     current_step_id) matches — fan-out lanes run INNER steps under spawnKey
-    //     `${runId}:${taskId}`, and `taskRef` narrows delivery to ONE lane.
+    //     `${runId}:${taskId}`, and `taskRef` narrows delivery to ONE lane;
+    //   - with `broadcastToLanes` (the steered id is an OUTER fan-out step, whose
+    //     lane pointers hold INNER ids that can never equal it), EVERY running
+    //     lane of the batch matches regardless of which inner step it is on.
     // Fail-soft: any error → 0 delivered (the stored next-spawn guidance is the
     // durable path); returns how many live agents actually accepted the push.
     const deliverLiveGuidance = (
@@ -2804,6 +2820,7 @@ app.whenReady().then(async () => {
       stepId: string,
       guidance: string,
       taskRef?: string,
+      broadcastToLanes?: boolean,
     ): number => {
       try {
         const live = new Set(substrateFacade.listLiveSpawnKeys(runId));
@@ -2819,12 +2836,19 @@ app.whenReady().then(async () => {
         if (!row) return 0;
         const targets: string[] = [];
         if (row.batchId) {
-          let laneRows = db
-            .prepare(
-              `SELECT task_id AS taskId FROM sprint_batch_tasks
-                 WHERE batch_id = ? AND status = 'running' AND current_step_id = ?`,
-            )
-            .all(row.batchId, stepId) as Array<{ taskId: string }>;
+          let laneRows = broadcastToLanes
+            ? (db
+                .prepare(
+                  `SELECT task_id AS taskId FROM sprint_batch_tasks
+                     WHERE batch_id = ? AND status = 'running'`,
+                )
+                .all(row.batchId) as Array<{ taskId: string }>)
+            : (db
+                .prepare(
+                  `SELECT task_id AS taskId FROM sprint_batch_tasks
+                     WHERE batch_id = ? AND status = 'running' AND current_step_id = ?`,
+                )
+                .all(row.batchId, stepId) as Array<{ taskId: string }>);
           if (taskRef !== undefined) {
             // Ref-or-id resolution (mirrors taskMutationHandler.resolveTaskId):
             // an opaque id matches directly; a display ref resolves project-scoped.
@@ -2914,6 +2938,25 @@ app.whenReady().then(async () => {
       steerStep: async (runId, input) => {
         const v = validateRunStep(runId, input.stepId);
         if (!v.ok) return { ok: false, message: v.message };
+        // An OUTER fan-out step never spawns its own agent while lanes exist and
+        // its durable guidance is never re-read (the controller walks the
+        // synthesized INNER chain; SpawnStepRunner resolves guidance by the inner
+        // ids) — storing under it would be a silent no-op reported as success.
+        // Treat it as a LIVE-ONLY broadcast to the running sprint agents instead,
+        // and point the operator at the inner step ids for durable guidance.
+        if (isOuterFanOutStep(runId, input.stepId)) {
+          const delivered = deliverLiveGuidance(runId, input.stepId, input.guidance, input.taskRef, true);
+          if (delivered > 0) {
+            return {
+              ok: true,
+              message: `Delivered your guidance live to ${delivered} running sprint agent${delivered === 1 ? '' : 's'}. (Live-only: '${input.stepId}' is a fan-out phase, so nothing is stored — steer one of its inner steps, e.g. 'implement', to store guidance for future spawns.)`,
+            };
+          }
+          return {
+            ok: false,
+            message: `No sprint agent is running right now, so there was nothing to steer live — and '${input.stepId}' is a fan-out phase whose stored guidance would never be read. Steer one of its inner steps (e.g. 'implement') to store guidance for future spawns.`,
+          };
+        }
         // taskRef narrows to ONE sprint lane's RUNNING agent — a live-only
         // delivery (RunDirectives.stepGuidance is keyed by stepId alone, so a
         // stored per-lane steer would leak to every lane's next spawn of that
