@@ -16,6 +16,8 @@ export interface TurnSessionEventProjectionContext {
   model: string;
   durationMs: number;
   usage?: AgentUsage;
+  /** Suppress app-server's echo of an internal workflow prompt from chat. */
+  hideUserMessage?: boolean;
 }
 
 const CODEX_EVENT_SOURCE = {
@@ -178,6 +180,7 @@ function projectCompletedItem(
   const { item, threadId } = event;
   switch (item.type) {
     case 'userMessage': {
+      if (context.hideUserMessage === true) return [];
       const text = userMessageText(item);
       return text.trim().length === 0
         ? []

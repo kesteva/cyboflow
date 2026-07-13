@@ -147,6 +147,13 @@ export interface ClaudeSpawnerOptions {
   worktreePath: string;
   prompt: string;
   /**
+   * The prompt is orchestration plumbing, not a user-authored chat turn. Codex
+   * app-server echoes every turn input as a userMessage; its manager uses this
+   * flag to keep that echo out of the chat projection while retaining the raw
+   * provider notification for diagnostics. Quick-chat and nudge inputs omit it.
+   */
+  hidePromptFromTranscript?: boolean;
+  /**
    * Workflow 4-mode agent permission value resolved from the run snapshot
    * (`workflow_runs.permission_mode_snapshot`). Threaded to the spawning
    * manager so each substrate can apply native auto / accept-edits / ask /
@@ -776,6 +783,7 @@ export class RunExecutor {
           runId,
           worktreePath: run.worktree_path,
           prompt,
+          hidePromptFromTranscript: turnKind === 'launch',
           ...renderedOverrides,
           ...(resumeSessionId ? { resumeSessionId } : {}),
         });

@@ -72,6 +72,7 @@ describe('SpawnStepRunner', () => {
     const passed = (spawner.spawnCliProcess as ReturnType<typeof vi.fn>).mock.calls[0][0] as ClaudeSpawnerOptions;
     expect(passed.prompt).toContain('# Runtime adapter: Codex');
     expect(passed.prompt).toContain('`epics`');
+    expect(passed.hidePromptFromTranscript).toBe(true);
   });
 
   it('forwards ctx.item into the composed prompt (fan-out item scope)', async () => {

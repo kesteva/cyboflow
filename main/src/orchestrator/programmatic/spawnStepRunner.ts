@@ -146,6 +146,7 @@ export class SpawnStepRunner implements StepRunner {
         runId: this.opts.runId,
         worktreePath: this.opts.worktreePath,
         prompt,
+        hidePromptFromTranscript: true,
         agentInvocationStepId: step.id,
         ...(this.opts.model ? { model: this.opts.model } : {}),
         ...(agentPermissionMode ? { agentPermissionMode } : {}),

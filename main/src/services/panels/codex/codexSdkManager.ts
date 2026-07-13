@@ -452,6 +452,7 @@ export class CodexSdkManager extends AbstractCliManager {
         model: this.displayModel(options.model),
         durationMs: Date.now() - startedAt,
         usage: usageAccumulator.snapshot(),
+        hideUserMessage: options.hidePromptFromTranscript,
       });
       for (const projected of projectedEvents) {
         if (projected.type === 'agent_result') {

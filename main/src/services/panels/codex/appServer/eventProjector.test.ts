@@ -138,6 +138,22 @@ describe('projectTurnSessionEvent', () => {
     }]);
   });
 
+  it('omits an internal workflow prompt echo while preserving raw diagnostics upstream', () => {
+    expect(projectTurnSessionEvent(completedItem({
+      type: 'userMessage',
+      id: 'workflow-launch',
+      clientId: null,
+      content: [{
+        type: 'text',
+        text: '# Runtime adapter: Codex\n\nInternal workflow body',
+        text_elements: [],
+      }],
+    }), {
+      ...CONTEXT,
+      hideUserMessage: true,
+    })).toEqual([]);
+  });
+
   it('correlates command, MCP, and web-search calls with their results', () => {
     expect(project(completedItem({
       type: 'commandExecution',

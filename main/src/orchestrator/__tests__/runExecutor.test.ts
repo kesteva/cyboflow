@@ -1209,6 +1209,7 @@ describe('RunExecutor — getPrompt reads workflow file via injected reader', ()
     expect(opts.prompt).toContain('# Runtime adapter: Codex');
     expect(opts.prompt.endsWith('do the sprint')).toBe(true);
     expect(opts.systemPromptAppend).toBe('append me');
+    expect(opts.hidePromptFromTranscript).toBe(true);
   });
 
   it('does not wrap Codex nudge prompts because the resumed thread already has the launch envelope', async () => {
@@ -1235,6 +1236,7 @@ describe('RunExecutor — getPrompt reads workflow file via injected reader', ()
     const opts = spawnedOpts(spawner);
     expect(opts.prompt).toBe('follow up');
     expect(opts.prompt).not.toContain('# Runtime adapter: Codex');
+    expect(opts.hidePromptFromTranscript).toBe(false);
   });
 
   // Custom-flow routing (workflow_path === null): getPrompt no longer throws on a
