@@ -3,6 +3,7 @@ import { GitMerge, ExternalLink, Trash2 } from 'lucide-react';
 import { useLifecycleTarget } from '../../hooks/useLifecycleTarget';
 import { trpc } from '../../trpc/client';
 import { findGuardedExperimentForSession } from '../../utils/armDismissGuard';
+import type { GuardedAction } from '../../utils/armDismissGuard';
 import { experimentDisplayName } from '../../utils/experimentDisplay';
 import { ArmDismissGuardDialog } from './ArmDismissGuardDialog';
 import type { ExperimentArm, ExperimentRow, ExperimentStatus } from '../../../../shared/types/experiments';
@@ -18,6 +19,10 @@ interface ArmGuardState {
   arm: ExperimentArm;
   status: ExperimentStatus;
   experimentName?: string;
+  /** Which lifecycle action triggered the guard — drives the dialog's copy/label. */
+  action: GuardedAction;
+  /** The original action's continuation, invoked once the user confirms. */
+  proceed: () => void;
 }
 
 export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: SessionLifecycleActionBarProps) {
@@ -42,25 +47,27 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
 
   const session = target.session;
 
-  // Intercept Dismiss when the session is one arm of a LIVE A/B experiment.
-  // Tearing down a single arm strands the experiment in 'grading' with an
-  // unresolvable blocking review item — so we prompt instead. On ANY read
-  // failure (or a session with no project) we fall through to the normal dismiss
-  // flow: dismissal must never be BLOCKED by a failed guard read.
-  const handleDismissClick = () => {
+  // Intercept Dismiss/Merge/Create-PR when the session is one arm of a LIVE A/B
+  // experiment. Tearing down (or accepting) a single arm strands the experiment
+  // undecided — merged/dismissed arm sessions drop out of the rail group (see
+  // railExperimentGrouping.ts), losing the decide CTAs (promote/rerun/switch-to
+  // -randomized) reachable only from the comparison view. So we prompt instead.
+  // On ANY read failure (or a session with no project) we fall through to the
+  // normal action: the action must never be BLOCKED by a failed guard read.
+  const runGuardedAction = (action: GuardedAction, proceed: () => void) => {
     const projectId = session.projectId;
     if (projectId === undefined) {
-      onDismiss?.();
+      proceed();
       return;
     }
     // Initiate the read inside a synchronous try/catch: an unavailable/unwired
     // experiments route throws right here (not as a rejection), and that must
-    // fall through to the normal dismiss SYNCHRONOUSLY, same as a rejected read.
+    // fall through to the normal action SYNCHRONOUSLY, same as a rejected read.
     let queryPromise: Promise<ExperimentRow[]>;
     try {
       queryPromise = trpc.cyboflow.experiments.listForProject.query({ projectId });
     } catch {
-      onDismiss?.();
+      proceed();
       return;
     }
     setCheckingArm(true);
@@ -68,7 +75,7 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
       .then(async (experiments) => {
         const match = findGuardedExperimentForSession(session.id, experiments);
         if (!match) {
-          onDismiss?.();
+          proceed();
           return;
         }
         // Best-effort enrichment: resolve the experiment's display name from the
@@ -93,14 +100,20 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
           arm: match.arm,
           status: match.experiment.status,
           experimentName,
+          action,
+          proceed,
         });
       })
       .catch(() => {
-        // Never block dismissal on a failed read — proceed with the normal flow.
-        onDismiss?.();
+        // Never block the action on a failed read — proceed with the normal flow.
+        proceed();
       })
       .finally(() => setCheckingArm(false));
   };
+
+  const handleMergeClick = () => runGuardedAction('merge', () => onMerge?.());
+  const handleCreatePRClick = () => runGuardedAction('create-pr', () => onCreatePR?.());
+  const handleDismissClick = () => runGuardedAction('dismiss', () => onDismiss?.());
 
   return (
     <>
@@ -110,8 +123,8 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
       {!inPlace && (
         <button
           data-testid="session-action-merge"
-          disabled={acceptDisabled}
-          onClick={onMerge}
+          disabled={acceptDisabled || checkingArm}
+          onClick={handleMergeClick}
           className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
           title={acceptDisabled ? 'Wait for the work to finish before merging' : 'Merge changes into base branch'}
         >
@@ -123,8 +136,8 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
       {!inPlace && (
         <button
           data-testid="session-action-create-pr"
-          disabled={acceptDisabled}
-          onClick={onCreatePR}
+          disabled={acceptDisabled || checkingArm}
+          onClick={handleCreatePRClick}
           className="inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium text-text-secondary hover:bg-bg-tertiary hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
           title={acceptDisabled ? 'Wait for the work to finish before creating a PR' : 'Create a pull request'}
         >
@@ -153,10 +166,13 @@ export function SessionLifecycleActionBar({ onMerge, onCreatePR, onDismiss }: Se
         arm={armGuard.arm}
         status={armGuard.status}
         experimentName={armGuard.experimentName}
-        onDismissArm={() => {
-          // Proceed with the existing dismiss path unchanged (dismiss THIS arm).
+        action={armGuard.action}
+        onConfirm={() => {
+          // Proceed with the original action's continuation unchanged (act on
+          // THIS arm only, leaving the other arm + experiment intact).
+          const proceed = armGuard.proceed;
           setArmGuard(null);
-          onDismiss?.();
+          proceed();
         }}
       />
     )}

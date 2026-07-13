@@ -1,6 +1,14 @@
 import type { ExperimentArm, ExperimentRow } from '../../../shared/types/experiments';
 
 /**
+ * A session-lifecycle action that can be intercepted by the arm guard when the
+ * target session is one arm of a LIVE A/B experiment. Shared between
+ * SessionLifecycleActionBar (which action triggered the check) and
+ * ArmDismissGuardDialog (which drives the button label + body copy).
+ */
+export type GuardedAction = 'dismiss' | 'merge' | 'create-pr';
+
+/**
  * A live experiment that the session-to-dismiss is an arm of, plus which arm
  * letter it is (derived from which session column matched).
  */
@@ -10,8 +18,8 @@ export interface GuardedExperimentMatch {
 }
 
 /**
- * Decide whether dismissing a session would tear down half of a LIVE A/B
- * experiment, and if so, which arm the session is.
+ * Decide whether dismissing/merging/creating-a-PR-from a session would tear
+ * down half of a LIVE A/B experiment, and if so, which arm the session is.
  *
  * Guard iff some experiment is still live — status 'running' (one/both arms
  * executing) or 'grading' (both arms settled, awaiting the human verdict) — AND

@@ -43,7 +43,8 @@ describe('ArmDismissGuardDialog', () => {
     experimentId: 'exp-1',
     arm: 'A' as const,
     status: 'running' as const,
-    onDismissArm: vi.fn(),
+    action: 'dismiss' as const,
+    onConfirm: vi.fn(),
   };
 
   it('renders nothing when isOpen is false', () => {
@@ -73,6 +74,31 @@ describe('ArmDismissGuardDialog', () => {
     expect(screen.getByText('sprint A/B · fast-mode')).toBeInTheDocument();
   });
 
+  it('action="merge": confirm button reads "Merge only this arm" and Merging appears in the body copy', () => {
+    render(<ArmDismissGuardDialog {...defaultProps} action="merge" />);
+    expect(screen.getByText('Merge only this arm')).toBeInTheDocument();
+    expect(screen.getByText(/^Merging just this arm leaves the experiment ungraded/)).toBeInTheDocument();
+    // The title stays action-neutral — it always describes what the session IS, not the action taken.
+    expect(
+      screen.getByText('This session is arm A of a running A/B experiment'),
+    ).toBeInTheDocument();
+  });
+
+  it('action="create-pr": confirm button reads "Create PR for only this arm"', () => {
+    render(<ArmDismissGuardDialog {...defaultProps} action="create-pr" />);
+    expect(screen.getByText('Create PR for only this arm')).toBeInTheDocument();
+    expect(
+      screen.getByText(/^Creating a PR for just this arm leaves the experiment ungraded/),
+    ).toBeInTheDocument();
+  });
+
+  it('action="merge": confirming invokes onConfirm and NOT abandon', () => {
+    render(<ArmDismissGuardDialog {...defaultProps} action="merge" />);
+    fireEvent.click(screen.getByText('Merge only this arm'));
+    expect(defaultProps.onConfirm).toHaveBeenCalledTimes(1);
+    expect(abandonMutate).not.toHaveBeenCalled();
+  });
+
   it('"Cancel whole experiment" calls experiments.abandon with the id and NOT the dismiss path', async () => {
     render(<ArmDismissGuardDialog {...defaultProps} />);
 
@@ -83,7 +109,7 @@ describe('ArmDismissGuardDialog', () => {
     expect(abandonMutate).toHaveBeenCalledWith({ experimentId: 'exp-1' });
     // abandon dismisses both sessions server-side — the normal per-arm dismiss
     // continuation must NOT run.
-    expect(defaultProps.onDismissArm).not.toHaveBeenCalled();
+    expect(defaultProps.onConfirm).not.toHaveBeenCalled();
     expect(defaultProps.onClose).toHaveBeenCalled();
     expect(mockShowError).not.toHaveBeenCalled();
   });
@@ -93,7 +119,7 @@ describe('ArmDismissGuardDialog', () => {
 
     fireEvent.click(screen.getByText('Dismiss only this arm'));
 
-    expect(defaultProps.onDismissArm).toHaveBeenCalledTimes(1);
+    expect(defaultProps.onConfirm).toHaveBeenCalledTimes(1);
     expect(abandonMutate).not.toHaveBeenCalled();
   });
 
@@ -104,7 +130,7 @@ describe('ArmDismissGuardDialog', () => {
 
     expect(defaultProps.onClose).toHaveBeenCalledTimes(1);
     expect(abandonMutate).not.toHaveBeenCalled();
-    expect(defaultProps.onDismissArm).not.toHaveBeenCalled();
+    expect(defaultProps.onConfirm).not.toHaveBeenCalled();
   });
 
   it('surfaces showError and stays open when abandon rejects', async () => {
@@ -119,6 +145,6 @@ describe('ArmDismissGuardDialog', () => {
       expect.objectContaining({ title: 'Cancel experiment failed', error: 'Network error' }),
     );
     expect(defaultProps.onClose).not.toHaveBeenCalled();
-    expect(defaultProps.onDismissArm).not.toHaveBeenCalled();
+    expect(defaultProps.onConfirm).not.toHaveBeenCalled();
   });
 });

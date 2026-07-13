@@ -2,42 +2,55 @@ import { useCallback, useEffect, useState } from 'react';
 import { FlaskConical, X } from 'lucide-react';
 import { trpc } from '../../trpc/client';
 import { useErrorStore } from '../../stores/errorStore';
+import type { GuardedAction } from '../../utils/armDismissGuard';
 import type { ExperimentArm, ExperimentStatus } from '../../../../shared/types/experiments';
+
+/** Per-action copy: the confirm-button label + the verb forms used in the body text. */
+const ACTION_COPY: Record<GuardedAction, { confirmLabel: string; gerund: string; verb: string }> = {
+  dismiss: { confirmLabel: 'Dismiss only this arm', gerund: 'Dismissing', verb: 'dismiss' },
+  merge: { confirmLabel: 'Merge only this arm', gerund: 'Merging', verb: 'merge' },
+  'create-pr': { confirmLabel: 'Create PR for only this arm', gerund: 'Creating a PR for', verb: 'create a PR for' },
+};
 
 interface ArmDismissGuardDialogProps {
   isOpen: boolean;
   onClose: () => void;
   experimentId: string;
-  /** Which arm the session-to-dismiss is (from the matched session column). */
+  /** Which arm the session-to-act-on is (from the matched session column). */
   arm: ExperimentArm;
   /** The live status that triggered the guard — 'running' or 'grading'. */
   status: ExperimentStatus;
   /** Enriched display name (e.g. 'sprint A/B · fast-mode'); best-effort, optional. */
   experimentName?: string;
+  /** Which lifecycle action triggered the guard; drives the button label + copy. */
+  action: GuardedAction;
   /**
-   * Proceed with the ORIGINAL session-dismiss continuation (dismiss THIS arm
-   * only, leaving the other arm + experiment intact). The caller wires this to
-   * the unchanged dismiss path.
+   * Proceed with the ORIGINAL session-lifecycle continuation for `action`
+   * (dismiss/merge/create-PR THIS arm only, leaving the other arm + experiment
+   * intact). The caller wires this to the unchanged original action.
    */
-  onDismissArm: () => void;
+  onConfirm: () => void;
 }
 
 /**
- * Guard shown when the user tries to dismiss a session that is one arm of a LIVE
- * A/B experiment (status 'running' | 'grading'). Silently tearing down half an
- * experiment strands it in 'grading' and mints an unresolvable blocking review
- * item — so we intercept and offer the three coherent choices instead.
+ * Guard shown when the user tries to dismiss/merge/create-a-PR-from a session
+ * that is one arm of a LIVE A/B experiment (status 'running' | 'grading').
+ * Silently tearing down half an experiment strands it in 'grading' (or leaves
+ * it unreachable once its rail group is gone) with an unresolvable blocking
+ * review item — so we intercept and offer the three coherent choices instead.
  *
  * Structure/styling mirror RunCancelDialog → ConfirmDialog (fixed overlay,
  * bg-surface-primary card, danger primary), extended to THREE actions because a
- * two-button confirm cannot express "cancel the whole experiment" vs. "dismiss
+ * two-button confirm cannot express "cancel the whole experiment" vs. "act on
  * just this arm" vs. "keep everything".
  *
- *   [Cancel whole experiment]  danger — experiments.abandon; the route dismisses
- *                              BOTH arm sessions + cleans the reports server-side,
- *                              so we do NOT run the normal session-delete path.
- *   [Dismiss only this arm]    → onDismissArm (the unchanged dismiss continuation).
- *   [Keep]                     → onClose; nothing happens.
+ *   [Cancel whole experiment]     danger — experiments.abandon; the route tears
+ *                                 down BOTH arm sessions + cleans the reports
+ *                                 server-side, so we do NOT run the normal
+ *                                 per-arm continuation.
+ *   [Dismiss/Merge/Create PR for
+ *    only this arm]               → onConfirm (the unchanged original action).
+ *   [Keep]                        → onClose; nothing happens.
  */
 export function ArmDismissGuardDialog({
   isOpen,
@@ -46,7 +59,8 @@ export function ArmDismissGuardDialog({
   arm,
   status,
   experimentName,
-  onDismissArm,
+  action,
+  onConfirm,
 }: ArmDismissGuardDialogProps) {
   const [abandoning, setAbandoning] = useState(false);
 
@@ -88,6 +102,7 @@ export function ArmDismissGuardDialog({
 
   const experimentPhrase =
     status === 'grading' ? 'an A/B experiment awaiting its verdict' : 'a running A/B experiment';
+  const { confirmLabel, gerund, verb } = ACTION_COPY[action];
 
   return (
     <div className="fixed inset-0 bg-modal-overlay flex items-center justify-center z-50">
@@ -115,9 +130,10 @@ export function ArmDismissGuardDialog({
             <p className="text-sm font-medium text-text-secondary">{experimentName}</p>
           )}
           <p className="text-text-secondary leading-relaxed">
-            Dismissing just this arm leaves the experiment ungraded — it can never reach a verdict
-            with an arm torn out. Cancel the whole experiment to tear down both arms and clean up
-            its reports, or dismiss only this arm and leave the other running.
+            {gerund} just this arm leaves the experiment ungraded — it can never reach a verdict
+            with an arm torn out. Decide the experiment from its comparison view first, cancel the
+            whole experiment to tear down both arms and clean up its reports, or {verb} only this
+            arm and leave the other running.
           </p>
         </div>
 
@@ -130,11 +146,11 @@ export function ArmDismissGuardDialog({
             Keep
           </button>
           <button
-            onClick={onDismissArm}
+            onClick={onConfirm}
             disabled={abandoning}
             className="px-4 py-2 text-sm font-medium text-text-secondary bg-bg-tertiary hover:bg-bg-hover rounded-md transition-colors disabled:cursor-not-allowed disabled:opacity-50"
           >
-            Dismiss only this arm
+            {confirmLabel}
           </button>
           <button
             onClick={handleAbandon}
