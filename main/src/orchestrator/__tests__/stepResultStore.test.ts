@@ -61,6 +61,53 @@ describe('StepResultStore', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// deleteForSteps — the rewind purge primitive (Lane B)
+// ---------------------------------------------------------------------------
+
+describe('StepResultStore.deleteForSteps', () => {
+  it('deletes ONLY the listed step ids for the given run and returns the delete count', () => {
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    store.record({ runId: 'r', stepId: 'a', outcome: 'done', attempts: 1 });
+    store.record({ runId: 'r', stepId: 'b', outcome: 'done', attempts: 1 });
+    store.record({ runId: 'r', stepId: 'c', outcome: 'failed', attempts: 1 });
+
+    const deleted = store.deleteForSteps('r', ['b', 'c']);
+
+    expect(deleted).toBe(2);
+    // Only 'a' survives — the purged ids are gone.
+    expect(store.listForRun('r').map((x) => x.stepId)).toEqual(['a']);
+  });
+
+  it('scopes the delete to the run — a same-named step of another run is untouched', () => {
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    store.record({ runId: 'r1', stepId: 'a', outcome: 'done', attempts: 1 });
+    store.record({ runId: 'r2', stepId: 'a', outcome: 'done', attempts: 1 });
+
+    const deleted = store.deleteForSteps('r1', ['a']);
+
+    expect(deleted).toBe(1);
+    expect(store.listForRun('r1')).toEqual([]);
+    // r2's identically-named step is NOT purged.
+    expect(store.listForRun('r2').map((x) => x.stepId)).toEqual(['a']);
+  });
+
+  it('is a no-op returning 0 for an empty id list (no invalid `IN ()` SQL)', () => {
+    const store = new StepResultStore(dbAdapter(buildDb()));
+    store.record({ runId: 'r', stepId: 'a', outcome: 'done', attempts: 1 });
+
+    expect(store.deleteForSteps('r', [])).toBe(0);
+    // Nothing purged.
+    expect(store.listForRun('r').map((x) => x.stepId)).toEqual(['a']);
+  });
+
+  it('is fail-soft returning 0 when the step_results table is absent', () => {
+    const store = new StepResultStore(dbAdapter(buildDb(false)));
+    expect(() => store.deleteForSteps('r', ['a', 'b'])).not.toThrow();
+    expect(store.deleteForSteps('r', ['a', 'b'])).toBe(0);
+  });
+});
+
 describe('StepResultStore seam-error telemetry (seam G)', () => {
   afterEach(() => setSeamErrorSink(undefined as never));
 

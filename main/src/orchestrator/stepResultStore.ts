@@ -123,4 +123,34 @@ export class StepResultStore {
       .filter((r) => COMPLETED_OUTCOMES.has(r.outcome))
       .map((r) => r.stepId);
   }
+
+  /**
+   * DELETE the persisted rows for the given step ids of `runId` — the REWIND
+   * purge primitive (monitor rewind, Lane B). When the monitor rewinds a
+   * programmatic run to an EARLIER step, every step at-and-after the target is
+   * about to be re-run, so its prior 'done'/'skipped'/'failed' row is now STALE.
+   * Left in place those rows would POISON two resume consumers:
+   *   1. boot-recovery's completedStepIds() (done+skipped) — a crash mid-rewind
+   *      would fast-forward the re-drive straight PAST the very downstream steps
+   *      the rewind meant to re-run, silently swallowing the whole point of it;
+   *   2. any later resume skip set derived from listForRun().
+   * rewindRunHandler therefore DELETEs the at-and-after slice (minus any fan-out
+   * step it deliberately keeps settled — see the handler's carve-out) BEFORE it
+   * re-drives the walk.
+   *
+   * No-op returning 0 for an empty id list — there is nothing to purge, and a
+   * bare `IN ()` is invalid SQL, so the empty case is short-circuited before the
+   * statement is built. Fail-soft returning 0 on a missing table (early boot /
+   * minimal test DBs), mirroring record()/listForRun()/completedStepIds().
+   * Returns the number of rows actually deleted.
+   */
+  deleteForSteps(runId: string, stepIds: readonly string[]): number {
+    if (stepIds.length === 0) return 0;
+    if (!hasStepResultsTable(this.db)) return 0;
+    const placeholders = stepIds.map(() => '?').join(', ');
+    const { changes } = this.db
+      .prepare(`DELETE FROM step_results WHERE run_id = ? AND step_id IN (${placeholders})`)
+      .run(runId, ...stepIds) as { changes: number };
+    return changes;
+  }
 }
