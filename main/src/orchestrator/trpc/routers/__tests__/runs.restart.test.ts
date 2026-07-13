@@ -39,6 +39,8 @@ describe('cyboflow.runs.restart', () => {
     db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     // Columns / tables restart touches that the shared fixture does not add.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
+    // Migration 060: restart reads seed_idea_ids to re-thread a multi-idea seed.
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_ids TEXT');
     db.exec(
       `CREATE TABLE IF NOT EXISTS sprint_batch_tasks (
          id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -182,6 +184,68 @@ describe('cyboflow.runs.restart', () => {
     expect(launchMock).toHaveBeenCalledOnce();
     // The 16th positional arg is the A/B launchOptions object.
     expect(launchMock.mock.calls[0][15]).toEqual({ requestedVariantId: 'wfv_42' });
+  });
+
+  // -------------------------------------------------------------------------
+  // (b4) Planner multi-idea seed recovery (IDEA-009 / migration 060): a run seeded
+  // with seed_idea_ids re-threads them in the launchOptions bag (merged with the
+  // baseline pin), AND the first id rides the positional ideaId (5th) via
+  // seed_idea_id — so the restart re-dual-writes both columns.
+  // -------------------------------------------------------------------------
+  it('(b4) re-threads a multi-idea seed on restart (ideaIds in launchOptions + ideaId[0] positional)', async () => {
+    const { runId } = seedRun(db, { id: 'run-ideas-failed', status: 'failed', projectId: 1 });
+    db.prepare(
+      `UPDATE workflow_runs SET session_id = 'sess-host', seed_idea_id = 'ide_1',
+              seed_idea_ids = '["ide_1","ide_2"]' WHERE id = ?`,
+    ).run(runId);
+
+    const launchMock = vi.fn().mockResolvedValue({ runId: 'run-2', worktreePath: '/w', branchName: 'b' });
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: () => ({ path: '/projects/p' }) },
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await caller.cyboflow.runs.restart({ runId });
+
+    expect(launchMock).toHaveBeenCalledOnce();
+    // The singular ideaId positional (5th, index 4) = seed_idea_id (the first id).
+    expect(launchMock.mock.calls[0][4]).toBe('ide_1');
+    // The trailing launchOptions (16th, index 15) merges the baseline pin (variant
+    // NULL) with the recovered ideaIds.
+    expect(launchMock.mock.calls[0][15]).toEqual({ baseline: true, ideaIds: ['ide_1', 'ide_2'] });
+  });
+
+  // -------------------------------------------------------------------------
+  // (b5) CORRUPT seed_idea_ids JSON restarts fail-soft as a single-idea run: no
+  // throw, no ideaIds in launchOptions — the positional ideaId (seed_idea_id) is
+  // the sole seed the relaunch carries.
+  // -------------------------------------------------------------------------
+  it('(b5) fail-soft: corrupt seed_idea_ids JSON restarts as single-idea without throwing', async () => {
+    const { runId } = seedRun(db, { id: 'run-badideas-failed', status: 'failed', projectId: 1 });
+    db.prepare(
+      `UPDATE workflow_runs SET session_id = 'sess-host', seed_idea_id = 'ide_1',
+              seed_idea_ids = 'not-json{' WHERE id = ?`,
+    ).run(runId);
+
+    const launchMock = vi.fn().mockResolvedValue({ runId: 'run-2', worktreePath: '/w', branchName: 'b' });
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: () => ({ path: '/projects/p' }) },
+    });
+
+    const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
+    await expect(caller.cyboflow.runs.restart({ runId })).resolves.toEqual({
+      runId: 'run-2',
+      worktreePath: '/w',
+      branchName: 'b',
+    });
+
+    expect(launchMock).toHaveBeenCalledOnce();
+    // Single-idea fallback: seed_idea_id rides the positional ideaId; launchOptions
+    // carries only the baseline pin (no ideaIds key).
+    expect(launchMock.mock.calls[0][4]).toBe('ide_1');
+    expect(launchMock.mock.calls[0][15]).toEqual({ baseline: true });
   });
 
   // -------------------------------------------------------------------------

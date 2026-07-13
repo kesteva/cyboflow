@@ -318,6 +318,15 @@ export class RunLauncher {
       // baseline config even after the workflow gained active variants ("restart
       // inherits, no re-roll"). Ignored when requestedVariantId is set.
       baseline?: boolean;
+      // Planner multi-idea seed (IDEA-009 / migration 060). When supplied, the run
+      // is dual-write seeded: seed_idea_id gets ideaIds[0] (the single-idea `#
+      // Selected idea` block still fires) AND seed_idea_ids gets the JSON array —
+      // even a 1-element array (downstream buildSeedIdeaBlock treats <=1 resolved
+      // idea as the single-idea path, so behavior is identical). ONLY valid when the
+      // workflow's name === 'planner' — any other workflow throws (mirrors the
+      // compound-only findingIds guard). The singular positional `ideaId` param
+      // stays valid for planner AND ship, unchanged, and leaves seed_idea_ids NULL.
+      ideaIds?: string[];
     },
   ): Promise<{ runId: string; worktreePath: string; branchName: string; permissionMode: PermissionMode }> {
     await this.ensureGitignoreEntry(projectPath);
@@ -351,6 +360,22 @@ export class RunLauncher {
       }
       if (findingIds.length < 1) {
         throw new Error('findingIds must contain at least one finding id');
+      }
+    }
+
+    // Planner multi-idea seed validation (IDEA-009 / migration 060) — BEFORE
+    // createRun so an invalid request never leaves a half-created run row behind.
+    // Mirrors the compound findingIds guard: the multi-idea ideaIds seed is ONLY
+    // valid for the 'planner' workflow (the singular positional ideaId stays valid
+    // for planner AND ship, unchanged). No store dependency (a direct workflow_runs
+    // write). The <=4 cap is enforced at the runs.start zod boundary.
+    const ideaIds = launchOptions?.ideaIds;
+    if (ideaIds !== undefined) {
+      if (workflow.name !== 'planner') {
+        throw new Error("ideaIds is only valid for the 'planner' workflow");
+      }
+      if (ideaIds.length < 1) {
+        throw new Error('ideaIds must contain at least one idea id');
       }
     }
 
@@ -536,15 +561,26 @@ export class RunLauncher {
         .prepare('UPDATE sessions SET run_id = ?, substrate = ? WHERE id = ?')
         .run(runId, resolvedSubstrate, sessionId);
 
-      // Planner pre-launch seed idea (migration 017). A direct workflow_runs
-      // write — NOT a tasks write, and NOT routed through the stage deriver
-      // (the seed idea participates in no stage derivation). RunExecutor.getPrompt
-      // reads this column to inject the `# Selected idea` block. Idempotent and
-      // independent of any taskId link below.
-      if (ideaId) {
+      // Planner pre-launch seed idea(s) (migrations 017 + 060). A direct
+      // workflow_runs write — NOT a tasks write, and NOT routed through the stage
+      // deriver (the seed idea participates in no stage derivation).
+      // RunExecutor.getPrompt reads seed_idea_id to inject the `# Selected idea`
+      // block. When the multi-idea ideaIds param is supplied it WINS: seed_idea_id
+      // gets ideaIds[0] via this same UPDATE, AND seed_idea_ids gets the JSON array
+      // below (even a 1-element array — downstream treats <=1 resolved idea as the
+      // single-idea path, so behavior stays identical). The legacy singular ideaId
+      // path leaves seed_idea_ids NULL. Idempotent and independent of any taskId
+      // link below.
+      const seedIdeaId = ideaIds && ideaIds.length > 0 ? ideaIds[0] : ideaId;
+      if (seedIdeaId) {
         this.db
           .prepare('UPDATE workflow_runs SET seed_idea_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
-          .run(ideaId, runId);
+          .run(seedIdeaId, runId);
+      }
+      if (ideaIds && ideaIds.length > 0) {
+        this.db
+          .prepare('UPDATE workflow_runs SET seed_idea_ids = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+          .run(JSON.stringify(ideaIds), runId);
       }
 
       // Parallel-sprint lane seeding (feat/parallel-sprint, migration 022).

@@ -70,6 +70,8 @@ function sessionHostedDb(): Database.Database {
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
   // Migration 034: seed_finding_ids is written by the compound launch path.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
+  // Migration 060: seed_idea_ids is dual-written by the planner multi-idea path.
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_ids TEXT');
   db.exec(`
     CREATE TABLE sessions (
       id TEXT PRIMARY KEY,
@@ -1301,13 +1303,15 @@ describe('RunLauncher.launch ideaId seed', () => {
 
       await launcher.launch(workflowId, tmpDir, undefined, undefined, 'IDEA-42', sessionId);
 
-      interface SeedRow { seed_idea_id: string | null; task_id: string | null }
+      interface SeedRow { seed_idea_id: string | null; seed_idea_ids: string | null; task_id: string | null }
       const row = db
-        .prepare('SELECT seed_idea_id, task_id FROM workflow_runs WHERE id = ?')
+        .prepare('SELECT seed_idea_id, seed_idea_ids, task_id FROM workflow_runs WHERE id = ?')
         .get(cannedRunId) as SeedRow;
 
       // seed_idea_id is written; task_id stays null (no task link from an ideaId).
+      // The legacy singular ideaId path leaves seed_idea_ids NULL (migration 060).
       expect(row.seed_idea_id).toBe('IDEA-42');
+      expect(row.seed_idea_ids).toBeNull();
       expect(row.task_id).toBeNull();
       // The seed idea participates in NO stage derivation.
       expect(recomputeSpy).not.toHaveBeenCalled();
@@ -1328,6 +1332,121 @@ describe('RunLauncher.launch ideaId seed', () => {
       expect(row.seed_idea_id).toBeNull();
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// RunLauncher.launch — ideaIds (planner multi-idea seed, IDEA-009 / migration 060)
+//
+// The multi-idea seed rides the trailing launchOptions bag (16th positional).
+// When supplied it DUAL-WRITES seed_idea_id = ideaIds[0] AND seed_idea_ids = the
+// JSON array; it is ONLY valid for the 'planner' workflow (the launcher guard
+// throws before createRun for any other). The singular ideaId path is unchanged
+// (covered above) and leaves seed_idea_ids NULL.
+// ---------------------------------------------------------------------------
+describe('RunLauncher.launch ideaIds (planner multi-idea seed)', () => {
+  /** A launcher whose registry seeds a queued run row for `workflowName`. */
+  function makeMultiIdeaFixture(db: Database.Database, tmpDir: string, workflowName: string) {
+    const adapter = dbAdapter(db);
+    const logger = makeSpyLogger();
+
+    const seedWorkflowId = randomUUID();
+    db.prepare(
+      "INSERT INTO workflows (id, project_id, name, workflow_path, permission_mode) VALUES (?, 1, ?, '/fake/wf.md', 'default')",
+    ).run(seedWorkflowId, workflowName);
+
+    const cannedRunId = randomUUID().replace(/-/g, '');
+    const cannedWorktreePath = join(tmpDir, '.cyboflow', 'worktrees', workflowName, cannedRunId.slice(0, 8));
+    const cannedBranchName = `cyboflow/${workflowName}/${cannedRunId.slice(0, 8)}`;
+    const sessionId = 'sess-ideas';
+    seedSession(db, sessionId, cannedWorktreePath);
+
+    const createRunSpy = vi.fn((_id: string, substrate?: CliSubstrate, sid?: string) => {
+      db.prepare(
+        "INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, session_id) VALUES (?, ?, ?, 'queued', 'default', ?)",
+      ).run(cannedRunId, seedWorkflowId, 1, sid ?? null);
+      return { runId: cannedRunId, permissionMode: 'default' as const, substrate: substrate ?? ('sdk' as const) };
+    });
+
+    const fakeRegistry = {
+      getById: (id: string) =>
+        db.prepare(
+          'SELECT id, project_id, name, workflow_path, permission_mode, created_at FROM workflows WHERE id = ?',
+        ).get(id) ?? null,
+      createRun: createRunSpy,
+    } as unknown as WorkflowRegistry;
+
+    const { worktree: fakeWorktree } = sessionWorktreeStub(cannedBranchName);
+
+    const launcher = new RunLauncher(
+      adapter,
+      fakeRegistry,
+      fakeWorktree,
+      logger,
+      fakeMcpConfigWriter,
+      fakeOrchSocketProvider,
+      fakeBridgeScriptResolver,
+      fakeNodeResolver,
+    );
+
+    return { launcher, workflowId: seedWorkflowId, sessionId, cannedRunId, createRunSpy };
+  }
+
+  it('dual-writes seed_idea_id = ideaIds[0] AND seed_idea_ids = JSON for a planner launch', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = sessionHostedDb();
+      const { launcher, workflowId, sessionId, cannedRunId } = makeMultiIdeaFixture(db, tmpDir, 'planner');
+
+      await launcher.launch(
+        workflowId, tmpDir, undefined, undefined, undefined, sessionId,
+        undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, { ideaIds: ['ide_a', 'ide_b'] },
+      );
+
+      const row = db
+        .prepare('SELECT seed_idea_id, seed_idea_ids FROM workflow_runs WHERE id = ?')
+        .get(cannedRunId) as { seed_idea_id: string | null; seed_idea_ids: string | null };
+      expect(row.seed_idea_id).toBe('ide_a');
+      expect(row.seed_idea_ids).toBe(JSON.stringify(['ide_a', 'ide_b']));
+    });
+  });
+
+  it('writes seed_idea_ids even for a 1-element array (downstream single-idea path)', async () => {
+    await withTempDir('runlauncher-test-', async (tmpDir) => {
+      const db = sessionHostedDb();
+      const { launcher, workflowId, sessionId, cannedRunId } = makeMultiIdeaFixture(db, tmpDir, 'planner');
+
+      await launcher.launch(
+        workflowId, tmpDir, undefined, undefined, undefined, sessionId,
+        undefined, undefined, undefined, undefined, undefined, undefined,
+        undefined, undefined, undefined, { ideaIds: ['ide_solo'] },
+      );
+
+      const row = db
+        .prepare('SELECT seed_idea_id, seed_idea_ids FROM workflow_runs WHERE id = ?')
+        .get(cannedRunId) as { seed_idea_id: string | null; seed_idea_ids: string | null };
+      expect(row.seed_idea_id).toBe('ide_solo');
+      expect(row.seed_idea_ids).toBe(JSON.stringify(['ide_solo']));
+    });
+  });
+
+  it.each(['ship', 'sprint', 'compound'])(
+    'rejects ideaIds for the non-planner %s workflow BEFORE creating a run row',
+    async (workflowName) => {
+      await withTempDir('runlauncher-test-', async (tmpDir) => {
+        const db = sessionHostedDb();
+        const { launcher, workflowId, sessionId, createRunSpy } = makeMultiIdeaFixture(db, tmpDir, workflowName);
+
+        await expect(
+          launcher.launch(
+            workflowId, tmpDir, undefined, undefined, undefined, sessionId,
+            undefined, undefined, undefined, undefined, undefined, undefined,
+            undefined, undefined, undefined, { ideaIds: ['ide_a'] },
+          ),
+        ).rejects.toThrow("ideaIds is only valid for the 'planner' workflow");
+        expect(createRunSpy).not.toHaveBeenCalled();
+      });
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------

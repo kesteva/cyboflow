@@ -855,6 +855,14 @@ export const runsRouter = router({
       // launcher writes workflow_runs.seed_idea_id DIRECTLY (no stage derivation);
       // RunExecutor.getPrompt injects the idea body as a `# Selected idea` block.
       ideaId: z.string().min(1).optional(),
+      // Optional planner MULTI-idea seed (IDEA-009 / migration 060). When supplied,
+      // the launcher dual-writes workflow_runs.seed_idea_id = ideaIds[0] AND
+      // seed_idea_ids (a JSON string array); RunExecutor.getPrompt injects the
+      // combined `# Selected ideas` block. Only valid for the 'planner' workflow
+      // (the launcher enforces this, mirroring findingIds' compound-only rule).
+      // Mutually exclusive with the singular ideaId — supplying both is rejected
+      // in the handler. Capped at 4 (a planner run scopes at most 4 ideas at once).
+      ideaIds: z.array(z.string().min(1)).min(1).max(4).optional(),
       // REQUIRED session host (session<->run restructure / migration 019;
       // permission-mode redesign slice 1a). The run executes inside this session's
       // existing worktree, and createRun stamps workflow_runs.session_id from it so
@@ -937,6 +945,17 @@ export const runsRouter = router({
         throw new TRPCError({
           code: 'METHOD_NOT_SUPPORTED',
           message: 'start dependencies not wired yet. Call setStartRunDeps() at boot.',
+        });
+      }
+      // Planner seed inputs are mutually exclusive: the singular ideaId is the
+      // legacy single-idea path (planner + ship), ideaIds is the multi-idea seed
+      // (planner-only, IDEA-009). Supplying both is ambiguous — reject it here so a
+      // caller never dual-writes conflicting seeds. (The launcher's planner-only
+      // guard enforces the workflow-name rule for ideaIds.)
+      if (input.ideaId !== undefined && input.ideaIds !== undefined) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'ideaId and ideaIds are mutually exclusive — supply one or the other, not both',
         });
       }
       const project = startRunDeps.sessionManager.getProjectById(input.projectId);
@@ -1048,15 +1067,22 @@ export const runsRouter = router({
         input.model,
         input.evalEnabled,
         input.verifyEnabled,
-        // A/B testing (migration 048): the trailing launchOptions object. An
-        // explicit variant pin wins over a baseline pin (VariantSelector only ever
-        // sends one or the other); rotation (neither supplied) and experiment
-        // stamps are resolved/supplied elsewhere.
-        input.variantId !== undefined
-          ? { requestedVariantId: input.variantId }
-          : input.baseline
-            ? { baseline: true }
-            : undefined,
+        // The trailing launchOptions object carries the A/B variant/baseline pin
+        // (migration 048) PLUS the planner multi-idea seed (IDEA-009 / migration
+        // 060). An explicit variant pin wins over a baseline pin (VariantSelector
+        // only ever sends one or the other); rotation (neither supplied) and
+        // experiment stamps are resolved/supplied elsewhere. ideaIds is orthogonal
+        // and threaded whenever supplied (planner-only; the launcher enforces that).
+        input.variantId !== undefined || input.baseline || input.ideaIds !== undefined
+          ? {
+              ...(input.variantId !== undefined
+                ? { requestedVariantId: input.variantId }
+                : input.baseline
+                  ? { baseline: true }
+                  : {}),
+              ...(input.ideaIds !== undefined ? { ideaIds: input.ideaIds } : {}),
+            }
+          : undefined,
       );
       return { runId, worktreePath, branchName };
     }),
@@ -1102,7 +1128,7 @@ export const runsRouter = router({
       const row = ctx.db
         .prepare(
           `SELECT workflow_id, project_id, status, substrate, session_id,
-                  permission_mode_snapshot, model, task_id, seed_idea_id, seed_finding_ids, batch_id,
+                  permission_mode_snapshot, model, task_id, seed_idea_id, seed_idea_ids, seed_finding_ids, batch_id,
                   eval_enabled, variant_id, experiment_id
              FROM workflow_runs WHERE id = ?`,
         )
@@ -1117,6 +1143,7 @@ export const runsRouter = router({
             model: string | null;
             task_id: string | null;
             seed_idea_id: string | null;
+            seed_idea_ids: string | null;
             seed_finding_ids: string | null;
             batch_id: string | null;
             eval_enabled: number | null;
@@ -1159,6 +1186,23 @@ export const runsRouter = router({
           findingIds = undefined;
         }
       }
+      // Planner multi-idea seed recovery (IDEA-009 / migration 060). Fail-soft,
+      // mirroring the seed_finding_ids parse above: a run seeded with multiple ideas
+      // re-threads them so the restart re-dual-writes. CORRUPT JSON degrades to the
+      // single-idea path (seed_idea_id is threaded as the positional ideaId below),
+      // never throws — the run still restarts.
+      let ideaIds: string[] | undefined;
+      if (row.seed_idea_ids) {
+        try {
+          const parsed: unknown = JSON.parse(row.seed_idea_ids);
+          if (Array.isArray(parsed)) {
+            const ids = parsed.filter((x): x is string => typeof x === 'string');
+            if (ids.length > 0) ideaIds = ids;
+          }
+        } catch {
+          ideaIds = undefined;
+        }
+      }
       let taskIds: string[] | undefined;
       if (row.batch_id) {
         const laneRows = ctx.db
@@ -1194,13 +1238,19 @@ export const runsRouter = router({
         // into a forced pin. Passing undefined lets the restart re-inherit the
         // current global visualVerify.enabled / project verify.json.
         undefined,
-        // A/B testing (migration 048): INHERIT the failed run's variant (no re-roll)
-        // so per-variant stats stay coherent. An explicit pin loads regardless of
-        // status, so a paused/retired variant still restarts correctly. Baseline
-        // runs (variant_id NULL) pin `baseline: true` so the resolver returns null
-        // WITHOUT rotating — reproducing the baseline config even if the workflow has
-        // since gained active variants (restart inherits, no re-roll).
-        row.variant_id !== null ? { requestedVariantId: row.variant_id } : { baseline: true },
+        // The trailing launchOptions object. A/B testing (migration 048): INHERIT
+        // the failed run's variant (no re-roll) so per-variant stats stay coherent.
+        // An explicit pin loads regardless of status, so a paused/retired variant
+        // still restarts correctly. Baseline runs (variant_id NULL) pin `baseline:
+        // true` so the resolver returns null WITHOUT rotating — reproducing the
+        // baseline config even if the workflow has since gained active variants
+        // (restart inherits, no re-roll). ideaIds (IDEA-009 / migration 060) is
+        // merged in whenever the failed run carried a multi-idea seed, so the
+        // restart re-dual-writes seed_idea_id + seed_idea_ids.
+        {
+          ...(row.variant_id !== null ? { requestedVariantId: row.variant_id } : { baseline: true }),
+          ...(ideaIds !== undefined ? { ideaIds } : {}),
+        },
       );
       return { runId, worktreePath, branchName };
     }),

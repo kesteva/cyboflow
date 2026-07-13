@@ -646,6 +646,142 @@ describe('cyboflow.runs.start', () => {
   });
 
   // -------------------------------------------------------------------------
+  // (a6b) ideaIds supplied (IDEA-009 / migration 060) → forwarded in the trailing
+  // launchOptions bag (16th slot), NOT the singular positional ideaId (5th). The
+  // launcher dual-writes seed_idea_id + seed_idea_ids and enforces the planner-only
+  // rule (covered in runLauncher.test.ts, where the real launcher runs).
+  // -------------------------------------------------------------------------
+  it('(a6b) ideaIds supplied → forwards them in the trailing launchOptions (16th slot), ideaId slot undefined', async () => {
+    const launchMock = vi.fn().mockResolvedValue({
+      runId: 'run-start-ideas',
+      worktreePath: '/tmp/wt/ideas',
+      branchName: 'cyboflow/planner/ideas123',
+    });
+    const sessionManagerStub = {
+      getProjectById: (_id: number) => ({ path: '/projects/my-project' }),
+    };
+
+    setStartRunDeps({ runLauncher: { launch: launchMock }, sessionManager: sessionManagerStub });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await caller.cyboflow.runs.start({
+        workflowId: 'wf-planner',
+        projectId: 1,
+        sessionId: 'sess-1',
+        ideaIds: ['ide_a', 'ide_b'],
+      });
+
+      expect(launchMock).toHaveBeenCalledOnce();
+      // The singular ideaId positional (5th) stays undefined; ideaIds rides the
+      // 16th (LAST) launchOptions slot.
+      expect(launchMock.mock.calls[0][4]).toBeUndefined();
+      expect(launchMock.mock.calls[0][15]).toEqual({ ideaIds: ['ide_a', 'ide_b'] });
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a6c) more than 4 ideaIds → rejected at the zod boundary (the .max(4) cap: a
+  // planner run scopes at most 4 ideas at once).
+  // -------------------------------------------------------------------------
+  it('(a6c) rejects more than 4 ideaIds (over the max-4 cap)', async () => {
+    const launchMock = vi.fn();
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-planner',
+          projectId: 1,
+          sessionId: 'sess-1',
+          ideaIds: ['a', 'b', 'c', 'd', 'e'],
+        }),
+      ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
+      expect(launchMock).not.toHaveBeenCalled();
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a6d) ideaId + ideaIds together → rejected in the handler as mutually
+  // exclusive (the singular legacy seed vs the multi-idea seed).
+  // -------------------------------------------------------------------------
+  it('(a6d) rejects ideaId and ideaIds supplied together', async () => {
+    const launchMock = vi.fn();
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-planner',
+          projectId: 1,
+          sessionId: 'sess-1',
+          ideaId: 'ide_a',
+          ideaIds: ['ide_a', 'ide_b'],
+        }),
+      ).rejects.toThrow(/mutually exclusive/);
+      expect(launchMock).not.toHaveBeenCalled();
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // (a6e) ideaIds for a non-planner workflow → the launcher's planner-only guard
+  // rejects; start forwards ideaIds and surfaces the rejection (does not swallow
+  // it). The guard itself is exercised against the REAL launcher in
+  // runLauncher.test.ts; here we assert start propagates it for the mocked launch.
+  // -------------------------------------------------------------------------
+  it('(a6e) surfaces the launcher planner-only rejection for a non-planner workflow', async () => {
+    const launchMock = vi
+      .fn()
+      .mockRejectedValue(new Error("ideaIds is only valid for the 'planner' workflow"));
+    setStartRunDeps({
+      runLauncher: { launch: launchMock },
+      sessionManager: { getProjectById: (_id: number) => ({ path: '/projects/my-project' }) },
+    });
+
+    try {
+      const caller = appRouter.createCaller(createContext());
+      await expect(
+        caller.cyboflow.runs.start({
+          workflowId: 'wf-sprint',
+          projectId: 1,
+          sessionId: 'sess-1',
+          ideaIds: ['ide_a'],
+        }),
+      ).rejects.toThrow("ideaIds is only valid for the 'planner' workflow");
+      expect(launchMock).toHaveBeenCalledOnce();
+      expect(launchMock.mock.calls[0][15]).toEqual({ ideaIds: ['ide_a'] });
+    } finally {
+      setStartRunDeps({
+        runLauncher: { launch: vi.fn().mockRejectedValue(new Error('not wired')) },
+        sessionManager: { getProjectById: () => undefined },
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
   // (a7) model supplied (migration 037) → forwarded into the 13th (LAST) launch
   // slot as requestedModel, so createRun stamps workflow_runs.model.
   // -------------------------------------------------------------------------
