@@ -1300,7 +1300,7 @@ export const ChatTranscript: React.FC<ChatTranscriptProps> = ({
                 liveTail ?? (
                   filteredMessages.length === 0 ||
                   (filteredMessages.length > 0 && filteredMessages[filteredMessages.length - 1].role === 'user') ? (
-                    <ThinkingPlaceholder />
+                    <ThinkingPlaceholder agentName={agentName} />
                   ) : (
                     <InlineWorkingIndicator />
                   )
