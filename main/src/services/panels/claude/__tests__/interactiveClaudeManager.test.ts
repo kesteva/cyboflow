@@ -555,7 +555,10 @@ describe('InteractiveClaudeManager', () => {
         const inlineSettings = JSON.parse(args[settingsIdx + 1]) as {
           fastMode: boolean;
           fastModePerSessionOptIn: boolean;
-          hooks?: { PreToolUse?: { matcher?: string; hooks?: { type?: string; command?: string; timeout?: number }[] }[] };
+          hooks?: {
+            PreToolUse?: { matcher?: string; hooks?: { type?: string; command?: string; timeout?: number }[] }[];
+            Stop?: { matcher?: string; hooks?: { type?: string; command?: string; timeout?: number }[] }[];
+          };
         };
         expect(inlineSettings.fastMode).toBe(false);
         expect(inlineSettings.fastModePerSessionOptIn).toBe(true);
@@ -566,20 +569,27 @@ describe('InteractiveClaudeManager', () => {
         expect(gate?.hooks?.[0]?.type).toBe('command');
         expect(gate?.hooks?.[0]?.command).toContain('preToolUseShellHook');
         expect(gate?.hooks?.[0]?.timeout).toBe(86_400);
+        // The Stop turn-end hook (IDEA-030) rides the SAME flag, unconditionally
+        // (no matcher, no permissionMode opt-out).
+        const stop = inlineSettings.hooks?.Stop?.[0];
+        expect(stop?.matcher).toBeUndefined();
+        expect(stop?.hooks?.[0]?.type).toBe('command');
+        expect(stop?.hooks?.[0]?.command).toContain('stopShellHook');
+        expect(stop?.hooks?.[0]?.timeout).toBe(10);
       } finally {
         fs.rmSync(wt, { recursive: true, force: true });
       }
     });
 
     /** Parse the inline --settings JSON out of a built args array. */
-    function inlineSettingsOf(args: string[]): { hooks?: unknown } {
+    function inlineSettingsOf(args: string[]): { hooks?: { PreToolUse?: unknown; Stop?: unknown } } {
       const idx = args.indexOf('--settings');
       expect(idx).toBeGreaterThanOrEqual(0);
-      return JSON.parse(args[idx + 1]) as { hooks?: unknown };
+      return JSON.parse(args[idx + 1]) as { hooks?: { PreToolUse?: unknown; Stop?: unknown } };
     }
 
     it.each(['ignore', 'auto', 'dontAsk'] as const)(
-      'omits the inline gating hook for opt-out mode %s (single opt-out source: resolveInlineGatingHooks)',
+      'omits the inline PreToolUse gate for opt-out mode %s (single opt-out source: resolveInlineGatingHooks), but the Stop turn-end hook STILL rides the same flag (no opt-out, IDEA-030)',
       (mode) => {
         const args = mgr.callBuildCommandArgs({
           panelId: 'p1',
@@ -588,7 +598,8 @@ describe('InteractiveClaudeManager', () => {
           prompt: 'hi',
           ...(mode === 'ignore' ? { permissionMode: 'ignore' } : { agentPermissionMode: mode }),
         });
-        expect(inlineSettingsOf(args).hooks).toBeUndefined();
+        expect(inlineSettingsOf(args).hooks?.PreToolUse).toBeUndefined();
+        expect(inlineSettingsOf(args).hooks?.Stop).toBeDefined();
       },
     );
 
@@ -600,7 +611,8 @@ describe('InteractiveClaudeManager', () => {
         prompt: 'hi',
         agentPermissionMode: 'acceptEdits',
       });
-      expect(inlineSettingsOf(args).hooks).toBeDefined();
+      expect(inlineSettingsOf(args).hooks?.PreToolUse).toBeDefined();
+      expect(inlineSettingsOf(args).hooks?.Stop).toBeDefined();
     });
 
     it('points --mcp-config at the APP DATA dir path for an in-place session (never the checkout)', () => {
@@ -642,7 +654,8 @@ describe('InteractiveClaudeManager', () => {
     });
 
     it('4-mode agentPermissionMode takes precedence over the legacy permissionMode for the gate decision', () => {
-      // legacy 'approve' (gate) + 4-mode 'auto' (no gate) → no gate.
+      // legacy 'approve' (gate) + 4-mode 'auto' (no gate) → no PreToolUse gate
+      // (the Stop hook is unaffected — it has no opt-out).
       const args = mgr.callBuildCommandArgs({
         panelId: 'p1',
         sessionId: 's1',
@@ -651,7 +664,8 @@ describe('InteractiveClaudeManager', () => {
         permissionMode: 'approve',
         agentPermissionMode: 'auto',
       });
-      expect(inlineSettingsOf(args).hooks).toBeUndefined();
+      expect(inlineSettingsOf(args).hooks?.PreToolUse).toBeUndefined();
+      expect(inlineSettingsOf(args).hooks?.Stop).toBeDefined();
     });
   });
 
@@ -922,7 +936,7 @@ describe('InteractiveClaudeManager', () => {
       // logger (debug -> verbose). A no-logger call would silently no-op this.
       expect(
         logger.verbose.mock.calls.some(
-          (c) => typeof c[0] === 'string' && c[0].includes('opts out of gating'),
+          (c) => typeof c[0] === 'string' && c[0].includes('opts out of PreToolUse gating'),
         ),
       ).toBe(true);
 
@@ -1154,6 +1168,74 @@ describe('InteractiveClaudeManager', () => {
       expect((afterTeardown as { permissions?: { allow?: string[] } }).permissions?.allow).toEqual(['Bash(ls)']);
 
       void spawn;
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // notifyTurnEnd — the Stop-hook seam (IDEA-030 turn-end-detection fix).
+  // mcpQueryHandler's interactive-turn-end dispatch calls this directly (no PTY
+  // spawn involved), so these tests seed `interactiveRuns` via the test
+  // accessor rather than exercising the full spawn machinery.
+  // -------------------------------------------------------------------------
+  describe('notifyTurnEnd (Stop-hook seam, IDEA-030)', () => {
+    let db: Database.Database;
+    let mgr: TestableInteractiveClaudeManager;
+
+    beforeEach(() => {
+      db = makeRawEventsDb();
+      mgr = new TestableInteractiveClaudeManager(
+        createMockSessionManager(),
+        createLoggerSpy() as unknown as import('../../../../utils/logger').Logger,
+        createMockConfigManager(),
+        db,
+      );
+    });
+
+    afterEach(() => {
+      db.close();
+      vi.clearAllMocks();
+    });
+
+    /** Seed a minimal InteractiveRun entry directly (bypassing spawnCliProcess). */
+    function seedInteractiveRun(panelId: string, runId: string): void {
+      mgr.publicInteractiveRuns().set(panelId, {
+        panelId,
+        sessionId: `sess-${panelId}`,
+        runId,
+        worktreePath: '/tmp/wt',
+        persistent: true,
+        turnEnded: false,
+        resolve: () => undefined,
+        reject: () => undefined,
+      });
+    }
+
+    it('returns true and emits "turn-end" with the matching panel/session for a tracked runId', () => {
+      seedInteractiveRun('panel-x', 'run-x');
+      const events: unknown[] = [];
+      mgr.on('turn-end', (payload) => events.push(payload));
+
+      expect(mgr.notifyTurnEnd('run-x')).toBe(true);
+      expect(events).toEqual([{ panelId: 'panel-x', sessionId: 'sess-panel-x', runId: 'run-x' }]);
+    });
+
+    it('returns false and emits nothing for an unknown runId', () => {
+      seedInteractiveRun('panel-y', 'run-y');
+      const events: unknown[] = [];
+      mgr.on('turn-end', (payload) => events.push(payload));
+
+      expect(mgr.notifyTurnEnd('run-does-not-exist')).toBe(false);
+      expect(events).toHaveLength(0);
+    });
+
+    it('scans across multiple tracked runs and drives the SAME "turn-end" event the transcript-marker path uses', () => {
+      seedInteractiveRun('panel-a', 'run-a');
+      seedInteractiveRun('panel-b', 'run-b');
+      const events: Array<{ panelId: string; sessionId: string; runId: string }> = [];
+      mgr.on('turn-end', (payload) => events.push(payload as { panelId: string; sessionId: string; runId: string }));
+
+      expect(mgr.notifyTurnEnd('run-b')).toBe(true);
+      expect(events).toEqual([{ panelId: 'panel-b', sessionId: 'sess-panel-b', runId: 'run-b' }]);
     });
   });
 

@@ -3717,3 +3717,82 @@ describe('McpQueryHandler — mcp-request-verification', () => {
     expect(count.n).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// interactive-turn-end (INTERACTIVE substrate Stop hook, IDEA-030). Fire-and-
+// ack: unlike shell-approval-request, this ALWAYS writeResponses synchronously
+// — there is no verdict to defer, only "was a live run notified or not".
+// mcpQueryHandler cannot import main/src/services (ORCHESTRATOR LAYERING
+// RULE), so the actual InteractiveClaudeManager.notifyTurnEnd call is exercised
+// in interactiveClaudeManager.test.ts; here we only exercise the dispatch +
+// the injected onInteractiveTurnEnd dep contract.
+// ---------------------------------------------------------------------------
+
+describe('interactive-turn-end', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb({ disableForeignKeys: true });
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  it('ok:true and forwards runId when the injected dep reports a match', async () => {
+    const onInteractiveTurnEnd = vi.fn(() => true);
+    const handler = new McpQueryHandler(dbAdapter(db), undefined, { onInteractiveTurnEnd });
+    const { socket, writes } = makeSocketDouble();
+
+    await handler.handleMessage(
+      { type: 'interactive-turn-end', requestId: 'tte-1', runId: 'run-1' },
+      socket,
+    );
+
+    expect(onInteractiveTurnEnd).toHaveBeenCalledWith('run-1');
+    const response = parseLastWrite(writes);
+    expect(response.type).toBe('mcp-query-response');
+    expect(response.requestId).toBe('tte-1');
+    expect(response.ok).toBe(true);
+    expect(response.error).toBeUndefined();
+  });
+
+  it('ok:false error="turn_end_unavailable" when the dep reports no matching run', async () => {
+    const onInteractiveTurnEnd = vi.fn(() => false);
+    const handler = new McpQueryHandler(dbAdapter(db), undefined, { onInteractiveTurnEnd });
+    const { socket, writes } = makeSocketDouble();
+
+    await handler.handleMessage(
+      { type: 'interactive-turn-end', requestId: 'tte-2', runId: 'run-does-not-exist' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe('turn_end_unavailable');
+  });
+
+  it('ok:false error="turn_end_unavailable" when no dep is wired at all (host never wired it)', async () => {
+    const handler = new McpQueryHandler(dbAdapter(db));
+    const { socket, writes } = makeSocketDouble();
+
+    await handler.handleMessage(
+      { type: 'interactive-turn-end', requestId: 'tte-3', runId: 'run-1' },
+      socket,
+    );
+
+    const response = parseLastWrite(writes);
+    expect(response.ok).toBe(false);
+    expect(response.error).toBe('turn_end_unavailable');
+  });
+
+  it('never throws and always replies exactly once, synchronously', async () => {
+    const handler = new McpQueryHandler(dbAdapter(db));
+    const { socket, writes } = makeSocketDouble();
+
+    await expect(
+      handler.handleMessage({ type: 'interactive-turn-end', requestId: 'tte-4', runId: 'run-1' }, socket),
+    ).resolves.toBeUndefined();
+    expect(writes).toHaveLength(1);
+  });
+});

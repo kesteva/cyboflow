@@ -28,6 +28,7 @@ import {
   InteractiveSettingsWriter,
   resolveInlineGatingHooks,
   resolveShellHookScriptPath,
+  resolveStopHookScriptPath,
 } from '../interactiveSettingsWriter';
 import { makeSpyLogger } from '../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
 
@@ -81,31 +82,41 @@ function legacyCyboflowGroup(command: string): HookMatcherGroup {
 
 describe('resolveInlineGatingHooks', () => {
   const hookPath = resolveShellHookScriptPath(HOOK_DIR);
+  const stopHookPath = resolveStopHookScriptPath(HOOK_DIR);
+
+  /** The Stop entry every fragment carries, regardless of permissionMode. */
+  function expectStopEntry(fragment: ReturnType<typeof resolveInlineGatingHooks>): void {
+    expect(fragment.Stop).toHaveLength(1);
+    const group = fragment.Stop[0];
+    expect(group.matcher).toBeUndefined();
+    expect(group.hooks).toEqual([{ type: 'command', command: stopHookPath, timeout: 10 }]);
+  }
 
   it.each([undefined, 'approve', 'default', 'acceptEdits'] as const)(
-    'gating mode %s → a "*" PreToolUse fragment referencing the hook script with the high timeout',
+    'gating mode %s → a "*" PreToolUse fragment referencing the hook script with the high timeout, PLUS the Stop entry',
     (permissionMode) => {
       const fragment = resolveInlineGatingHooks(
         { permissionMode, hookDirOverride: HOOK_DIR },
         makeSpyLogger(),
       );
 
-      expect(fragment).not.toBeNull();
-      expect(fragment!.PreToolUse).toHaveLength(1);
-      const group = fragment!.PreToolUse[0];
+      expect(fragment.PreToolUse).toHaveLength(1);
+      const group = fragment.PreToolUse![0];
       expect(group.matcher).toBe('*');
       expect(group.hooks).toEqual([{ type: 'command', command: hookPath, timeout: 86_400 }]);
+      expectStopEntry(fragment);
     },
   );
 
   it.each(['ignore', 'dontAsk', 'auto'] as const)(
-    'opt-out mode %s → null (no gate; native/opted-out gating owns the decision)',
+    'opt-out mode %s → PreToolUse omitted (native/opted-out gating owns the decision), but Stop is STILL present',
     (permissionMode) => {
       const fragment = resolveInlineGatingHooks(
         { permissionMode, hookDirOverride: HOOK_DIR },
         makeSpyLogger(),
       );
-      expect(fragment).toBeNull();
+      expect(fragment.PreToolUse).toBeUndefined();
+      expectStopEntry(fragment);
     },
   );
 
@@ -124,7 +135,7 @@ describe('resolveInlineGatingHooks', () => {
     const logger = makeSpyLogger();
     resolveInlineGatingHooks({ permissionMode: 'auto', hookDirOverride: HOOK_DIR }, logger);
     expect(
-      logger.calls.some((c) => c.level === 'debug' && c.message.includes('opts out of gating')),
+      logger.calls.some((c) => c.level === 'debug' && c.message.includes('opts out of PreToolUse gating')),
     ).toBe(true);
   });
 });

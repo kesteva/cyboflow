@@ -20,6 +20,14 @@
  *                                  writes the verdict via ApprovalRouter's
  *                                  socketReply closure, possibly minutes later).
  *
+ * Plus the INTERACTIVE-substrate Stop turn-end signal (IDEA-030):
+ *   - interactive-turn-end        (fire-and-ack — replies synchronously and
+ *                                  invokes the injected `onInteractiveTurnEnd`
+ *                                  dep, which routes to
+ *                                  InteractiveClaudeManager.notifyTurnEnd via
+ *                                  main/src/index.ts wiring; this file may NOT
+ *                                  import main/src/services directly).
+ *
  * Unknown message types produce a structured error response — they never throw,
  * so a malformed subprocess message cannot crash the orchestrator socket.
  *
@@ -322,6 +330,17 @@ export type McpQueryMessage =
       runId: string;
       toolName: string;
       toolInput: Record<string, unknown>;
+    }
+  | {
+      /**
+       * Deterministic turn-end signal from the INTERACTIVE substrate's Stop
+       * hook (stopShellHook.ts, IDEA-030 turn-end-detection fix). Fire-and-ack
+       * — unlike shell-approval-request, this ALWAYS writeResponses
+       * synchronously; there is no verdict to defer.
+       */
+      type: 'interactive-turn-end';
+      requestId: string;
+      runId: string;
     };
 
 export interface McpQueryResponse {
@@ -434,6 +453,24 @@ interface InFlightShellApproval {
   detachListeners: () => void;
 }
 
+/**
+ * Callback deps this handler needs from main/src/services — ORCHESTRATOR
+ * LAYERING RULE: mcpQueryHandler must NOT import from main/src/services, so
+ * every such dependency is injected as a plain function rather than a
+ * concrete class import. All members optional: a caller (test or a stripped-
+ * down OrchSocketServer) that omits a dep gets the handler's documented
+ * "unavailable" fallback for that message type, never a crash.
+ */
+export interface McpQueryHandlerDeps {
+  /**
+   * Deliver a Stop-hook turn-end notification (IDEA-030) to the live
+   * InteractiveClaudeManager. Returns true if a tracked interactive run for
+   * `runId` was found and notified, false otherwise. Wired in main/src/index.ts
+   * to `interactiveCliManager.notifyTurnEnd`.
+   */
+  onInteractiveTurnEnd?: (runId: string) => boolean;
+}
+
 // ---------------------------------------------------------------------------
 // McpQueryHandler
 // ---------------------------------------------------------------------------
@@ -452,10 +489,15 @@ export class McpQueryHandler {
    * @param logger Optional structured logger. Passed through for connect /
    *               disconnect / precondition diagnostics on the shell-approval
    *               path (CLAUDE.md optional-logger rule: pass it, don't omit it).
+   * @param deps   Optional callback deps otherwise unreachable from this layer
+   *               (see McpQueryHandlerDeps). Defaults to `{}` — every member is
+   *               individually optional, so omitting this arg entirely (as every
+   *               existing test call site does) is equivalent to passing `{}`.
    */
   constructor(
     private readonly db: DatabaseLike,
     private readonly logger?: LoggerLike,
+    private readonly deps: McpQueryHandlerDeps = {},
   ) {}
 
   // --------------------------------------------------------------------------
@@ -541,6 +583,11 @@ export class McpQueryHandler {
           // synchronously. It returns after kicking off requestApproval; only
           // the socketReply closure writes the verdict, possibly minutes later.
           this.handleShellApprovalRequest(msg, client);
+          break;
+        case 'interactive-turn-end':
+          // Fire-and-ack: unlike shell-approval-request, there is no verdict to
+          // defer — writeResponse happens synchronously either way.
+          this.handleInteractiveTurnEnd(msg, client);
           break;
         default: {
           // TypeScript exhaustiveness helper — cast so the switch compiles even
@@ -2611,6 +2658,47 @@ export class McpQueryHandler {
       count: entries.length,
     });
     return entries.length;
+  }
+
+  // --------------------------------------------------------------------------
+  // interactive-turn-end (INTERACTIVE substrate Stop hook, IDEA-030)
+  // --------------------------------------------------------------------------
+
+  /**
+   * Fire-and-ack: unlike shell-approval-request, there is no verdict to defer
+   * — the Stop hook (stopShellHook.ts) does not gate anything, it only reports
+   * that a turn ended, and it already applies its OWN bounded wait for this ack.
+   * Routes to the injected `onInteractiveTurnEnd` dep (absent in tests/hosts
+   * that never wired it — e.g. a bare OrchSocketServer in a unit test), which
+   * this layer cannot reach directly (ORCHESTRATOR LAYERING RULE: no
+   * main/src/services imports here).
+   *
+   * `ok:true` iff a live interactive run for `runId` was found and notified;
+   * `ok:false` with `error:'turn_end_unavailable'` when the dep is missing OR
+   * it reports no matching run — either way the hook script (which exits 0
+   * unconditionally regardless of this response) has nothing to act on.
+   */
+  private handleInteractiveTurnEnd(
+    msg: Extract<McpQueryMessage, { type: 'interactive-turn-end' }>,
+    client: net.Socket,
+  ): void {
+    const notified = typeof msg.runId === 'string' && msg.runId.length > 0
+      ? (this.deps.onInteractiveTurnEnd?.(msg.runId) ?? false)
+      : false;
+
+    if (!notified) {
+      this.logger?.debug('[Cyboflow MCP Query] interactive-turn-end had no effect', {
+        runId: msg.runId,
+        depWired: this.deps.onInteractiveTurnEnd !== undefined,
+      });
+    }
+
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: notified,
+      ...(notified ? {} : { error: 'turn_end_unavailable' }),
+    });
   }
 
   /**

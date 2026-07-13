@@ -28,7 +28,7 @@
 import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
-import { McpQueryHandler, type McpQueryMessage } from './mcpQueryHandler';
+import { McpQueryHandler, type McpQueryMessage, type McpQueryHandlerDeps } from './mcpQueryHandler';
 import type { DatabaseLike, LoggerLike } from '../types';
 import type { PermissionServerLike } from '../stuckDetector';
 
@@ -86,8 +86,9 @@ export class OrchSocketServer implements PermissionServerLike {
     private readonly socketPath: string,
     db: DatabaseLike,
     private readonly logger: LoggerLike,
+    deps: McpQueryHandlerDeps = {},
   ) {
-    this.handler = new McpQueryHandler(db);
+    this.handler = new McpQueryHandler(db, logger, deps);
   }
 
   /**

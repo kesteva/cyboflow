@@ -1298,10 +1298,16 @@ async function initializeServices() {
   // tools are routable.  Started here (before the RunLauncher block) so its
   // socket path is available to the providers, the McpServerLifecycle, and the
   // CLI manager below.  `cyboflowDb`/`cyboflowLogger` are already in scope above.
+  // `onInteractiveTurnEnd` wires the Stop-hook turn-end seam (IDEA-030):
+  // mcpQueryHandler cannot import main/src/services directly (ORCHESTRATOR
+  // LAYERING RULE), so the callback is threaded in here where
+  // `interactiveCliManager` is already narrowed to InteractiveClaudeManager
+  // (the throw-guard above at its construction site).
   const orchSocketServer = new OrchSocketServer(
     getCyboflowSubdirectory('sockets', 'orch.sock'),
     cyboflowDb,
     cyboflowLogger,
+    { onInteractiveTurnEnd: (runId) => interactiveCliManager.notifyTurnEnd(runId) },
   );
   // Keep the start promise so the MCP subprocess (below) can be gated on the
   // socket actually listening — it is a pure client and dies with ECONNREFUSED if

@@ -76,8 +76,12 @@ import type { PermissionMode, WorkflowDefinition } from '../../../../../shared/t
  *                      branch that omits the PreToolUse hook
  *                      (claudeCodeManager.ts:446). The opt-out branch is owned by
  *                      resolveInlineGatingHooks (interactiveSettingsWriter.ts) —
- *                      'ignore'/'dontAsk'/'auto' return null (no hook). The
- *                      manager adds NO second gate (single source of truth).
+ *                      'ignore'/'dontAsk'/'auto' omit the PreToolUse key (no
+ *                      gate) from the returned fragment. The manager adds NO
+ *                      second gate (single source of truth). The Stop turn-end
+ *                      hook (IDEA-030) has NO opt-out and is always present in
+ *                      the same fragment — resolveInlineGatingHooks never
+ *                      returns null.
  *   strictMcpConfig  : threads `--strict-mcp-config` iff strictMcpConfig===true,
  *                      so only the per-run `.mcp.json` servers load and user
  *                      globals cannot interfere with the permission bridge.
@@ -94,6 +98,13 @@ import type { PermissionMode, WorkflowDefinition } from '../../../../../shared/t
  *                      substrate. spawnCliProcess still calls
  *                      settingsWriter.remove() so a LEGACY on-disk entry from an
  *                      older build cannot double-fire alongside the inline one.
+ *                      The SAME flag also always carries a Stop hook (IDEA-030):
+ *                      newer CLIs stopped reliably emitting the transcript
+ *                      turn-end markers, so a deterministic Stop-hook signal
+ *                      (stopShellHook.js) notifies the orchestrator over the
+ *                      socket, which routes it to notifyTurnEnd -> the SAME
+ *                      handleTurnEnd path the transcript marker uses. No
+ *                      permissionMode opt-out applies to it.
  *   resume/isResume  : the legacy boolean `isResume` is still ignored (no
  *                      `--resume` is emitted from it). RESUME of a lost quick
  *                      session is driven by the explicit `resumeSessionId` option
@@ -600,25 +611,28 @@ export class InteractiveClaudeManager extends AbstractCliManager {
       sessionSettings.enabledPlugins = enabledPlugins;
     }
 
-    // The PreToolUse `'*'` shell-approval gate rides this same inline flag
-    // (probe-verified on CLI 2.1.201: flag-tier hooks FIRE and BLOCK, and are
-    // ADDITIVE to file-based hooks — user hooks keep firing). Inline delivery
-    // writes NOTHING into the working tree, which is what allows in-place
-    // sessions (migration 047) on this substrate. The opt-out branch lives in
-    // resolveInlineGatingHooks — the NEW 4-mode `agentPermissionMode` (workflow
-    // runs) takes precedence when set: 'auto'/'dontAsk' skip the hook so native
-    // gating owns the decision ('auto' = the model classifier reached via
-    // `--permission-mode auto` above; a hook would pre-empt it — hooks run FIRST
-    // in the CLI permission order), while 'default'/'acceptEdits' keep it. When
+    // The PreToolUse `'*'` shell-approval gate AND the Stop turn-end hook
+    // (IDEA-030) ride this same inline flag (probe-verified on CLI 2.1.201:
+    // flag-tier hooks FIRE and BLOCK, and are ADDITIVE to file-based hooks —
+    // user hooks keep firing; probe-verified on CLI 2.1.207: a Stop hook fires
+    // the same way in -p mode). Inline delivery writes NOTHING into the working
+    // tree, which is what allows in-place sessions (migration 047) on this
+    // substrate. The PreToolUse opt-out branch lives in resolveInlineGatingHooks
+    // — the NEW 4-mode `agentPermissionMode` (workflow runs) takes precedence
+    // when set: 'auto'/'dontAsk' skip the gate so native gating owns the
+    // decision ('auto' = the model classifier reached via `--permission-mode
+    // auto` above; a hook would pre-empt it — hooks run FIRST in the CLI
+    // permission order), while 'default'/'acceptEdits' keep it. When
     // agentPermissionMode is unset (quick/legacy sessions) the legacy
-    // `permissionMode` 'ignore' opt-out is preserved. NO second gate here.
-    const gatingHooks = resolveInlineGatingHooks(
+    // `permissionMode` 'ignore' opt-out is preserved. NO second gate here. The
+    // Stop hook has NO opt-out branch — resolveInlineGatingHooks ALWAYS returns
+    // a fragment (never null) because every mode still needs deterministic
+    // turn-end detection (newer CLIs stopped reliably emitting the transcript
+    // markers this substrate previously relied on exclusively).
+    sessionSettings.hooks = resolveInlineGatingHooks(
       { permissionMode: options.agentPermissionMode ?? options.permissionMode },
       this.toLoggerLike(this.logger),
     );
-    if (gatingHooks) {
-      sessionSettings.hooks = gatingHooks;
-    }
 
     args.push('--settings', JSON.stringify(sessionSettings));
 
@@ -1388,6 +1402,33 @@ export class InteractiveClaudeManager extends AbstractCliManager {
     run.turnEnded = true;
     this.logger?.verbose(`[InteractiveClaudeManager] turn-end for panel ${panelId} — writing EOF/exit to end REPL turn`);
     this.writeExitToRepl(panelId);
+  }
+
+  /**
+   * Deterministic turn-end signal from the Stop-hook seam (IDEA-030), routed
+   * here by mcpQueryHandler's `interactive-turn-end` dispatch. Newer `claude`
+   * CLIs (2.1.207+) stopped reliably emitting the transcript `stop_hook_summary`
+   * / `turn_duration` markers `onTurnEnd` (the tail-source callback above) relies
+   * on, leaving quick PTY sessions stuck at 'running' forever — the Merge button
+   * (disabled while running) never enables. This drives the SAME handleTurnEnd
+   * path the transcript marker uses, so downstream (SubstrateDispatchFacade's
+   * 'turn-end' re-emit -> RunExecutor's event-driven rest) sees one emission
+   * shape regardless of source. A transcript marker AND this hook landing for
+   * the SAME turn double-fires 'turn-end' — accepted, not guarded against here:
+   * downstream consumers key off current status, so a redundant emit is a no-op.
+   *
+   * @returns true if a live interactive run for `runId` was found and notified;
+   *   false if none is tracked (already torn down, or a stale/unrelated runId).
+   */
+  notifyTurnEnd(runId: string): boolean {
+    for (const [panelId, run] of this.interactiveRuns) {
+      if (run.runId === runId) {
+        this.handleTurnEnd(panelId);
+        return true;
+      }
+    }
+    this.logger?.verbose(`[InteractiveClaudeManager] notifyTurnEnd: no live interactive run for runId ${runId}`);
+    return false;
   }
 
   /**
