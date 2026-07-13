@@ -61,8 +61,15 @@ function App() {
   const reviewQueueCount = pendingApprovalsCount + aggregatedReviewItems.length;
   // Non-done, non-archived task count drives the backlog rail badge (mirrors the
   // review count). Cross-project by design — the board is the overall view now.
+  // Experiment-arm tasks are EXCLUDED (experiment_id tag) so the badge matches the
+  // board, which hides them (filterTasks/isExperimentSandboxed): the full backlog
+  // sync omits tagged rows, but per-entity TaskChangedEvent deltas (e.g. an arm's
+  // approve-plan reveal) upsert them into the store, so the raw count must filter.
   const backlogCount = useBacklogStore(
-    (s) => s.tasks.filter((t) => !t.isDone && t.archived_at === null).length,
+    (s) =>
+      s.tasks.filter(
+        (t) => !t.isDone && t.archived_at === null && (t.experiment_id ?? null) === null,
+      ).length,
   );
   // Pending findings drive the Insights rail badge — derived from the SAME
   // source the review-queue findings partition uses (useReviewItemsSlice.items
