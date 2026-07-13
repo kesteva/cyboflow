@@ -249,4 +249,53 @@ describe('RunBottomPane', () => {
     expect(screen.getByTestId('run-chat-view-mock')).toBeInTheDocument();
     expect(screen.queryByText('run-xyz')).not.toBeInTheDocument();
   });
+
+  // -------------------------------------------------------------------------
+  // onChatTabActiveChange wiring (TASK-047): the pane reports whether the Chat
+  // tab is the active bottom-dock tab up to RunCenterPane, which combines it
+  // with the dock-open state to tell RunPendingInputStrip whether the chat
+  // transcript is the visible surface for a live question (so the strip can
+  // stand down its duplicate live-question card).
+  // -------------------------------------------------------------------------
+
+  it('reports Chat-tab active (true) on mount — Chat is the default tab', () => {
+    const onChatTabActiveChange = vi.fn();
+    seedRun('run-xyz', 'sdk');
+    setActiveRun('run-xyz');
+    render(<RunBottomPane onChatTabActiveChange={onChatTabActiveChange} />);
+    expect(onChatTabActiveChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it('reports false when switching to a non-chat tab (Data Stream) and true again on return to Chat', () => {
+    const onChatTabActiveChange = vi.fn();
+    seedRun('run-xyz', 'sdk');
+    setActiveRun('run-xyz');
+    render(<RunBottomPane onChatTabActiveChange={onChatTabActiveChange} />);
+
+    // Leaving Chat → the chat transcript is no longer the visible surface.
+    fireEvent.click(screen.getByRole('tab', { name: 'Data Stream' }));
+    expect(onChatTabActiveChange).toHaveBeenLastCalledWith(false);
+
+    // Returning to Chat → the transcript is visible again.
+    fireEvent.click(screen.getByRole('tab', { name: 'Chat' }));
+    expect(onChatTabActiveChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it('reports false when the Terminal tab is active (only Chat counts as the chat surface)', () => {
+    const onChatTabActiveChange = vi.fn();
+    seedRun('run-xyz', 'sdk');
+    setActiveRun('run-xyz');
+    render(<RunBottomPane onChatTabActiveChange={onChatTabActiveChange} />);
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
+    expect(onChatTabActiveChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('works stand-alone when onChatTabActiveChange is omitted (optional prop)', () => {
+    seedRun('run-xyz', 'sdk');
+    setActiveRun('run-xyz');
+    // No callback threaded — must not throw and still renders the Chat tab.
+    expect(() => render(<RunBottomPane />)).not.toThrow();
+    expect(screen.getByRole('tab', { name: 'Chat' })).toBeInTheDocument();
+  });
 });
