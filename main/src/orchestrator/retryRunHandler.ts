@@ -105,6 +105,7 @@
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import { resolveWorkflowDefinition } from '../../../shared/types/workflows';
+import { resolveRunFrozenSpec } from './runFrozenSpec';
 
 // ---------------------------------------------------------------------------
 // Collaborator interfaces
@@ -183,8 +184,6 @@ interface RetryRunRow {
   execution_model: string | null;
   current_step_id: string | null;
   batch_id: string | null;
-  workflow_name: string;
-  spec_json: string | null;
   /** Snapshotted in the pre-flight read to close the revive TOCTOU (see header). */
   updated_at: string;
 }
@@ -220,13 +219,9 @@ export async function retryRunHandler(
     logger,
   } = deps;
 
-  const RUN_SELECT_SQL = `SELECT r.status AS status, r.execution_model AS execution_model,
-                r.current_step_id AS current_step_id, r.batch_id AS batch_id,
-                w.name AS workflow_name, w.spec_json AS spec_json,
-                r.updated_at AS updated_at
-           FROM workflow_runs r
-           JOIN workflows w ON w.id = r.workflow_id
-          WHERE r.id = ?`;
+  const RUN_SELECT_SQL = `SELECT status, execution_model, current_step_id, batch_id, updated_at
+           FROM workflow_runs
+          WHERE id = ?`;
 
   // Pre-flight (OUTSIDE the per-run queue). A programmatic walk HOLDS
   // runQueues[runId] for its entire duration (a run parked at a human gate holds
@@ -294,10 +289,14 @@ export async function retryRunHandler(
       return { ok: false, reason: 'no_target_step' };
     }
 
-    // Validate against the run's own definition — an unvalidated id would
-    // silently restart the walk from the beginning (the controller's own
-    // fallback for an unknown resume step); refuse instead of guessing.
-    const definition = resolveWorkflowDefinition(row.workflow_name, row.spec_json);
+    // Validate against the run's own FROZEN definition (resolveRunFrozenSpec —
+    // never the live workflows.spec_json, which walks the wrong graph for a
+    // variant run or a workflow edited mid-run; docs/CODE-PATTERNS.md). An
+    // unvalidated id would silently restart the walk from the beginning (the
+    // controller's own fallback for an unknown resume step); refuse instead of
+    // guessing.
+    const frozen = resolveRunFrozenSpec(db, runId);
+    const definition = frozen ? resolveWorkflowDefinition(frozen.workflowName, frozen.specJson) : null;
     const allSteps = definition ? definition.phases.flatMap((phase) => phase.steps) : [];
     const targetStep = allSteps.find((step) => step.id === target);
     if (!targetStep) {

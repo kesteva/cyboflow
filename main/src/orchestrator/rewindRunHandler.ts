@@ -48,8 +48,9 @@
  *     → { noOp: 'not_rewindable' }.
  *
  * Target validation + the DIRECTIONAL guard: the target is validated against the
- * run's own WorkflowDefinition (resolveWorkflowDefinition, flattening every
- * phase's steps) — an id not in the definition → { noOp: 'unknown_step' }. When
+ * run's FROZEN WorkflowDefinition (resolveRunFrozenSpec → resolveWorkflowDefinition,
+ * flattening every phase's steps — never the live workflows.spec_json; see
+ * docs/CODE-PATTERNS.md) — an id not in the definition → { noOp: 'unknown_step' }. When
  * the run's current_step_id ALSO resolves to a flat index, the target must be
  * at-or-before it (targetIdx <= currentIdx), else { noOp: 'target_not_prior' }:
  * rewind means BACKWARD. `target === current` IS allowed — "restart the current
@@ -145,6 +146,7 @@
 import type { DatabaseLike, LoggerLike } from './types';
 import type { RunQueueRegistry } from './RunQueueRegistry';
 import { resolveWorkflowDefinition } from '../../../shared/types/workflows';
+import { resolveRunFrozenSpec } from './runFrozenSpec';
 
 // ---------------------------------------------------------------------------
 // Collaborator interfaces
@@ -287,8 +289,6 @@ interface RewindRunRow {
   execution_model: string | null;
   current_step_id: string | null;
   batch_id: string | null;
-  workflow_name: string;
-  spec_json: string | null;
 }
 
 /**
@@ -305,12 +305,23 @@ type GuardOutcome =
 /** Statuses a programmatic run can be rewound from (see header for the rationale). */
 const REWINDABLE_STATUSES = new Set<string>(['running', 'awaiting_review', 'failed', 'paused']);
 
-const RUN_SELECT_SQL = `SELECT r.status AS status, r.execution_model AS execution_model,
-              r.current_step_id AS current_step_id, r.batch_id AS batch_id,
-              w.name AS workflow_name, w.spec_json AS spec_json
-         FROM workflow_runs r
-         JOIN workflows w ON w.id = r.workflow_id
-        WHERE r.id = ?`;
+const RUN_SELECT_SQL = `SELECT status, execution_model, current_step_id, batch_id
+         FROM workflow_runs
+        WHERE id = ?`;
+
+/**
+ * Resolve the run's FROZEN definition (resolveRunFrozenSpec — the spec the run
+ * actually executes, per docs/CODE-PATTERNS.md "Per-run workflow definitions
+ * resolve the FROZEN spec"). A live `workflows.spec_json` read here would
+ * validate the target and compute the purge slice against the WRONG graph for a
+ * variant run or a workflow edited mid-run — rejecting valid frozen steps,
+ * accepting live-only targets the controller cannot resume at, and leaving stale
+ * downstream step_results that boot recovery treats as completed.
+ */
+function resolveFrozenDefinition(db: DatabaseLike, runId: string) {
+  const frozen = resolveRunFrozenSpec(db, runId);
+  return frozen ? resolveWorkflowDefinition(frozen.workflowName, frozen.specJson) : null;
+}
 
 // ---------------------------------------------------------------------------
 // Handler
@@ -362,7 +373,7 @@ export async function rewindRunHandler(
   }
 
   // ── 2. TARGET VALIDATION + directional guard ──────────────────────────────
-  const definition = resolveWorkflowDefinition(preflightRow.workflow_name, preflightRow.spec_json);
+  const definition = resolveFrozenDefinition(db, runId);
   const flat = definition ? definition.phases.flatMap((phase) => phase.steps) : [];
   const targetIdx = flat.findIndex((step) => step.id === stepId);
   if (targetIdx < 0) {
@@ -425,9 +436,9 @@ export async function rewindRunHandler(
       return { ok: false, reason: 'not_rewindable' };
     }
 
-    // Re-derive flat/targetIdx defensively (spec_json is immutable per run, but the
-    // re-read keeps Phase 1 self-contained).
-    const def = resolveWorkflowDefinition(row.workflow_name, row.spec_json);
+    // Re-derive flat/targetIdx defensively from the FROZEN spec (immutable per
+    // run, but the re-read keeps Phase 1 self-contained).
+    const def = resolveFrozenDefinition(db, runId);
     const flatSteps = def ? def.phases.flatMap((phase) => phase.steps) : [];
     const tIdx = flatSteps.findIndex((step) => step.id === stepId);
     if (tIdx < 0) {

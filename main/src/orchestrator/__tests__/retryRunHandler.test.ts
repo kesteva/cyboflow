@@ -270,7 +270,10 @@ describe('retryRunHandler — guard matrix', () => {
     const adapter: DatabaseLike = {
       prepare: (sql: string): PreparedStatement => {
         const stmt = real.prepare(sql);
-        if (sql.includes('FROM workflow_runs r') && sql.includes('JOIN workflows w')) {
+        // Intercept ONLY the handler's guard SELECT (run columns incl.
+        // execution_model + updated_at) — the frozen-spec resolution reads pass
+        // through to the real rows.
+        if (sql.includes('execution_model') && sql.includes('updated_at') && sql.trimStart().startsWith('SELECT')) {
           return {
             run: (...params: unknown[]) => stmt.run(...params),
             get: () => ({
@@ -278,8 +281,6 @@ describe('retryRunHandler — guard matrix', () => {
               execution_model: 'programmatic',
               current_step_id: 'step-a',
               batch_id: null,
-              workflow_name: 'test-workflow',
-              spec_json: BASIC_SPEC,
               updated_at: '2026-01-01T00:00:00.000Z',
             }),
             all: (...params: unknown[]) => stmt.all(...params),
@@ -650,7 +651,9 @@ describe('retryRunHandler — pre-flight (no-enqueue) discipline', () => {
     const adapter: DatabaseLike = {
       prepare: (sql: string): PreparedStatement => {
         const stmt = real.prepare(sql);
-        if (sql.includes('FROM workflow_runs r') && sql.includes('JOIN workflows w')) {
+        // Match ONLY the handler's guard SELECT (run columns incl.
+        // execution_model + updated_at); frozen-spec reads pass through.
+        if (sql.includes('execution_model') && sql.includes('updated_at') && sql.trimStart().startsWith('SELECT')) {
           return {
             run: (...params: unknown[]) => stmt.run(...params),
             get: (...params: unknown[]) => {
@@ -747,6 +750,74 @@ describe('retryRunHandler — batch reopen', () => {
     expect(result).toEqual({ delivered: true, stepId: 'step-a' });
     expect(reopenBatch).not.toHaveBeenCalled();
     await waitForRedrive(runQueues, runId);
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Frozen-spec resolution — the retry target validates against the run's FROZEN
+// revision, never the live workflows.spec_json (docs/CODE-PATTERNS.md reader
+// rule; pattern mirrors stepTransitionBridge.frozenSpec.test.ts)
+// ---------------------------------------------------------------------------
+
+describe('retryRunHandler — frozen-spec resolution', () => {
+  const VARIANT_SPEC = JSON.stringify({
+    id: 'test-wf-variant',
+    phases: [
+      {
+        id: 'phase-1',
+        label: 'Phase 1',
+        color: '#111111',
+        steps: [{ id: 'var-a', name: 'Var A', agent: 'agent-a' }],
+      },
+    ],
+  });
+
+  /** Live spec = THREE_STEP_SPEC (step-a..c); the run's frozen revision = VARIANT_SPEC. */
+  function seedVariantRun(db: Database.Database): { runId: string } {
+    const { runId, workflowId } = seedProgrammaticRun(db, {
+      status: 'failed',
+      specJson: THREE_STEP_SPEC,
+      currentStepId: 'var-a',
+    });
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
+    db.exec(`
+      CREATE TABLE workflow_revisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id TEXT NOT NULL, spec_hash TEXT NOT NULL,
+        spec_json TEXT NOT NULL, UNIQUE(workflow_id, spec_hash)
+      );
+    `);
+    db.prepare('UPDATE workflow_runs SET spec_hash = ? WHERE id = ?').run('variant-hash', runId);
+    db.prepare('INSERT INTO workflow_revisions (workflow_id, spec_hash, spec_json) VALUES (?, ?, ?)').run(
+      workflowId,
+      'variant-hash',
+      VARIANT_SPEC,
+    );
+    return { runId };
+  }
+
+  it('ACCEPTS a target present only in the frozen variant revision', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedVariantRun(db);
+    const executor = makeFakeExecutor();
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues });
+
+    const result = await retryRunHandler(runId, 'var-a', deps);
+
+    expect(result).toEqual({ delivered: true, stepId: 'var-a' });
+    await waitForRedrive(runQueues, runId);
+    db.close();
+  });
+
+  it('REJECTS a target present only in the LIVE workflow spec (unknown_step)', async () => {
+    const db = makeDb();
+    const { runId } = seedVariantRun(db);
+    const executor = makeFakeExecutor();
+
+    const result = await retryRunHandler(runId, 'step-a', makeDeps(dbAdapter(db), executor));
+
+    expect(result).toEqual({ noOp: true, reason: 'unknown_step' });
     db.close();
   });
 });

@@ -2767,17 +2767,16 @@ app.whenReady().then(async () => {
       stepId: string,
     ): { ok: true } | { ok: false; message: string } => {
       const row = db
-        .prepare(
-          `SELECT wr.execution_model AS executionModel, w.name AS workflowName, w.spec_json AS specJson
-             FROM workflow_runs wr JOIN workflows w ON w.id = wr.workflow_id WHERE wr.id = ?`,
-        )
-        .get(runId) as
-        | { executionModel: string | null; workflowName: string; specJson: string | null }
-        | undefined;
+        .prepare('SELECT execution_model AS executionModel FROM workflow_runs WHERE id = ?')
+        .get(runId) as { executionModel: string | null } | undefined;
       if (!row) return { ok: false, message: 'Run not found.' };
       if (row.executionModel !== 'programmatic')
         return { ok: false, message: 'Only programmatic runs support step control.' };
-      const def = resolveWorkflowDefinition(row.workflowName, row.specJson);
+      // FROZEN spec, never the live workflows.spec_json — a live read validates
+      // step ids against the wrong graph for a variant run / mid-run edit
+      // (docs/CODE-PATTERNS.md "Per-run workflow definitions resolve the FROZEN spec").
+      const frozen = resolveRunFrozenSpec(db, runId);
+      const def = frozen ? resolveWorkflowDefinition(frozen.workflowName, frozen.specJson) : null;
       if (!def) return { ok: false, message: "This run's workflow definition could not be resolved." };
       const exists = def.phases.some((p) =>
         p.steps.some(

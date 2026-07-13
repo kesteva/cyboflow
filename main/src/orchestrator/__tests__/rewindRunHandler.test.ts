@@ -652,7 +652,10 @@ describe('rewindRunHandler — guarded-revive race', () => {
     const adapter: DatabaseLike = {
       prepare: (sql: string): PreparedStatement => {
         const stmt = real.prepare(sql);
-        if (sql.includes('FROM workflow_runs r') && sql.includes('JOIN workflows w')) {
+        // Intercept ONLY the handler's guard SELECT (run columns incl.
+        // execution_model + batch_id) — the frozen-spec resolution reads pass
+        // through to the real rows.
+        if (sql.includes('execution_model') && sql.includes('batch_id') && sql.trimStart().startsWith('SELECT')) {
           return {
             run: (...params: unknown[]) => stmt.run(...params),
             get: () => ({
@@ -660,8 +663,6 @@ describe('rewindRunHandler — guarded-revive race', () => {
               execution_model: 'programmatic',
               current_step_id: 'step-c',
               batch_id: null,
-              workflow_name: 'test-workflow',
-              spec_json: THREE_STEP_SPEC,
             }),
             all: (...params: unknown[]) => stmt.all(...params),
           };
@@ -775,6 +776,83 @@ describe('rewindRunHandler — delivery mechanics', () => {
 
     expect(result).toEqual({ noOp: true, reason: 'not_rewindable' });
     expect(getOrCreateSpy).not.toHaveBeenCalled();
+    db.close();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Frozen-spec resolution — targets validate against the run's FROZEN revision,
+// never the live workflows.spec_json (docs/CODE-PATTERNS.md reader rule;
+// pattern mirrors stepTransitionBridge.frozenSpec.test.ts)
+// ---------------------------------------------------------------------------
+
+describe('rewindRunHandler — frozen-spec resolution', () => {
+  /** Two steps present ONLY in the run's frozen variant revision. */
+  const VARIANT_SPEC = JSON.stringify({
+    id: 'test-wf-variant',
+    phases: [
+      {
+        id: 'phase-1',
+        label: 'Phase 1',
+        color: '#111111',
+        steps: [
+          { id: 'var-a', name: 'Var A', agent: 'agent-a' },
+          { id: 'var-b', name: 'Var B', agent: 'agent-b' },
+        ],
+      },
+    ],
+  });
+
+  /** Live spec = THREE_STEP_SPEC (step-a..c); the run's frozen revision = VARIANT_SPEC. */
+  function seedVariantRun(db: Database.Database): { runId: string } {
+    const { runId, workflowId } = seedProgrammaticRun(db, {
+      status: 'failed',
+      specJson: THREE_STEP_SPEC,
+      currentStepId: 'var-b',
+    });
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN spec_hash TEXT');
+    db.exec(`
+      CREATE TABLE workflow_revisions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, workflow_id TEXT NOT NULL, spec_hash TEXT NOT NULL,
+        spec_json TEXT NOT NULL, UNIQUE(workflow_id, spec_hash)
+      );
+    `);
+    db.prepare('UPDATE workflow_runs SET spec_hash = ? WHERE id = ?').run('variant-hash', runId);
+    db.prepare('INSERT INTO workflow_revisions (workflow_id, spec_hash, spec_json) VALUES (?, ?, ?)').run(
+      workflowId,
+      'variant-hash',
+      VARIANT_SPEC,
+    );
+    return { runId };
+  }
+
+  it('ACCEPTS a target present only in the frozen variant revision', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedVariantRun(db);
+    const executor = makeFakeExecutor();
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues });
+
+    const result = await rewindRunHandler(runId, 'var-a', deps);
+
+    expect(result).toMatchObject({ delivered: true, stepId: 'var-a' });
+    // The purge slice is computed from the FROZEN graph too.
+    expect(deps.deleteStepResults).toHaveBeenCalledWith(runId, ['var-a', 'var-b']);
+    await waitForRedrive(runQueues, runId);
+    db.close();
+  });
+
+  it('REJECTS a target present only in the LIVE workflow spec (unknown_step)', async () => {
+    const db = makeDb();
+    const runQueues = new RunQueueRegistry();
+    const { runId } = seedVariantRun(db);
+    const executor = makeFakeExecutor();
+    const deps = makeDeps(dbAdapter(db), executor, { runQueues });
+
+    const result = await rewindRunHandler(runId, 'step-a', deps);
+
+    expect(result).toEqual({ noOp: true, reason: 'unknown_step' });
+    expect(deps.deleteStepResults).not.toHaveBeenCalled();
     db.close();
   });
 });
