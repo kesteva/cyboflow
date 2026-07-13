@@ -180,6 +180,58 @@ function successfulHandler(method: string, _params: unknown, client: FakeAppServ
 }
 
 describe('CodexSdkManager app-server runtime', () => {
+  it('probes ChatGPT auth without starting a thread and stops the temporary app-server', async () => {
+    const db = createDb();
+    try {
+      const { manager, getClient } = makeManager(db, successfulHandler);
+
+      await expect(manager.detectChatGptAccount()).resolves.toEqual({
+        runtime: {
+          found: true,
+          path: '/app/codex/bin/codex',
+          version: '0.143.0',
+        },
+        account: {
+          found: true,
+          email: 'user@example.com',
+          planType: 'pro',
+        },
+        state: 'detected',
+      });
+
+      const client = getClient();
+      expect(client.start).toHaveBeenCalledOnce();
+      expect(client.stop).toHaveBeenCalledOnce();
+      expect(client.requests).toEqual([{
+        method: 'account/read',
+        params: { refreshToken: false },
+      }]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('reports a bundled Codex runtime as logged out when account/read is not ChatGPT auth', async () => {
+    const db = createDb();
+    try {
+      const { manager, getClient } = makeManager(db, (method) => {
+        if (method === 'account/read') {
+          return { account: null, requiresOpenaiAuth: true };
+        }
+        throw new Error(`Unexpected request: ${method}`);
+      });
+
+      await expect(manager.detectChatGptAccount()).resolves.toMatchObject({
+        runtime: { found: true },
+        account: { found: false },
+        state: 'loggedOut',
+      });
+      expect(getClient().stop).toHaveBeenCalledOnce();
+    } finally {
+      db.close();
+    }
+  });
+
   it('routes a projected usage-limit failure through the programmatic systemic pause', async () => {
     const db = createDb();
     try {

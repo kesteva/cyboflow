@@ -11,7 +11,7 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
-import type { ClaudeDetectionResult } from '../../../shared/types/onboarding';
+import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
 
 interface LogEntry {
   timestamp: string;
@@ -376,6 +376,9 @@ interface ElectronAPI {
   // First-run onboarding — Claude Code login/binary probe.
   claude: {
     detect: () => Promise<IPCResponse<ClaudeDetectionResult>>;
+  };
+  codex: {
+    detect: () => Promise<IPCResponse<CodexDetectionResult>>;
   };
 
   // Model availability (guarded models, e.g. Fable 5)

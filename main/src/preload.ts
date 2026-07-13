@@ -7,7 +7,12 @@ import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../
 import type { ToolPanel, FastModeStateNotice, QueuedPanelInput } from '../../shared/types/panels';
 import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
-import { CLAUDE_DETECT_CHANNEL, type ClaudeDetectionResult } from '../../shared/types/onboarding';
+import {
+  CLAUDE_DETECT_CHANNEL,
+  CODEX_DETECT_CHANNEL,
+  type ClaudeDetectionResult,
+  type CodexDetectionResult,
+} from '../../shared/types/onboarding';
 
 interface LogEntry {
   timestamp: string;
@@ -405,6 +410,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // First-run onboarding — Claude Code login/binary probe (step 1, "Check again").
   claude: {
     detect: (): Promise<IPCResponse<ClaudeDetectionResult>> => ipcRenderer.invoke(CLAUDE_DETECT_CHANNEL),
+  },
+  codex: {
+    detect: (): Promise<IPCResponse<CodexDetectionResult>> => ipcRenderer.invoke(CODEX_DETECT_CHANNEL),
   },
 
   // Model availability (guarded models, e.g. Fable 5)

@@ -14,6 +14,7 @@ import type {
   AgentSessionInfoEvent,
   AgentStreamEvent,
 } from '../../../../../shared/types/agentStream';
+import type { CodexDetectionResult } from '../../../../../shared/types/onboarding';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { resolveAgentModelAlias } from '../agentModelContext';
 import {
@@ -32,7 +33,10 @@ import {
   type QuestionRouterPort,
 } from './appServer/questionBridge';
 import { CodexRawNotificationSink } from './appServer/rawNotificationSink';
-import { requireCodexChatGptAccount } from './appServer/account';
+import {
+  CodexChatGptAuthRequiredError,
+  requireCodexChatGptAccount,
+} from './appServer/account';
 import {
   CodexAppServerClient,
   type CodexAppServerClientOptions,
@@ -196,6 +200,86 @@ export class CodexSdkManager extends AbstractCliManager {
 
   setQuestionRouterProvider(provider: () => QuestionRouterPort): void {
     this.questionRouterProvider = provider;
+  }
+
+  /**
+   * Probe the bundled Codex runtime and ChatGPT login without starting a thread.
+   * The temporary app-server is always stopped before this method resolves.
+   */
+  async detectChatGptAccount(): Promise<CodexDetectionResult> {
+    let executable: ResolvedCodexExecutable;
+    try {
+      executable = this.getResolvedExecutable();
+    } catch (error) {
+      this.logger?.warn(
+        `[CodexSdkManager] onboarding runtime detection failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return {
+        runtime: { found: false, path: null, version: null },
+        account: { found: false, email: null, planType: null },
+        state: 'unavailable',
+      };
+    }
+
+    const runtime = {
+      found: true,
+      path: executable.executablePath,
+      version: executable.version,
+    };
+    const client = this.createAppServerClient({
+      command: executable.executablePath,
+      env: prependCodexPathToEnvironment(process.env, executable.pathDir),
+      onStderr: (chunk) => this.logger?.warn(`[Codex app-server detection stderr] ${chunk.trimEnd()}`),
+    });
+
+    try {
+      client.start();
+      const initialized = await withTimeout(
+        client.initialize(initializeParams(this.clientVersion)),
+        APP_SERVER_REQUEST_TIMEOUT_MS,
+        'Codex app-server onboarding initialization',
+      );
+      if (!initialized.userAgent.includes(CODEX_EXECUTABLE_VERSION)) {
+        throw new Error(
+          `Codex app-server protocol mismatch: expected ${CODEX_EXECUTABLE_VERSION}, got ${initialized.userAgent}`,
+        );
+      }
+      const response = await withTimeout(
+        client.sendRequest<unknown, { refreshToken: false }>(
+          'account/read',
+          { refreshToken: false },
+        ),
+        APP_SERVER_REQUEST_TIMEOUT_MS,
+        'Codex ChatGPT onboarding account check',
+      );
+      const account = requireCodexChatGptAccount(response).account;
+      return {
+        runtime,
+        account: {
+          found: true,
+          email: account.email,
+          planType: account.planType,
+        },
+        state: 'detected',
+      };
+    } catch (error) {
+      if (!(error instanceof CodexChatGptAuthRequiredError)) {
+        this.logger?.warn(
+          `[CodexSdkManager] onboarding account detection failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return {
+        runtime,
+        account: { found: false, email: null, planType: null },
+        state: error instanceof CodexChatGptAuthRequiredError ? 'loggedOut' : 'unavailable',
+      };
+    } finally {
+      await client.stop().catch((error: unknown) => {
+        this.logger?.warn(
+          `[CodexSdkManager] onboarding detection teardown failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
   }
 
   protected async testCliAvailability(): Promise<{ available: boolean; error?: string; version?: string; path?: string }> {
