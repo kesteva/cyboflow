@@ -348,6 +348,52 @@ describe('parseConverseOutput', () => {
     ).toEqual({ reply: 'ok' });
   });
 
+  it('parses a valid steer_step action with taskRef passed through verbatim', () => {
+    expect(
+      parseConverseOutput({
+        reply: 'steering it.',
+        action: { kind: 'steer_step', stepId: 'tasks', guidance: 'be careful', taskRef: 'TASK-3' },
+      }),
+    ).toEqual({
+      reply: 'steering it.',
+      action: { kind: 'steer_step', stepId: 'tasks', guidance: 'be careful', taskRef: 'TASK-3' },
+    });
+  });
+
+  it('leaves taskRef absent on steer_step when not provided (and drops a blank one without dropping the action)', () => {
+    // Absent taskRef stays absent — no key at all.
+    expect(
+      parseConverseOutput({ reply: 'ok', action: { kind: 'steer_step', stepId: 'tasks', guidance: 'be careful' } }),
+    ).toEqual({ reply: 'ok', action: { kind: 'steer_step', stepId: 'tasks', guidance: 'be careful' } });
+    // A blank taskRef is optional, so it does not invalidate the whole action — it is simply dropped.
+    expect(
+      parseConverseOutput({
+        reply: 'ok',
+        action: { kind: 'steer_step', stepId: 'tasks', guidance: 'be careful', taskRef: '   ' },
+      }),
+    ).toEqual({ reply: 'ok', action: { kind: 'steer_step', stepId: 'tasks', guidance: 'be careful' } });
+    // A non-string taskRef drops the whole action, mirroring every other optional-field type check.
+    expect(
+      parseConverseOutput({
+        reply: 'ok',
+        action: { kind: 'steer_step', stepId: 'tasks', guidance: 'be careful', taskRef: 42 },
+      }),
+    ).toEqual({ reply: 'ok' });
+  });
+
+  it('parses a valid rewind_to_step action', () => {
+    expect(parseConverseOutput({ reply: 'rewinding it.', action: { kind: 'rewind_to_step', stepId: 'analyze' } })).toEqual({
+      reply: 'rewinding it.',
+      action: { kind: 'rewind_to_step', stepId: 'analyze' },
+    });
+  });
+
+  it('drops rewind_to_step when stepId is missing/blank/non-string', () => {
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'rewind_to_step' } })).toEqual({ reply: 'ok' });
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'rewind_to_step', stepId: '   ' } })).toEqual({ reply: 'ok' });
+    expect(parseConverseOutput({ reply: 'ok', action: { kind: 'rewind_to_step', stepId: 42 } })).toEqual({ reply: 'ok' });
+  });
+
   it('parses a valid resolve_review_item action (outcome/resolution optional)', () => {
     expect(
       parseConverseOutput({ reply: 'resolving it.', action: { kind: 'resolve_review_item', reviewItemId: 'RI-1' } }),
@@ -407,7 +453,7 @@ describe('parseConverseOutput', () => {
 });
 
 describe('MONITOR_CONVERSE_SCHEMA', () => {
-  it('requires reply, makes action optional, and enforces the kind enum (10 actions + 2 control signals)', () => {
+  it('requires reply, makes action optional, and enforces the kind enum (11 actions + 2 control signals)', () => {
     expect(MONITOR_CONVERSE_SCHEMA.required).toEqual(['reply']);
     expect(MONITOR_CONVERSE_SCHEMA.additionalProperties).toBe(false);
     const props = MONITOR_CONVERSE_SCHEMA.properties as Record<string, Record<string, unknown>>;
@@ -423,6 +469,7 @@ describe('MONITOR_CONVERSE_SCHEMA', () => {
       'skip_step',
       'unskip_step',
       'steer_step',
+      'rewind_to_step',
       'resolve_review_item',
       'file_note',
       'confirm',
@@ -475,7 +522,7 @@ describe('buildActionAnswerPrompt', () => {
     expect(p).toContain('you never claim it succeeded yourself');
   });
 
-  it('describes all 10 action kinds, grouped by task edits / step control / review queue', () => {
+  it('describes all 11 action kinds, grouped by task edits / step control / review queue', () => {
     const history: MonitorHistory = { conversation: [], steps: [] };
     const p = buildActionAnswerPrompt(ctx, 'what can you do?', history);
     for (const kind of [
@@ -487,6 +534,7 @@ describe('buildActionAnswerPrompt', () => {
       'skip_step',
       'unskip_step',
       'steer_step',
+      'rewind_to_step',
       'resolve_review_item',
       'file_note',
     ]) {
@@ -495,10 +543,32 @@ describe('buildActionAnswerPrompt', () => {
     // Task edits: not-yet-started + next-wave framing.
     expect(p).toContain('NOT-YET-STARTED');
     expect(p).toContain('NEXT wave');
-    // Step control: upcoming/not-reached framing.
+    // Step control: upcoming/not-reached framing (still true for skip_step/unskip_step).
     expect(p).toContain("HASN'T reached yet");
-    // Return-shape contract lists all 10 kinds and defers to per-kind fields.
+    // Return-shape contract lists all 11 kinds and defers to per-kind fields.
     expect(p).toContain('fields relevant to the chosen');
+  });
+
+  it('describes rewind_to_step as a confirm-gated whole-run rewind, distinct from retry_step', () => {
+    const history: MonitorHistory = { conversation: [], steps: [] };
+    const p = buildActionAnswerPrompt(ctx, 'rewind the run to the analyze step', history);
+    expect(p).toContain('"rewind_to_step"');
+    expect(p).toContain('rewind the WHOLE run to an earlier step');
+    expect(p).toContain("a step at or before the run's current step");
+    expect(p).toContain('the host safely stops current work first');
+    expect(p).toContain('prefer "retry_step" for simply re-running a failed step');
+    // It follows the same staged-confirm contract as the other steering kinds.
+    expect(p).toContain('"rewind_to_step" follows the same staged-confirm contract');
+  });
+
+  it('describes steer_step live-delivery to a currently-running step, with optional taskRef narrowing', () => {
+    const history: MonitorHistory = { conversation: [], steps: [] };
+    const p = buildActionAnswerPrompt(ctx, 'steer the running step', history);
+    expect(p).toContain('"steer_step"');
+    expect(p).toContain('If that step is CURRENTLY RUNNING the host also delivers the guidance live');
+    expect(p).toContain('mid-flight');
+    expect(p).toContain('every future spawn of that step (including retries)');
+    expect(p).toContain("Setting `taskRef` narrows to ONE sprint task's currently-running agent and is LIVE-ONLY");
   });
 
   it('describes the host-enforced two-phase confirmation protocol (stage → confirm/cancel) for mutating actions, including the low-risk file_note', () => {
@@ -664,7 +734,7 @@ function collectInjected(): { injectEvent: (event: unknown) => void; injected: A
 
 /**
  * Build a fully-populated fake `MonitorActions` bag (a no-op `vi.fn()` per
- * method), with any subset overridden. All 10 methods are required members of
+ * method), with any subset overridden. All 11 methods are required members of
  * the interface, so every test constructing a bag needs the full shape.
  */
 function makeActions(overrides: Partial<MonitorActions> = {}): MonitorActions {
@@ -677,6 +747,7 @@ function makeActions(overrides: Partial<MonitorActions> = {}): MonitorActions {
     skipStep: vi.fn<MonitorActions['skipStep']>(),
     unskipStep: vi.fn<MonitorActions['unskipStep']>(),
     steerStep: vi.fn<MonitorActions['steerStep']>(),
+    rewindToStep: vi.fn<MonitorActions['rewindToStep']>(),
     resolveReviewItem: vi.fn<MonitorActions['resolveReviewItem']>(),
     fileNote: vi.fn<MonitorActions['fileNote']>(),
     ...overrides,
@@ -936,7 +1007,7 @@ describe('DefaultMonitorSession.converse — actuation (MonitorActions seam)', (
   });
 });
 
-describe('DefaultMonitorSession.converse — expanded actuation (8 new steering actions, host-staged)', () => {
+describe('DefaultMonitorSession.converse — expanded actuation (9 steering actions, host-staged)', () => {
   const steeringCases = [
     {
       name: 'add_task',
@@ -979,6 +1050,14 @@ describe('DefaultMonitorSession.converse — expanded actuation (8 new steering 
       method: 'steerStep' as const,
       expectedInput: { stepId: 'tasks', guidance: 'be extra careful with the migration' },
       stageText: 'Ready to steer step tasks.',
+    },
+    {
+      name: 'rewind_to_step',
+      action: { kind: 'rewind_to_step', stepId: 'analyze' },
+      method: 'rewindToStep' as const,
+      expectedInput: { stepId: 'analyze' },
+      stageText:
+        'Ready to rewind the run to step analyze — current work will be stopped and every step from there on re-runs.',
     },
     {
       name: 'resolve_review_item',
@@ -1108,6 +1187,114 @@ describe('DefaultMonitorSession.converse — expanded actuation (8 new steering 
 
     expect(reply).toBe('skipping it.');
     expect(injected.at(-1)).toEqual({ role: 'assistant', text: '⚠ That action is not available for this run.' });
+  });
+});
+
+describe('DefaultMonitorSession.converse — rewind_to_step (confirm-gated whole-run rewind)', () => {
+  it('a cancel after staging a rewind clears pending, does not actuate, and injects a discard turn', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery = seqStructuredQuery(
+      { reply: 'staging the rewind.', action: { kind: 'rewind_to_step', stepId: 'analyze' } },
+      { reply: 'okay, never mind.', action: { kind: 'cancel' } },
+    );
+    const rewindToStep = vi.fn<MonitorActions['rewindToStep']>().mockResolvedValue({ ok: true, message: 'rewound' });
+    const actions = makeActions({ rewindToStep });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    await session.converse('rewind the run to analyze');
+    await session.converse('actually never mind');
+
+    expect(rewindToStep).not.toHaveBeenCalled();
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '✖ Discarded the proposed action.' });
+  });
+
+  it('a staged rewind EXPIRES: after a plain-answer turn, a confirm finds nothing to confirm', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery = seqStructuredQuery(
+      { reply: 'staging the rewind.', action: { kind: 'rewind_to_step', stepId: 'analyze' } },
+      { reply: 'here is a plain answer.' }, // no action, no control → clears the stale proposal
+      { reply: 'confirming.', action: { kind: 'confirm' } },
+    );
+    const rewindToStep = vi.fn<MonitorActions['rewindToStep']>().mockResolvedValue({ ok: true, message: 'rewound' });
+    const actions = makeActions({ rewindToStep });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    await session.converse('rewind the run to analyze');
+    await session.converse('wait, what is the run doing?');
+    await session.converse('okay, confirm the rewind');
+
+    expect(rewindToStep).not.toHaveBeenCalled();
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: 'There is no pending action to confirm.' });
+  });
+
+  it('once confirmed, calls rewindToStep(stepId) with the mapped input', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery = seqStructuredQuery(
+      { reply: 'staging the rewind.', action: { kind: 'rewind_to_step', stepId: 'analyze' } },
+      { reply: 'confirmed.', action: { kind: 'confirm' } },
+    );
+    const rewindToStep = vi
+      .fn<MonitorActions['rewindToStep']>()
+      .mockResolvedValue({ ok: true, message: 'run rewound to analyze' });
+    const actions = makeActions({ rewindToStep });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    await session.converse('rewind the run to analyze');
+    await session.converse('yes, do it');
+
+    expect(rewindToStep).toHaveBeenCalledTimes(1);
+    expect(rewindToStep).toHaveBeenCalledWith({ stepId: 'analyze' });
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '▶ run rewound to analyze' });
+  });
+
+  it('a bag missing rewindToStep, once confirmed, resolves to the graceful "not available" fallback instead of throwing', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery = seqStructuredQuery(
+      { reply: 'staging the rewind.', action: { kind: 'rewind_to_step', stepId: 'analyze' } },
+      { reply: 'rewinding it.', action: { kind: 'confirm' } },
+    );
+    // A bag that type-satisfies MonitorActions but was constructed without
+    // rewindToStep wired — the defensive `typeof === 'function'` guard in
+    // `runAction` must catch this rather than throwing.
+    const bag = makeActions() as unknown as Record<string, unknown>;
+    delete bag.rewindToStep;
+    const partialActions = bag as unknown as MonitorActions;
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({
+      ctx,
+      history: reader,
+      structuredQuery,
+      textQuery: vi.fn(),
+      injectEvent,
+      actions: partialActions,
+    });
+
+    await session.converse('rewind the run to analyze');
+    const reply = await session.converse('yes, do it');
+
+    expect(reply).toBe('rewinding it.');
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '⚠ That action is not available for this run.' });
+  });
+
+  it('a throwing rewindToStep, once confirmed, fails soft: injects the rewind-specific apology, converse still resolves with the reply', async () => {
+    const { reader } = fakeHistory({ conversation: [], steps: [] });
+    const structuredQuery = seqStructuredQuery(
+      { reply: 'staging the rewind.', action: { kind: 'rewind_to_step', stepId: 'analyze' } },
+      { reply: 'rewinding now.', action: { kind: 'confirm' } },
+    );
+    const rewindToStep = vi.fn<MonitorActions['rewindToStep']>().mockRejectedValue(new Error('handler exploded'));
+    const actions = makeActions({ rewindToStep });
+    const { injectEvent, injected } = collectInjected();
+    const session = new DefaultMonitorSession({ ctx, history: reader, structuredQuery, textQuery: vi.fn(), injectEvent, actions });
+
+    await session.converse('rewind the run to analyze');
+    const reply = await session.converse('yes, do it');
+
+    expect(reply).toBe('rewinding now.');
+    expect(injected.at(-1)).toEqual({ role: 'assistant', text: '⚠ The rewind action failed unexpectedly.' });
   });
 });
 

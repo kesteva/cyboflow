@@ -230,12 +230,13 @@ Answer concisely and concretely, grounding your reply in the run's history above
  * Compose the ACTION-CAPABLE answer prompt used when the monitor session was built
  * with a `MonitorActions` actuator wired (the monitor-actuation seam). Same digest
  * scaffolding as `buildAnswerPrompt`, but the hard "do NOT try to run ... steps" line
- * is replaced with a capabilities contract covering 10 action kinds: retrying/
+ * is replaced with a capabilities contract covering 11 action kinds: retrying/
  * handover (`retry_step`, the ONE-WAY `switch_to_orchestrated`), task mutations
  * (`add_task`/`remove_task`/`edit_task`), step control (`skip_step`/`unskip_step`/
- * `steer_step`), and review-queue actions (`resolve_review_item`/`file_note`). The
- * monitor may attach AT MOST ONE action per reply. The eight steering kinds (task
- * mutations, step control, review-queue, `file_note`) are HOST-STAGED: the model
+ * `steer_step`), run control (the confirm-gated whole-run `rewind_to_step`), and
+ * review-queue actions (`resolve_review_item`/`file_note`). The monitor may attach
+ * AT MOST ONE action per reply. The nine steering kinds (task mutations, step
+ * control, run control, review-queue, `file_note`) are HOST-STAGED: the model
  * attaches the action, the host stages it (does NOT execute) and shows a pause marker,
  * and the model executes it on a LATER turn by attaching a `confirm` control (or
  * abandons it with `cancel`) — the confirmation is ENFORCED by the host, not merely
@@ -270,10 +271,11 @@ Capabilities:
   - Action "add_task": add a new task. Set \`title\` (required), and optionally \`body\` and \`priority\`.
   - Action "remove_task": remove a not-yet-started task. Set \`taskRef\` (required) to its ref or id.
   - Action "edit_task": edit a not-yet-started task. Set \`taskRef\` (required) plus at least one of \`title\`, \`body\`, or \`priority\` to change.
-- Step control: these affect an UPCOMING step the run HASN'T reached yet — they cannot change a step already running or finished.
-  - Action "skip_step": skip an upcoming step. Set \`stepId\` (required).
-  - Action "unskip_step": reverse a previously requested skip on an upcoming step. Set \`stepId\` (required).
-  - Action "steer_step": inject freeform guidance for an upcoming step before it runs. Set \`stepId\` and \`guidance\` (both required).
+- Step control:
+  - Action "skip_step": skip an upcoming step the run HASN'T reached yet. Set \`stepId\` (required). Cannot change a step already running or finished.
+  - Action "unskip_step": reverse a previously requested skip on an upcoming step. Set \`stepId\` (required). Same restriction as "skip_step" — cannot change a step already running or finished.
+  - Action "steer_step": inject freeform operator guidance for a step. Set \`stepId\` and \`guidance\` (both required). If that step is CURRENTLY RUNNING the host also delivers the guidance live to its running agent(s) mid-flight; either way it is included in every future spawn of that step (including retries). Setting \`taskRef\` narrows to ONE sprint task's currently-running agent and is LIVE-ONLY: it is delivered to that agent mid-flight and NOT stored for future spawns (and fails if that task's agent isn't running the step right now) — omit \`taskRef\` to store the guidance for every future spawn.
+  - Action "rewind_to_step": rewind the WHOLE run to an earlier step and re-run everything from that step onward. Set \`stepId\` (required) to a step at or before the run's current step (from the timeline above). Works even while the run is actively executing — the host safely stops current work first. Use when earlier output was wrong and later steps built on it; prefer "retry_step" for simply re-running a failed step.
 - Review queue:
   - Action "resolve_review_item": resolve a pending gate, finding, or permission request by id. Set \`reviewItemId\` (required), and optionally \`outcome\` ("approve" or "reject") and \`resolution\` (a short note).
   - Action "file_note": file a non-blocking informational note into the run's review queue. Set \`title\` (required) and optionally \`body\`.
@@ -283,7 +285,7 @@ CONFIRM BEFORE YOU ACT (host-enforced): when the user clearly wants a mutating a
 
 Answer concisely and concretely, grounding your reply in the run's history above. You have read-only tools (Read/Grep/Glob) for inspecting the worktree — use them when needed to answer accurately.
 
-Return your response as structured output: { reply: string, action?: { kind: "retry_step" | "switch_to_orchestrated" | "add_task" | "remove_task" | "edit_task" | "skip_step" | "unskip_step" | "steer_step" | "resolve_review_item" | "file_note" | "confirm" | "cancel", ...fields } }, where only the fields relevant to the chosen \`kind\` (see Capabilities above) should be set ("confirm"/"cancel" carry no fields). \`reply\` is the message shown to the user.`;
+Return your response as structured output: { reply: string, action?: { kind: "retry_step" | "switch_to_orchestrated" | "add_task" | "remove_task" | "edit_task" | "skip_step" | "unskip_step" | "steer_step" | "rewind_to_step" | "resolve_review_item" | "file_note" | "confirm" | "cancel", ...fields } }, where only the fields relevant to the chosen \`kind\` (see Capabilities above) should be set ("confirm"/"cancel" carry no fields; "rewind_to_step" follows the same staged-confirm contract as the other steering kinds above). \`reply\` is the message shown to the user.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -292,13 +294,14 @@ Return your response as structured output: { reply: string, action?: { kind: "re
 
 /**
  * JSON schema the SDK `outputFormat` enforces for a structured converse reply: a
- * required `reply` string plus an OPTIONAL `action` object (one of 10 host-action
- * kinds — `retry_step` / `switch_to_orchestrated` plus 8 non-stopping steering
- * actions: task mutations, step control, and review-queue actions) PLUS two
- * host-side control signals (`confirm` / `cancel`) that drive the two-phase
- * confirmation gate. The control signals are NOT host actions: `parseConverseOutput`
- * maps them to a `control` field and they never enter `parseConverseAction` / the
- * `runAction` switch. `additionalProperties: false` at every level so the SDK rejects
+ * required `reply` string plus an OPTIONAL `action` object (one of 11 host-action
+ * kinds — `retry_step` / `switch_to_orchestrated` plus the nine confirm-gated
+ * steering kinds: task mutations, step control — including the whole-run
+ * `rewind_to_step` — and review-queue actions) PLUS two host-side control signals
+ * (`confirm` / `cancel`) that drive the two-phase confirmation gate. The control
+ * signals are NOT host actions: `parseConverseOutput` maps them to a `control`
+ * field and they never enter `parseConverseAction` / the `runAction` switch.
+ * `additionalProperties: false` at every level so the SDK rejects
  * any extra fields. Used only when a `MonitorActions` actuator is wired
  * (`converseOnce` picks this over `MONITOR_TRIAGE_SCHEMA` / plain text).
  *
@@ -321,7 +324,7 @@ export const MONITOR_CONVERSE_SCHEMA: Record<string, unknown> = {
         kind: {
           type: 'string',
           description:
-            'The action to attach — one of the 10 host actions, OR a host-side control signal: "confirm" executes a previously-staged action, "cancel" discards it. The two control signals are NOT host actions.',
+            'The action to attach — one of the 11 host actions, OR a host-side control signal: "confirm" executes a previously-staged action, "cancel" discards it. The two control signals are NOT host actions.',
           enum: [
             'retry_step',
             'switch_to_orchestrated',
@@ -331,6 +334,7 @@ export const MONITOR_CONVERSE_SCHEMA: Record<string, unknown> = {
             'skip_step',
             'unskip_step',
             'steer_step',
+            'rewind_to_step',
             'resolve_review_item',
             'file_note',
             // Host-side two-phase-confirmation CONTROL signals (NOT host actions):
@@ -342,7 +346,7 @@ export const MONITOR_CONVERSE_SCHEMA: Record<string, unknown> = {
         stepId: {
           type: 'string',
           description:
-            'retry_step / skip_step / unskip_step / steer_step: exact step id from the timeline. For retry_step, omit to default to the run\'s failed step.',
+            'retry_step / skip_step / unskip_step / steer_step / rewind_to_step: exact step id from the timeline. For retry_step, omit to default to the run\'s failed step. For rewind_to_step, the step must be at or before the run\'s current step.',
         },
         reason: {
           type: 'string',
@@ -363,11 +367,13 @@ export const MONITOR_CONVERSE_SCHEMA: Record<string, unknown> = {
         },
         taskRef: {
           type: 'string',
-          description: 'remove_task / edit_task: the ref or id of the task to mutate.',
+          description:
+            "remove_task / edit_task: the ref or id of the task to mutate. steer_step: optionally targets ONE sprint lane's currently-running agent (live-only — not stored for future spawns).",
         },
         guidance: {
           type: 'string',
-          description: 'steer_step only (REQUIRED in practice): freeform guidance injected before the step runs.',
+          description:
+            'steer_step only (REQUIRED in practice): freeform operator guidance for the step — delivered live to its running agent(s) when the step is currently executing, and included in every future spawn of the step.',
         },
         reviewItemId: {
           type: 'string',
@@ -445,11 +451,29 @@ export interface ConverseUnskipStepAction {
   stepId: string;
 }
 
-/** Inject freeform guidance for an upcoming (not-yet-reached) step before it runs. */
+/**
+ * Inject freeform guidance for a step. When the step is currently running, the
+ * host ALSO delivers the guidance live into its running agent(s) mid-turn; either
+ * way it is stored for every future spawn of the step (including retries).
+ * `taskRef`, if present, narrows live delivery to one sprint lane's agent.
+ */
 export interface ConverseSteerStepAction {
   kind: 'steer_step';
   stepId: string;
   guidance: string;
+  taskRef?: string;
+}
+
+/**
+ * Rewind the WHOLE run to an earlier step and re-run every step from there
+ * onward, discarding their prior results. Unlike `retry_step` (which re-runs ONE
+ * already-failed step in place — non-destructive recovery), this can abort work
+ * that is CURRENTLY in flight; the host stops it safely before rewinding.
+ * `stepId` must name a step at or before the run's current step.
+ */
+export interface ConverseRewindToStepAction {
+  kind: 'rewind_to_step';
+  stepId: string;
 }
 
 /**
@@ -480,6 +504,7 @@ export type ConverseAction =
   | ConverseSkipStepAction
   | ConverseUnskipStepAction
   | ConverseSteerStepAction
+  | ConverseRewindToStepAction
   | ConverseResolveReviewItemAction
   | ConverseFileNoteAction;
 
@@ -507,7 +532,11 @@ function isNonEmptyString(v: unknown): v is string {
  * - `remove_task` requires `taskRef`.
  * - `edit_task` requires `taskRef` AND at least one of `title`/`body`/`priority`.
  * - `skip_step` / `unskip_step` require `stepId`.
- * - `steer_step` requires `stepId` AND `guidance`.
+ * - `steer_step` requires `stepId` AND `guidance`; its optional `taskRef` is kept
+ *   only when it is a non-empty string — absent stays absent, and a blank
+ *   `taskRef` is simply dropped rather than failing the whole action (it is not a
+ *   required field).
+ * - `rewind_to_step` requires `stepId`.
  * - `resolve_review_item` requires `reviewItemId`; `outcome`, if present, must be
  *   `'approve'` or `'reject'` — an invalid `outcome` is dropped to `undefined`
  *   while the rest of the action is KEPT (not the same failure mode as a missing
@@ -569,7 +598,17 @@ function parseConverseAction(v: unknown): ConverseAction | undefined {
     }
     case 'steer_step': {
       if (!isNonEmptyString(o.stepId) || !isNonEmptyString(o.guidance)) return undefined;
-      return { kind: 'steer_step', stepId: o.stepId, guidance: o.guidance };
+      if (o.taskRef !== undefined && typeof o.taskRef !== 'string') return undefined;
+      return {
+        kind: 'steer_step',
+        stepId: o.stepId,
+        guidance: o.guidance,
+        ...(isNonEmptyString(o.taskRef) ? { taskRef: o.taskRef } : {}),
+      };
+    }
+    case 'rewind_to_step': {
+      if (!isNonEmptyString(o.stepId)) return undefined;
+      return { kind: 'rewind_to_step', stepId: o.stepId };
     }
     case 'resolve_review_item': {
       if (!isNonEmptyString(o.reviewItemId)) return undefined;
@@ -625,7 +664,7 @@ export function parseConverseOutput(
 // ---------------------------------------------------------------------------
 
 /**
- * The EIGHT steering kinds that must be STAGED and explicitly confirmed on a later
+ * The NINE steering kinds that must be STAGED and explicitly confirmed on a later
  * turn before the host actuates them (the host-enforced two-phase confirmation gate).
  *
  * `retry_step` and `switch_to_orchestrated` are DELIBERATELY excluded: `retry_step`
@@ -634,6 +673,14 @@ export function parseConverseOutput(
  * keeps its own pre-existing suggest-first-in-reply prompt contract (the model offers
  * it in prose and waits for confirmation before attaching). Both were live-verified
  * single-turn in a prior batch and intentionally stay single-turn here.
+ *
+ * `rewind_to_step` IS gated, even though it superficially resembles `retry_step`:
+ * a retry re-runs ONE already-failed step in place — a bounded, non-destructive
+ * recovery affordance — whereas a rewind can abort work that is CURRENTLY in
+ * flight and re-runs EVERY step from the target onward, discarding their prior
+ * results. That much larger, potentially-destructive blast radius is exactly what
+ * this gate exists to guard, so — unlike `retry_step` — it must be staged and
+ * explicitly confirmed like the other steering kinds.
  */
 const CONFIRMATION_REQUIRED_KINDS: ReadonlySet<ConverseAction['kind']> = new Set([
   'add_task',
@@ -642,18 +689,19 @@ const CONFIRMATION_REQUIRED_KINDS: ReadonlySet<ConverseAction['kind']> = new Set
   'skip_step',
   'unskip_step',
   'steer_step',
+  'rewind_to_step',
   'resolve_review_item',
   'file_note',
 ]);
 
-/** True iff `kind` is one of the eight steering actions gated behind staged confirmation. */
+/** True iff `kind` is one of the nine steering actions gated behind staged confirmation. */
 function requiresConfirmation(kind: ConverseAction['kind']): boolean {
   return CONFIRMATION_REQUIRED_KINDS.has(kind);
 }
 
 /**
  * A concise, human-readable one-liner describing a staged action, shown in the pause
- * turn that asks the user to confirm. The switch covers the eight confirmation-
+ * turn that asks the user to confirm. The switch covers the nine confirmation-
  * required kinds; the generic fallback exists only for exhaustiveness (the two
  * excluded kinds never reach here, since they are actuated without staging).
  */
@@ -671,6 +719,8 @@ function stageDescription(a: ConverseAction): string {
       return `Ready to un-skip step ${a.stepId}.`;
     case 'steer_step':
       return `Ready to steer step ${a.stepId}.`;
+    case 'rewind_to_step':
+      return `Ready to rewind the run to step ${a.stepId} — current work will be stopped and every step from there on re-runs.`;
     case 'resolve_review_item':
       return `Ready to resolve review item ${a.reviewItemId}.`;
     case 'file_note':
@@ -722,6 +772,8 @@ function actuationFailureFallback(kind: ConverseAction['kind']): string {
       return '⚠ Un-skipping the step failed unexpectedly.';
     case 'steer_step':
       return '⚠ Steering the step failed unexpectedly.';
+    case 'rewind_to_step':
+      return '⚠ The rewind action failed unexpectedly.';
     case 'resolve_review_item':
       return '⚠ Resolving the review item failed unexpectedly.';
     case 'file_note':
@@ -815,11 +867,31 @@ export interface MonitorActions {
   unskipStep(input: { stepId: string }): Promise<MonitorActionResult>;
 
   /**
-   * Inject freeform guidance for an upcoming (not-yet-reached) step to steer how
-   * it executes. Host-validated and host-executed; never actuated without the
-   * user's explicit confirmation.
+   * Inject freeform guidance for a step to steer how it executes. Host-validated
+   * and host-executed; never actuated without the user's explicit confirmation.
+   * Without `taskRef`: the guidance is stored for the step's future spawns
+   * (including retries) AND, when the step is CURRENTLY RUNNING, is ALSO
+   * delivered live into the running agent(s) mid-turn. With `taskRef`: LIVE-ONLY
+   * — delivered to that one sprint lane's currently-running agent and NOT stored
+   * (the host refuses when that lane isn't mid-flight on the step; the stored
+   * directive is step-scoped, so a per-lane store would leak to every lane).
    */
-  steerStep(input: { stepId: string; guidance: string }): Promise<MonitorActionResult>;
+  steerStep(input: { stepId: string; guidance: string; taskRef?: string }): Promise<MonitorActionResult>;
+
+  /**
+   * Rewind the WHOLE run to an earlier step and re-run every step from there
+   * onward, discarding their prior results. Host-validated (the target step must
+   * be at or before the run's current step) and host-executed via the production
+   * `rewindRunHandler`; the monitor brain never validates or executes this itself
+   * — it only requests it and relays the host's reported outcome, never claiming
+   * success on its own.
+   *
+   * Works on a LIVE run: if the target step (or a later one) is currently
+   * executing, the host safely aborts that in-flight work before rewinding.
+   * Because a rewind discards already-completed work, it is NEVER actuated
+   * without the user's explicit confirmation.
+   */
+  rewindToStep(input: { stepId: string }): Promise<MonitorActionResult>;
 
   /**
    * Resolve a pending review-queue item (a gate, finding, or permission request)
@@ -876,10 +948,11 @@ export interface MonitorSession {
    *      `{ reply, action? }` request instead of a plain text answer, and — only
    *      when the user explicitly asked for it AND (for every kind but a bare
    *      retry) explicitly confirmed on a later turn — an at-most-one host action
-   *      (one of 10 kinds: `retry_step` / `switch_to_orchestrated` plus 8
-   *      non-stopping steering actions — task mutations, step control, review-queue
-   *      resolution) comes back attached to the reply. Without an actuator wired,
-   *      this step is the plain `answer()` path, unchanged.
+   *      (one of 11 kinds: `retry_step` / `switch_to_orchestrated` plus the nine
+   *      confirm-gated steering kinds — task mutations, step control including the
+   *      whole-run `rewind_to_step`, and review-queue resolution) comes back
+   *      attached to the reply. Without an actuator wired, this step is the plain
+   *      `answer()` path, unchanged.
    *   3. INJECT the monitor's reply as an assistant turn.
    *   4. If an action came back, EXECUTE it via the actuator (host-validated) and
    *      INJECT a follow-up assistant turn reporting the outcome. Fail-soft: a
@@ -913,7 +986,7 @@ export interface DefaultMonitorSessionDeps {
   /**
    * The monitor-actuation seam: when present, `converse` upgrades its query from a
    * plain text answer to a structured `{ reply, action? }` request and may execute
-   * an at-most-one host action (one of 10 kinds — see `MonitorActions`) the user
+   * an at-most-one host action (one of 11 kinds — see `MonitorActions`) the user
    * explicitly asked for. Wired only in production (where real host-executed
    * handlers exist); absent here ⇒ `converse` behaves byte-identically to before
    * this seam existed.
@@ -1159,7 +1232,7 @@ export class DefaultMonitorSession implements MonitorSession {
   /**
    * Execute a requested action via the host actuator and inject a follow-up
    * assistant turn reporting the outcome (`▶` on success, `⚠` on a reported
-   * failure) — the SAME outcome-turn shape for all 10 action kinds. Fail-soft: a
+   * failure) — the SAME outcome-turn shape for all 11 action kinds. Fail-soft: a
    * throwing actuator injects a per-kind apology turn instead of escaping — the
    * exchange's reply has already been returned by the time this runs, so a throw
    * here must never surface to `converse`'s caller.
@@ -1181,7 +1254,7 @@ export class DefaultMonitorSession implements MonitorSession {
 
   /**
    * Dispatch one parsed action to its `MonitorActions` method, mapping the
-   * action's fields onto the method's input shape. `MonitorActions`' 10 methods
+   * action's fields onto the method's input shape. `MonitorActions`' 11 methods
    * are required members of the interface, so whenever `actions` (the bag) is
    * present every method is too under the type system — the `typeof ... ===
    * 'function'` checks below are a defensive runtime guard (mirrors the
@@ -1222,7 +1295,11 @@ export class DefaultMonitorSession implements MonitorSession {
           : ACTION_UNAVAILABLE;
       case 'steer_step':
         return typeof actions.steerStep === 'function'
-          ? actions.steerStep({ stepId: action.stepId, guidance: action.guidance })
+          ? actions.steerStep({ stepId: action.stepId, guidance: action.guidance, taskRef: action.taskRef })
+          : ACTION_UNAVAILABLE;
+      case 'rewind_to_step':
+        return typeof actions.rewindToStep === 'function'
+          ? actions.rewindToStep({ stepId: action.stepId })
           : ACTION_UNAVAILABLE;
       case 'resolve_review_item':
         return typeof actions.resolveReviewItem === 'function'
