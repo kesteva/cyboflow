@@ -312,6 +312,52 @@ describe('ExperimentComparisonView', () => {
     expect(bootstrapArmSessionPanels).not.toHaveBeenCalled();
   });
 
+  it('Accept B bootstraps the arm-B session (session_b_id) — winner mapping for arm B', async () => {
+    getQuery
+      .mockResolvedValueOnce(makeExp())
+      .mockResolvedValue(makeExp({ status: 'decided', winner_run_id: 'run-b', winner_arm: 'B' }));
+    getComparisonQuery.mockResolvedValue(makePayload());
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+    decideMutate.mockResolvedValue({ experimentId: 'exp_1', status: 'decided', winnerRunId: 'run-b' });
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    const btn = await screen.findByTestId('experiment-accept-b');
+    await waitFor(() => expect(btn).not.toBeDisabled());
+    fireEvent.click(btn);
+
+    await waitFor(() =>
+      expect(decideMutate).toHaveBeenCalledWith({ experimentId: 'exp_1', winnerRunId: 'run-b' }),
+    );
+    await waitFor(() => expect(bootstrapArmSessionPanels).toHaveBeenCalledWith('sess-b'));
+  });
+
+  it('records the decision + bootstraps the winner even when the post-decide refresh fails', async () => {
+    // Regression (Codex finding 1): decide succeeds server-side, then the refresh
+    // `get` rejects. The winner must STILL be bootstrapped, the view must NOT
+    // close, and the error must read as a refresh failure — NOT "Failed to record
+    // the decision" (the decision is durable; a re-decide would CONFLICT).
+    getQuery.mockResolvedValueOnce(makeExp()).mockRejectedValue(new Error('refresh boom'));
+    getComparisonQuery.mockResolvedValue(makePayload());
+    getComparisonDiffsQuery.mockResolvedValue(makeDiffs());
+    decideMutate.mockResolvedValue({ experimentId: 'exp_1', status: 'decided', winnerRunId: 'run-a' });
+
+    render(<ExperimentComparisonView experimentId="exp_1" />);
+    const btn = await screen.findByTestId('experiment-accept-a');
+    await waitFor(() => expect(btn).not.toBeDisabled());
+    fireEvent.click(btn);
+
+    await waitFor(() =>
+      expect(decideMutate).toHaveBeenCalledWith({ experimentId: 'exp_1', winnerRunId: 'run-a' }),
+    );
+    // Bootstrap ran despite the refresh failure (derived from the pre-decision row).
+    await waitFor(() => expect(bootstrapArmSessionPanels).toHaveBeenCalledWith('sess-a'));
+    // Error is a refresh failure, not a decide failure; the view stays open.
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/refreshing the comparison failed/i);
+    expect(alert).not.toHaveTextContent(/Failed to record the decision/i);
+    expect(closeExperimentComparison).not.toHaveBeenCalled();
+  });
+
   it('gates "Re-run comparison" on the experiment status (running|grading only)', async () => {
     getQuery.mockResolvedValue(makeExp({ status: 'decided' }));
     getComparisonQuery.mockResolvedValue(makePayload());

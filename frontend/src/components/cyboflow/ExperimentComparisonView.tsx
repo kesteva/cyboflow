@@ -316,45 +316,65 @@ export function ExperimentComparisonView({ experimentId }: ExperimentComparisonV
     if (actionBusy !== null) return;
     setActionBusy('decide');
     setActionError(null);
+
+    // Resolve the winner session id from the PRE-decision experiment row: an arm's
+    // session id is immutable across decide, and computing it here (not from the
+    // post-decide re-fetch) keeps winner bootstrap independent of whether the
+    // refresh below succeeds. Discard-both (winnerRunId null) has no winner.
+    const winnerSessionId =
+      winnerRunId !== null && payload !== null && exp !== null
+        ? winnerRunId === payload.armA.runId
+          ? exp.session_a_id
+          : winnerRunId === payload.armB.runId
+            ? exp.session_b_id
+            : null
+        : null;
+
     try {
       await trpc.cyboflow.experiments.decide.mutate({ experimentId, winnerRunId });
-      // Piece 1 (CHANGES) is now recorded. Keep the comparison OPEN and re-fetch the
-      // experiment so it flips to `decided` (expSettled → true): the Changes group
-      // collapses to its summary line and the piece-2 "Which version wins?" group
-      // (promote / switch-to-rotation / run-again) enables in place. Previously this
-      // closed the view, stranding the user before the variant-outcome decision.
+    } catch (err: unknown) {
+      // The decision itself failed — nothing was recorded. This is the ONLY path
+      // that reports "Failed to record the decision".
+      setActionError(err instanceof Error ? err.message : 'Failed to record the decision');
+      setActionBusy(null);
+      return;
+    }
+
+    // The decision is now RECORDED server-side (the loser session is dismissed).
+    // The two steps below are INDEPENDENT post-decision side effects — neither may
+    // re-report the (durable) decide as failed. A retry is impossible anyway:
+    // decide on a decided experiment throws CONFLICT.
+
+    // 1. Bootstrap the WINNER arm session's renderer panels so it hosts a Claude
+    //    agent for post-experiment continuation (e.g. rebasing the branch before
+    //    merge). Arm sessions are born headless (createArmSession creates no
+    //    panels) and decide keeps the winner session, so a winner the user never
+    //    explicitly opened would otherwise rest with no agent, forcing a manual
+    //    `claude` in a raw terminal. Idempotent, so an arm already opened via
+    //    handleOpenArmSession is unaffected. Fail-soft.
+    if (winnerSessionId !== null) {
+      try {
+        await bootstrapArmSessionPanels(winnerSessionId);
+      } catch (bootstrapErr: unknown) {
+        console.warn(
+          '[ExperimentComparisonView] winner arm panel bootstrap failed (decision already recorded):',
+          bootstrapErr,
+        );
+      }
+    }
+
+    // 2. Re-fetch so the comparison flips to `decided` (expSettled → true) IN
+    //    PLACE: the Changes group collapses to its summary line and the piece-2
+    //    "Which version wins?" group (promote / switch-to-rotation / run-again)
+    //    enables. A refresh failure must NOT read as a decide failure — the
+    //    decision is durable; the view just failed to reflect it.
+    try {
       const fresh = await trpc.cyboflow.experiments.get.query({ experimentId });
       setExp(fresh);
-
-      // Bootstrap the WINNER arm session's renderer panels so it hosts a Claude
-      // agent for post-experiment continuation (e.g. rebasing the branch before
-      // merge). Arm sessions are born headless — createArmSession creates no
-      // panels — and decide keeps the winner session (dismissing only the loser),
-      // so a winner the user never explicitly opened would otherwise rest with no
-      // agent, forcing a manual `claude` in a raw terminal. Idempotent, so an arm
-      // already opened via handleOpenArmSession is unaffected. Fail-soft: the
-      // decision is already recorded server-side, so a bootstrap failure must not
-      // surface as a decide error.
-      if (winnerRunId !== null && payload !== null) {
-        const winnerSessionId =
-          winnerRunId === payload.armA.runId
-            ? (fresh ?? exp)?.session_a_id ?? null
-            : winnerRunId === payload.armB.runId
-              ? (fresh ?? exp)?.session_b_id ?? null
-              : null;
-        if (winnerSessionId !== null) {
-          try {
-            await bootstrapArmSessionPanels(winnerSessionId);
-          } catch (bootstrapErr: unknown) {
-            console.warn(
-              '[ExperimentComparisonView] winner arm panel bootstrap failed (decision already recorded):',
-              bootstrapErr,
-            );
-          }
-        }
-      }
-    } catch (err: unknown) {
-      setActionError(err instanceof Error ? err.message : 'Failed to record the decision');
+    } catch {
+      setActionError(
+        'The decision was recorded, but refreshing the comparison failed — reopen the experiment to see the result.',
+      );
     } finally {
       setActionBusy(null);
     }
