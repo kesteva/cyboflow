@@ -1,7 +1,8 @@
 /**
  * TaskChangeRouter — A/B experiment sandbox (migration 049).
  *
- * Covers: create-tag + pending landing, the BIDIRECTIONAL update guard, the
+ * Covers: create-tag + approved_at-follows-plan-gate landing (board hiding is by
+ * the experiment_id tag, NOT approved_at), the BIDIRECTIONAL update guard, the
  * orchestrator-only clearExperiment reveal, the causedByRunId attribution scalar,
  * and deleteExperimentArmEntities (experiment-gated hard-delete with epic-cascade
  * child-sparing).
@@ -79,7 +80,7 @@ describe('TaskChangeRouter — experiment sandbox (migration 049)', () => {
     ReviewItemRouter._resetForTesting();
   });
 
-  it('create by an experiment run stamps experiment_id; epic/task land PENDING, idea tagged', async () => {
+  it('create by an experiment run stamps experiment_id; approved_at follows the plan-gate rule (tag hides, not approved_at)', async () => {
     const db = buildDb();
     seedRun(db, 'runX', 'exp-1');
     const router = TaskChangeRouter.initialize(dbAdapter(db));
@@ -91,9 +92,13 @@ describe('TaskChangeRouter — experiment sandbox (migration 049)', () => {
     expect(expField(db, 'ideas', idea.taskId, 'experiment_id')).toBe('exp-1');
     expect(expField(db, 'epics', epic.taskId, 'experiment_id')).toBe('exp-1');
     expect(expField(db, 'tasks', task.taskId, 'experiment_id')).toBe('exp-1');
-    // Epic/task land PENDING (approved_at NULL) even though sprint is not plan-gated.
-    expect(expField(db, 'epics', epic.taskId, 'approved_at')).toBeNull();
-    expect(expField(db, 'tasks', task.taskId, 'approved_at')).toBeNull();
+    // Board visibility is gated on the experiment_id TAG, not approved_at — so a
+    // tagged create follows the SAME plan-gate rule as any other. This run is a
+    // sprint (NOT plan-gated), so epic/task land sprint-ELIGIBLE (approved_at set)
+    // while the tag keeps them off the shared board — the same eligible-but-hidden
+    // state the cloneSeedTask seed-clone pattern relies on. Ideas never carry approved_at.
+    expect(expField(db, 'epics', epic.taskId, 'approved_at')).not.toBeNull();
+    expect(expField(db, 'tasks', task.taskId, 'approved_at')).not.toBeNull();
   });
 
   it('explicit change.experimentId stamps a clone with no runId', async () => {

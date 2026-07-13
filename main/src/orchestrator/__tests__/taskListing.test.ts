@@ -512,6 +512,28 @@ describe('taskListing — dependency overlay', () => {
     const shownIdea = shown.find((t) => t.id === ideaId)!;
     expect(shownIdea.experiment_id).toBe('exp-1');
   });
+
+  // BOARD-LEAK AUDIT (load-bearing for the ship-arm materialize fix): board
+  // visibility is gated on the experiment_id TAG, not approved_at. An experiment-arm
+  // task revealed for sprint-eligibility (approved_at STAMPED) must STILL be excluded
+  // from the shared board while its tag is set — otherwise both arms' clones would
+  // dirty the board mid-experiment. This is exactly the tagged+approved state a
+  // revealed arm task sits in between its approve-plan gate and experiments.decide.
+  it('selectProjectBacklog EXCLUDES a tagged row even when approved_at is stamped (tag, not approval, hides)', () => {
+    const db = buildDb();
+    const { epicId, taskId } = seedFixture(db);
+    // Reveal for eligibility (approved_at set) BUT keep the experiment tag.
+    const now = '2026-02-02T00:00:00.000Z';
+    db.prepare('UPDATE epics SET approved_at = ?, experiment_id = ? WHERE id = ?').run(now, 'exp-1', epicId);
+    db.prepare('UPDATE tasks SET approved_at = ?, experiment_id = ? WHERE id = ?').run(now, 'exp-1', taskId);
+
+    const board = selectProjectBacklog(dbAdapter(db), 1);
+    expect(board.some((t) => t.id === epicId)).toBe(false);
+    // The task nests under its epic; assert it is absent from the entire projected tree.
+    const allIds = board.flatMap((t) => [t.id, ...(t.children ?? []).map((c) => c.id)]);
+    expect(allIds).not.toContain(taskId);
+    expect(allIds).not.toContain(epicId);
+  });
 });
 
 // ---------------------------------------------------------------------------

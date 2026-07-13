@@ -1030,10 +1030,13 @@ export class TaskChangeRouter {
       // PENDING (approved_at NULL = backend-invisible + sprint-ineligible) until
       // the approve-plan gate flips the run's plan_approved_at; every other create
       // is VISIBLE (approved_at = now). Ideas never carry approved_at (always
-      // visible — hasApproval=false). An experiment-tagged epic/task ALSO lands
-      // PENDING regardless of gate (it must never surface until decide reveals it).
+      // visible — hasApproval=false). An experiment-tagged epic/task follows the
+      // SAME plan-gate rule — it is kept off the board by its experiment_id TAG (not
+      // by approved_at), so its approved_at tracks sprint-eligibility only: PENDING
+      // during the arm's unapproved plan, sprint-eligible once the arm's approve-plan
+      // gate reveals it, still board-hidden until decide clears the tag.
       const approvedAt = desc.hasApproval
-        ? this.computeCreateApprovedAt(change, now, createExperimentId)
+        ? this.computeCreateApprovedAt(change, now)
         : null;
 
       this.insertEntity(desc, {
@@ -1288,11 +1291,12 @@ export class TaskChangeRouter {
   private computeCreateApprovedAt(
     change: TaskChange,
     now: string,
-    createExperimentId: string | null,
   ): string | null {
-    // A/B SANDBOX: an experiment-tagged epic/task is PENDING until decide reveals
-    // it — never visible mid-experiment regardless of the plan gate.
-    if (createExperimentId !== null) return null;
+    // approved_at gates SPRINT-ELIGIBILITY (board visibility is gated separately by
+    // the experiment_id tag), so an experiment-tagged create follows the SAME
+    // plan-gate rule as any other — no special case. During an unapproved plan-gated
+    // run it lands PENDING; the arm's approve-plan reveal then stamps it eligible
+    // while the tag keeps it board-hidden until decide.
     if (!change.runId) return now; // user/manual create or no creating run -> visible
     let run:
       | { planApprovedAt?: unknown; stepsSnapshotJson?: unknown; workflowName?: unknown }

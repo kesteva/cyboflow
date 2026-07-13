@@ -1289,11 +1289,14 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     expect(epicApprovedAt(db, epicId)).not.toBeNull();
   });
 
-  // A/B REVEAL SUPPRESSION (migration 049): an experiment-arm run's drafts must
-  // NOT be revealed by the completion/approve path — reveal happens exclusively via
-  // experiments.decide. Both promotePendingDraftsForRun and promoteTasksOnPlanApproval
-  // funnel through revealRunDrafts, which no-ops for an experiment-tagged run.
-  it('experiment-tagged run: promotePendingDraftsForRun does NOT reveal (drafts stay pending)', async () => {
+  // A/B ARM REVEAL (sprint-eligibility vs board-visibility split): an experiment-arm
+  // run's reveal DOES stamp approved_at on its drafts — so ship's mid-run
+  // materialize-batch (which filters on approved_at) sees sprint-eligible tasks — but
+  // the reveal core NEVER clears the experiment_id tag, so the entities stay OFF the
+  // shared board (board visibility is gated on the tag, not approved_at). Only
+  // experiments.decide clears the winner's tag. This is the fix for the ship-arm
+  // materialize failure.
+  it('experiment-tagged run: promotePendingDraftsForRun reveals approved_at but KEEPS the tag', async () => {
     const db = buildDb();
     const adapter = dbAdapter(db);
     const taskRouter = TaskChangeRouter.initialize(adapter);
@@ -1303,19 +1306,24 @@ describe('QuestionRouter approve-plan promotes tasks to Ready for development (F
     db.prepare("UPDATE workflow_runs SET experiment_id = 'exp-1' WHERE id = ?").run('run-exp');
     const { epicId, taskIds } = await seedRunEntities(taskRouter, 2, 'run-exp');
 
-    // Minted PENDING + tagged.
+    // Minted PENDING (the run is plan-gated + unapproved) + tagged.
     for (const id of taskIds) expect(taskApprovedAt(db, id)).toBeNull();
     expect(epicApprovedAt(db, epicId)).toBeNull();
 
     await router.promotePendingDraftsForRun('run-exp');
     await TaskChangeRouter.getInstance()._queueForProject(1).onIdle();
 
-    // SUPPRESSED: still pending, run NOT plan-approved, tags intact.
-    expect(planApprovedAt(db, 'run-exp')).toBeNull();
-    for (const id of taskIds) expect(taskApprovedAt(db, id)).toBeNull();
-    expect(epicApprovedAt(db, epicId)).toBeNull();
+    // REVEALED for eligibility: run plan-approved, every draft now approved_at-stamped.
+    expect(planApprovedAt(db, 'run-exp')).not.toBeNull();
+    for (const id of taskIds) expect(taskApprovedAt(db, id)).not.toBeNull();
+    expect(epicApprovedAt(db, epicId)).not.toBeNull();
+    // But the experiment_id TAG survives on every entity — still board-hidden until decide.
     const epicTag = (db.prepare('SELECT experiment_id AS v FROM epics WHERE id = ?').get(epicId) as { v: unknown }).v;
     expect(epicTag).toBe('exp-1');
+    for (const id of taskIds) {
+      const taskTag = (db.prepare('SELECT experiment_id AS v FROM tasks WHERE id = ?').get(id) as { v: unknown }).v;
+      expect(taskTag).toBe('exp-1');
+    }
   });
 
   it('F3: promotePendingDraftsForRun is a no-op for an ALREADY-approved run (idempotent)', async () => {
