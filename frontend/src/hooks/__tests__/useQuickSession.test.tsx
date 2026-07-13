@@ -156,14 +156,18 @@ describe('useQuickSession — start() signature', () => {
 });
 
 describe('useQuickSession — always creates both panels', () => {
-  it('creates Claude panel first', async () => {
+  it('creates the Chat panel first while retaining the internal claude type', async () => {
     const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
 
     await act(async () => {
       await result.current.start();
     });
 
-    expect(mockCreatePanel).toHaveBeenCalledWith({ sessionId: 'sess-001', type: 'claude' });
+    expect(mockCreatePanel).toHaveBeenCalledWith({
+      sessionId: 'sess-001',
+      type: 'claude',
+      title: 'Chat',
+    });
   });
 
   it('creates Terminal panel second with cwd=worktreePath', async () => {
@@ -207,7 +211,7 @@ describe('useQuickSession — always creates both panels', () => {
     expect(callOrder).toEqual(['claude', 'terminal']);
   });
 
-  it('creates a Codex-titled chat panel for codex-sdk quick sessions', async () => {
+  it('creates a provider-neutral Chat panel for codex-sdk quick sessions', async () => {
     const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
 
     await act(async () => {
@@ -233,7 +237,7 @@ describe('useQuickSession — always creates both panels', () => {
     expect(mockCreatePanel).toHaveBeenCalledWith({
       sessionId: 'sess-001',
       type: 'claude',
-      title: 'Codex',
+      title: 'Chat',
     });
     expect(mockSetModel).toHaveBeenCalledWith('panel-001', 'gpt-5.5');
     expect(mockSetFastMode).not.toHaveBeenCalled();
@@ -287,7 +291,7 @@ describe('useQuickSession — server-created claude panel (claudePanelId)', () =
 });
 
 describe('useQuickSession — Codex PTY fallback panel', () => {
-  it('creates a usable Codex panel when eager server-side panel creation failed', async () => {
+  it('creates a usable Chat panel when eager server-side panel creation failed', async () => {
     const { result } = renderHook(() => useQuickSession({ projectId: 1 }));
 
     await act(async () => {
@@ -308,7 +312,7 @@ describe('useQuickSession — Codex PTY fallback panel', () => {
     expect(mockCreatePanel).toHaveBeenNthCalledWith(1, {
       sessionId: 'sess-001',
       type: 'claude',
-      title: 'Codex',
+      title: 'Chat',
     });
     expect(mockCreatePanel).toHaveBeenNthCalledWith(2, {
       sessionId: 'sess-001',

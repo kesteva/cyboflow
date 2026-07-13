@@ -8,6 +8,16 @@ import { Dropdown } from '../ui/Dropdown';
 import { useSession } from '../../contexts/SessionContext';
 import { StatusDot } from '../ui/StatusDot';
 
+function getPanelDisplayTitle(panel: ToolPanel): string {
+  if (panel.type === 'diff') return 'Diff';
+  if (panel.type !== 'claude') return panel.title;
+
+  const legacyDefaultTitle = /^(?:Claude|Codex)(\s+\d+)?$/.exec(panel.title);
+  if (legacyDefaultTitle) return `Chat${legacyDefaultTitle[1] ?? ''}`;
+  if (panel.title === 'Claude - Resolve Conflicts') return 'Chat - Resolve Conflicts';
+  return panel.title;
+}
+
 export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
   panels,
   activePanel,
@@ -48,7 +58,7 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
       return;
     }
     setEditingPanelId(panel.id);
-    setEditingTitle(panel.title);
+    setEditingTitle(getPanelDisplayTitle(panel));
   }, []);
   
   const handleRenameSubmit = useCallback(async () => {
@@ -175,7 +185,7 @@ export const PanelTabBar: React.FC<PanelTabBarProps> = memo(({
           const isPermanent = panel.metadata?.permanent === true;
           const isEditing = editingPanelId === panel.id;
           const isDiffPanel = panel.type === 'diff';
-          const displayTitle = isDiffPanel ? 'Diff' : panel.title;
+          const displayTitle = getPanelDisplayTitle(panel);
           const statusConfig = getPanelStatusConfig(panel);
 
           return (

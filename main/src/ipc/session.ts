@@ -880,7 +880,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           const panel = await panelManager.createPanel({
             sessionId: session.id,
             type: 'claude',
-            title: 'Codex',
+            title: 'Chat',
           });
           claudePanelId = panel.id;
           if (requestedModel !== undefined) {
@@ -915,7 +915,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           const panel = await panelManager.createPanel({
             sessionId: session.id,
             type: 'claude',
-            title: 'Claude',
+            title: 'Chat',
           });
           claudePanelId = panel.id;
           await sessionManager.updateSession(session.id, { status: 'running' });
@@ -948,7 +948,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           const panel = await panelManager.createPanel({
             sessionId: session.id,
             type: 'claude',
-            title: 'Claude'
+            title: 'Chat'
           });
           claudePanelId = panel.id;
           // Persist the launch model + fast-mode on the panel so a later
@@ -1328,7 +1328,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
           await panelManager.createPanel({
             sessionId: sessionId,
             type: 'claude',
-            title: 'Claude'
+            title: 'Chat'
           });
           console.log(`[IPC] Created Claude panel for session ${sessionId}`);
         } catch (error) {
@@ -1664,7 +1664,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
             await panelManager.createPanel({
               sessionId: sessionId,
               type: 'claude',
-              title: 'Claude'
+              title: 'Chat'
             });
             console.log(`[IPC] Created Claude panel for session ${sessionId}`);
           } catch (error) {
@@ -1851,7 +1851,7 @@ export function registerSessionHandlers(ipcMain: IpcMain, services: AppServices)
               await panelManager.createPanel({
                 sessionId: sessionId,
                 type: 'claude',
-                title: 'Claude'
+                title: 'Chat'
               });
               console.log(`[IPC] Migrated session ${sessionId} to use Claude panel`);
             } catch (error) {

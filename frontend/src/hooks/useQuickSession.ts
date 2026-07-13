@@ -142,7 +142,7 @@ export function useQuickSession(opts: UseQuickSessionOptions): UseQuickSessionRe
           const claudePanel = await panelApi.createPanel({
             sessionId,
             type: 'claude',
-            ...(isCodexRuntime ? { title: 'Codex' } : {}),
+            title: 'Chat',
           });
           // Persist the launch model + fast-mode on the SDK panel so the first
           // (and every) sessions:input turn spawns with them — the request's

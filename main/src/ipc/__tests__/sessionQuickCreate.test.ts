@@ -624,7 +624,7 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     expect(vi.mocked(panelManager.createPanel)).toHaveBeenCalledWith({
       sessionId: 'sess-001',
       type: 'claude',
-      title: 'Claude',
+      title: 'Chat',
     });
     expect(fakeInteractiveCliManager.startPanel).toHaveBeenCalledTimes(1);
     const [panelId, sessionId, worktreePath, briefing] =
@@ -715,7 +715,7 @@ describe('sessions:create-quick handler - substrate threading + eager PTY spawn'
     expect(vi.mocked(panelManager.createPanel)).toHaveBeenCalledWith({
       sessionId: 'sess-001',
       type: 'claude',
-      title: 'Codex',
+      title: 'Chat',
     });
     expect(fakeCodexPtyManager.startPanel).toHaveBeenCalledTimes(1);
     expect(fakeCodexPtyManager.startPanel).toHaveBeenCalledWith(

@@ -16,7 +16,7 @@ import {
  * interactive → PTY) even though the codebase substrate is 'interactive'.
  */
 export interface ModeIdentityStripProps {
-  /** session/panel label, e.g. "Claude 1" (SDK) or "Terminal" (PTY). */
+  /** session/panel label, e.g. "Chat 1" (SDK) or "Terminal" (PTY). */
   name: string;
   transport: ChatTransport;
   mode: ChatMode;

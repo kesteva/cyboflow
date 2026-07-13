@@ -1002,7 +1002,7 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         const panel = await panelManager.createPanel({
           sessionId: sessionId,
           type: 'claude',
-          title: 'Claude - Resolve Conflicts'
+          title: 'Chat - Resolve Conflicts'
         });
         
         // Get the claudePanelManager from the claudePanel module
