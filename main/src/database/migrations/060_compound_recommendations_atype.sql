@@ -1,4 +1,4 @@
--- Migration 059: widen artifacts.atype CHECK to include 'compound-recommendations'.
+-- Migration 060: widen artifacts.atype CHECK to include 'compound-recommendations'.
 --
 -- The 'compound-recommendations' templated artifact is the Compound flow's
 -- summary-of-recommendations doc, surfaced for the approve-learnings gate. Unlike

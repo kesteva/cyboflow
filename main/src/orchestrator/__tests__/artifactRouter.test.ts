@@ -68,7 +68,7 @@ function buildDb(): Database.Database {
     '016_review_items.sql',
     '035_artifacts.sql',
     '045_arch_design_atype.sql',
-    '059_compound_recommendations_atype.sql',
+    '060_compound_recommendations_atype.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
