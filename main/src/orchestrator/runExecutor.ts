@@ -84,6 +84,9 @@ export interface IdeaBodyReaderLike {
   } | null;
 }
 
+/** A non-null idea row resolved by IdeaBodyReaderLike.read (seed-idea rendering). */
+type ResolvedIdea = NonNullable<ReturnType<IdeaBodyReaderLike['read']>>;
+
 /**
  * Narrow injected reader for a SELECTED finding's content (migration 034).
  *
@@ -1430,39 +1433,94 @@ export class RunExecutor {
   }
 
   /**
-   * Resolve the `# Selected idea` block body for a run's seed_idea_id (Piece A).
+   * Resolve the `# Selected idea` block body for a planner run's seed ideas
+   * (Piece A; multi-idea via migration 060).
    *
-   * Returns null (so getPrompt falls through to the base prompt) when: no
-   * ideaBodyReader is injected, the run is missing or carries no seed_idea_id,
-   * the reader resolves no entity, or the resolved entity has no usable content
-   * (title, summary AND body all empty/whitespace). A title-only idea IS valid
-   * and is injected. The block is title + (summary + body, each when present),
-   * trimmed.
+   * Branches on the number of RESOLVED seed ideas:
+   *  - 0 resolved → null, so getPrompt falls through to the base prompt.
+   *  - exactly 1 (the legacy single-`seed_idea_id` path, the corrupt/empty
+   *    `seed_idea_ids` fallback, or a multi-seed where only one id resolves) →
+   *    the single-idea markdown block, byte-identical to the pre-060 output.
+   *  - >1 → an indexed `<ideas>` XML block (Anthropic long-context guidance)
+   *    with a per-idea fold directive.
+   *
+   * seed_idea_ids (migration 060) is preferred and parsed fail-soft; each id is
+   * resolved fail-soft and skipped on a per-id miss or a content-less entity, so
+   * one stale id never sinks the block. When it yields nothing (null/corrupt/all
+   * misses) the single `seed_idea_id` (migration 017) path is the fallback.
    *
    * Kept as a separate helper so Piece C can layer its pending-nudge branch
    * ahead of this one in getPrompt without re-deriving the seed-idea logic.
-   *
-   * The block leads with a dedup directive naming the existing idea (by ref +
-   * id) so the planner FOLDS the spec into it via cyboflow_update_task rather
-   * than creating a duplicate idea row.
    */
   private buildSeedIdeaBlock(runId: string): string | null {
-    if (!this.ideaBodyReader) return null;
+    const reader = this.ideaBodyReader;
+    if (!reader) return null;
     const run = this.registry.getRunById(runId);
-    const seedIdeaId = run?.seed_idea_id ?? null;
+    if (!run) return null;
+
+    // Multi-idea seed (migration 060): resolve every id in seed_idea_ids.
+    const multiIds = this.parseSeedIdeaIds(runId, run.seed_idea_ids ?? null);
+    if (multiIds) {
+      const resolved: Array<{ id: string; idea: ResolvedIdea }> = [];
+      for (const id of multiIds) {
+        const idea = reader.read(id);
+        if (idea && this.ideaHasContent(idea)) resolved.push({ id, idea });
+      }
+      if (resolved.length > 1) return this.renderMultiIdeaBlock(resolved);
+      if (resolved.length === 1) return this.renderSingleIdeaBlock(resolved[0].id, resolved[0].idea);
+      // 0 resolved → fall through to the single seed_idea_id path below.
+    }
+
+    // Legacy single-idea seed (migration 017) / corrupt-or-empty seed_idea_ids
+    // fallback: resolve the single seed_idea_id, byte-identical to the original.
+    const seedIdeaId = run.seed_idea_id ?? null;
     if (!seedIdeaId) return null;
+    const idea = reader.read(seedIdeaId);
+    if (!idea || !this.ideaHasContent(idea)) return null;
+    return this.renderSingleIdeaBlock(seedIdeaId, idea);
+  }
 
-    const idea = this.ideaBodyReader.read(seedIdeaId);
-    if (!idea) return null;
+  /**
+   * Parse a run's seed_idea_ids (migration 060) into a non-empty string array,
+   * fail-soft. Returns null when the JSON is absent, does not parse, is not an
+   * array, or filters to no non-empty strings — the caller then falls back to
+   * the single seed_idea_id path. Mirrors buildSelectedFindingsBlock's parse.
+   */
+  private parseSeedIdeaIds(runId: string, rawIds: string | null): string[] | null {
+    if (!rawIds) return null;
+    let ids: string[];
+    try {
+      const parsed: unknown = JSON.parse(rawIds);
+      if (!Array.isArray(parsed)) return null;
+      ids = parsed.filter((v): v is string => typeof v === 'string' && v.length > 0);
+    } catch (err) {
+      this.logger.warn(
+        `RunExecutor.buildSeedIdeaBlock: could not parse seed_idea_ids for run ${runId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return null;
+    }
+    return ids.length > 0 ? ids : null;
+  }
 
-    // A title-only idea is valid — the title IS the idea (e.g. "Create a
-    // website for tester"). Render whatever fields are present; only bail when
-    // the resolved entity has no usable content at all (title + summary + body
-    // all empty/whitespace).
+  /** True when the idea has any usable prose (title, summary OR body non-empty). */
+  private ideaHasContent(idea: ResolvedIdea): boolean {
+    return (
+      (idea.title?.trim() ?? '') !== '' ||
+      (idea.summary?.trim() ?? '') !== '' ||
+      (idea.body?.trim() ?? '') !== ''
+    );
+  }
+
+  /**
+   * The single-idea `# Selected idea` block body: a dedup directive naming the
+   * existing idea (by ref + id) so the planner FOLDS the spec into it via
+   * cyboflow_update_task, then title + (summary + body, each when present), then
+   * any image attachments (migration 028). Byte-identical to the pre-060 output.
+   */
+  private renderSingleIdeaBlock(seedIdeaId: string, idea: ResolvedIdea): string {
     const title = idea.title?.trim() ?? '';
     const summary = idea.summary?.trim() ?? '';
     const body = idea.body?.trim() ?? '';
-    if (title === '' && summary === '' && body === '') return null;
 
     const ref = idea.ref?.trim() ?? '';
     const handle = ref !== '' ? `ref \`${ref}\`, id \`${seedIdeaId}\`` : `id \`${seedIdeaId}\``;
@@ -1489,6 +1547,50 @@ export class RunExecutor {
     }
 
     return parts.join('\n\n');
+  }
+
+  /**
+   * The multi-idea block body: an indexed `<ideas>` XML wrapper (Anthropic
+   * long-context guidance) with one `<idea index=… id=… ref=…>` element per
+   * seeded idea carrying its title/scope/summary/body (present fields only, same
+   * markdown style as the single-idea block), followed by a per-idea fold
+   * directive adapting the single-idea dedup directive so the planner folds each
+   * idea's refinements into that idea via cyboflow_update_task and never mints a
+   * duplicate. Callers pass ≥2 resolved ideas.
+   */
+  private renderMultiIdeaBlock(ideas: Array<{ id: string; idea: ResolvedIdea }>): string {
+    const elements = ideas.map(({ id, idea }, i) => {
+      const ref = idea.ref?.trim() ?? '';
+      const openTag =
+        ref !== ''
+          ? `<idea index="${i + 1}" id="${id}" ref="${ref}">`
+          : `<idea index="${i + 1}" id="${id}">`;
+
+      const title = idea.title?.trim() ?? '';
+      const scope = idea.scope?.trim() ?? '';
+      const summary = idea.summary?.trim() ?? '';
+      const body = idea.body?.trim() ?? '';
+
+      const inner: string[] = [];
+      if (title !== '') inner.push(`## ${title}`);
+      if (scope !== '') inner.push(`Scope: ${scope}`);
+      if (summary !== '') inner.push(summary);
+      if (body !== '') inner.push(body);
+
+      return `${openTag}\n${inner.join('\n\n')}\n</idea>`;
+    });
+
+    const foldLines = ideas.map(({ id, idea }, i) => {
+      const ref = idea.ref?.trim() ?? '';
+      const handle = ref !== '' ? `ref \`${ref}\`, id \`${id}\`` : `id \`${id}\``;
+      return `> - idea ${i + 1} (${handle}) → fold its refinements via cyboflow_update_task(task_id="${id}", …)`;
+    });
+    const directive = [
+      "> Each idea above already exists — fold that idea's refinements INTO it and do NOT create a new idea row for any of them:",
+      ...foldLines,
+    ].join('\n');
+
+    return `<ideas>\n${elements.join('\n')}\n</ideas>\n\n${directive}`;
   }
 
   /**

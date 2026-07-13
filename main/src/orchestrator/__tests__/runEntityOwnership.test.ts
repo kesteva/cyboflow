@@ -52,6 +52,17 @@ function insertRun(db: Database.Database, id: string, seedIdeaId: string | null)
   db.prepare('INSERT INTO workflow_runs (id, seed_idea_id) VALUES (?, ?)').run(id, seedIdeaId);
 }
 
+/** A buildDb() variant carrying the migration-060 seed_idea_ids column. */
+function buildDbWithSeedIds(): Database.Database {
+  const db = buildDb();
+  db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_ids TEXT');
+  return db;
+}
+
+function setSeedIdeaIds(db: Database.Database, id: string, seedIdeaIds: string | null): void {
+  db.prepare('UPDATE workflow_runs SET seed_idea_ids = ? WHERE id = ?').run(seedIdeaIds, id);
+}
+
 let seqCounter = 0;
 function insertEvent(
   db: Database.Database,
@@ -107,6 +118,70 @@ describe('runEntityOwnership.listRunOwnedIdeaIds', () => {
     insertEvent(db, { entityType: 'idea', entityId: 'ide_x', kind: 'created', runId: 'run-noseed' });
 
     expect(listRunOwnedIdeaIds(dbAdapter(db), 'run-noseed')).toEqual(['ide_x']);
+  });
+});
+
+describe('runEntityOwnership.listRunOwnedIdeaIds — seed_idea_ids (migration 060)', () => {
+  it('unions seed_idea_id, seed_idea_ids and run-created ideas, de-duped', () => {
+    const db = buildDbWithSeedIds();
+    insertRun(db, 'run-multi', 'ide_seed');
+    setSeedIdeaIds(db, 'run-multi', JSON.stringify(['ide_seed', 'ide_x', 'ide_y']));
+    insertEvent(db, { entityType: 'idea', entityId: 'ide_created', kind: 'created', runId: 'run-multi' });
+
+    const owned = listRunOwnedIdeaIds(dbAdapter(db), 'run-multi');
+    expect([...owned].sort()).toEqual(['ide_created', 'ide_seed', 'ide_x', 'ide_y']);
+    expect(owned).toHaveLength(new Set(owned).size);
+  });
+
+  it('collapses an id shared by all three sources to a single entry', () => {
+    const db = buildDbWithSeedIds();
+    insertRun(db, 'run-overlap', 'ide_dup');
+    setSeedIdeaIds(db, 'run-overlap', JSON.stringify(['ide_dup']));
+    insertEvent(db, { entityType: 'idea', entityId: 'ide_dup', kind: 'created', runId: 'run-overlap' });
+
+    expect(listRunOwnedIdeaIds(dbAdapter(db), 'run-overlap')).toEqual(['ide_dup']);
+  });
+
+  it('NULL seed_idea_ids (legacy single-idea run) contributes nothing beyond seed_idea_id', () => {
+    const db = buildDbWithSeedIds();
+    insertRun(db, 'run-null', 'ide_seed'); // seed_idea_ids defaults NULL
+
+    expect(listRunOwnedIdeaIds(dbAdapter(db), 'run-null')).toEqual(['ide_seed']);
+  });
+
+  it('filters non-string and empty-string members of seed_idea_ids', () => {
+    const db = buildDbWithSeedIds();
+    insertRun(db, 'run-mixed', null);
+    setSeedIdeaIds(db, 'run-mixed', JSON.stringify(['ide_ok', 123, '', null]));
+
+    expect(listRunOwnedIdeaIds(dbAdapter(db), 'run-mixed')).toEqual(['ide_ok']);
+  });
+
+  it('fail-soft: a pre-060 DB without the seed_idea_ids column still unions seed_idea_id + created', () => {
+    const db = buildDb(); // no seed_idea_ids column
+    insertRun(db, 'run-pre060', 'ide_seed');
+    insertEvent(db, { entityType: 'idea', entityId: 'ide_c', kind: 'created', runId: 'run-pre060' });
+
+    expect(() => listRunOwnedIdeaIds(dbAdapter(db), 'run-pre060')).not.toThrow();
+    expect([...listRunOwnedIdeaIds(dbAdapter(db), 'run-pre060')].sort()).toEqual(['ide_c', 'ide_seed']);
+  });
+
+  it('fail-soft: corrupt seed_idea_ids JSON contributes nothing (seed_idea_id + created still union)', () => {
+    const db = buildDbWithSeedIds();
+    insertRun(db, 'run-corrupt', 'ide_seed');
+    setSeedIdeaIds(db, 'run-corrupt', '{not valid json');
+    insertEvent(db, { entityType: 'idea', entityId: 'ide_c', kind: 'created', runId: 'run-corrupt' });
+
+    expect(() => listRunOwnedIdeaIds(dbAdapter(db), 'run-corrupt')).not.toThrow();
+    expect([...listRunOwnedIdeaIds(dbAdapter(db), 'run-corrupt')].sort()).toEqual(['ide_c', 'ide_seed']);
+  });
+
+  it('fail-soft: a non-array seed_idea_ids value contributes nothing', () => {
+    const db = buildDbWithSeedIds();
+    insertRun(db, 'run-nonarray', 'ide_seed');
+    setSeedIdeaIds(db, 'run-nonarray', JSON.stringify({ not: 'an array' }));
+
+    expect(listRunOwnedIdeaIds(dbAdapter(db), 'run-nonarray')).toEqual(['ide_seed']);
   });
 });
 

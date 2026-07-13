@@ -1440,6 +1440,150 @@ describe('RunExecutor.getPrompt — seed-idea injection (migration 017)', () => 
   });
 });
 
+describe('RunExecutor.getPrompt — multi-idea seed injection (migration 060)', () => {
+  it('prepends an indexed <ideas> XML block when seed_idea_ids resolves >1 idea', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/w',
+      seed_idea_id: 'IDEA-1',
+      seed_idea_ids: JSON.stringify(['IDEA-1', 'IDEA-2']),
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({
+      'IDEA-1': { type: 'idea', title: 'First idea', summary: 'Sum one', body: 'Body one.', scope: 'small', ref: 'IDEA-1' },
+      'IDEA-2': { type: 'idea', title: 'Second idea', summary: null, body: 'Body two.', scope: null, ref: 'IDEA-2' },
+    });
+    const executor = makeSeedExecutor(spawner, registry, reader, ideaReader);
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt.startsWith('# Selected idea')).toBe(true);
+    expect(prompt).toContain('<ideas>');
+    expect(prompt).toContain('index="1"');
+    expect(prompt).toContain('index="2"');
+    expect(prompt).toContain('id="IDEA-1"');
+    expect(prompt).toContain('id="IDEA-2"');
+    expect(prompt).toContain('ref="IDEA-1"');
+    expect(prompt).toContain('ref="IDEA-2"');
+    expect(prompt).toContain('## First idea');
+    expect(prompt).toContain('## Second idea');
+    expect(prompt).toContain('Scope: small');
+    expect(prompt).toContain('Body one.');
+    expect(prompt).toContain('Body two.');
+    // Per-idea fold directive names each idea's update target.
+    expect(prompt).toContain('cyboflow_update_task(task_id="IDEA-1"');
+    expect(prompt).toContain('cyboflow_update_task(task_id="IDEA-2"');
+    // Base prompt preserved after the injected block.
+    expect(prompt).toContain('PLAN BODY');
+    expect(prompt.indexOf('<ideas>')).toBeLessThan(prompt.indexOf('PLAN BODY'));
+  });
+
+  it('falls back to the single-idea block when seed_idea_ids is corrupt JSON', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/w',
+      seed_idea_id: 'IDEA-1',
+      seed_idea_ids: '{not valid json',
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({
+      'IDEA-1': { type: 'idea', title: 'My idea', summary: 'A short summary', body: 'The idea body.', scope: 'small', ref: 'IDEA-1' },
+    });
+    const executor = makeSeedExecutor(spawner, registry, reader, ideaReader);
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt.startsWith('# Selected idea')).toBe(true);
+    expect(prompt).not.toContain('<ideas>');
+    expect(prompt).toContain('## My idea');
+    expect(prompt).toContain('This idea already exists');
+  });
+
+  it('emits the single-idea block when only one of two seeded ideas resolves', async () => {
+    const run = makeWorkflowRunRow({
+      worktree_path: '/w',
+      seed_idea_id: 'IDEA-1',
+      seed_idea_ids: JSON.stringify(['IDEA-1', 'IDEA-MISSING']),
+    });
+    const workflow = makeWorkflowRow({ id: run.workflow_id, workflow_path: '/fake/planner.md' });
+    const registry: WorkflowRegistryLike = {
+      getRunById: vi.fn().mockReturnValue(run),
+      getById: vi.fn().mockReturnValue(workflow),
+    };
+    const spawner = makeSpawner();
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+    const ideaReader = makeIdeaReader({
+      'IDEA-1': { type: 'idea', title: 'Only resolvable', summary: null, body: 'Body.', scope: null, ref: 'IDEA-1' },
+      // 'IDEA-MISSING' resolves to null.
+    });
+    const executor = makeSeedExecutor(spawner, registry, reader, ideaReader);
+
+    await executor.execute(run.id);
+
+    const prompt = spawnedPrompt(spawner);
+    expect(prompt.startsWith('# Selected idea')).toBe(true);
+    expect(prompt).not.toContain('<ideas>');
+    expect(prompt).toContain('## Only resolvable');
+    expect(prompt).toContain('This idea already exists');
+  });
+
+  it('produces a byte-identical single-idea block for a 1-element seed_idea_ids array (dual-write parity)', async () => {
+    const ideaEntry = {
+      type: 'idea',
+      title: 'My idea',
+      summary: 'A short summary',
+      body: 'The idea body.',
+      scope: 'small',
+      ref: 'IDEA-1',
+    } as const;
+    const reader = makeStubReader({ '/fake/planner.md': { prompt: 'PLAN BODY', systemPromptAppend: '' } });
+
+    // Legacy path: seed_idea_id only.
+    const legacyRun = makeWorkflowRunRow({ worktree_path: '/w', seed_idea_id: 'IDEA-1' });
+    const legacyWorkflow = makeWorkflowRow({ id: legacyRun.workflow_id, workflow_path: '/fake/planner.md' });
+    const legacySpawner = makeSpawner();
+    const legacyExec = makeSeedExecutor(
+      legacySpawner,
+      { getRunById: vi.fn().mockReturnValue(legacyRun), getById: vi.fn().mockReturnValue(legacyWorkflow) },
+      reader,
+      makeIdeaReader({ 'IDEA-1': { ...ideaEntry } }),
+    );
+    await legacyExec.execute(legacyRun.id);
+    const legacyPrompt = spawnedPrompt(legacySpawner);
+
+    // Dual-write path: seed_idea_id + a 1-element seed_idea_ids array.
+    const dualRun = makeWorkflowRunRow({
+      worktree_path: '/w',
+      seed_idea_id: 'IDEA-1',
+      seed_idea_ids: JSON.stringify(['IDEA-1']),
+    });
+    const dualWorkflow = makeWorkflowRow({ id: dualRun.workflow_id, workflow_path: '/fake/planner.md' });
+    const dualSpawner = makeSpawner();
+    const dualExec = makeSeedExecutor(
+      dualSpawner,
+      { getRunById: vi.fn().mockReturnValue(dualRun), getById: vi.fn().mockReturnValue(dualWorkflow) },
+      reader,
+      makeIdeaReader({ 'IDEA-1': { ...ideaEntry } }),
+    );
+    await dualExec.execute(dualRun.id);
+    const dualPrompt = spawnedPrompt(dualSpawner);
+
+    expect(dualPrompt).toBe(legacyPrompt);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // feat/parallel-sprint: getPrompt seed-tasks injection (single-run lane model)
 // ---------------------------------------------------------------------------

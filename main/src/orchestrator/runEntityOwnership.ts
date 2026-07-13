@@ -2,11 +2,15 @@
  * runEntityOwnership — derives which backlog entities a workflow run "owns".
  *
  * Ownership model:
- *  - Owned ideas = the run's `workflow_runs.seed_idea_id` (the idea chosen or
- *    minted at planner launch) UNION every idea the run CREATED during execution
- *    (entity_events rows entity_type='idea', kind='created', run_id=?), de-duped.
- *    A seed idea may also appear among the run-created ideas; the Set collapses
- *    the overlap so it surfaces once.
+ *  - Owned ideas = the run's seed ideas UNION every idea the run CREATED during
+ *    execution (entity_events rows entity_type='idea', kind='created', run_id=?),
+ *    de-duped. The seed ideas are `workflow_runs.seed_idea_id` (the single idea
+ *    chosen or minted at planner launch) UNION `workflow_runs.seed_idea_ids` (the
+ *    JSON string array of ALL ideas seeded into a multi-idea planner run,
+ *    migration 060 — NULL on a legacy single-idea run, where seed_idea_id alone
+ *    carries the seed). A seed idea may also appear among the run-created ideas,
+ *    and seed_idea_id is dual-written as seed_idea_ids[0]; the Set collapses every
+ *    overlap so each idea surfaces once.
  *  - Created tasks = every task the run created (entity_events entity_type='task',
  *    kind='created', run_id=?). There is no seed-task notion (seed_idea_id is the
  *    only run→entity link column), so this is purely the created-event projection.
@@ -50,8 +54,9 @@ function entityIdsCreatedByRun(
 }
 
 /**
- * The idea ids a run owns: its `seed_idea_id` (if set) UNION the ideas it
- * created during the run, de-duped. Fail-soft — see file header contract.
+ * The idea ids a run owns: its seed ideas (`seed_idea_id` UNION the
+ * `seed_idea_ids` JSON array, migration 060) UNION the ideas it created during
+ * the run, de-duped. Fail-soft — see file header contract.
  *
  * @param db    Narrow DatabaseLike interface.
  * @param runId The workflow_runs.id whose owned ideas to resolve.
@@ -72,6 +77,27 @@ export function listRunOwnedIdeaIds(db: DatabaseLike, runId: string): string[] {
     }
   } catch {
     // Pre-migration-017 DB (no seed_idea_id column) — fall through.
+  }
+
+  // seed_idea_ids (migration 060) read is wrapped in its OWN try/catch, distinct
+  // from the seed_idea_id read above: a pre-060 DB lacking the column, a NULL
+  // value (legacy single-idea run), or corrupt JSON must each contribute nothing
+  // while the seed_idea_id + run-created unions keep working exactly as before.
+  try {
+    const seedIdsRow = db
+      .prepare('SELECT seed_idea_ids AS seedIdeaIds FROM workflow_runs WHERE id = ?')
+      .get(runId) as { seedIdeaIds: unknown } | undefined;
+    const rawIds = seedIdsRow?.seedIdeaIds;
+    if (typeof rawIds === 'string' && rawIds.length > 0) {
+      const parsed: unknown = JSON.parse(rawIds);
+      if (Array.isArray(parsed)) {
+        for (const id of parsed) {
+          if (typeof id === 'string' && id.length > 0) ownedIds.add(id);
+        }
+      }
+    }
+  } catch {
+    // Pre-060 DB (no seed_idea_ids column) / NULL / corrupt JSON — fall through.
   }
 
   for (const ideaId of entityIdsCreatedByRun(db, runId, 'idea')) {
@@ -106,7 +132,8 @@ export function listRunCreatedEpicIds(db: DatabaseLike, runId: string): string[]
 
 /**
  * The idea ids a run CREATED during execution (the run-created projection ONLY —
- * unlike {@link listRunOwnedIdeaIds}, this does NOT union the run's seed_idea_id).
+ * unlike {@link listRunOwnedIdeaIds}, this does NOT union the run's seed ideas:
+ * neither seed_idea_id nor the seed_idea_ids array).
  * Used by the experiment-arm sweep, which must delete only ideas the arm minted,
  * never the (orchestrator-created) injected seed clone — that is passed
  * explicitly. Fail-soft — see file header contract.
