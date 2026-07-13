@@ -1000,6 +1000,10 @@ export function ArtifactTabRenderer({ artifact, projectId }: ArtifactTabRenderer
     case 'ui-prototype':
     case 'generic':
       return <CanvasBody artifact={artifact} projectId={projectId} />;
+    case 'approve-ideas':
+      // Placeholder until the approve-ideas template body lands (IDEA-009):
+      // the per-idea Approve/Deny surface replaces this generic-canvas fallback.
+      return <CanvasBody artifact={{ ...artifact, atype: 'generic' }} projectId={projectId} />;
     default: {
       // Exhaustive guard — ArtifactType is a closed union; this never executes.
       // Falls back to the canvas (generic) view if a new atype is ever added.

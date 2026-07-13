@@ -17,9 +17,9 @@
 import type { CaptureOrigin, VerdictV1 } from './visualVerification';
 
 /**
- * Artifact kinds. The four bespoke (templated) types plus a `generic` fallback
- * that renders in the live canvas. Keep in sync with the migration 029
- * `artifacts.atype` CHECK constraint when the backend lands.
+ * Artifact kinds. The bespoke (templated) types plus a `generic` fallback
+ * that renders in the live canvas. Keep in sync with the `artifacts.atype`
+ * CHECK constraint (currently widened by migration 061).
  */
 export type ArtifactType =
   | 'idea-spec'
@@ -28,7 +28,8 @@ export type ArtifactType =
   | 'ui-prototype'
   | 'generic'
   | 'arch-design'
-  | 'compound-recommendations';
+  | 'compound-recommendations'
+  | 'approve-ideas';
 
 /** How an artifact tab renders: a bespoke template vs. an embedded live canvas. */
 export type ArtifactRenderMode = 'template' | 'canvas';
@@ -45,6 +46,7 @@ export const ARTIFACT_RENDER_MODE: Record<ArtifactType, ArtifactRenderMode> = {
   generic: 'canvas',
   'arch-design': 'template',
   'compound-recommendations': 'template',
+  'approve-ideas': 'template',
 };
 
 /**
@@ -62,6 +64,7 @@ export const ARTIFACT_COLORS: Record<ArtifactType, string> = {
   // Compound's phase color (#8b5cf6, the violet used in the run rail) so the
   // recommendations tab reads as part of the Compound flow.
   'compound-recommendations': '#8b5cf6',
+  'approve-ideas': '#b8860b',
 };
 
 /**
@@ -76,6 +79,7 @@ export const ARTIFACT_GLYPHS: Record<ArtifactType, string> = {
   generic: '◳',
   'arch-design': '▣',
   'compound-recommendations': '▧',
+  'approve-ideas': '☑',
 };
 
 /** True when the artifact renders in an embedded live canvas (not a template). */

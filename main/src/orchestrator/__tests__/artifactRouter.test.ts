@@ -69,6 +69,7 @@ function buildDb(): Database.Database {
     '035_artifacts.sql',
     '045_arch_design_atype.sql',
     '060_compound_recommendations_atype.sql',
+    '062_approve_ideas_atype.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
@@ -254,6 +255,19 @@ describe('ArtifactRouter', () => {
     expect(deleted).toEqual([ephemeral.artifactId]);
     expect(db.prepare('SELECT COUNT(*) AS n FROM artifacts').get()).toMatchObject({ n: 1 });
     expect(events.some((e) => e.action === 'deleted' && e.artifactId === ephemeral.artifactId)).toBe(true);
+  });
+
+  it('accepts the approve-ideas atype (IDEA-009 multi-idea approve gate)', async () => {
+    const db = buildDb();
+    seedRun(db, 'run-1');
+    const router = ArtifactRouter.initialize(dbAdapter(db));
+
+    const { artifactId } = await router.apply(1, {
+      op: 'create', runId: 'run-1', atype: 'approve-ideas', label: '3 ideas seeded', actor: 'orchestrator',
+    });
+
+    const row = db.prepare('SELECT * FROM artifacts WHERE id = ?').get(artifactId) as Record<string, unknown>;
+    expect(row).toMatchObject({ run_id: 'run-1', atype: 'approve-ideas', label: '3 ideas seeded', mode: 'template' });
   });
 
   it('rejects an invalid atype and an unknown run', async () => {

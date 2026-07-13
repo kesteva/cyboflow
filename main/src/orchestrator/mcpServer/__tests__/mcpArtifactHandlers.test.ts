@@ -40,7 +40,7 @@ function parseLastWrite(writes: string[]): McpQueryResponse {
   return JSON.parse(writes[writes.length - 1]) as McpQueryResponse;
 }
 
-// DB: projects + 006 + 011 + 014 + 015 + 016 + 035 (mirrors artifactRouter.test.ts).
+// DB: projects + 006 + 011 + 014 + 015 + 016 + 035 + 061 (mirrors artifactRouter.test.ts).
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
@@ -62,6 +62,7 @@ function buildDb(): Database.Database {
     '015_entity_model_rebuild.sql',
     '016_review_items.sql',
     '035_artifacts.sql',
+    '062_approve_ideas_atype.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
@@ -161,6 +162,28 @@ describe('McpQueryHandler artifact handlers', () => {
       const id2 = (parseLastWrite(writes).data as { artifactId: string }).artifactId;
       expect(id2).toBe(id1);
       expect((db.prepare('SELECT COUNT(*) AS n FROM artifacts').get() as { n: number }).n).toBe(1);
+    });
+
+    it('accepts the approve-ideas atype (IDEA-009 multi-idea approve gate)', async () => {
+      seedRun(db, 'run-1');
+      const { socket, writes } = makeSocketDouble();
+      await handler.handleMessage(
+        {
+          type: 'mcp-report-artifact',
+          requestId: 'a-1',
+          runId: 'run-1',
+          atype: 'approve-ideas',
+          label: '3 ideas seeded',
+        },
+        socket,
+      );
+
+      const res = parseLastWrite(writes);
+      expect(res.ok).toBe(true);
+      const data = res.data as { artifactId: string; atype: string };
+      expect(data.atype).toBe('approve-ideas');
+      const row = artifactRow(db, data.artifactId);
+      expect(row).toMatchObject({ run_id: 'run-1', atype: 'approve-ideas', label: '3 ideas seeded' });
     });
 
     it('surfaces an invalid atype as ok:false "invalid_atype: ..."', async () => {

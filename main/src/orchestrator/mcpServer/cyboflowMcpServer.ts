@@ -404,7 +404,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_report_artifact',
         description:
-          'Create or update a run deliverable ("artifact") for THIS run — e.g. a live UI-prototype preview, a captured screenshot gallery, a generated report, or a custom canvas. The artifact appears as its own tab in the center pane and in the right-rail Artifacts panel. The run is derived from CYBOFLOW_RUN_ID (no run argument). There is one artifact per atype per run: calling again with the same atype ENRICHES the existing one (and returns the same id). The templated deliverables idea-spec, decomposed-stories and arch-design are auto-created by the orchestrator (arch-design derives from the idea body’s "## Architecture design" section — update the idea body instead of reporting it); screenshots, ui-prototype and generic are reported BY YOU with this tool. For screenshots, first write the PNG bytes into the run artifacts dir ($CYBOFLOW_RUN_ARTIFACTS_DIR) and pass their BASENAMES in payload_json.fileNames. Returns { artifactId }.',
+          'Create or update a run deliverable ("artifact") for THIS run — e.g. a live UI-prototype preview, a captured screenshot gallery, a generated report, or a custom canvas. The artifact appears as its own tab in the center pane and in the right-rail Artifacts panel. The run is derived from CYBOFLOW_RUN_ID (no run argument). There is one artifact per atype per run: calling again with the same atype ENRICHES the existing one (and returns the same id). The templated deliverables idea-spec, decomposed-stories and arch-design are auto-created by the orchestrator (arch-design derives from the idea body’s "## Architecture design" section — update the idea body instead of reporting it); screenshots, ui-prototype, generic, and approve-ideas are reported BY YOU with this tool. For screenshots, first write the PNG bytes into the run artifacts dir ($CYBOFLOW_RUN_ARTIFACTS_DIR) and pass their BASENAMES in payload_json.fileNames. Returns { artifactId }.',
         inputSchema: {
           type: 'object',
           properties: {
@@ -412,8 +412,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: 'string',
               // 'arch-design' is deliberately absent: auto-mint-only (see the
               // validAtypes comment in the CallTool handler below).
-              enum: ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic', 'compound-recommendations'],
-              description: 'Artifact type (required). ui-prototype / generic render an embedded live canvas; screenshots renders an on-disk PNG gallery (you write the files + report their basenames); compound-recommendations renders a markdown doc from payload_json.markdown (the Compound flow’s summary-of-recommendations); idea-spec / decomposed-stories / arch-design are the auto-created templates.',
+              enum: ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic', 'compound-recommendations', 'approve-ideas'],
+              description: 'Artifact type (required). ui-prototype / generic render an embedded live canvas; screenshots renders an on-disk PNG gallery (you write the files + report their basenames); compound-recommendations renders a markdown doc from payload_json.markdown (the Compound flow’s summary-of-recommendations); approve-ideas is the per-idea Approve/Deny decision surface; idea-spec / decomposed-stories / arch-design are the auto-created templates.',
             },
             label: { type: 'string', description: 'Short tab/card label for the artifact (required)' },
             payload_json: {
@@ -1475,7 +1475,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // ListTools enum above. 'compound-recommendations' IS agent-reportable: it
       // is payload-backed (payload_json.markdown), so it renders correctly with
       // source_ref NULL, unlike the entity-backed templated atypes.
-      const validAtypes = ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic', 'compound-recommendations'];
+      const validAtypes = ['idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic', 'compound-recommendations', 'approve-ideas'];
       if (typeof atype !== 'string' || !validAtypes.includes(atype)) {
         return {
           content: [
