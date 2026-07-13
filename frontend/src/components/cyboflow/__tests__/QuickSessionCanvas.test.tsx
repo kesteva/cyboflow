@@ -41,9 +41,9 @@ vi.mock('../../../trpc/client', () => ({
 }));
 
 vi.mock('../IdeaPickerModal', () => ({
-  IdeaPickerModal: (props: { isOpen: boolean; onPicked: (id: string) => void }) =>
+  IdeaPickerModal: (props: { isOpen: boolean; onPicked: (ids: string[]) => void }) =>
     props.isOpen ? (
-      <button data-testid="mock-pick-idea" onClick={() => props.onPicked('idea-x')}>
+      <button data-testid="mock-pick-idea" onClick={() => props.onPicked(['idea-x'])}>
         pick idea
       </button>
     ) : null,

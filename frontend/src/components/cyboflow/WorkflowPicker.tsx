@@ -314,10 +314,10 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   );
 
   const handleIdeaPicked = useCallback(
-    (ideaId: string): void => {
+    (ideaIds: string[]): void => {
       setIdeaPickerOpen(false);
       if (selectedId === null) return;
-      void launchRun(selectedId, ideaId);
+      void launchRun(selectedId, ideaIds[0]);
     },
     [selectedId, launchRun],
   );

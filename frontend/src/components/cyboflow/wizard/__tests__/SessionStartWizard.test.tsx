@@ -105,8 +105,8 @@ vi.mock('../../TaskBatchPickerModal', () => ({
 // goToSession) is tested in isolation. Shared by the Planner AND Ship flows
 // (both IDEA-seeded). The modal's own internals are covered by its test file.
 vi.mock('../../IdeaPickerModal', () => ({
-  IdeaPickerModal: ({ onPicked }: { onPicked: (id: string) => void }) => (
-    <button data-testid="mock-idea-pick" onClick={() => onPicked('IDEA-7')}>
+  IdeaPickerModal: ({ onPicked }: { onPicked: (ids: string[]) => void }) => (
+    <button data-testid="mock-idea-pick" onClick={() => onPicked(['IDEA-7'])}>
       pick idea
     </button>
   ),

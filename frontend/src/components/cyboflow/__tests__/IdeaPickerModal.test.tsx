@@ -134,7 +134,8 @@ describe('IdeaPickerModal — pick existing', () => {
     });
 
     expect(onPicked).toHaveBeenCalledOnce();
-    expect(onPicked).toHaveBeenCalledWith('IDEA-3');
+    // Single mode emits a 1-element array with no opts.
+    expect(onPicked).toHaveBeenCalledWith(['IDEA-3']);
     expect(mockCreate).not.toHaveBeenCalled();
   });
 });
@@ -168,7 +169,7 @@ describe('IdeaPickerModal — new idea', () => {
       attachments: [],
       priority: 'P2',
     });
-    expect(onPicked).toHaveBeenCalledWith('IDEA-NEW');
+    expect(onPicked).toHaveBeenCalledWith(['IDEA-NEW']);
   });
 
   it('defaultMode="new" opens straight on the New idea form (onboarding path)', async () => {
@@ -205,5 +206,126 @@ describe('IdeaPickerModal — new idea', () => {
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('chokepoint rejected: bad parent');
     expect(onPicked).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Multi-select planner mode (IDEA-009)
+// ---------------------------------------------------------------------------
+
+const MULTI_ITEMS: BacklogTaskItem[] = [
+  makeItem({ id: 'IDEA-A', ref: 'IDEA-A', title: 'Alpha', scope: 'small' }),
+  makeItem({ id: 'IDEA-B', ref: 'IDEA-B', title: 'Bravo', scope: 'large' }),
+  makeItem({ id: 'IDEA-C', ref: 'IDEA-C', title: 'Charlie', scope: null }),
+  makeItem({ id: 'IDEA-D', ref: 'IDEA-D', title: 'Delta', scope: 'small' }),
+  makeItem({ id: 'IDEA-E', ref: 'IDEA-E', title: 'Echo', scope: 'small' }),
+];
+
+async function renderMulti(items = MULTI_ITEMS, onPicked = vi.fn(), onClose = vi.fn()) {
+  mockList.mockResolvedValue(structuredClone(items));
+  render(<IdeaPickerModal isOpen multi projectId={1} onClose={onClose} onPicked={onPicked} />);
+  // The meter renders once the checklist loads (multi + ideas.length > 0).
+  await screen.findByTestId('idea-picker-meter');
+  return { onPicked, onClose };
+}
+
+describe('IdeaPickerModal — multi-select planner mode', () => {
+  it('caps the batch at 4: the 5th row disables and a banner appears', async () => {
+    const { onPicked } = await renderMulti();
+
+    for (const id of ['IDEA-A', 'IDEA-C', 'IDEA-D', 'IDEA-E']) {
+      await act(async () => {
+        fireEvent.click(screen.getByTestId(`idea-check-${id}`));
+      });
+    }
+
+    expect(screen.getByTestId('idea-picker-meter')).toHaveTextContent('4 of 4 selected');
+    expect(screen.getByTestId('idea-picker-cap-banner')).toBeInTheDocument();
+
+    // The 5th (unchecked) row is disabled and clicking it is a no-op.
+    const fifth = screen.getByTestId('idea-check-IDEA-B') as HTMLInputElement;
+    expect(fifth).toBeDisabled();
+    await act(async () => {
+      fireEvent.click(fifth);
+    });
+    expect(screen.getByTestId('idea-picker-meter')).toHaveTextContent('4 of 4 selected');
+
+    // Submit emits the batch of four with an empty separate list.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-picker-submit'));
+    });
+    expect(onPicked).toHaveBeenCalledWith(['IDEA-A', 'IDEA-C', 'IDEA-D', 'IDEA-E'], {
+      separateIdeaIds: [],
+    });
+  });
+
+  it('renders S / L / ? scope badges per row', async () => {
+    await renderMulti();
+
+    // Small (A, D, E) → S; large (B) → L in list order; unset (C) → ?.
+    const scopeTexts = screen.getAllByTestId('scope-tag').map((t) => t.textContent);
+    expect(scopeTexts).toEqual(['S', 'L', 'S', 'S']);
+    expect(screen.getByTestId('scope-tag-unset')).toHaveTextContent('?');
+  });
+
+  it('splits a large idea out via Plan separately and reports it in opts', async () => {
+    const { onPicked } = await renderMulti();
+
+    // Mixing a large idea (B) with another (A) surfaces the warning on B.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-check-IDEA-A'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-check-IDEA-B'));
+    });
+
+    const planBtn = await screen.findByTestId('plan-separately-IDEA-B');
+    await act(async () => {
+      fireEvent.click(planBtn);
+    });
+
+    // B leaves the checklist and becomes a queued-separate chip; A stays selected.
+    expect(screen.queryByTestId('idea-check-IDEA-B')).not.toBeInTheDocument();
+    expect(screen.getByTestId('separate-chip-IDEA-B')).toBeInTheDocument();
+    expect(screen.getByTestId('idea-picker-meter')).toHaveTextContent('1 of 4 selected');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-picker-submit'));
+    });
+    expect(onPicked).toHaveBeenCalledWith(['IDEA-A'], { separateIdeaIds: ['IDEA-B'] });
+  });
+
+  it('undo restores a parked idea to the selectable list (unchecked)', async () => {
+    await renderMulti();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-check-IDEA-A'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-check-IDEA-B'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('plan-separately-IDEA-B'));
+    });
+    expect(screen.getByTestId('separate-chip-IDEA-B')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('separate-undo-IDEA-B'));
+    });
+
+    expect(screen.queryByTestId('separate-chip-IDEA-B')).not.toBeInTheDocument();
+    const restored = screen.getByTestId('idea-check-IDEA-B') as HTMLInputElement;
+    expect(restored).toBeInTheDocument();
+    expect(restored.checked).toBe(false);
+  });
+
+  it('a lone large idea shows no split warning (only when mixed)', async () => {
+    await renderMulti();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-check-IDEA-B'));
+    });
+    // Single large selection is fine on its own — no split prompt.
+    expect(screen.queryByTestId('plan-separately-IDEA-B')).not.toBeInTheDocument();
   });
 });

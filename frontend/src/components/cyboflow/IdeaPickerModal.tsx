@@ -14,6 +14,7 @@
 import { useEffect, useState } from 'react';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal';
 import { IdeaAttachmentStrip } from './IdeaAttachmentStrip';
+import { ScopeTag } from '../Backlog/markers';
 import { useIdeaAttachments } from '../../hooks/useIdeaAttachments';
 import { trpc } from '../../trpc/client';
 import type { BacklogTaskItem } from '../../../../shared/types/tasks';
@@ -21,12 +22,38 @@ import type { BacklogTaskItem } from '../../../../shared/types/tasks';
 /** Empty seed for the create-form attachment hook (stable reference). */
 const NO_ATTACHMENTS: never[] = [];
 
+/** Multi-select planner batch cap (IDEA-009). */
+const MULTI_CAP = 4;
+
+/**
+ * Neutral "scope not set" chip for the multi-select checklist. Kept local so the
+ * shared ScopeTag's Record<IdeaScope, …> maps stay exhaustive over the real
+ * scope values (small | large) — an unset idea is a picker concern, not a scope.
+ */
+function UnsetScopeTag(): React.JSX.Element {
+  return (
+    <span
+      className="eyebrow rounded-[3px] border border-border-primary bg-bg-tertiary px-1.5 py-px text-text-tertiary"
+      title="Scope: not set"
+      data-testid="scope-tag-unset"
+    >
+      ?
+    </span>
+  );
+}
+
 interface IdeaPickerModalProps {
   isOpen: boolean;
   projectId: number;
   onClose: () => void;
-  /** Called with the chosen (existing) or minted (free-text) idea id. */
-  onPicked: (ideaId: string) => void;
+  /**
+   * Called with the chosen/minted idea id(s). Single-select and "new idea" modes
+   * emit a 1-element array with no opts. Multi mode emits the batch selection
+   * (max {@link MULTI_CAP}) plus `opts.separateIdeaIds` for ideas the user peeled
+   * off via "Plan separately" (empty array when none). A later task threads the
+   * arrays through the launch surfaces.
+   */
+  onPicked: (ideaIds: string[], opts?: { separateIdeaIds: string[] }) => void;
   /**
    * Which tab opens first. Defaults to 'pick'. The onboarding /ship path passes
    * 'new' — a first-run user has no backlog yet, so writing their first idea is
@@ -38,6 +65,12 @@ interface IdeaPickerModalProps {
    * onboarding path sets this so the first idea a user writes comes with context.
    */
   showIdeaExplainer?: boolean;
+  /**
+   * Multi-select planner mode: a checkbox list capped at {@link MULTI_CAP} with
+   * per-row scope badges and a pick-time "Plan separately" split. Default false =
+   * the original single-select UI (unchanged). Ship/AB flows keep single-select.
+   */
+  multi?: boolean;
 }
 
 type Mode = 'pick' | 'new';
@@ -49,10 +82,15 @@ export function IdeaPickerModal({
   onPicked,
   defaultMode = 'pick',
   showIdeaExplainer = false,
+  multi = false,
 }: IdeaPickerModalProps): React.JSX.Element {
   const [mode, setMode] = useState<Mode>(defaultMode);
   const [ideas, setIdeas] = useState<BacklogTaskItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // Multi mode: the batch selection (capped at MULTI_CAP) and the ids peeled off
+  // to their own run via "Plan separately".
+  const [multiSelectedIds, setMultiSelectedIds] = useState<string[]>([]);
+  const [separateIds, setSeparateIds] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
@@ -68,6 +106,8 @@ export function IdeaPickerModal({
     if (!isOpen) return;
     setIsLoading(true);
     setError(null);
+    setMultiSelectedIds([]);
+    setSeparateIds([]);
     trpc.cyboflow.tasks.list
       .query({ projectId })
       .then((rows) => {
@@ -101,7 +141,26 @@ export function IdeaPickerModal({
     setBody('');
     setError(null);
     setSubmitting(false);
+    setMultiSelectedIds([]);
+    setSeparateIds([]);
     attachmentsCtl.reset();
+  };
+
+  const toggleMulti = (id: string): void => {
+    setMultiSelectedIds((prev) => {
+      if (prev.includes(id)) return prev.filter((x) => x !== id);
+      if (prev.length >= MULTI_CAP) return prev;
+      return [...prev, id];
+    });
+  };
+
+  const planSeparately = (id: string): void => {
+    setMultiSelectedIds((prev) => prev.filter((x) => x !== id));
+    setSeparateIds((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  };
+
+  const restoreFromSeparate = (id: string): void => {
+    setSeparateIds((prev) => prev.filter((x) => x !== id));
   };
 
   const handleClose = (): void => {
@@ -110,8 +169,15 @@ export function IdeaPickerModal({
   };
 
   const handlePickExisting = (): void => {
-    if (selectedId === null || submitting) return;
-    onPicked(selectedId);
+    if (submitting) return;
+    if (multi) {
+      if (multiSelectedIds.length === 0 && separateIds.length === 0) return;
+      onPicked(multiSelectedIds, { separateIdeaIds: separateIds });
+      reset();
+      return;
+    }
+    if (selectedId === null) return;
+    onPicked([selectedId]);
     reset();
   };
 
@@ -130,7 +196,7 @@ export function IdeaPickerModal({
         attachments: attachmentsCtl.attachments,
         priority: 'P2',
       });
-      onPicked(result.taskId);
+      onPicked([result.taskId]);
       reset();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to create idea');
@@ -138,11 +204,24 @@ export function IdeaPickerModal({
     }
   };
 
-  const canSubmit = mode === 'pick' ? selectedId !== null : title.trim().length > 0;
+  const atCap = multiSelectedIds.length >= MULTI_CAP;
+  // Ideas still selectable in the checklist (parked ones move to the chip row).
+  const parkedSet = new Set(separateIds);
+  const listIdeas = ideas.filter((i) => !parkedSet.has(i.id));
+  const separateIdeas = separateIds
+    .map((id) => ideas.find((i) => i.id === id))
+    .filter((i): i is BacklogTaskItem => i !== undefined);
+
+  const canSubmit =
+    mode === 'new'
+      ? title.trim().length > 0
+      : multi
+        ? multiSelectedIds.length > 0 || separateIds.length > 0
+        : selectedId !== null;
 
   return (
     <Modal isOpen={isOpen} onClose={handleClose} size="md">
-      <ModalHeader>Select an idea for the planner</ModalHeader>
+      <ModalHeader>{multi ? 'Select ideas for the planner' : 'Select an idea for the planner'}</ModalHeader>
       <ModalBody>
         <div className="flex flex-col gap-3">
           {showIdeaExplainer && (
@@ -206,7 +285,7 @@ export function IdeaPickerModal({
                   No open ideas in the backlog. Switch to “New idea” to describe one.
                 </p>
               )}
-              {!isLoading && ideas.length > 0 && (
+              {!isLoading && ideas.length > 0 && !multi && (
                 <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
                   Idea
                   <select
@@ -222,6 +301,106 @@ export function IdeaPickerModal({
                     ))}
                   </select>
                 </label>
+              )}
+              {!isLoading && ideas.length > 0 && multi && (
+                <div className="flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-medium text-text-secondary">Ideas</span>
+                    <span
+                      className="text-xs text-text-secondary"
+                      data-testid="idea-picker-meter"
+                    >
+                      {multiSelectedIds.length} of {MULTI_CAP} selected
+                    </span>
+                  </div>
+                  {atCap && (
+                    <div
+                      className="rounded border-l-2 border-status-warning bg-status-warning/10 px-3 py-2 text-xs leading-relaxed text-text-secondary"
+                      data-testid="idea-picker-cap-banner"
+                    >
+                      You can plan up to {MULTI_CAP} ideas at once. Launch this batch, then run
+                      another batch after.
+                    </div>
+                  )}
+                  <div className="flex max-h-64 flex-col gap-1 overflow-y-auto">
+                    {listIdeas.map((i) => {
+                      const checked = multiSelectedIds.includes(i.id);
+                      const disabled = !checked && atCap;
+                      const mixedLarge =
+                        i.scope === 'large' && checked && multiSelectedIds.length > 1;
+                      return (
+                        <div key={i.id} className="flex flex-col gap-1">
+                          <label
+                            className={`flex items-center gap-2 rounded-input border border-border-primary px-2 py-1.5 text-sm ${
+                              disabled
+                                ? 'cursor-not-allowed bg-bg-primary opacity-50'
+                                : 'cursor-pointer bg-bg-primary hover:bg-bg-hover'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              disabled={disabled}
+                              onChange={() => toggleMulti(i.id)}
+                              data-testid={`idea-check-${i.id}`}
+                              aria-label={`${i.ref} — ${i.title}`}
+                            />
+                            <span className="flex-1 truncate text-text-primary">
+                              {i.ref} — {i.title}
+                            </span>
+                            {i.scope ? <ScopeTag scope={i.scope} /> : <UnsetScopeTag />}
+                          </label>
+                          {mixedLarge && (
+                            <div
+                              className="flex items-center justify-between gap-2 rounded border-l-2 border-status-warning bg-status-warning/10 px-3 py-1.5 text-xs text-text-secondary"
+                              data-testid={`plan-separately-warning-${i.id}`}
+                            >
+                              <span>
+                                This idea is large — planning it in its own run keeps the batch
+                                focused.
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => planSeparately(i.id)}
+                                data-testid={`plan-separately-${i.id}`}
+                                className="shrink-0 rounded-button border border-status-warning/40 bg-bg-primary px-2 py-1 font-medium text-status-warning hover:bg-status-warning/10"
+                              >
+                                Plan separately
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  {separateIdeas.length > 0 && (
+                    <div className="flex flex-col gap-1">
+                      <span className="text-xs font-medium text-text-secondary">
+                        Queued as separate runs
+                      </span>
+                      <div className="flex flex-wrap gap-2">
+                        {separateIdeas.map((i) => (
+                          <span
+                            key={i.id}
+                            className="inline-flex items-center gap-1.5 rounded-full border border-border-primary bg-bg-tertiary px-2 py-0.5 text-[11px] font-medium text-text-secondary"
+                            data-testid={`separate-chip-${i.id}`}
+                          >
+                            <span className="truncate">{i.ref} · separate run</span>
+                            <button
+                              type="button"
+                              onClick={() => restoreFromSeparate(i.id)}
+                              data-testid={`separate-undo-${i.id}`}
+                              aria-label={`Undo separate run for ${i.ref}`}
+                              className="text-text-tertiary hover:text-text-primary"
+                            >
+                              Undo
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               )}
             </>
           )}
@@ -289,7 +468,7 @@ export function IdeaPickerModal({
           data-testid="idea-picker-submit"
           className="rounded-button bg-interactive px-3 py-1.5 text-sm font-medium text-text-on-interactive hover:bg-interactive-hover disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {submitting ? 'Creating…' : mode === 'pick' ? 'Use idea' : 'Create & use'}
+          {submitting ? 'Creating…' : mode === 'new' ? 'Create & use' : multi ? 'Use ideas' : 'Use idea'}
         </button>
       </ModalFooter>
     </Modal>

@@ -215,7 +215,8 @@ export function ABTestLaunchModal({
     setSeedIdeaLabel(null);
   };
 
-  const handleIdeaPicked = (ideaId: string): void => {
+  const handleIdeaPicked = (ideaIds: string[]): void => {
+    const ideaId = ideaIds[0];
     setIdeaPickerOpen(false);
     setSeedIdeaId(ideaId);
     setSeedIdeaLabel(ideaId);

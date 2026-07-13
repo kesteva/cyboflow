@@ -64,11 +64,11 @@ vi.mock('../IdeaPickerModal', () => ({
     onPicked,
   }: {
     isOpen: boolean;
-    onPicked: (ideaId: string) => void;
+    onPicked: (ideaIds: string[]) => void;
   }) =>
     isOpen ? (
       <div data-testid="mock-idea-picker">
-        <button type="button" onClick={() => onPicked('IDEA-1')}>
+        <button type="button" onClick={() => onPicked(['IDEA-1'])}>
           pick IDEA-1
         </button>
       </div>

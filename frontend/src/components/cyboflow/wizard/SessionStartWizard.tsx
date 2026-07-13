@@ -712,10 +712,10 @@ export default function SessionStartWizard(): React.JSX.Element {
   }, [selection, workflowMetas, startQuickSession, launchRun, permissionMode, substrate, model, fastMode, disabledMcpServers, enabledPlugins, pluginBaseline, worktreeModeOverride]);
 
   const handleIdeaPicked = useCallback(
-    (ideaId: string) => {
+    (ideaIds: string[]) => {
       setIdeaPickerOpen(false);
       if (pendingWorkflowId === null) return;
-      void launchRun(pendingWorkflowId, ideaId);
+      void launchRun(pendingWorkflowId, ideaIds[0]);
     },
     [pendingWorkflowId, launchRun],
   );

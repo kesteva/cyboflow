@@ -353,10 +353,10 @@ export function QuickSessionCanvas({
   );
 
   const handleIdeaPicked = useCallback(
-    (ideaId: string) => {
+    (ideaIds: string[]) => {
       const id = plannerIdForGate;
       setPlannerIdForGate(null);
-      if (id !== null) void launch(id, { ideaId });
+      if (id !== null) void launch(id, { ideaId: ideaIds[0] });
     },
     [plannerIdForGate, launch],
   );
