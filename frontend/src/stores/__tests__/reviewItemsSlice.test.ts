@@ -240,14 +240,16 @@ describe('useReviewItemsSlice.init — subscribe lifecycle', () => {
     unsub();
   });
 
-  it('returns the cached unsubscribe on a same-projectId re-init (no re-subscribe)', async () => {
+  it('a second same-projectId init joins the existing subscription (no re-subscribe) with a DISTINCT release', async () => {
     listQuery.mockResolvedValue([]);
     const unsub1 = useReviewItemsSlice.getState().init(1);
     await flush();
     const unsub2 = useReviewItemsSlice.getState().init(1);
-    expect(unsub2).toBe(unsub1);
+    // Refcounted: each init returns its OWN release, but no second subscribe.
+    expect(unsub2).not.toBe(unsub1);
     expect(subscribeState.calls).toBe(1);
     unsub1();
+    unsub2();
   });
 
   it('tears down the old subscription and re-syncs on a DIFFERENT projectId', async () => {
@@ -315,5 +317,79 @@ describe('useReviewItemsSlice.init — subscribe lifecycle', () => {
     subscribeState.onData?.(makeEvent(makeItem('live'), 1));
     expect(useReviewItemsSlice.getState().items.map((i) => i.id)).toEqual(['live']);
     unsub();
+  });
+});
+
+describe('useReviewItemsSlice.init — multi-consumer refcount', () => {
+  beforeEach(() => {
+    // Same closure reset as the lifecycle block.
+    listQuery.mockReset().mockResolvedValue([]);
+    const reset = useReviewItemsSlice.getState().init(-999);
+    reset();
+    subscribe.mockClear();
+    subscribeState.unsubscribe.mockClear();
+    subscribeState.onData = undefined;
+    subscribeState.onError = undefined;
+    subscribeState.calls = 0;
+    useReviewItemsSlice.setState({ projectId: null, items: [], connectionStatus: 'idle' });
+  });
+
+  it('one consumer releasing does NOT drop deltas for a co-mounted same-project consumer', async () => {
+    const init = useReviewItemsSlice.getState().init;
+    const releaseA = init(1);
+    const releaseB = init(1);
+    await flush();
+    // Only ONE subscription wired for the shared project.
+    expect(subscribeState.calls).toBe(1);
+
+    // Consumer A unmounts. The shared subscription must stay alive.
+    releaseA();
+    expect(subscribeState.unsubscribe).not.toHaveBeenCalled();
+
+    // Deltas still flow to the store for the remaining consumer B.
+    subscribeState.onData?.(makeEvent(makeItem('after-a-left'), 1));
+    expect(useReviewItemsSlice.getState().items.map((i) => i.id)).toEqual(['after-a-left']);
+
+    // Last consumer releases → teardown.
+    releaseB();
+    expect(subscribeState.unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('is idempotent — releasing the same consumer twice does not over-decrement', async () => {
+    const init = useReviewItemsSlice.getState().init;
+    const releaseA = init(1);
+    const releaseB = init(1);
+    await flush();
+
+    releaseA();
+    releaseA(); // double-release: must be a no-op, not a premature teardown
+    expect(subscribeState.unsubscribe).not.toHaveBeenCalled();
+
+    releaseB();
+    expect(subscribeState.unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('a project change still force-rewires while consumers are mounted, and a stale release is a no-op', async () => {
+    const init = useReviewItemsSlice.getState().init;
+    const releaseP1 = init(1);
+    await flush();
+    expect(subscribeState.calls).toBe(1);
+
+    // Switch project while the project-1 consumer is still "mounted".
+    listQuery.mockResolvedValue([makeItem('p2', { project_id: 2 })]);
+    const releaseP2 = init(2);
+    // Old subscription torn down, new one wired.
+    expect(subscribeState.unsubscribe).toHaveBeenCalledTimes(1);
+    expect(subscribeState.calls).toBe(2);
+    await flush();
+    expect(useReviewItemsSlice.getState().projectId).toBe(2);
+
+    // The stale project-1 release must NOT tear down the live project-2 sub.
+    releaseP1();
+    expect(subscribeState.unsubscribe).toHaveBeenCalledTimes(1);
+
+    // The current consumer releasing tears down project 2.
+    releaseP2();
+    expect(subscribeState.unsubscribe).toHaveBeenCalledTimes(2);
   });
 });

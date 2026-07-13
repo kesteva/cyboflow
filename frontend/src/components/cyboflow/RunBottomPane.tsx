@@ -65,7 +65,17 @@ function tabIcon(kind: TabKind) {
 // RunBottomPane
 // ---------------------------------------------------------------------------
 
-export function RunBottomPane() {
+interface RunBottomPaneProps {
+  /**
+   * Reports whether the CHAT tab is the active bottom-dock tab. RunCenterPane
+   * combines this with the dock-open state to tell RunPendingInputStrip whether
+   * the chat transcript is the visible surface for a run's live question (so the
+   * strip can stand down its duplicate card). Optional — the pane works stand-alone.
+   */
+  onChatTabActiveChange?: (active: boolean) => void;
+}
+
+export function RunBottomPane({ onChatTabActiveChange }: RunBottomPaneProps = {}) {
   // Default to the unified Chat transcript so a run opens to the same rich
   // experience as a quick session.
   const [activeId, setActiveId] = useState<string>('chat');
@@ -138,6 +148,13 @@ export function RunBottomPane() {
   // Resolve the active tab; if the selected id vanished (e.g. the Agent tab went
   // away with the substrate, or a terminal was closed), fall back to Chat.
   const activeTab = tabs.find((t) => t.id === activeId) ?? tabs[0];
+
+  // Report Chat-tab activeness up so the pending-input strip can de-dupe the
+  // live-question card (the chat transcript renders it inline on the Chat tab).
+  const chatTabActive = activeTab?.kind === 'chat';
+  useEffect(() => {
+    onChatTabActiveChange?.(chatTabActive);
+  }, [chatTabActive, onChatTabActiveChange]);
 
   const handleAddTerminal = useCallback(() => {
     if (activeRunId === null) return;

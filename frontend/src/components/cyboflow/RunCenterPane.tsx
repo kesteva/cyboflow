@@ -14,7 +14,7 @@
  * terminal dock collapses via display:none and NEVER unmounts RunBottomPane, so
  * the live interactive xterm survives a collapse (see TerminalDock).
  */
-import { useEffect, type ReactElement } from 'react';
+import { useEffect, useState, type ReactElement } from 'react';
 import { WorkflowCanvas } from './WorkflowCanvas';
 import { SprintSwimlaneCanvas } from './SprintSwimlaneCanvas';
 import { RunBottomPane } from './RunBottomPane';
@@ -90,6 +90,16 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
   useArtifactTabsSync(sessionKey, artifacts, loaded);
 
   const activeTab = session.tabs.find((t) => t.id === session.activeTabId) ?? session.tabs[0];
+
+  // Whether the bottom dock's CHAT tab is active (reported by RunBottomPane).
+  // Combined with the dock-open state below to tell RunPendingInputStrip whether
+  // the chat transcript is the visible surface for a live question — so the strip
+  // can stand down its duplicate card. Seed true (RunBottomPane opens on Chat).
+  const [chatTabActive, setChatTabActive] = useState(true);
+  // The chat transcript only actually renders (and shows the inline question)
+  // when the dock is OPEN; a collapsed dock hides it, so the strip must keep its
+  // card. `session.terminalOpen` is the dock-open state.
+  const chatSurfaceVisible = session.terminalOpen && chatTabActive;
 
   const renderFlow = (): ReactElement => {
     // Run ended → the Flow tab shows the end-of-workflow summary instead of the
@@ -273,14 +283,18 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
         )}
       </div>
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>{renderActiveTab()}</div>
-      <RunPendingInputStrip runId={activeRunId} projectId={projectId} />
+      <RunPendingInputStrip
+        runId={activeRunId}
+        projectId={projectId}
+        chatSurfaceVisible={chatSurfaceVisible}
+      />
       <TerminalDock
         open={session.terminalOpen}
         onToggle={() => toggleTerminal(sessionKey)}
         folderLabel={folderBasename(activeRun?.worktree_path)}
         branchName={activeRun?.branch_name ?? undefined}
       >
-        <RunBottomPane />
+        <RunBottomPane onChatTabActiveChange={setChatTabActive} />
       </TerminalDock>
     </div>
   );

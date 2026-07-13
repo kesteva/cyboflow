@@ -59,10 +59,18 @@ export interface ReviewItemsState {
 
   /**
    * Initialise (or re-target) the slice for `projectId`.
-   *  - First call: full sync + subscribe.
-   *  - Same projectId again: no-op (returns the cached unsubscribe).
+   *  - First consumer for a project: full sync + subscribe.
+   *  - Additional consumer, SAME projectId: joins the existing subscription
+   *    (no re-subscribe) and takes its own reference on it.
    *  - DIFFERENT projectId: tear down the old subscription, re-sync, re-subscribe.
-   * Returns an unsubscribe function the caller should invoke on unmount.
+   *
+   * Multi-consumer safe: the tRPC subscription is REFCOUNTED per project — each
+   * `init()` returns a DISTINCT release fn and the subscription is torn down
+   * only when the LAST consumer releases. (Mirrors {@link useQuestionStore}'s
+   * singleton-teardown guard, but refcounted so co-mounted consumers of the same
+   * project — e.g. RunPendingInputStrip + a future second reader — don't kill
+   * each other's feed on unmount.) Returns a release fn the caller should invoke
+   * on unmount; calling it more than once is a no-op.
    */
   init: (projectId: number) => (() => void);
 }
@@ -129,8 +137,20 @@ export function pendingReviewItemsForRun(
 
 export const useReviewItemsSlice = create<ReviewItemsState>((set, get) => {
   // Closure-private subscription state — NOT exposed via ReviewItemsState.
+  //
+  // Refcounted per project so multiple co-mounted consumers of the SAME project
+  // share one tRPC subscription and each holds an independent release. Teardown
+  // happens only when the last consumer releases; a project change force-rewires
+  // (a fresh generation) and makes any still-outstanding release for the prior
+  // wiring a no-op.
   let wiredProjectId: number | null = null;
-  let cachedUnsubscribe: (() => void) | null = null;
+  // Tears down the ACTUAL tRPC subscription for the wired project (null = none).
+  let subscriptionTeardown: (() => void) | null = null;
+  // Number of live consumers holding the current wiring.
+  let refCount = 0;
+  // Bumped on every fresh wire; a release captures its wiring's generation so a
+  // stale release (project changed / errored out from under it) is ignored.
+  let generation = 0;
 
   return {
     projectId: null,
@@ -153,17 +173,28 @@ export const useReviewItemsSlice = create<ReviewItemsState>((set, get) => {
     // -- Actions --------------------------------------------------------------
 
     init: (projectId) => {
-      // Same project already wired — return the cached unsubscribe (no-op).
-      if (wiredProjectId === projectId && cachedUnsubscribe) {
-        return cachedUnsubscribe;
+      // Project CHANGED while wired to another one: force a full rewire. Tear
+      // down the old subscription and drop the old wiring's refs — the previous
+      // project's outstanding releases become no-ops (generation mismatch).
+      if (wiredProjectId !== null && wiredProjectId !== projectId) {
+        if (subscriptionTeardown) subscriptionTeardown();
+        subscriptionTeardown = null;
+        refCount = 0;
+        wiredProjectId = null;
       }
 
-      // Project CHANGED (or first init): tear down any prior subscription.
-      if (cachedUnsubscribe) {
-        cachedUnsubscribe();
+      // Already wired to this project — a second consumer just joins: take a
+      // reference on the existing subscription, no re-subscribe.
+      if (wiredProjectId === projectId && subscriptionTeardown !== null) {
+        refCount += 1;
+        return makeRelease(generation);
       }
 
+      // First consumer for this project: wire a fresh subscription.
       wiredProjectId = projectId;
+      generation += 1;
+      const myGeneration = generation;
+      refCount = 1;
       set({ projectId, connectionStatus: 'connecting' });
 
       const { replaceItems, applyChange, setConnectionStatus } = get();
@@ -194,23 +225,46 @@ export const useReviewItemsSlice = create<ReviewItemsState>((set, get) => {
             console.error('[reviewItemsSlice] onReviewItemChanged subscription error:', err);
             setConnectionStatus('disconnected');
             subscription.unsubscribe();
-            if (wiredProjectId === projectId) {
+            // Drop the wiring so a later init re-subscribes — but only if this
+            // wiring is still current. Bumping the generation makes every
+            // outstanding release for it no-op (they don't touch the new wiring).
+            if (generation === myGeneration) {
+              subscriptionTeardown = null;
               wiredProjectId = null;
-              cachedUnsubscribe = null;
+              refCount = 0;
+              generation += 1;
             }
           },
         },
       );
 
-      const unsubscribe = () => {
+      subscriptionTeardown = () => {
         subscription.unsubscribe();
-        if (wiredProjectId === projectId) {
-          wiredProjectId = null;
-          cachedUnsubscribe = null;
-        }
       };
-      cachedUnsubscribe = unsubscribe;
-      return unsubscribe;
+      return makeRelease(myGeneration);
     },
   };
+
+  /**
+   * Build a per-`init()` release fn for a given wiring generation. Idempotent
+   * (a second call no-ops). Decrements the refcount only while the wiring it was
+   * issued for is still current; tears the subscription down at zero.
+   */
+  function makeRelease(issuedGeneration: number): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      // Stale release: the wiring it belonged to was superseded (project change
+      // or subscription error). The refcount was already reset for us.
+      if (issuedGeneration !== generation) return;
+      refCount -= 1;
+      if (refCount <= 0) {
+        if (subscriptionTeardown) subscriptionTeardown();
+        subscriptionTeardown = null;
+        wiredProjectId = null;
+        refCount = 0;
+      }
+    };
+  }
 });

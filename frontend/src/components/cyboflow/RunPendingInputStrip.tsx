@@ -4,8 +4,8 @@
  *
  * Mounted once in RunCenterPane, BETWEEN the tab content and TerminalDock, so
  * it is visible regardless of the active tab. Mirrors the init/subscribe/
- * cleanup + empty-state-null pattern established by
- * `ReviewQueue/PendingApprovalsForRun.tsx`, but sources from TWO stores:
+ * cleanup + empty-state-null pattern established by `ReviewQueueView.tsx`, but
+ * sources from TWO stores:
  *
  *   - {@link useReviewItemsSlice} (project-scoped review_items inbox) —
  *     filtered to this run's PENDING items, blocking-first, via the shared
@@ -13,14 +13,28 @@
  *   - {@link useQuestionStore} (global live AskUserQuestion queue) — filtered
  *     to this run's Questions.
  *
- * ## De-dupe: folded question review items vs. live questions
+ * ## De-dupe: three surfaces for one live question
  *
- * A `source === 'question'` review item is the FOLDED read-model row for an
- * open AskUserQuestion gate — it carries no `toolUseId` (`payload: null`) and
- * there is at most one pending per run. So whenever the run has ANY live
- * questionStore Question, every `source === 'question'` review item for that
- * run is dropped from the render (the live AskUserQuestionCard is the single
- * surface for answering it) — suppression is by RUN, not by toolUseId.
+ * A live AskUserQuestion for a run can appear in THREE places; exactly one must
+ * be interactive at a time:
+ *
+ *   1. The FOLDED read-model row — a `source === 'question'` review item (no
+ *      `toolUseId`, `payload: null`, at most one pending per run). Whenever the
+ *      run has ANY live questionStore Question, every `source === 'question'`
+ *      review item for that run is dropped from the render — suppression is by
+ *      RUN, not by toolUseId.
+ *   2. The CHAT-TRANSCRIPT inline card — `RunChatView.renderToolCallExtra`
+ *      renders an AskUserQuestionCard at the question's tool_use position, but
+ *      only when the Chat tab is the visible bottom-dock surface.
+ *   3. THIS strip's own AskUserQuestionCard — the guaranteed-visible fallback
+ *      for every NON-chat tab (and a collapsed dock).
+ *
+ * To keep a single interactive surface, the strip stands down its own live
+ * question card (#3) exactly when the chat transcript already renders it (#2) —
+ * i.e. `chatSurfaceVisible` (Chat tab active AND the dock open). Any other tab,
+ * or a collapsed dock, keeps the strip's card so the gate is never hidden. The
+ * folded-row suppression (#1) still fires whenever the run has a live question,
+ * regardless of which of #2/#3 is showing it.
  */
 import { useEffect, useMemo, type ReactElement } from 'react';
 import { useReviewItemsSlice, pendingReviewItemsForRun } from '../../stores/reviewItemsSlice';
@@ -31,9 +45,22 @@ import { AskUserQuestionCard } from '../AskUserQuestion/AskUserQuestionCard';
 interface RunPendingInputStripProps {
   runId: string;
   projectId: number | null;
+  /**
+   * Whether the chat transcript surface (which renders the same live question
+   * inline via `RunChatView.renderToolCallExtra`) is currently VISIBLE — the
+   * Chat tab is the active bottom-dock tab AND the dock is open. When true the
+   * strip stands down its own live-question card so the gate has one interactive
+   * surface. Defaults to false (strip owns the surface) — the safe fallback for
+   * every non-chat tab / collapsed dock, and for callers that don't thread it.
+   */
+  chatSurfaceVisible?: boolean;
 }
 
-export function RunPendingInputStrip({ runId, projectId }: RunPendingInputStripProps): ReactElement | null {
+export function RunPendingInputStrip({
+  runId,
+  projectId,
+  chatSurfaceVisible = false,
+}: RunPendingInputStripProps): ReactElement | null {
   useEffect(() => {
     if (projectId === null) return;
     const unsubscribe = useReviewItemsSlice.getState().init(projectId);
@@ -60,15 +87,21 @@ export function RunPendingInputStrip({ runId, projectId }: RunPendingInputStripP
     [questionQueue, runId],
   );
 
+  // Live question cards THIS strip renders. When the chat transcript is the
+  // visible surface it already renders them inline, so the strip stands down —
+  // one interactive surface per live question (surface #2 vs #3, see docstring).
+  const stripQuestions = chatSurfaceVisible ? [] : liveQuestions;
+
   const pendingItems = useMemo(() => {
     const pending = pendingReviewItemsForRun(items, runId);
     if (liveQuestions.length === 0) return pending;
     // A live question is present for this run — suppress the folded
-    // question-sourced review item(s) so the run's gate has one surface.
+    // question-sourced review item(s) regardless of which surface (chat inline
+    // or this strip) is showing the live card, so the gate has one surface.
     return pending.filter((it) => it.source !== 'question');
   }, [items, runId, liveQuestions.length]);
 
-  const shownCount = pendingItems.length + liveQuestions.length;
+  const shownCount = pendingItems.length + stripQuestions.length;
   if (shownCount === 0) return null;
 
   return (
@@ -92,7 +125,7 @@ export function RunPendingInputStrip({ runId, projectId }: RunPendingInputStripP
         {pendingItems.map((item) => (
           <ReviewItemCard key={item.id} item={item} />
         ))}
-        {liveQuestions.map((question) => (
+        {stripQuestions.map((question) => (
           <AskUserQuestionCard key={question.toolUseId} item={question} />
         ))}
       </div>
