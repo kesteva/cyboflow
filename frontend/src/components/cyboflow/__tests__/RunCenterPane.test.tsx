@@ -27,6 +27,12 @@ import type { ActiveRunRow } from '../../../stores/activeRunsStore';
 import type { WorkflowDefinition } from '../../../../../shared/types/workflows';
 import type { Artifact } from '../../../../../shared/types/artifacts';
 
+let reportBottomTabKind: ((kind: 'chat' | 'agent' | 'terminal' | 'data-stream') => void) | undefined;
+let pendingStripProps: {
+  chatSurfaceVisible?: boolean;
+  suppressLiveQuestions?: boolean;
+} | undefined;
+
 vi.mock('../WorkflowCanvas', () => ({
   WorkflowCanvas: () => <div data-testid="mock-workflow-canvas" />,
 }));
@@ -34,7 +40,23 @@ vi.mock('../SprintSwimlaneCanvas', () => ({
   SprintSwimlaneCanvas: () => <div data-testid="mock-swimlane-canvas" />,
 }));
 vi.mock('../RunBottomPane', () => ({
-  RunBottomPane: () => <div data-testid="mock-run-bottom-pane" />,
+  RunBottomPane: ({
+    onActiveTabKindChange,
+  }: {
+    onActiveTabKindChange?: (kind: 'chat' | 'agent' | 'terminal' | 'data-stream') => void;
+  }) => {
+    reportBottomTabKind = onActiveTabKindChange;
+    return <div data-testid="mock-run-bottom-pane" />;
+  },
+}));
+vi.mock('../RunPendingInputStrip', () => ({
+  RunPendingInputStrip: (props: {
+    chatSurfaceVisible?: boolean;
+    suppressLiveQuestions?: boolean;
+  }) => {
+    pendingStripProps = props;
+    return <div data-testid="mock-run-pending-input-strip" />;
+  },
 }));
 // The artifacts list + ArtifactTabRenderer are exercised by their own suites and
 // by the orchestrator integration tests; stub them here so the tab/dock shell
@@ -111,6 +133,8 @@ describe('RunCenterPane', () => {
     useCenterPaneStore.setState({ bySession: {} });
     mockArtifacts = [];
     mockLoaded = true;
+    reportBottomTabKind = undefined;
+    pendingStripProps = undefined;
   });
 
   it('renders the tab strip with the pinned Flow tab and the terminal dock', () => {
@@ -123,6 +147,28 @@ describe('RunCenterPane', () => {
     // Pinned → no close button.
     expect(screen.queryByTestId('center-pane-tab-close-flow')).not.toBeInTheDocument();
     expect(screen.getByTestId('terminal-dock')).toBeInTheDocument();
+  });
+
+  it('suppresses live questions only while the visible bottom tab is Data Stream', () => {
+    render(
+      <RunCenterPane activeRunId="run-1" phaseState={makePhaseState(DEFINITION)} activeRun={makeRun()} />,
+    );
+    expect(pendingStripProps).toMatchObject({
+      chatSurfaceVisible: true,
+      suppressLiveQuestions: false,
+    });
+
+    act(() => reportBottomTabKind?.('data-stream'));
+    expect(pendingStripProps).toMatchObject({
+      chatSurfaceVisible: false,
+      suppressLiveQuestions: true,
+    });
+
+    act(() => reportBottomTabKind?.('terminal'));
+    expect(pendingStripProps).toMatchObject({
+      chatSurfaceVisible: false,
+      suppressLiveQuestions: false,
+    });
   });
 
   it('renders the "Variant: <label>" pill when the active run carries a variant_label', () => {

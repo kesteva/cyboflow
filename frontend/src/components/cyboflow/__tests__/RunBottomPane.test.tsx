@@ -251,47 +251,42 @@ describe('RunBottomPane', () => {
   });
 
   // -------------------------------------------------------------------------
-  // onChatTabActiveChange wiring (TASK-047): the pane reports whether the Chat
-  // tab is the active bottom-dock tab up to RunCenterPane, which combines it
-  // with the dock-open state to tell RunPendingInputStrip whether the chat
-  // transcript is the visible surface for a live question (so the strip can
-  // stand down its duplicate live-question card).
+  // Active-tab wiring: RunCenterPane needs the full surface kind to distinguish
+  // Chat ownership, the Terminal fallback, and an unobstructed Data Stream.
   // -------------------------------------------------------------------------
 
-  it('reports Chat-tab active (true) on mount — Chat is the default tab', () => {
-    const onChatTabActiveChange = vi.fn();
+  it('reports Chat on mount — Chat is the default tab', () => {
+    const onActiveTabKindChange = vi.fn();
     seedRun('run-xyz', 'sdk');
     setActiveRun('run-xyz');
-    render(<RunBottomPane onChatTabActiveChange={onChatTabActiveChange} />);
-    expect(onChatTabActiveChange).toHaveBeenLastCalledWith(true);
+    render(<RunBottomPane onActiveTabKindChange={onActiveTabKindChange} />);
+    expect(onActiveTabKindChange).toHaveBeenLastCalledWith('chat');
   });
 
-  it('reports false when switching to a non-chat tab (Data Stream) and true again on return to Chat', () => {
-    const onChatTabActiveChange = vi.fn();
+  it('reports Data Stream and then Chat as the active surface changes', () => {
+    const onActiveTabKindChange = vi.fn();
     seedRun('run-xyz', 'sdk');
     setActiveRun('run-xyz');
-    render(<RunBottomPane onChatTabActiveChange={onChatTabActiveChange} />);
+    render(<RunBottomPane onActiveTabKindChange={onActiveTabKindChange} />);
 
-    // Leaving Chat → the chat transcript is no longer the visible surface.
     fireEvent.click(screen.getByRole('tab', { name: 'Data Stream' }));
-    expect(onChatTabActiveChange).toHaveBeenLastCalledWith(false);
+    expect(onActiveTabKindChange).toHaveBeenLastCalledWith('data-stream');
 
-    // Returning to Chat → the transcript is visible again.
     fireEvent.click(screen.getByRole('tab', { name: 'Chat' }));
-    expect(onChatTabActiveChange).toHaveBeenLastCalledWith(true);
+    expect(onActiveTabKindChange).toHaveBeenLastCalledWith('chat');
   });
 
-  it('reports false when the Terminal tab is active (only Chat counts as the chat surface)', () => {
-    const onChatTabActiveChange = vi.fn();
+  it('reports Terminal when the worktree shell is active', () => {
+    const onActiveTabKindChange = vi.fn();
     seedRun('run-xyz', 'sdk');
     setActiveRun('run-xyz');
-    render(<RunBottomPane onChatTabActiveChange={onChatTabActiveChange} />);
+    render(<RunBottomPane onActiveTabKindChange={onActiveTabKindChange} />);
 
     fireEvent.click(screen.getByRole('tab', { name: 'Terminal' }));
-    expect(onChatTabActiveChange).toHaveBeenLastCalledWith(false);
+    expect(onActiveTabKindChange).toHaveBeenLastCalledWith('terminal');
   });
 
-  it('works stand-alone when onChatTabActiveChange is omitted (optional prop)', () => {
+  it('works stand-alone when onActiveTabKindChange is omitted (optional prop)', () => {
     seedRun('run-xyz', 'sdk');
     setActiveRun('run-xyz');
     // No callback threaded — must not throw and still renders the Chat tab.

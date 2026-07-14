@@ -186,14 +186,34 @@ describe('RunPendingInputStrip', () => {
     expect(container).toBeEmptyDOMElement();
   });
 
-  it('surfaces the live question card on a NON-chat tab (chat transcript not visible)', () => {
-    // Non-chat tab: the chat transcript is not the visible surface, so the strip
-    // is the ONLY interactive surface and must render the card.
+  it('surfaces the live question card on Terminal/Agent fallback surfaces', () => {
     mockQuestionQueue = [makeQuestion({ toolUseId: 'tool-live', runId: 'run-1' })];
     render(<RunPendingInputStrip runId="run-1" projectId={5} chatSurfaceVisible={false} />);
     const cards = screen.getAllByTestId('ask-question-card');
     expect(cards).toHaveLength(1);
     expect(cards[0]).toHaveAttribute('data-tool-use-id', 'tool-live');
+  });
+
+  it('keeps Data Stream unobstructed while preserving unrelated pending items', () => {
+    mockItems = [
+      makeReviewItem({ id: 'rvw-question', run_id: 'run-1', kind: 'decision', source: 'question', payload: null }),
+      makeReviewItem({ id: 'rvw-decision', run_id: 'run-1', kind: 'decision' }),
+    ];
+    mockQuestionQueue = [makeQuestion({ toolUseId: 'tool-live', runId: 'run-1' })];
+    render(
+      <RunPendingInputStrip
+        runId="run-1"
+        projectId={5}
+        chatSurfaceVisible={false}
+        suppressLiveQuestions
+      />,
+    );
+
+    expect(screen.queryByTestId('ask-question-card')).toBeNull();
+    expect(screen.getAllByTestId('review-item-card').map((card) => card.getAttribute('data-item-id'))).toEqual([
+      'rvw-decision',
+    ]);
+    expect(screen.getByTestId('pending-input-count')).toHaveTextContent('1');
   });
 
   it('stands down the live question card when the chat transcript is the visible surface (Chat tab)', () => {
