@@ -73,24 +73,25 @@ import type { AppServices } from '../types';
 // ---------------------------------------------------------------------------
 
 describe('generateQuickWorktreeBranchName', () => {
-  it('returns a deterministic adjective-noun name for an injected rng', () => {
+  it('returns a deterministic adjective-noun-YYYYMMDD name for an injected rng + date', () => {
     // rng() is called twice: once for the adjective index, once for the noun
-    // index. A constant 0 always selects the first entry of each list.
-    const result = generateQuickWorktreeBranchName(() => 0);
-    expect(result).toBe('amber-alpaca');
+    // index. A constant 0 always selects the first entry of each list; the
+    // date suffix uses UTC components of the injected instant.
+    const result = generateQuickWorktreeBranchName(() => 0, new Date('2026-07-15T03:04:05Z'));
+    expect(result).toBe('amber-alpaca-20260715');
   });
 
-  it('matches the /^(quick-)?[a-z]+-[a-z]+$/ shape for a default (Math.random) call', () => {
+  it('matches the /^(quick-)?[a-z]+-[a-z]+-\\d{8}$/ shape for a default (Math.random / now) call', () => {
     const result = generateQuickWorktreeBranchName();
-    expect(result).toMatch(/^(quick-)?[a-z]+-[a-z]+$/);
+    expect(result).toMatch(/^(quick-)?[a-z]+-[a-z]+-\d{8}$/);
   });
 
   it('selects different words for different rng values', () => {
     const first = generateQuickWorktreeBranchName(() => 0);
     const second = generateQuickWorktreeBranchName(() => 0.999999);
     expect(first).not.toBe(second);
-    expect(first).toMatch(/^(quick-)?[a-z]+-[a-z]+$/);
-    expect(second).toMatch(/^(quick-)?[a-z]+-[a-z]+$/);
+    expect(first).toMatch(/^(quick-)?[a-z]+-[a-z]+-\d{8}$/);
+    expect(second).toMatch(/^(quick-)?[a-z]+-[a-z]+-\d{8}$/);
   });
 
   it('word lists are large enough, lowercase-ascii-only, and duplicate-free', () => {

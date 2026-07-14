@@ -160,14 +160,20 @@ export const QUICK_NAME_NOUNS = [
  * (IDEA-001), Heroku/Docker style: `<adjective>-<noun>`, both drawn from fixed
  * word lists below. No behavioral code keys off the old `quick-` prefix (see
  * IDEA-001 investigation), so it is dropped in favor of the plain two-word
- * shape. The `rng` parameter mirrors the existing Date-injection pattern
- * elsewhere in this file — inject a fixed function for deterministic test
- * output; the default is `Math.random`.
+ * shape, but the UTC creation date is appended (`<adjective>-<noun>-YYYYMMDD`)
+ * so names stay chronologically scannable in branch lists. The `rng` / `now`
+ * parameters exist for deterministic test output; defaults are `Math.random`
+ * and the wall-clock instant at call time.
  */
-export function generateQuickWorktreeBranchName(rng: () => number = Math.random): string {
+export function generateQuickWorktreeBranchName(
+  rng: () => number = Math.random,
+  now: Date = new Date(),
+): string {
   const adjective = QUICK_NAME_ADJECTIVES[Math.floor(rng() * QUICK_NAME_ADJECTIVES.length)];
   const noun = QUICK_NAME_NOUNS[Math.floor(rng() * QUICK_NAME_NOUNS.length)];
-  return `${adjective}-${noun}`;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const date = `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}`;
+  return `${adjective}-${noun}-${date}`;
 }
 
 /**
