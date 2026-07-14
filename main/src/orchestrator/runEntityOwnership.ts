@@ -7,7 +7,7 @@
  *    de-duped. The seed ideas are `workflow_runs.seed_idea_id` (the single idea
  *    chosen or minted at planner launch) UNION `workflow_runs.seed_idea_ids` (the
  *    JSON string array of ALL ideas seeded into a multi-idea planner run,
- *    migration 060 — NULL on a legacy single-idea run, where seed_idea_id alone
+ *    migration 061 — NULL on a legacy single-idea run, where seed_idea_id alone
  *    carries the seed). A seed idea may also appear among the run-created ideas,
  *    and seed_idea_id is dual-written as seed_idea_ids[0]; the Set collapses every
  *    overlap so each idea surfaces once.
@@ -99,7 +99,7 @@ function runCreatedChildLineageIdeaIds(db: DatabaseLike, runId: string): Set<str
 
 /**
  * The idea ids a run owns: its seed ideas (`seed_idea_id` UNION the
- * `seed_idea_ids` JSON array, migration 060) UNION the ideas it created during
+ * `seed_idea_ids` JSON array, migration 061) UNION the ideas it created during
  * the run, de-duped. Fail-soft — see file header contract.
  *
  * @param db    Narrow DatabaseLike interface.
@@ -123,7 +123,7 @@ export function listRunOwnedIdeaIds(db: DatabaseLike, runId: string): string[] {
     // Pre-migration-017 DB (no seed_idea_id column) — fall through.
   }
 
-  // seed_idea_ids (migration 060) read is wrapped in its OWN try/catch, distinct
+  // seed_idea_ids (migration 061) read is wrapped in its OWN try/catch, distinct
   // from the seed_idea_id read above: a pre-060 DB lacking the column, a NULL
   // value (legacy single-idea run), or corrupt JSON must each contribute nothing
   // while the seed_idea_id + run-created unions keep working exactly as before.

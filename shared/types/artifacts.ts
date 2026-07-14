@@ -19,7 +19,7 @@ import type { CaptureOrigin, VerdictV1 } from './visualVerification';
 /**
  * Artifact kinds. The bespoke (templated) types plus a `generic` fallback
  * that renders in the live canvas. Keep in sync with the `artifacts.atype`
- * CHECK constraint (currently widened by migration 061).
+ * CHECK constraint (currently widened by migration 062).
  */
 export type ArtifactType =
   | 'idea-spec'
@@ -91,7 +91,7 @@ export function isCanvasArtifact(atype: ArtifactType): boolean {
  * Atypes that are NOT one-per-(run, atype): a single run may hold MULTIPLE
  * artifacts of this kind, one per source entity (source_ref). The multi-idea
  * planner batch (IDEA-009) mints one 'idea-spec' per seeded/owned idea, so
- * idea-spec identity is (run_id, atype, source_ref) — see migration 062. Every
+ * idea-spec identity is (run_id, atype, source_ref) — see migration 063. Every
  * OTHER atype keeps the strict one-per-(run, atype) rule.
  *
  * This is the SINGLE HOME for the "per-entity" decision — the ArtifactRouter

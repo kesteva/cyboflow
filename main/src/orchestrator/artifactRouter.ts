@@ -344,7 +344,7 @@ export class ArtifactRouter {
 
     // Identity for the enrich-vs-insert decision. Non-per-entity atypes are
     // one-per-(run, atype). PER-ENTITY atypes (idea-spec — a multi-idea planner
-    // batch mints one per idea, migration 062) are one-per-(run, atype,
+    // batch mints one per idea, migration 063) are one-per-(run, atype,
     // source_ref); `source_ref IS ?` is null-safe (binding null matches a NULL
     // row), mirroring the partial unique index COALESCE(source_ref, '').
     const existing = isPerEntityArtifact(change.atype)

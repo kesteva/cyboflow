@@ -40,7 +40,7 @@ function apply(db: Database.Database, files: string[]): void {
   for (const f of files) db.exec(readFileSync(join(MIG_DIR, f), 'utf-8'));
 }
 
-const THROUGH_061 = [
+const THROUGH_062 = [
   '006_cyboflow_schema.sql',
   '011_workflow_step_tracking.sql',
   '014_native_tasks.sql',
@@ -48,13 +48,13 @@ const THROUGH_061 = [
   '016_review_items.sql',
   '035_artifacts.sql',
   '045_arch_design_atype.sql',
-  '061_approve_ideas_atype.sql',
+  '062_approve_ideas_atype.sql',
 ];
 
 function buildDb(): Database.Database {
   const db = new Database(':memory:');
   seedProject(db);
-  apply(db, [...THROUGH_061, '063_per_idea_spec_artifacts.sql']);
+  apply(db, [...THROUGH_062, '063_per_idea_spec_artifacts.sql']);
   return db;
 }
 
@@ -131,7 +131,7 @@ describe('Migration 063: one idea-spec per idea (split identity)', () => {
   it('(e) preserves pre-existing artifacts rows across the copy', () => {
     const db = new Database(':memory:');
     seedProject(db);
-    apply(db, THROUGH_061); // up to but NOT including 063
+    apply(db, THROUGH_062); // up to but NOT including 063
     seedRun(db, 'run-keep');
     db.prepare(
       `INSERT INTO artifacts (id, run_id, atype, label, mode, payload_json, source_ref, committed)

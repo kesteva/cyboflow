@@ -123,7 +123,7 @@ function eventCount(db: Database.Database, type: string, id: string): number {
 
 /**
  * buildDb() variant carrying workflow_runs.seed_idea_id (migration 017) +
- * seed_idea_ids (migration 060) — neither is part of buildDb()'s base migration
+ * seed_idea_ids (migration 061) — neither is part of buildDb()'s base migration
  * chain, so the DECOMP-LINKAGE auto-stamp tests ALTER them in directly (mirrors
  * runEntityOwnership.test.ts's buildDbWithSeedIds). Guarded against a
  * double-ALTER in case a future shared fixture already carries one column.

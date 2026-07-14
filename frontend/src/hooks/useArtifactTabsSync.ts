@@ -83,7 +83,7 @@ export function useArtifactTabsSync(sessionKey: string, artifacts: Artifact[], l
       // means each id flips at most once (no repeated yanking on later syncs).
       //
       // Tab-id scheme (centerPaneStore.artifactTabId): PER-ENTITY atypes
-      // (idea-spec — the multi-idea planner batch, migration 062) key by artifact
+      // (idea-spec — the multi-idea planner batch, migration 063) key by artifact
       // id (`art:idea-spec:<id>`), so passing artifactId below surfaces ONE tab
       // per idea. Every OTHER atype keys by atype alone (`art:<atype>` — "one tab
       // per atype within a session"), so that slot acts as one VIEWER per atype: a

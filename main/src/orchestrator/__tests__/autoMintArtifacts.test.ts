@@ -91,9 +91,9 @@ function buildDb(): Database.Database {
   // 060 adds workflow_runs.seed_idea_ids (multi-idea planner batch); 061 widens the
   // artifacts.atype CHECK to include 'approve-ideas'; 062 relaxes idea-spec identity
   // to (run_id, atype, source_ref) so a run can hold one idea-spec per idea.
-  db.exec(readFileSync(join(migDir, '060_run_seed_idea_ids.sql'), 'utf-8'));
-  db.exec(readFileSync(join(migDir, '061_approve_ideas_atype.sql'), 'utf-8'));
-  db.exec(readFileSync(join(migDir, '062_per_idea_spec_artifacts.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '061_run_seed_idea_ids.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '062_approve_ideas_atype.sql'), 'utf-8'));
+  db.exec(readFileSync(join(migDir, '063_per_idea_spec_artifacts.sql'), 'utf-8'));
   // workflow_runs.session_id (migration 019) — added directly here; migration 019
   // itself backfills from the Crystal-legacy `sessions` table, which this entity
   // test DB doesn't create. ArtifactRouter's emitChange resolves this column on
@@ -126,7 +126,7 @@ function setSeedIdea(db: Database.Database, runId: string, ideaId: string): void
 }
 
 /**
- * Stamp the multi-idea seed (migration 060): seed_idea_ids = JSON array, with
+ * Stamp the multi-idea seed (migration 061): seed_idea_ids = JSON array, with
  * seed_idea_id dual-written as ids[0] (the production dual-write invariant).
  */
 function setSeedIdeaIds(db: Database.Database, runId: string, ideaIds: string[]): void {

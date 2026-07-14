@@ -234,7 +234,7 @@ describe('RunCenterPane', () => {
     );
     const session = useCenterPaneStore.getState().bySession['sess-1'];
     // The artifact tab was registered… (idea-spec is per-entity → tab id keyed by
-    // artifact id, `art:idea-spec:<id>`, migration 062).
+    // artifact id, `art:idea-spec:<id>`, migration 063).
     expect(session.tabs.some((t) => t.id === 'art:idea-spec:art-seed')).toBe(true);
     // …but focus stayed on Flow, and the tab carries no client "new" pulse.
     expect(session.activeTabId).toBe('flow');

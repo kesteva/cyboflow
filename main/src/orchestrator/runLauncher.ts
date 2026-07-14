@@ -318,7 +318,7 @@ export class RunLauncher {
       // baseline config even after the workflow gained active variants ("restart
       // inherits, no re-roll"). Ignored when requestedVariantId is set.
       baseline?: boolean;
-      // Planner multi-idea seed (IDEA-009 / migration 060). When supplied, the run
+      // Planner multi-idea seed (IDEA-009 / migration 061). When supplied, the run
       // is dual-write seeded: seed_idea_id gets ideaIds[0] (the single-idea `#
       // Selected idea` block still fires) AND seed_idea_ids gets the JSON array —
       // even a 1-element array (downstream buildSeedIdeaBlock treats <=1 resolved
@@ -363,7 +363,7 @@ export class RunLauncher {
       }
     }
 
-    // Planner multi-idea seed validation (IDEA-009 / migration 060) — BEFORE
+    // Planner multi-idea seed validation (IDEA-009 / migration 061) — BEFORE
     // createRun so an invalid request never leaves a half-created run row behind.
     // Mirrors the compound findingIds guard: the multi-idea ideaIds seed is ONLY
     // valid for the 'planner' workflow (the singular positional ideaId stays valid

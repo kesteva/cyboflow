@@ -1440,7 +1440,7 @@ describe('RunExecutor.getPrompt — seed-idea injection (migration 017)', () => 
   });
 });
 
-describe('RunExecutor.getPrompt — multi-idea seed injection (migration 060)', () => {
+describe('RunExecutor.getPrompt — multi-idea seed injection (migration 061)', () => {
   it('prepends an indexed <ideas> XML block when seed_idea_ids resolves >1 idea', async () => {
     const run = makeWorkflowRunRow({
       worktree_path: '/w',

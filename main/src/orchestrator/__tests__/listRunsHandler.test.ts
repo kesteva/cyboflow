@@ -247,7 +247,7 @@ describe('listRunsHandler variant_label projection', () => {
 });
 
 // ---------------------------------------------------------------------------
-// (g) seed_idea_ids projection (migration 060 / IDEA-009 multi-idea planner).
+// (g) seed_idea_ids projection (migration 061 / IDEA-009 multi-idea planner).
 //
 // WorkflowRunListRow declares seed_idea_ids, but the handler's SELECT previously
 // omitted it — a silent-drop: the field was always undefined at runtime. The

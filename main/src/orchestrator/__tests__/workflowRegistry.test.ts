@@ -141,7 +141,7 @@ describe('WorkflowRegistry', () => {
     // migration 032); layer the additive ALTER on top so the projection resolves.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
     // getRunById now SELECTs workflow_runs.seed_idea_ids (IDEA-009 multi-idea
-    // planner seed, migration 060); layer the additive ALTER on top so the
+    // planner seed, migration 061); layer the additive ALTER on top so the
     // projection resolves. Mirrors seed_finding_ids above.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_ids TEXT');
     // createRun stamps workflow_runs.model (per-run model pin, migration 037) and

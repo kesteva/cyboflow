@@ -197,7 +197,7 @@ export function createTestDb(options?: CreateTestDbOptions): Database.Database {
     // batch_id (the swimlane-canvas switch keys off it). Same read-model
     // surface, same opt-in flag. Additive — never widens GATE_SCHEMA.
     addBatchIdColumnOnce();
-    // Migration 060 (multi-idea planner batch): listRunsHandler's SELECT projects
+    // Migration 061 (multi-idea planner batch): listRunsHandler's SELECT projects
     // seed_idea_ids (the JSON seed array) so the multi-idea signal reaches the
     // frontend. Same read-model surface, same opt-in flag. Additive.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_ids TEXT');

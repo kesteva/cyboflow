@@ -495,7 +495,7 @@ function pluralize(count: number, noun: string): string {
  * multi-idea idea-spec mint uses), e.g. "5 epics, 12 tasks across 3 ideas".
  * sourceRef stays the run's FIRST owned idea (`ideaId`) — artifact IDENTITY is
  * UNCHANGED: still exactly ONE decomposed-stories artifact per (run_id, atype),
- * never one per idea like idea-spec (migration 062's per-source-ref identity is
+ * never one per idea like idea-spec (migration 063's per-source-ref identity is
  * idea-spec-only). Content is re-derived on read (mode 'template') so
  * payloadJson is left null. Shared by the step-completion path
  * (mintDecomposedStories) and the run-start baseline path (handleRunStart).

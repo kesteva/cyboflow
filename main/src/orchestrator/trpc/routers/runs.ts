@@ -855,7 +855,7 @@ export const runsRouter = router({
       // launcher writes workflow_runs.seed_idea_id DIRECTLY (no stage derivation);
       // RunExecutor.getPrompt injects the idea body as a `# Selected idea` block.
       ideaId: z.string().min(1).optional(),
-      // Optional planner MULTI-idea seed (IDEA-009 / migration 060). When supplied,
+      // Optional planner MULTI-idea seed (IDEA-009 / migration 061). When supplied,
       // the launcher dual-writes workflow_runs.seed_idea_id = ideaIds[0] AND
       // seed_idea_ids (a JSON string array); RunExecutor.getPrompt injects the
       // combined `# Selected ideas` block. Only valid for the 'planner' workflow
@@ -1186,7 +1186,7 @@ export const runsRouter = router({
           findingIds = undefined;
         }
       }
-      // Planner multi-idea seed recovery (IDEA-009 / migration 060). Fail-soft,
+      // Planner multi-idea seed recovery (IDEA-009 / migration 061). Fail-soft,
       // mirroring the seed_finding_ids parse above: a run seeded with multiple ideas
       // re-threads them so the restart re-dual-writes. CORRUPT JSON degrades to the
       // single-idea path (seed_idea_id is threaded as the positional ideaId below),
@@ -1244,7 +1244,7 @@ export const runsRouter = router({
         // still restarts correctly. Baseline runs (variant_id NULL) pin `baseline:
         // true` so the resolver returns null WITHOUT rotating — reproducing the
         // baseline config even if the workflow has since gained active variants
-        // (restart inherits, no re-roll). ideaIds (IDEA-009 / migration 060) is
+        // (restart inherits, no re-roll). ideaIds (IDEA-009 / migration 061) is
         // merged in whenever the failed run carried a multi-idea seed, so the
         // restart re-dual-writes seed_idea_id + seed_idea_ids.
         {

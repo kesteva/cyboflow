@@ -1434,7 +1434,7 @@ export class RunExecutor {
 
   /**
    * Resolve the `# Selected idea` block body for a planner run's seed ideas
-   * (Piece A; multi-idea via migration 060).
+   * (Piece A; multi-idea via migration 061).
    *
    * Branches on the number of RESOLVED seed ideas:
    *  - 0 resolved → null, so getPrompt falls through to the base prompt.
@@ -1444,7 +1444,7 @@ export class RunExecutor {
    *  - >1 → an indexed `<ideas>` XML block (Anthropic long-context guidance)
    *    with a per-idea fold directive.
    *
-   * seed_idea_ids (migration 060) is preferred and parsed fail-soft; each id is
+   * seed_idea_ids (migration 061) is preferred and parsed fail-soft; each id is
    * resolved fail-soft and skipped on a per-id miss or a content-less entity, so
    * one stale id never sinks the block. When it yields nothing (null/corrupt/all
    * misses) the single `seed_idea_id` (migration 017) path is the fallback.
@@ -1458,7 +1458,7 @@ export class RunExecutor {
     const run = this.registry.getRunById(runId);
     if (!run) return null;
 
-    // Multi-idea seed (migration 060): resolve every id in seed_idea_ids.
+    // Multi-idea seed (migration 061): resolve every id in seed_idea_ids.
     const multiIds = this.parseSeedIdeaIds(runId, run.seed_idea_ids ?? null);
     if (multiIds) {
       const resolved: Array<{ id: string; idea: ResolvedIdea }> = [];
@@ -1481,7 +1481,7 @@ export class RunExecutor {
   }
 
   /**
-   * Parse a run's seed_idea_ids (migration 060) into a non-empty string array,
+   * Parse a run's seed_idea_ids (migration 061) into a non-empty string array,
    * fail-soft. Returns null when the JSON is absent, does not parse, is not an
    * array, or filters to no non-empty strings — the caller then falls back to
    * the single seed_idea_id path. Mirrors buildSelectedFindingsBlock's parse.

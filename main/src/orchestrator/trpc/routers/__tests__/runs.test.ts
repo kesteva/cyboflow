@@ -646,7 +646,7 @@ describe('cyboflow.runs.start', () => {
   });
 
   // -------------------------------------------------------------------------
-  // (a6b) ideaIds supplied (IDEA-009 / migration 060) → forwarded in the trailing
+  // (a6b) ideaIds supplied (IDEA-009 / migration 061) → forwarded in the trailing
   // launchOptions bag (16th slot), NOT the singular positional ideaId (5th). The
   // launcher dual-writes seed_idea_id + seed_idea_ids and enforces the planner-only
   // rule (covered in runLauncher.test.ts, where the real launcher runs).

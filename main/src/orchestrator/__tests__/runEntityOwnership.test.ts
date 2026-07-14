@@ -159,7 +159,7 @@ describe('runEntityOwnership.listRunOwnedIdeaIds', () => {
   });
 });
 
-describe('runEntityOwnership.listRunOwnedIdeaIds — seed_idea_ids (migration 060)', () => {
+describe('runEntityOwnership.listRunOwnedIdeaIds — seed_idea_ids (migration 061)', () => {
   it('unions seed_idea_id, seed_idea_ids and run-created ideas, de-duped', () => {
     const db = buildDbWithSeedIds();
     insertRun(db, 'run-multi', 'ide_seed');

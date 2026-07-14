@@ -70,7 +70,7 @@ function sessionHostedDb(): Database.Database {
   db.exec('ALTER TABLE workflow_runs ADD COLUMN session_id TEXT');
   // Migration 034: seed_finding_ids is written by the compound launch path.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
-  // Migration 060: seed_idea_ids is dual-written by the planner multi-idea path.
+  // Migration 061: seed_idea_ids is dual-written by the planner multi-idea path.
   db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_idea_ids TEXT');
   db.exec(`
     CREATE TABLE sessions (
@@ -1309,7 +1309,7 @@ describe('RunLauncher.launch ideaId seed', () => {
         .get(cannedRunId) as SeedRow;
 
       // seed_idea_id is written; task_id stays null (no task link from an ideaId).
-      // The legacy singular ideaId path leaves seed_idea_ids NULL (migration 060).
+      // The legacy singular ideaId path leaves seed_idea_ids NULL (migration 061).
       expect(row.seed_idea_id).toBe('IDEA-42');
       expect(row.seed_idea_ids).toBeNull();
       expect(row.task_id).toBeNull();
@@ -1335,7 +1335,7 @@ describe('RunLauncher.launch ideaId seed', () => {
 });
 
 // ---------------------------------------------------------------------------
-// RunLauncher.launch — ideaIds (planner multi-idea seed, IDEA-009 / migration 060)
+// RunLauncher.launch — ideaIds (planner multi-idea seed, IDEA-009 / migration 061)
 //
 // The multi-idea seed rides the trailing launchOptions bag (16th positional).
 // When supplied it DUAL-WRITES seed_idea_id = ideaIds[0] AND seed_idea_ids = the

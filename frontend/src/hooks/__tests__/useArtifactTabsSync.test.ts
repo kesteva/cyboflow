@@ -76,7 +76,7 @@ describe('useArtifactTabsSync', () => {
 
     const session = useCenterPaneStore.getState().bySession[SESSION_KEY];
     // The artifact tab was registered… (idea-spec is per-entity, so its tab id is
-    // keyed by the artifact id — `art:idea-spec:<id>`, migration 062).
+    // keyed by the artifact id — `art:idea-spec:<id>`, migration 063).
     expect(session.tabs.some((t) => t.id === 'art:idea-spec:art-seed')).toBe(true);
     // …but focus stayed on the pre-existing file tab, not the flow tab and not
     // the freshly-registered artifact tab.

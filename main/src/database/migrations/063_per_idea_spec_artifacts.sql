@@ -24,7 +24,7 @@ CREATE TABLE artifacts_new (
   id           TEXT PRIMARY KEY,
   run_id       TEXT NOT NULL,
   session_id   TEXT,
-  atype        TEXT NOT NULL CHECK (atype IN ('idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic', 'arch-design', 'approve-ideas')),
+  atype        TEXT NOT NULL CHECK (atype IN ('idea-spec', 'decomposed-stories', 'screenshots', 'ui-prototype', 'generic', 'arch-design', 'compound-recommendations', 'approve-ideas')),
   label        TEXT NOT NULL,
   step_origin  TEXT,
   mode         TEXT NOT NULL DEFAULT 'canvas' CHECK (mode IN ('template', 'canvas')),

@@ -39,7 +39,7 @@ describe('cyboflow.runs.restart', () => {
     db = createTestDb({ includeSubstrate: true, includeWorkflowRunTaskColumns: true });
     // Columns / tables restart touches that the shared fixture does not add.
     db.exec('ALTER TABLE workflow_runs ADD COLUMN seed_finding_ids TEXT');
-    // seed_idea_ids (migration 060) is now provided by createTestDb's
+    // seed_idea_ids (migration 061) is now provided by createTestDb's
     // includeSubstrate branch (listRunsHandler projects it), so it is NOT added
     // here — a manual ADD COLUMN would collide ("duplicate column name").
     db.exec(
@@ -188,7 +188,7 @@ describe('cyboflow.runs.restart', () => {
   });
 
   // -------------------------------------------------------------------------
-  // (b4) Planner multi-idea seed recovery (IDEA-009 / migration 060): a run seeded
+  // (b4) Planner multi-idea seed recovery (IDEA-009 / migration 061): a run seeded
   // with seed_idea_ids re-threads them in the launchOptions bag (merged with the
   // baseline pin), AND the first id rides the positional ideaId (5th) via
   // seed_idea_id — so the restart re-dual-writes both columns.

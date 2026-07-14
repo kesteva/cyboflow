@@ -970,7 +970,7 @@ export class TaskChangeRouter {
       // path); only when seed_idea_id is present. Fail-soft: a missing column on
       // an older DB / missing run row degrades to NULL (the prior behaviour).
       if (originatingIdeaId === null && type === 'task' && change.runId) {
-        // MULTI-SEED FAIL-CLOSED (migration 060, IDEA-009 TASK-029): a run
+        // MULTI-SEED FAIL-CLOSED (migration 061, IDEA-009 TASK-029): a run
         // seeded with MORE THAN ONE idea (workflow_runs.seed_idea_ids, a JSON
         // string array) cannot have its lineage safely guessed — stamping any
         // single one of several seed ideas would silently mis-attribute the
