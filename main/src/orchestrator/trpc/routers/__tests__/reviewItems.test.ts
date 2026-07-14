@@ -927,6 +927,26 @@ describe('cyboflow.reviewItems.resolve — approve-ideas verdict fold', () => {
     const row = db.prepare('SELECT status FROM review_items WHERE id = ?').get('rvw_empty') as { status: string };
     expect(row.status).toBe('pending');
   });
+
+  it('REFUSES a scalar outcome with no verdicts (BAD_REQUEST) — the batch gate survives', async () => {
+    const { caller, db } = buildCaller();
+    seedApproveIdeasGate(db, { runId: 'run-scalar', reviewItemId: 'rvw_scalar', ideaRefs: ['IDEA-1', 'IDEA-2'] });
+
+    // The generic queue card's "Approve & resume" payload — without per-idea
+    // verdicts it would clear the gate while recording no decision at all.
+    await expect(
+      caller.cyboflow.reviewItems.resolve({ projectId: 1, reviewItemId: 'rvw_scalar', outcome: 'approve' }),
+    ).rejects.toSatisfy((err: unknown) => err instanceof TRPCError && err.code === 'BAD_REQUEST');
+
+    const row = db.prepare('SELECT status, resolution FROM review_items WHERE id = ?').get('rvw_scalar') as {
+      status: string;
+      resolution: string | null;
+    };
+    expect(row.status).toBe('pending');
+    expect(row.resolution).toBeNull();
+    const run = db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get('run-scalar') as { status: string };
+    expect(run.status).toBe('awaiting_review'); // not resumed
+  });
 });
 
 // ---------------------------------------------------------------------------

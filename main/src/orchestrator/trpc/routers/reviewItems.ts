@@ -640,6 +640,10 @@ export const reviewItemsRouter = router({
    * the resumed planner cannot read review items via MCP, so the decisions are
    * DELIVERED as the run's next turn (nudge-first / resolve-on-delivered) — a
    * refused resume throws CONFLICT and records nothing so the card can retry.
+   * A SCALAR resolve (outcome/resolution, no `verdicts`) on a PENDING
+   * approve-ideas gate is REFUSED by the shared core (invalid_payload →
+   * BAD_REQUEST): it would clear the gate while recording no per-idea decision,
+   * stranding the parked planner. Submit the verdict map instead.
    */
   resolve: protectedProcedure
     .input(

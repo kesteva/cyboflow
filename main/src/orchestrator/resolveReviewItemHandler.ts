@@ -336,13 +336,22 @@ export async function resolveReviewItem(
 
   // Read the item's run binding + blocking flag + gate provenance BEFORE resolving
   // (the resolve changes none of them) so we know whether to apply aggregate-unblock
-  // and whether an explicit outcome drives gate side effects.
+  // and whether an explicit outcome drives gate side effects. `status` feeds only
+  // the approve-ideas scalar guard below (pending-only, so an already-terminal item
+  // still surfaces the chokepoint's own 'invalid_status' refusal).
   const before = db
     .prepare(
-      'SELECT run_id AS runId, blocking, kind, source, payload_json AS payloadJson FROM review_items WHERE id = ? AND project_id = ?',
+      'SELECT run_id AS runId, blocking, status, kind, source, payload_json AS payloadJson FROM review_items WHERE id = ? AND project_id = ?',
     )
     .get(input.reviewItemId, input.projectId) as
-    | { runId?: string | null; blocking?: number; kind?: string; source?: string | null; payloadJson?: string | null }
+    | {
+        runId?: string | null;
+        blocking?: number;
+        status?: string;
+        kind?: string;
+        source?: string | null;
+        payloadJson?: string | null;
+      }
     | undefined;
 
   const gateStepId = humanGateStepId(before?.kind, before?.source);
@@ -353,6 +362,26 @@ export async function resolveReviewItem(
   let resolution = input.outcome !== undefined ? input.outcome : input.resolution;
 
   try {
+    // Approve-ideas BATCH gate, scalar-resolve REFUSAL: without a verdict map
+    // there is nothing to fold OR deliver — a bare approve/reject (the generic
+    // queue card's buttons, or a monitor resolveReviewItem action) would clear
+    // the gate while recording no per-idea decision, stranding the parked
+    // planner with no way to learn which ideas were approved. Refuse
+    // (invalid_payload → BAD_REQUEST) and leave the gate pending; the only
+    // honest surface is the run's Approve-ideas artifact tab, which submits
+    // `verdicts`. Pending-only so an already-terminal item still surfaces the
+    // chokepoint's own 'invalid_status' below.
+    if (
+      input.verdicts === undefined &&
+      before?.status === 'pending' &&
+      isApproveIdeasGate(before?.kind, before?.source, before?.payloadJson)
+    ) {
+      throw new ReviewItemError(
+        'invalid_payload',
+        "an approve-ideas batch gate needs per-idea verdicts — submit decisions from the run's Approve ideas tab",
+      );
+    }
+
     // Approve-ideas BATCH gate: a submitted per-idea verdict map is validated
     // against the gate's batch payload and folded into the stored resolution the
     // resumed planner reads. Recognized via isApproveIdeasGate (source OR payload)
@@ -363,7 +392,8 @@ export async function resolveReviewItem(
     // (empty / unknown ref / bad value / incomplete coverage), which the catch below
     // maps to a refusal BEFORE the single atomic resolve runs, so the gate stays
     // pending and nothing is recorded. Only the "Submit decisions" surface passes
-    // `verdicts`; every scalar gate leaves it undefined and is byte-for-byte unaffected.
+    // `verdicts`; a scalar resolve on THIS gate was already refused above, and every
+    // OTHER gate leaves `verdicts` undefined and is byte-for-byte unaffected.
     if (input.verdicts !== undefined && isApproveIdeasGate(before?.kind, before?.source, before?.payloadJson)) {
       resolution = foldIdeaVerdicts(parseApproveIdeasRefs(before?.payloadJson), input.verdicts);
     }

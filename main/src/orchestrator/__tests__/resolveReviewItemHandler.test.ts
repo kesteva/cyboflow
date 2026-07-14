@@ -424,6 +424,57 @@ describe('resolveReviewItem — approve-ideas verdict fold', () => {
     expect(runStatus(db, 'run-bad')).toBe('awaiting_review');
   });
 
+  it('REFUSES a scalar outcome on a pending approve-ideas gate (no verdicts → nothing to fold or deliver)', async () => {
+    const db = buildDb();
+    seedApproveIdeasGate(db, { id: 'rvw_scalar', runId: 'run-scalar', ideaRefs: ['IDEA-1', 'IDEA-2'] });
+    const deps = makeDeps(db);
+
+    // The generic queue card's "Approve & resume" sends exactly this — it would
+    // clear the batch gate while recording no per-idea decision.
+    const result = await resolveReviewItem(baseInput({ reviewItemId: 'rvw_scalar', outcome: 'approve' }), deps);
+
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_payload' });
+    expect(deps.applyReviewItemResolve).not.toHaveBeenCalled();
+    expect(deps.maybeResumeRun).not.toHaveBeenCalled();
+    expect(itemStatus(db, 'rvw_scalar')).toBe('pending'); // gate survives to be submitted properly
+    expect(runStatus(db, 'run-scalar')).toBe('awaiting_review');
+  });
+
+  it('REFUSES a scalar resolve on the AGENT-minted gate too (payload-only discriminant)', async () => {
+    const db = buildDb();
+    // The orchestrated planner's mint: source 'agent:<label>' — the gate is
+    // discoverable ONLY via payload_json, so a source-keyed guard would miss it.
+    seedApproveIdeasGate(db, {
+      id: 'rvw_scalar_agent',
+      runId: 'run-sa',
+      ideaRefs: ['IDEA-1'],
+      source: 'agent:planner',
+    });
+    const deps = makeDeps(db);
+
+    const result = await resolveReviewItem(
+      baseInput({ reviewItemId: 'rvw_scalar_agent', resolution: 'looks fine' }),
+      deps,
+    );
+
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_payload' });
+    expect(deps.applyReviewItemResolve).not.toHaveBeenCalled();
+    expect(itemStatus(db, 'rvw_scalar_agent')).toBe('pending');
+  });
+
+  it('an already-terminal approve-ideas gate still surfaces invalid_status, not the scalar guard', async () => {
+    const db = buildDb();
+    seedApproveIdeasGate(db, { id: 'rvw_done', runId: 'run-done', ideaRefs: ['IDEA-1'] });
+    db.prepare("UPDATE review_items SET status = 'resolved' WHERE id = ?").run('rvw_done');
+    const deps = makeDeps(db);
+
+    // The scalar guard is pending-only — a terminal item falls through to the
+    // chokepoint, whose own refusal names the real problem.
+    const result = await resolveReviewItem(baseInput({ reviewItemId: 'rvw_done', outcome: 'approve' }), deps);
+
+    expect(result).toMatchObject({ ok: false, reason: 'invalid_status' });
+  });
+
   it('rejects a verdict map on a gate whose payload carries no batch ideaRefs', async () => {
     const db = buildDb();
     seedItem(db, {

@@ -237,6 +237,22 @@ function guardResolutionPath(resolution: string | null): 'separate-planner' | 'r
   return null;
 }
 
+/**
+ * IDEA-009: true for an approve-ideas BATCH-gate decision item — minted by
+ * EITHER the programmatic runner (source 'gate:human-step:approve-ideas') OR
+ * the default ORCHESTRATED planner (source 'agent:<label>', where the gate is
+ * discoverable ONLY via the payload — keying on source alone would silently
+ * never fire for it, the TASK-035B landmine). Mirrors the backend's
+ * isApproveIdeasGate discriminant; parsed defensively like the sibling
+ * {@link isIdeaSizeGuard}.
+ */
+function isApproveIdeasGateItem(item: ReviewItem): boolean {
+  if (item.kind !== 'decision') return false;
+  if (item.source === 'gate:human-step:approve-ideas') return true;
+  const payload = item.payload;
+  return Boolean(payload && payload.kind === 'decision' && payload.gate === 'approve-ideas');
+}
+
 export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewItemCardProps): React.ReactElement {
   const {
     pendingItemId,
@@ -353,6 +369,8 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
 
   // A question-sourced decision can only be settled by ANSWERING the question
   // in the session chat — jump there (mirrors TypeGroupedQueue's openRunSession).
+  // Also reused by the approve-ideas gate branch: its verdicts are submitted
+  // from the run's Approve-ideas artifact tab, so the CTA is the same navigation.
   const handleAnswerInSession = (): void => {
     if (item.run_id === null) return;
     useCyboflowStore.getState().setActiveRun(item.run_id);
@@ -540,6 +558,32 @@ export function ReviewItemCard({ item, isFocused = false, onResolved }: ReviewIt
                 Return to backlog
               </Button>
             </>
+          );
+        }
+        // IDEA-009 approve-ideas BATCH gate: per-idea verdicts are collected and
+        // submitted from the run's Approve-ideas artifact tab (which validates the
+        // map and DELIVERS the decisions into the parked planner). A generic scalar
+        // Approve/Reject here would clear the gate while recording no per-idea
+        // decision — the backend refuses exactly that (invalid_payload) — so the
+        // only honest action is routing to the run session.
+        if (isApproveIdeasGateItem(item)) {
+          if (item.status !== 'pending') {
+            return (
+              <span className="text-xs text-text-tertiary" data-testid="approve-ideas-resolved">
+                Decisions submitted
+              </span>
+            );
+          }
+          return (
+            <Button
+              variant="primary"
+              size="sm"
+              disabled={item.run_id === null}
+              onClick={handleAnswerInSession}
+              data-testid="decision-review-ideas"
+            >
+              Review ideas →
+            </Button>
           );
         }
         // A question-sourced decision is an OPEN AskUserQuestion: the run is

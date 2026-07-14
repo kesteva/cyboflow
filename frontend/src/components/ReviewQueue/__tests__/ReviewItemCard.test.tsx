@@ -572,4 +572,76 @@ describe('ReviewItemCard', () => {
     expect(screen.queryByTestId('decision-reject')).not.toBeInTheDocument();
   });
 
+  // -- IDEA-009 approve-ideas BATCH gate ------------------------------------
+
+  it('a pending approve-ideas gate routes to the session, NOT the generic Approve/Reject (payload-keyed, agent mint)', () => {
+    // The default ORCHESTRATED planner's mint: source 'agent:<label>' — the gate
+    // is discoverable ONLY via the payload discriminant (TASK-035B landmine).
+    const item = makeItem(
+      'decision',
+      { id: 'rvw_ai', blocking: true, source: 'agent:planner' },
+      { kind: 'decision', gate: 'approve-ideas', ideaRefs: ['IDEA-1', 'IDEA-2'] },
+    );
+    render(<ReviewItemCard item={item} />);
+    expect(screen.getByTestId('decision-review-ideas')).toHaveTextContent('Review ideas');
+    // A generic scalar Approve/Reject would clear the gate with no per-idea
+    // decision recorded — the backend refuses it, so the card must not offer it.
+    expect(screen.queryByTestId('decision-resolve')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('decision-reject')).not.toBeInTheDocument();
+  });
+
+  it('a pending approve-ideas gate is also recognized by the programmatic source alone', () => {
+    const item = makeItem('decision', {
+      id: 'rvw_ai_prog',
+      blocking: true,
+      source: 'gate:human-step:approve-ideas',
+    });
+    render(<ReviewItemCard item={item} />);
+    expect(screen.getByTestId('decision-review-ideas')).toBeInTheDocument();
+    expect(screen.queryByTestId('decision-resolve')).not.toBeInTheDocument();
+  });
+
+  it('clicking Review ideas navigates to the run session without firing any triage mutation', async () => {
+    const { useNavigationStore } = await import('../../../stores/navigationStore');
+    const { useCyboflowStore } = await import('../../../stores/cyboflowStore');
+    useNavigationStore.setState({ activeProjectId: null });
+    // The real setActiveRun opens a run-event IPC subscription (window.electron),
+    // which jsdom lacks — stub it so the handler's navigation half is observable.
+    const setActiveRun = vi.fn();
+    const realSetActiveRun = useCyboflowStore.getState().setActiveRun;
+    useCyboflowStore.setState({ setActiveRun });
+    try {
+      const item = makeItem(
+        'decision',
+        { id: 'rvw_ai_nav', blocking: true, source: 'agent:planner', run_id: 'run-ai' },
+        { kind: 'decision', gate: 'approve-ideas', ideaRefs: ['IDEA-1'] },
+      );
+      render(<ReviewItemCard item={item} />);
+      fireEvent.click(screen.getByTestId('decision-review-ideas'));
+      expect(setActiveRun).toHaveBeenCalledWith('run-ai');
+      expect(useNavigationStore.getState().activeProjectId).toBe(5);
+      expect(useNavigationStore.getState().view).toBe('session');
+      expect(mockResolve).not.toHaveBeenCalled();
+      expect(mockDismiss).not.toHaveBeenCalled();
+    } finally {
+      useCyboflowStore.setState({ setActiveRun: realSetActiveRun });
+    }
+  });
+
+  it('a resolved approve-ideas gate shows the submitted state, not the CTA', () => {
+    const item = makeItem(
+      'decision',
+      {
+        id: 'rvw_ai_done',
+        blocking: true,
+        source: 'agent:planner',
+        status: 'resolved',
+        resolution: 'idea-verdicts: {"IDEA-1":"approve"}',
+      },
+      { kind: 'decision', gate: 'approve-ideas', ideaRefs: ['IDEA-1'] },
+    );
+    render(<ReviewItemCard item={item} />);
+    expect(screen.getByTestId('approve-ideas-resolved')).toHaveTextContent('Decisions submitted');
+    expect(screen.queryByTestId('decision-review-ideas')).not.toBeInTheDocument();
+  });
 });
