@@ -41,11 +41,14 @@ input block that arrives ahead of this prompt:
   `id` for the fold write and the guard entity-link, and the `ref` for the gates.
 
 The batch flow is a **lightweight lane for small ideas**: it plans each seed into
-tasks and gates the whole batch once. It deliberately SKIPS the optional design
-steps (`ui-prototype` / `architecture` / `approve-design`) and the epic breakdown —
-an idea large enough to want those deserves its own focused planner run, so the
-batch **guards it out** (below) rather than half-planning it. A batch that collapses
-to a single surviving idea falls back to the single-idea flow, inline gates and all.
+tasks and gates the whole batch once. It SKIPS the `architecture` step and the epic
+breakdown — an idea large enough to want a schema/architecture design or an epic tree
+deserves its own focused planner run, so the batch **guards it out** (below) rather
+than half-planning it. It does **not** skip `ui-prototype` wholesale: when any
+surviving idea has a UI surface, the batch builds ONE combined prototype covering all
+of them (step 4 batch branch), and `approve-design` then gates that single prototype.
+A batch that collapses to a single surviving idea falls back to the single-idea flow,
+inline gates and all.
 
 **Sizing.** `small` = shippable in roughly one focused session across a handful of
 files with no schema or architecture change; anything that needs decomposition into
@@ -91,9 +94,10 @@ After sizing every seed, your **working set** is the surviving `small` ideas:
   resolve them.
 - **exactly 1 survives** → fall back to the single-idea flow from the `approve-idea`
   gate onward (inline **AskUserQuestion**), treating that idea as the selected idea.
-- **>1 survive** → run the **batch `approve-ideas` gate** (step 3 batch branch),
-  then decompose each approved idea into tasks and gate them together at
-  `approve-plan`.
+- **>1 survive** → run the **batch `approve-ideas` gate** (step 3 batch branch);
+  then, if any approved idea has a UI surface, build ONE combined `ui-prototype`
+  across them (step 4 batch branch) and gate it at `approve-design`; then decompose
+  each approved idea into tasks and gate them together at `approve-plan`.
 
 **Lineage is mandatory in a batch run.** In any run seeded as a batch (the `<ideas>`
 block, or a raw prompt from which you minted more than one idea) the write
@@ -179,21 +183,32 @@ human approves the plan.
    with a URL, surface it: call `cyboflow_report_artifact` with
    `atype: 'ui-prototype'`, a short label, and `payload_json`
    `{"url": "<the url>"}` — the live prototype tab renders from that URL. Skip this
-   step entirely when the flag is `no`. **Batch branch:** skipped — see
-   **Multi-idea batches**.
-5. **architecture** (optional) → run ONLY when context returned `ARCH_DESIGN: yes`
-   (or the user explicitly asked for an architecture writeup). Report the step, then
-   delegate to `cyboflow-architecture` with the spec (plus prototype notes when one
-   exists). Fold its `## Architecture design` section into the idea body via
-   `cyboflow_update_task` — when the body already has an `## Architecture design`
-   section, REPLACE that section (never stack a second copy); otherwise append it.
-   The arch-design deliverable tab derives from the body automatically, so you do
-   **not** report an artifact for this step. Skip when the flag is `no`. **Batch
-   branch:** skipped — see **Multi-idea batches**.
+   step entirely when the flag is `no`. **Batch branch:** when ANY surviving idea's
+   context returned `UI_PROTOTYPE: yes`, delegate **once** to `cyboflow-ui-prototype`
+   with ALL of those approved specs, instructing a **single combined prototype**
+   clearly sectioned per idea; report the ONE `ui-prototype` artifact exactly as
+   above (one tab for the whole batch). When no surviving idea wants a prototype, skip
+   the step.
+5. **architecture** (optional, **`large` ideas only**) → run ONLY for a `large`-scoped
+   idea whose context returned `ARCH_DESIGN: yes` (or when the user explicitly asked
+   for an architecture writeup). A `small` idea **SKIPS** this step — architecture
+   design is a large-idea concern, and context emits `ARCH_DESIGN: no` for small ideas.
+   Report the step, then delegate to `cyboflow-architecture` with the spec (plus
+   prototype notes when one exists). Fold its `## Architecture design` section into the
+   idea body via `cyboflow_update_task` — when the body already has an
+   `## Architecture design` section, REPLACE that section (never stack a second copy);
+   otherwise append it. The arch-design deliverable tab derives from the body
+   automatically, so you do **not** report an artifact for this step. **Batch branch:**
+   skipped — every batched idea is `small` (a `large` one was guarded out), so the batch
+   never runs it.
 6. **approve-design** → **human gate, inline — ONLY when step 4 or 5 ran.** When
    neither ran, do **not** ask — continue straight to epics. Use **AskUserQuestion**
    (header `Approve design`, options Approve / Revise ONLY; put the prototype URL
-   and/or the architecture section in the option markdown preview).
+   and/or the architecture section in the option markdown preview). **Batch branch:**
+   the batch never runs step 5, so this gate runs only when step 4 built the combined
+   prototype — one gate over that single prototype (there is no per-idea design gate);
+   put its URL in the preview. When no batch prototype was built, skip straight to
+   tasks.
    - **Approve** → continue to epics.
    - **Revise** → re-delegate the relevant subagent(s) with the feedback, refresh
      the artifact (a repeat `cyboflow_report_artifact` call with the same atype

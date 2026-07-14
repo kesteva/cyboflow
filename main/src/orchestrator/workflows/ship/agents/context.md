@@ -79,7 +79,9 @@ writeup, answer `yes` for that flag regardless of the heuristics below.
   meaningful user-facing UI surface where an interactive mockup would materially
   sharpen the human's review (new views, layout changes, novel interactions);
   `no` for backend/infra/refactor work or trivial UI tweaks.
-- A line `ARCH_DESIGN: yes` or `ARCH_DESIGN: no` — `yes` when the change spans
-  multiple subsystems, introduces new data models/services/seams, or has more than
-  one viable architecture worth an explicit human decision; `no` for localized
+- A line `ARCH_DESIGN: yes` or `ARCH_DESIGN: no` — the flag is only meaningful for a
+  `large`-scoped idea, so **a `small` idea ALWAYS emits `ARCH_DESIGN: no`** (small
+  ideas skip the architecture step). For a `large` idea, answer `yes` when the change
+  spans multiple subsystems, introduces new data models/services/seams, or has more
+  than one viable architecture worth an explicit human decision; `no` for localized
   changes that follow existing patterns.
