@@ -245,3 +245,61 @@ describe('listRunsHandler variant_label projection', () => {
     expect(result[0].variant_label).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------
+// (g) seed_idea_ids projection (migration 060 / IDEA-009 multi-idea planner).
+//
+// WorkflowRunListRow declares seed_idea_ids, but the handler's SELECT previously
+// omitted it — a silent-drop: the field was always undefined at runtime. The
+// frontend's multi-idea signal (Workflow Progress chip → combined approve-ideas
+// review) reads it off the run row, so it must round-trip. Same read-model
+// surface / fixture flag as substrate + variant_label.
+// ---------------------------------------------------------------------------
+
+function seedRunWithSeedIdeaIds(
+  db: Database.Database,
+  runId: string,
+  projectId: number,
+  seedIdeaIds: string | null,
+): void {
+  const workflowId = `workflow-for-${runId}`;
+
+  db.prepare(
+    `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json)
+     VALUES (?, ?, 'test-workflow', '{}')`,
+  ).run(workflowId, projectId);
+
+  db.prepare(
+    `INSERT INTO workflow_runs
+       (id, workflow_id, project_id, worktree_path, status, policy_json, seed_idea_ids)
+     VALUES (?, ?, ?, '/tmp/test', 'running', '{}', ?)`,
+  ).run(runId, workflowId, projectId, seedIdeaIds);
+}
+
+describe('listRunsHandler seed_idea_ids projection', () => {
+  let db: Database.Database;
+
+  beforeEach(() => {
+    db = createTestDb({ includeSubstrate: true });
+  });
+
+  it('round-trips the seed_idea_ids JSON array for a multi-idea planner run', () => {
+    seedRunWithSeedIdeaIds(db, 'run-multi', 1, JSON.stringify(['ide_1', 'ide_2', 'ide_3']));
+
+    const adapter = dbAdapter(db);
+    const result = listRunsHandler(adapter, 1);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].seed_idea_ids).toBe('["ide_1","ide_2","ide_3"]');
+  });
+
+  it('reads back seed_idea_ids as null for a single-idea / non-planner run', () => {
+    seedRun(db, { id: 'run-single', projectId: 1 });
+
+    const adapter = dbAdapter(db);
+    const result = listRunsHandler(adapter, 1);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].seed_idea_ids ?? null).toBeNull();
+  });
+});

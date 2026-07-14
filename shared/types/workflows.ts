@@ -241,6 +241,15 @@ export interface WorkflowRunListRow {
   /** Sprint lane batch (migration 022) — soft link to sprint_batches.id; stamped on seeded 'sprint' runs, NULL for every other run. */
   batch_id?: string | null;
   /**
+   * Multi-idea planner seed (migration 060) — the JSON-encoded string array of ALL
+   * idea ids seeded into a planner batch run. Surfaced on the list row so the
+   * frontend can read the multi-idea signal (e.g. the Workflow Progress idea-spec
+   * chip routing to the combined approve-ideas review) without a second query.
+   * NULL for single-idea / non-planner runs. Optional + additive, mirroring
+   * `batch_id?`; the frontend `ActiveRunRow` already declares the matching field.
+   */
+  seed_idea_ids?: string | null;
+  /**
    * Per-run pinned model alias (migration 037) — the user-facing alias stamped
    * onto workflow_runs.model at launch (Configure surface), resolved to a concrete
    * snapshot at the spawn seam. Surfaced on the list row so the run composer can

@@ -32,6 +32,16 @@ vi.mock('../../../utils/cyboflowApi', () => ({
   },
 }));
 
+// Mock the run artifacts hook so the "creates ⟨artifact⟩" chip's multi-idea route
+// signal (does the run have an approve-ideas artifact?) is controllable per test,
+// with no real IPC. Default: no artifacts (single-idea run).
+const { mockUseArtifactsList } = vi.hoisted(() => ({
+  mockUseArtifactsList: vi.fn(() => ({ artifacts: [] as unknown[], loaded: true })),
+}));
+vi.mock('../../../hooks/useArtifactsList', () => ({
+  useArtifactsList: mockUseArtifactsList,
+}));
+
 // ---------------------------------------------------------------------------
 // Imports after mocks
 // ---------------------------------------------------------------------------
@@ -169,6 +179,9 @@ beforeEach(() => {
   act(() => {
     useCyboflowStore.getState().clearActiveRun();
   });
+
+  // Default: single-idea run (no approve-ideas artifact).
+  mockUseArtifactsList.mockReturnValue({ artifacts: [], loaded: true });
 
   // jsdom does not implement scrollIntoView
   HTMLElement.prototype.scrollIntoView = vi.fn();
@@ -426,5 +439,73 @@ describe('WorkflowProgressTimeline', () => {
     const artifactTab = session?.tabs.find((t) => t.kind === 'artifact' && t.atype === 'idea-spec');
     expect(artifactTab).toBeDefined();
     expect(session?.activeTabId).toBe(artifactTab?.id);
+  });
+
+  // ── idea-spec chip route target: single-idea vs multi-idea batch ──────────
+
+  /** A one-step planner phaseState whose only step declares the idea-spec artifact. */
+  function ideaSpecChipPhaseState(): UseWorkflowPhaseStateResult {
+    return {
+      definition: {
+        id: 'planner',
+        phases: [
+          {
+            id: 'plan',
+            label: 'Plan',
+            color: '#3b6dd6',
+            steps: [
+              {
+                id: 'write-spec',
+                name: 'Write idea spec',
+                agent: 'idea-extractor',
+                mcps: [],
+                retries: 0,
+                outputArtifact: { atype: 'idea-spec', label: 'idea spec' },
+              },
+            ],
+          },
+        ],
+      },
+      currentStepId: null,
+      stepStates: [{ stepId: 'write-spec', status: 'pending' }],
+      isLoading: false,
+      error: null,
+    };
+  }
+
+  it('idea-spec chip opens an idea-spec tab on a SINGLE-idea run (no approve-ideas artifact)', () => {
+    useCenterPaneStore.setState({ bySession: {} });
+    mockUseArtifactsList.mockReturnValue({ artifacts: [], loaded: true });
+
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={ideaSpecChipPhaseState()} />);
+
+    act(() => {
+      fireEvent.click(screen.getByTestId('step-artifact-chip-idea-spec'));
+    });
+
+    const session = useCenterPaneStore.getState().bySession['run-A'];
+    expect(session?.tabs.some((t) => t.kind === 'artifact' && t.atype === 'idea-spec')).toBe(true);
+    // Single-idea → it must NOT route to the combined approve-ideas review.
+    expect(session?.tabs.some((t) => t.kind === 'artifact' && t.atype === 'approve-ideas')).toBe(false);
+  });
+
+  it('idea-spec chip routes to the combined approve-ideas review on a MULTI-idea run', () => {
+    useCenterPaneStore.setState({ bySession: {} });
+    // The run carries an approve-ideas artifact → the combined review exists.
+    mockUseArtifactsList.mockReturnValue({ artifacts: [{ atype: 'approve-ideas' }], loaded: true });
+
+    render(<WorkflowProgressTimeline runId="run-A" phaseState={ideaSpecChipPhaseState()} />);
+
+    act(() => {
+      fireEvent.click(screen.getByTestId('step-artifact-chip-idea-spec'));
+    });
+
+    const session = useCenterPaneStore.getState().bySession['run-A'];
+    const approveTab = session?.tabs.find((t) => t.kind === 'artifact' && t.atype === 'approve-ideas');
+    expect(approveTab).toBeDefined();
+    expect(approveTab?.label).toBe('Approve ideas');
+    expect(session?.activeTabId).toBe(approveTab?.id);
+    // The chip did NOT also open a per-idea idea-spec tab.
+    expect(session?.tabs.some((t) => t.kind === 'artifact' && t.atype === 'idea-spec')).toBe(false);
   });
 });

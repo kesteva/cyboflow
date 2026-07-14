@@ -20,6 +20,7 @@ import { useEffect, type ReactElement } from 'react';
 import { useCyboflowStore } from '../../stores/cyboflowStore';
 import { useActiveRunsStore } from '../../stores/activeRunsStore';
 import { useCenterPaneStore } from '../../stores/centerPaneStore';
+import { useArtifactsList } from '../../hooks/useArtifactsList';
 import type { UseWorkflowPhaseStateResult } from '../../hooks/useWorkflowPhaseState';
 import type { WorkflowStepState, WorkflowStep } from '../../../../shared/types/workflows';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
@@ -199,9 +200,16 @@ function ensurePulseStyle(): void {
 function StepArtifactChip({
   outputArtifact,
   sessionKey,
+  combinedReviewAvailable,
 }: {
   outputArtifact: NonNullable<WorkflowStep['outputArtifact']>;
   sessionKey: string | null;
+  /**
+   * True when the run has a combined approve-ideas review surface (a multi-idea
+   * planner batch). The idea-spec step's chip then routes to that single review
+   * (which lists every seeded idea) instead of a single per-idea idea-spec tab.
+   */
+  combinedReviewAvailable: boolean;
 }): ReactElement {
   const { atype, label } = outputArtifact;
   const color = ARTIFACT_COLORS[atype];
@@ -212,6 +220,18 @@ function StepArtifactChip({
   const handleClick = (e: React.MouseEvent): void => {
     e.stopPropagation();
     if (sessionKey === null) return;
+    // Multi-idea batch: the idea-spec chip opens the COMBINED approve-ideas review
+    // rather than a single idea-spec tab. We key on approve-ideas artifact PRESENCE
+    // (combinedReviewAvailable), NOT seed_idea_ids.length > 1, because the target
+    // tab must actually exist to open — a multi-idea run whose approve-ideas artifact
+    // hasn't minted yet still opens a per-idea idea-spec tab. Single-idea runs (no
+    // approve-ideas artifact) are unchanged.
+    if (atype === 'idea-spec' && combinedReviewAvailable) {
+      useCenterPaneStore
+        .getState()
+        .openArtifactTab(sessionKey, { atype: 'approve-ideas', label: 'Approve ideas' });
+      return;
+    }
     useCenterPaneStore.getState().openArtifactTab(sessionKey, { atype, label });
   };
 
@@ -260,15 +280,28 @@ export function WorkflowProgressTimeline({
   // ── Center-pane session key for the "creates ⟨artifact⟩" chip ──────────────
   // The chip opens an artifact tab keyed by the run's parent session (the same
   // key RunCenterPane uses: session_id ?? runId). Resolve the run from
-  // activeRunsStore to read its session_id; fall back to the runId for legacy
-  // parentless runs. Selecting the whole map keeps this reactive to refresh().
+  // activeRunsStore to read its session_id (and project_id); fall back to the
+  // runId for legacy parentless runs. Selecting the whole map keeps this reactive
+  // to refresh().
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
-  const sessionKey: string | null =
+  const run =
     runId === null
-      ? null
-      : (Object.values(runsByProject)
+      ? undefined
+      : Object.values(runsByProject)
           .flat()
-          .find((r) => r.id === runId)?.session_id ?? runId);
+          .find((r) => r.id === runId);
+  const sessionKey: string | null = runId === null ? null : (run?.session_id ?? runId);
+  const projectId = run?.project_id ?? null;
+
+  // ── Multi-idea signal for the idea-spec chip's route target ────────────────
+  // A run has a COMBINED approve-ideas review exactly when it carries an
+  // approve-ideas artifact (the multi-idea planner batch mints one). We prefer
+  // artifact presence over seed_idea_ids.length > 1 as the signal because the
+  // idea-spec chip opens the approve-ideas TAB, which can only open once the
+  // artifact exists. useArtifactsList no-ops (returns []) until runId+projectId
+  // are both known, so a single-idea run reads combinedReviewAvailable=false.
+  const { artifacts: runArtifacts } = useArtifactsList(runId, projectId);
+  const combinedReviewAvailable = runArtifacts.some((a) => a.atype === 'approve-ideas');
 
   // ── Pulse style injection (once) ───────────────────────────────────────────
   useEffect(() => {
@@ -443,6 +476,7 @@ export function WorkflowProgressTimeline({
                       <StepArtifactChip
                         outputArtifact={step.outputArtifact}
                         sessionKey={sessionKey}
+                        combinedReviewAvailable={combinedReviewAvailable}
                       />
                     )}
                   </div>
