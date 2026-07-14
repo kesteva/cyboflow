@@ -42,7 +42,11 @@ import { trpc } from '../trpc/client';
 import { API } from '../utils/api';
 import type { Project } from '../types/project';
 import type { ReviewItem } from '../../../shared/types/reviews';
-import { useActiveRunsStore, type ActiveRunRow } from './activeRunsStore';
+import {
+  isTerminalRunStatus,
+  useActiveRunsStore,
+  type ActiveRunRow,
+} from './activeRunsStore';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -128,6 +132,17 @@ export function flattenPendingBlockingFindings(
         out.push(item);
       }
     }
+  }
+  return out;
+}
+
+/** Flatten only genuinely active rows; the rail store also retains terminal history. */
+export function flattenActiveRunRows(
+  byProject: Record<number, ActiveRunRow[]>,
+): ActiveRunRow[] {
+  const out: ActiveRunRow[] = [];
+  for (const runs of Object.values(byProject)) {
+    out.push(...runs.filter((run) => !isTerminalRunStatus(run.status)));
   }
   return out;
 }
@@ -368,17 +383,13 @@ export function useAggregatedBlockingFindings(): ReviewItem[] {
 }
 
 /**
- * All active runs across every project, flattened from the REUSED
- * {@link useActiveRunsStore} (never re-fetched here). Memoized on the stable
- * `runsByProject` slice.
+ * All genuinely active runs across every project, flattened from the REUSED
+ * {@link useActiveRunsStore} (never re-fetched here). Terminal rows retained for
+ * sidebar history are excluded. Memoized on the stable `runsByProject` slice.
  */
 export function useAggregatedRuns(): ActiveRunRow[] {
   const runsByProject = useActiveRunsStore((s) => s.runsByProject);
-  return useMemo(() => {
-    const out: ActiveRunRow[] = [];
-    for (const runs of Object.values(runsByProject)) out.push(...runs);
-    return out;
-  }, [runsByProject]);
+  return useMemo(() => flattenActiveRunRows(runsByProject), [runsByProject]);
 }
 
 /**

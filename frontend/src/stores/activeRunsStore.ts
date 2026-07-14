@@ -1,11 +1,11 @@
 /**
- * activeRunsStore — Zustand slice that surfaces ACTIVE workflow runs in the rail.
+ * activeRunsStore — Zustand slice that surfaces reachable workflow runs in the rail.
  *
  * Workflow runs live in the `workflow_runs` table and do NOT create `sessions`
  * rows, so they are invisible to the session-store-driven rail. This store fills
- * that gap: it lists workflow runs per project and exposes only the ACTIVE ones
- * (anything that is not terminal — see {@link TERMINAL_RUN_STATUSES}) so an
- * in-flight run (e.g. a "planner" run) stays reachable from the sidebar.
+ * that gap: it lists workflow runs per project and exposes every non-terminal
+ * run plus the newest terminal run for each parent session, so both in-flight
+ * work and the latest finished terminal workflow stay reachable in the sidebar.
  *
  * ## Data source (reused, not new)
  *   - `trpc.cyboflow.runs.list({ projectId })`      → WorkflowRunListRow[]
@@ -30,7 +30,10 @@
  * project-expand effect. This avoids inventing a polling loop.
  *
  * ## Filtering
- *   - Terminal statuses (completed / failed / canceled) are excluded.
+ *   - Every non-terminal run is included.
+ *   - The newest terminal run for each non-null session_id is retained.
+ *   - The selected run is retained even when it is older or parentless.
+ *   - Other terminal history and parentless terminal runs are excluded.
  *   - `__quick__` sentinel-workflow runs are excluded (quick sessions own those).
  */
 import { create } from 'zustand';
@@ -61,16 +64,20 @@ const QUICK_WORKFLOW_NAME = '__quick__';
 const QUICK_WORKFLOW_ID_SUFFIX = `-${QUICK_WORKFLOW_NAME}`;
 
 /**
- * Terminal run statuses. A run in any of these is NOT active and is excluded
- * from the rail. Everything else (queued / starting / running / awaiting_review
- * / stuck / any future awaiting_* state) is treated as active — defined as an
- * exclusion set so new non-terminal statuses surface by default.
+ * Terminal run statuses. Everything else (queued / starting / running /
+ * awaiting_review / stuck / any future awaiting_* state) is treated as active.
+ * The exclusion set makes new non-terminal statuses active by default.
  */
 const TERMINAL_RUN_STATUSES = new Set<string>(['completed', 'failed', 'canceled']);
 
+/** Shared active/busy discriminator for consumers of retained rail rows. */
+export function isTerminalRunStatus(status: string): boolean {
+  return TERMINAL_RUN_STATUSES.has(status);
+}
+
 /**
- * An active workflow run as rendered in the rail: the list row plus its
- * resolved workflow display name.
+ * A workflow run reachable from the rail: the list row plus its resolved
+ * workflow display name. The row may be terminal under the retention rules.
  */
 export interface ActiveRunRow extends WorkflowRunListRow {
   /** Human-readable workflow name (e.g. "planner"), resolved from workflow_id. */
@@ -88,12 +95,12 @@ export interface ActiveRunRow extends WorkflowRunListRow {
 }
 
 export interface ActiveRunsState {
-  /** Active runs keyed by projectId. Empty until `refresh(projectId)` runs. */
+  /** Sidebar-reachable runs keyed by projectId. Empty until `refresh(projectId)` runs. */
   runsByProject: Record<number, ActiveRunRow[]>;
 
   /**
-   * Fetch and refresh the active-run list for a single project.
-   * Resolves workflow_id → name, excludes `__quick__` runs and terminal runs.
+   * Fetch and refresh the reachable-run list for a single project.
+   * Resolves workflow_id → name and applies the quick/terminal retention rules.
    * Failures are logged and leave existing state untouched (never throws).
    */
   refresh: (projectId: number) => Promise<void>;
@@ -108,7 +115,7 @@ export interface ActiveRunsState {
 }
 
 // ---------------------------------------------------------------------------
-// Pure helper — build the active-run rows from the two list queries.
+// Pure helper — build the sidebar-reachable rows from the two list queries.
 // ---------------------------------------------------------------------------
 
 export function buildActiveRunRows(
@@ -119,19 +126,35 @@ export function buildActiveRunRows(
   const nameById = new Map<string, string>();
   for (const wf of workflows) nameById.set(wf.id, wf.name);
 
-  return runs
+  const nonQuickRuns = runs
     // Exclude quick-session sentinel runs. They can't be filtered by resolved
     // name (the `__quick__` workflow is excluded from `workflows.list`, so
     // `nameById` never holds it — the old name-based check let every quick run
     // slip through with a "workflow" fallback label). Match the id suffix
     // instead, which is the only reliable signal here.
-    .filter((run) => !run.workflow_id.endsWith(QUICK_WORKFLOW_ID_SUFFIX))
-    // Drop terminal runs so the rail stays an active-runs list, NOT a historic
-    // log — EXCEPT the currently-selected run (`pinnedRunId`). A run the user is
-    // viewing must stay reachable even after it completes/fails, otherwise it
-    // vanishes mid-session and can't be reopened (e.g. a planner that finished
-    // or got stuck with no merge prompt).
-    .filter((run) => !TERMINAL_RUN_STATUSES.has(run.status) || run.id === pinnedRunId)
+    .filter((run) => !run.workflow_id.endsWith(QUICK_WORKFLOW_ID_SUFFIX));
+
+  // Retain one terminal workflow per real parent session. runs.list is ordered
+  // newest-first, but comparing created_at keeps this helper correct for callers
+  // and tests that supply a different order. Ties preserve the first list row.
+  const newestTerminalBySession = new Map<string, WorkflowRunListRow>();
+  for (const run of nonQuickRuns) {
+    if (!isTerminalRunStatus(run.status) || run.session_id == null) continue;
+    const previous = newestTerminalBySession.get(run.session_id);
+    if (!previous || run.created_at > previous.created_at) {
+      newestTerminalBySession.set(run.session_id, run);
+    }
+  }
+
+  return nonQuickRuns
+    // Keep every active row, the newest terminal row per parent session, and the
+    // selected row. This is intentionally not a history list: older terminal
+    // rows and unpinned terminal rows without a parent session remain hidden.
+    .filter((run) =>
+      !isTerminalRunStatus(run.status) ||
+      run.id === pinnedRunId ||
+      (run.session_id != null && newestTerminalBySession.get(run.session_id)?.id === run.id),
+    )
     .map((run) => ({
       ...run,
       workflowName: nameById.get(run.workflow_id) ?? 'workflow',
@@ -167,9 +190,9 @@ export const useActiveRunsStore = create<ActiveRunsState>((set, get) => {
         // terminal (read non-reactively — refresh already re-runs on
         // activeRunId change via the rail's effect).
         const pinnedRunId = useCyboflowStore.getState().activeRunId;
-        const active = buildActiveRunRows(runs, workflows, pinnedRunId);
+        const reachable = buildActiveRunRows(runs, workflows, pinnedRunId);
         set((state) => ({
-          runsByProject: { ...state.runsByProject, [projectId]: active },
+          runsByProject: { ...state.runsByProject, [projectId]: reachable },
         }));
       } catch (err: unknown) {
         console.warn('[activeRunsStore] refresh failed for project', projectId, err);

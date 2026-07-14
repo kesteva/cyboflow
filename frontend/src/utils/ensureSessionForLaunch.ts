@@ -17,9 +17,9 @@
  * rule in `RunLauncher.launch` (`main/src/orchestrator/runLauncher.ts`): reusing
  * a session that already hosts a running workflow would make that guard throw
  * (`session <id> already has a running workflow`), so we fall through to a fresh
- * session instead. "Busy" is read from `useActiveRunsStore.runsByProject`, which
- * already excludes terminal runs (see `TERMINAL_RUN_STATUSES`), so every row
- * present there is a non-terminal (active) run.
+ * session instead. "Busy" is read from `useActiveRunsStore.runsByProject`; that
+ * store also retains the latest terminal workflow per session for sidebar
+ * visibility, so the shared terminal predicate keeps those resting rows free.
  *
  * The returned id is threaded into `runs.start.mutate({ sessionId })` so the
  * RunLauncher executes the run in that session's worktree and dual-writes
@@ -52,7 +52,7 @@ import { API } from './api';
 import { panelApi } from '../services/panelApi';
 import { trackEvent } from './telemetry';
 import { useCyboflowStore } from '../stores/cyboflowStore';
-import { useActiveRunsStore } from '../stores/activeRunsStore';
+import { isTerminalRunStatus, useActiveRunsStore } from '../stores/activeRunsStore';
 import { useSessionStore } from '../stores/sessionStore';
 import type {
   AgentProvider,
@@ -82,13 +82,14 @@ export async function ensureSessionForLaunch(
   // Launch into the active session if one is already selected — but ONLY when it
   // is free (and the caller hasn't forced a new session). Reusing a session that
   // already hosts a running workflow would trip the backend's
-  // one-active-workflow-per-session guard in RunLauncher.launch. Active runs in
-  // `runsByProject` are already terminal-filtered, so a row whose session_id
-  // matches the selection means that session is busy.
+  // one-active-workflow-per-session guard in RunLauncher.launch. The rail store
+  // retains terminal rows, so only a matching NON-terminal row means busy.
   const sel = useCyboflowStore.getState().selectedSessionId;
   if (sel && !opts.forceNew) {
     const activeRuns = useActiveRunsStore.getState().runsByProject[projectId] ?? [];
-    const selectionIsBusy = activeRuns.some((run) => run.session_id === sel);
+    const selectionIsBusy = activeRuns.some(
+      (run) => run.session_id === sel && !isTerminalRunStatus(run.status),
+    );
     // Workflows may never run on the raw checkout: an in-place session (or the
     // main-repo singleton) can't host a run, so skip reuse and fall through to a
     // fresh worktree-backed session. Mirrors the backend RunLauncher guard.

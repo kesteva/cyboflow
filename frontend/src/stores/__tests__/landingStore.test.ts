@@ -14,6 +14,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import type { ReviewItem, ReviewItemKind, ReviewItemStatus } from '../../../../shared/types/reviews';
+import type { ActiveRunRow } from '../activeRunsStore';
 
 vi.mock('../../trpc/client', () => ({
   trpc: {
@@ -38,10 +39,25 @@ vi.mock('../../utils/api', () => ({
 
 import {
   collectPendingBlockingRunIds,
+  flattenActiveRunRows,
   flattenPendingBlockingFindings,
   flattenPendingReviewItems,
   upsertReviewItem,
 } from '../landingStore';
+
+describe('flattenActiveRunRows', () => {
+  it('excludes terminal rows retained by the sidebar store', () => {
+    const row = (id: string, status: ActiveRunRow['status']): ActiveRunRow =>
+      ({ id, status } as ActiveRunRow);
+
+    const result = flattenActiveRunRows({
+      1: [row('running', 'running'), row('completed', 'completed')],
+      2: [row('awaiting', 'awaiting_review'), row('failed', 'failed'), row('canceled', 'canceled')],
+    });
+
+    expect(result.map((run) => run.id)).toEqual(['running', 'awaiting']);
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Fixture builder

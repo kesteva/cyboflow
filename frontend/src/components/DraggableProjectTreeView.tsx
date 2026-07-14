@@ -3,7 +3,7 @@ import { ChevronRight, ChevronDown, Folder as FolderIcon, FolderOpen, Plus, Sett
 import { useErrorStore } from '../stores/errorStore';
 import { useNavigationStore } from '../stores/navigationStore';
 import { useCyboflowStore } from '../stores/cyboflowStore';
-import { useActiveRunsStore } from '../stores/activeRunsStore';
+import { isTerminalRunStatus, useActiveRunsStore } from '../stores/activeRunsStore';
 import { useSessionStore } from '../stores/sessionStore';
 import ProjectSettings from './ProjectSettings';
 import { EmptyState } from './EmptyState';
@@ -912,21 +912,22 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
     // RUN pane instead of the resting QuickSessionCanvas. Otherwise the session
     // view shows "No active run / Add a workflow" while a workflow is plainly
     // running in it — the exact mismatch where clicking the run vs. the session
-    // gave two different views. runsByProject is already terminal-filtered AND
-    // excludes the quick session's __quick__ sentinel, so a hit here is a real,
-    // live workflow run; routing it through setActiveRun is therefore safe (no
-    // __quick__-sentinel throw in getPhaseState). Mirrors handleActiveRunClick.
+    // gave two different views. runsByProject also retains the newest terminal
+    // workflow per session, so explicitly require a non-terminal row here. Quick
+    // sentinels are excluded by the store. Mirrors handleActiveRunClick.
     const hostedRun =
       session.projectId != null
-        ? (runsByProject[session.projectId] ?? []).find((r) => r.session_id === session.id)
+        ? (runsByProject[session.projectId] ?? []).find(
+            (r) => r.session_id === session.id && !isTerminalRunStatus(r.status),
+          )
         : undefined;
     if (hostedRun) {
       useCyboflowStore.getState().setActiveRun(hostedRun.id, session.id);
     } else {
       // Rail sessions are quick sessions: open them via the panel surface, the
-      // same way useQuickSession does on creation. Passing runId (when the row
-      // was backfilled per TASK-788) starts the approval subscription.
-      useCyboflowStore.getState().setActiveQuickSession(session.id, session.runId ?? undefined);
+      // same way useQuickSession does on creation. chatRunId is the persistent
+      // __quick__ sentinel; runId may instead point at the latest resting flow.
+      useCyboflowStore.getState().setActiveQuickSession(session.id, session.chatRunId ?? undefined);
     }
     if (session.projectId != null) {
       useNavigationStore.getState().setActiveProjectId(session.projectId);
@@ -1157,19 +1158,28 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
               // the run's worktree is the session's, which is now gone, so the run
               // should not linger in the rail after a session dismiss. Runs with no
               // session (legacy parentless) are unaffected.
-              const projectActiveRuns = (runsByProject[project.id] ?? []).filter(
+              const projectRunRows = (runsByProject[project.id] ?? []).filter(
                 (r) => r.session_id == null || !allSessions.some((s) => s.id === r.session_id && s.archived),
               );
               const sessionCount = projectSessions.length;
-              const runCount = projectActiveRuns.length;
-              // Group active runs under their parent session (workflow_runs.session_id).
+              // Group reachable runs under their parent session (workflow_runs.session_id).
               // A run nests beneath its session row; runs with no session (legacy
-              // parentless) — or whose parent session isn't in the active list — render
-              // as their own top-level rows after the session list, as before.
+              // parentless) — or whose parent session isn't in the active list — may
+              // render as their own top-level rows after the session list.
               const sessionIdSet = new Set(projectSessions.map((s) => s.id));
-              const runsForSession = (sid: string): typeof projectActiveRuns =>
-                projectActiveRuns.filter((r) => r.session_id === sid);
-              const parentlessRuns = projectActiveRuns.filter(
+              // A retained terminal row is sidebar history only when its parent
+              // session is reachable. Unpinned terminal rows never become orphan
+              // top-level entries while session hydration catches up or after dismiss.
+              const visibleRunRows = projectRunRows.filter(
+                (r) =>
+                  !isTerminalRunStatus(r.status) ||
+                  r.id === activeRunId ||
+                  (r.session_id != null && sessionIdSet.has(r.session_id)),
+              );
+              const runCount = visibleRunRows.length;
+              const runsForSession = (sid: string): typeof visibleRunRows =>
+                visibleRunRows.filter((r) => r.session_id === sid);
+              const parentlessRuns = visibleRunRows.filter(
                 (r) => r.session_id == null || !sessionIdSet.has(r.session_id),
               );
               const parentlessRunCount = parentlessRuns.length;
@@ -1329,8 +1339,8 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                         // (activeRunsStore stamps workflowName). '' → helper falls
                         // back to "workflow".
                         const workflowName =
-                          projectActiveRuns.find((r) => r.experiment_id === exp.id)?.workflowName ??
-                          projectActiveRuns.find((r) => r.id === exp.run_a_id || r.id === exp.run_b_id)
+                          visibleRunRows.find((r) => r.experiment_id === exp.id)?.workflowName ??
+                          visibleRunRows.find((r) => r.id === exp.run_a_id || r.id === exp.run_b_id)
                             ?.workflowName ??
                           '';
                         const name = experimentDisplayName(
@@ -1390,7 +1400,7 @@ export function DraggableProjectTreeView(_props: DraggableProjectTreeViewProps) 
                                 <div className="border-t border-border-primary/60">
                                   {group.arms.map((armRow) => {
                                     const armRun = armRow.runId
-                                      ? projectActiveRuns.find((r) => r.id === armRow.runId)
+                                      ? visibleRunRows.find((r) => r.id === armRow.runId)
                                       : undefined;
                                     const dotStatus = armRun?.status ?? armRow.session.status;
                                     const armActivityAt = armRow.session.lastActivity ?? armRow.session.createdAt;

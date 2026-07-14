@@ -6,7 +6,7 @@
  *   (a) session rows render under an expanded project (by name)
  *   (b) main-repo sessions are excluded
  *   (c) clicking a quick session (no runId) → setActiveQuickSession(id, undefined) + setActiveProjectId
- *   (d) clicking a runId-backed session → setActiveQuickSession(id, runId) + setActiveProjectId
+ *   (d) clicking a resting session → setActiveQuickSession(id, chatRunId) + setActiveProjectId
  *       (panel surface, NOT setActiveRun — avoids the __quick__ workflow-pane bug)
  *   (d2) clicking a session that HOSTS an active workflow run → setActiveRun (run pane,
  *        not the resting QuickSessionCanvas)
@@ -201,6 +201,8 @@ vi.mock('../../stores/activeRunsStore', () => {
     refresh: async () => {},
   });
   return {
+    isTerminalRunStatus: (status: string) =>
+      status === 'completed' || status === 'failed' || status === 'canceled',
     useActiveRunsStore: Object.assign(
       (selector: (s: ReturnType<typeof state>) => unknown) => selector(state()),
       { getState: state },
@@ -377,8 +379,16 @@ describe('DraggableProjectTreeView — active-session tree', () => {
     expect(mockCloseHumanReview).toHaveBeenCalled();
   });
 
-  it('(d) clicking a runId-backed session opens the panel surface via setActiveQuickSession(id, runId)', async () => {
-    mockSessions = [makeSession({ id: 'sess-wf', name: 'wf-CLICK', projectId: 1, runId: 'run-xyz' })];
+  it('(d) clicking a resting session opens quick chat with chatRunId, never runId', async () => {
+    mockSessions = [
+      makeSession({
+        id: 'sess-wf',
+        name: 'wf-CLICK',
+        projectId: 1,
+        runId: 'flow-run-xyz',
+        chatRunId: 'quick-chat-xyz',
+      }),
+    ];
 
     await renderExpanded();
     await waitFor(() => expect(screen.getByText('wf-CLICK')).toBeInTheDocument());
@@ -387,10 +397,9 @@ describe('DraggableProjectTreeView — active-session tree', () => {
     expect(row).not.toBeNull();
     fireEvent.click(row!);
 
-    // Quick sessions get a backfilled runId (TASK-788); reopening must NOT route
-    // through setActiveRun (workflow-run pane) — that throws on the __quick__
-    // sentinel in getPhaseState. Pass runId so the approval subscription starts.
-    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-wf', 'run-xyz');
+    // runId is the latest flow role and may be terminal. Quick chat approvals
+    // must subscribe to the never-clobbered __quick__ sentinel in chatRunId.
+    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-wf', 'quick-chat-xyz');
     expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
     expect(mockSetActiveRun).not.toHaveBeenCalled();
     expect(mockCloseHumanReview).toHaveBeenCalled();
@@ -400,8 +409,8 @@ describe('DraggableProjectTreeView — active-session tree', () => {
     // Regression: a session co-hosting a live (non-terminal) workflow run must open
     // the RUN pane, not the resting "No active run" QuickSessionCanvas — the
     // mismatch where clicking the run vs. its session gave two different views.
-    // The run is matched by workflow_runs.session_id in runsByProject (which is
-    // already terminal-filtered and excludes the __quick__ sentinel).
+    // The run is matched by workflow_runs.session_id in runsByProject. The store
+    // also retains terminal rows, so the click path must discriminate by status.
     mockSessions = [makeSession({ id: 'sess-host', name: 'host-CLICK', projectId: 1, runId: null })];
     mockRunsByProject = {
       1: [makeRun({ id: 'run-live-1', session_id: 'sess-host', status: 'running' })],
@@ -418,6 +427,31 @@ describe('DraggableProjectTreeView — active-session tree', () => {
     expect(mockSetActiveQuickSession).not.toHaveBeenCalled();
     expect(mockSetActiveProjectId).toHaveBeenCalledWith(1);
     expect(mockCloseHumanReview).toHaveBeenCalled();
+  });
+
+  it('(d3) clicking a session with only a retained terminal workflow opens resting quick chat', async () => {
+    mockSessions = [
+      makeSession({
+        id: 'sess-resting',
+        name: 'resting-CLICK',
+        projectId: 1,
+        runId: 'run-done',
+        chatRunId: 'chat-resting',
+      }),
+    ];
+    mockRunsByProject = {
+      1: [makeRun({ id: 'run-done', session_id: 'sess-resting', status: 'completed' })],
+    };
+
+    await renderExpanded();
+    await waitFor(() => expect(screen.getByText('resting-CLICK')).toBeInTheDocument());
+
+    const row = screen.getByText('resting-CLICK').closest('[role="button"]');
+    expect(row).not.toBeNull();
+    fireEvent.click(row!);
+
+    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-resting', 'chat-resting');
+    expect(mockSetActiveRun).not.toHaveBeenCalled();
   });
 
   it('(e) status indicator dot class differs across session statuses', async () => {
@@ -565,6 +599,44 @@ describe('DraggableProjectTreeView — runs nest under their session', () => {
     const nestedRun = within(sessionWrapper as HTMLElement).getByText('sprint');
     expect(nestedRun).toBeInTheDocument();
     expect(screen.queryByText('sprint · quick-A')).toBeNull();
+  });
+
+  it('keeps a retained terminal run nested under its visible parent session', async () => {
+    mockSessions = [makeSession({ id: 'sess-A', name: 'quick-A', projectId: 1 })];
+    mockRunsByProject = {
+      1: [
+        makeRun({
+          id: 'run-done',
+          session_id: 'sess-A',
+          workflowName: 'sprint',
+          status: 'completed',
+        }),
+      ],
+    };
+
+    await renderExpanded();
+    const sessionRow = await waitFor(() => screen.getByText('quick-A').closest('[role="button"]'));
+    expect(sessionRow).not.toBeNull();
+    expect(within(sessionRow!.parentElement as HTMLElement).getByText('sprint')).toBeInTheDocument();
+  });
+
+  it('hides an unpinned terminal run when its parent session is not reachable', async () => {
+    mockSessions = [];
+    mockRunsByProject = {
+      1: [
+        makeRun({
+          id: 'run-done',
+          session_id: 'sess-gone',
+          workflowName: 'planner',
+          branch_name: 'orphan-terminal',
+          status: 'completed',
+        }),
+      ],
+    };
+
+    await renderExpanded();
+
+    expect(screen.queryByText('planner · orphan-terminal')).not.toBeInTheDocument();
   });
 
   it('renders a run whose parent session is absent as a top-level row with the branch suffix', async () => {
