@@ -639,6 +639,76 @@ describe('experiments router orchestration (slice B)', () => {
     expect(h.launches).toHaveLength(0);
   });
 
+  it('rejects a seed task already in development via a DIRECT active run (double-pull guard, migration 061)', async () => {
+    const h = makeHarness();
+    const good = await seedEligibleTask(h, 'good', 'b');
+    const inDev = await seedEligibleTask(h, 'in-dev', 'b');
+    // Give `inDev` a live (non-terminal) DIRECT run association.
+    h.db
+      .prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id)
+         VALUES ('run-live', 'wf-sprint', 1, 'running', 'default', ?)`,
+      )
+      .run(inDev);
+    await expect(
+      startExperiment(h.deps, {
+        projectId: 1,
+        workflowId: 'wf-sprint',
+        variantAId: 'vA-sprint',
+        variantBId: 'vB-sprint',
+        seedTaskIds: [good, inDev],
+      }),
+    ).rejects.toThrow(/already in development/i);
+    expect(h.launches).toHaveLength(0);
+  });
+
+  it('rejects a seed task already in development via a BATCH lane (double-pull guard, migration 061)', async () => {
+    const h = makeHarness();
+    const inDev = await seedEligibleTask(h, 'in-dev', 'b');
+    // A non-terminal BATCH run + a lane naming `inDev`.
+    h.db
+      .prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, batch_id)
+         VALUES ('run-batch', 'wf-sprint', 1, 'running', 'default', 'batch-live')`,
+      )
+      .run();
+    h.db
+      .prepare(`INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES ('batch-live', ?, 'queued')`)
+      .run(inDev);
+    await expect(
+      startExperiment(h.deps, {
+        projectId: 1,
+        workflowId: 'wf-sprint',
+        variantAId: 'vA-sprint',
+        variantBId: 'vB-sprint',
+        seedTaskIds: [inDev],
+      }),
+    ).rejects.toThrow(/already in development/i);
+    expect(h.launches).toHaveLength(0);
+  });
+
+  it('accepts a seed task whose ONLY run association is terminal (not in development)', async () => {
+    const h = makeHarness();
+    const t1 = await seedEligibleTask(h, 'done-before', 'b');
+    // A terminal (completed) direct run does NOT count as in-development.
+    h.db
+      .prepare(
+        `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id, outcome)
+         VALUES ('run-old', 'wf-sprint', 1, 'completed', 'default', ?, 'dismissed')`,
+      )
+      .run(t1);
+    const res = await startExperiment(h.deps, {
+      projectId: 1,
+      workflowId: 'wf-sprint',
+      variantAId: 'vA-sprint',
+      variantBId: 'vB-sprint',
+      seedTaskIds: [t1],
+    });
+    // Cloned + launched normally — the terminal run never blocks re-seeding.
+    expect(listExperimentSeedTasks(dbAdapter(h.db), res.experimentId)).toHaveLength(2); // 1 task × 2 arms
+    expect(h.launches).toHaveLength(2);
+  });
+
   it('rejects seed tasks on a NON-sprint workflow, and a sprint with NO seed tasks', async () => {
     const h = makeHarness();
     const t1 = await seedEligibleTask(h, 'T1', 'b');

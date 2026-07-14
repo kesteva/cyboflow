@@ -299,13 +299,45 @@ interface SeedTaskFields {
 }
 
 /**
+ * True when `taskId` currently holds an ACTIVE run association — a non-terminal
+ * workflow_runs row linked DIRECTLY (task_id) OR via a sprint BATCH lane the task
+ * belongs to. Mirrors SprintLaneStore.filterEligibleTaskIds' double-pull NOT EXISTS
+ * arm (migration 061), replicated here to preserve the router's injected-deps +
+ * standalone-typecheck invariant. Degrades PERMISSIVELY (returns false) on a schema
+ * lacking workflow_runs/sprint_batch_tasks, exactly like that filter.
+ */
+function taskHasActiveRun(db: DatabaseLike, taskId: string): boolean {
+  try {
+    const row = db
+      .prepare(
+        `SELECT 1 FROM workflow_runs wr
+          WHERE wr.status NOT IN ('completed', 'failed', 'canceled')
+            AND (
+              wr.task_id = ?
+              OR wr.batch_id IN (
+                   SELECT sbt.batch_id FROM sprint_batch_tasks sbt WHERE sbt.task_id = ?
+                 )
+            )
+          LIMIT 1`,
+      )
+      .get(taskId, taskId);
+    return row !== undefined;
+  } catch (err) {
+    if (err instanceof Error && /no such (column|table)/i.test(err.message)) return false;
+    throw err;
+  }
+}
+
+/**
  * Read + validate ONE seed task for a sprint experiment. Returns null (the caller
  * rejects) unless the task exists, belongs to the project, is NOT already
- * experiment-tagged, and is sprint-eligible — the SAME predicate the normal sprint
- * batch picker + runs.start pre-check enforce (SprintLaneStore.filterEligibleTaskIds):
- * approved (approved_at NOT NULL), not archived, at a ready-or-later, NON-terminal
- * board stage (position >= 6 AND is_terminal = 0). Replicated here (not imported
- * from SprintLaneStore) to preserve the router's injected-deps + standalone-typecheck
+ * experiment-tagged, is sprint-eligible, AND has no active run association — the
+ * SAME predicate the normal sprint batch picker + runs.start pre-check enforce
+ * (SprintLaneStore.filterEligibleTaskIds): approved (approved_at NOT NULL), not
+ * archived, at a ready-or-later, NON-terminal board stage (position >= 6 AND
+ * is_terminal = 0), and NO non-terminal run linked directly or via a batch lane
+ * (double-pull guard, migration 061). Replicated here (not imported from
+ * SprintLaneStore) to preserve the router's injected-deps + standalone-typecheck
  * invariant; kept in lockstep with that filter by the shared SQL shape.
  */
 function readSeedTask(db: DatabaseLike, taskId: string, projectId: number): SeedTaskFields | null {
@@ -343,6 +375,10 @@ function readSeedTask(db: DatabaseLike, taskId: string, projectId: number): Seed
   if (row.archived_at !== null && row.archived_at !== undefined) return null;
   if (typeof row.stage_position !== 'number' || row.stage_position < 6) return null;
   if (row.is_terminal === 1) return null;
+  // DOUBLE-PULL GUARD (migration 061): lockstep with filterEligibleTaskIds' active-
+  // run NOT EXISTS arm — never seed a task that already has a live run association
+  // (a task currently 'In development' would be double-pulled into the experiment).
+  if (taskHasActiveRun(db, taskId)) return null;
   return {
     id: taskId,
     title: typeof row.title === 'string' ? row.title : 'Untitled',
@@ -582,7 +618,7 @@ export async function startExperiment(deps: ExperimentsDeps, input: StartInput):
         code: 'BAD_REQUEST',
         message: `${ineligible.length} seed task(s) not eligible for a sprint experiment: ${ineligible.join(
           ', ',
-        )} — each must exist in this project, be approved + at "Ready for development" or later (not archived/done/won't-do), and not already part of an experiment`,
+        )} — each must exist in this project, be approved + at "Ready for development" or later (not archived/done/won't-do), not already part of an experiment, and not already in development (a live run is associated — cancel it first)`,
       });
     }
     seedTasks = resolved;
