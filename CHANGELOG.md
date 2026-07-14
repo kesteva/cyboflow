@@ -6,6 +6,56 @@ The format is loosely based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+## [0.1.23] — 2026-07-14
+
+### Added
+
+- **Entity category (feature / bug / chore).** Every backlog entity — idea, epic,
+  task — now carries a `category` classification alongside its priority, threaded
+  end-to-end: through the `TaskChangeRouter` write chokepoint, the 3-table UNION
+  read path, and the tRPC + MCP write/read surfaces, with a `CategoryTag` render
+  plus create/edit controls in the UI. Default `feature` backfills every existing
+  row. [migration 059]
+- **Compound recommendations doc.** The compound flow no longer files individual
+  `finding` items — it proposes quick / doc / task improvements and surfaces
+  discarded candidates in a single **`compound-recommendations`** artifact (new
+  artifact type, accepted at the ArtifactRouter write chokepoint), ending on a
+  fifth human-review "merge in changes" gate with one batched final review that
+  applies edits on approval. [migration 060]
+- **S9 static-server verification seam.** `htmlPath` visual verifications are now
+  served over a tokenized loopback static file server (fixing the `file://`
+  ES-module CORS failure), with worktree-first HTML resolution + static-deliverable
+  matching, `captureOrigin` + capture diagnostics rendered on the human surfaces,
+  and a pixel-area fold clamp in `CapturePageBackend`.
+- **Deterministic PTY turn-end signal.** A Stop-hook shell script, delivered
+  inline and routed to `handleTurnEnd`, gives interactive (PTY) sessions a
+  reliable turn-end signal.
+
+### Changed
+
+- **Sessions inherit user plugins.** `sessions.enabled_plugins_json` now defaults
+  to `NULL` (was `'[]'`, which force-disabled every file-enabled plugin such as
+  codex); a shape-guarded, idempotent reconciler backfills legacy `'[]'` → `NULL`.
+  The numbered 059 slot for this is intentionally inert — the real rebuild lives
+  in `reconcileSessionsPluginsColumn`.
+- **Single live-question surface.** A run's live AskUserQuestion now renders on
+  one surface, with `reviewItemsSlice.init` refcounted so overlapping owners don't
+  tear down the subscription early.
+
+### Fixed
+
+- **A/B experiment arm safety.** An arm is no longer graded while it rests behind
+  an open approval gate or is paused at a mid-run human gate; Merge / Create-PR /
+  dismiss actions are guarded against a live experiment arm and session drift;
+  `approved_at` is split from board visibility so a ship-arm can materialize; the
+  rail experiment group stays visible while undecided; experiment-arm tasks are
+  excluded from the rail badge count, `hasChildren`, and foreign `runs.start`
+  sprint selection; a picked winner is given a Claude agent and its bootstrap is
+  decoupled from decide success. Pairwise verdict rationale now uses stable arm
+  identity instead of "Solution 1/2".
+- Interactive transcript discovery tolerates a slow start with late recovery.
+- Fan-out inner-loopback UI framing no longer shows a stale "reserved" label.
+
 ## [0.1.22] — 2026-07-13
 
 ### Added
