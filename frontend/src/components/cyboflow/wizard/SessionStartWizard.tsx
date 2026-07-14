@@ -1346,6 +1346,10 @@ export default function SessionStartWizard(): React.JSX.Element {
           // Multi-select batch (IDEA-009) is a Planner-only affordance — Ship
           // stays single-select (it consumes exactly one idea per run).
           multi={workflowMetas.find((m) => m.id === pendingWorkflowId)?.name === 'planner'}
+          // The wizard's launch navigates away on success and cannot fire the
+          // per-idea N+1 separate launches, so the pick-time split is hidden
+          // here (handleIdeaPicked drops opts — see its doc comment).
+          allowPlanSeparately={false}
         />
       )}
 

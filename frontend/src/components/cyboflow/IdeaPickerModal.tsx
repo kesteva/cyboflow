@@ -71,6 +71,14 @@ interface IdeaPickerModalProps {
    * the original single-select UI (unchanged). Ship/AB flows keep single-select.
    */
   multi?: boolean;
+  /**
+   * Whether the hosting surface honors `opts.separateIdeaIds` by firing one
+   * extra single-idea launch per peeled idea. Default true. SessionStartWizard
+   * passes false — its launch navigates away on success, so it cannot run the
+   * N+1 loop and a peeled idea would be silently dropped; hiding the split
+   * keeps the affordance honest there (large ideas can still be unchecked).
+   */
+  allowPlanSeparately?: boolean;
 }
 
 type Mode = 'pick' | 'new';
@@ -83,6 +91,7 @@ export function IdeaPickerModal({
   defaultMode = 'pick',
   showIdeaExplainer = false,
   multi = false,
+  allowPlanSeparately = true,
 }: IdeaPickerModalProps): React.JSX.Element {
   const [mode, setMode] = useState<Mode>(defaultMode);
   const [ideas, setIdeas] = useState<BacklogTaskItem[]>([]);
@@ -350,7 +359,7 @@ export function IdeaPickerModal({
                             </span>
                             {i.scope ? <ScopeTag scope={i.scope} /> : <UnsetScopeTag />}
                           </label>
-                          {mixedLarge && (
+                          {mixedLarge && allowPlanSeparately && (
                             <div
                               className="flex items-center justify-between gap-2 rounded border-l-2 border-status-warning bg-status-warning/10 px-3 py-1.5 text-xs text-text-secondary"
                               data-testid={`plan-separately-warning-${i.id}`}

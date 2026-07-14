@@ -328,4 +328,33 @@ describe('IdeaPickerModal — multi-select planner mode', () => {
     // Single large selection is fine on its own — no split prompt.
     expect(screen.queryByTestId('plan-separately-IDEA-B')).not.toBeInTheDocument();
   });
+
+  it('allowPlanSeparately=false hides the split even on a mixed-large selection (wizard host)', async () => {
+    // SessionStartWizard cannot fire the N+1 separate launches (it navigates
+    // away on success), so it opts out of the affordance entirely — a peeled
+    // idea there would be silently dropped.
+    mockList.mockResolvedValue(structuredClone(MULTI_ITEMS));
+    render(
+      <IdeaPickerModal
+        isOpen
+        multi
+        allowPlanSeparately={false}
+        projectId={1}
+        onClose={vi.fn()}
+        onPicked={vi.fn()}
+      />,
+    );
+    await screen.findByTestId('idea-picker-meter');
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-check-IDEA-A'));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('idea-check-IDEA-B'));
+    });
+
+    // The mixed-large warning/split affordance never renders in this host.
+    expect(screen.queryByTestId('plan-separately-IDEA-B')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('plan-separately-warning-IDEA-B')).not.toBeInTheDocument();
+  });
 });
