@@ -2,12 +2,12 @@
  * seedBoardParity — the P1 ATOMICITY cross-check.
  *
  * Asserts that database.ts seedDefaultBoard (invoked via createProject) produces
- * a board whose 4 stages are FIELD-FOR-FIELD identical to the migration-driven
+ * a board whose 5 stages are FIELD-FOR-FIELD identical to the migration-driven
  * seed (014 stages 1..11 + 015 position-12 'Decomposed' MINUS the position-11
- * 'Archived' stage removed by 024, collapsed to positions 1/6/9/10 by 042). If
- * the two ever drift, createProject() would seed a different board than a
- * migrated DB and brick boot — this test is the guard that keeps them locked
- * together.
+ * 'Archived' stage removed by 024, collapsed to positions 1/6/9/10 by 042, with
+ * the derived position-7 'In development' stage re-added by 061). If the two ever
+ * drift, createProject() would seed a different board than a migrated DB and
+ * brick boot — this test is the guard that keeps them locked together.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
@@ -35,7 +35,7 @@ function stageRows(db: Database.Database, boardId: string): StageRow[] {
     .all(boardId) as StageRow[];
 }
 
-/** Build a migration-only DB (006 -> 011 -> 014 -> 015 -> 024 -> 042) with project 1 seeded. */
+/** Build a migration-only DB (006 -> 011 -> 014 -> 015 -> 024 -> 042 -> 061) with project 1 seeded. */
 function buildMigrationDb(): Database.Database {
   const db = new Database(':memory:');
   db.pragma('foreign_keys = ON');
@@ -57,26 +57,28 @@ function buildMigrationDb(): Database.Database {
     '015_entity_model_rebuild.sql',
     '024_archive_in_place.sql',
     '042_collapse_board.sql',
+    '061_in_development_stage.sql',
   ]) {
     db.exec(readFileSync(join(migDir, f), 'utf-8'));
   }
   return db;
 }
 
-describe('seedDefaultBoard <-> migrated (014+015+024+042) seed parity', () => {
+describe('seedDefaultBoard <-> migrated (014+015+024+042+061) seed parity', () => {
   let tmpDbDir: string;
 
   afterEach(() => {
     if (tmpDbDir) rmSync(tmpDbDir, { recursive: true, force: true });
   });
 
-  it('createProject seeds the SAME 4 stages as the 014+015+024+042 migration seed', () => {
-    // (1) Migration-driven board for project 1 (042 collapses to positions 1/6/9/10).
+  it('createProject seeds the SAME 5 stages as the 014+015+024+042+061 migration seed', () => {
+    // (1) Migration-driven board for project 1 (042 collapses to positions 1/6/9/10;
+    //     061 re-adds the derived position-7 'In development' stage).
     const migDb = buildMigrationDb();
     const migStages = stageRows(migDb, 'board-1-default');
     migDb.close();
-    expect(migStages).toHaveLength(4);
-    expect(migStages.map((s) => s.position)).toEqual([1, 6, 9, 10]);
+    expect(migStages).toHaveLength(5);
+    expect(migStages.map((s) => s.position)).toEqual([1, 6, 7, 9, 10]);
 
     // (2) seedDefaultBoard-driven board via DatabaseService.createProject. The
     //     service runs all migrations on initialize(); createProject then calls
@@ -88,8 +90,8 @@ describe('seedDefaultBoard <-> migrated (014+015+024+042) seed parity', () => {
     const project = svc.createProject('Parity Proj', join(tmpDbDir, 'repo'));
     const seededStages = stageRows(svc.getDb(), `board-${project.id}-default`);
 
-    expect(seededStages).toHaveLength(4);
-    expect(seededStages.map((s) => s.position)).toEqual([1, 6, 9, 10]);
+    expect(seededStages).toHaveLength(5);
+    expect(seededStages.map((s) => s.position)).toEqual([1, 6, 7, 9, 10]);
     // Field-for-field equality of the ordered stage rows (id is deterministic and
     // board-scoped, so it is excluded; every other column must match exactly).
     expect(seededStages).toEqual(migStages);

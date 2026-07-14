@@ -1723,27 +1723,30 @@ export class DatabaseService {
     if (!project) {
       throw new Error('Failed to create project');
     }
-    // Seed the default board + 4 stages for the new project (migrations 014 + 015,
-    // collapsed to positions 1/6/9/10 by migration 042).
+    // Seed the default board + 5 stages for the new project (migrations 014 + 015,
+    // collapsed to positions 1/6/9/10 by migration 042, plus the derived
+    // position-7 'In development' stage re-added by migration 061).
     this.seedDefaultBoard(project.id);
     return project;
   }
 
   /**
-   * Seed the default board and its 4 canonical stages for a project
-   * (positions 1, 6, 9, 10 — the collapsed board).
+   * Seed the default board and its 5 canonical stages for a project
+   * (positions 1, 6, 7, 9, 10 — the collapsed board plus the derived
+   * 'In development' stage).
    *
-   * Mirrors the post-042 migrated board: migration 042_collapse_board.sql
+   * Mirrors the post-061 migrated board: migration 042_collapse_board.sql
    * narrows the 12-stage board (014 stages 1..11; 015 position-12 'Decomposed';
-   * 024 removed position-11 'Archived') down to the FOUR kept stages at their
-   * existing positions — removing positions 2,3,4,5,7,8,12. The migrations
+   * 024 removed position-11 'Archived') down to the four kept stages at their
+   * existing positions — removing positions 2,3,4,5,7,8,12 — and migration 061
+   * re-introduces the DERIVED position-7 'In development' stage. The migrations
    * seed + migrate all EXISTING projects; this seeds each NEW project on
    * creation. Uses deterministic ids + INSERT OR IGNORE so it is idempotent and
    * safe to call more than once. Wrapped in a single transaction.
    *
    * Source of truth for the stage table: the spec's BACKLOG_STAGES seed; this
-   * MUST stay field-for-field in sync with the post-042 migrated board state.
-   * The cross-check test asserts seedDefaultBoard === the migrated 4-stage seed.
+   * MUST stay field-for-field in sync with the post-061 migrated board state.
+   * The cross-check test asserts seedDefaultBoard === the migrated 5-stage seed.
    */
   seedDefaultBoard(projectId: number): void {
     const boardId = `board-${projectId}-default`;
@@ -1751,6 +1754,9 @@ export class DatabaseService {
     const stages: Array<[number, string, string, string, 'asserted' | 'derived', 0 | 1, 0 | 1]> = [
       [1, 'Idea', 'oklch(0.58 0.15 262)', 'Raw input captured', 'asserted', 0, 0],
       [6, 'Ready for development', 'oklch(0.64 0.15 28)', 'Approved · queued', 'asserted', 0, 0],
+      // Position 7 'In development' is the orchestrator-DERIVED execution stage
+      // (re-introduced by migration 061): a task moves here while a run is active.
+      [7, 'In development', 'oklch(0.63 0.16 45)', 'Pulled into a live session', 'derived', 0, 0],
       [9, 'Done', 'oklch(0.56 0.13 152)', 'Merged & archived', 'asserted', 1, 0],
       [10, "Won't do", 'oklch(0.55 0.02 30)', 'Decided not to pursue', 'asserted', 1, 1],
     ];

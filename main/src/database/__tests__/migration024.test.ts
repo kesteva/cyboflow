@@ -266,15 +266,15 @@ describe('Migration 024: archive-in-place + Archived stage removal', () => {
         expect(cols, `${table} should have archived_at`).toContain('archived_at');
       }
 
-      // The fresh DB now runs through 042_collapse_board.sql, which removes
-      // positions 2,3,4,5,7,8,12 and keeps the 4 collapsed stages 1/6/9/10
-      // (still no position-11 stage).
+      // The fresh DB runs through 042_collapse_board.sql (removes positions
+      // 2,3,4,5,7,8,12, keeps 1/6/9/10) and then 061_in_development_stage.sql,
+      // which re-adds the derived position-7 'In development' stage.
       const positions = (
         db
           .prepare('SELECT position FROM board_stages WHERE board_id = ? ORDER BY position')
           .all(`board-${project.id}-default`) as { position: number }[]
       ).map((r) => r.position);
-      expect(positions).toEqual([1, 6, 9, 10]);
+      expect(positions).toEqual([1, 6, 7, 9, 10]);
     });
   });
 });
