@@ -40,6 +40,7 @@ import { PromptNavigation, type PromptMarker } from '../../panels/claude/PromptN
 import { PendingSendRow } from './PendingSendRow';
 import type { PendingSend } from '../../../stores/pendingSendStore';
 import type { UnifiedMessage } from '../../../../../shared/types/unifiedMessage';
+import { isAgentDispatchToolName } from '../../../../../shared/types/agentIdentity';
 import type { RichOutputSettings } from '../../panels/ai/AbstractAIPanel';
 
 // ---------------------------------------------------------------------------
@@ -211,7 +212,7 @@ export function UnifiedChatView({
     const subAgentIds = new Set<string>();
     for (const msg of messages) {
       for (const seg of msg.segments) {
-        if (seg.type === 'tool_call' && seg.tool.name === 'Task') {
+        if (seg.type === 'tool_call' && isAgentDispatchToolName(seg.tool.name)) {
           subAgentIds.add(seg.tool.id);
         }
       }

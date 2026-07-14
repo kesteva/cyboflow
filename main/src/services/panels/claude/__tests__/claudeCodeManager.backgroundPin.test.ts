@@ -20,7 +20,7 @@
  * (anthropics/claude-code#30770), so the merge must spread the full base input.
  *
  * This suite pins:
- *   (1) isAgentDispatchTool / resolveAgentDispatchBackgroundPin pure matrices;
+ *   (1) isAgentDispatchToolName / resolveAgentDispatchBackgroundPin pure matrices;
  *   (2) applyAgentDispatchBackgroundPin merge semantics per output shape;
  *   (3) the installed dynamic hook end-to-end per spawn kind and mode (dontAsk
  *       allow, auto-defer no-decision, router allow), via publicBuildSdkOptions;
@@ -37,10 +37,10 @@ import { createTestDb } from '../../../../orchestrator/__test_fixtures__/orchest
 import { makeProdLoggerSpy } from '../../../../orchestrator/__test_fixtures__/loggerLikeSpy';
 import {
   ClaudeCodeManager,
-  isAgentDispatchTool,
   resolveAgentDispatchBackgroundPin,
   applyAgentDispatchBackgroundPin,
 } from '../claudeCodeManager';
+import { isAgentDispatchToolName } from '../../../../../../shared/types/agentIdentity';
 import type { SessionManager } from '../../../sessionManager';
 import type { Logger } from '../../../../utils/logger';
 import type {
@@ -182,14 +182,14 @@ function decisionOf(out: HookJSONOutput): string | undefined {
 // (1) Pure matrices
 // ---------------------------------------------------------------------------
 
-describe('isAgentDispatchTool', () => {
+describe('isAgentDispatchToolName', () => {
   it.each([
     ['Agent', true], // CLI ≥~2.1.2xx (verified on the vendored 2.1.201)
     ['Task', true], // older CLIs
     ['Bash', false],
     ['AgentOutput', false],
   ] as const)('%s → %s', (name, expected) => {
-    expect(isAgentDispatchTool(name)).toBe(expected);
+    expect(isAgentDispatchToolName(name)).toBe(expected);
   });
 });
 

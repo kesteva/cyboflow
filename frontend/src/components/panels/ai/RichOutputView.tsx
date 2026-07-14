@@ -8,6 +8,7 @@ import { API } from '../../../utils/api';
 import { MessageTransformer, UnifiedMessage } from './transformers/MessageTransformer';
 import { RichOutputSettings } from './AbstractAIPanel';
 import { ChatTranscript } from '../../chat/ChatTranscript';
+import { isAgentDispatchToolName } from '../../../../../shared/types/agentIdentity';
 
 // Interface for conversation messages from database
 interface ConversationMessage {
@@ -157,7 +158,7 @@ export const RichOutputView = React.forwardRef<{ scrollToPrompt: (promptIndex: n
         const newSubAgentIds = new Set<string>();
         conversationMessages.forEach(msg => {
           msg.segments.forEach(seg => {
-            if (seg.type === 'tool_call' && seg.tool.name === 'Task') {
+            if (seg.type === 'tool_call' && isAgentDispatchToolName(seg.tool.name)) {
               newSubAgentIds.add(seg.tool.id);
             }
           });

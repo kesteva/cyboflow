@@ -2,6 +2,7 @@ import React from 'react';
 import { Wrench, CheckCircle, XCircle, Clock, ChevronDown, ChevronRight } from 'lucide-react';
 import { ToolCall } from '../transformers/MessageTransformer';
 import { MarkdownPreview } from '../../../MarkdownPreview';
+import { isAgentDispatchToolName } from '../../../../../../shared/types/agentIdentity';
 
 interface ToolCallViewProps {
   tool: ToolCall;
@@ -299,7 +300,7 @@ export const ToolCallView: React.FC<ToolCallViewProps> = ({
   onToggleExpand,
   expandedTools 
 }) => {
-  const isTaskAgent = tool.isSubAgent && tool.name === 'Task';
+  const isTaskAgent = tool.isSubAgent && isAgentDispatchToolName(tool.name);
   const hasChildTools = tool.childToolCalls && tool.childToolCalls.length > 0;
   
   // Sub-agents (Task tools) should always be expanded by default
@@ -543,8 +544,8 @@ const formatToolResultMarkdown = (toolName: string, result: string, isError: boo
     // Check if result is JSON
     const parsed = JSON.parse(result);
     
-    // Handle Task tool results (array with text objects)
-    if (toolName === 'Task' && Array.isArray(parsed)) {
+    // Handle Agent-dispatch tool results (array with text objects)
+    if (isAgentDispatchToolName(toolName) && Array.isArray(parsed)) {
       // Extract text content from Task results
       const textContent = parsed
         .filter(item => item.type === 'text' && item.text)

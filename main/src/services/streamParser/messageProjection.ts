@@ -21,6 +21,7 @@
 
 import type { ClaudeStreamEvent, SystemInitEvent, SystemCompactBoundaryEvent, AssistantEvent, UserEvent, ResultEvent, TextBlock } from '../../../../shared/types/claudeStream';
 import type { UnifiedMessage, MessageSegment, ToolCall, ToolResult } from '../../../../shared/types/unifiedMessage';
+import { isAgentDispatchToolName } from '../../../../shared/types/agentIdentity';
 import type { ILogger } from './types';
 
 export class MessageProjection {
@@ -173,7 +174,7 @@ export class MessageProjection {
     // Step 1: collect tool_use blocks into allToolCalls so we can reference them.
     for (const block of content) {
       if (block.type === 'tool_use') {
-        const isSubAgent = block.name === 'Task';
+        const isSubAgent = isAgentDispatchToolName(block.name);
         const toolCall: ToolCall = {
           id: block.id,
           name: block.name,

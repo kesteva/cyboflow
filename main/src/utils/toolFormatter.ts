@@ -3,6 +3,7 @@ import { formatJsonForOutput } from './formatters';
 import type { ClaudeJsonMessage } from '../types/session';
 import type { ToolResultBlock } from '../../../shared/types/claudeStream';
 import { extractToolResultText } from '../../../shared/utils/extractToolResultText';
+import { isAgentDispatchToolName } from '../../../shared/types/agentIdentity';
 
 interface ToolCall {
   type: 'tool_use';
@@ -200,7 +201,7 @@ export function formatToolInteraction(
       output += `\x1b[90m│  File: ${makePathsRelative(toolCall.input.file_path, gitRepoPath)}\x1b[0m\r\n`;
       const edits = Array.isArray(toolCall.input.edits) ? toolCall.input.edits : [];
       output += `\x1b[90m│  Edits: ${edits.length} changes\x1b[0m\r\n`;
-    } else if (toolCall.name === 'Task' && toolCall.input.prompt) {
+    } else if (isAgentDispatchToolName(toolCall.name) && toolCall.input.prompt) {
       const prompt = String(toolCall.input.prompt);
       const truncated = prompt.length > 100 ? prompt.substring(0, 100) + '...' : prompt;
       output += `\x1b[90m│  Description: ${toolCall.input.description || 'Task'}\x1b[0m\r\n`;
@@ -327,8 +328,8 @@ export function formatToolInteraction(
             output += `\x1b[90m│  \x1b[37m${line}\x1b[0m\r\n`;
           }
         });
-      } else if (toolCall.name === 'Task') {
-        // Task tool results are usually longer, show more lines
+      } else if (isAgentDispatchToolName(toolCall.name)) {
+        // Agent-dispatch results are usually longer, show more lines
         const taskMaxLines = 25;
         lines.slice(0, taskMaxLines).forEach(line => {
           output += `\x1b[90m│  \x1b[37m${line}\x1b[0m\r\n`;

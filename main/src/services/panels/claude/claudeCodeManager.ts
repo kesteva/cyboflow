@@ -58,6 +58,7 @@ import type { ChatSentinelProvider } from '../../../orchestrator/chatSentinelPro
 import { DEFAULT_PERMISSION_MODE } from '../../../../../shared/types/permissionMode';
 import type { FastModeState, FastModeStateNotice, QueuedPanelInput } from '../../../../../shared/types/panels';
 import { isPermissionMode, type PermissionMode } from '../../../../../shared/types/workflows';
+import { isAgentDispatchToolName } from '../../../../../shared/types/agentIdentity';
 
 /**
  * PreToolUse hook timeout in SECONDS (SDK HookCallbackMatcher.timeout unit).
@@ -278,16 +279,6 @@ export function shouldHoldFlowTurnOpen(params: {
 export type AgentDispatchSpawnKind = 'flow' | 'lane' | 'chat';
 
 /**
- * The Agent-dispatch tool's name at the PreToolUse hook. CLI ≥~2.1.2xx presents
- * it as 'Agent' (empirically verified against 2.1.209); older CLIs used 'Task'.
- * Match BOTH — the runtime CLI version is whatever `claude` resolves on the
- * user's PATH, not something this codebase pins.
- */
-export function isAgentDispatchTool(toolName: string): boolean {
-  return toolName === 'Agent' || toolName === 'Task';
-}
-
-/**
  * Resolve the `run_in_background` pin for an Agent-tool dispatch (fix B — the
  * depth-aware companion to fix A's hold-open, 2026-07-14). SDK ≥0.3.201 defaults
  * Agent dispatches to the BACKGROUND; whether that default is right depends on
@@ -313,7 +304,7 @@ export function resolveAgentDispatchBackgroundPin(params: {
   spawnKind: AgentDispatchSpawnKind;
   hookAgentId: string | undefined;
 }): boolean | undefined {
-  if (!isAgentDispatchTool(params.toolName)) return undefined;
+  if (!isAgentDispatchToolName(params.toolName)) return undefined;
   if (params.spawnKind === 'chat') return undefined;
   if (params.spawnKind === 'lane') return false;
   return params.hookAgentId === undefined;

@@ -44,6 +44,7 @@ import {
   TERMINAL_BATCH_STATUSES,
 } from '../../../shared/types/sprintBatch';
 import { resolveRunFanOutInner } from './laneChainResolution';
+import { isAgentDispatchToolName } from '../../../shared/types/agentIdentity';
 import type { FanOutInnerStep } from '../../../shared/types/workflows';
 
 // ---------------------------------------------------------------------------
@@ -785,11 +786,10 @@ export class SprintLaneStore {
     const { runId, toolName, toolInput } = args;
     try {
       if (runId === 'orchestrator') return;
-      // The dispatch tool is 'Agent' on CLI ≥~2.1.2xx (empirically verified on
-      // 2.1.209) and 'Task' on older CLIs — the runtime version is whatever
-      // `claude` resolves on the user's PATH, so match BOTH. A 'Task'-only match
-      // silently killed this backstop on current CLIs.
-      if (toolName !== 'Task' && toolName !== 'Agent') return;
+      // 'Agent' on CLI ≥~2.1.2xx, 'Task' on older CLIs — a 'Task'-only match
+      // silently killed this backstop on current CLIs (see the single-home
+      // helper's doc in shared/types/agentIdentity.ts).
+      if (!isAgentDispatchToolName(toolName)) return;
 
       const subagentType = toolInput['subagent_type'];
       if (typeof subagentType !== 'string') return;

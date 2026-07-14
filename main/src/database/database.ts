@@ -3632,6 +3632,7 @@ export class DatabaseService {
                       'BashOutput': 30,
                       'KillBash': 50,
                       'Task': 1000,
+                      'Agent': 1000, // 'Task' renamed on CLI ≥~2.1.2xx
                       'TodoWrite': 100,
                       'WebSearch': 2000,
                       'WebFetch': 1500,

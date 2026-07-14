@@ -86,3 +86,16 @@ export function normalizeAgentLabel(label: string): string {
 export function isCanonicalAgentKey(s: string): s is CanonicalAgentKey {
   return (CANONICAL_AGENT_KEYS as readonly string[]).includes(s);
 }
+
+/**
+ * The Agent-dispatch tool's name across CLI versions: 'Agent' on ≥~2.1.2xx
+ * (verified against the SDK-vendored 2.1.201 the app actually spawns), 'Task'
+ * on older CLIs. The SINGLE HOME for the name-keyed dispatch classification —
+ * sub-agent rendering (messageProjection / ToolCallView / chat auto-expand),
+ * the sprint-lane derive backstop, and the run_in_background pin all key off
+ * it, so a future CLI rename is a one-line change. The runtime CLI is whatever
+ * the SDK resolves, not something this codebase pins — always match BOTH.
+ */
+export function isAgentDispatchToolName(toolName: string): boolean {
+  return toolName === 'Agent' || toolName === 'Task';
+}
