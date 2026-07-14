@@ -679,11 +679,11 @@ describe('QuestionRouter', () => {
 
   // -------------------------------------------------------------------------
   // Case 9: recoverStaleAwaitingInput rests resumable runs in awaiting_review
-  //         (reopenable) and fails ONLY sessionless ones.
+  //         (reopenable) and fails ONLY runs without a resume target.
   // -------------------------------------------------------------------------
-  it('recoverStaleAwaitingInput rests resumable runs in awaiting_review and fails only sessionless ones', () => {
-    // includeWorkflowRunTaskColumns adds claude_session_id (migration 018) — the
-    // resumability signal the recovery now keys on.
+  it('recoverStaleAwaitingInput rests resumable runs and fails only runs without a resume target', () => {
+    // This pre-065 fixture has no agent_invocations table, proving recovery keeps
+    // using AgentInvocationStore's legacy Claude fallback.
     const db = createTestDb({ includeQuestionsTable: true, includeWorkflowRunTaskColumns: true });
     const adapter = dbAdapter(db);
     const router = QuestionRouter.initialize(adapter);
@@ -745,8 +745,8 @@ describe('QuestionRouter', () => {
 // ---------------------------------------------------------------------------
 
 describe('QuestionRouter boot recovery mints durable recovery gates', () => {
-  // Full chain THROUGH migration 016 (review_items) so coWriteDecisionReviewItem
-  // can mint the gate; + claude_session_id (migration 018) for the resumability key.
+  // Full chain through migration 016 (review_items), plus the run-level agent
+  // columns and migration 065 invocation store used by resumability checks.
   function buildDb(): Database.Database {
     const db = new Database(':memory:');
     db.pragma('foreign_keys = ON');
@@ -769,6 +769,14 @@ describe('QuestionRouter boot recovery mints durable recovery gates', () => {
     db.exec(readFileSync(join(migDir, '015_entity_model_rebuild.sql'), 'utf-8'));
     db.exec(readFileSync(join(migDir, '016_review_items.sql'), 'utf-8'));
     db.exec('ALTER TABLE workflow_runs ADD COLUMN claude_session_id TEXT');
+    db.exec(
+      "ALTER TABLE workflow_runs ADD COLUMN agent_provider TEXT NOT NULL DEFAULT 'claude' CHECK (agent_provider IN ('claude','codex'))",
+    );
+    db.exec(
+      "ALTER TABLE workflow_runs ADD COLUMN agent_runtime TEXT NOT NULL DEFAULT 'claude-sdk' CHECK (agent_runtime IN ('claude-sdk','claude-interactive','codex-sdk'))",
+    );
+    db.exec('ALTER TABLE workflow_runs ADD COLUMN model TEXT');
+    db.exec(readFileSync(join(migDir, '065_agent_invocations.sql'), 'utf-8'));
     return db;
   }
 
@@ -833,6 +841,46 @@ describe('QuestionRouter boot recovery mints durable recovery gates', () => {
       .prepare("SELECT id FROM review_items WHERE run_id = 'brun-2' AND source = 'gate:ask-user-question-recovery'")
       .get();
     expect(gate).toBeUndefined();
+  });
+
+  it('rests a fresh Codex invocation in awaiting_review and mints its recovery gate', () => {
+    const db = buildDb();
+    const router = QuestionRouter.initialize(dbAdapter(db));
+    const questions = [
+      {
+        question: 'Continue?',
+        header: 'Continue',
+        multiSelect: false,
+        options: [{ label: 'Yes' }, { label: 'No' }],
+      },
+    ];
+    seedParkedRun(db, {
+      runId: 'brun-codex',
+      sessionId: null,
+      questionsJson: JSON.stringify(questions),
+    });
+    db.prepare(
+      "UPDATE workflow_runs SET agent_provider = 'codex', agent_runtime = 'codex-sdk' WHERE id = ?",
+    )
+      .run('brun-codex');
+    db.prepare(
+      `INSERT INTO agent_invocations
+         (agent_invocation_id, run_id, step_id, agent_provider, agent_runtime, external_session_id)
+       VALUES ('inv-brun-codex', ?, NULL, 'codex', 'codex-sdk', 'thread-codex')`,
+    ).run('brun-codex');
+
+    expect(router.recoverStaleAwaitingInput()).toEqual({ resumable: 1, failed: 0 });
+
+    const run = db
+      .prepare("SELECT status, error_message FROM workflow_runs WHERE id = 'brun-codex'")
+      .get() as { status: string; error_message: string | null };
+    expect(run).toEqual({ status: 'awaiting_review', error_message: null });
+    const gate = db
+      .prepare(
+        "SELECT status FROM review_items WHERE run_id = 'brun-codex' AND source = 'gate:ask-user-question-recovery'",
+      )
+      .get() as { status: string } | undefined;
+    expect(gate).toEqual({ status: 'pending' });
   });
 });
 

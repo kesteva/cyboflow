@@ -61,14 +61,15 @@ import {
   listRunCreatedTaskIds,
   listRunCreatedEpicIds,
 } from './runEntityOwnership';
+import { AgentInvocationStore } from './agentInvocationStore';
 
 export type { QuestionRequest, QuestionAnswer, QuestionPayload };
 
 /**
- * Boot recovery only rests a resumable awaiting_input run (one with a captured
- * claude_session_id) in 'awaiting_review' when it was last touched within this
- * many days. Beyond it the local SDK --resume session data is unlikely to still
- * exist, so the run is failed instead — this caps the review queue so it cannot
+ * Boot recovery only rests an awaiting_input run with a captured provider resume
+ * target in 'awaiting_review' when it was last touched within this many days.
+ * Beyond it the provider's local session/thread data is unlikely to still exist,
+ * so the run is failed instead — this caps the review queue so it cannot
  * accumulate ancient reopen candidates across many restarts.
  */
 const STALE_RESUMABLE_RECOVERY_DAYS = 7;
@@ -1243,9 +1244,9 @@ export class QuestionRouter extends EventEmitter {
     // the run is unreachable until recoverStaleAwaitingInput at the NEXT app boot
     // flips it to 'failed'. Rest it in 'awaiting_review' instead, so it lands in
     // the review queue and is nudge-resumable (runs.nudge requires
-    // awaiting_review + a captured claude_session_id, both of which a torn-down
-    // run has). Guarded `WHERE status='awaiting_input'`: a cancel / fail path
-    // that already stamped (or, like cancelRunHandler, later stamps under
+    // awaiting_review + a captured provider resume target, both of which a
+    // torn-down run has). Guarded `WHERE status='awaiting_input'`: a cancel /
+    // fail path that already stamped (or, like cancelRunHandler, later stamps under
     // `status NOT IN terminal`) a terminal status always wins, and an
     // already-terminal run never matches. Fail-soft — a DB error during teardown
     // must never throw.
@@ -1272,13 +1273,12 @@ export class QuestionRouter extends EventEmitter {
 
   /**
    * Boot-time recovery for workflow_runs left in 'awaiting_input' by a previous
-   * session (the SDK iterator is one-shot and is gone after a restart).
+   * session (the in-process agent turn is gone after a restart).
    *
-   * The SDK *process* being gone does NOT mean the *conversation* is gone: a run
-   * that captured a `claude_session_id` (stamped at the first system/init event)
-   * can be re-opened via `--resume` (runs.nudge re-drives the same conversation).
-   * So we split the stale runs:
-   *   - RESUMABLE (claude_session_id present AND last touched within
+   * The agent *process* being gone does NOT mean the *conversation* is gone: a run
+   * with a captured provider session/thread can be reopened by resuming that
+   * conversation (runs.nudge re-drives it). So we split the stale runs:
+   *   - RESUMABLE (provider resume target present AND last touched within
    *     STALE_RESUMABLE_RECOVERY_DAYS) → 'awaiting_review'. The run lands in the
    *     review queue and is nudge-resumable — NOT a dead end. (This is the
    *     "reopen after timeout" fix; mirrors the in-session teardown settle in
@@ -1300,28 +1300,28 @@ export class QuestionRouter extends EventEmitter {
    */
   recoverStaleAwaitingInput(): { resumable: number; failed: number } {
     const resolvedReviewItemIds: string[] = [];
+    const invocationStore = new AgentInvocationStore(this.db);
     // Durable recovery gates minted for RESUMABLE runs below, emitted AFTER the
     // transaction commits (mirrors clearPendingForRun's minted-then-emit order).
     const mintedRecoveryGateIds: string[] = [];
     const transition = this.db.transaction(() => {
       const staleRuns = this.db
         .prepare(
-          `SELECT id, claude_session_id,
+          `SELECT id,
                   CASE WHEN julianday('now') - julianday(updated_at) <= ? THEN 1 ELSE 0 END AS is_fresh
              FROM workflow_runs WHERE status = 'awaiting_input'`,
         )
         .all(STALE_RESUMABLE_RECOVERY_DAYS) as {
           id: string;
-          claude_session_id: string | null;
           is_fresh: number;
         }[];
       if (staleRuns.length === 0) return { resumable: 0, failed: 0 };
 
-      // Reopenable = captured an SDK conversation AND recovered recently enough
-      // (is_fresh) that the local --resume session data plausibly still exists.
-      // Anything else (sessionless OR stale) is failed instead.
-      const isResumable = (r: { claude_session_id: string | null; is_fresh: number }): boolean =>
-        r.claude_session_id !== null && r.claude_session_id !== '' && r.is_fresh === 1;
+      // Reopenable = captured a provider-neutral resume target AND recovered
+      // recently enough that the provider's local session/thread data plausibly
+      // still exists. AgentInvocationStore owns the legacy Claude fallback.
+      const isResumable = (r: { id: string; is_fresh: number }): boolean =>
+        r.is_fresh === 1 && invocationStore.getLatestTopLevelResumeTarget(r.id) !== null;
       const resumableIds = staleRuns.filter(isResumable).map((r) => r.id);
       const failedIds = staleRuns.filter((r) => !isResumable(r)).map((r) => r.id);
       const allIds = staleRuns.map((r) => r.id);
@@ -1437,7 +1437,7 @@ export class QuestionRouter extends EventEmitter {
       console.log(
         `[QuestionRouter] Boot recovery: ${total} stale awaiting_input run(s) — ` +
         `${resumable} rested in awaiting_review (resumable, ${mintedRecoveryGateIds.length} recovery gate(s) minted), ` +
-        `${failed} failed (no session / stale > ${STALE_RESUMABLE_RECOVERY_DAYS}d)`,
+        `${failed} failed (no resume target / stale > ${STALE_RESUMABLE_RECOVERY_DAYS}d)`,
       );
     }
     return { resumable, failed };
