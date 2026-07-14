@@ -21,8 +21,10 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import Database from 'better-sqlite3';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join, isAbsolute } from 'node:path';
+import * as os from 'node:os';
+import { setCyboflowDirectory, getCyboflowSubdirectory } from '../../../utils/cyboflowDirectory';
 import { McpQueryHandler, type McpQueryMessage, type McpQueryResponse } from '../mcpQueryHandler';
 import type * as net from 'net';
 import { dbAdapter } from '../../__test_fixtures__/dbAdapter';
@@ -1804,6 +1806,106 @@ describe('McpQueryHandler', () => {
           expect(response.ok).toBe(true);
           expect((response.data as { task: Record<string, unknown> }).task['id']).toBe(armAEntity.id);
         }
+      });
+    });
+
+    // -----------------------------------------------------------------------
+    // IDEA-006: idea attachments read-through on cyboflow_get_task.
+    // -----------------------------------------------------------------------
+    describe('mcp-get-task attachments (IDEA-006)', () => {
+      let attTmpRoot: string;
+
+      beforeEach(() => {
+        attTmpRoot = mkdtempSync(join(os.tmpdir(), 'cyboflow-mcp-att-'));
+        setCyboflowDirectory(attTmpRoot);
+      });
+
+      afterEach(() => {
+        rmSync(attTmpRoot, { recursive: true, force: true });
+      });
+
+      it('surfaces an idea\'s attachments with a RESOLVED ABSOLUTE path', async () => {
+        listSeedRun(listDb, 'run-get-att-1');
+        const idea = await createEntity('run-get-att-1', 'Idea with a screenshot');
+
+        const ideaAttDir = getCyboflowSubdirectory('artifacts', 'ideas', idea.id);
+        mkdirSync(ideaAttDir, { recursive: true });
+        const filePath = join(ideaAttDir, 'att_abc123.png');
+        writeFileSync(filePath, Buffer.from('fake-png-bytes'));
+
+        listDb.prepare('UPDATE ideas SET attachments = ? WHERE id = ?').run(
+          JSON.stringify([{ id: 'att_abc123', name: 'screenshot.png', path: filePath, type: 'image/png', size: 14 }]),
+          idea.id,
+        );
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-att-1', runId: 'run-get-att-1', taskId: idea.id },
+          socket,
+        );
+
+        const response = parseLastWrite(writes);
+        expect(response.ok).toBe(true);
+        const data = response.data as { task: Record<string, unknown> };
+        const attachments = data.task['attachments'] as Array<Record<string, unknown>>;
+        expect(attachments).toHaveLength(1);
+        expect(attachments[0]).toEqual({
+          id: 'att_abc123',
+          label: 'screenshot.png',
+          mimeType: 'image/png',
+          path: filePath,
+        });
+        expect(isAbsolute(attachments[0]['path'] as string)).toBe(true);
+      });
+
+      it('returns an empty attachments array for an idea with none', async () => {
+        listSeedRun(listDb, 'run-get-att-2');
+        const idea = await createEntity('run-get-att-2', 'Idea without attachments');
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-att-2', runId: 'run-get-att-2', taskId: idea.id },
+          socket,
+        );
+
+        const data = parseLastWrite(writes).data as { task: Record<string, unknown> };
+        expect(data.task['attachments']).toEqual([]);
+      });
+
+      it('never surfaces an "attachments" key for a task (epics/tasks carry no such column)', async () => {
+        listSeedRun(listDb, 'run-get-att-3');
+        const task = await createEntity('run-get-att-3', 'A plain task', 'task');
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-att-3', runId: 'run-get-att-3', taskId: task.id },
+          socket,
+        );
+
+        const data = parseLastWrite(writes).data as { task: Record<string, unknown> };
+        expect('attachments' in data.task).toBe(false);
+      });
+
+      it('drops an attachment whose stored path resolves outside the artifacts root', async () => {
+        listSeedRun(listDb, 'run-get-att-4');
+        const idea = await createEntity('run-get-att-4', 'Idea with a poisoned path');
+
+        const outsideFile = join(attTmpRoot, 'outside-secret.txt');
+        writeFileSync(outsideFile, 'secret');
+
+        listDb.prepare('UPDATE ideas SET attachments = ? WHERE id = ?').run(
+          JSON.stringify([{ id: 'att_evil', name: 'evil.txt', path: outsideFile, type: 'text/plain', size: 6 }]),
+          idea.id,
+        );
+
+        const { socket, writes } = makeSocketDouble();
+        await listHandler.handleMessage(
+          { type: 'mcp-get-task', requestId: 'gt-att-4', runId: 'run-get-att-4', taskId: idea.id },
+          socket,
+        );
+
+        const data = parseLastWrite(writes).data as { task: Record<string, unknown> };
+        expect(data.task['attachments']).toEqual([]);
       });
     });
   });

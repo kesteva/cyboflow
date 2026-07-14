@@ -10,10 +10,18 @@
 -- (`path` is the absolute on-disk file path; NULL/absent = no attachments).
 --
 -- Ideas-only by design: the flow agents never mint image attachments (humans
--- paste them), so epics/tasks get no such column and the cyboflow_* MCP tools
--- are NOT extended. The column is written exclusively through the chokepoint
--- (TaskChangeRouter.applyChange) like every other entity field, so each change
--- still bumps `version` and appends an `entity_events` delta.
+-- paste them), so epics/tasks get no such column and the cyboflow_* WRITE
+-- surface (create/update) is NOT extended. The column is written exclusively
+-- through the chokepoint (TaskChangeRouter.applyChange) like every other
+-- entity field, so each change still bumps `version` and appends an
+-- `entity_events` delta.
+--
+-- READ-through (IDEA-006): cyboflow_get_task DOES surface an idea's
+-- attachments — [{ id, label, mimeType, path }], `path` RESOLVED to an
+-- absolute on-disk path via the same containment guard as the
+-- ideas:load-attachments IPC handler (main/src/orchestrator/mcpServer/
+-- mcpQueryHandler.ts, McpQueryHandler.toMcpAttachments) — so a flow agent can
+-- Read the bytes itself. Epics/tasks still get no `attachments` key at all.
 --
 -- NUMBERING: 028 is the next free file after 027_session_substrate.sql.
 --

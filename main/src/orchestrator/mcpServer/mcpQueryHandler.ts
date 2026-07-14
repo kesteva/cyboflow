@@ -12,6 +12,12 @@
  *   - mcp-report-finding          (NON-BLOCKING review-item create via the
  *                                  ReviewItemRouter chokepoint; replies ok:true
  *                                  immediately and never pauses the run)
+ *   - mcp-get-task                (READ-ONLY; an idea's `attachments` — migration
+ *                                  028 image metadata — is threaded onto the
+ *                                  response, RESOLVED to an absolute on-disk path
+ *                                  via the same containment guard as
+ *                                  ideas:load-attachments, IDEA-006. Epics/tasks
+ *                                  get no `attachments` key at all.)
  *
  * Plus the INTERACTIVE-substrate PreToolUse gate (IDEA-013 S5 / TASK-810):
  *   - shell-approval-request      (ASYNC-DEFERRED — the first handler that does
@@ -52,7 +58,10 @@
  *   changes are required here for quick-session support.
  */
 import * as net from 'net';
+import * as path from 'path';
+import { existsSync } from 'fs';
 import type { DatabaseLike, LoggerLike } from '../types';
+import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
 import { resolveWorkflowDefinition, isPermissionMode } from '../../../../shared/types/workflows';
 import { resolveRunFrozenSpec } from '../runFrozenSpec';
 import type { PermissionMode } from '../../../../shared/types/workflows';
@@ -68,7 +77,7 @@ import type { TaskChange, TaskActor, TaskDependencyKind } from '../taskChangeRou
 import { ReviewItemRouter, ReviewItemError } from '../reviewItemRouter';
 import type { ReviewActor, ReviewItemCreate, ReviewItemTriage } from '../reviewItemRouter';
 import { selectFindingForSeed } from '../reviewItemListing';
-import { selectProjectBacklog, selectTaskById, resolveBacklogRef } from '../taskListing';
+import { selectProjectBacklog, selectTaskById, resolveBacklogRef, selectIdeaAttachments } from '../taskListing';
 import { ArtifactRouter, ArtifactError } from '../artifactRouter';
 import type { ArtifactActor } from '../artifactRouter';
 import type { ArtifactType } from '../../../../shared/types/artifacts';
@@ -89,7 +98,7 @@ import { resolveRunFanOutInner } from '../laneChainResolution';
 import type { CliSubstrate } from '../../../../shared/types/substrate';
 import { runStatusEvents } from '../trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../../shared/types/cyboflow';
-import type { BacklogTaskItem, EntityCategory, Priority, TaskType } from '../../../../shared/types/tasks';
+import type { BacklogTaskItem, EntityCategory, IdeaAttachment, Priority, TaskType } from '../../../../shared/types/tasks';
 import type { ExperimentArm } from '../../../../shared/types/experiments';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import type {
@@ -1282,6 +1291,35 @@ export class McpQueryHandler {
   }
 
   /**
+   * Project an idea's image attachments (migration 028) into the MCP read shape
+   * for cyboflow_get_task: [{ id, label, mimeType, path }], `path` RESOLVED to
+   * an absolute on-disk path — never base64/dataURLs (flow agents fetch bytes
+   * themselves via Read). Reuses the EXACT resolution + containment guard the
+   * ideas:load-attachments IPC handler applies (main/src/ipc/ideaAttachments.ts)
+   * so this read-only surface can never be used to escape the artifacts root:
+   * an attachment whose stored path resolves outside CYBOFLOW_DIR/artifacts, or
+   * that no longer exists on disk, is silently dropped rather than surfaced.
+   */
+  private static toMcpAttachments(attachments: IdeaAttachment[]): Array<{
+    id: string;
+    label: string;
+    mimeType: string;
+    path: string;
+  }> {
+    const artifactsRoot = path.resolve(getCyboflowSubdirectory('artifacts'));
+    const result: Array<{ id: string; label: string; mimeType: string; path: string }> = [];
+    for (const att of attachments) {
+      const resolved = path.resolve(att.path);
+      if (resolved !== artifactsRoot && !resolved.startsWith(artifactsRoot + path.sep)) {
+        continue;
+      }
+      if (!existsSync(resolved)) continue;
+      result.push({ id: att.id, label: att.name, mimeType: att.type, path: resolved });
+    }
+    return result;
+  }
+
+  /**
    * List the backlog for THIS run's project — read-only, run-bound (no project
    * argument; resolveTaskRunContext derives it from CYBOFLOW_RUN_ID).
    *
@@ -1420,11 +1458,20 @@ export class McpQueryHandler {
       }
     }
 
+    const task = McpQueryHandler.toFullTask(item);
+    // Ideas-only (migration 028 / IDEA-006): epics/tasks carry no attachments
+    // column at all, so they get no `attachments` key; an idea with none gets
+    // the empty array (a stable, documented shape either way).
+    if (item.type === 'idea') {
+      const attachments = selectIdeaAttachments(this.db, item.id);
+      task['attachments'] = McpQueryHandler.toMcpAttachments(attachments);
+    }
+
     this.writeResponse(client, {
       type: 'mcp-query-response',
       requestId: msg.requestId,
       ok: true,
-      data: { task: McpQueryHandler.toFullTask(item) },
+      data: { task },
     });
   }
 

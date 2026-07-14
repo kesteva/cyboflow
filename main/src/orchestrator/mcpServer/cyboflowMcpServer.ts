@@ -273,7 +273,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       {
         name: 'cyboflow_get_task',
         description:
-          "Fetch ONE backlog entity with its FULL markdown body, by opaque id OR display ref (e.g. IDEA-009, EPIC-002, TASK-014) — pass a ref straight from cyboflow_list_tasks, it is resolved automatically. Read-only, scoped to THIS run's project: an id/ref that belongs to another project is reported as not_found.",
+          "Fetch ONE backlog entity with its FULL markdown body, by opaque id OR display ref (e.g. IDEA-009, EPIC-002, TASK-014) — pass a ref straight from cyboflow_list_tasks, it is resolved automatically. Read-only, scoped to THIS run's project: an id/ref that belongs to another project is reported as not_found. For an IDEA, the response also includes an 'attachments' array — [{ id, label, mimeType, path }], `path` a RESOLVED ABSOLUTE on-disk path (never base64/dataURLs) — read the image bytes yourself via the Read tool; an idea with none returns attachments: []. Epics/tasks carry no 'attachments' key.",
         inputSchema: {
           type: 'object',
           properties: {
