@@ -51,6 +51,19 @@ export interface CancelAndRestartDeps {
    */
   deletePendingDraftsForRun?: (runId: string) => Promise<void>;
   /**
+   * Revert the OLD run's tasks off 'In development' (migration 061) once it flips
+   * 'canceled'. The replacement run is inserted WITHOUT a task_id/batch_id link
+   * (restart semantics are out of scope — it re-plans from scratch), so nothing
+   * else re-derives those tasks; a stuck sprint's lane tasks would otherwise stay
+   * at 'In development' until the next boot sweep. `recomputeTasksForBatch` handles
+   * a canceled BATCH run's lanes; `recomputeTask` handles a DIRECT task-linked run.
+   * Both optional + fail-soft: a missing dep or a throw never breaks the restart
+   * (the old run is already canceled + the new run inserted). Awaited so the revert
+   * lands before the handler returns.
+   */
+  recomputeTasksForBatch?: (batchId: string) => Promise<void>;
+  recomputeTask?: (taskId: string) => Promise<void>;
+  /**
    * Optional structured logger.  When provided, errors from `claudeManagerStop`
    * are logged as `[cancelAndRestart]` entries before the handler proceeds to
    * the DB writes (the run is conceptually canceled regardless of PTY teardown
@@ -94,6 +107,14 @@ interface WorkflowRunRow {
   permission_mode_snapshot: string | null;
   model: string | null;
   eval_enabled: number | null;
+  /**
+   * Task/batch links (migration 061). Read so the OLD run's tasks can revert off
+   * 'In development' after it flips 'canceled'. Deliberately NOT copied to the
+   * replacement run's INSERT — a restart re-plans from scratch, so the tasks
+   * legitimately fall back to their entry stage.
+   */
+  task_id: string | null;
+  batch_id: string | null;
 }
 
 // Terminal statuses — cancel-and-restart is a no-op on these.
@@ -126,7 +147,17 @@ export async function cancelAndRestartHandler(
   runId: string,
   deps: CancelAndRestartDeps,
 ): Promise<CancelAndRestartResult> {
-  const { db, approvalRouter, questionRouter, runQueues, claudeManagerStop, deletePendingDraftsForRun, logger } = deps;
+  const {
+    db,
+    approvalRouter,
+    questionRouter,
+    runQueues,
+    claudeManagerStop,
+    deletePendingDraftsForRun,
+    recomputeTasksForBatch,
+    recomputeTask,
+    logger,
+  } = deps;
 
   // Execute everything inside the per-run PQueue to serialize with any
   // concurrent status changes for this run.
@@ -134,7 +165,7 @@ export async function cancelAndRestartHandler(
     // Step 1: Fetch the run row.
     const row = db.prepare(
       `SELECT id, workflow_id, project_id, worktree_path, policy_json, status, session_id,
-              substrate, permission_mode_snapshot, model, eval_enabled
+              substrate, permission_mode_snapshot, model, eval_enabled, task_id, batch_id
        FROM workflow_runs WHERE id = ?`,
     ).get(runId) as WorkflowRunRow | undefined;
 
@@ -236,6 +267,35 @@ export async function cancelAndRestartHandler(
       } catch (err: unknown) {
         logger?.error('[cancelAndRestart] deletePendingDraftsForRun rejected — restart already committed', {
           runId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Step 5c (migration 061): the replacement run inserted in step 5 carries NO
+    // task_id/batch_id link (a restart re-plans from scratch), so nothing else
+    // re-derives the OLD run's tasks. Now the old run is 'canceled', revert its
+    // batch lanes + direct task off 'In development' to their entry stage. Both
+    // fail-isolated — the restart already committed, so a revert error must not
+    // surface out of the handler.
+    if (recomputeTasksForBatch && row.batch_id) {
+      try {
+        await recomputeTasksForBatch(row.batch_id);
+      } catch (err: unknown) {
+        logger?.error('[cancelAndRestart] recomputeTasksForBatch failed — task stages left as-is', {
+          runId,
+          batchId: row.batch_id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (recomputeTask && row.task_id) {
+      try {
+        await recomputeTask(row.task_id);
+      } catch (err: unknown) {
+        logger?.error('[cancelAndRestart] recomputeTask failed — task stage left as-is', {
+          runId,
+          taskId: row.task_id,
           error: err instanceof Error ? err.message : String(err),
         });
       }

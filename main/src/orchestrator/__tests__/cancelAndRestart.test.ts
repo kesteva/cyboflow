@@ -131,8 +131,14 @@ describe('cancelAndRestartHandler', () => {
   beforeEach(() => {
     // includeSubstrate folds in migration 019's session_id column on
     // workflow_runs (see orchestratorTestDb) so the handler's SELECT + INSERT
-    // of session_id resolve.
-    db = createTestDb({ includeStuckDetectedAt: true, includeSubstrate: true });
+    // of session_id resolve. includeWorkflowRunTaskColumns adds task_id (mig 014)
+    // — batch_id already rides includeSubstrate — so the handler's SELECT of both
+    // (migration 061 revert seam) resolves.
+    db = createTestDb({
+      includeStuckDetectedAt: true,
+      includeSubstrate: true,
+      includeWorkflowRunTaskColumns: true,
+    });
     spy = makeOrderSpy();
     runQueues = new RunQueueRegistry();
     vi.clearAllMocks();
@@ -631,5 +637,123 @@ describe('cancelAndRestartHandler', () => {
     const runIds = allRuns.map((r) => r.id);
     expect(runIds).toHaveLength(1);
     expect(runIds[0]).toBe(runId);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Migration 061 revert seam: the OLD run flips 'canceled' but the replacement run
+// carries NO task_id/batch_id link (restart re-plans from scratch), so the OLD
+// run's tasks must be reverted off 'In development' here — nothing else does it.
+// ---------------------------------------------------------------------------
+
+describe('cancelAndRestartHandler — task-stage revert (migration 061)', () => {
+  let db: Database.Database;
+  let spy: OrderSpy;
+  let runQueues: RunQueueRegistry;
+
+  beforeEach(() => {
+    db = createTestDb({
+      includeStuckDetectedAt: true,
+      includeSubstrate: true,
+      includeWorkflowRunTaskColumns: true,
+    });
+    spy = makeOrderSpy();
+    runQueues = new RunQueueRegistry();
+    vi.clearAllMocks();
+  });
+
+  function statusOf(runId: string): string {
+    return (db.prepare('SELECT status FROM workflow_runs WHERE id = ?').get(runId) as { status: string }).status;
+  }
+
+  it('reverts a stuck BATCH run via recomputeTasksForBatch, AFTER the old run is canceled', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+    db.prepare('UPDATE workflow_runs SET batch_id = ? WHERE id = ?').run('batch-9', runId);
+    let statusWhenCalled: string | undefined;
+    const recomputeTasksForBatch = vi.fn(async (_batchId: string) => {
+      statusWhenCalled = statusOf(runId);
+    });
+    const recomputeTask = vi.fn();
+
+    const result = await cancelAndRestartHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      recomputeTasksForBatch,
+      recomputeTask,
+    });
+
+    expect('newRunId' in result).toBe(true);
+    expect(recomputeTasksForBatch).toHaveBeenCalledTimes(1);
+    expect(recomputeTasksForBatch).toHaveBeenCalledWith('batch-9');
+    expect(statusWhenCalled).toBe('canceled'); // ran AFTER the cancel+insert tx
+    expect(recomputeTask).not.toHaveBeenCalled(); // no direct task link
+  });
+
+  it('reverts a DIRECT task-linked run via recomputeTask(taskId)', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+    db.prepare('UPDATE workflow_runs SET task_id = ? WHERE id = ?').run('task-9', runId);
+    const recomputeTasksForBatch = vi.fn();
+    const recomputeTask = vi.fn();
+
+    const result = await cancelAndRestartHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      recomputeTasksForBatch,
+      recomputeTask,
+    });
+
+    expect('newRunId' in result).toBe(true);
+    expect(recomputeTask).toHaveBeenCalledTimes(1);
+    expect(recomputeTask).toHaveBeenCalledWith('task-9');
+    expect(recomputeTasksForBatch).not.toHaveBeenCalled(); // no batch link
+  });
+
+  it('the replacement run copies NEITHER task_id NOR batch_id (tasks legitimately revert)', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+    db.prepare('UPDATE workflow_runs SET task_id = ?, batch_id = ? WHERE id = ?').run('task-9', 'batch-9', runId);
+
+    const result = await cancelAndRestartHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      recomputeTasksForBatch: vi.fn(),
+      recomputeTask: vi.fn(),
+    });
+
+    if (!('newRunId' in result)) throw new Error('expected a restart');
+    const newRun = db
+      .prepare('SELECT task_id, batch_id FROM workflow_runs WHERE id = ?')
+      .get(result.newRunId) as { task_id: string | null; batch_id: string | null };
+    expect(newRun.task_id).toBeNull();
+    expect(newRun.batch_id).toBeNull();
+  });
+
+  it('is fail-soft: a throwing revert dep never breaks the restart', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+    db.prepare('UPDATE workflow_runs SET task_id = ?, batch_id = ? WHERE id = ?').run('task-9', 'batch-9', runId);
+
+    const result = await cancelAndRestartHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      recomputeTasksForBatch: vi.fn(async () => {
+        throw new Error('lane store offline');
+      }),
+      recomputeTask: vi.fn(async () => {
+        throw new Error('router offline');
+      }),
+    });
+
+    expect('newRunId' in result).toBe(true);
+    expect(statusOf(runId)).toBe('canceled'); // old run still canceled
+  });
+
+  it('restarts fine when the revert deps are omitted (optional)', async () => {
+    const runId = randomUUID();
+    seedWorkflowAndRun(db, runId, 'stuck');
+    db.prepare('UPDATE workflow_runs SET task_id = ?, batch_id = ? WHERE id = ?').run('task-9', 'batch-9', runId);
+
+    const result = await cancelAndRestartHandler(runId, makeDeps(db, spy, runQueues));
+
+    expect('newRunId' in result).toBe(true);
+    expect(statusOf(runId)).toBe('canceled');
   });
 });

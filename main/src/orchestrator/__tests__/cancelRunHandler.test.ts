@@ -556,3 +556,91 @@ describe('cancelRunHandler — sprint-lane batch close-out', () => {
     expect(getRun(db, second.runId).status).toBe('canceled');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Direct task-link revert (migration 061): a canceled run linked DIRECTLY to a
+// task (workflow_runs.task_id, no batch) reverts that task off 'In development'.
+// Load-bearing for session dismiss (cancelHostedRuns → this handler), which never
+// recomputes a direct task's stage otherwise (runs.dismiss throws for hosted runs).
+// ---------------------------------------------------------------------------
+
+describe('cancelRunHandler — direct task-link revert (recomputeTask)', () => {
+  let db: Database.Database;
+  let spy: OrderSpy;
+  let runQueues: RunQueueRegistry;
+
+  beforeEach(() => {
+    db = createTestDb({ includeWorkflowRunTaskColumns: true });
+    spy = makeOrderSpy();
+    runQueues = new RunQueueRegistry();
+    vi.clearAllMocks();
+  });
+
+  function stampTask(runId: string, taskId: string): void {
+    db.prepare('UPDATE workflow_runs SET task_id = ? WHERE id = ?').run(taskId, runId);
+  }
+
+  it('calls recomputeTask(taskId) exactly once AFTER the cancel write for a direct task-linked run', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    stampTask(runId, 'task-42');
+    // Assert ordering by observing the DB state from inside the mock: the row must
+    // already be 'canceled' when the revert fires.
+    let statusWhenCalled: string | undefined;
+    const recomputeTask = vi.fn(async (_taskId: string) => {
+      statusWhenCalled = getRun(db, runId).status;
+    });
+
+    const result = await cancelRunHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      recomputeTask,
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(recomputeTask).toHaveBeenCalledTimes(1);
+    expect(recomputeTask).toHaveBeenCalledWith('task-42');
+    expect(statusWhenCalled).toBe('canceled'); // ran AFTER the write
+  });
+
+  it('does NOT call recomputeTask for a run without a task_id (batch or unlinked run)', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    const recomputeTask = vi.fn();
+
+    const result = await cancelRunHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      recomputeTask,
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(recomputeTask).not.toHaveBeenCalled();
+  });
+
+  it('does NOT call recomputeTask on an already-terminal noOp (double-cancel)', async () => {
+    const { runId } = seedRun(db, { status: 'canceled' });
+    stampTask(runId, 'task-42');
+    const recomputeTask = vi.fn();
+
+    const result = await cancelRunHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      recomputeTask,
+    });
+
+    expect(result).toEqual({ noOp: true, reason: 'already_terminal' });
+    expect(recomputeTask).not.toHaveBeenCalled();
+  });
+
+  it('is fail-soft: a throwing recomputeTask never fails the cancel', async () => {
+    const { runId } = seedRun(db, { status: 'running' });
+    stampTask(runId, 'task-42');
+    const recomputeTask = vi.fn(async () => {
+      throw new Error('router offline');
+    });
+
+    const result = await cancelRunHandler(runId, {
+      ...makeDeps(db, spy, runQueues),
+      recomputeTask,
+    });
+
+    expect(result).toEqual({ success: true });
+    expect(getRun(db, runId).status).toBe('canceled');
+  });
+});

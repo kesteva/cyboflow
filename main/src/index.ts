@@ -2571,6 +2571,13 @@ app.whenReady().then(async () => {
       claudeManagerStop: (sessionId: string) => defaultCliManager.stopPanel(sessionId),
       // F5: sweep the OLD run's pending drafts after it flips 'canceled'.
       deletePendingDraftsForRun,
+      // Migration 061: the OLD run flips 'canceled' but the replacement run carries
+      // no task/batch link, so revert the old run's batch lanes + direct task off
+      // 'In development' to their entry stage (fail-soft inside the handler).
+      recomputeTasksForBatch: (batchId: string) =>
+        TaskChangeRouter.getInstance().recomputeTasksForBatch(batchId),
+      recomputeTask: (taskId: string) =>
+        TaskChangeRouter.getInstance().recomputeTaskExecutionStage(taskId),
       logger: loggerLike,
     });
     console.log('[Main] cancelAndRestart deps wired');
@@ -2617,6 +2624,11 @@ app.whenReady().then(async () => {
       // non-integrated lanes off 'In development' to their entry stage.
       recomputeTasksForBatch: (batchId: string) =>
         TaskChangeRouter.getInstance().recomputeTasksForBatch(batchId),
+      // Migration 061: a DIRECTLY task-linked run (workflow_runs.task_id, no batch)
+      // reverts its task off 'In development' too. Load-bearing for session dismiss
+      // (cancelHostedRuns → cancelRunHandler), which never recomputes otherwise.
+      recomputeTask: (taskId: string) =>
+        TaskChangeRouter.getInstance().recomputeTaskExecutionStage(taskId),
       // Q1 GUARD: after a successful cancel, drop the run's PENDING draft entities
       // (epics + orphan tasks it created pre-approval) so a torn-down plan leaves
       // no orphans. Shares the single deletePendingDraftsForRun sweep defined at the

@@ -97,6 +97,18 @@ export interface CancelRunDeps {
    */
   recomputeTasksForBatch?: (batchId: string) => Promise<void>;
   /**
+   * Revert a DIRECTLY task-linked run's task off 'In development' (migration 061):
+   * a canceled run whose only live association was this direct task-link reverts
+   * the task to its entry stage. Backed by
+   * TaskChangeRouter.recomputeTaskExecutionStage (idempotent, per-task fail-soft).
+   * Optional + fail-soft: a missing dep or a throw never blocks the cancel. Awaited
+   * so the revert lands before the handler returns. This is load-bearing for the
+   * SESSION DISMISS path (ipc/session.ts → cancelHostedRuns → this handler, then an
+   * outcome-only stampSessionRunsOutcome), which otherwise never recomputes a direct
+   * task's stage — the run-scoped runs.dismiss throws for session-hosted runs.
+   */
+  recomputeTask?: (taskId: string) => Promise<void>;
+  /**
    * Q1 GUARD (interrupt = no tasks): delete the canceled run's PENDING draft
    * entities (the epics + orphan tasks it created during planning) AFTER the
    * cancel write commits, so cancelling a plan-gated run BEFORE approval leaves
@@ -155,6 +167,8 @@ export type CancelRunResult =
 interface CancelRunRow {
   status: string;
   batch_id: string | null;
+  /** Direct task-link (migration 061); non-null when the run drives one task's derived stage. */
+  task_id: string | null;
 }
 
 // Terminal statuses — cancel is an idempotent no-op on these (double-cancel).
@@ -201,6 +215,7 @@ export async function cancelRunHandler(
     emitRunStatusChanged,
     markBatchTerminal,
     recomputeTasksForBatch,
+    recomputeTask,
     deletePendingDraftsForRun,
     cancelVerificationsForRun,
     reapPrototypeServers,
@@ -216,7 +231,7 @@ export async function cancelRunHandler(
   // running agent simply ignored Cancel until it finished on its own). The abort
   // MUST pre-empt the in-flight run from OUTSIDE the queue.
   const row = db
-    .prepare('SELECT status, batch_id FROM workflow_runs WHERE id = ?')
+    .prepare('SELECT status, batch_id, task_id FROM workflow_runs WHERE id = ?')
     .get(runId) as CancelRunRow | undefined;
 
   if (!row) {
@@ -288,10 +303,12 @@ export async function cancelRunHandler(
   // per-run queue. With the abort done above, execute() is unblocked and will fire
   // its own drain transition (awaiting_review, non-terminal); this serialized
   // write lands AFTER that and overwrites it to 'canceled'. The guard (status NOT
-  // IN terminal) also makes the write order-independent + idempotent. A DIRECTLY
-  // task-linked run is NOT reverted here (cancel is git-neutral; the Dismiss path
-  // owns that). A canceled BATCH run's lanes, however, ARE recomputed below so a
-  // task whose only live association was this run reverts off 'In development'.
+  // IN terminal) also makes the write order-independent + idempotent. AFTER the
+  // write, BOTH a canceled BATCH run's lanes AND a DIRECTLY task-linked run's task
+  // are recomputed below so a task whose only live association was this run reverts
+  // off 'In development'. (The direct-task revert used to be claimed as the Dismiss
+  // path's job, but session dismiss reaches cancel via cancelHostedRuns and never
+  // recomputes otherwise — runs.dismiss throws for session-hosted runs.)
   const result = await runQueues.getOrCreate(runId).add(async (): Promise<CancelRunResult> => {
     const now = new Date().toISOString();
     const cancelTx = db.transaction(() => {
@@ -350,6 +367,23 @@ export async function cancelRunHandler(
       logger?.error('[cancelRun] recomputeTasksForBatch failed — task stages left as-is', {
         runId,
         batchId: row.batch_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Direct task-link revert (migration 061): a canceled run linked DIRECTLY to a
+  // task (workflow_runs.task_id, no batch) reverts that task off 'In development'
+  // to its entry stage. Load-bearing for session dismiss (cancelHostedRuns → this
+  // handler), which otherwise never recomputes a direct task's stage. Fail-soft
+  // AFTER the write — the run row is canonical.
+  if ('success' in settled && row.task_id) {
+    try {
+      await recomputeTask?.(row.task_id);
+    } catch (err: unknown) {
+      logger?.error('[cancelRun] recomputeTask failed — task stage left as-is', {
+        runId,
+        taskId: row.task_id,
         error: err instanceof Error ? err.message : String(err),
       });
     }

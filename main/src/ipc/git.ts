@@ -218,6 +218,60 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
     }
   };
 
+  // Re-derive the board stages a session's runs drove, AFTER a close-out has
+  // stamped those runs terminal / merged. Needed because the run-status flips
+  // happen OUTSIDE the TaskChangeRouter chokepoint (stampSessionRunsPrOpen /
+  // stampSessionRunsOutcome raw-UPDATE workflow_runs), so nothing recomputes the
+  // derived 'In development' stage (migration 061) afterward:
+  //   • A DIRECT task-linked run (workflow_runs.task_id, no batch) is never touched
+  //     by finalizeSprintLanesOnSessionMerge (batch-only) — arm 1 lands its task on
+  //     Done on merge here, instead of waiting for the next boot sweep.
+  //   • A BATCH run's lanes were recomputed by finalizeSprintLanesOnSessionMerge
+  //     while its run was still non-terminal (arm 2 held non-integrated tasks at
+  //     'In development'); re-running now the run is terminal reverts them to their
+  //     entry stage (pr_open ≠ merged). The terminal-stage guard in
+  //     recomputeTaskExecutionStage protects the just-Done integrated tasks.
+  // Entirely fail-soft + per-run isolated — the git operation already succeeded.
+  const recomputeSessionRunTaskStages = async (sessionId: string): Promise<void> => {
+    try {
+      const db = databaseService.getDb();
+      const runs = db
+        .prepare('SELECT batch_id, task_id FROM workflow_runs WHERE session_id = ?')
+        .all(sessionId) as Array<{ batch_id: string | null; task_id: string | null }>;
+      if (runs.length === 0) return;
+      const taskRouter = TaskChangeRouter.getInstance();
+      const seenBatches = new Set<string>();
+      for (const run of runs) {
+        if (run.batch_id && !seenBatches.has(run.batch_id)) {
+          seenBatches.add(run.batch_id);
+          try {
+            await taskRouter.recomputeTasksForBatch(run.batch_id);
+          } catch (batchError) {
+            console.error(
+              `[IPC:git] close-out recompute: batch ${run.batch_id} failed (continuing):`,
+              batchError
+            );
+          }
+        }
+        if (run.task_id) {
+          try {
+            await taskRouter.recomputeTaskExecutionStage(run.task_id);
+          } catch (taskError) {
+            console.error(
+              `[IPC:git] close-out recompute: task ${run.task_id} failed (continuing):`,
+              taskError
+            );
+          }
+        }
+      }
+    } catch (error) {
+      console.error(
+        `[IPC:git] close-out recompute failed for session ${sessionId} (git operation unaffected):`,
+        error
+      );
+    }
+  };
+
   // After a successful session merge (squash or rebase), stamp outcome='merged'
   // on that session's child runs so the run-outcome stats (Insights) credit the
   // merge. Runs link via workflow_runs.session_id — the sessionId here IS that
@@ -248,6 +302,12 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
     } catch (error) {
       console.error(`[IPC:git] Failed to stamp merged outcome for session ${sessionId}:`, error);
     }
+    // Migration 061: now outcome='merged' is stamped, re-derive the board stages
+    // the session's runs drove. finalizeSprintLanesOnSessionMerge (called just
+    // before this) closes out BATCH lanes, but a DIRECT task-linked run is never
+    // touched by it — arm 1 lands its task on Done immediately here instead of at
+    // the next boot sweep. Fail-soft (never blocks the merge response).
+    await recomputeSessionRunTaskStages(sessionId);
     // Merge close-out reached only after a successful squash/rebase merge.
     trackUsage('session_resolved', { action: 'merge', had_conflicts: false });
   };
@@ -1441,6 +1501,16 @@ export function registerGitHandlers(ipcMain: IpcMain, services: AppServices): vo
         if (closed > 0) {
           console.log(`[IPC:git] Create-PR close-out: marked ${closed} run(s) completed/pr_open for session ${sessionId}`);
         }
+        // Migration 061: finalizeSprintLanesOnSessionMerge ran its recompute while
+        // the runs were STILL non-terminal (arm 2 held tasks at 'In development');
+        // stampSessionRunsPrOpen just flipped them terminal (status='completed',
+        // outcome='pr_open'). Re-derive now they are terminal so non-integrated
+        // batch lanes AND direct task-linked runs revert off 'In development' to
+        // their entry stage (pr_open ≠ merged). The terminal-stage guard protects
+        // the just-Done integrated tasks. Without this the later sessions:delete
+        // dismiss cannot heal them (cancelHostedRuns selects only non-terminal runs
+        // → zero rows). Fail-soft.
+        await recomputeSessionRunTaskStages(sessionId);
         trackUsage('session_resolved', { action: 'pr' });
       } catch (closeoutError) {
         console.error(`[IPC:git] Create-PR close-out failed for session ${sessionId} (push unaffected):`, closeoutError);
