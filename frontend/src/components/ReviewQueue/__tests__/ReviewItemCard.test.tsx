@@ -32,6 +32,7 @@ const {
   mockAnswerRecovery,
   mockLaunchSeparatePlanner,
   mockReturnIdeaToBacklog,
+  mockEnsureSessionForLaunch,
 } = vi.hoisted(() => ({
   mockResolve: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_1', resumed: true }),
   mockDismiss: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_1' }),
@@ -43,6 +44,7 @@ const {
     .fn()
     .mockResolvedValue({ runId: 'run_child', worktreePath: '/tmp/wt', branchName: 'quick-child' }),
   mockReturnIdeaToBacklog: vi.fn().mockResolvedValue({ reviewItemId: 'rvw_1', ideaId: 'idea_1' }),
+  mockEnsureSessionForLaunch: vi.fn().mockResolvedValue('sess-child'),
 }));
 
 vi.mock('../../../trpc/client', () => ({
@@ -64,6 +66,12 @@ vi.mock('../../../trpc/client', () => ({
       },
     },
   },
+}));
+
+// The guard's launch CTA creates the child's FRESH host session before mutating
+// (via useReviewItemActions) — stub the session helper so no real IPC fires.
+vi.mock('../../../utils/ensureSessionForLaunch', () => ({
+  ensureSessionForLaunch: mockEnsureSessionForLaunch,
 }));
 
 import { ReviewItemCard } from '../ReviewItemCard';
@@ -110,6 +118,8 @@ beforeEach(() => {
   mockAnswerRecovery.mockClear();
   mockLaunchSeparatePlanner.mockClear();
   mockReturnIdeaToBacklog.mockClear();
+  mockEnsureSessionForLaunch.mockClear();
+  mockEnsureSessionForLaunch.mockResolvedValue('sess-child');
 });
 
 describe('ReviewItemCard', () => {
@@ -482,13 +492,19 @@ describe('ReviewItemCard', () => {
     expect(screen.queryByTestId('decision-reject')).not.toBeInTheDocument();
   });
 
-  it('clicking Launch a separate planner calls launchSeparatePlanner exactly once with {projectId, reviewItemId}', async () => {
+  it('clicking Launch a separate planner creates a fresh session then calls launchSeparatePlanner once', async () => {
     const onResolved = vi.fn();
     render(<ReviewItemCard item={makeGuardItem()} onResolved={onResolved} />);
     fireEvent.click(screen.getByTestId('guard-launch-separate'));
     await waitFor(() =>
-      expect(mockLaunchSeparatePlanner).toHaveBeenCalledWith({ projectId: 5, reviewItemId: 'rvw_guard' }),
+      expect(mockLaunchSeparatePlanner).toHaveBeenCalledWith({
+        projectId: 5,
+        reviewItemId: 'rvw_guard',
+        sessionId: 'sess-child',
+      }),
     );
+    // The child's host session is FORCED fresh — the parent's is parked behind this guard.
+    expect(mockEnsureSessionForLaunch).toHaveBeenCalledWith(5, { forceNew: true });
     expect(mockLaunchSeparatePlanner).toHaveBeenCalledTimes(1);
     expect(mockReturnIdeaToBacklog).not.toHaveBeenCalled();
     expect(mockResolve).not.toHaveBeenCalled();
@@ -555,4 +571,5 @@ describe('ReviewItemCard', () => {
     expect(screen.queryByTestId('decision-resolve')).not.toBeInTheDocument();
     expect(screen.queryByTestId('decision-reject')).not.toBeInTheDocument();
   });
+
 });

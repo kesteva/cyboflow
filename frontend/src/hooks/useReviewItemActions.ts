@@ -35,6 +35,7 @@ import { useCallback, useState } from 'react';
 import { trpc } from '../trpc/client';
 import { acceptedResolution } from '../../../shared/types/reviews';
 import type { IdeaVerdictMap } from '../../../shared/types/reviews';
+import { ensureSessionForLaunch } from '../utils/ensureSessionForLaunch';
 
 export interface ReviewItemActionsState {
   /** Review item id whose mutation is currently in flight (or null when idle). */
@@ -87,9 +88,13 @@ export interface ReviewItemActionsState {
   /**
    * Launch a dedicated single-idea planner for the idea flagged by a
    * `gate:'idea-size-guard'` decision item, resolving the guard as part of the
-   * same server-side mutation (create-then-resolve). Returns the new run's
-   * `{ runId, worktreePath, branchName }` on success, or null on error — an
-   * already-resolved guard hard-errors server-side (surfaced via `error`).
+   * same server-side mutation (create-then-resolve). Creates a FRESH host
+   * session first (ensureSessionForLaunch forceNew — the parent's session still
+   * hosts the parked parent run, so the launcher would reject it) and threads
+   * its id to the mutation. Returns the new run's `{ runId, worktreePath,
+   * branchName }` on success, or null on error — an already-resolved guard
+   * hard-errors server-side (surfaced via `error`; the created session is then
+   * left behind as an idle quick session the user can dismiss).
    */
   launchSeparatePlanner: (
     projectId: number,
@@ -208,7 +213,13 @@ export function useReviewItemActions(): ReviewItemActionsState {
       setError(null);
       setPendingItemId(reviewItemId);
       try {
-        return await trpc.cyboflow.runs.launchSeparatePlanner.mutate({ projectId, reviewItemId });
+        // The child planner needs its own worktree-backed host session — the
+        // parent run's session is parked non-terminal behind this very guard, so
+        // RunLauncher's one-running-per-session guard would reject it. forceNew
+        // also bootstraps the default Claude + Terminal panels (a server-created
+        // session would be panel-less, the A/B arm-session gap).
+        const sessionId = await ensureSessionForLaunch(projectId, { forceNew: true });
+        return await trpc.cyboflow.runs.launchSeparatePlanner.mutate({ projectId, reviewItemId, sessionId });
       } catch (err: unknown) {
         setError(messageOf(err, 'Failed to launch a separate planner'));
         return null;

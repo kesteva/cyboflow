@@ -1266,8 +1266,13 @@ export const runsRouter = router({
    * planner run scoped to JUST that idea: the linked idea rides the POSITIONAL
    * ideaId — a single-idea seed, so workflow_runs.seed_idea_ids stays NULL and
    * launchOptions.ideaIds (the multi-idea path) is deliberately NOT used — and the
-   * child inherits the parent run's substrate + model (but NOT its session —
-   * that session still hosts the parked parent run). It resolves
+   * child inherits the parent run's substrate + model but NOT its session: that
+   * session still hosts the parked parent run, and RunLauncher requires a session
+   * and rejects a busy one, so the CALLER must create a fresh worktree-backed host
+   * session first and pass its id as `sessionId` (the card's hook does this via
+   * ensureSessionForLaunch({ forceNew: true }), which also bootstraps the session's
+   * default panels — a server-side createQuickSessionCore session would be
+   * panel-less, the A/B arm-session gap). It resolves
    * the guard ONLY AFTER the launch confirms, with a durable
    * `separate-planner:<childRunId>` resolution (a stable prefix a later card/
    * return-to-backlog task discriminates on).
@@ -1294,6 +1299,13 @@ export const runsRouter = router({
       z.object({
         projectId: z.number().int().positive(),
         reviewItemId: z.string().min(1),
+        /**
+         * The FRESH host session for the child planner, created by the caller
+         * (ensureSessionForLaunch({ forceNew: true })). Never the parent run's
+         * session — the parked parent still occupies it and RunLauncher's
+         * one-running-per-session guard would reject the launch.
+         */
+        sessionId: z.string().min(1),
       }),
     )
     .mutation(async ({ ctx, input }): Promise<{ runId: string; worktreePath: string; branchName: string }> => {
@@ -1367,12 +1379,11 @@ export const runsRouter = router({
       // (2) Launch the dedicated single-idea planner (create-then-resolve, step 2).
       // The linked idea rides the POSITIONAL ideaId (5th arg) — a single-idea seed,
       // so seed_idea_ids stays NULL; substrate (3rd) and model (13th) inherit from
-      // the parent run. sessionId (6th) is deliberately OMITTED: the parent session
-      // still hosts the parked parent run (the pending guard holds it non-terminal),
-      // and RunLauncher's one-running-per-session guard would reject a second run in
-      // that session — the child gets its own dedicated session/worktree instead.
-      // The trailing launchOptions is OMITTED so NO ideaIds multi-idea seed is
-      // written. A launch failure leaves the guard pending (rethrown below).
+      // the parent run. sessionId (6th) is the CALLER-created fresh host session
+      // (never the parent's — the parked parent run holds it non-terminal, and
+      // RunLauncher both requires a session and rejects a busy one). The trailing
+      // launchOptions is OMITTED so NO ideaIds multi-idea seed is written. A launch
+      // failure leaves the guard pending (rethrown below).
       let child: Awaited<ReturnType<RunLauncherLike['launch']>>;
       try {
         child = await startRunDeps.runLauncher.launch(
@@ -1381,7 +1392,7 @@ export const runsRouter = router({
           run.substrate ?? undefined,
           undefined,
           ideaId,
-          undefined,
+          input.sessionId,
           undefined,
           undefined,
           undefined,

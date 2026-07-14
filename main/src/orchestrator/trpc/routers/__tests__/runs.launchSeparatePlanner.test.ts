@@ -5,8 +5,9 @@
  * The planner's size guard parks a too-large idea behind a BLOCKING `decision`
  * review item (soft-linked entity_type='idea', run_id=<parent planner>). This
  * mutation mints a dedicated single-idea planner (idea on the POSITIONAL ideaId,
- * inheriting the parent run's substrate + model but NOT its session — the parked
- * parent still occupies it), and ONLY THEN
+ * inheriting the parent run's substrate + model, hosted in the CALLER-created
+ * fresh session `input.sessionId` — never the parent's, which the parked parent
+ * still occupies), and ONLY THEN
  * resolves the guard with a durable `separate-planner:<childRunId>` resolution.
  *
  * These tests pin:
@@ -141,20 +142,25 @@ describe('cyboflow.runs.launchSeparatePlanner', () => {
     const resolveSpy = vi.spyOn(ReviewItemRouter.getInstance(), 'applyReviewItem');
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
-    const result = await caller.cyboflow.runs.launchSeparatePlanner({ projectId: 1, reviewItemId });
+    const result = await caller.cyboflow.runs.launchSeparatePlanner({
+      projectId: 1,
+      reviewItemId,
+      sessionId: 'sess-child',
+    });
 
     expect(result).toEqual({ runId: 'child-run', worktreePath: '/w/child', branchName: 'b/child' });
 
     // Launch args: workflow, project path, substrate(3rd), taskId(undef), ideaId
-    // POSITIONAL(5th), sessionId(6th) DELIBERATELY undefined — the parent session
-    // still hosts the parked parent run and the launcher's one-running-per-session
-    // guard would reject a second run there, so the child gets its own session —
-    // permission(undef), baseBranch(undef), seedTaskIds(undef), projectId(10th),
-    // execModel(undef), findingIds(undef), model(13th). NO trailing launchOptions →
-    // the multi-idea seed_idea_ids stays NULL.
+    // POSITIONAL(5th), sessionId(6th) = the CALLER-created fresh host session —
+    // NEVER 'sess-parent' (the parked parent run occupies it and the launcher's
+    // one-running-per-session guard would reject) and NEVER undefined (the
+    // launcher requires a session) — permission(undef), baseBranch(undef),
+    // seedTaskIds(undef), projectId(10th), execModel(undef), findingIds(undef),
+    // model(13th). NO trailing launchOptions → the multi-idea seed_idea_ids
+    // stays NULL.
     expect(launchMock).toHaveBeenCalledOnce();
     expect(launchMock).toHaveBeenCalledWith(
-      'wf-planner', '/projects/p', 'interactive', undefined, 'ide_big', undefined,
+      'wf-planner', '/projects/p', 'interactive', undefined, 'ide_big', 'sess-child',
       undefined, undefined, undefined, 1, undefined, undefined, 'opus',
     );
     // launchOptions (16th arg, index 15) is absent — no ideaIds multi-idea path.
@@ -192,7 +198,7 @@ describe('cyboflow.runs.launchSeparatePlanner', () => {
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
     await expect(
-      caller.cyboflow.runs.launchSeparatePlanner({ projectId: 1, reviewItemId }),
+      caller.cyboflow.runs.launchSeparatePlanner({ projectId: 1, reviewItemId, sessionId: 'sess-child' }),
     ).rejects.toMatchObject({ code: 'INTERNAL_SERVER_ERROR' });
 
     expect(launchMock).toHaveBeenCalledOnce();
@@ -216,7 +222,7 @@ describe('cyboflow.runs.launchSeparatePlanner', () => {
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
     await expect(
-      caller.cyboflow.runs.launchSeparatePlanner({ projectId: 1, reviewItemId }),
+      caller.cyboflow.runs.launchSeparatePlanner({ projectId: 1, reviewItemId, sessionId: 'sess-child' }),
     ).rejects.toMatchObject({ code: 'BAD_REQUEST' });
     expect(launchMock).not.toHaveBeenCalled();
   });
@@ -241,7 +247,7 @@ describe('cyboflow.runs.launchSeparatePlanner', () => {
 
     const caller = appRouter.createCaller(createContext({ db: dbAdapter(db) }));
     await expect(
-      caller.cyboflow.runs.launchSeparatePlanner({ projectId: 1, reviewItemId }),
+      caller.cyboflow.runs.launchSeparatePlanner({ projectId: 1, reviewItemId, sessionId: 'sess-child' }),
     ).rejects.toMatchObject({ code: 'PRECONDITION_FAILED' });
     expect(launchMock).not.toHaveBeenCalled();
   });

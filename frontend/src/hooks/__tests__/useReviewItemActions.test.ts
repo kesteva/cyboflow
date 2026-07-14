@@ -15,12 +15,20 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 
-const { mockResolve, mockDismiss, mockPromote, mockLaunchSeparatePlanner, mockReturnIdeaToBacklog } = vi.hoisted(() => ({
+const {
+  mockResolve,
+  mockDismiss,
+  mockPromote,
+  mockLaunchSeparatePlanner,
+  mockReturnIdeaToBacklog,
+  mockEnsureSessionForLaunch,
+} = vi.hoisted(() => ({
   mockResolve: vi.fn(),
   mockDismiss: vi.fn(),
   mockPromote: vi.fn(),
   mockLaunchSeparatePlanner: vi.fn(),
   mockReturnIdeaToBacklog: vi.fn(),
+  mockEnsureSessionForLaunch: vi.fn(),
 }));
 
 vi.mock('../../trpc/client', () => ({
@@ -39,6 +47,12 @@ vi.mock('../../trpc/client', () => ({
   },
 }));
 
+// launchSeparatePlanner creates the child's FRESH host session before mutating —
+// stub the session helper (its real IPC/panel bootstrap is covered elsewhere).
+vi.mock('../../utils/ensureSessionForLaunch', () => ({
+  ensureSessionForLaunch: mockEnsureSessionForLaunch,
+}));
+
 import { useReviewItemActions } from '../useReviewItemActions';
 
 beforeEach(() => {
@@ -47,6 +61,8 @@ beforeEach(() => {
   mockPromote.mockReset();
   mockLaunchSeparatePlanner.mockReset();
   mockReturnIdeaToBacklog.mockReset();
+  mockEnsureSessionForLaunch.mockReset();
+  mockEnsureSessionForLaunch.mockResolvedValue('sess-child');
 });
 
 describe('useReviewItemActions', () => {
@@ -188,7 +204,7 @@ describe('useReviewItemActions', () => {
     expect(result.current.error).toContain('invalid_entity');
   });
 
-  it('launchSeparatePlanner forwards the input and returns the new run', async () => {
+  it('launchSeparatePlanner creates a FRESH host session then forwards it with the input', async () => {
     mockLaunchSeparatePlanner.mockResolvedValue({
       runId: 'run_child',
       worktreePath: '/tmp/wt',
@@ -201,7 +217,15 @@ describe('useReviewItemActions', () => {
       res = await result.current.launchSeparatePlanner(4, 'rvw_guard');
     });
 
-    expect(mockLaunchSeparatePlanner).toHaveBeenCalledWith({ projectId: 4, reviewItemId: 'rvw_guard' });
+    // forceNew is REQUIRED: the parent run's session is parked non-terminal
+    // behind the guard, so reusing the current selection would be rejected by
+    // the backend's one-running-per-session guard.
+    expect(mockEnsureSessionForLaunch).toHaveBeenCalledWith(4, { forceNew: true });
+    expect(mockLaunchSeparatePlanner).toHaveBeenCalledWith({
+      projectId: 4,
+      reviewItemId: 'rvw_guard',
+      sessionId: 'sess-child',
+    });
     expect(res).toEqual({ runId: 'run_child', worktreePath: '/tmp/wt', branchName: 'quick-child' });
     expect(result.current.pendingItemId).toBeNull();
     expect(result.current.error).toBeNull();
@@ -218,6 +242,20 @@ describe('useReviewItemActions', () => {
 
     expect(res).toBeNull();
     expect(result.current.error).toContain('already');
+  });
+
+  it('sets error and skips the mutation when the session create itself fails', async () => {
+    mockEnsureSessionForLaunch.mockRejectedValue(new Error('Failed to create session for launch'));
+    const { result } = renderHook(() => useReviewItemActions());
+
+    let res: { runId: string; worktreePath: string; branchName: string } | null = { runId: 'x', worktreePath: 'x', branchName: 'x' };
+    await act(async () => {
+      res = await result.current.launchSeparatePlanner(4, 'rvw_guard');
+    });
+
+    expect(res).toBeNull();
+    expect(mockLaunchSeparatePlanner).not.toHaveBeenCalled();
+    expect(result.current.error).toContain('Failed to create session');
   });
 
   it('returnIdeaToBacklog forwards the input and returns the resolved ids', async () => {
