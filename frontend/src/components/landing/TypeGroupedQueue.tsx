@@ -67,22 +67,46 @@ function openRunSession(runId: string, projectId: number): void {
 }
 
 /**
+ * Open an idle QUICK session by its sessionId. Idle-session review items carry a
+ * `__quick__` sentinel run whose workflow definition can't resolve, so routing
+ * them through the flow-run host (setActiveRun) hangs the center pane forever on
+ * "Loading workflow…". Quick sessions must instead render the QuickSessionCenterPane
+ * via setActiveQuickSession, which never resolves a workflow definition.
+ */
+function openQuickSession(sessionId: string, runId: string | null, projectId: number): void {
+  useCyboflowStore.getState().setActiveQuickSession(sessionId, runId ?? undefined);
+  useNavigationStore.getState().setActiveProjectId(projectId);
+  useNavigationStore.getState().goToSession();
+}
+
+/**
  * Right-aligned ghost link that jumps to the originating run's session. Rendered
  * only when both a runId and a resolved projectId are available.
+ *
+ * When `quickSessionId` is set (an idle-session item), the click opens the quick
+ * session host instead of the flow-run host — see {@link openQuickSession}.
  */
 function OpenSessionLink({
   runId,
   projectId,
+  quickSessionId,
 }: {
   runId: string | null;
   projectId: number | undefined;
+  quickSessionId?: string | null;
 }): React.JSX.Element | null {
-  if (runId === null || projectId === undefined) return null;
+  if (projectId === undefined) return null;
+  // A quick-session item can open even with a null runId; a flow-run item needs one.
+  if (quickSessionId == null && runId === null) return null;
+  const onClick =
+    quickSessionId != null
+      ? () => openQuickSession(quickSessionId, runId, projectId)
+      : () => openRunSession(runId as string, projectId);
   return (
     <div className="flex justify-end px-4 pb-2">
       <button
         type="button"
-        onClick={() => openRunSession(runId, projectId)}
+        onClick={onClick}
         className="eyebrow text-text-tertiary hover:text-interactive"
       >
         Open session →
@@ -143,10 +167,20 @@ function PermissionRow({
 }
 
 function ReviewItemRow({ item }: { item: ReviewItem }): React.JSX.Element {
+  // An idle-session item's source is `idle-session:<sessionId>`; its run_id is a
+  // `__quick__` sentinel that has no resolvable workflow definition, so open it as
+  // a quick session rather than through the flow-run host.
+  const quickSessionId = item.source?.startsWith(IDLE_REVIEW_SOURCE_PREFIX)
+    ? item.source.slice(IDLE_REVIEW_SOURCE_PREFIX.length)
+    : null;
   return (
     <div>
       <ReviewItemCard item={item} />
-      <OpenSessionLink runId={item.run_id} projectId={item.project_id} />
+      <OpenSessionLink
+        runId={item.run_id}
+        projectId={item.project_id}
+        quickSessionId={quickSessionId}
+      />
     </div>
   );
 }

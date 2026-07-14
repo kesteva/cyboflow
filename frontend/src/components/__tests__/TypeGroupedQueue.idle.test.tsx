@@ -7,11 +7,14 @@
  * first (earliest created_at at the top).
  */
 import '@testing-library/jest-dom';
-import { render, screen, within } from '@testing-library/react';
-import { describe, it, expect, vi } from 'vitest';
+import { render, screen, within, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { IDLE_REVIEW_SOURCE_PREFIX, type ReviewItem } from '../../../../shared/types/reviews';
 
 let mockReviewItems: ReviewItem[] = [];
+
+const mockSetActiveRun = vi.fn();
+const mockSetActiveQuickSession = vi.fn();
 
 vi.mock('../../stores/reviewQueueStore', () => ({
   useReviewQueueView: () => ({ blocking: [], normal: [] }),
@@ -26,13 +29,23 @@ vi.mock('../../stores/landingStore', () => ({
   useRunProjectMap: () => ({}),
 }));
 vi.mock('../../stores/cyboflowStore', () => ({
-  useCyboflowStore: { getState: () => ({ setActiveRun: vi.fn() }) },
+  useCyboflowStore: {
+    getState: () => ({
+      setActiveRun: mockSetActiveRun,
+      setActiveQuickSession: mockSetActiveQuickSession,
+    }),
+  },
 }));
 vi.mock('../../stores/navigationStore', () => ({
   useNavigationStore: {
     getState: () => ({ setActiveProjectId: vi.fn(), goToSession: vi.fn() }),
   },
 }));
+
+beforeEach(() => {
+  mockSetActiveRun.mockClear();
+  mockSetActiveQuickSession.mockClear();
+});
 vi.mock('../../hooks/useReviewItemActions', () => ({
   useReviewItemActions: () => ({
     pendingItemId: null,
@@ -117,6 +130,28 @@ describe('TypeGroupedQueue — Idle sessions group', () => {
 
     const group = screen.getByTestId('queue-group-human-task');
     expect(within(group).getByRole('button', { name: /resolve/i })).toBeInTheDocument();
+  });
+
+  it('opens an idle item via setActiveQuickSession (quick host), NOT setActiveRun', () => {
+    // The idle item's run_id is a __quick__ sentinel with no resolvable workflow
+    // definition; routing it through setActiveRun (the flow-run host) hangs the
+    // pane on "Loading workflow…". It must open via the quick-session host, keyed
+    // by the sessionId parsed from the `idle-session:<sessionId>` source.
+    mockReviewItems = [
+      makeItem({
+        id: 'rvw_idle',
+        title: 'Idle session needs your attention: quick-a',
+        source: `${IDLE_REVIEW_SOURCE_PREFIX}sess-a`,
+        run_id: 'quick-run-1',
+      }),
+    ];
+    render(<TypeGroupedQueue />);
+
+    const group = screen.getByTestId('queue-group-idle');
+    fireEvent.click(within(group).getByRole('button', { name: /open session/i }));
+
+    expect(mockSetActiveQuickSession).toHaveBeenCalledWith('sess-a', 'quick-run-1');
+    expect(mockSetActiveRun).not.toHaveBeenCalled();
   });
 
   it('orders idle items oldest-idle first (earliest created_at at the top)', () => {

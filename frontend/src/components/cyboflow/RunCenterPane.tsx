@@ -107,9 +107,19 @@ export function RunCenterPane({ activeRunId, phaseState, activeRun, flowEndSumma
     // completion never hides the chat.
     if (flowEndSummary) return flowEndSummary;
     if (phaseState.definition === null) {
+      // Distinguish a genuine in-flight fetch from a settled failure. Without this
+      // an unresolvable definition (e.g. a __quick__ sentinel run or a broken
+      // custom-flow spec_json) leaves the pane spinning on "Loading workflow…"
+      // forever — the fetch has already settled by rejecting, which sets `error`.
+      // Key on `error` (not `!isLoading`) so the pre-effect first render, where
+      // isLoading is still false, keeps showing "Loading…" rather than flashing
+      // the failure copy.
+      const settledFailed = phaseState.error !== null;
       return (
-        <div className="flex h-full items-center justify-center text-sm text-text-secondary">
-          Loading workflow…
+        <div className="flex h-full items-center justify-center px-6 text-center text-sm text-text-secondary">
+          {settledFailed
+            ? 'This session has no workflow to display. Open it from the sessions list to view its chat.'
+            : 'Loading workflow…'}
         </div>
       );
     }
