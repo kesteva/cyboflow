@@ -8,7 +8,9 @@
  * redesign moved permission mode out of global Settings into the per-panel CLI
  * composer (`BaseCliPanel.tsx`), which isn't reachable without a live session.
  * So this spec now asserts what global Settings actually renders today — the
- * modal opens over live IPC and its General/Notifications/Updates tabs mount.
+ * modal opens over live IPC and its General/AI/Integrations/Notifications/Updates
+ * tabs mount (IDEA-016 split the former "AI Integration" section of General into
+ * its own AI tab and added an empty-scaffold Integrations tab).
  */
 import { test, expect, dismissDialogs, settle } from './helpers/electronApp';
 import type { Page } from './helpers/electronApp';
@@ -24,10 +26,12 @@ async function openSettings(page: Page) {
 }
 
 test.describe('Settings dialog', () => {
-  test('opens over live IPC and shows all three tabs', async ({ page }) => {
+  test('opens over live IPC and shows all five tabs', async ({ page }) => {
     const dialog = await openSettings(page);
 
     await expect(dialog.getByRole('button', { name: 'General', exact: true })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'AI', exact: true })).toBeVisible();
+    await expect(dialog.getByRole('button', { name: 'Integrations', exact: true })).toBeVisible();
     await expect(dialog.getByRole('button', { name: 'Notifications', exact: true })).toBeVisible();
     await expect(dialog.getByRole('button', { name: 'Updates', exact: true })).toBeVisible();
   });

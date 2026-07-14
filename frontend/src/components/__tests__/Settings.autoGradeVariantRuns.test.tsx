@@ -51,20 +51,20 @@ beforeEach(() => {
 describe('Settings — autoGradeVariantRuns toggle', () => {
   it('loads checked by default (absent ⇒ ON) and renders inside Code Review Eval', async () => {
     configGet.mockResolvedValue({ success: true, data: baseConfig({ autoGradeVariantRuns: undefined }) });
-    render(<Settings isOpen onClose={vi.fn()} />);
+    render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
     const checkbox = await screen.findByLabelText('Auto-grade variant & experiment runs');
     expect(checkbox).toBeChecked();
   });
 
   it('reflects a loaded false value as unchecked', async () => {
     configGet.mockResolvedValue({ success: true, data: baseConfig({ autoGradeVariantRuns: false }) });
-    render(<Settings isOpen onClose={vi.fn()} />);
+    render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
     const checkbox = await screen.findByLabelText('Auto-grade variant & experiment runs');
     expect(checkbox).not.toBeChecked();
   });
 
   it('toggling off and saving carries autoGradeVariantRuns: false into API.config.update', async () => {
-    render(<Settings isOpen onClose={vi.fn()} />);
+    render(<Settings isOpen onClose={vi.fn()} initialTab="ai" />);
     const checkbox = await screen.findByLabelText('Auto-grade variant & experiment runs');
     expect(checkbox).toBeChecked();
 
