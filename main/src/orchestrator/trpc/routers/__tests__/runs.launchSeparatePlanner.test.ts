@@ -5,7 +5,8 @@
  * The planner's size guard parks a too-large idea behind a BLOCKING `decision`
  * review item (soft-linked entity_type='idea', run_id=<parent planner>). This
  * mutation mints a dedicated single-idea planner (idea on the POSITIONAL ideaId,
- * inheriting the parent run's substrate + model + session host), and ONLY THEN
+ * inheriting the parent run's substrate + model but NOT its session — the parked
+ * parent still occupies it), and ONLY THEN
  * resolves the guard with a durable `separate-planner:<childRunId>` resolution.
  *
  * These tests pin:
@@ -145,12 +146,15 @@ describe('cyboflow.runs.launchSeparatePlanner', () => {
     expect(result).toEqual({ runId: 'child-run', worktreePath: '/w/child', branchName: 'b/child' });
 
     // Launch args: workflow, project path, substrate(3rd), taskId(undef), ideaId
-    // POSITIONAL(5th), sessionId(6th), permission(undef), baseBranch(undef),
-    // seedTaskIds(undef), projectId(10th), execModel(undef), findingIds(undef),
-    // model(13th). NO trailing launchOptions → the multi-idea seed_idea_ids stays NULL.
+    // POSITIONAL(5th), sessionId(6th) DELIBERATELY undefined — the parent session
+    // still hosts the parked parent run and the launcher's one-running-per-session
+    // guard would reject a second run there, so the child gets its own session —
+    // permission(undef), baseBranch(undef), seedTaskIds(undef), projectId(10th),
+    // execModel(undef), findingIds(undef), model(13th). NO trailing launchOptions →
+    // the multi-idea seed_idea_ids stays NULL.
     expect(launchMock).toHaveBeenCalledOnce();
     expect(launchMock).toHaveBeenCalledWith(
-      'wf-planner', '/projects/p', 'interactive', undefined, 'ide_big', 'sess-parent',
+      'wf-planner', '/projects/p', 'interactive', undefined, 'ide_big', undefined,
       undefined, undefined, undefined, 1, undefined, undefined, 'opus',
     );
     // launchOptions (16th arg, index 15) is absent — no ideaIds multi-idea path.

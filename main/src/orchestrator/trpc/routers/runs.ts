@@ -1266,7 +1266,8 @@ export const runsRouter = router({
    * planner run scoped to JUST that idea: the linked idea rides the POSITIONAL
    * ideaId — a single-idea seed, so workflow_runs.seed_idea_ids stays NULL and
    * launchOptions.ideaIds (the multi-idea path) is deliberately NOT used — and the
-   * child inherits the parent run's substrate + model + session host. It resolves
+   * child inherits the parent run's substrate + model (but NOT its session —
+   * that session still hosts the parked parent run). It resolves
    * the guard ONLY AFTER the launch confirms, with a durable
    * `separate-planner:<childRunId>` resolution (a stable prefix a later card/
    * return-to-backlog task discriminates on).
@@ -1346,14 +1347,13 @@ export const runsRouter = router({
       // item.entityId (string | null) can lapse into the launcher's string-only ideaId.
       const ideaId: string = item.entityId;
       const run = ctx.db
-        .prepare(`SELECT workflow_id, project_id, substrate, model, session_id FROM workflow_runs WHERE id = ?`)
+        .prepare(`SELECT workflow_id, project_id, substrate, model FROM workflow_runs WHERE id = ?`)
         .get(item.runId) as
         | {
             workflow_id: string;
             project_id: number;
             substrate: CliSubstrate | null;
             model: string | null;
-            session_id: string | null;
           }
         | undefined;
       if (!run) {
@@ -1366,10 +1366,13 @@ export const runsRouter = router({
 
       // (2) Launch the dedicated single-idea planner (create-then-resolve, step 2).
       // The linked idea rides the POSITIONAL ideaId (5th arg) — a single-idea seed,
-      // so seed_idea_ids stays NULL; substrate (3rd), session host (6th), and model
-      // (13th) inherit from the parent run. The trailing launchOptions is OMITTED so
-      // NO ideaIds multi-idea seed is written. A launch failure leaves the guard
-      // pending (rethrown as a TRPCError below).
+      // so seed_idea_ids stays NULL; substrate (3rd) and model (13th) inherit from
+      // the parent run. sessionId (6th) is deliberately OMITTED: the parent session
+      // still hosts the parked parent run (the pending guard holds it non-terminal),
+      // and RunLauncher's one-running-per-session guard would reject a second run in
+      // that session — the child gets its own dedicated session/worktree instead.
+      // The trailing launchOptions is OMITTED so NO ideaIds multi-idea seed is
+      // written. A launch failure leaves the guard pending (rethrown below).
       let child: Awaited<ReturnType<RunLauncherLike['launch']>>;
       try {
         child = await startRunDeps.runLauncher.launch(
@@ -1378,7 +1381,7 @@ export const runsRouter = router({
           run.substrate ?? undefined,
           undefined,
           ideaId,
-          run.session_id ?? undefined,
+          undefined,
           undefined,
           undefined,
           undefined,
