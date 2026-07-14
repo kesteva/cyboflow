@@ -175,6 +175,7 @@ export function VariantManagerSection({
   const { variants, baseline, loading, error: loadError } = useWorkflowVariants(workflowId);
   const [actionError, setActionError] = useState<string | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
+  const [renamingVariant, setRenamingVariant] = useState<WorkflowVariantRow | null>(null);
   const [editingVariant, setEditingVariant] = useState<WorkflowVariantRow | null>(null);
   const [weightDrafts, setWeightDrafts] = useState<Record<string, string>>({});
   const [baselineWeightDraft, setBaselineWeightDraft] = useState<string | null>(null);
@@ -254,6 +255,20 @@ export function VariantManagerSection({
       }
     },
     [workflowId, invalidate],
+  );
+
+  const handleRename = useCallback(
+    async (variantId: string, label: string) => {
+      setRenamingVariant(null);
+      setActionError(null);
+      try {
+        await trpc.cyboflow.variants.update.mutate({ variantId, label });
+        await invalidate();
+      } catch (err: unknown) {
+        setActionError(err instanceof Error ? err.message : 'Failed to rename variant');
+      }
+    },
+    [invalidate],
   );
 
   const handleSetStatus = useCallback(
@@ -481,6 +496,15 @@ export function VariantManagerSection({
                   >
                     Edit
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setRenamingVariant(variant)}
+                    disabled={isBusy}
+                    data-testid={`variant-rename-button-${variant.id}`}
+                    className="rounded-button border border-border-primary bg-bg-primary px-2 py-1 text-[11px] font-medium text-text-primary hover:bg-bg-hover disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    Rename
+                  </button>
                   {variant.status !== 'active' && variant.status !== 'retired' && (
                     <button
                       type="button"
@@ -543,6 +567,17 @@ export function VariantManagerSection({
         confirmLabel="Create"
         onConfirm={(name) => void handleCreate(name)}
         onClose={() => setCreateDialogOpen(false)}
+      />
+
+      <FlowNameDialog
+        isOpen={renamingVariant !== null}
+        title="Rename variant"
+        defaultValue={renamingVariant?.label ?? ''}
+        confirmLabel="Rename"
+        onConfirm={(name) => {
+          if (renamingVariant !== null) void handleRename(renamingVariant.id, name);
+        }}
+        onClose={() => setRenamingVariant(null)}
       />
 
       {editingVariant !== null && (

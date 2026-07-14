@@ -269,6 +269,47 @@ describe('VariantManagerSection', () => {
     expect(screen.getByTestId('mock-variant-editor-modal')).toHaveTextContent('Variant A');
   });
 
+  it('(h2) Rename opens the FlowNameDialog pre-filled with the current label and calls variants.update({ variantId, label })', async () => {
+    mockUseWorkflowVariants.mockReturnValue({
+      variants: [makeVariant({ id: 'wfv_1', label: 'Variant A' })],
+      baseline: null,
+      loading: false,
+      error: null,
+    });
+    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+
+    fireEvent.click(screen.getByTestId('variant-rename-button-wfv_1'));
+    expect(screen.getByTestId('flow-name-input')).toHaveValue('Variant A');
+
+    fireEvent.change(screen.getByTestId('flow-name-input'), { target: { value: 'Variant B' } });
+    fireEvent.click(screen.getByTestId('flow-name-confirm'));
+
+    await waitFor(() => {
+      expect(mockUpdate).toHaveBeenCalledWith({ variantId: 'wfv_1', label: 'Variant B' });
+    });
+    expect(mockInvalidate).toHaveBeenCalledWith('wf-1');
+  });
+
+  it('(h3) Rename with a duplicate label surfaces the CONFLICT error inline rather than throwing', async () => {
+    mockUseWorkflowVariants.mockReturnValue({
+      variants: [makeVariant({ id: 'wfv_1', label: 'Variant A' })],
+      baseline: null,
+      loading: false,
+      error: null,
+    });
+    mockUpdate.mockRejectedValue(new Error('WorkflowRegistry.updateVariant: label already exists'));
+    render(<VariantManagerSection workflowId="wf-1" projectId={1} />);
+
+    fireEvent.click(screen.getByTestId('variant-rename-button-wfv_1'));
+    fireEvent.change(screen.getByTestId('flow-name-input'), { target: { value: 'Variant B' } });
+    fireEvent.click(screen.getByTestId('flow-name-confirm'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('variant-manager-error')).toHaveTextContent(/label already exists/i);
+    });
+    expect(mockInvalidate).not.toHaveBeenCalled();
+  });
+
   it('(i) create button is DISABLED with a save-first hint when the editor is dirty', () => {
     mockUseWorkflowVariants.mockReturnValue({ variants: [], baseline: null, loading: false, error: null });
     render(<VariantManagerSection workflowId="wf-1" projectId={1} editorDirty />);
