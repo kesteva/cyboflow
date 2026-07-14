@@ -109,7 +109,7 @@ export async function nudgeRunHandler(
   runId: string,
   text: string,
   deps: NudgeRunDeps,
-  opts: { ignoreBlockingReviewItemId?: string } = {},
+  opts: { ignoreBlockingReviewItemId?: string | string[] } = {},
 ): Promise<NudgeRunResult> {
   const { db, runQueues, runExecutor, logger } = deps;
 
@@ -133,8 +133,9 @@ export async function nudgeRunHandler(
     if (row.status !== 'awaiting_review') {
       return { ok: false as const, reason: 'not_idle' as const };
     }
-    // `ignoreBlockingReviewItemId` excludes the gate the caller is answering (the
-    // answerRecoveryGate flow), so that gate does not block its own resume.
+    // `ignoreBlockingReviewItemId` excludes the gate(s) the caller is answering
+    // (answerRecoveryGate; approve-ideas verdict delivery also ignores the batch's
+    // co-pending idea-size guards), so those gates do not block the resume.
     if (countPendingBlockingReviewItems(db, runId, opts.ignoreBlockingReviewItemId) > 0) {
       return { ok: false as const, reason: 'blocked' as const };
     }

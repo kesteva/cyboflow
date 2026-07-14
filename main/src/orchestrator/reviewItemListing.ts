@@ -432,25 +432,32 @@ function transitionReviewItemRow(
 export function countPendingBlockingReviewItems(
   db: DatabaseLike,
   runId: string,
-  excludeReviewItemId?: string,
+  excludeReviewItemId?: string | string[],
 ): number {
   if (!hasReviewItemsTable(db)) return 0;
-  // `excludeReviewItemId` lets a caller that is IN THE ACT of clearing a specific
-  // blocking gate (answerRecoveryGate → nudge) ask "is the run blocked by anything
-  // OTHER than this gate?" — so the gate does not block its own resume.
-  const row = excludeReviewItemId
-    ? (db
-        .prepare(
-          `SELECT COUNT(*) AS n FROM review_items
-            WHERE run_id = ? AND blocking = 1 AND status = 'pending' AND id != ?`,
-        )
-        .get(runId, excludeReviewItemId) as { n: number })
-    : (db
-        .prepare(
-          `SELECT COUNT(*) AS n FROM review_items
-            WHERE run_id = ? AND blocking = 1 AND status = 'pending'`,
-        )
-        .get(runId) as { n: number });
+  // `excludeReviewItemId` lets a caller that is IN THE ACT of clearing specific
+  // blocking gates ask "is the run blocked by anything OTHER than these?" — so a
+  // gate does not block its own resume (answerRecoveryGate → nudge), and the
+  // approve-ideas verdict delivery can also ignore the batch's co-pending
+  // idea-size guards (resolved out-of-session; they gate COMPLETION, not resume).
+  const excludeIds = (
+    typeof excludeReviewItemId === 'string' ? [excludeReviewItemId] : (excludeReviewItemId ?? [])
+  ).filter((id) => id.length > 0);
+  const row =
+    excludeIds.length > 0
+      ? (db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM review_items
+              WHERE run_id = ? AND blocking = 1 AND status = 'pending'
+                AND id NOT IN (${excludeIds.map(() => '?').join(', ')})`,
+          )
+          .get(runId, ...excludeIds) as { n: number })
+      : (db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM review_items
+              WHERE run_id = ? AND blocking = 1 AND status = 'pending'`,
+          )
+          .get(runId) as { n: number });
   return row.n;
 }
 

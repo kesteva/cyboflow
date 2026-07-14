@@ -979,7 +979,7 @@ describe('cyboflow.reviewItems.resolve — approve-ideas verdict delivery (agent
     expect(nudge).toHaveBeenCalledWith(
       'run-agent',
       expect.stringContaining('# Approve-ideas decisions'),
-      { ignoreBlockingReviewItemId: 'rvw_agent' },
+      { ignoreBlockingReviewItemId: ['rvw_agent'] },
     );
     const deliveredText = nudge.mock.calls[0][1];
     expect(deliveredText).toContain('- IDEA-1: approve');
@@ -995,6 +995,44 @@ describe('cyboflow.reviewItems.resolve — approve-ideas verdict delivery (agent
     expect(row.resolution.startsWith(RESOLUTION_PREFIX_IDEA_VERDICTS)).toBe(true);
     expect(parseIdeaVerdictMap(row.resolution)).toEqual({ 'IDEA-1': 'approve', 'IDEA-2': 'deny' });
     expect(res.reviewItemId).toBe('rvw_agent');
+  });
+
+  it('the delivery nudge also ignores co-pending idea-size guards (mixed batch), but not other blocking items', async () => {
+    // A mixed batch rests with the approve-ideas gate AND one idea-size guard
+    // per large seed pending on the SAME run. The guards are resolved
+    // out-of-session (CTA mutations) and gate COMPLETION — they must not block
+    // the verdict delivery, or the human could never submit the batch first.
+    const { caller, db } = buildCaller();
+    seedAgentGate(db, { runId: 'run-mixed', reviewItemId: 'rvw_gate', ideaRefs: ['IDEA-1'] });
+    const now = new Date().toISOString();
+    const insert = db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, entity_type, entity_id, kind, status, blocking,
+          title, body, severity, source, payload_json, created_at, updated_at, resolved_by, resolution)
+       VALUES (?, 1, 'run-mixed', 'idea', ?, 'decision', 'pending', 1, ?, NULL, NULL, 'agent:planner', ?, ?, ?, NULL, NULL)`,
+    );
+    insert.run(
+      'rvw_guard',
+      'ide_big',
+      'IDEA-BIG looks large',
+      JSON.stringify({ kind: 'decision', gate: 'idea-size-guard', ideaRef: 'IDEA-BIG' }),
+      now,
+      now,
+    );
+    // A blocking decision that is NOT a size guard must stay blocking.
+    insert.run('rvw_other', 'ide_oth', 'Some other gate', JSON.stringify({ kind: 'decision', gate: 'approve-plan' }), now, now);
+    const nudge = wireNudge({ delivered: true });
+
+    await caller.cyboflow.reviewItems.resolve({
+      projectId: 1,
+      reviewItemId: 'rvw_gate',
+      verdicts: { 'IDEA-1': 'approve' },
+    });
+
+    expect(nudge).toHaveBeenCalledTimes(1);
+    const opts = nudge.mock.calls[0][2];
+    expect(opts.ignoreBlockingReviewItemId).toEqual(expect.arrayContaining(['rvw_gate', 'rvw_guard']));
+    expect(opts.ignoreBlockingReviewItemId).not.toEqual(expect.arrayContaining(['rvw_other']));
   });
 
   it('refused resume leaves the gate PENDING and throws CONFLICT (decisions not recorded)', async () => {

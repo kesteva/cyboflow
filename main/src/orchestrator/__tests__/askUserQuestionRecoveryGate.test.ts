@@ -95,6 +95,29 @@ describe('QuestionRouter.clearPendingForRun preserveGates (SDK-session expiry)',
     expect(q.status).toBe('timed_out');
   });
 
+  it('countPendingBlockingReviewItems excludes a LIST of ids (approve-ideas delivery ignores co-pending guards)', async () => {
+    const db = buildReviewInboxDb();
+    const runId = seedInboxRun(db, 'rg-run-multi', 'running');
+    const now = new Date().toISOString();
+    const insert = db.prepare(
+      `INSERT INTO review_items
+         (id, project_id, run_id, kind, status, blocking, title, source, created_at, updated_at)
+       VALUES (?, 1, ?, 'decision', 'pending', 1, ?, 'agent:planner', ?, ?)`,
+    );
+    insert.run('ri-gate', runId, 'approve ideas', now, now);
+    insert.run('ri-guard', runId, 'size guard', now, now);
+    insert.run('ri-other', runId, 'other gate', now, now);
+
+    expect(countPendingBlockingReviewItems(db, runId)).toBe(3);
+    // Single-id exclude (legacy string form) unchanged.
+    expect(countPendingBlockingReviewItems(db, runId, 'ri-gate')).toBe(2);
+    // Array form excludes every listed id but nothing else.
+    expect(countPendingBlockingReviewItems(db, runId, ['ri-gate', 'ri-guard'])).toBe(1);
+    expect(countPendingBlockingReviewItems(db, runId, ['ri-gate', 'ri-guard', 'ri-other'])).toBe(0);
+    // Empty array behaves like no exclude.
+    expect(countPendingBlockingReviewItems(db, runId, [])).toBe(3);
+  });
+
   it('does NOT mint a recovery gate on a cancel (preserveGates default false)', async () => {
     const db = buildReviewInboxDb();
     const router = QuestionRouter.initialize(dbAdapter(db));

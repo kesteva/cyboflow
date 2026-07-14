@@ -159,12 +159,16 @@ export function resumeWouldStrandEndedWalk(runId: string): boolean {
 // path before wiring throws METHOD_NOT_SUPPORTED (mirrors runs.ts's dep-bag idiom).
 // ---------------------------------------------------------------------------
 
-/** Verdict-delivery nudge: resume `runId` with `text`, ignoring the gate's own blocking row. */
+/**
+ * Verdict-delivery nudge: resume `runId` with `text`, ignoring the gate's own
+ * blocking row PLUS the batch's co-pending idea-size guards (they are resolved
+ * out-of-session and gate run COMPLETION, not this resume).
+ */
 export interface ResolveVerdictNudgeDeps {
   nudge: (
     runId: string,
     text: string,
-    opts: { ignoreBlockingReviewItemId: string },
+    opts: { ignoreBlockingReviewItemId: string | string[] },
   ) => Promise<NudgeRunResult>;
 }
 
@@ -385,14 +389,56 @@ async function deliverApproveIdeasVerdicts(
   }
   const delivered = renderApproveIdeasDecisions(refs, verdicts);
 
+  // A mixed batch rests with the approve-ideas gate AND one idea-size guard per
+  // large seed pending on the SAME run (planner.md mints both, then ends the
+  // turn). The guards are resolved out-of-session (launch-separate-planner /
+  // return-to-backlog CTAs) and gate run COMPLETION — they must not block THIS
+  // resume, or the human could never submit the batch approvals first. Ignore
+  // them alongside the gate's own row. Fail-soft parse: a malformed payload just
+  // doesn't qualify as a guard.
+  const ignoreIds = [input.reviewItemId];
+  try {
+    const rows = db
+      .prepare(
+        `SELECT id, payload_json AS payloadJson FROM review_items
+          WHERE run_id = ? AND kind = 'decision' AND blocking = 1 AND status = 'pending' AND id != ?`,
+      )
+      .all(runId, input.reviewItemId) as Array<{ id: string; payloadJson: string | null }>;
+    for (const row of rows) {
+      if (typeof row.payloadJson !== 'string') continue;
+      try {
+        const parsed: unknown = JSON.parse(row.payloadJson);
+        if (
+          typeof parsed === 'object' &&
+          parsed !== null &&
+          (parsed as { gate?: unknown }).gate === 'idea-size-guard'
+        ) {
+          ignoreIds.push(row.id);
+        }
+      } catch {
+        // Corrupt payload — not a guard; keep it blocking.
+      }
+    }
+  } catch {
+    // Table/read failure — fall back to ignoring only the gate's own row.
+  }
+
   const nudge = await resolveVerdictNudgeDeps.nudge(runId, delivered, {
-    ignoreBlockingReviewItemId: input.reviewItemId,
+    ignoreBlockingReviewItemId: ignoreIds,
   });
   if (!('delivered' in nudge && nudge.delivered)) {
     const reason = 'noOp' in nudge ? nudge.reason : 'unknown';
+    const hint =
+      reason === 'blocked'
+        ? 'other blocking review items are pending on this run — resolve or dismiss them first'
+        : reason === 'not_idle'
+          ? 'the run is busy mid-turn — retry once it goes idle'
+          : reason === 'terminal'
+            ? 'the run already ended'
+            : 'the run could not be resumed';
     throw new TRPCError({
       code: 'CONFLICT',
-      message: `invalid_status: the run could not be resumed to deliver the approve-ideas decisions (${reason}); the decisions were NOT recorded — retry once the run is idle`,
+      message: `invalid_status: the approve-ideas decisions were NOT recorded (${reason}): ${hint}`,
     });
   }
 

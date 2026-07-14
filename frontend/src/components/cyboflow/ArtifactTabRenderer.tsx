@@ -1160,7 +1160,7 @@ function ApproveIdeasBody({ artifact, projectId }: { artifact: Artifact; project
   const readOnly = gateItem === null;
 
   const [verdicts, setVerdicts] = useState<IdeaVerdictMap>({});
-  const { resolve } = useReviewItemActions();
+  const { resolve, error: resolveError } = useReviewItemActions();
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
 
@@ -1191,6 +1191,9 @@ function ApproveIdeasBody({ artifact, projectId }: { artifact: Artifact; project
     setSubmitError(null);
     resolve(projectId, gateItem.id, { verdicts }).then((result) => {
       setSubmitting(false);
+      // The hook stores the server's real message (e.g. "blocked: resolve the
+      // pending size guards first") in its own error state; the alert below
+      // prefers it over this generic fallback.
       if (result === null) setSubmitError('Failed to submit decisions.');
     });
   };
@@ -1245,9 +1248,9 @@ function ApproveIdeasBody({ artifact, projectId }: { artifact: Artifact; project
                 {`${approvedCount} approved · ${deniedCount} denied · ${undecidedCount} undecided`}
               </span>
               <span style={{ flex: 1 }} />
-              {submitError && (
+              {(resolveError ?? submitError) && (
                 <span data-testid="approve-ideas-submit-error" style={{ fontSize: '10px', color: VERDICT_FAIL }}>
-                  {submitError}
+                  {resolveError ?? submitError}
                 </span>
               )}
               <button
