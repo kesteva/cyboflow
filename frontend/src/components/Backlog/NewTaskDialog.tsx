@@ -19,7 +19,7 @@ import { IdeaAttachmentStrip } from '../cyboflow/IdeaAttachmentStrip';
 import { useIdeaAttachments } from '../../hooks/useIdeaAttachments';
 import { trpc } from '../../trpc/client';
 import { useBacklogStore } from '../../stores/backlogStore';
-import type { EntityCategory, IdeaAttachment, Priority, TaskType } from '../../../../shared/types/tasks';
+import type { EntityCategory, IdeaAttachment, IdeaScope, Priority, TaskType } from '../../../../shared/types/tasks';
 
 /** Empty seed for the attachment hook (stable reference). */
 const NO_ATTACHMENTS: IdeaAttachment[] = [];
@@ -50,6 +50,10 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
   const [summary, setSummary] = useState('');
   const [priority, setPriority] = useState<Priority>('P2');
   const [category, setCategory] = useState<EntityCategory>('feature');
+  // Idea size hint (IDEA-009) — '' = unset, the planner's triage judges it.
+  // A pre-stamped value feeds the picker's S/L badges + plan-separately split
+  // and the planner's "trust existing scope" path. Ideas only.
+  const [scope, setScope] = useState<'' | IdeaScope>('');
   // null = "track the default" — the board's project filter, then the pane's
   // projectId prop, then the first known project. An explicit user pick pins
   // the override; reset() drops back to tracking.
@@ -70,6 +74,7 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
     setSummary('');
     setPriority('P2');
     setCategory('feature');
+    setScope('');
     setProjectOverride(null);
     setError(null);
     attachmentsCtl.reset();
@@ -92,6 +97,9 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
         summary: summary.trim().length > 0 ? summary.trim() : null,
         // Attachments are ideas-only; the chokepoint ignores them otherwise.
         ...(type === 'idea' ? { attachments: attachmentsCtl.attachments } : {}),
+        // Size hint is ideas-only too; unset ('') is omitted so the column
+        // stays NULL and the planner's triage judges it.
+        ...(type === 'idea' && scope !== '' ? { scope } : {}),
         priority,
         category,
       });
@@ -217,6 +225,26 @@ export function NewTaskDialog({ isOpen, projectId, onClose, onCreated }: NewTask
               ))}
             </select>
           </label>
+
+          {/* Size hint — ideas only (IDEA-009). Pre-stamping saves the planner's
+              triage a judgment call and drives the multi-select picker's S/L
+              badges + plan-separately split. */}
+          {type === 'idea' && (
+            <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
+              Size
+              <select
+                value={scope}
+                onChange={(e) => setScope(e.target.value as '' | IdeaScope)}
+                className="rounded-input border border-border-primary bg-input-bg px-2 py-1.5 text-sm text-input-text"
+                aria-label="Idea size"
+                data-testid="new-task-scope"
+              >
+                <option value="">Let the planner judge</option>
+                <option value="small">Small — fits a batch</option>
+                <option value="large">Large — plan on its own</option>
+              </select>
+            </label>
+          )}
 
           {error && (
             <p className="text-xs text-status-error" role="alert">

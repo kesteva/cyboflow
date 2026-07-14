@@ -226,6 +226,8 @@ export const tasksRouter = router({
         /** Entity category — feature/bug/chore (migration 059); create-time attribute, unlike scope. */
         category: categorySchema.optional(),
         repo: z.string().nullable().optional(),
+        /** Idea size hint — only meaningful on type='idea' (chokepoint ignores it otherwise). */
+        scope: scopeSchema.nullable().optional(),
         /** File attachments — only meaningful on type='idea' (chokepoint ignores it otherwise). */
         attachments: z.array(attachmentSchema).nullable().optional(),
         parentEpicId: z.string().nullable().optional(),
@@ -244,6 +246,7 @@ export const tasksRouter = router({
           priority: input.priority,
           category: input.category,
           repo: input.repo,
+          scope: input.scope,
           attachments: input.attachments,
           parentEpicId: input.parentEpicId,
           boardId: input.boardId,

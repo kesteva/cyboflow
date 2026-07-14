@@ -125,6 +125,45 @@ describe('NewTaskDialog — create', () => {
   });
 });
 
+describe('NewTaskDialog — idea size hint (IDEA-009)', () => {
+  it('shows the Size select for ideas only', () => {
+    render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />);
+    expect(screen.getByTestId('new-task-scope')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Task type'), { target: { value: 'task' } });
+    expect(screen.queryByTestId('new-task-scope')).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Task type'), { target: { value: 'epic' } });
+    expect(screen.queryByTestId('new-task-scope')).not.toBeInTheDocument();
+  });
+
+  it('sends the picked scope on create', async () => {
+    render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('Task title'), { target: { value: 'a big one' } });
+    fireEvent.change(screen.getByTestId('new-task-scope'), { target: { value: 'large' } });
+    fireEvent.click(screen.getByTestId('new-task-submit'));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
+    expect(mockCreate.mock.calls[0][0]).toMatchObject({ type: 'idea', scope: 'large' });
+  });
+
+  it('omits scope entirely when left unset (column stays NULL, the planner judges)', async () => {
+    render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />);
+    fireEvent.change(screen.getByLabelText('Task title'), { target: { value: 'unsure' } });
+    fireEvent.click(screen.getByTestId('new-task-submit'));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
+    expect(mockCreate.mock.calls[0][0]).not.toHaveProperty('scope');
+  });
+
+  it('drops a picked scope when the type is switched off idea before submit', async () => {
+    render(<NewTaskDialog isOpen projectId={1} onClose={vi.fn()} />);
+    fireEvent.change(screen.getByTestId('new-task-scope'), { target: { value: 'small' } });
+    fireEvent.change(screen.getByLabelText('Task type'), { target: { value: 'task' } });
+    fireEvent.change(screen.getByLabelText('Task title'), { target: { value: 'now a task' } });
+    fireEvent.click(screen.getByTestId('new-task-submit'));
+    await waitFor(() => expect(mockCreate).toHaveBeenCalledTimes(1));
+    expect(mockCreate.mock.calls[0][0]).toMatchObject({ type: 'task' });
+    expect(mockCreate.mock.calls[0][0]).not.toHaveProperty('scope');
+  });
+});
+
 describe('NewTaskDialog — close resets fields', () => {
   it('clears the title and project override after Cancel + reopen', () => {
     const onClose = vi.fn();
