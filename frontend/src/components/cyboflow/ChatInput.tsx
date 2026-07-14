@@ -210,26 +210,34 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
   }, [isInteractive]);
 
   // -- on-demand monitor gate (monitor-unify) -------------------------------
-  // Every SDK programmatic run always carries an active monitor session (no
+  // Every SDK PROGRAMMATIC run always carries an active monitor session (no
   // config opt-in); when it does, the run-chat composer is ENABLED so the user
   // can query the monitor and its reply renders in the same unified Chat pane.
-  // The probe is gated on `substrate === 'sdk'` so the quick / interactive /
-  // orchestrated send paths are never touched.
+  // The probe is gated on `substrate === 'sdk'` AND `execution_model ===
+  // 'programmatic'` so the quick / interactive / orchestrated send paths are
+  // never touched — and it mirrors the backend rehydrator's refusal matrix
+  // (monitorRehydration.ts refuses a non-sdk / non-programmatic run).
   //
-  // We RE-PROBE on the run's status (not just on runId), because the monitor
-  // session is registered only while the controller walks the DAG (registered at
-  // run start; unregistered when the walk drains to awaiting_review). A one-shot
-  // probe would (a) miss the active window if it fired while the run was still
-  // 'starting' — leaving the composer permanently disabled — and (b) go stale
-  // after drain. Keying on `status` makes starting→running enable it and
-  // running→awaiting_review/terminal disable it (reverting to the nudge
-  // affordance).
+  // We RE-PROBE on the run's status AND execution_model (not just on runId).
+  //   - status: the monitor session is registered only while the controller walks
+  //     the DAG (registered at run start; unregistered when the walk drains). A
+  //     one-shot probe would miss the active window if it fired while 'starting'
+  //     and go stale after drain.
+  //   - execution_model: a programmatic→orchestrated HANDOVER (switch_to_orchestrated)
+  //     disposes the monitor and flips execution_model, but the run's STATUS can
+  //     settle back to the SAME value it held before (running→starting→running),
+  //     so a status-only re-probe would never re-fire and `monitorActive` would
+  //     stay stale-true — leaving the composer wedged in workflow-monitor mode
+  //     (monitor.send then fails with "monitor is no longer active"). Keying on
+  //     execution_model as well forces the re-probe (here, straight to false via
+  //     the guard) the moment the handover flips the model.
   const isSdkRun = activeRun?.substrate === 'sdk';
+  const isProgrammatic = activeRun?.execution_model === 'programmatic';
   const runStatus = activeRun?.status;
   const [monitorActive, setMonitorActive] = useState(false);
 
   useEffect(() => {
-    if (runId === null || !isSdkRun) {
+    if (runId === null || !isSdkRun || !isProgrammatic) {
       setMonitorActive(false);
       return;
     }
@@ -246,7 +254,7 @@ export function ChatInput({ runId, onPermissionApplied }: ChatInputProps): React
     return () => {
       cancelled = true;
     };
-  }, [runId, isSdkRun, runStatus]);
+  }, [runId, isSdkRun, isProgrammatic, runStatus]);
 
   // -- mode gate ------------------------------------------------------------
   const isInteractiveRunning =

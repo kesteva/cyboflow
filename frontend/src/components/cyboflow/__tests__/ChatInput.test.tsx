@@ -712,6 +712,10 @@ describe('ChatInput — workflow-monitor composer (monitor-unify)', () => {
       project_id: PROJECT_ID,
       status: 'running',
       substrate: 'sdk',
+      // A monitor exists ONLY for an SDK PROGRAMMATIC run — the composer's probe
+      // now gates on execution_model as well (mirrors the backend rehydrator's
+      // refusal matrix), so these monitored-run fixtures must declare it.
+      execution_model: 'programmatic',
       worktree_path: '/Users/me/worktrees/mon',
       branch_name: 'planner/mon',
       created_at: '2026-01-01T00:00:00.000Z',
@@ -859,6 +863,46 @@ describe('ChatInput — workflow-monitor composer (monitor-unify)', () => {
     });
   });
 
+  it('LEAVES monitor mode when a handover flips execution_model to orchestrated at the SAME status', async () => {
+    // Regression: a programmatic→orchestrated handover (switch_to_orchestrated)
+    // disposes the monitor and flips execution_model, but the run's STATUS can
+    // settle back to the same value it held before ('running'→'running'). A
+    // status-only re-probe would never re-fire, leaving monitorActive stale-true
+    // and the composer wedged in workflow-monitor mode (monitor.send then fails
+    // with "monitor is no longer active"). Keying the probe on execution_model as
+    // well must force the exit to the orchestrated queue path.
+    vi.mocked(trpc.cyboflow.monitor.isActive.query).mockResolvedValue({ active: true });
+    activate({ status: 'running', execution_model: 'programmatic' });
+    render(<ChatInput runId={RUN_ID} />);
+
+    // Monitor is up → the composer is in the monitor path.
+    await waitFor(() => {
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).placeholder).toBe(
+        'Ask the monitor about this run…',
+      );
+    });
+
+    // Handover flips execution_model to 'orchestrated' with status UNCHANGED.
+    activate({ status: 'running', execution_model: 'orchestrated' });
+
+    // The composer must leave the monitor path (→ orchestrated running-queue path)
+    // WITHOUT any status change driving it.
+    await waitFor(() => {
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).placeholder).toBe(
+        'Queue a message for the agent — sent on its next turn…',
+      );
+    });
+
+    // Sending now routes to the orchestrated queue, never the (gone) monitor.
+    // In queue mode the send button reads "Queue" — target the stable testid.
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'orchestrated now?' } });
+    fireEvent.click(screen.getByTestId('unified-composer-send'));
+    await waitFor(() => {
+      expect(vi.mocked(trpc.cyboflow.runs.queueInput.mutate)).toHaveBeenCalled();
+    });
+    expect(vi.mocked(trpc.cyboflow.monitor.send.mutate)).not.toHaveBeenCalled();
+  });
+
   it('does NOT probe the monitor for an interactive run (the live-PTY relay path is untouched)', async () => {
     act(() => {
       useCyboflowStore.getState().setActiveRun(RUN_ID);
@@ -973,10 +1017,12 @@ describe('ChatInput — SDK running queue ("always allow messaging a running flo
   });
 
   it('an ACTIVE monitor still wins (queries the monitor, not the queue path)', async () => {
-    // monitor-unify precedence: when an SDK run has an active monitor, Send routes
-    // to monitor.send — the queue path must NOT fire.
+    // monitor-unify precedence: when an SDK PROGRAMMATIC run has an active monitor,
+    // Send routes to monitor.send — the queue path must NOT fire. (The composer's
+    // monitor probe gates on execution_model === 'programmatic', so this run must
+    // declare it; a plain running SDK run in this block is otherwise orchestrated.)
     vi.mocked(trpc.cyboflow.monitor.isActive.query).mockResolvedValue({ active: true });
-    activate();
+    activate({ execution_model: 'programmatic' });
     render(<ChatInput runId={RUN_ID} />);
 
     await waitFor(() => expect(screen.getByRole('textbox')).not.toBeDisabled());
