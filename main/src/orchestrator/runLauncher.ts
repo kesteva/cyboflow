@@ -276,8 +276,9 @@ export class RunLauncher {
     // block. OPTIONAL — when omitted the run is not finding-seeded.
     findingIds?: string[],
     // The user's explicit per-run MODEL choice (Configure surface →
-    // runs.start → here), a user-facing alias ('opus' | 'opus-250k' | 'sonnet' |
-    // 'haiku' | 'auto') threaded into WorkflowRegistry.createRun, which stamps it
+    // runs.start → here), a user-facing alias ('opus' | 'sonnet' | 'haiku' | 'auto';
+    // legacy 'opus-250k' still resolves for back-compat but is no longer offered
+    // in the picker) threaded into WorkflowRegistry.createRun, which stamps it
     // onto workflow_runs.model (migration 037). OPTIONAL — when omitted the run
     // pins no model and RunExecutor falls through to the SDK default. There is no
     // resolver ladder; the value is resolved to a concrete snapshot at the spawn

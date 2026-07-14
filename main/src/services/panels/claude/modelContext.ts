@@ -23,8 +23,10 @@ export const CONTEXT_1M_BETA: SdkBeta = 'context-1m-2025-08-07';
  * The families reach their 1M window differently:
  *   - Opus carries cyboflow's `[1m]` model-id suffix; the runtime reports a
  *     1,000,000 window for `claude-opus-4-8[1m]`, so the suffixed id IS the 1M
- *     model and the seam keeps it (no beta). The bare `claude-opus-4-8`
- *     (`opus-250k`) is the default-window variant.
+ *     model and the seam keeps it (no beta). The bare `claude-opus-4-8` is the
+ *     default-window variant; the legacy `opus-250k` alias maps to it for
+ *     back-compat (a stored picker value never strands) but is no longer
+ *     offered in the picker (removed from picker, IDEA-017).
  *   - Sonnet 5 is 1M by DEFAULT — the bare `claude-sonnet-5` id already reports a
  *     1M window, so it carries NO `[1m]` suffix and needs NO beta. Sonnet 5 has
  *     no separate 250K mode; the legacy `sonnet-250k` alias maps to the same id

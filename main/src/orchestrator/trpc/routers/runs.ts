@@ -884,7 +884,8 @@ export const runsRouter = router({
       // cap (OD-7) — a triage tray may seed any number of findings.
       findingIds: z.array(z.string().min(1)).optional(),
       // Optional per-run model pin (migration 037). A USER-FACING alias from the
-      // Configure surface ('opus' | 'opus-250k' | 'sonnet' | 'haiku' | 'auto'),
+      // Configure surface ('opus' | 'sonnet' | 'haiku' | 'auto'; legacy 'opus-250k'
+      // still resolves for back-compat but is no longer offered in the picker),
       // forwarded to RunLauncher.launch → WorkflowRegistry.createRun which stamps
       // workflow_runs.model. Validated only as a non-empty string here — the alias
       // set is owned by the spawn-seam resolver (modelContext.resolveModelAlias),
