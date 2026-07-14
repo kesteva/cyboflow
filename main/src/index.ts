@@ -127,6 +127,7 @@ import type { DatabaseLike } from './orchestrator/types';
 import { buildApprovalCreatedEvent } from './orchestrator/approvalCreatedBridge';
 import { buildQuestionCreatedEvent } from './orchestrator/questionCreatedBridge';
 import { WorkflowRegistry } from './orchestrator/workflowRegistry';
+import { buildBuiltInWorkflows } from './orchestrator/workflows/builtInWorkflows';
 import { makeChatSentinelProvider } from './orchestrator/chatSentinelProvider';
 import { RunLauncher } from './orchestrator/runLauncher';
 import type { StreamEventPublisher, OrchSocketProvider, BridgeScriptResolver, NodeResolver } from './orchestrator/runLauncher';
@@ -1307,7 +1308,31 @@ async function initializeServices() {
     getCyboflowSubdirectory('sockets', 'orch.sock'),
     cyboflowDb,
     cyboflowLogger,
-    { onInteractiveTurnEnd: (runId) => interactiveCliManager.notifyTurnEnd(runId) },
+    {
+      onInteractiveTurnEnd: (runId) => interactiveCliManager.notifyTurnEnd(runId),
+      // Workflow/variant configuration tools (cyboflow_*_workflow / _variant):
+      // forward the WorkflowRegistry as the narrow WorkflowConfigLike structural
+      // surface so quick sessions can edit flows + variants over MCP without the
+      // handler importing the concrete registry. ensureGlobalBuiltIns is a
+      // zero-arg closure here (supplying the in-repo built-ins), matching the
+      // structural type; every other method forwards 1:1.
+      workflowConfig: {
+        getById: (id) => workflowRegistry.getById(id),
+        listByProject: (projectId) => workflowRegistry.listByProject(projectId),
+        ensureGlobalBuiltIns: () => workflowRegistry.ensureGlobalBuiltIns(buildBuiltInWorkflows()),
+        getBaselineRotation: (id) => workflowRegistry.getBaselineRotation(id),
+        updateSpec: (id, def) => workflowRegistry.updateSpec(id, def),
+        resetSpec: (id) => workflowRegistry.resetSpec(id),
+        createCustom: (params) => workflowRegistry.createCustom(params),
+        deleteWorkflow: (id) => workflowRegistry.deleteWorkflow(id),
+        listVariants: (id) => workflowRegistry.listVariants(id),
+        createVariantFromCurrent: (id, label) => workflowRegistry.createVariantFromCurrent(id, label),
+        updateVariant: (variantId, patch) => workflowRegistry.updateVariant(variantId, patch),
+        setVariantStatus: (variantId, status) => workflowRegistry.setVariantStatus(variantId, status),
+        deleteVariant: (variantId) => workflowRegistry.deleteVariant(variantId),
+        setBaselineRotation: (id, patch) => workflowRegistry.setBaselineRotation(id, patch),
+      },
+    },
   );
   // Keep the start promise so the MCP subprocess (below) can be gated on the
   // socket actually listening — it is a pure client and dies with ECONNREFUSED if

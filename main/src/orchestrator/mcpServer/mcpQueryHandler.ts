@@ -62,9 +62,10 @@ import * as path from 'path';
 import { existsSync } from 'fs';
 import type { DatabaseLike, LoggerLike } from '../types';
 import { getCyboflowSubdirectory } from '../../utils/cyboflowDirectory';
-import { resolveWorkflowDefinition, isPermissionMode } from '../../../../shared/types/workflows';
+import { resolveWorkflowDefinition, isPermissionMode, isCyboflowWorkflowName } from '../../../../shared/types/workflows';
 import { resolveRunFrozenSpec } from '../runFrozenSpec';
-import type { PermissionMode } from '../../../../shared/types/workflows';
+import type { PermissionMode, WorkflowDefinition, WorkflowRow } from '../../../../shared/types/workflows';
+import { workflowDefinitionSchema } from '../workflowDefinitionSchema';
 import { buildStepTransitionEvent } from '../stepTransitionBridge';
 import { handleEntityWrite } from '../autoMintArtifacts';
 import { listRunOwnedIdeaIds, listRunCreatedTaskIds } from '../runEntityOwnership';
@@ -99,7 +100,7 @@ import type { CliSubstrate } from '../../../../shared/types/substrate';
 import { runStatusEvents } from '../trpc/routers/events';
 import type { RunStatusChangedEvent } from '../../../../shared/types/cyboflow';
 import type { BacklogTaskItem, EntityCategory, IdeaAttachment, Priority, TaskType } from '../../../../shared/types/tasks';
-import type { ExperimentArm } from '../../../../shared/types/experiments';
+import type { ExperimentArm, WorkflowVariantRow, WorkflowVariantStatus } from '../../../../shared/types/experiments';
 import { resolveStepAgentKey } from '../../../../shared/types/agentIdentity';
 import type {
   FindingPayload,
@@ -337,6 +338,127 @@ export type McpQueryMessage =
        */
       taskRef?: string;
     }
+  // -------------------------------------------------------------------------
+  // Workflow + variant configuration writes (cyboflow_*_workflow / _variant).
+  //
+  // These reach the WorkflowRegistry through the injected `workflowConfig` dep
+  // (McpQueryHandlerDeps) rather than a direct import — the ORCHESTRATOR
+  // LAYERING RULE forbids main/src/services imports, and the deps-injection
+  // pattern (mirroring onInteractiveTurnEnd + the experiments router) keeps the
+  // handler decoupled + unit-testable. When the dep is absent every handler
+  // returns 'workflow_config_unavailable' (documented no-op fallback).
+  //
+  // Scope note: workflows are GLOBAL (a built-in edit touches the single
+  // `wf-global-<name>` row shared across every project) — unlike task writes,
+  // which are project-scoped. Only mcp-list-workflows needs the run's projectId
+  // (for the built-in reconcile + union); the id-keyed writes operate on global
+  // handles. All still reject the 'orchestrator' sentinel / terminal runs via
+  // resolveTaskRunContext for parity with the task writes.
+  // -------------------------------------------------------------------------
+  | {
+      /** READ-ONLY: list this run's project workflows (built-ins reconciled). */
+      type: 'mcp-list-workflows';
+      requestId: string;
+      runId: string;
+    }
+  | {
+      /** READ-ONLY: one workflow's resolved definition + meta + baseline rotation. */
+      type: 'mcp-get-workflow';
+      requestId: string;
+      runId: string;
+      workflowId: string;
+    }
+  | {
+      /** Persist an edited definition onto the workflow's spec_json ("Save").
+       *  `definitionJson` is a JSON-encoded WorkflowDefinition, re-validated by
+       *  workflowDefinitionSchema in the handler (parity with the tRPC input). */
+      type: 'mcp-update-workflow';
+      requestId: string;
+      runId: string;
+      workflowId: string;
+      definitionJson: string;
+    }
+  | {
+      /** Reset a BUILT-IN workflow's spec to its static default. */
+      type: 'mcp-reset-workflow';
+      requestId: string;
+      runId: string;
+      workflowId: string;
+    }
+  | {
+      /** Create a new custom workflow. `scope` chooses global (product default)
+       *  vs a project-scoped copy; `definitionJson` (optional) is a JSON-encoded
+       *  WorkflowDefinition validated in the handler. */
+      type: 'mcp-create-workflow';
+      requestId: string;
+      runId: string;
+      name: string;
+      definitionJson?: string;
+      permissionMode?: PermissionMode;
+      scope?: 'global' | 'project';
+    }
+  | {
+      /** Delete a workflow (refused for reserved built-ins / flows with runs). */
+      type: 'mcp-delete-workflow';
+      requestId: string;
+      runId: string;
+      workflowId: string;
+    }
+  | {
+      /** READ-ONLY: a workflow's variants (newest-first). */
+      type: 'mcp-list-variants';
+      requestId: string;
+      runId: string;
+      workflowId: string;
+    }
+  | {
+      /** Create a variant snapshotting the workflow's current resolved definition. */
+      type: 'mcp-create-variant';
+      requestId: string;
+      runId: string;
+      workflowId: string;
+      label: string;
+    }
+  | {
+      /** Patch a variant in place. `definitionJson` (JSON-encoded
+       *  WorkflowDefinition) is validated in the handler; `agentOverridesJson`
+       *  (JSON string or null) is stored verbatim; the rest map 1:1 to the
+       *  registry patch. Every field optional. */
+      type: 'mcp-update-variant';
+      requestId: string;
+      runId: string;
+      variantId: string;
+      definitionJson?: string;
+      agentOverridesJson?: string | null;
+      model?: string | null;
+      executionModel?: 'orchestrated' | 'programmatic' | null;
+      weight?: number;
+      label?: string;
+    }
+  | {
+      /** Transition a variant's rotation status. */
+      type: 'mcp-set-variant-status';
+      requestId: string;
+      runId: string;
+      variantId: string;
+      status: WorkflowVariantStatus;
+    }
+  | {
+      /** Delete a variant (refused when workflow_runs reference it). */
+      type: 'mcp-delete-variant';
+      requestId: string;
+      runId: string;
+      variantId: string;
+    }
+  | {
+      /** Opt the workflow's live baseline into/out of rotation + set its weight. */
+      type: 'mcp-set-baseline-rotation';
+      requestId: string;
+      runId: string;
+      workflowId: string;
+      inRotation?: boolean;
+      weight?: number;
+    }
   | {
       type: 'shell-approval-request';
       requestId: string;
@@ -482,6 +604,57 @@ export interface McpQueryHandlerDeps {
    * to `interactiveCliManager.notifyTurnEnd`.
    */
   onInteractiveTurnEnd?: (runId: string) => boolean;
+
+  /**
+   * WorkflowRegistry surface for the workflow/variant configuration tools
+   * (cyboflow_*_workflow / _variant). Injected as a narrow STRUCTURAL type
+   * (never the concrete WorkflowRegistry class) in main/src/index.ts so this
+   * handler stays decoupled + unit-testable. Absent → every config tool returns
+   * 'workflow_config_unavailable'. Method contracts mirror the workflows /
+   * variants tRPC routers exactly; distinguishable Error messages ('not found' /
+   * 'reserved' / 'run history' / 'already exists' / 'unresolvable') are mapped to
+   * ok:false error codes by writeWorkflowConfigError.
+   */
+  workflowConfig?: WorkflowConfigLike;
+}
+
+/**
+ * Narrow structural surface over WorkflowRegistry — exactly the methods the
+ * workflow/variant MCP tools call. Kept in lockstep with the registry by the
+ * wiring in main/src/index.ts (which forwards the real methods). Every method
+ * may throw a distinguishable Error the handler maps to an ok:false code.
+ */
+export interface WorkflowConfigLike {
+  getById(workflowId: string): WorkflowRow | null;
+  listByProject(projectId: number): WorkflowRow[];
+  /** Reconcile the in-repo built-ins as global rows (mirrors the tRPC list). */
+  ensureGlobalBuiltIns(): void;
+  getBaselineRotation(workflowId: string): { inRotation: boolean; weight: number } | null;
+  updateSpec(workflowId: string, definition: WorkflowDefinition): void;
+  resetSpec(workflowId: string): void;
+  createCustom(params: {
+    projectId: number | null;
+    name: string;
+    specJson?: string;
+    permissionMode?: PermissionMode;
+  }): WorkflowRow;
+  deleteWorkflow(workflowId: string): void;
+  listVariants(workflowId: string): WorkflowVariantRow[];
+  createVariantFromCurrent(workflowId: string, label: string): WorkflowVariantRow;
+  updateVariant(
+    variantId: string,
+    patch: {
+      specJson?: string;
+      agentOverridesJson?: string | null;
+      model?: string | null;
+      executionModel?: 'orchestrated' | 'programmatic' | null;
+      weight?: number;
+      label?: string;
+    },
+  ): void;
+  setVariantStatus(variantId: string, status: WorkflowVariantStatus): void;
+  deleteVariant(variantId: string): void;
+  setBaselineRotation(workflowId: string, patch: { inRotation?: boolean; weight?: number }): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -590,6 +763,42 @@ export class McpQueryHandler {
           // { requestId } (or { skipped:true } for a disabled run), then nudges the
           // scheduler — the lane never blocks on the verdict.
           this.handleRequestVerification(msg, client);
+          break;
+        case 'mcp-list-workflows':
+          this.handleListWorkflows(msg, client);
+          break;
+        case 'mcp-get-workflow':
+          this.handleGetWorkflow(msg, client);
+          break;
+        case 'mcp-update-workflow':
+          this.handleUpdateWorkflow(msg, client);
+          break;
+        case 'mcp-reset-workflow':
+          this.handleResetWorkflow(msg, client);
+          break;
+        case 'mcp-create-workflow':
+          this.handleCreateWorkflow(msg, client);
+          break;
+        case 'mcp-delete-workflow':
+          this.handleDeleteWorkflow(msg, client);
+          break;
+        case 'mcp-list-variants':
+          this.handleListVariants(msg, client);
+          break;
+        case 'mcp-create-variant':
+          this.handleCreateVariant(msg, client);
+          break;
+        case 'mcp-update-variant':
+          this.handleUpdateVariant(msg, client);
+          break;
+        case 'mcp-set-variant-status':
+          this.handleSetVariantStatus(msg, client);
+          break;
+        case 'mcp-delete-variant':
+          this.handleDeleteVariant(msg, client);
+          break;
+        case 'mcp-set-baseline-rotation':
+          this.handleSetBaselineRotation(msg, client);
           break;
         case 'shell-approval-request':
           // Async-deferred — the FIRST handler that does NOT writeResponse
@@ -2892,6 +3101,418 @@ export class McpQueryHandler {
       ok: true,
       data,
     });
+  }
+
+  // --------------------------------------------------------------------------
+  // Workflow + variant configuration (cyboflow_*_workflow / _variant)
+  //
+  // All reach the WorkflowRegistry through the injected `workflowConfig` dep
+  // (absent → 'workflow_config_unavailable'). Reads/writes are keyed by global
+  // workflow/variant ids; only handleListWorkflows uses the run's projectId (for
+  // the built-in reconcile + union). Registry guard Errors are mapped to ok:false
+  // codes by writeWorkflowConfigError, mirroring the workflows/variants tRPC
+  // routers. WARNING: editing a built-in edits the single global row shared by
+  // every project — the tool descriptions call this out.
+  // --------------------------------------------------------------------------
+
+  /**
+   * Shared preamble for the config handlers: require the injected dep AND a real,
+   * non-terminal run (resolveTaskRunContext rejects the 'orchestrator' sentinel /
+   * missing / terminal runs). Returns the config surface + projectId, or null
+   * after writing the appropriate ok:false response.
+   */
+  private resolveWorkflowConfig(
+    msg: Extract<McpQueryMessage, { runId: string; requestId: string }>,
+    client: net.Socket,
+  ): { cfg: WorkflowConfigLike; projectId: number } | null {
+    const cfg = this.deps.workflowConfig;
+    if (!cfg) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'workflow_config_unavailable',
+      });
+      return null;
+    }
+    const ctx = this.resolveTaskRunContext(msg.runId);
+    if (!ctx.ok) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: ctx.error,
+      });
+      return null;
+    }
+    return { cfg, projectId: ctx.projectId };
+  }
+
+  /** Compact workflow projection (no spec_json blob — see get_workflow for the definition). */
+  private static toCompactWorkflow(row: WorkflowRow): Record<string, unknown> {
+    const specJson = typeof row.spec_json === 'string' ? row.spec_json.trim() : '';
+    return {
+      id: row.id,
+      name: row.name,
+      project_id: row.project_id,
+      scope: row.project_id === null ? 'global' : 'project',
+      is_built_in: row.project_id === null && isCyboflowWorkflowName(row.name),
+      permission_mode: row.permission_mode,
+      // A non-empty, non-'{}' spec_json means the row carries an edited/custom
+      // definition (vs falling back to the built-in). The full graph is on
+      // get_workflow, not here.
+      has_custom_spec: specJson.length > 0 && specJson !== '{}',
+      created_at: row.created_at,
+    };
+  }
+
+  /** Compact variant projection (omits the spec_json / agent_overrides_json blobs). */
+  private static toCompactVariant(row: WorkflowVariantRow): Record<string, unknown> {
+    return {
+      id: row.id,
+      workflow_id: row.workflow_id,
+      label: row.label,
+      model: row.model,
+      execution_model: row.execution_model,
+      weight: row.weight,
+      status: row.status,
+      has_agent_overrides: row.agent_overrides_json !== null,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  }
+
+  /**
+   * Parse + validate a JSON-encoded WorkflowDefinition with the SAME strict
+   * schema the tRPC write path runs as `.input()`. Returns the parsed definition
+   * or null after writing an ok:false response (bad JSON → 'invalid_json',
+   * schema violation → 'invalid_definition').
+   */
+  private parseDefinitionJson(
+    definitionJson: string,
+    requestId: string,
+    client: net.Socket,
+  ): WorkflowDefinition | null {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(definitionJson);
+    } catch {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId,
+        ok: false,
+        error: 'invalid_json',
+      });
+      return null;
+    }
+    const parsed = workflowDefinitionSchema.safeParse(raw);
+    if (!parsed.success) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId,
+        ok: false,
+        error: 'invalid_definition',
+      });
+      return null;
+    }
+    return parsed.data;
+  }
+
+  /**
+   * Map a WorkflowRegistry guard Error to an ok:false code by its distinguishable
+   * message substring (parity with the workflows/variants tRPC error mapping):
+   *   'not found' → not_found; 'run history' → run_history;
+   *   'already exists' → already_exists; 'reserved' → reserved;
+   *   otherwise → workflow_config_failed (logged).
+   */
+  private writeWorkflowConfigError(client: net.Socket, requestId: string, err: unknown): void {
+    const message = err instanceof Error ? err.message : String(err);
+    let error = 'workflow_config_failed';
+    if (message.includes('not found')) error = 'not_found';
+    else if (message.includes('run history')) error = 'run_history';
+    else if (message.includes('already exists')) error = 'already_exists';
+    else if (message.includes('reserved')) error = 'reserved';
+    else if (message.includes('unresolvable')) error = 'unresolvable';
+    else if (message.includes('cannot reset')) error = 'not_a_builtin';
+    else {
+      this.logger?.error('[Cyboflow MCP Query] workflow config change failed', { error: message });
+    }
+    this.writeResponse(client, { type: 'mcp-query-response', requestId, ok: false, error });
+  }
+
+  private handleListWorkflows(
+    msg: Extract<McpQueryMessage, { type: 'mcp-list-workflows' }>,
+    client: net.Socket,
+  ): void {
+    const resolved = this.resolveWorkflowConfig(msg, client);
+    if (!resolved) return;
+    const { cfg, projectId } = resolved;
+    // Reconcile the in-repo built-ins as global rows first (mirrors the tRPC
+    // list) so a fresh project sees planner/sprint/compound/ship.
+    cfg.ensureGlobalBuiltIns();
+    const rows = cfg.listByProject(projectId);
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { workflows: rows.map((r) => McpQueryHandler.toCompactWorkflow(r)) },
+    });
+  }
+
+  private handleGetWorkflow(
+    msg: Extract<McpQueryMessage, { type: 'mcp-get-workflow' }>,
+    client: net.Socket,
+  ): void {
+    const resolved = this.resolveWorkflowConfig(msg, client);
+    if (!resolved) return;
+    const { cfg } = resolved;
+    const row = cfg.getById(msg.workflowId);
+    if (!row) {
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: false,
+        error: 'not_found',
+      });
+      return;
+    }
+    // The EFFECTIVE definition the editor seeds from (spec_json wins, else the
+    // built-in fallback, else null for a broken custom flow).
+    const definition = resolveWorkflowDefinition(row.name, row.spec_json);
+    const baselineRotation = cfg.getBaselineRotation(msg.workflowId);
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: {
+        workflow: McpQueryHandler.toCompactWorkflow(row),
+        definition,
+        baseline_rotation: baselineRotation,
+      },
+    });
+  }
+
+  private handleUpdateWorkflow(
+    msg: Extract<McpQueryMessage, { type: 'mcp-update-workflow' }>,
+    client: net.Socket,
+  ): void {
+    const resolved = this.resolveWorkflowConfig(msg, client);
+    if (!resolved) return;
+    const definition = this.parseDefinitionJson(msg.definitionJson, msg.requestId, client);
+    if (!definition) return;
+    try {
+      resolved.cfg.updateSpec(msg.workflowId, definition);
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { workflow_id: msg.workflowId },
+      });
+    } catch (err) {
+      this.writeWorkflowConfigError(client, msg.requestId, err);
+    }
+  }
+
+  private handleResetWorkflow(
+    msg: Extract<McpQueryMessage, { type: 'mcp-reset-workflow' }>,
+    client: net.Socket,
+  ): void {
+    const resolved = this.resolveWorkflowConfig(msg, client);
+    if (!resolved) return;
+    try {
+      resolved.cfg.resetSpec(msg.workflowId);
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { workflow_id: msg.workflowId },
+      });
+    } catch (err) {
+      this.writeWorkflowConfigError(client, msg.requestId, err);
+    }
+  }
+
+  private handleCreateWorkflow(
+    msg: Extract<McpQueryMessage, { type: 'mcp-create-workflow' }>,
+    client: net.Socket,
+  ): void {
+    const resolved = this.resolveWorkflowConfig(msg, client);
+    if (!resolved) return;
+    // Optional definition — omit to seed a default '{}' flow (createCustom's own
+    // default). A supplied definition is validated with the strict schema.
+    let specJson: string | undefined;
+    if (msg.definitionJson !== undefined) {
+      const definition = this.parseDefinitionJson(msg.definitionJson, msg.requestId, client);
+      if (!definition) return;
+      specJson = JSON.stringify(definition);
+    }
+    // scope 'project' pins the copy to THIS run's project; 'global' (default,
+    // the product default per the tRPC router) mints a cross-project flow.
+    const projectId = msg.scope === 'project' ? resolved.projectId : null;
+    try {
+      const row = resolved.cfg.createCustom({
+        projectId,
+        name: msg.name,
+        ...(specJson !== undefined ? { specJson } : {}),
+        ...(msg.permissionMode !== undefined ? { permissionMode: msg.permissionMode } : {}),
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { workflow: McpQueryHandler.toCompactWorkflow(row) },
+      });
+    } catch (err) {
+      this.writeWorkflowConfigError(client, msg.requestId, err);
+    }
+  }
+
+  private handleDeleteWorkflow(
+    msg: Extract<McpQueryMessage, { type: 'mcp-delete-workflow' }>,
+    client: net.Socket,
+  ): void {
+    const resolved = this.resolveWorkflowConfig(msg, client);
+    if (!resolved) return;
+    try {
+      resolved.cfg.deleteWorkflow(msg.workflowId);
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { workflow_id: msg.workflowId, deleted: true },
+      });
+    } catch (err) {
+      this.writeWorkflowConfigError(client, msg.requestId, err);
+    }
+  }
+
+  private handleListVariants(
+    msg: Extract<McpQueryMessage, { type: 'mcp-list-variants' }>,
+    client: net.Socket,
+  ): void {
+    const resolved = this.resolveWorkflowConfig(msg, client);
+    if (!resolved) return;
+    const rows = resolved.cfg.listVariants(msg.workflowId);
+    this.writeResponse(client, {
+      type: 'mcp-query-response',
+      requestId: msg.requestId,
+      ok: true,
+      data: { variants: rows.map((r) => McpQueryHandler.toCompactVariant(r)) },
+    });
+  }
+
+  private handleCreateVariant(
+    msg: Extract<McpQueryMessage, { type: 'mcp-create-variant' }>,
+    client: net.Socket,
+  ): void {
+    const resolved = this.resolveWorkflowConfig(msg, client);
+    if (!resolved) return;
+    try {
+      const row = resolved.cfg.createVariantFromCurrent(msg.workflowId, msg.label);
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { variant: McpQueryHandler.toCompactVariant(row) },
+      });
+    } catch (err) {
+      this.writeWorkflowConfigError(client, msg.requestId, err);
+    }
+  }
+
+  private handleUpdateVariant(
+    msg: Extract<McpQueryMessage, { type: 'mcp-update-variant' }>,
+    client: net.Socket,
+  ): void {
+    const resolved = this.resolveWorkflowConfig(msg, client);
+    if (!resolved) return;
+    // A supplied definition is validated + re-serialized; agent_overrides_json is
+    // stored verbatim (already a JSON string or explicit null clearing it).
+    let specJson: string | undefined;
+    if (msg.definitionJson !== undefined) {
+      const definition = this.parseDefinitionJson(msg.definitionJson, msg.requestId, client);
+      if (!definition) return;
+      specJson = JSON.stringify(definition);
+    }
+    try {
+      resolved.cfg.updateVariant(msg.variantId, {
+        ...(specJson !== undefined ? { specJson } : {}),
+        ...(msg.agentOverridesJson !== undefined ? { agentOverridesJson: msg.agentOverridesJson } : {}),
+        ...(msg.model !== undefined ? { model: msg.model } : {}),
+        ...(msg.executionModel !== undefined ? { executionModel: msg.executionModel } : {}),
+        ...(msg.weight !== undefined ? { weight: msg.weight } : {}),
+        ...(msg.label !== undefined ? { label: msg.label } : {}),
+      });
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { variant_id: msg.variantId },
+      });
+    } catch (err) {
+      this.writeWorkflowConfigError(client, msg.requestId, err);
+    }
+  }
+
+  private handleSetVariantStatus(
+    msg: Extract<McpQueryMessage, { type: 'mcp-set-variant-status' }>,
+    client: net.Socket,
+  ): void {
+    const resolved = this.resolveWorkflowConfig(msg, client);
+    if (!resolved) return;
+    try {
+      resolved.cfg.setVariantStatus(msg.variantId, msg.status);
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { variant_id: msg.variantId, status: msg.status },
+      });
+    } catch (err) {
+      this.writeWorkflowConfigError(client, msg.requestId, err);
+    }
+  }
+
+  private handleDeleteVariant(
+    msg: Extract<McpQueryMessage, { type: 'mcp-delete-variant' }>,
+    client: net.Socket,
+  ): void {
+    const resolved = this.resolveWorkflowConfig(msg, client);
+    if (!resolved) return;
+    try {
+      resolved.cfg.deleteVariant(msg.variantId);
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { variant_id: msg.variantId, deleted: true },
+      });
+    } catch (err) {
+      this.writeWorkflowConfigError(client, msg.requestId, err);
+    }
+  }
+
+  private handleSetBaselineRotation(
+    msg: Extract<McpQueryMessage, { type: 'mcp-set-baseline-rotation' }>,
+    client: net.Socket,
+  ): void {
+    const resolved = this.resolveWorkflowConfig(msg, client);
+    if (!resolved) return;
+    try {
+      resolved.cfg.setBaselineRotation(msg.workflowId, {
+        ...(msg.inRotation !== undefined ? { inRotation: msg.inRotation } : {}),
+        ...(msg.weight !== undefined ? { weight: msg.weight } : {}),
+      });
+      const updated = resolved.cfg.getBaselineRotation(msg.workflowId);
+      this.writeResponse(client, {
+        type: 'mcp-query-response',
+        requestId: msg.requestId,
+        ok: true,
+        data: { workflow_id: msg.workflowId, baseline_rotation: updated },
+      });
+    } catch (err) {
+      this.writeWorkflowConfigError(client, msg.requestId, err);
+    }
   }
 
   // --------------------------------------------------------------------------
