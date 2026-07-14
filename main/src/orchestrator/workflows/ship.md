@@ -221,8 +221,9 @@ the failure is surfaced at the human gate.
   concise message referencing the task ref.
 - Set the task's lane to `integrated` via `cyboflow_update_sprint_task`.
 
-The task's board stage stays at **Ready for development** — it advances to **Done**
-only when the session is actually merged. Do **not** move task board stages by hand;
+The task's board stage sits at the derived **In development** stage for the run — it
+advances to **Done** when the session is actually merged, and reverts to its entry
+stage if the run ends without merging. Do **not** move task board stages by hand;
 the lane (and the Sessions / Runs view) is where live per-task status lives.
 
 **Lane discipline:** every lane transition goes through

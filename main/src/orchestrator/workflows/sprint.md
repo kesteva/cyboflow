@@ -31,9 +31,10 @@ The pattern for every phase:
 1. **Report the step.** Call `cyboflow_report_step` with the phase's `step_id` as
    you begin it (ids are in the step-reporting block appended below), and move each
    task's **lane** with `cyboflow_update_sprint_task`. You do **not** drive task
-   board stages by hand — a task stays at **Ready for development** until the session
-   is merged (which moves it to **Done**); live per-task progress is the lane (and
-   the Sessions / Runs view).
+   board stages by hand — a pulled task sits at the derived **In development** stage
+   for the duration of the run, advances to **Done** on merge, and reverts to its
+   entry stage if the run ends without merging; live per-task progress is the lane
+   (and the Sessions / Runs view).
 2. **Do the phase.** Delegate to its subagent with the **Agent tool**
    (`subagent_type: "<agent>"`, `prompt:` the task body + acceptance criteria + what
    to return), or run the gate yourself with **AskUserQuestion**.
@@ -96,8 +97,9 @@ is held until **all** lanes reach `integrated`.
   concise message referencing the task ref.
 - Set the task's lane to `integrated` via `cyboflow_update_sprint_task`.
 
-The task's board stage stays at **Ready for development** — it advances to **Done**
-only when the session is actually merged. Do **not** move task board stages by hand;
+The task's board stage sits at the derived **In development** stage for the run — it
+advances to **Done** when the session is actually merged, and reverts to its entry
+stage if the run ends without merging. Do **not** move task board stages by hand;
 the lane (and the Sessions / Runs view) is where live per-task status lives.
 
 **Lane discipline:** every lane transition goes through
