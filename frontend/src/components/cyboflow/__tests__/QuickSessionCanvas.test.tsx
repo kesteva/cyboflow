@@ -223,7 +223,10 @@ describe('QuickSessionCanvas', () => {
     fireEvent.click(screen.getByTestId('mock-pick-idea-with-separate'));
     await waitFor(() => expect(mockLaunch).toHaveBeenCalledTimes(2));
     expect(mockLaunch).toHaveBeenNthCalledWith(1, 'wf-planner', { ideaId: 'idea-x' });
-    expect(mockLaunch).toHaveBeenNthCalledWith(2, 'wf-planner', { ideaId: 'idea-z' });
+    // The peeled launch FORCES a fresh host session: the batch launch just
+    // occupied the current one, and the busy-check's activeRunsStore re-fetch is
+    // async — reuse would trip the backend's one-running-per-session guard.
+    expect(mockLaunch).toHaveBeenNthCalledWith(2, 'wf-planner', { ideaId: 'idea-z' }, { forceNewSession: true });
   });
 
   it('opens the full picker via Browse all', async () => {

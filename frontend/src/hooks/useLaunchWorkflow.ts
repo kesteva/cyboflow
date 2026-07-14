@@ -42,8 +42,22 @@ export interface LaunchSeed {
 }
 
 export interface UseLaunchWorkflowResult {
-  /** Fire the launch. Resolves to the new runId, or null on failure. */
-  launch: (workflowId: string, seed?: LaunchSeed) => Promise<string | null>;
+  /**
+   * Fire the launch. Resolves to the new runId, or null on failure.
+   *
+   * `launchOpts.forceNewSession` makes THIS call create a fresh worktree-backed
+   * host session instead of reusing the current selection — required for the
+   * "Plan separately" peeled launches (IDEA-009): the batch launch just occupied
+   * the current session, and the busy-check in ensureSessionForLaunch reads
+   * `activeRunsStore`, which learns about that run only via an ASYNC re-fetch —
+   * a sequential peeled launch would re-select the now-busy session and be
+   * rejected by the backend's one-running-per-session guard.
+   */
+  launch: (
+    workflowId: string,
+    seed?: LaunchSeed,
+    launchOpts?: { forceNewSession?: boolean },
+  ) => Promise<string | null>;
   isLaunching: boolean;
   error: string | null;
 }
@@ -80,7 +94,11 @@ export function useLaunchWorkflow(
   const forced = useForcedSubstrate();
 
   const launch = useCallback(
-    async (workflowId: string, seed?: LaunchSeed): Promise<string | null> => {
+    async (
+      workflowId: string,
+      seed?: LaunchSeed,
+      launchOpts?: { forceNewSession?: boolean },
+    ): Promise<string | null> => {
       if (inFlightRef.current) return null;
       inFlightRef.current = true;
       setError(null);
@@ -88,9 +106,12 @@ export function useLaunchWorkflow(
       try {
         // Launch INTO the active session (the resting quick session), reusing
         // its worktree — ensureSessionForLaunch returns selectedSessionId when set.
-        // `forceNew` (in-place / main-repo host session) skips that reuse and
-        // creates a fresh worktree-backed session instead.
-        const sessionId = await ensureSessionForLaunch(projectId, { forceNew });
+        // `forceNew` (in-place / main-repo host session) and the per-call
+        // `forceNewSession` (a "Plan separately" peeled launch) skip that reuse
+        // and create a fresh worktree-backed session instead.
+        const sessionId = await ensureSessionForLaunch(projectId, {
+          forceNew: forceNew || launchOpts?.forceNewSession === true,
+        });
         const base = {
           workflowId,
           projectId,

@@ -370,9 +370,13 @@ export function QuickSessionCanvas({
         // one additional single-idea planner launch per peeled idea,
         // sequentially, after the batch launch. Safe here — useLaunchWorkflow's
         // in-flight latch resets unconditionally in its `finally`, and this
-        // fast lane never navigates away.
+        // fast lane never navigates away. Each peeled launch FORCES a fresh
+        // host session: the batch launch just occupied the current one, and the
+        // busy-check reads activeRunsStore, whose authoritative re-fetch is
+        // async — reusing the stale selection would trip the backend's
+        // one-running-per-session guard and silently drop the peeled planner.
         for (const sepId of opts?.separateIdeaIds ?? []) {
-          await launch(id, { ideaId: sepId });
+          await launch(id, { ideaId: sepId }, { forceNewSession: true });
         }
       })();
     },
