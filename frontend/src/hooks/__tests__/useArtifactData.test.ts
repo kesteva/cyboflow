@@ -218,7 +218,7 @@ describe('useArtifactData', () => {
       payload: { markdown: '## Recommendations\n\n- do the thing' },
     });
     expect(getQuerySpy).not.toHaveBeenCalled();
-    expect(decompositionQuerySpy).not.toHaveBeenCalled();
+    expect(runDecompositionQuerySpy).not.toHaveBeenCalled();
   });
 
   // --- live refresh ---------------------------------------------------------

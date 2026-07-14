@@ -69,6 +69,8 @@ function buildDb(): Database.Database {
   db.exec('ALTER TABLE tasks ADD COLUMN approved_at TEXT;');
   db.exec('ALTER TABLE workflow_runs ADD COLUMN plan_approved_at TEXT;');
   db.exec(readFileSync(join(migDir, '057_entity_sort_order.sql'), 'utf-8'));
+  // Migration 059: entity `category` — TaskChangeRouter.insertEntity now writes it.
+  db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
   return db;
 }
 
