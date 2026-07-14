@@ -52,7 +52,7 @@ describe('Codex app-server run configuration', () => {
     expect(params).not.toHaveProperty('hooks');
   });
 
-  it('replaces a stale Claude model with the compatible default and maps dontAsk to native unrestricted settings', () => {
+  it('omits a stale Claude model and maps dontAsk to native unrestricted settings', () => {
     const params = buildCodexAppServerThreadStartParams('run-1', {
       panelId: 'run-1',
       sessionId: 'run-1',
@@ -65,11 +65,11 @@ describe('Codex app-server run configuration', () => {
     expect(params).toMatchObject({
       sandbox: 'danger-full-access',
       approvalPolicy: 'never',
-      model: 'gpt-5.5',
     });
+    expect(params.model).toBeUndefined();
   });
 
-  it('pins auto to the model supported by the bundled Codex runtime', () => {
+  it('omits auto so the Codex runtime selects its advertised default', () => {
     const params = buildCodexAppServerThreadStartParams('run-1', {
       panelId: 'run-1',
       sessionId: 'run-1',
@@ -78,7 +78,7 @@ describe('Codex app-server run configuration', () => {
       model: 'auto',
     }, runtimeConfig);
 
-    expect(params.model).toBe('gpt-5.5');
+    expect(params.model).toBeUndefined();
   });
 
   it('maps only auto mode to the pinned auto-review reviewer', () => {

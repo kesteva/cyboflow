@@ -7,6 +7,7 @@ import type { CreateProjectRequest, UpdateProjectRequest, Project } from '../../
 import type { ToolPanel, FastModeStateNotice, QueuedPanelInput } from '../../shared/types/panels';
 import type { UpdaterEvent, UpdateCheckResult } from '../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../shared/types/modelAvailability';
+import type { CodexModelCatalog } from '../../shared/types/agentModels';
 import {
   CLAUDE_DETECT_CHANNEL,
   CODEX_DETECT_CHANNEL,
@@ -425,6 +426,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   models: {
     getAvailability: (): Promise<IPCResponse<ModelAvailabilityMap>> =>
       ipcRenderer.invoke('models:get-availability'),
+    getCodexCatalog: (): Promise<IPCResponse<CodexModelCatalog>> =>
+      ipcRenderer.invoke('models:get-codex-catalog'),
     onAvailabilityChanged: (callback: (map: ModelAvailabilityMap) => void) => {
       const subscription = (_event: Electron.IpcRendererEvent, map: ModelAvailabilityMap) => callback(map);
       ipcRenderer.on('model-availability-changed', subscription);

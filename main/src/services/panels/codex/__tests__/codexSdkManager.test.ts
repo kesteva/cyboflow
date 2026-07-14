@@ -232,6 +232,85 @@ describe('CodexSdkManager app-server runtime', () => {
     }
   });
 
+  it('discovers, paginates, projects, and caches the visible Codex model catalog', async () => {
+    const db = createDb();
+    try {
+      const { manager, getClient } = makeManager(db, (method, params) => {
+        if (method !== 'model/list') throw new Error(`Unexpected request: ${method}`);
+        const cursor = (params as { cursor?: string }).cursor;
+        if (!cursor) {
+          return {
+            data: [
+              {
+                id: 'opaque-sol',
+                model: 'gpt-5.6-sol',
+                displayName: 'GPT-5.6 Sol',
+                description: 'Frontier coding model',
+                hidden: false,
+                isDefault: true,
+              },
+              {
+                id: 'opaque-hidden',
+                model: 'internal-model',
+                displayName: 'Internal',
+                description: 'Hidden model',
+                hidden: true,
+                isDefault: false,
+              },
+            ],
+            nextCursor: 'page-2',
+          };
+        }
+        return {
+          data: [{
+            id: 'opaque-terra',
+            model: 'gpt-5.6-terra',
+            displayName: 'GPT-5.6 Terra',
+            description: 'Balanced coding model',
+            hidden: false,
+            isDefault: false,
+          }],
+          nextCursor: null,
+        };
+      });
+
+      const [first, concurrent] = await Promise.all([
+        manager.getCodexModelCatalog(),
+        manager.getCodexModelCatalog(),
+      ]);
+      const cached = await manager.getCodexModelCatalog();
+
+      expect(first).toEqual({
+        models: [
+          {
+            id: 'gpt-5.6-sol',
+            label: 'GPT-5.6 Sol',
+            description: 'Frontier coding model',
+            isDefault: true,
+          },
+          {
+            id: 'gpt-5.6-terra',
+            label: 'GPT-5.6 Terra',
+            description: 'Balanced coding model',
+            isDefault: false,
+          },
+        ],
+        defaultModel: 'gpt-5.6-sol',
+      });
+      expect(concurrent).toEqual(first);
+      expect(cached).toEqual(first);
+      const client = getClient();
+      expect(client.start).toHaveBeenCalledOnce();
+      expect(client.stop).toHaveBeenCalledOnce();
+      expect(client.requests).toEqual([
+        { method: 'model/list', params: { includeHidden: false } },
+        { method: 'model/list', params: { includeHidden: false, cursor: 'page-2' } },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
   it('routes a projected usage-limit failure through the programmatic systemic pause', async () => {
     const db = createDb();
     try {
@@ -347,7 +426,7 @@ describe('CodexSdkManager app-server runtime', () => {
     }
   });
 
-  it('pins auto for the configured thread and turn and persists provider-neutral events', async () => {
+  it('lets the runtime resolve auto and persists provider-neutral events', async () => {
     const db = createDb();
     try {
       const { manager, getClient } = makeManager(db, successfulHandler);
@@ -400,7 +479,6 @@ describe('CodexSdkManager app-server runtime', () => {
           sandbox: 'workspace-write',
           approvalPolicy: 'on-request',
           approvalsReviewer: 'user',
-          model: 'gpt-5.5',
           developerInstructions: 'Report through Cyboflow.',
         },
       });
@@ -409,7 +487,6 @@ describe('CodexSdkManager app-server runtime', () => {
         params: {
           threadId: 'codex-thread-1',
           input: [{ type: 'text', text: 'ship it', text_elements: [] }],
-          model: 'gpt-5.5',
         },
       });
 
@@ -437,7 +514,7 @@ describe('CodexSdkManager app-server runtime', () => {
       expect(invocationRow).toEqual({
         provider: 'codex',
         runtime: 'codex-sdk',
-        model: 'gpt-5.5',
+        model: null,
         externalSessionId: 'codex-thread-1',
         stepId: 'verify-step',
       });

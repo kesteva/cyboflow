@@ -5,8 +5,8 @@ import { Dropdown, type DropdownItem } from '../../ui/Dropdown';
 import { Pill } from '../../ui/Pill';
 import { cn } from '../../../utils/cn';
 import { useModelAvailability } from '../../../stores/modelAvailabilityStore';
+import { useCodexModelCatalog } from '../../../stores/codexModelCatalogStore';
 import type { AgentProvider } from '../../../../../shared/types/agentRuntime';
-import { CODEX_MODEL_OPTIONS } from '../../../../../shared/types/agentModels';
 
 /**
  * ModelPill — interactive model selector for a quick SDK session's composer.
@@ -50,11 +50,6 @@ export const MODEL_OPTIONS: ReadonlyArray<ModelOption> = [
 ];
 
 const OPTION_BY_ID = new Map(MODEL_OPTIONS.map((o) => [o.id, o] as const));
-const CODEX_PILL_OPTIONS: ReadonlyArray<ModelOption> = CODEX_MODEL_OPTIONS.map((option) => ({
-  ...option,
-  context: null,
-}));
-const CODEX_OPTION_BY_ID = new Map(CODEX_PILL_OPTIONS.map((option) => [option.id, option] as const));
 
 /** Compact "version · context" display for a model id (falls back to the raw id). */
 export function modelDisplayLabel(
@@ -62,9 +57,8 @@ export function modelDisplayLabel(
   agentProvider: AgentProvider = 'claude',
 ): string {
   const active = id ?? 'auto';
-  const o = agentProvider === 'codex'
-    ? CODEX_OPTION_BY_ID.get(active)
-    : OPTION_BY_ID.get(active);
+  if (agentProvider === 'codex') return active === 'auto' ? 'Auto/default' : active;
+  const o = OPTION_BY_ID.get(active);
   if (!o) return active;
   return o.context ? `${o.label} · ${o.context}` : o.label;
 }
@@ -92,9 +86,16 @@ export function ModelPill({
 }: ModelPillProps): React.ReactElement {
   const [open, setOpen] = useState(false);
   const { isAliasUsable, unavailableReason } = useModelAvailability();
+  const { options: codexCatalogOptions } = useCodexModelCatalog(agentProvider === 'codex');
   const active = currentModel ?? 'auto';
-  const label = modelDisplayLabel(active, agentProvider);
-  const options = agentProvider === 'codex' ? CODEX_PILL_OPTIONS : MODEL_OPTIONS;
+  const codexOptions: ReadonlyArray<ModelOption> = codexCatalogOptions.map((option) => ({
+    ...option,
+    context: null,
+  }));
+  const options = agentProvider === 'codex' ? codexOptions : MODEL_OPTIONS;
+  const label = agentProvider === 'codex'
+    ? (codexOptions.find((option) => option.id === active)?.label ?? modelDisplayLabel(active, agentProvider))
+    : modelDisplayLabel(active, agentProvider);
 
   const handleSelect = async (model: string): Promise<void> => {
     setOpen(false);

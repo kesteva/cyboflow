@@ -15,6 +15,7 @@ import type {
   AgentStreamEvent,
 } from '../../../../../shared/types/agentStream';
 import type { CodexDetectionResult } from '../../../../../shared/types/onboarding';
+import type { CodexModelCatalog } from '../../../../../shared/types/agentModels';
 import { AbstractCliManager } from '../cli/AbstractCliManager';
 import { resolveAgentModelAlias } from '../agentModelContext';
 import {
@@ -52,6 +53,8 @@ import {
 import type {
   AppServerInitializeParams,
   AppServerInitializeResponse,
+  AppServerModelListParams,
+  AppServerModelListResponse,
 } from './appServer/protocol';
 import {
   CodexAppServerTurnSession,
@@ -62,6 +65,7 @@ import { CodexTurnUsageAccumulator } from './appServer/usageAccumulator';
 
 const APP_SERVER_REQUEST_TIMEOUT_MS = 15_000;
 const APP_SERVER_INTERRUPT_TIMEOUT_MS = 2_000;
+const MODEL_CATALOG_CACHE_TTL_MS = 5 * 60_000;
 
 interface StubCliProcess {
   process: never;
@@ -161,6 +165,39 @@ function initializeParams(clientVersion: string): AppServerInitializeParams {
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function requireModelListResponse(value: unknown): AppServerModelListResponse {
+  if (!isRecord(value) || !Array.isArray(value.data)) {
+    throw new Error('Codex model/list returned an invalid response');
+  }
+  const nextCursor = value.nextCursor;
+  if (nextCursor !== null && typeof nextCursor !== 'string') {
+    throw new Error('Codex model/list returned an invalid cursor');
+  }
+  for (const model of value.data) {
+    if (!isRecord(model)
+      || typeof model.id !== 'string'
+      || typeof model.model !== 'string'
+      || typeof model.displayName !== 'string'
+      || typeof model.description !== 'string'
+      || typeof model.hidden !== 'boolean'
+      || typeof model.isDefault !== 'boolean') {
+      throw new Error('Codex model/list returned an invalid model entry');
+    }
+  }
+  return value as unknown as AppServerModelListResponse;
+}
+
+function cloneModelCatalog(catalog: CodexModelCatalog): CodexModelCatalog {
+  return {
+    models: catalog.models.map((model) => ({ ...model })),
+    defaultModel: catalog.defaultModel,
+  };
+}
+
 export class CodexSdkManager extends AbstractCliManager {
   private readonly activeRuns = new Map<string, ActiveCodexRun>();
   private readonly spawnKeysByPanelId = new Map<string, Set<string>>();
@@ -170,6 +207,9 @@ export class CodexSdkManager extends AbstractCliManager {
   private approvalRouterProvider: (() => ApprovalRouterPort) | null = null;
   private questionRouterProvider: (() => QuestionRouterPort) | null = null;
   private resolvedExecutable: ResolvedCodexExecutable | null = null;
+  private modelCatalog: CodexModelCatalog | null = null;
+  private modelCatalogFetchedAt = 0;
+  private modelCatalogRequest: Promise<CodexModelCatalog> | null = null;
 
   constructor(
     sessionManager: SessionManager,
@@ -279,6 +319,21 @@ export class CodexSdkManager extends AbstractCliManager {
           `[CodexSdkManager] onboarding detection teardown failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       });
+    }
+  }
+
+  async getCodexModelCatalog(): Promise<CodexModelCatalog> {
+    if (this.modelCatalog && Date.now() - this.modelCatalogFetchedAt < MODEL_CATALOG_CACHE_TTL_MS) {
+      return cloneModelCatalog(this.modelCatalog);
+    }
+    this.modelCatalogRequest ??= this.fetchCodexModelCatalog();
+    try {
+      const catalog = await this.modelCatalogRequest;
+      this.modelCatalog = catalog;
+      this.modelCatalogFetchedAt = Date.now();
+      return cloneModelCatalog(catalog);
+    } finally {
+      this.modelCatalogRequest = null;
     }
   }
 
@@ -677,6 +732,66 @@ export class CodexSdkManager extends AbstractCliManager {
   private getResolvedExecutable(): ResolvedCodexExecutable {
     this.resolvedExecutable ??= this.resolveExecutable();
     return this.resolvedExecutable;
+  }
+
+  private async fetchCodexModelCatalog(): Promise<CodexModelCatalog> {
+    const executable = this.getResolvedExecutable();
+    const client = this.createAppServerClient({
+      command: executable.executablePath,
+      env: prependCodexPathToEnvironment(process.env, executable.pathDir),
+      onStderr: (chunk) => this.logger?.warn(`[Codex app-server model discovery stderr] ${chunk.trimEnd()}`),
+    });
+
+    try {
+      client.start();
+      const initialized = await withTimeout(
+        client.initialize(initializeParams(this.clientVersion)),
+        APP_SERVER_REQUEST_TIMEOUT_MS,
+        'Codex app-server model discovery initialization',
+      );
+      if (!initialized.userAgent.includes(CODEX_EXECUTABLE_VERSION)) {
+        throw new Error(
+          `Codex app-server protocol mismatch: expected ${CODEX_EXECUTABLE_VERSION}, got ${initialized.userAgent}`,
+        );
+      }
+
+      const models = new Map<string, CodexModelCatalog['models'][number]>();
+      let cursor: string | null | undefined;
+      do {
+        const params: AppServerModelListParams = { includeHidden: false };
+        if (cursor) params.cursor = cursor;
+        const response = requireModelListResponse(await withTimeout(
+          client.sendRequest<unknown, AppServerModelListParams>('model/list', params),
+          APP_SERVER_REQUEST_TIMEOUT_MS,
+          'Codex model discovery',
+        ));
+        for (const model of response.data) {
+          if (model.hidden) continue;
+          models.set(model.model, {
+            id: model.model,
+            label: model.displayName,
+            description: model.description,
+            isDefault: model.isDefault,
+          });
+        }
+        cursor = response.nextCursor;
+      } while (cursor);
+
+      if (models.size === 0) {
+        throw new Error('Codex model/list returned no visible models');
+      }
+      const visibleModels = [...models.values()];
+      return {
+        models: visibleModels,
+        defaultModel: visibleModels.find((model) => model.isDefault)?.id ?? null,
+      };
+    } finally {
+      await client.stop().catch((error: unknown) => {
+        this.logger?.warn(
+          `[CodexSdkManager] model discovery teardown failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
+    }
   }
 
   private requireApprovalRouter(): ApprovalRouterPort {

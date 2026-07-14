@@ -11,6 +11,7 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { UnifiedMessage } from '../../../shared/types/unifiedMessage';
 import type { UpdaterEvent, UpdateCheckResult } from '../../../shared/types/updater';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
+import type { CodexModelCatalog } from '../../../shared/types/agentModels';
 import type { ClaudeDetectionResult, CodexDetectionResult } from '../../../shared/types/onboarding';
 
 interface LogEntry {
@@ -384,6 +385,7 @@ interface ElectronAPI {
   // Model availability (guarded models, e.g. Fable 5)
   models: {
     getAvailability: () => Promise<IPCResponse<ModelAvailabilityMap>>;
+    getCodexCatalog: () => Promise<IPCResponse<CodexModelCatalog>>;
     onAvailabilityChanged: (callback: (map: ModelAvailabilityMap) => void) => () => void;
     onModelFallback: (callback: (notice: ModelFallbackNotice) => void) => () => void;
   };

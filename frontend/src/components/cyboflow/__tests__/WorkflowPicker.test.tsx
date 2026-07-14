@@ -142,6 +142,15 @@ vi.mock('../../../utils/api', () => ({
       setModel: vi.fn().mockResolvedValue({ success: true }),
       setFastMode: vi.fn().mockResolvedValue({ success: true }),
     },
+    models: {
+      getCodexCatalog: vi.fn().mockResolvedValue({
+        success: true,
+        data: {
+          models: [{ id: 'gpt-5.4', label: 'GPT-5.4', description: 'Strong coding model', isDefault: true }],
+          defaultModel: 'gpt-5.4',
+        },
+      }),
+    },
   },
 }));
 
@@ -285,10 +294,7 @@ describe('WorkflowPicker — Quick Session button', () => {
     });
 
     expect(screen.getByLabelText('Select Codex model')).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /^GPT-5\.5 —/i })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /GPT-5\.4 —/i })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /GPT-5\.4 Mini/i })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: /GPT-5\.3 Codex Spark/i })).toBeInTheDocument();
+    expect(await screen.findByRole('option', { name: /GPT-5\.4 —/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Start Run' })).toBeDisabled();
 
     await act(async () => {

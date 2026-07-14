@@ -4,14 +4,28 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { ModelPill, MODEL_OPTIONS } from '../ModelPill';
 
 const mockSetModel = vi.fn();
+const mockGetCodexCatalog = vi.fn();
 vi.mock('../../../../utils/api', () => ({
-  API: { claudePanels: { setModel: (...args: unknown[]) => mockSetModel(...args) } },
+  API: {
+    claudePanels: { setModel: (...args: unknown[]) => mockSetModel(...args) },
+    models: { getCodexCatalog: (...args: unknown[]) => mockGetCodexCatalog(...args) },
+  },
 }));
 
 describe('ModelPill', () => {
   beforeEach(() => {
     mockSetModel.mockReset();
     mockSetModel.mockResolvedValue({ success: true });
+    mockGetCodexCatalog.mockResolvedValue({
+      success: true,
+      data: {
+        models: [
+          { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', description: 'Frontier coding model', isDefault: true },
+          { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', description: 'Balanced coding model', isDefault: false },
+        ],
+        defaultModel: 'gpt-5.6-sol',
+      },
+    });
   });
 
   it('renders the current model label with version + context', () => {
@@ -39,21 +53,19 @@ describe('ModelPill', () => {
       <ModelPill
         panelId="p1"
         agentProvider="codex"
-        currentModel="gpt-5.5"
+        currentModel="gpt-5.6-sol"
         onModelChange={onChange}
       />,
     );
 
-    fireEvent.click(screen.getByText('GPT-5.5'));
-    expect(await screen.findByText('GPT-5.4')).toBeInTheDocument();
-    expect(screen.getByText('GPT-5.4 Mini')).toBeInTheDocument();
-    expect(screen.getByText('GPT-5.3 Codex Spark')).toBeInTheDocument();
+    fireEvent.click(await screen.findByText('GPT-5.6 Sol'));
+    expect(await screen.findByText('GPT-5.6 Terra')).toBeInTheDocument();
     expect(screen.queryByText(/Fable 5/)).toBeNull();
     expect(screen.queryByText(/Opus 4\.8/)).toBeNull();
 
-    fireEvent.click(screen.getByText('GPT-5.4'));
-    await waitFor(() => expect(mockSetModel).toHaveBeenCalledWith('p1', 'gpt-5.4'));
-    expect(onChange).toHaveBeenCalledWith('gpt-5.4');
+    fireEvent.click(screen.getByText('GPT-5.6 Terra'));
+    await waitFor(() => expect(mockSetModel).toHaveBeenCalledWith('p1', 'gpt-5.6-terra'));
+    expect(onChange).toHaveBeenCalledWith('gpt-5.6-terra');
   });
   it('does not re-persist when selecting the already-active model', async () => {
     const onChange = vi.fn();

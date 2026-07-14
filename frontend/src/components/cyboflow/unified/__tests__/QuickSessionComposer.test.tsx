@@ -17,6 +17,7 @@ const mockOnModelFallback = vi.fn((_cb: (notice: unknown) => void) => () => {});
 const mockGetFastModeState = vi.fn();
 const mockOnFastModeState = vi.fn((_cb: (notice: unknown) => void) => () => {});
 const mockQueueInput = vi.fn();
+const mockGetCodexCatalog = vi.fn();
 vi.mock('../../../../utils/api', () => ({
   API: {
     sessions: {
@@ -38,6 +39,7 @@ vi.mock('../../../../utils/api', () => ({
     },
     models: {
       onModelFallback: (cb: (notice: unknown) => void) => mockOnModelFallback(cb),
+      getCodexCatalog: () => mockGetCodexCatalog(),
     },
   },
 }));
@@ -173,6 +175,16 @@ describe('QuickSessionComposer — SDK', () => {
 
   it('uses the Codex model family for an idle Codex SDK session', async () => {
     mockGetModel.mockResolvedValue({ success: true, data: 'gpt-5.4' });
+    mockGetCodexCatalog.mockResolvedValue({
+      success: true,
+      data: {
+        models: [
+          { id: 'gpt-5.4', label: 'GPT-5.4', description: 'Strong coding model', isDefault: false },
+          { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', description: 'Frontier coding model', isDefault: true },
+        ],
+        defaultModel: 'gpt-5.6-sol',
+      },
+    });
     render(
       <Harness
         session={makeSession({
@@ -185,7 +197,7 @@ describe('QuickSessionComposer — SDK', () => {
     );
 
     fireEvent.click(await screen.findByText('GPT-5.4'));
-    expect(await screen.findByText('GPT-5.3 Codex Spark')).toBeInTheDocument();
+    expect(await screen.findByText('GPT-5.6 Sol')).toBeInTheDocument();
     expect(screen.queryByText(/Fable 5/)).toBeNull();
   });
 });

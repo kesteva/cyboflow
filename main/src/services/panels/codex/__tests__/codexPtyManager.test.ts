@@ -67,7 +67,7 @@ describe('CodexPtyManager.buildCommandArgs', () => {
     ]);
   });
 
-  it('replaces a stale Claude model with the compatible Codex default', () => {
+  it('omits a stale Claude model', () => {
     const manager = new TestableCodexPtyManager(makeSessionManager('acceptEdits'));
 
     expect(manager.callBuildCommandArgs({ model: 'opus', prompt: 'implement this' })).toEqual([
@@ -75,14 +75,12 @@ describe('CodexPtyManager.buildCommandArgs', () => {
       'workspace-write',
       '--ask-for-approval',
       'on-request',
-      '--model',
-      'gpt-5.5',
       '--',
       'implement this',
     ]);
   });
 
-  it('pins auto to the model supported by the bundled Codex runtime', () => {
+  it('omits auto so the Codex runtime selects its advertised default', () => {
     const manager = new TestableCodexPtyManager(makeSessionManager('acceptEdits'));
 
     expect(manager.callBuildCommandArgs({ model: 'auto' })).toEqual([
@@ -90,8 +88,6 @@ describe('CodexPtyManager.buildCommandArgs', () => {
       'workspace-write',
       '--ask-for-approval',
       'on-request',
-      '--model',
-      'gpt-5.5',
     ]);
   });
 
@@ -103,8 +99,6 @@ describe('CodexPtyManager.buildCommandArgs', () => {
       'danger-full-access',
       '--ask-for-approval',
       'never',
-      '--model',
-      'gpt-5.5',
     ]);
   });
 });

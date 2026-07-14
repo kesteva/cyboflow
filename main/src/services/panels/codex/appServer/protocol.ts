@@ -44,6 +44,26 @@ export interface AppServerInitializeResponse {
   platformOs: string;
 }
 
+export interface AppServerModelListParams {
+  cursor?: string | null;
+  limit?: number | null;
+  includeHidden?: boolean | null;
+}
+
+export interface AppServerModel {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string;
+  hidden: boolean;
+  isDefault: boolean;
+}
+
+export interface AppServerModelListResponse {
+  data: AppServerModel[];
+  nextCursor: string | null;
+}
+
 export type AppServerApprovalPolicy =
   | 'untrusted'
   | 'on-request'

@@ -150,6 +150,15 @@ vi.mock('../../../../utils/api', () => ({
       setModel: vi.fn().mockResolvedValue({ success: true }),
       setFastMode: vi.fn().mockResolvedValue({ success: true }),
     },
+    models: {
+      getCodexCatalog: vi.fn().mockResolvedValue({
+        success: true,
+        data: {
+          models: [{ id: 'gpt-5.4', label: 'GPT-5.4', description: 'Strong coding model', isDefault: true }],
+          defaultModel: 'gpt-5.4',
+        },
+      }),
+    },
   },
 }));
 
@@ -709,7 +718,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
 
     await act(async () => {
       fireEvent.change(screen.getByLabelText('Select Codex model'), {
-        target: { value: 'gpt-5.4-mini' },
+        target: { value: 'gpt-5.4' },
       });
     });
 
@@ -721,7 +730,7 @@ describe('SessionStartWizard — step ③ launch threading', () => {
       expect(mockRunStart).toHaveBeenCalledWith(expect.objectContaining({
         agentProvider: 'codex',
         agentRuntime: 'codex-sdk',
-        model: 'gpt-5.4-mini',
+        model: 'gpt-5.4',
       }));
     });
     expect(mockEnsureSession).toHaveBeenCalled();

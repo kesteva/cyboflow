@@ -6,6 +6,7 @@ import type { PermissionMode } from '../../../shared/types/workflows';
 import type { ModelAvailabilityMap, ModelFallbackNotice } from '../../../shared/types/modelAvailability';
 import type { FastModeStateNotice } from '../../../shared/types/panels';
 import type { ClaudeDetectionResult } from '../../../shared/types/onboarding';
+import type { CodexModelCatalog } from '../../../shared/types/agentModels';
 
 // Type for IPC response.
 // T defaults to `unknown` (not `any`) so callers must narrow before reading .data.
@@ -598,6 +599,13 @@ export class API {
       // should degrade to optimistic, not crash the picker.
       if (!isElectron() || !window.electronAPI.models) throw new Error('Electron API not available');
       return window.electronAPI.models.getAvailability();
+    },
+    /** Models advertised by the bundled Codex runtime for the signed-in account. */
+    async getCodexCatalog(): Promise<IPCResponse<CodexModelCatalog>> {
+      if (!isElectron() || !window.electronAPI.models?.getCodexCatalog) {
+        throw new Error('Electron API not available');
+      }
+      return window.electronAPI.models.getCodexCatalog();
     },
     /** Subscribe to live availability flips; returns an unsubscribe fn. No-op off Electron. */
     onAvailabilityChanged(callback: (map: ModelAvailabilityMap) => void): () => void {

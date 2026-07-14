@@ -27,7 +27,7 @@ import { VariantSelector } from './VariantSelector';
 import { variantSelectionToStartInput, type VariantSelection } from './variantSelectorLogic';
 import { type WorkflowRow, CYBOFLOW_WORKFLOW_NAMES } from '../../../../shared/types/workflows';
 import { DEFAULT_SUBSTRATE } from '../../../../shared/types/substrate';
-import { isCodexModelFamily, isCodexModelOption } from '../../../../shared/types/agentModels';
+import { isCodexModelFamily, isCodexModelSelection } from '../../../../shared/types/agentModels';
 import { DEFAULT_SESSION_AGENT_RUNTIME } from '../../../../shared/types/agentRuntime';
 import type { LaunchAgentRuntime } from './agentRuntimeUi';
 import {
@@ -77,7 +77,7 @@ export function WorkflowPicker({ projectId, onWorkflowStarted, forceNewSession =
   const [model, setModel] = useState<string>(DEFAULT_WORKFLOW_MODEL);
   useEffect(() => {
     if (isCodexRuntime(agentRuntime)) {
-      if (!isCodexModelOption(model)) setModel(DEFAULT_CODEX_MODEL);
+      if (!isCodexModelSelection(model)) setModel(DEFAULT_CODEX_MODEL);
       return;
     }
     if (isCodexModelFamily(model)) setModel(DEFAULT_WORKFLOW_MODEL);

@@ -10,13 +10,14 @@
  * snapshot (Opus 4.8, Sonnet 5, …), so "Opus" actually runs Opus 4.8 and the
  * "· 1M context" labels are honest.
  *
- * Options + descriptions are single-sourced from {@link MODEL_OPTIONS} (shared
- * with the in-composer ModelPill) so the two surfaces never drift.
+ * Claude options are shared with the in-composer ModelPill. Codex options come
+ * from the bundled runtime's `model/list` response through the shared renderer
+ * catalog store, so launch and in-session pickers stay aligned.
  */
 import { MODEL_OPTIONS } from './unified/ModelPill';
 import { useModelAvailability } from '../../stores/modelAvailabilityStore';
+import { useCodexModelCatalog } from '../../stores/codexModelCatalogStore';
 import type { AgentProvider, AgentRuntime } from '../../../../shared/types/agentRuntime';
-import { CODEX_MODEL_OPTIONS } from '../../../../shared/types/agentModels';
 
 /** The quick-session default model — Opus, per product direction. */
 export const DEFAULT_QUICK_MODEL = 'opus';
@@ -62,7 +63,8 @@ export function ModelSelector({
   agentRuntime = 'claude-sdk',
 }: ModelSelectorProps): React.JSX.Element {
   const isCodexRuntime = agentProvider === 'codex' || agentRuntime.startsWith('codex-');
-  const codexActive = CODEX_MODEL_OPTIONS.find((o) => o.id === value);
+  const { options: codexOptions } = useCodexModelCatalog(isCodexRuntime);
+  const codexActive = codexOptions.find((o) => o.id === value);
   const claudeActive = MODEL_OPTIONS.find((o) => o.id === value);
   const { isAliasUsable, unavailableReason } = useModelAvailability();
   const activeReason = unavailableReason(value);
@@ -80,7 +82,7 @@ export function ModelSelector({
         aria-label={isCodexRuntime ? 'Select Codex model' : 'Select Claude model'}
       >
         {isCodexRuntime ? (
-          CODEX_MODEL_OPTIONS.map((o) => (
+          codexOptions.map((o) => (
             <option key={o.id} value={o.id}>
               {o.label} — {o.description}
             </option>
