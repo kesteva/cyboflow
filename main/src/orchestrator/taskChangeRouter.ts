@@ -344,6 +344,8 @@ interface EntityDbRow {
   caused_by_run_id: string | null;
   /** User-controlled manual rank (migration 057); NULL = unranked + on pre-057 DBs. */
   sort_order: number | null;
+  /** Development-cycle re-open stamp (tasks-only, migration 062); NULL = never re-opened + on ideas/epics + pre-062 DBs. */
+  reopened_at: string | null;
   version: number;
   created_at: string;
   updated_at: string;
@@ -1512,6 +1514,21 @@ export class TaskChangeRouter {
         params.push(change.stageId);
         deltas.push({ field: 'stage_id', from: current.stage_id, to: change.stageId });
         action = 'stageMoved';
+
+        // RE-OPEN WINDOW (migration 062): a TASK moving FROM a terminal stage
+        // (Done / Won't do) TO a non-terminal stage — by ANY actor — begins a new
+        // development cycle. Stamp reopened_at so recomputeTaskExecutionStage's
+        // gatherTaskRuns excludes the PRIOR cycle's runs (a stale merged run must
+        // not snap the re-pulled task back to Done). Gated on the column existing
+        // for pre-062 schemas; a non-terminal-origin move never re-opens.
+        if (type === 'task' && this.columnExists('tasks', 'reopened_at')) {
+          const fromStage = this.lookupStage(current.stage_id);
+          if (fromStage?.is_terminal === 1 && targetStage.is_terminal !== 1) {
+            sets.push('reopened_at = ?');
+            params.push(now);
+            deltas.push({ field: 'reopened_at', from: current.reopened_at ?? null, to: now });
+          }
+        }
       }
 
       // ----- decomposed toggle (idea retire stamp, migration 042) -----
@@ -2160,10 +2177,15 @@ export class TaskChangeRouter {
     const sortOrder = this.columnExists(desc.table, 'sort_order')
       ? 'sort_order'
       : 'NULL AS sort_order';
+    // Development-cycle re-open stamp (migration 062, tasks-only), fail-soft on
+    // pre-062 / non-task tables (ideas/epics never carry it).
+    const reopenedAt = this.columnExists(desc.table, 'reopened_at')
+      ? 'reopened_at'
+      : 'NULL AS reopened_at';
     const row = this.db
       .prepare(
         `SELECT id, project_id, ref, title, summary, body, priority, category, repo, board_id, stage_id, archived_at,
-                ${decomposedAt}, ${approvedAt}, ${experimentId}, ${experimentArm}, ${causedByRunId}, ${sortOrder}, version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
+                ${decomposedAt}, ${approvedAt}, ${experimentId}, ${experimentArm}, ${causedByRunId}, ${sortOrder}, ${reopenedAt}, version, created_at, updated_at, ${parentEpic}, ${originatingIdea}, ${entryStage}, ${scope}, ${attachments}
            FROM ${desc.table} WHERE id = ? AND project_id = ?`,
       )
       .get(id, projectId) as EntityDbRow | undefined;
@@ -2205,10 +2227,21 @@ export class TaskChangeRouter {
    * just-Done task back to Ready.
    */
   async recomputeTaskExecutionStage(taskId: string): Promise<void> {
+    // Development-cycle re-open window (migration 062): read reopened_at ALONGSIDE
+    // the task row (columnExists-gated for pre-062 schemas) so gatherTaskRuns can
+    // exclude runs from a PRIOR cycle. NULL (pre-062 / never re-opened) -> full history.
+    const reopenedCol = this.columnExists('tasks', 'reopened_at') ? 'reopened_at' : 'NULL AS reopened_at';
     const task = this.db
-      .prepare('SELECT id, project_id, board_id, stage_id, entry_stage_id FROM tasks WHERE id = ?')
+      .prepare(`SELECT id, project_id, board_id, stage_id, entry_stage_id, ${reopenedCol} FROM tasks WHERE id = ?`)
       .get(taskId) as
-      | { id: string; project_id: number; board_id: string; stage_id: string; entry_stage_id: string | null }
+      | {
+          id: string;
+          project_id: number;
+          board_id: string;
+          stage_id: string;
+          entry_stage_id: string | null;
+          reopened_at: string | null;
+        }
       | undefined;
 
     if (!task) {
@@ -2218,7 +2251,7 @@ export class TaskChangeRouter {
       return;
     }
 
-    const runs = this.gatherTaskRuns(taskId);
+    const runs = this.gatherTaskRuns(taskId, task.reopened_at);
     if (runs.length === 0) {
       // No runs: leave an asserted planning stage untouched. A DERIVED stage with
       // zero runs is a stale projection (e.g. the runs were deleted) — revert it
@@ -2287,14 +2320,30 @@ export class TaskChangeRouter {
    * columnExists('workflow_runs','batch_id') (added with sprint_batch_tasks in
    * migration 022) so a pre-022 test schema degrades to the direct-only set
    * instead of throwing 'no such table/column'.
+   *
+   * RE-OPEN WINDOW (migration 062): when the task carries a `reopenedAt` stamp
+   * (moved FROM a terminal stage TO a non-terminal one — a fresh development
+   * cycle), exclude every run created BEFORE that instant so only the CURRENT
+   * cycle's runs drive the derived stage. Only gatherTaskRuns is scoped this way —
+   * hasNonTerminalRun / the eligibility filters key on non-terminal runs, which
+   * are inherently current, and the active-run guard already prevents re-opening
+   * while any run is live. LANDMINE: workflow_runs.created_at is SQLite
+   * CURRENT_TIMESTAMP form ('YYYY-MM-DD HH:MM:SS') while the stamp is ISO-8601
+   * with a 'T' separator — a raw string compare is skewed by 'T' (0x54) > ' '
+   * (0x20), so BOTH sides are wrapped in datetime(). A NULL reopenedAt short-
+   * circuits the predicate (the '? IS NULL OR ...' arm) and admits the full history.
    */
   private gatherTaskRuns(
     taskId: string,
+    reopenedAt: string | null,
   ): Array<{ status: string; outcome: string | null; source: 'direct' | 'batch'; laneStatus: string | null }> {
     const direct = (
       this.db
-        .prepare('SELECT status, outcome FROM workflow_runs WHERE task_id = ?')
-        .all(taskId) as Array<{ status: string; outcome: string | null }>
+        .prepare(
+          `SELECT status, outcome FROM workflow_runs
+            WHERE task_id = ? AND (? IS NULL OR datetime(created_at) >= datetime(?))`,
+        )
+        .all(taskId, reopenedAt, reopenedAt) as Array<{ status: string; outcome: string | null }>
     ).map((r) => ({ status: r.status, outcome: r.outcome, source: 'direct' as const, laneStatus: null }));
 
     if (!this.columnExists('workflow_runs', 'batch_id')) {
@@ -2307,9 +2356,10 @@ export class TaskChangeRouter {
           `SELECT wr.status AS status, wr.outcome AS outcome, sbt.status AS laneStatus
              FROM workflow_runs wr
              JOIN sprint_batch_tasks sbt ON sbt.batch_id = wr.batch_id AND sbt.task_id = ?
-            WHERE wr.batch_id IS NOT NULL`,
+            WHERE wr.batch_id IS NOT NULL
+              AND (? IS NULL OR datetime(wr.created_at) >= datetime(?))`,
         )
-        .all(taskId) as Array<{ status: string; outcome: string | null; laneStatus: string }>
+        .all(taskId, reopenedAt, reopenedAt) as Array<{ status: string; outcome: string | null; laneStatus: string }>
     ).map((r) => ({ status: r.status, outcome: r.outcome, source: 'batch' as const, laneStatus: r.laneStatus }));
 
     return [...direct, ...batch];

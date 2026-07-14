@@ -1,0 +1,27 @@
+-- Migration 062: per-task re-open window stamp for the development-cycle deriver.
+--
+-- recomputeTaskExecutionStage (migration 061) aggregates over ALL of a task's
+-- historical runs, and both sprint_batch_tasks lane rows and workflow_runs
+-- outcome='merged' persist FOREVER. A task merged in one sprint, then re-opened
+-- (Done -> Ready, legal once its runs are terminal) and pulled into a LATER
+-- sprint, would have its stale prior merged run snap it straight back to Done
+-- while the new sprint is still actively working it. reopened_at records the
+-- instant a task is re-opened (moved FROM a terminal stage TO a non-terminal one,
+-- by any actor); gatherTaskRuns then EXCLUDES every run created before that
+-- instant, so only the CURRENT development cycle's runs drive the derived stage.
+--
+-- Nullable TEXT storing an ISO-8601 timestamp (TaskChangeRouter's Date.toISOString
+-- form); NULL = never re-opened -> the deriver sees the full run history exactly
+-- as before. Tasks-only: ideas/epics never enter the derived execution stages.
+--
+-- No backfill: a task that has never been re-opened keeps NULL and its current
+-- behaviour. No schema.sql parity concern -- the tasks table and every column on
+-- it are created purely by these numbered migrations (schema.sql does not declare
+-- it), so a fresh install runs this ALTER exactly like an upgrade.
+--
+-- NOTE: No explicit BEGIN/COMMIT -- runFileBasedMigrations() in database.ts wraps
+-- every file in a this.transaction(...) call, so an inner BEGIN would nest.
+-- Re-running the file (after a ledger reset) throws "duplicate column name",
+-- which the runner treats as an idempotent success.
+
+ALTER TABLE tasks ADD COLUMN reopened_at TEXT;

@@ -96,6 +96,10 @@ function buildDb(): Database.Database {
   // Migration 059: category (feature|bug|chore) — an unconditional column in
   // insertEntity/readEntity now (mirrors priority), so every create needs it.
   db.exec(readFileSync(join(migDir, '059_entity_category.sql'), 'utf-8'));
+  // Migration 062: tasks.reopened_at — the re-open window stamp the deriver reads
+  // (columnExists-gated) and the stage-move branch writes on a terminal->non-terminal
+  // move. Present here so the window + stamp are exercised (absent -> full history).
+  db.exec(readFileSync(join(migDir, '062_task_reopened_at.sql'), 'utf-8'));
   return db;
 }
 
@@ -105,15 +109,17 @@ function stageId(position: number, projectId = 1): string {
 
 function seedRunForTask(
   db: Database.Database,
-  opts: { taskId: string; runId: string; status: string; outcome?: string | null },
+  opts: { taskId: string; runId: string; status: string; outcome?: string | null; createdAt?: string },
 ): void {
   db.prepare(
     `INSERT OR IGNORE INTO workflows (id, project_id, name, spec_json) VALUES ('wf-1', 1, 'sprint', '{}')`,
   ).run();
+  // createdAt (optional) exercises the re-open window (migration 062); COALESCE to
+  // CURRENT_TIMESTAMP preserves the default for callers that don't set it.
   db.prepare(
-    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id, outcome)
-     VALUES (?, 'wf-1', 1, ?, 'default', ?, ?)`,
-  ).run(opts.runId, opts.status, opts.taskId, opts.outcome ?? null);
+    `INSERT INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, task_id, outcome, created_at)
+     VALUES (?, 'wf-1', 1, ?, 'default', ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
+  ).run(opts.runId, opts.status, opts.taskId, opts.outcome ?? null, opts.createdAt ?? null);
 }
 
 /**
@@ -130,6 +136,7 @@ function seedBatchLaneForTask(
     runStatus: string;
     runOutcome?: string | null;
     laneStatus?: 'queued' | 'running' | 'integrated' | 'failed' | 'blocked';
+    createdAt?: string;
   },
 ): void {
   db.prepare(
@@ -138,10 +145,11 @@ function seedBatchLaneForTask(
   db.prepare(
     `INSERT OR IGNORE INTO sprint_batches (id, project_id, substrate, status) VALUES (?, 1, 'sdk', 'running')`,
   ).run(opts.batchId);
+  // createdAt (optional) exercises the re-open window (migration 062).
   db.prepare(
-    `INSERT OR IGNORE INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, batch_id, outcome)
-     VALUES (?, 'wf-1', 1, ?, 'default', ?, ?)`,
-  ).run(opts.runId, opts.runStatus, opts.batchId, opts.runOutcome ?? null);
+    `INSERT OR IGNORE INTO workflow_runs (id, workflow_id, project_id, status, permission_mode_snapshot, batch_id, outcome, created_at)
+     VALUES (?, 'wf-1', 1, ?, 'default', ?, ?, COALESCE(?, CURRENT_TIMESTAMP))`,
+  ).run(opts.runId, opts.runStatus, opts.batchId, opts.runOutcome ?? null, opts.createdAt ?? null);
   db.prepare(
     `INSERT INTO sprint_batch_tasks (batch_id, task_id, status) VALUES (?, ?, ?)`,
   ).run(opts.batchId, opts.taskId, opts.laneStatus ?? 'queued');
@@ -1895,6 +1903,26 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       expect(task.stage_id).toBe(stageId(6)); // entry_stage_id
     });
 
+    it("pr_open outcome on a completed DIRECT run -> revert to entry stage (Fix 1 Create-PR close-out)", async () => {
+      // The Create-PR close-out (ipc/git.ts sessions:git-push) flips the run
+      // status='completed', outcome='pr_open' then re-derives. pr_open ≠ merged, so
+      // arm 1 does NOT fire: the terminal run with no live association reverts the
+      // task to its entry stage — the exact revert the git-push wiring now triggers.
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const taskId = await makeTaskWithEntry(db, router);
+      // Park the task at In development first (as it would be mid-run), then close out.
+      seedRunForTask(db, { taskId, runId: 'r1', status: 'running' });
+      await router.recomputeTaskExecutionStage(taskId);
+      expect((db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string }).stage_id).toBe(
+        stageId(7),
+      );
+      db.prepare("UPDATE workflow_runs SET status = 'completed', outcome = 'pr_open' WHERE id = 'r1'").run();
+      await router.recomputeTaskExecutionStage(taskId);
+      const task = db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string };
+      expect(task.stage_id).toBe(stageId(6)); // entry_stage_id (NOT Done)
+    });
+
     it('all runs terminal-without-merge -> revert to entry_stage_id', async () => {
       const db = buildDb();
       const router = TaskChangeRouter.initialize(dbAdapter(db));
@@ -2091,6 +2119,209 @@ describe('TaskChangeRouter (3-table entity model)', () => {
       await router.recomputeTaskExecutionStage(epicId);
       const epic = db.prepare('SELECT stage_id FROM epics WHERE id = ?').get(epicId) as { stage_id: string };
       expect(epic.stage_id).toBe(stageId(9));
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // re-open window (migration 062): a task re-opened (terminal -> non-terminal)
+  // stamps reopened_at, and gatherTaskRuns then excludes runs from the PRIOR
+  // development cycle so a stale merged run can't snap a re-pulled task to Done.
+  // -------------------------------------------------------------------------
+
+  describe('re-open window (migration 062)', () => {
+    /** A task at Ready-for-dev (position 6) with entry_stage_id captured. */
+    async function makeTaskAtReady(db: Database.Database, router: TaskChangeRouter): Promise<string> {
+      const { taskId } = await router.applyChange(1, { actor: 'user', entityType: 'task', title: 'T' });
+      await router.applyChange(1, { actor: 'orchestrator', taskId, fields: { entryStageId: stageId(6) } });
+      return taskId;
+    }
+
+    function reopenedAtOf(db: Database.Database, taskId: string): string | null {
+      return (db.prepare('SELECT reopened_at FROM tasks WHERE id = ?').get(taskId) as { reopened_at: string | null })
+        .reopened_at;
+    }
+
+    function stageOf(db: Database.Database, taskId: string): string {
+      return (db.prepare('SELECT stage_id FROM tasks WHERE id = ?').get(taskId) as { stage_id: string }).stage_id;
+    }
+
+    // (d) the Done -> Ready user move writes reopened_at + its field delta.
+    it('Done -> Ready (terminal -> non-terminal) move stamps reopened_at + rides a field delta on the event', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const taskId = await makeTaskAtReady(db, router);
+      // Park at Done (terminal, position 9) as the orchestrator.
+      await router.applyChange(1, {
+        actor: 'orchestrator',
+        entityType: 'task',
+        taskId,
+        stageId: stageId(9),
+        kind: 'execution-stage',
+      });
+      expect(reopenedAtOf(db, taskId)).toBeNull(); // -> terminal never stamps
+      // USER re-opens: Done -> Ready (terminal -> non-terminal).
+      await router.applyChange(1, { actor: 'user', entityType: 'task', taskId, stageId: stageId(6) });
+      const reopenedAt = reopenedAtOf(db, taskId);
+      expect(stageOf(db, taskId)).toBe(stageId(6));
+      expect(reopenedAt).not.toBeNull();
+      // The reopened_at delta rides the SAME stage-move event as stage_id.
+      const lastEvent = db
+        .prepare(
+          "SELECT changes_json FROM entity_events WHERE entity_type = 'task' AND entity_id = ? ORDER BY seq DESC LIMIT 1",
+        )
+        .get(taskId) as { changes_json: string };
+      const deltas = JSON.parse(lastEvent.changes_json) as Array<{ field: string; from: unknown; to: unknown }>;
+      expect(deltas.find((d) => d.field === 'stage_id')).toBeDefined();
+      expect(deltas.find((d) => d.field === 'reopened_at')).toEqual({ field: 'reopened_at', from: null, to: reopenedAt });
+    });
+
+    // (e) a non-terminal -> non-terminal or -> terminal move does NOT stamp.
+    it('a non-terminal-origin move (Ready -> In development, In development -> Done) does NOT stamp reopened_at', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const taskId = await makeTaskAtReady(db, router);
+      // Ready (non-terminal) -> In development (non-terminal): no stamp.
+      await router.applyChange(1, {
+        actor: 'orchestrator',
+        entityType: 'task',
+        taskId,
+        stageId: stageId(7),
+        kind: 'execution-stage',
+      });
+      expect(reopenedAtOf(db, taskId)).toBeNull();
+      // In development (non-terminal) -> Done (terminal): still no stamp (origin non-terminal).
+      await router.applyChange(1, {
+        actor: 'orchestrator',
+        entityType: 'task',
+        taskId,
+        stageId: stageId(9),
+        kind: 'execution-stage',
+      });
+      expect(reopenedAtOf(db, taskId)).toBeNull();
+    });
+
+    // (c) a task NEVER re-opened keeps exact current behaviour (merged -> Done).
+    it('a task NEVER re-opened sees the full run history (an OLD merged run -> Done)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const taskId = await makeTaskAtReady(db, router);
+      seedBatchLaneForTask(db, {
+        taskId,
+        batchId: 'bat-1',
+        runId: 'r1',
+        runStatus: 'completed',
+        runOutcome: 'merged',
+        laneStatus: 'integrated',
+        createdAt: '2020-01-01 00:00:00',
+      });
+      await router.recomputeTaskExecutionStage(taskId);
+      expect(reopenedAtOf(db, taskId)).toBeNull();
+      expect(stageOf(db, taskId)).toBe(stageId(9)); // Done — window admits everything
+    });
+
+    // (a) merged -> reopened -> re-pulled derives In development (7), not Done.
+    it('merged -> reopened -> re-pulled derives In development (7), NOT Done (stale merged run excluded)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const taskId = await makeTaskAtReady(db, router);
+      // Sprint 1: a merged batch run + integrated lane, created BEFORE the re-open.
+      seedBatchLaneForTask(db, {
+        taskId,
+        batchId: 'bat-old',
+        runId: 'r-old',
+        runStatus: 'completed',
+        runOutcome: 'merged',
+        laneStatus: 'integrated',
+        createdAt: '2020-01-01 00:00:00',
+      });
+      await router.recomputeTaskExecutionStage(taskId);
+      expect(stageOf(db, taskId)).toBe(stageId(9)); // Done
+
+      // User re-opens Done -> Ready (stamps reopened_at at "now", between 2020 and 2099).
+      await router.applyChange(1, { actor: 'user', entityType: 'task', taskId, stageId: stageId(6) });
+      expect(reopenedAtOf(db, taskId)).not.toBeNull();
+
+      // Sprint 2: a NEW running batch run, created AFTER the re-open.
+      seedBatchLaneForTask(db, {
+        taskId,
+        batchId: 'bat-new',
+        runId: 'r-new',
+        runStatus: 'running',
+        laneStatus: 'queued',
+        createdAt: '2099-01-01 00:00:00',
+      });
+      await router.recomputeTaskExecutionStage(taskId);
+      // The stale merged run is BEFORE reopened_at -> excluded; only the new running
+      // run is in-window -> In development, NOT Done.
+      expect(stageOf(db, taskId)).toBe(stageId(7));
+    });
+
+    // (b) the re-pulled run getting canceled reverts the reopened task to Ready.
+    it('re-pulled run canceled reverts the reopened task to entry (Ready 6), NOT back to Done', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const taskId = await makeTaskAtReady(db, router);
+      seedBatchLaneForTask(db, {
+        taskId,
+        batchId: 'bat-old',
+        runId: 'r-old',
+        runStatus: 'completed',
+        runOutcome: 'merged',
+        laneStatus: 'integrated',
+        createdAt: '2020-01-01 00:00:00',
+      });
+      await router.recomputeTaskExecutionStage(taskId);
+      await router.applyChange(1, { actor: 'user', entityType: 'task', taskId, stageId: stageId(6) });
+      seedBatchLaneForTask(db, {
+        taskId,
+        batchId: 'bat-new',
+        runId: 'r-new',
+        runStatus: 'running',
+        laneStatus: 'queued',
+        createdAt: '2099-01-01 00:00:00',
+      });
+      await router.recomputeTaskExecutionStage(taskId);
+      expect(stageOf(db, taskId)).toBe(stageId(7)); // In development
+
+      // Cancel the new run without merging: terminal, non-integrated.
+      db.prepare("UPDATE workflow_runs SET status = 'canceled' WHERE id = 'r-new'").run();
+      db.prepare("UPDATE sprint_batch_tasks SET status = 'failed' WHERE batch_id = 'bat-new' AND task_id = ?").run(taskId);
+      await router.recomputeTaskExecutionStage(taskId);
+      // The old merged run is still excluded by the window, so arm 3 reverts to the
+      // entry stage — NOT arm 1 back to Done.
+      expect(stageOf(db, taskId)).toBe(stageId(6));
+    });
+
+    // The datetime()-on-both-sides landmine: an ISO-8601-with-T reopened_at vs a
+    // SQLite space-format created_at must compare by instant, not raw string.
+    it('window compares an ISO-8601-with-T reopened_at against SQLite space-format created_at (datetime() both sides)', async () => {
+      const db = buildDb();
+      const router = TaskChangeRouter.initialize(dbAdapter(db));
+      const taskId = await makeTaskAtReady(db, router);
+      // Stamp reopened_at in ISO-8601-with-T form (TaskChangeRouter's Date.toISOString shape).
+      db.prepare('UPDATE tasks SET reopened_at = ? WHERE id = ?').run('2026-07-14T12:00:00.000Z', taskId);
+      // BEFORE the re-open (previous day, SQLite space form) — a merged run to EXCLUDE.
+      seedRunForTask(db, {
+        taskId,
+        runId: 'r-before',
+        status: 'completed',
+        outcome: 'merged',
+        createdAt: '2026-07-13 23:00:00',
+      });
+      // AFTER the re-open (same day, 5s later, SQLite space form) — a running run to INCLUDE.
+      // Raw string compare would wrongly EXCLUDE it: at char 10, ' ' (0x20) < 'T' (0x54),
+      // so '2026-07-14 12:00:05' < '2026-07-14T12:00:00.000Z'. datetime() on both sides fixes it.
+      seedRunForTask(db, {
+        taskId,
+        runId: 'r-after',
+        status: 'running',
+        createdAt: '2026-07-14 12:00:05',
+      });
+      await router.recomputeTaskExecutionStage(taskId);
+      // Correct: r-before excluded (no Done), r-after included (In development) -> 7.
+      // A raw-string compare would see NO in-window runs -> no-op at Ready (6); NO window
+      // at all would let the merged r-before force Done (9). Asserting 7 rules out both.
+      expect(stageOf(db, taskId)).toBe(stageId(7));
     });
   });
 
