@@ -849,6 +849,47 @@ describe('ArtifactTabRenderer', () => {
     expect(reviewItemsResolveMutate).toHaveBeenCalledTimes(1);
   });
 
+  it('Approve all fills every row with approve and enables Submit in one click', () => {
+    setReviewItems([makeGateItem()]);
+    renderApproveIdeas();
+
+    fireEvent.click(screen.getByTestId('approve-ideas-approve-all'));
+
+    expect(screen.getByTestId('approve-ideas-approve-IDEA-014')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('approve-ideas-approve-IDEA-015')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('approve-ideas-counts')).toHaveTextContent('2 approved · 0 denied · 0 undecided');
+    expect(screen.getByTestId('approve-ideas-submit')).not.toBeDisabled();
+  });
+
+  it('Deny all overwrites prior per-row picks with deny for every row', () => {
+    setReviewItems([makeGateItem()]);
+    renderApproveIdeas();
+
+    fireEvent.click(screen.getByTestId('approve-ideas-approve-IDEA-014'));
+    fireEvent.click(screen.getByTestId('approve-ideas-deny-all'));
+
+    expect(screen.getByTestId('approve-ideas-approve-IDEA-014')).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.getByTestId('approve-ideas-deny-IDEA-014')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('approve-ideas-deny-IDEA-015')).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByTestId('approve-ideas-counts')).toHaveTextContent('0 approved · 2 denied · 0 undecided');
+  });
+
+  it('Approve all then Submit resolves with an all-approve verdict map', async () => {
+    setReviewItems([makeGateItem()]);
+    renderApproveIdeas();
+
+    fireEvent.click(screen.getByTestId('approve-ideas-approve-all'));
+    fireEvent.click(screen.getByTestId('approve-ideas-submit'));
+
+    await waitFor(() =>
+      expect(reviewItemsResolveMutate).toHaveBeenCalledWith({
+        projectId: 1,
+        reviewItemId: 'rvw_gate',
+        verdicts: { 'IDEA-014': 'approve', 'IDEA-015': 'approve' },
+      }),
+    );
+  });
+
   it('renders read-only rows + a note when the batch has ideas but no pending gate for this run', () => {
     setReviewItems([]); // no gate item at all
     renderApproveIdeas();

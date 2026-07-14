@@ -1192,6 +1192,15 @@ function ApproveIdeasBody({ artifact, projectId }: { artifact: Artifact; project
     setVerdicts((prev) => ({ ...prev, [ref]: verdict }));
   };
 
+  // Bulk verdict fill (Approve all / Deny all): overwrites every row's verdict
+  // in one click — Submit stays the single explicit confirmation step, so a
+  // stray bulk click is always reversible before anything is recorded.
+  const setAllVerdicts = (verdict: IdeaVerdict): void => {
+    const next: IdeaVerdictMap = {};
+    for (const idea of ideas) next[idea.ref] = verdict;
+    setVerdicts(next);
+  };
+
   // Spec viewing (orthogonal to verdicts — works read-only and gated). The
   // artifact payload's rows carry only a display ref, not an opaque entity
   // id, so a click resolves the ref against the live project backlog. An
@@ -1306,6 +1315,45 @@ function ApproveIdeasBody({ artifact, projectId }: { artifact: Artifact; project
               <span data-testid="approve-ideas-counts" style={{ fontSize: '11px', color: MUTED, fontWeight: 600 }}>
                 {`${approvedCount} approved · ${deniedCount} denied · ${undecidedCount} undecided`}
               </span>
+              <div style={{ display: 'flex', border: `1px solid ${HAIRLINE}`, borderRadius: 3, overflow: 'hidden' }}>
+                <button
+                  type="button"
+                  data-testid="approve-ideas-approve-all"
+                  disabled={submitting}
+                  onClick={() => setAllVerdicts('approve')}
+                  style={{
+                    fontSize: '10px',
+                    fontWeight: 700,
+                    padding: '4px 10px',
+                    border: 'none',
+                    background: 'var(--color-surface-primary)',
+                    color: VERDICT_PASS,
+                    cursor: submitting ? 'default' : 'pointer',
+                    opacity: submitting ? 0.5 : 1,
+                  }}
+                >
+                  Approve all
+                </button>
+                <button
+                  type="button"
+                  data-testid="approve-ideas-deny-all"
+                  disabled={submitting}
+                  onClick={() => setAllVerdicts('deny')}
+                  style={{
+                    fontSize: '10px',
+                    fontWeight: 700,
+                    padding: '4px 10px',
+                    border: 'none',
+                    borderLeft: `1px solid ${HAIRLINE}`,
+                    background: 'var(--color-surface-primary)',
+                    color: VERDICT_FAIL,
+                    cursor: submitting ? 'default' : 'pointer',
+                    opacity: submitting ? 0.5 : 1,
+                  }}
+                >
+                  Deny all
+                </button>
+              </div>
               <span style={{ flex: 1 }} />
               {(resolveError ?? submitError) && (
                 <span data-testid="approve-ideas-submit-error" style={{ fontSize: '10px', color: VERDICT_FAIL }}>
