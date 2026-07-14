@@ -484,6 +484,189 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ['intent'],
         },
       },
+      // ---------------------------------------------------------------------
+      // Workflow + variant configuration (edit flows / configure variants from
+      // a quick session instead of the UI). WARNING: editing a BUILT-IN
+      // workflow (planner/sprint/compound/ship) edits the single GLOBAL row
+      // shared by every project. Custom flows and variants are safer to edit.
+      // ---------------------------------------------------------------------
+      {
+        name: 'cyboflow_list_workflows',
+        description:
+          "List the workflows available in THIS run's project (the built-in planner/sprint/compound/ship plus any custom flows), reconciling the in-repo built-ins first. Read-only, run-bound (no project argument). Returns COMPACT rows (id, name, scope global|project, is_built_in, permission_mode, has_custom_spec) WITHOUT the full step graph — use cyboflow_get_workflow to fetch one flow's definition. Call this first to discover workflow ids before editing.",
+        inputSchema: { type: 'object', properties: {}, required: [] },
+      },
+      {
+        name: 'cyboflow_get_workflow',
+        description:
+          "Fetch ONE workflow's EFFECTIVE definition (the phase/step graph the editor seeds from — a saved spec_json wins, else the built-in fallback), plus its metadata and baseline rotation participation, by workflow id. Read-only. The returned `definition` is the exact shape cyboflow_update_workflow expects back (round-trippable): edit it and pass it as definition_json. NOT_FOUND (error 'not_found') when the id is unknown.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflow_id: { type: 'string', description: 'The workflow id (from cyboflow_list_workflows)' },
+          },
+          required: ['workflow_id'],
+        },
+      },
+      {
+        name: 'cyboflow_update_workflow',
+        description:
+          "Save an edited workflow definition onto a workflow's spec_json (the editor's \"Save\"). `definition_json` is a JSON-encoded WorkflowDefinition (get the current one from cyboflow_get_workflow, edit, pass it back) — it is re-validated by the same strict schema the UI uses (malformed → error 'invalid_definition'; bad JSON → 'invalid_json'). WARNING: editing a global built-in changes it for EVERY project. Unknown id → error 'not_found'.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflow_id: { type: 'string', description: 'The workflow id to update (required)' },
+            definition_json: {
+              type: 'string',
+              description: 'JSON-encoded WorkflowDefinition — the full edited graph (required)',
+            },
+          },
+          required: ['workflow_id', 'definition_json'],
+        },
+      },
+      {
+        name: 'cyboflow_reset_workflow',
+        description:
+          "Reset a BUILT-IN workflow's spec back to its static in-repo default (the editor's \"Reset to default\"), discarding any saved edits. Only valid for a built-in flow — resetting a custom flow is rejected (error 'not_a_builtin'). Unknown id → 'not_found'. WARNING: resets the global built-in for every project.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflow_id: { type: 'string', description: 'The built-in workflow id to reset (required)' },
+          },
+          required: ['workflow_id'],
+        },
+      },
+      {
+        name: 'cyboflow_create_workflow',
+        description:
+          "Create a brand-new CUSTOM workflow (\"Save as new flow\"). `name` must not collide with a built-in or an existing flow (collision → error 'already_exists'; a reserved name → 'reserved'). `definition_json` (optional JSON-encoded WorkflowDefinition, validated like update) seeds the graph — omit to start empty. `scope` = 'global' (default; shared across every project) or 'project' (this run's project only).",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string', description: 'Unique workflow name (required)' },
+            definition_json: {
+              type: 'string',
+              description: 'Optional JSON-encoded WorkflowDefinition to seed the flow; omit for an empty flow.',
+            },
+            permission_mode: {
+              type: 'string',
+              enum: ['default', 'acceptEdits', 'auto', 'dontAsk'],
+              description: "Optional default permission mode; defaults to 'default'.",
+            },
+            scope: {
+              type: 'string',
+              enum: ['global', 'project'],
+              description: "Optional scope; 'global' (default) shares the flow across projects, 'project' pins it to this run's project.",
+            },
+          },
+          required: ['name'],
+        },
+      },
+      {
+        name: 'cyboflow_delete_workflow',
+        description:
+          "Delete a workflow. Refused for reserved global built-ins (error 'reserved') and for any flow that has run history (error 'run_history' — retire/keep it instead, since deleting would cascade its run + Insights history). Unknown id → 'not_found'. Safe for custom flows with no runs.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflow_id: { type: 'string', description: 'The workflow id to delete (required)' },
+          },
+          required: ['workflow_id'],
+        },
+      },
+      {
+        name: 'cyboflow_list_variants',
+        description:
+          "List a workflow's A/B variants (newest-first). Read-only. Returns COMPACT rows (id, label, model, execution_model, weight, status draft|active|paused|retired, has_agent_overrides). Use before creating/editing variants to see what already exists.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflow_id: { type: 'string', description: 'The parent workflow id (required)' },
+          },
+          required: ['workflow_id'],
+        },
+      },
+      {
+        name: 'cyboflow_create_variant',
+        description:
+          "Create a new variant of a workflow, snapshotting its CURRENT resolved definition, seeded status='draft' (opt into rotation later via cyboflow_set_variant_status / cyboflow_update_variant weight). `label` must be unique within the workflow (collision → error 'already_exists'). Unknown workflow → 'not_found'.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflow_id: { type: 'string', description: 'The parent workflow id (required)' },
+            label: { type: 'string', description: 'Unique variant label within the workflow (required)' },
+          },
+          required: ['workflow_id', 'label'],
+        },
+      },
+      {
+        name: 'cyboflow_update_variant',
+        description:
+          "Patch a variant in place. All fields optional: `definition_json` (JSON-encoded WorkflowDefinition, re-snapshots + validated like update_workflow), `agent_overrides_json` (a JSON string of `{ [agentKey]: { systemPrompt?, model? } }`, or null to clear), `model` (alias or null), `execution_model` ('orchestrated'|'programmatic'|null), `weight` (non-negative integer rotation share), `label`. Past runs are unaffected. Unknown id → 'not_found'.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            variant_id: { type: 'string', description: 'The variant id to update (required)' },
+            definition_json: { type: 'string', description: 'Optional JSON-encoded WorkflowDefinition to re-snapshot.' },
+            agent_overrides_json: {
+              type: ['string', 'null'],
+              description: 'Optional JSON string of per-agent overrides `{ [agentKey]: { systemPrompt?, model? } }`; pass null to clear.',
+            },
+            model: { type: ['string', 'null'], description: 'Optional per-variant model alias; null clears it.' },
+            execution_model: {
+              type: ['string', 'null'],
+              enum: ['orchestrated', 'programmatic', null],
+              description: 'Optional per-variant execution model; null clears it.',
+            },
+            weight: { type: 'number', description: 'Optional rotation weight (non-negative integer).' },
+            label: { type: 'string', description: 'Optional new label (must stay unique within the workflow).' },
+          },
+          required: ['variant_id'],
+        },
+      },
+      {
+        name: 'cyboflow_set_variant_status',
+        description:
+          "Transition a variant's rotation status: 'draft' (pinnable/experiment-usable, never auto-rotated), 'active' (competes in the randomized rotation), 'paused' (temporarily out), 'retired' (permanently out but stats stay resolvable). Unknown id → 'not_found'.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            variant_id: { type: 'string', description: 'The variant id (required)' },
+            status: {
+              type: 'string',
+              enum: ['draft', 'active', 'paused', 'retired'],
+              description: 'The target rotation status (required)',
+            },
+          },
+          required: ['variant_id', 'status'],
+        },
+      },
+      {
+        name: 'cyboflow_delete_variant',
+        description:
+          "Delete a variant. Refused (error 'run_history') when any run references it — retire it via cyboflow_set_variant_status instead so per-variant stats stay resolvable. Unknown id → 'not_found'. Safe for a variant with no runs.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            variant_id: { type: 'string', description: 'The variant id to delete (required)' },
+          },
+          required: ['variant_id'],
+        },
+      },
+      {
+        name: 'cyboflow_set_baseline_rotation',
+        description:
+          "Configure a workflow's BASELINE (its live definition) participation in the A/B rotation: `in_rotation` opts the baseline in/out, `weight` sets its rotation share (non-negative integer). When in rotation the baseline competes on equal footing with active variants. Returns the updated participation. Unknown workflow → 'not_found'.",
+        inputSchema: {
+          type: 'object',
+          properties: {
+            workflow_id: { type: 'string', description: 'The workflow id (required)' },
+            in_rotation: { type: 'boolean', description: 'Optional — opt the baseline into/out of rotation.' },
+            weight: { type: 'number', description: 'Optional baseline rotation weight (non-negative integer).' },
+          },
+          required: ['workflow_id'],
+        },
+      },
     ],
   };
 });
@@ -516,6 +699,15 @@ async function executeMcpQuery(
     const message = error instanceof Error ? error.message : String(error);
     return { content: [{ type: 'text', text: JSON.stringify({ error: message }) }] };
   }
+}
+
+/**
+ * Uniform invalid-arguments CallToolResult. Used by the workflow/variant config
+ * cases below to keep their arg-validation terse (the earlier cases inline the
+ * same shape).
+ */
+function invalidArgs(expected: string): CallToolResult {
+  return { content: [{ type: 'text', text: JSON.stringify({ error: 'invalid_arguments', expected }) }] };
 }
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -1366,6 +1558,208 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // taskRef: the lane attribution for the visual merge-gate (verdict→lane).
       if (task_ref !== undefined) queryParams['taskRef'] = task_ref;
       return executeMcpQuery('mcp-request-verification', queryParams);
+    }
+
+    case 'cyboflow_list_workflows': {
+      // Run-bound (project derived from CYBOFLOW_RUN_ID) — no arguments.
+      return executeMcpQuery('mcp-list-workflows', {});
+    }
+
+    case 'cyboflow_get_workflow': {
+      const args = (request.params.arguments ?? {}) as { workflow_id?: unknown };
+      const { workflow_id } = args;
+      if (typeof workflow_id !== 'string' || workflow_id.length === 0) {
+        return invalidArgs('workflow_id: string');
+      }
+      return executeMcpQuery('mcp-get-workflow', { workflowId: workflow_id });
+    }
+
+    case 'cyboflow_update_workflow': {
+      const args = (request.params.arguments ?? {}) as { workflow_id?: unknown; definition_json?: unknown };
+      const { workflow_id, definition_json } = args;
+      if (typeof workflow_id !== 'string' || workflow_id.length === 0) {
+        return invalidArgs('workflow_id: string');
+      }
+      if (typeof definition_json !== 'string' || definition_json.length === 0) {
+        return invalidArgs('definition_json: string (JSON-encoded WorkflowDefinition)');
+      }
+      return executeMcpQuery('mcp-update-workflow', { workflowId: workflow_id, definitionJson: definition_json });
+    }
+
+    case 'cyboflow_reset_workflow': {
+      const args = (request.params.arguments ?? {}) as { workflow_id?: unknown };
+      const { workflow_id } = args;
+      if (typeof workflow_id !== 'string' || workflow_id.length === 0) {
+        return invalidArgs('workflow_id: string');
+      }
+      return executeMcpQuery('mcp-reset-workflow', { workflowId: workflow_id });
+    }
+
+    case 'cyboflow_create_workflow': {
+      const args = (request.params.arguments ?? {}) as {
+        name?: unknown;
+        definition_json?: unknown;
+        permission_mode?: unknown;
+        scope?: unknown;
+      };
+      const { name, definition_json, permission_mode, scope } = args;
+      if (typeof name !== 'string' || name.length === 0) {
+        return invalidArgs('name: string');
+      }
+      if (definition_json !== undefined && typeof definition_json !== 'string') {
+        return invalidArgs('definition_json: string (optional, JSON-encoded WorkflowDefinition)');
+      }
+      if (
+        permission_mode !== undefined &&
+        permission_mode !== 'default' &&
+        permission_mode !== 'acceptEdits' &&
+        permission_mode !== 'auto' &&
+        permission_mode !== 'dontAsk'
+      ) {
+        return invalidArgs("permission_mode: 'default' | 'acceptEdits' | 'auto' | 'dontAsk' (optional)");
+      }
+      if (scope !== undefined && scope !== 'global' && scope !== 'project') {
+        return invalidArgs("scope: 'global' | 'project' (optional)");
+      }
+      const queryParams: Record<string, unknown> = { name };
+      if (definition_json !== undefined) queryParams['definitionJson'] = definition_json;
+      if (permission_mode !== undefined) queryParams['permissionMode'] = permission_mode;
+      if (scope !== undefined) queryParams['scope'] = scope;
+      return executeMcpQuery('mcp-create-workflow', queryParams);
+    }
+
+    case 'cyboflow_delete_workflow': {
+      const args = (request.params.arguments ?? {}) as { workflow_id?: unknown };
+      const { workflow_id } = args;
+      if (typeof workflow_id !== 'string' || workflow_id.length === 0) {
+        return invalidArgs('workflow_id: string');
+      }
+      return executeMcpQuery('mcp-delete-workflow', { workflowId: workflow_id });
+    }
+
+    case 'cyboflow_list_variants': {
+      const args = (request.params.arguments ?? {}) as { workflow_id?: unknown };
+      const { workflow_id } = args;
+      if (typeof workflow_id !== 'string' || workflow_id.length === 0) {
+        return invalidArgs('workflow_id: string');
+      }
+      return executeMcpQuery('mcp-list-variants', { workflowId: workflow_id });
+    }
+
+    case 'cyboflow_create_variant': {
+      const args = (request.params.arguments ?? {}) as { workflow_id?: unknown; label?: unknown };
+      const { workflow_id, label } = args;
+      if (typeof workflow_id !== 'string' || workflow_id.length === 0) {
+        return invalidArgs('workflow_id: string');
+      }
+      if (typeof label !== 'string' || label.length === 0) {
+        return invalidArgs('label: string');
+      }
+      return executeMcpQuery('mcp-create-variant', { workflowId: workflow_id, label });
+    }
+
+    case 'cyboflow_update_variant': {
+      const args = (request.params.arguments ?? {}) as {
+        variant_id?: unknown;
+        definition_json?: unknown;
+        agent_overrides_json?: unknown;
+        model?: unknown;
+        execution_model?: unknown;
+        weight?: unknown;
+        label?: unknown;
+      };
+      const { variant_id, definition_json, agent_overrides_json, model, execution_model, weight, label } = args;
+      if (typeof variant_id !== 'string' || variant_id.length === 0) {
+        return invalidArgs('variant_id: string');
+      }
+      if (definition_json !== undefined && typeof definition_json !== 'string') {
+        return invalidArgs('definition_json: string (optional, JSON-encoded WorkflowDefinition)');
+      }
+      // null is a MEANINGFUL clear for agent_overrides_json / model / execution_model.
+      if (agent_overrides_json !== undefined && agent_overrides_json !== null && typeof agent_overrides_json !== 'string') {
+        return invalidArgs('agent_overrides_json: string | null (optional)');
+      }
+      if (model !== undefined && model !== null && typeof model !== 'string') {
+        return invalidArgs('model: string | null (optional)');
+      }
+      if (
+        execution_model !== undefined &&
+        execution_model !== null &&
+        execution_model !== 'orchestrated' &&
+        execution_model !== 'programmatic'
+      ) {
+        return invalidArgs("execution_model: 'orchestrated' | 'programmatic' | null (optional)");
+      }
+      if (weight !== undefined && (typeof weight !== 'number' || !Number.isInteger(weight) || weight < 0)) {
+        return invalidArgs('weight: integer >= 0 (optional)');
+      }
+      if (label !== undefined && (typeof label !== 'string' || label.length === 0)) {
+        return invalidArgs('label: non-empty string (optional)');
+      }
+      if (
+        definition_json === undefined &&
+        agent_overrides_json === undefined &&
+        model === undefined &&
+        execution_model === undefined &&
+        weight === undefined &&
+        label === undefined
+      ) {
+        return invalidArgs('at least one field to update');
+      }
+      const queryParams: Record<string, unknown> = { variantId: variant_id };
+      if (definition_json !== undefined) queryParams['definitionJson'] = definition_json;
+      if (agent_overrides_json !== undefined) queryParams['agentOverridesJson'] = agent_overrides_json;
+      if (model !== undefined) queryParams['model'] = model;
+      if (execution_model !== undefined) queryParams['executionModel'] = execution_model;
+      if (weight !== undefined) queryParams['weight'] = weight;
+      if (label !== undefined) queryParams['label'] = label;
+      return executeMcpQuery('mcp-update-variant', queryParams);
+    }
+
+    case 'cyboflow_set_variant_status': {
+      const args = (request.params.arguments ?? {}) as { variant_id?: unknown; status?: unknown };
+      const { variant_id, status } = args;
+      if (typeof variant_id !== 'string' || variant_id.length === 0) {
+        return invalidArgs('variant_id: string');
+      }
+      if (status !== 'draft' && status !== 'active' && status !== 'paused' && status !== 'retired') {
+        return invalidArgs("status: 'draft' | 'active' | 'paused' | 'retired'");
+      }
+      return executeMcpQuery('mcp-set-variant-status', { variantId: variant_id, status });
+    }
+
+    case 'cyboflow_delete_variant': {
+      const args = (request.params.arguments ?? {}) as { variant_id?: unknown };
+      const { variant_id } = args;
+      if (typeof variant_id !== 'string' || variant_id.length === 0) {
+        return invalidArgs('variant_id: string');
+      }
+      return executeMcpQuery('mcp-delete-variant', { variantId: variant_id });
+    }
+
+    case 'cyboflow_set_baseline_rotation': {
+      const args = (request.params.arguments ?? {}) as {
+        workflow_id?: unknown;
+        in_rotation?: unknown;
+        weight?: unknown;
+      };
+      const { workflow_id, in_rotation, weight } = args;
+      if (typeof workflow_id !== 'string' || workflow_id.length === 0) {
+        return invalidArgs('workflow_id: string');
+      }
+      if (in_rotation !== undefined && typeof in_rotation !== 'boolean') {
+        return invalidArgs('in_rotation: boolean (optional)');
+      }
+      if (weight !== undefined && (typeof weight !== 'number' || !Number.isInteger(weight) || weight < 0)) {
+        return invalidArgs('weight: integer >= 0 (optional)');
+      }
+      if (in_rotation === undefined && weight === undefined) {
+        return invalidArgs('at least one of in_rotation / weight');
+      }
+      const queryParams: Record<string, unknown> = { workflowId: workflow_id };
+      if (in_rotation !== undefined) queryParams['inRotation'] = in_rotation;
+      if (weight !== undefined) queryParams['weight'] = weight;
+      return executeMcpQuery('mcp-set-baseline-rotation', queryParams);
     }
 
     default:
