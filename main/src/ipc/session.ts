@@ -125,23 +125,49 @@ export function projectStoredOutputs(
   return result;
 }
 
+// Word lists for generateQuickWorktreeBranchName (IDEA-001: Heroku/Docker-style
+// two-word names). All lowercase ascii [a-z]+, friendly/neutral vocabulary
+// (nature, colors, textures, animals, landforms) — nothing violent, anatomical,
+// branded, or ambiguous. Kept free of duplicates within each list (asserted by
+// a test), but the two lists are independent so cross-list repeats are fine.
+export const QUICK_NAME_ADJECTIVES = [
+  'amber', 'azure', 'brave', 'bright', 'calm', 'coral', 'cozy', 'crisp',
+  'curious', 'dawn', 'dusty', 'eager', 'earthy', 'emerald', 'faint', 'fresh',
+  'gentle', 'golden', 'grand', 'green', 'happy', 'hazy', 'hidden', 'humble',
+  'ivory', 'jade', 'jolly', 'kind', 'lively', 'lucky', 'mellow', 'misty',
+  'mossy', 'muted', 'nimble', 'noble', 'olive', 'peaceful', 'pale', 'plucky',
+  'quiet', 'quick', 'rustic', 'sandy', 'shiny', 'silent', 'silver', 'sleepy',
+  'smooth', 'soft', 'solar', 'steady', 'stormy', 'sunny', 'swift', 'tidy',
+  'tranquil', 'twilight', 'velvet', 'vivid', 'warm', 'wild', 'windy', 'zesty',
+] as const;
+
+export const QUICK_NAME_NOUNS = [
+  'alpaca', 'badger', 'basin', 'beacon', 'birch', 'bison', 'bluff', 'brook',
+  'canyon', 'cedar', 'cliff', 'clover', 'comet', 'coral', 'cove', 'coyote',
+  'crane', 'creek', 'delta', 'dune', 'eagle', 'ember', 'falcon', 'fern',
+  'field', 'finch', 'fjord', 'forest', 'fox', 'glacier', 'glade', 'grove',
+  'harbor', 'hawk', 'heron', 'hill', 'island', 'ivy', 'juniper', 'lagoon',
+  'lake', 'lantern', 'lark', 'leaf', 'ledge', 'lily', 'lynx', 'maple',
+  'marsh', 'meadow', 'moss', 'mountain', 'otter', 'owl', 'panda', 'peak',
+  'pebble', 'pine', 'plain', 'plateau', 'pond', 'prairie', 'quail', 'reef',
+  'ridge', 'river', 'robin', 'sage', 'shore', 'sparrow', 'spring', 'stone',
+  'stream', 'summit', 'swan', 'thicket', 'tide', 'trail', 'valley', 'willow',
+  'wolf', 'wren',
+] as const;
+
 /**
- * Generate a UTC-based worktree branch name for quick sessions.
- *
- * Format: `quick-YYYYMMDD-HHmmss` (all UTC components, zero-padded).
- * The `now` parameter exists so callers and tests can inject a fixed Date
- * for deterministic output; the default is the wall-clock instant at call
- * time.
+ * Generate a human-friendly two-word worktree branch name for quick sessions
+ * (IDEA-001), Heroku/Docker style: `<adjective>-<noun>`, both drawn from fixed
+ * word lists below. No behavioral code keys off the old `quick-` prefix (see
+ * IDEA-001 investigation), so it is dropped in favor of the plain two-word
+ * shape. The `rng` parameter mirrors the existing Date-injection pattern
+ * elsewhere in this file — inject a fixed function for deterministic test
+ * output; the default is `Math.random`.
  */
-export function generateQuickWorktreeBranchName(now: Date = new Date()): string {
-  const pad = (n: number) => String(n).padStart(2, '0');
-  const y = now.getUTCFullYear();
-  const mo = pad(now.getUTCMonth() + 1);
-  const d = pad(now.getUTCDate());
-  const h = pad(now.getUTCHours());
-  const mi = pad(now.getUTCMinutes());
-  const s = pad(now.getUTCSeconds());
-  return `quick-${y}${mo}${d}-${h}${mi}${s}`;
+export function generateQuickWorktreeBranchName(rng: () => number = Math.random): string {
+  const adjective = QUICK_NAME_ADJECTIVES[Math.floor(rng() * QUICK_NAME_ADJECTIVES.length)];
+  const noun = QUICK_NAME_NOUNS[Math.floor(rng() * QUICK_NAME_NOUNS.length)];
+  return `${adjective}-${noun}`;
 }
 
 /**

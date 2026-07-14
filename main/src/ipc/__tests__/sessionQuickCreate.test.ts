@@ -59,7 +59,12 @@ vi.mock('../../services/database', () => ({
   },
 }));
 
-import { generateQuickWorktreeBranchName, registerSessionHandlers } from '../session';
+import {
+  generateQuickWorktreeBranchName,
+  registerSessionHandlers,
+  QUICK_NAME_ADJECTIVES,
+  QUICK_NAME_NOUNS,
+} from '../session';
 import { panelManager } from '../../services/panelManager';
 import type { AppServices } from '../types';
 
@@ -68,21 +73,36 @@ import type { AppServices } from '../types';
 // ---------------------------------------------------------------------------
 
 describe('generateQuickWorktreeBranchName', () => {
-  it('returns quick-YYYYMMDD-HHmmss for a fixed UTC date', () => {
-    // Date.UTC(2026, 4, 23, 15, 27, 58) -> 2026-05-23T15:27:58Z (month is 0-indexed)
-    const result = generateQuickWorktreeBranchName(new Date(Date.UTC(2026, 4, 23, 15, 27, 58)));
-    expect(result).toBe('quick-20260523-152758');
+  it('returns a deterministic adjective-noun name for an injected rng', () => {
+    // rng() is called twice: once for the adjective index, once for the noun
+    // index. A constant 0 always selects the first entry of each list.
+    const result = generateQuickWorktreeBranchName(() => 0);
+    expect(result).toBe('amber-alpaca');
   });
 
-  it('matches the /^quick-\d{8}-\d{6}$/ pattern for a default (now) call', () => {
+  it('matches the /^(quick-)?[a-z]+-[a-z]+$/ shape for a default (Math.random) call', () => {
     const result = generateQuickWorktreeBranchName();
-    expect(result).toMatch(/^quick-\d{8}-\d{6}$/);
+    expect(result).toMatch(/^(quick-)?[a-z]+-[a-z]+$/);
   });
 
-  it('zero-pads month, day, hour, minute, and second to two digits', () => {
-    // Date.UTC(2026, 0, 5, 3, 4, 5) -> 2026-01-05T03:04:05Z
-    const result = generateQuickWorktreeBranchName(new Date(Date.UTC(2026, 0, 5, 3, 4, 5)));
-    expect(result).toBe('quick-20260105-030405');
+  it('selects different words for different rng values', () => {
+    const first = generateQuickWorktreeBranchName(() => 0);
+    const second = generateQuickWorktreeBranchName(() => 0.999999);
+    expect(first).not.toBe(second);
+    expect(first).toMatch(/^(quick-)?[a-z]+-[a-z]+$/);
+    expect(second).toMatch(/^(quick-)?[a-z]+-[a-z]+$/);
+  });
+
+  it('word lists are large enough, lowercase-ascii-only, and duplicate-free', () => {
+    expect(QUICK_NAME_ADJECTIVES.length).toBeGreaterThanOrEqual(40);
+    expect(QUICK_NAME_NOUNS.length).toBeGreaterThanOrEqual(60);
+
+    for (const word of [...QUICK_NAME_ADJECTIVES, ...QUICK_NAME_NOUNS]) {
+      expect(word).toMatch(/^[a-z]+$/);
+    }
+
+    expect(new Set(QUICK_NAME_ADJECTIVES).size).toBe(QUICK_NAME_ADJECTIVES.length);
+    expect(new Set(QUICK_NAME_NOUNS).size).toBe(QUICK_NAME_NOUNS.length);
   });
 });
 
