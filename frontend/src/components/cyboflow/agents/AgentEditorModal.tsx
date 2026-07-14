@@ -31,7 +31,7 @@ import { AgentEditorForm } from './AgentEditorForm';
 import { AgentUsageInspector } from './AgentUsageInspector';
 import { useAgentEditorState } from './useAgentEditorState';
 import { estimateTokens } from './agentEditorTokens';
-import { agentModelLabel } from '../../../../../shared/types/agents';
+import { agentModelLabel, referencesForbiddenWriterTool } from '../../../../../shared/types/agents';
 import type { AgentEntry } from '../../../../../shared/types/agents';
 
 export interface AgentEditorModalProps {
@@ -117,20 +117,18 @@ export function AgentEditorModal({
   // default to revert to — it would use deleteCustom instead).
   const showReset = isOverridden && !isCustom;
 
-  // Description is required and must never name an MCP write tool. The rule
-  // targets a cyboflow_ reference the USER introduces — a built-in agent's own
-  // baseline description may legitimately name an MCP tool (e.g. visual-verify
-  // says "fires ONE cyboflow_request_verification"), so exempt it when the
-  // seeded baseline already contains one. Otherwise every such built-in would be
-  // permanently un-savable.
-  const baselineDescription = entry?.description ?? '';
+  // Description is required and must never name a cyboflow_* entity-write tool
+  // (mirrors the backend single-writer guard). referencesForbiddenWriterTool
+  // exempts the one sanctioned request-only tool (visual-verify's
+  // `cyboflow_request_verification`) so that legitimately-referencing built-in is
+  // still savable, while any real entity-write reference is still rejected.
   const descriptionError = useMemo<string | null>(() => {
     const d = state.draft.description.trim();
     if (d.length === 0) return 'A description is required.';
-    if (d.includes('cyboflow_') && !baselineDescription.includes('cyboflow_'))
+    if (referencesForbiddenWriterTool(d))
       return 'Description must not reference a cyboflow_ tool.';
     return null;
-  }, [state.draft.description, baselineDescription]);
+  }, [state.draft.description]);
 
   // Create mode mints a NEW custom: the server derives the agentKey from a
   // non-empty name and requires ≥1 tool (toolsSchema.min(1)). Gate Save on both

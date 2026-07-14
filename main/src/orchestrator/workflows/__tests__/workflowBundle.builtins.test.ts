@@ -13,6 +13,10 @@
 import { describe, it, expect } from 'vitest';
 import * as path from 'path';
 import { resolveWorkflowBundle } from '../workflowBundle';
+import {
+  SANCTIONED_SUBAGENT_TOOL,
+  SANCTIONED_SUBAGENT_TOOL_BARE,
+} from '../../../../../shared/types/agents';
 
 const workflowsDir = path.join(__dirname, '..');
 
@@ -80,30 +84,20 @@ describe('built-in workflow bundles', () => {
 });
 
 /**
- * The ONE sanctioned subagent-callable cyboflow MCP tool (visual-verification P6).
- * It is request-only / fire-and-continue (enqueues a verification request and
- * returns immediately; never mutates workflow state), so it does NOT break the
- * single-writer invariant — "subagents request, never mutate". Every OTHER
- * `cyboflow_*` reference in a subagent is still forbidden below.
- *
- * A subagent references it in TWO forms: the fully-qualified frontmatter grant
- * (`mcp__cyboflow__cyboflow_request_verification`) AND the bare call name in prose
- * (`cyboflow_request_verification(...)`, the visual merge-gate usage example — P8b).
- * Both are sanctioned; the strip removes the fully-qualified form FIRST (the bare
- * name is its substring), then any remaining bare occurrences.
- */
-const SANCTIONED_SUBAGENT_TOOL = 'mcp__cyboflow__cyboflow_request_verification';
-const SANCTIONED_SUBAGENT_TOOL_BARE = 'cyboflow_request_verification';
-
-/**
  * Every phase subagent carries name + description + tools frontmatter, returns a
  * `## Result` block, and NEVER touches a STATE-MUTATING `cyboflow_*` MCP tool —
  * the orchestrator is the single writer of workflow state (subagents only do
  * isolated side-work and return a compact result). The lone exception is the
- * request-only SANCTIONED_SUBAGENT_TOOL, which we strip before the guard so the
- * underscore match stays precise: agent prose freely says "cyboflow Planner" /
- * "cyboflow state" / `cyboflow-context`, none of which contain the tool-name
- * underscore.
+ * request-only SANCTIONED_SUBAGENT_TOOL (visual-verification P6:
+ * `cyboflow_request_verification`) — it enqueues a request and returns without
+ * mutating state, so it does NOT break the single-writer invariant. A subagent
+ * references it in TWO forms — the fully-qualified frontmatter grant
+ * (`mcp__cyboflow__cyboflow_request_verification`) and the bare prose call
+ * (`cyboflow_request_verification(...)`, the visual merge-gate example — P8b) —
+ * both stripped before the guard (fully-qualified FIRST, since the bare name is
+ * its substring) so the underscore match stays precise: agent prose freely says
+ * "cyboflow Planner" / "cyboflow state" / `cyboflow-context`, none of which
+ * contain the tool-name underscore.
  */
 function assertAgentShape(agents: { name: string; content: string }[]): void {
   for (const agent of agents) {

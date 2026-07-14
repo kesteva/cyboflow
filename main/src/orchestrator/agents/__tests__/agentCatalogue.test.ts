@@ -147,6 +147,37 @@ describe('validateAgentDraft', () => {
     );
   });
 
+  it('exempts the sanctioned request-only tool in the description (visual-verify)', () => {
+    expect(() =>
+      validateAgentDraft({
+        ...base,
+        description: 'Fires ONE cyboflow_request_verification for the deliverable.',
+      }),
+    ).not.toThrow();
+  });
+
+  it('exempts the sanctioned tool in both forms in the system prompt', () => {
+    expect(() =>
+      validateAgentDraft({
+        ...base,
+        systemPrompt:
+          'Grant: mcp__cyboflow__cyboflow_request_verification.\n' +
+          'Call cyboflow_request_verification(...) then stop.\n\n## Result\nOK.',
+      }),
+    ).not.toThrow();
+  });
+
+  it('still rejects a NON-sanctioned cyboflow_ reference alongside the sanctioned one', () => {
+    expectCode(
+      {
+        ...base,
+        systemPrompt:
+          'Call cyboflow_request_verification then cyboflow_update_task.\n\n## Result\nOK.',
+      },
+      'forbidden_writer_call',
+    );
+  });
+
   it('forbidden_tool for a non-CLI tool', () => {
     expectCode({ ...base, tools: ['Read', 'Task'] as unknown as CliTool[] }, 'forbidden_tool');
   });

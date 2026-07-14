@@ -13,6 +13,35 @@
 import type { CliTool } from './cliTools';
 
 /**
+ * The ONE cyboflow MCP tool a subagent may reference/call: the request-only,
+ * fire-and-continue visual-verification enqueue (visual-verification P6). It
+ * enqueues a request and returns immediately, never mutating workflow state, so
+ * it does NOT break the single-writer invariant ("subagents request, never
+ * mutate"). A subagent references it in TWO forms — the fully-qualified
+ * frontmatter grant AND the bare call name in prose — both sanctioned.
+ */
+export const SANCTIONED_SUBAGENT_TOOL = 'mcp__cyboflow__cyboflow_request_verification';
+export const SANCTIONED_SUBAGENT_TOOL_BARE = 'cyboflow_request_verification';
+
+/**
+ * True when `text` references a cyboflow_* ENTITY-WRITE tool — the single-writer
+ * invariant an agent's description/prompt must not violate. The one sanctioned
+ * request-only tool is stripped FIRST (fully-qualified form before the bare name,
+ * since the bare name is its substring), so a legitimate visual-verify reference
+ * does not trip the guard; any OTHER `cyboflow_` token then does. This is the
+ * single source of truth shared by the backend validator, the renderer editor,
+ * and the built-in bundle test.
+ */
+export function referencesForbiddenWriterTool(text: string): boolean {
+  const withoutSanctioned = text
+    .split(SANCTIONED_SUBAGENT_TOOL)
+    .join('')
+    .split(SANCTIONED_SUBAGENT_TOOL_BARE)
+    .join('');
+  return /cyboflow_/.test(withoutSanctioned);
+}
+
+/**
  * The models a workflow agent may PIN instead of inheriting the run model — the
  * bare family aliases (resolved to the current concrete snapshot at the spawn
  * seam, mirroring the quick-session picker). Only families are offered: a

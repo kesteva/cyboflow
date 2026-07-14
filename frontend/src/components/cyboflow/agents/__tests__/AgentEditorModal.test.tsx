@@ -273,15 +273,15 @@ describe('AgentEditorModal — built-in edit', () => {
     expect(screen.getByTestId('agent-editor-save-button')).toBeDisabled();
   });
 
-  it("does not reject a built-in whose baseline description legitimately names a cyboflow_ tool", async () => {
-    // A built-in like visual-verify ships a description that names an MCP tool.
-    // Seeding it must NOT fire the validation error, and an unrelated edit must
-    // stay savable — otherwise the agent is permanently un-editable.
-    const withCyboflowRef: AgentEntry = {
+  it('exempts the one sanctioned request-only tool (visual-verify stays savable)', async () => {
+    // visual-verify legitimately names `cyboflow_request_verification` (request-
+    // only, does not mutate state). That reference must NOT fire the guard, and an
+    // unrelated edit must stay savable — otherwise the agent is un-editable.
+    const withSanctionedRef: AgentEntry = {
       ...BUILTIN_ENTRY,
       description: 'Fires ONE cyboflow_request_verification for the task deliverable.',
     };
-    await renderModal({ entry: withCyboflowRef });
+    await renderModal({ entry: withSanctionedRef });
 
     expect(screen.queryByTestId('agent-description-error')).toBeNull();
     // Make an unrelated edit to dirty the form; Save must enable.
@@ -292,6 +292,19 @@ describe('AgentEditorModal — built-in edit', () => {
       expect(screen.getByTestId('agent-editor-save-button')).not.toBeDisabled(),
     );
     expect(screen.queryByTestId('agent-description-error')).toBeNull();
+  });
+
+  it('still rejects a NON-sanctioned cyboflow_ entity-write reference', async () => {
+    // The sanctioned-tool exemption must be surgical: an entity-write reference is
+    // still rejected even when it sits alongside the sanctioned request tool.
+    await renderModal();
+    fireEvent.change(screen.getByTestId('agent-description-input'), {
+      target: { value: 'fires cyboflow_request_verification then cyboflow_update_task' },
+    });
+    await waitFor(() =>
+      expect(screen.getByTestId('agent-description-error')).toHaveTextContent('cyboflow_'),
+    );
+    expect(screen.getByTestId('agent-editor-save-button')).toBeDisabled();
   });
 });
 

@@ -13,7 +13,7 @@
  */
 import { isCliTool } from '../../../../shared/types/cliTools';
 import type { CliTool } from '../../../../shared/types/cliTools';
-import { isAgentModelAlias } from '../../../../shared/types/agents';
+import { isAgentModelAlias, referencesForbiddenWriterTool } from '../../../../shared/types/agents';
 import type { AgentModelAlias } from '../../../../shared/types/agents';
 
 /** The discriminated set of validation/conflict failure codes. */
@@ -57,7 +57,12 @@ export interface AgentDraft {
 /** Canonical kebab-case key shape, e.g. `code-review`, `implement`. */
 const KEBAB_RE = /^[a-z][a-z0-9]*(-[a-z0-9]+)*$/;
 
-/** Any single-writer entity-write MCP token an agent must never reference. */
+/**
+ * Any `cyboflow_`-prefixed token — used for the MCP-server-name checks below,
+ * where NO reference is permitted. The description/prompt checks instead use
+ * {@link referencesForbiddenWriterTool}, which exempts the one sanctioned
+ * request-only tool (visual-verify's `cyboflow_request_verification`).
+ */
 const FORBIDDEN_WRITER_RE = /cyboflow_/;
 
 /**
@@ -85,7 +90,10 @@ export function validateAgentDraft(draft: AgentDraft): void {
     throw new AgentOverrideError('empty_description', 'Agent description must not be empty.');
   }
 
-  if (FORBIDDEN_WRITER_RE.test(draft.description) || FORBIDDEN_WRITER_RE.test(draft.systemPrompt)) {
+  if (
+    referencesForbiddenWriterTool(draft.description) ||
+    referencesForbiddenWriterTool(draft.systemPrompt)
+  ) {
     throw new AgentOverrideError(
       'forbidden_writer_call',
       'Agent description/prompt must not reference a cyboflow_* entity-write tool (single-writer invariant).',
